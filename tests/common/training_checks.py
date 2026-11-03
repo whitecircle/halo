@@ -1,5 +1,5 @@
-"""Checks of a finished training run: its per-step losses, the loss band and the finite-run verdicts the SFT
-and LoRA suites share, the loss deltas of a resumed run, and the trainable parameters a run stepped and moved."""
+"""Checks of a finished training run: losses, the finite-run verdicts, resumed loss deltas, and parameters stepped and
+moved."""
 
 import math
 from collections.abc import Collection
@@ -12,17 +12,16 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.runtime.dtensor import to_local
 from tests.common.rank_log import log, log_all
 
-# Where a trained causal-LM loss lands: the floor catches a collapsed or masked-away objective, the ceiling
-# an untrained or garbage forward. Finiteness alone passes both.
+# The floor catches a collapsed or masked-away objective, the ceiling an untrained forward. Finiteness alone passes
+# both.
 LM_TRAINING_LOSS_BAND = (0.05, 20.0)
-# Elements one update must be able to move before a tensor a run leaves bit-identical fails the run. Each moves on that
-# update under nearest rounding and with probability over one half under stochastic rounding, so all of them staying
-# put is out of reach of chance.
+# Elements one update must be able to move before a bit-identical tensor fails the run; all of them staying put, under
+# nearest or stochastic rounding, is out of reach of chance.
 MIN_MOVABLE_ELEMENTS = 64
 
 
 def step_losses(trainer) -> list[float]:
-    """Per-step training losses from a trainer's log history, eval entries and the run summary excluded."""
+    """Per-step training losses, eval entries and the run summary excluded."""
     return [e["loss"] for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e]
 
 
@@ -35,15 +34,8 @@ def training_run_checks(
     grad_norms: bool = False,
     loss_decreased: bool = False,
 ) -> dict[str, bool]:
-    """The finished-run checks the SFT and LoRA suites share, each logged with its verdict.
-
-    ``loss_finite`` (the reported training loss), ``all_steps_finite`` (at least one step loss logged,
-    every one finite), ``steps_completed`` (``max_steps`` optimizer steps ran), given ``loss_band``
-    ``loss_reasonable`` (the reported training loss strictly inside it), with ``grad_norms``
-    ``grad_norms_finite`` (at least one gradient norm logged, every one finite), and with
-    ``loss_decreased`` ``loss_decreased`` (the last logged step loss below the first, which fails on
-    fewer than two logged steps).
-    """
+    """The finished-run checks the SFT and LoRA suites share, each logged with its verdict; ``loss_decreased`` fails on
+    fewer than two steps."""
     training_loss = train_result.training_loss
     losses = step_losses(trainer)
     checks = {
@@ -79,12 +71,9 @@ def training_run_checks(
 def resumed_loss_deltas(
     uninterrupted: list[float], resumed: list[float], *, save_step: int, total_steps: int
 ) -> list[float] | None:
-    """``|resumed - uninterrupted|`` at each step after ``save_step`` (``inf`` where either loss is not
-    finite), or ``None`` when either run is missing one of those steps.
-
-    Both lists are :func:`step_losses`; a resumed run's log history opens with the steps its
-    checkpoint carried, so its last ``total_steps - save_step`` entries are the resumed ones.
-    """
+    """``|resumed - uninterrupted|`` at each step after ``save_step`` (``inf`` if not finite), or None when a step is
+    missing. A resumed log opens with the checkpoint's steps, so its last ``total_steps - save_step`` entries are the
+    resumed ones."""
     remaining = total_steps - save_step
     tail, reference = resumed[-remaining:], uninterrupted[save_step:]
     if not len(tail) == len(reference) == remaining:
@@ -103,8 +92,7 @@ def resumed_loss_deltas(
 
 
 def snapshot_trainable(model: torch.nn.Module) -> dict[str, torch.Tensor]:
-    """Every trainable parameter of ``model`` (framework wrappers stripped), whole and on the host:
-    FSDP2 / TP DTensors are gathered. Collective when any is a DTensor."""
+    """Every trainable parameter, whole and on the host; collective when any is a DTensor."""
     snapshot = {}
     for name, param in extract_model_from_parallel(model, recursive=True).named_parameters():
         if param.requires_grad:
@@ -114,8 +102,8 @@ def snapshot_trainable(model: torch.nn.Module) -> dict[str, torch.Tensor]:
 
 
 def movable_elements(tensor: torch.Tensor, step: float) -> int:
-    """How many elements of ``tensor`` an update of size ``step`` moves off their stored value under nearest rounding:
-    those whose spacing to the next value of larger magnitude in ``tensor``'s dtype is under ``2 * step``."""
+    """How many elements an update of ``step`` moves under nearest rounding: spacing to the next larger magnitude under
+    ``2 * step``."""
     finfo = torch.finfo(tensor.dtype)
     _, exponent = torch.frexp(tensor.detach().float().abs().clamp_min(finfo.tiny))
     spacing = torch.ldexp(torch.full(exponent.shape, finfo.eps, device=exponent.device), exponent - 1)
@@ -123,17 +111,14 @@ def movable_elements(tensor: torch.Tensor, step: float) -> int:
 
 
 def movable_tensors(tensors: dict[str, torch.Tensor], step: float) -> set[str]:
-    """The names in ``tensors`` holding at least :data:`MIN_MOVABLE_ELEMENTS` elements one update of size ``step``
-    moves: a run whose first update has that size must change each of them. Adam's first update is the learning rate
-    itself; at ``1e-5`` a bf16 element moves only below ``2**-8``, so norm gains near 1 stay bit-identical."""
+    """Names holding at least :data:`MIN_MOVABLE_ELEMENTS` elements one update moves. Adam's first update is the LR; at
+    ``1e-5`` a bf16 element moves only below ``2**-8``, so norm gains near 1 stay bit-identical."""
     return {name for name, tensor in tensors.items() if movable_elements(tensor, step) >= MIN_MOVABLE_ELEMENTS}
 
 
 def stepped_parameters(model: torch.nn.Module, optimizer, names: Collection[str]) -> set[str]:
-    """The ``names`` among ``model``'s parameters that this rank's AdamW-family ``optimizer`` stepped with a gradient:
-    those it holds a non-zero local first moment (``exp_avg``) for. A parameter outside the optimizer has no state,
-    and one no gradient reached keeps its moment at zero. FSDP2 modules are resharded first, so the registered
-    parameters are the shards the optimizer holds. Rank-local."""
+    """``names`` this rank's AdamW-family ``optimizer`` stepped: a non-zero local ``exp_avg``. Resharded first, so the
+    params are its shards. Rank-local."""
     reshard_fsdp2_modules(model)
     wanted = set(names)
     stepped = set()
@@ -151,14 +136,9 @@ def weight_update_checks(
     moved: Collection[str],
     learning_rate: float,
 ) -> dict[str, bool]:
-    """A full fine-tune's verdict on the tensors in ``before`` (this rank's copies from before the run, by registered
-    name), given the names in ``moved`` that the run changed bit for bit.
-
-    ``weights_stepped``: ``optimizer`` stepped every one of them (:func:`stepped_parameters`), the only signal on a
-    tensor whose stored values a few updates at ``learning_rate`` cannot change. ``movable_weights_moved``: every one
-    that a single update at ``learning_rate`` moves (:func:`movable_tensors`) changed, which a zero rate or an update
-    that misses the parameter fails. Logs what each check misses. Rank-local.
-    """
+    """A full fine-tune's verdict on ``before``, given the names in ``moved``. Rank-local. ``weights_stepped`` is the
+    only signal on a tensor a few updates cannot change; ``movable_weights_moved`` fails a zero rate or a missed
+    update."""
     names = set(before)
     stepped = stepped_parameters(model, optimizer, names)
     movable = movable_tensors(before, learning_rate)

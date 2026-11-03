@@ -1,6 +1,5 @@
-"""Environmental GRPO's reasoning budget: the per-level thinking contract a run draws, the reasoning end marker
-it resolves, and the length terms it charges (a per-level price and an under-use floor), waived in a training
-group no episode of which earned the objective."""
+"""Environmental GRPO's reasoning budget: the per-level thinking contract, the reasoning end marker and the length
+terms (a per-level price and an under-use floor), waived in a training group where no episode earned the objective."""
 
 import logging
 from collections.abc import Sequence
@@ -27,8 +26,6 @@ REASONING_TARGET_SHARE = 0.75
 
 
 def reasoning_token_counts(tokenizer, trajectory: Trajectory | None) -> list[int]:
-    """Each assistant turn's reasoning token count under ``tokenizer``, 0 for a thinking-free turn; none for an
-    episode without a trajectory."""
     if trajectory is None:
         return []
     return [
@@ -41,9 +38,8 @@ def reasoning_token_counts(tokenizer, trajectory: Trajectory | None) -> list[int
 def reasoning_price_term(
     reasoning_tokens: list[int], price_per_1k: float, cap: float, budget: int | None = None
 ) -> float:
-    """The capped reasoning price in ``[-cap, 0]``: ``-min(cap, price_per_1k * priced / 1000)``, ``priced`` being
-    every turn's reasoning tokens, or with a per-turn ``budget`` what each turn reasoned past it. The cap keeps a
-    long trace from outweighing the task reward."""
+    """``-min(cap, price_per_1k * priced / 1000)``, ``priced`` being every turn's reasoning tokens or, with a per-turn
+    ``budget``, what each turn reasoned past it. The cap keeps a long trace from outweighing the task reward."""
     priced = sum(reasoning_tokens) if budget is None else sum(max(0, tokens - budget) for tokens in reasoning_tokens)
     if priced <= 0:
         return 0.0
@@ -51,9 +47,8 @@ def reasoning_price_term(
 
 
 def reasoning_floor_term(reasoning_tokens: list[int], budget: int, weight: float) -> float:
-    """Under-use floor in ``[-weight, 0]``: ``-weight * shortfall / target`` while the episode's reasoning falls
-    short of :data:`REASONING_TARGET_SHARE` of its per-turn thinking ``budget``. Summed over the episode, so a
-    short repair turn is not under-use; an episode with no assistant turn pays nothing."""
+    """``-weight * shortfall / target`` below :data:`REASONING_TARGET_SHARE` of ``budget``. Summed over the episode, so
+    a short repair turn is not under-use."""
     target = round(budget * REASONING_TARGET_SHARE)
     shortfall = target - sum(reasoning_tokens)
     if not reasoning_tokens or target <= 0 or weight <= 0 or shortfall <= 0:
@@ -62,12 +57,8 @@ def reasoning_floor_term(reasoning_tokens: list[int], budget: int, weight: float
 
 
 def failed_group_mask(rollout_results: Sequence[RolloutResult], group_size: int) -> list[bool]:
-    """Per episode, whether no baseline episode of its GRPO group (``group_size`` consecutive episodes) earned the
-    objective: a positive ``reward/objective`` component, which a veto zeroes.
-
-    In such a group the length terms are most of what tells the attempts apart, so the group-relative advantage
-    would train reasoning length rather than the task wherever the task is out of reach. An episode outside the
-    baseline earns nothing for its group: it does not train, and a sibling's advantage does not read it."""
+    """Per episode, whether no baseline episode of its group earned the objective. There the length terms are most of
+    what tells attempts apart, so the advantage would train reasoning length rather than the task."""
     earned = [
         r.counts_toward_baseline
         and r.trajectory is not None
@@ -82,11 +73,7 @@ def failed_group_mask(rollout_results: Sequence[RolloutResult], group_size: int)
 
 
 class ReasoningBudgetMixin:
-    """The per-level reasoning contract a run draws, its reasoning end marker and the length terms."""
-
     def _efforts_by_level(self) -> dict[str | None, EpisodeEffort]:
-        """The contract every level this run can draw binds (:func:`efforts_by_level`, which refuses one the
-        turn cannot hold)."""
         cfg = self.async_config
         return efforts_by_level(
             self._rollout_env,
@@ -98,12 +85,11 @@ class ReasoningBudgetMixin:
 
     @property
     def _every_budget_soft(self) -> bool:
-        """Whether every level the run draws runs under a soft budget, one a turn can reason past."""
+        """A soft budget is one a turn can reason past."""
         return all(effort.budget_soft for effort in self._efforts_by_level().values())
 
     def _resolve_reasoning_end_ids(self) -> tuple[int, ...] | None:
-        """The ids the server's reasoning parser ends reasoning with on a budgeted vLLM run, else ``None``; a
-        marker the tokenizer does not write resolves none, warned on the main process."""
+        """On a budgeted vLLM run; a marker the tokenizer does not write resolves none, warned on the main process."""
         cfg = self.async_config
         if cfg.rollout_backend == SGLANG_BACKEND or not has_thinking_budget(self._efforts_by_level()):
             return None
@@ -126,7 +112,6 @@ class ReasoningBudgetMixin:
 
     @property
     def _any_episode_capped(self) -> bool:
-        """Whether some level the run draws binds a reasoning cap the engine closes at."""
         return any(effort.thinking_cap is not None for effort in self._efforts_by_level().values())
 
     def _resolve_forced_close_ids(self, reasoning_end_ids: tuple[int, ...] | None) -> tuple[int, ...] | None:
@@ -140,10 +125,9 @@ class ReasoningBudgetMixin:
         device: torch.device,
         mode: str,
     ) -> torch.Tensor:
-        """Per-trajectory environment rewards, each episode charged its level's reasoning price and its under-use
-        floor while that term is on, each term's batch mean recorded. An episode with no level pays no price, one
-        with no budget no floor, and a training episode whose group earned no objective (:func:`failed_group_mask`)
-        neither unless ``reasoning_terms_in_failed_groups``, the waived share recorded."""
+        """Each episode charged its level's price and under-use floor, except: no level pays no price, no budget no
+        floor, and a training episode whose group earned no objective neither, unless
+        ``reasoning_terms_in_failed_groups``."""
         rewards = torch.tensor([r.total_reward for r in rollout_results], device=device, dtype=torch.float32)
         cfg = self.async_config
         price_on, floor_on = cfg.reasoning_price is not None, cfg.reasoning_floor > 0

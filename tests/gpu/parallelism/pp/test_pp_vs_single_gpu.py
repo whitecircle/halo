@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""Pipeline parallelism equivalence gate: PP + FSDP2 must reproduce single-GPU gradients.
-
-The base PP correctness gate. It splits a tiny dense Qwen3 across 2 pipeline stages with FSDP2
-data parallelism inside each stage, and compares both the loss and every parameter gradient against
-an unsplit single-process baseline over the same global batch.
-
-It fails when any of the load-bearing pieces breaks:
-  * layer partition / stage slicing puts a layer on the wrong stage
-  * the final norm is applied mid-network (non-last stages must neutralize it)
-  * loss normalization or ``scale_grads`` mis-scales gradients by ``n_microbatches``
-  * the FSDP2 per-step grad reduction inside torch's schedule stops running
-  * boundary activations lose their gradient path
-
-Topology: world=4 run as 2 simulated nodes of 2 GPUs (``gpus_per_node``/NVLink domain = 2) with the
-pipeline crossing the simulated node boundary — the placement PP is designed for, so the stage
-groups exercise the cross-domain path rather than a single-node shortcut.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_vs_single_gpu.py
-"""
+"""PP + FSDP2 reproduces single-GPU loss and every gradient on a tiny dense Qwen3, over simulated nodes the pipeline
+crosses."""
 
 import sys
 
@@ -32,17 +15,15 @@ from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 
-# Depth scales with the launch: 4 GPUs -> pp2 (first+last only), 8 GPUs -> pp4, whose two middle
-# stages (no embedding, no loss, pure hidden->hidden) and 3-hop chains nothing else exercises.
+# 4 GPUs -> pp2, 8 GPUs -> pp4, whose two middle stages (no embedding, no loss) and 3-hop chains nothing else
+# exercises.
 GLOBAL_BATCH = 8
 GRAD_TOLERANCE = 2e-3
 
-# --gc: run the split model with non-reentrant activation checkpointing enabled. Checkpointing is
-# numerically exact, so the same golden gradients must reproduce; an engagement counter proves the
-# checkpoint path actually ran (the silent failure mode is HF's training/no-grad gate skipping it).
+# --gc: non-reentrant activation checkpointing, numerically exact; an engagement counter proves it ran, since HF's
+# training/no-grad gate can silently skip it.
 USE_GC = False
-# --pp_split lo,hi...: manual per-stage layer counts — proves the non-uniform partition machinery
-# (global naming, boundary activations, normalizer) is partition-agnostic, not just 4/4-correct.
+# --pp_split lo,hi...: manual per-stage layer counts, proving the partition machinery isn't just 4/4-correct.
 PP_SPLIT = None
 # --schedule gpipe: same equivalence under ScheduleGPipe, which no other GPU test runs.
 SCHEDULE = "1f1b"
@@ -52,9 +33,9 @@ SCHEDULE = "1f1b"
 def run(ctx):
     device = torch.device("cuda", ctx.local_rank)
 
-    # world/2 simulated nodes of 2 GPUs; the pipeline crosses every simulated node boundary.
+    # The pipeline crosses every simulated node boundary.
     pp_size = ctx.world_size // 2
-    n_microbatches = max(2, pp_size)  # Schedule1F1B needs a full pipeline
+    n_microbatches = max(2, pp_size)  # Schedule1F1B needs a full pipeline.
     config = ParallelismConfig(
         world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=pp_size, pp_schedule=SCHEDULE
     )
@@ -75,17 +56,15 @@ def run(ctx):
         lo, hi = stage_module.layer_range
         assert hi - lo == PP_SPLIT[config.pp_rank], (PP_SPLIT, config.pp_rank, (lo, hi))
 
-    # This DP replica's slice of the global batch; every rank of a chain gets the same slice.
+    # Every rank of a chain gets the same slice.
     dp_rank = config.get_data_parallel_rank()
     local_bs = GLOBAL_BATCH // config.data_parallel_size
     sl = slice(dp_rank * local_bs, (dp_rank + 1) * local_bs)
     loss = runner.step(input_ids[sl], labels[sl])
 
-    # Average the last stage's per-replica losses over DP -> the full-batch loss.
     checks, metrics = ppeq.check_loss_vs_baseline(loss, ref_loss, config, groups, tol=1e-4)
 
-    # Gradient check: every stage-local parameter against its counterpart in the unsplit model, through
-    # the production name remap, so a regression in it fails this test too.
+    # Through the production name remap, so a regression in it fails this test too.
     errors, worst_name = ppeq.max_abs_grad_errors(ppeq.gather_stage_grads(stage_module), ref_grads)
     stage_names = {stage_module.global_parameter_name(n) for n, _ in stage_module.named_parameters()}
     missing = sorted(stage_names - errors.keys())
@@ -95,23 +74,21 @@ def run(ctx):
         f"worst_rel_err={worst_err:.3e} @ {worst_name} missing={missing}"
     )
 
-    # A vacuous pass (nothing compared) must fail: it is the failure mode of a broken FQN mapping.
+    # A vacuous pass is the failure mode of a broken FQN mapping.
     checks["all_stage_params_compared"] = bool(errors) and not missing
     checks["grads_match_baseline"] = bool(errors) and worst_err < GRAD_TOLERANCE
     metrics["worst_grad_rel_err"] = worst_err
     metrics["params_compared"] = len(errors)
 
-    # Every stage must have contributed some parameters, or the split silently produced empty stages.
+    # Or the split silently produced empty stages.
     checks["every_stage_has_params"] = world_min(len(errors), device) > 0
 
-    # The clip must actually clip (every other call site uses max_norm=1e6, so a wrong coefficient
-    # or a missed plain-vs-DTensor scale would never fail a test): clip to half the current norm,
-    # verify the achieved norm halves; then max_norm=0 must disable (not zero the gradients).
-    # Runs after the grad comparisons — it scales the gradients.
+    # Every other call site uses max_norm=1e6, so a wrong coefficient never fails a test: clip to half, then max_norm=0
+    # must disable. After the grad comparisons, since it scales the gradients.
     params = list(stage_module.parameters())
     norm_full = pp_clip_grad_norm(params, 1e9)
     pp_clip_grad_norm(params, float(norm_full) / 2)
-    norm_after_zero_disable = pp_clip_grad_norm(params, 0)  # must not scale
+    norm_after_zero_disable = pp_clip_grad_norm(params, 0)  # Must not scale.
     norm_final = pp_clip_grad_norm(params, 1e9)
     halved_gap = abs(float(norm_final) - float(norm_full) / 2)
     checks["clip_halves_the_norm"] = halved_gap < TOL.clip_achieved_norm_rel * float(norm_full)

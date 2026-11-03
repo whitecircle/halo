@@ -1,46 +1,6 @@
 #!/usr/bin/env python
 """An injected-LoRA embedding checkpoint serves from its folded weights and resumes from its adapters.
-
-The embedding trainer injects LoRA in place, so every save folds the adapters into the weights it
-writes. The fold serves, but a resume cannot come back from it: the adapters would restart from
-initialization on top of the folded weights while their optimizer moments were restored. So every
-training checkpoint also carries the run's unfolded trainable tensors in ``resume_adapter/`` plus the
-root ``resume_adapter.json`` marker, and resume builds from the base, re-injects, and restores them.
-Driven through the real trainer on a tiny random BERT (CPU, fp32, dropout off, so a resumed step is
-bit-reproducible):
-
-* layout: the adapter file holds exactly the live trainable tensors at save time, bit for bit, the
-  root holds no adapter file or config, and the folded weights load with stock
-  ``SentenceTransformer`` / ``AutoModel`` as PEFT's merge of those same tensors; a failed
-  adapter write leaves no marker;
-* the final ``save_model`` export carries no resume state;
-* classification: the marker sends the policy load to the base;
-* resume: the restored tensors equal the saved ones bit for bit, the frozen base is the base's, and
-  the resumed steps reproduce the uninterrupted run's losses and final adapters exactly; the
-  ``load_best_model_at_end`` load restores the best checkpoint's adapters the same way;
-* refusals: a marked checkpoint missing its adapter file, an unmarked (folded-only) checkpoint under an
-  injected-LoRA run, a model built from the folded weights, a run without injected LoRA, a resume
-  adapter for other target modules or rank, and one trained at another LoRA scaling or without its
-  recorded scaling;
-* ordering: the resume adapter and its marker are on disk before rotation removes the previous
-  checkpoint, with ``save_only_model`` too;
-* a non-shared filesystem: two one-rank "nodes" each write a complete resume adapter to their own
-  directory and each restores its own; one node missing its copy raises on both;
-* other targets and variants (the input embedding ``word_embeddings`` beside the attention targets or
-  alone, DoRA): the checkpoint serves PEFT's own merge, carries every trainable tensor in its resume
-  adapter, and the run resumes exactly; an adapter the save cannot fold (``nn.MultiheadAttention``
-  LoRA) is refused at construction;
-* the resume-state rules every checkpoint follows: a save over a marked directory leaves no stale
-  marker (a full fine-tune's checkpoint is full, a torn LoRA save unmarked); a marked checkpoint
-  without its adapter is refused before the policy loads; a bf16 conversion keeps the resume state and
-  resumes like its source, while a vocabulary patch, an adapter merge and an N-way merge carry none;
-* the backbone's own ``lora_``-named parameters (jina's parametrizations) are base weights, neither
-  taken for injected LoRA nor dropped by the fold nor trained; LoRA goes into the backbone only, an
-  adapter outside it is refused, and under FSDP2 so is a head outside it that trains or is sharded;
-* a full fine-tune: the weight loader the trainer resumes through covers the names its saves write.
-
-    python tests/cpu/trainers/test_embedding_lora_resume.py
-"""
+A resume from the fold would restart the adapters under restored moments, hence ``resume_adapter/`` and its marker."""
 
 import ast
 import datetime
@@ -116,14 +76,13 @@ LORA_R = 4
 LORA_ALPHA = 8
 TOTAL_STEPS = 4
 SAVE_AT_STEP = 2
-# One rank per "node": every rank is its node's local main, hence a checkpoint writer.
+# TWO_NODE_ENV: one rank per node, so every rank is its node's local main, hence a checkpoint writer.
 patch_vocab = load_script_module("scripts/before_training/patch_vocab.py")
 TWO_NODE_ENV = {"LOCAL_RANK": "0", "LOCAL_WORLD_SIZE": "1", "DIST_OUTPUT_SHARED_FILESYSTEM": "0"}
 PG_TIMEOUT = datetime.timedelta(seconds=120)
 
 
 def _tiny_base(path) -> str:
-    """A random 2-layer BERT and a word-level tokenizer, saved as a plain transformers checkpoint."""
     backend = Tokenizer(models.WordLevel({word: i for i, word in enumerate(WORDS)}, unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.Whitespace()
     tokenizer = PreTrainedTokenizerFast(
@@ -153,8 +112,6 @@ def _lora_model(
     model: SentenceTransformer | None = None,
     **lora,
 ) -> SentenceTransformer:
-    """``source`` loaded (or ``model``, already built from it), then LoRA-injected by the embedding
-    script's own ``inject_lora``."""
     torch.manual_seed(seed)  # the adapter init draws from the global generator
     model = model if model is not None else SentenceTransformer(source, device="cpu")
     model_config = ModelArguments(
@@ -210,7 +167,6 @@ def _trainer(model, output_dir, *, callbacks=(), eval_dataset=None, **overrides)
 
 
 def _host(model) -> EmbeddingTrainer:
-    """The trainer methods under test over ``model``, without the trainer's construction."""
     host = object.__new__(EmbeddingTrainer)
     host.model = model
     host.parallelism_config = ParallelismConfig()
@@ -222,8 +178,7 @@ def _frozen(model) -> dict[str, torch.Tensor]:
 
 
 class _Snapshot(TrainerCallback):
-    """The trainable tensors right after the checkpoint save at ``SAVE_AT_STEP`` (``on_save``), or
-    right after a resume restored them (``on_train_begin``)."""
+    """The trainable tensors after the save at ``SAVE_AT_STEP`` or after a resume restored them."""
 
     def __init__(self, event: str):
         self.event = event
@@ -263,7 +218,7 @@ def _copy(checkpoint: str, destination) -> str:
 
 
 def _lora_config(target_modules=TARGET_MODULES, **lora) -> LoraConfig:
-    """The ``LoraConfig`` ``inject_lora`` builds for :func:`_lora_model`'s settings."""
+    """The ``LoraConfig`` ``inject_lora`` builds."""
     return LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=0.0, target_modules=list(target_modules), **lora)
 
 
@@ -288,9 +243,6 @@ def _assert_serves_the_fold(
     assert embeddings.shape[0] == 2 and torch.isfinite(embeddings).all()
 
 
-# --- layout ---------------------------------------------------------------------------------
-
-
 def test_a_training_checkpoint_carries_its_resume_adapter_beside_the_fold(run):
     checkpoint = run.checkpoint
     assert resume_adapter_dir(checkpoint) == os.path.join(checkpoint, RESUME_ADAPTER_DIR)
@@ -309,8 +261,7 @@ def test_a_training_checkpoint_carries_its_resume_adapter_beside_the_fold(run):
 
 
 def test_a_failed_adapter_write_leaves_the_checkpoint_unmarked(run, tmp_path, monkeypatch):
-    """The marker is the resume's verdict, so it must never outrun its adapter: after a failed write
-    the checkpoint stays unmarked, which an injected-LoRA resume refuses."""
+    """The marker must never outrun its adapter: an injected-LoRA resume refuses an unmarked checkpoint."""
     checkpoint = str(tmp_path / f"checkpoint-{SAVE_AT_STEP}")
     os.makedirs(checkpoint)
 
@@ -333,20 +284,13 @@ def test_the_final_export_is_a_serving_artifact_without_resume_state(run):
     _assert_serves_the_fold(final, run.base, run.final, backbone_prefix(run.trainer.model))
 
 
-# --- classification -------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("use_grouped_gemm", [True, False], ids=["grouped-gemm-default", "grouped-gemm-off"])
 def test_the_marker_sends_the_policy_load_to_the_base(run, use_grouped_gemm):
-    """The fold is as loadable as a full fine-tune's weights; building from it and restoring the
-    adapters would apply the delta twice. The default ``use_grouped_gemm`` takes the classifier."""
+    """Building from the fold and restoring the adapters would apply the delta twice."""
     assert classify_resume_weights(run.checkpoint) == "merged_adapter"
     model_config = SimpleNamespace(model_name_or_path=run.base)
     config = ParallelismConfig(use_grouped_gemm=use_grouped_gemm)
     assert resolve_resume_weights_source(run.checkpoint, model_config, config) == run.base
-
-
-# --- resume ---------------------------------------------------------------------------------
 
 
 def test_resume_restores_the_adapters_bit_equal_and_reproduces_the_run(run, tmp_path):
@@ -375,8 +319,6 @@ def test_resume_restores_the_adapters_bit_equal_and_reproduces_the_run(run, tmp_
 
 
 def test_load_best_model_at_end_restores_the_best_checkpoints_adapters(run, tmp_path):
-    """The end-of-run best-model load goes through the same override: the best checkpoint's adapters
-    come back from its resume adapter onto the live base, and the final export folds those."""
     trainer = _trainer(
         _lora_model(run.base, seed=1),
         tmp_path / "out",
@@ -405,8 +347,7 @@ def test_load_best_model_at_end_restores_the_best_checkpoints_adapters(run, tmp_
 
 @pytest.mark.parametrize("for_best_model", [False, True], ids=["resume", "best-model"])
 def test_an_injected_lora_resume_restores_the_state_beside_its_weights(run, monkeypatch, for_best_model):
-    """The router-balancing biases and the trainer sidecars sit beside the adapter this path restores in place
-    of the weights; skipped, a resumed run re-imbalances its router and drops its sidecar state."""
+    """Skipped, a resumed run re-imbalances its router and drops its sidecar state."""
     restored = []
     monkeypatch.setattr(
         EmbeddingTrainer,
@@ -416,9 +357,6 @@ def test_an_injected_lora_resume_restores_the_state_beside_its_weights(run, monk
     host = _host(_lora_model(run.base, seed=2))
     EmbeddingTrainer._load_from_checkpoint(host, run.checkpoint, for_best_model=for_best_model)
     assert restored == [(run.checkpoint, for_best_model)]
-
-
-# --- refusals -------------------------------------------------------------------------------
 
 
 def test_a_marked_checkpoint_without_its_adapter_file_raises(run, tmp_path):
@@ -432,10 +370,8 @@ def test_a_marked_checkpoint_without_its_adapter_file_raises(run, tmp_path):
 
 @pytest.mark.parametrize("built_from", ["resolver", "base"])
 def test_an_unmarked_folded_checkpoint_refuses_an_injected_lora_run(run, tmp_path, built_from):
-    """The layout a torn save leaves: folded weights, no marker. The resolver takes it for a full
-    checkpoint and builds from the fold; fresh adapters on top of it under restored optimizer moments
-    are the silent divergence, so the load raises. Built from the base too, where the adapter file the
-    torn save left would otherwise restore with nothing else to refuse it."""
+    """A torn save's layout: fresh adapters on the fold under restored optimizer moments would diverge silently.
+    Built from the base too, where the adapter file a torn save left would otherwise restore unrefused."""
     checkpoint = _copy(run.checkpoint, tmp_path / f"checkpoint-{SAVE_AT_STEP}")
     os.remove(os.path.join(checkpoint, RESUME_ADAPTER_MARKER_FILE))
     source = resolve_resume_weights_source(
@@ -481,9 +417,7 @@ def test_a_resume_adapter_for_another_adapter_layout_is_refused(run, tmp_path, l
 
 @pytest.mark.parametrize("lora", [{"lora_alpha": 2 * LORA_ALPHA}, {"use_rslora": True}], ids=["other-alpha", "rslora"])
 def test_a_resume_under_another_lora_scaling_is_refused(run, tmp_path, lora, monkeypatch):
-    """The adapters would restore by name and shape and every delta would be rescaled: the scaling the
-    run saved with is recorded beside its resume adapter and held to the live one, through the same
-    collective read the adapter restore of every other run uses, which reads the file once."""
+    """Adapters would restore by name and shape with every delta rescaled; the shared read reads the file once."""
     reads = []
     real_read = peft_mod.read_adapter_file
     monkeypatch.setattr(peft_mod, "read_adapter_file", lambda path: reads.append(path) or real_read(path))
@@ -507,13 +441,9 @@ def test_a_resume_adapter_without_its_recorded_scaling_is_refused(run, tmp_path)
         trainer._load_from_checkpoint(checkpoint)
 
 
-# --- ordering -------------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("save_only_model", [False, True], ids=["exact-resume", "save_only_model"])
 def test_the_resume_adapter_is_on_disk_before_rotation(run, tmp_path, monkeypatch, save_only_model):
-    """With ``save_total_limit: 1`` rotation deletes the previous checkpoint; a preemption between
-    that and the resume-adapter write would leave one checkpoint no resume accepts."""
+    """A preemption between rotation and the resume-adapter write would leave one checkpoint no resume accepts."""
     output_dir = tmp_path / "out"
     seen = []
 
@@ -534,11 +464,7 @@ def test_the_resume_adapter_is_on_disk_before_rotation(run, tmp_path, monkeypatc
     assert sorted(os.listdir(output_dir)) == [f"checkpoint-{TOTAL_STEPS}"]
 
 
-# --- non-shared filesystem ------------------------------------------------------------------
-
-
 def _node_checkpoint(root: str, rank: int) -> str:
-    """This node's own checkpoint directory: on a non-shared FS a node sees only its own disk."""
     return os.path.join(root, f"node_{rank}", f"checkpoint-{SAVE_AT_STEP}")
 
 
@@ -592,9 +518,7 @@ def _node_worker(rank: int, root: str, base: str) -> None:
 
 
 def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):
-    """Both ranks are writers, each on its own directory: a rank-0-only write leaves node 1 nothing to
-    resume from, and a restore that read another node's copy fails the per-node comparison, since the
-    two nodes hold different tensors. A copy missing on one node then raises on both, not one."""
+    """A rank-0-only write leaves node 1 nothing to resume from; a copy missing on one node raises on both."""
     base = _tiny_base(tmp_path / "base")
     run_gloo_ranks(_node_worker, 2, str(tmp_path), base, pg_timeout=PG_TIMEOUT, env=TWO_NODE_ENV)
 
@@ -603,9 +527,6 @@ def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):
         assert result == "PASS", f"rank {rank}: {result}"
     first = [(tmp_path / f"first_tensor_{rank}.txt").read_text() for rank in range(2)]
     assert first[0] != first[1], "premise: the two nodes hold different tensors"
-
-
-# --- other targets and variants ---------------------------------------------------------------
 
 
 @pytest.fixture(
@@ -619,9 +540,8 @@ def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):
     ids=["embedding-and-attention", "embedding-only", "dora"],
 )
 def variant_run(request, tmp_path_factory):
-    """``run`` with another target set or variant: PEFT adapts the input embedding as a
-    ``lora.Embedding``, whose ``lora_embedding_A``/``_B`` are neither ``lora_A`` nor ``lora_B``, and DoRA
-    adds a ``lora_magnitude_vector`` its merge rescales by."""
+    """PEFT's ``lora.Embedding`` holds ``lora_embedding_A``/``_B``, neither ``lora_A`` nor ``lora_B``.
+    DoRA adds a ``lora_magnitude_vector`` its merge rescales by."""
     PartialState()
     targets, lora, folds = request.param
     root = tmp_path_factory.mktemp("embedding_lora_variant")
@@ -643,8 +563,7 @@ def variant_run(request, tmp_path_factory):
 
 
 def test_every_target_serves_peft_merge_of_its_adapters(variant_run):
-    """The checkpoint serves PEFT's merge (``(B @ A)ᵀ`` for the embedding, DoRA's rescale) under the plain
-    names, with no adapter key left over, and its resume adapter holds every trainable tensor bit for bit."""
+    """Served under the plain names: PEFT's merge, ``(B @ A)ᵀ`` for the embedding and DoRA's rescale."""
     moved = [
         key for key, value in variant_run.at_save.items() if key.endswith(".lora_embedding_A.default") and value.any()
     ]
@@ -692,9 +611,8 @@ class _AttentionBackbone(torch.nn.Module):
 
 
 def test_an_adapter_the_save_cannot_fold_is_refused_at_construction():
-    """An ``nn.MultiheadAttention`` LoRA has no out-of-place fold. Refused when the trainer is built, on
-    every rank, rather than on the save rank alone at the first checkpoint, where its peers would
-    block in the save's collectives."""
+    """An ``nn.MultiheadAttention`` LoRA has no out-of-place fold.
+    Refused on the save rank alone, at the first checkpoint, its peers would block in the save's collectives."""
     backbone = inject_adapter_in_model(LoraConfig(r=2, target_modules=["attn"]), _AttentionBackbone())
 
     with pytest.raises(ValueError, match="cannot be folded out of place"):
@@ -708,12 +626,8 @@ def test_an_adapter_the_save_cannot_fold_is_refused_at_construction():
     assert "lora_fold_targets" in called, "the trainer's construction no longer checks the fold"
 
 
-# --- the backbone's own lora_ parameters, and modules outside the backbone ---------------------
-
-
 class _NativeLora(torch.nn.Module):
-    """A remote-code backbone's own LoRA, as jina-embeddings-v3 parametrizes its weights: base
-    parameters named ``lora_A`` / ``lora_B`` that no PEFT tuner layer owns."""
+    """jina-embeddings-v3's parametrization: base parameters named ``lora_A`` / ``lora_B`` no PEFT tuner layer owns."""
 
     def __init__(self, features: int):
         super().__init__()
@@ -725,8 +639,6 @@ class _NativeLora(torch.nn.Module):
 
 
 def _with_native_lora(model: SentenceTransformer) -> list[str]:
-    """Parametrize each attention ``key`` projection of ``model``'s backbone with :class:`_NativeLora`;
-    returns the backbone's names of the native factors."""
     backbone = model[0].auto_model
     for layer in backbone.encoder.layer:
         key = layer.attention.self.key
@@ -744,8 +656,6 @@ def test_a_backbones_own_lora_parameters_are_not_injected_lora(run):
 
 
 def test_the_fold_keeps_a_backbones_own_lora_parameters_and_trains_only_the_injected_ones(run):
-    """With injected LoRA on top, the fold drops the tensors the tuner layers own and nothing else, and
-    the script trains those alone."""
     model = SentenceTransformer(run.base, device="cpu")
     native = _with_native_lora(model)
     _lora_model(run.base, seed=1, model=model)
@@ -789,8 +699,7 @@ def test_lora_outside_the_backbone_is_refused_at_construction(run, tmp_path):
 
 
 def test_a_trainable_parameter_outside_the_backbone_is_refused_under_fsdp2(run):
-    """The save writes the head rank-locally and resume restores the backbone alone, so the head's
-    training is lost; a single process and DDP save and train the whole pipeline."""
+    """The save writes the head rank-locally and resume restores the backbone alone, so the head's training is lost."""
     model = SentenceTransformer(run.base, device="cpu")
     _with_dense_head(model)
 
@@ -800,8 +709,7 @@ def test_a_trainable_parameter_outside_the_backbone_is_refused_under_fsdp2(run):
 
 
 def test_a_frozen_head_passes_unless_fsdp2_shards_it(run):
-    """A frozen head FSDP2 leaves whole (a dtype exclusion) saves whole; a sharded one would be saved
-    as this rank's shard."""
+    """A frozen head FSDP2 leaves whole is saved whole; a sharded one would be saved as this rank's shard."""
     model = SentenceTransformer(run.base, device="cpu")
     linear = _with_dense_head(model).linear
     linear.requires_grad_(False)
@@ -815,14 +723,9 @@ def test_a_frozen_head_passes_unless_fsdp2_shards_it(run):
             reject_modules_outside_backbone(model, model[0].auto_model, saves_rank_locally=True)
 
 
-# --- the resume-state rules every checkpoint follows ---------------------------------------------
-
-
 def test_a_save_over_a_marked_directory_leaves_no_stale_marker(run, tmp_path, monkeypatch):
-    """A run resumed from an earlier checkpoint rewrites ``checkpoint-N`` in place. A marker the old save
-    left there would vouch for the old adapter beside the new weights, so every save removes it first:
-    a full fine-tune writes an unmarked, full checkpoint, and an injected-LoRA save torn before its own
-    adapter write leaves none."""
+    """A resumed run rewrites ``checkpoint-N`` in place.
+    A marker left there would vouch for the old adapter beside the new weights, so every save removes it first."""
     checkpoint = tmp_path / "out" / f"checkpoint-{SAVE_AT_STEP}"
     _copy(run.checkpoint, checkpoint)
     _trainer(SentenceTransformer(run.base, device="cpu"), tmp_path / "out", max_steps=SAVE_AT_STEP).train()
@@ -876,8 +779,7 @@ def test_a_bf16_conversion_keeps_the_resume_state_and_resumes_like_its_source(ru
 
 
 def test_a_new_base_built_from_the_checkpoint_carries_none_of_its_resume_state(run, tmp_path, monkeypatch):
-    """A vocabulary patch, an adapter merged into it and an N-way merge are new models: resumed, the
-    marker would rebuild them from the original base plus this run's adapter, dropping their weights."""
+    """These are new models: resumed, the marker would rebuild them from the original base plus this run's adapter."""
     patched = tmp_path / "patched"
     monkeypatch.setattr(
         sys,
@@ -911,14 +813,9 @@ def test_a_new_base_built_from_the_checkpoint_carries_none_of_its_resume_state(r
         assert classify_resume_weights(str(out)) == "full"
 
 
-# --- full fine-tune -------------------------------------------------------------------------
-
-
 def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path, monkeypatch):
-    """Every save writes the backbone's names, so the loader a full fine-tune resumes through must
-    hold the backbone: handed the SentenceTransformer (``0.<module>.*``) it matches none of them, and
-    the FSDP2 / TP reloads refuse the checkpoint at their coverage gate. The optimizer store keeps the
-    SentenceTransformer, whose parameters the optimizer steps."""
+    """On the SentenceTransformer (``0.<module>.*``) the loader matches no saved name, and FSDP2/TP reloads refuse.
+    The optimizer store keeps the SentenceTransformer, whose parameters the optimizer steps."""
     PartialState()
     base = _tiny_base(tmp_path / "base")
     _trainer(SentenceTransformer(base, device="cpu"), tmp_path / "out", max_steps=SAVE_AT_STEP).train()
@@ -940,9 +837,7 @@ def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path, mon
 
 
 def test_a_single_process_resume_restores_the_whole_pipeline(tmp_path):
-    """A single process trains and saves every module, a head past the backbone included, so its
-    reload stays with sentence-transformers' own, which rebuilds the pipeline from the checkpoint. The
-    mixin's whole-weight reload, pointed at the backbone, would leave the trained head at its init."""
+    """A single process saves every module; the mixin's reload of the backbone would leave a head at its init."""
     PartialState()
     base = _tiny_base(tmp_path / "base")
     torch.manual_seed(1)

@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """The embedding trainer refuses a ``max_length`` the entry script has not resolved.
-
-sentence-transformers' training collator truncates every text column to ``args.max_length``; a
-non-positive value stands for the backbone's context window only after ``resolve_embedding_max_length``
-runs, so a hand-built trainer handed one would train on texts cut to their special tokens.
-
-Run: pytest tests/cpu/trainers/test_embedding_max_length_gate.py
-"""
+A hand-built trainer handed a non-positive value would train on texts cut to their special tokens."""
 
 import ast
 import inspect

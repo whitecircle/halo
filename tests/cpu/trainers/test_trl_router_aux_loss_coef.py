@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """TRL's router aux-loss coefficient is the balancing mode's, and TRL's config writes do not stick.
-
-TRL 1.14 reads an unset ``router_aux_loss_coef`` off the model config and turns its aux loss on wherever
-that is non-zero: a hub coefficient (gpt-oss ships 0.9) would then train the aux term under
-``moe_balancing: none`` or a bias mode and add it to a policy-gradient loss. Its SFT trainer also writes
-``output_router_logits`` and the coefficient onto the text config at construction, which would undo the
-mode's own setting and reach the exported ``config.json``. The trainer mixin hands TRL the coefficient
-the mode put in effect where TRL adds the term itself (DPO, KTO) and 0.0 everywhere else, refuses one
-set on the trainer config, and restores the config fields after TRL's construction.
-
-    python tests/cpu/trainers/test_trl_router_aux_loss_coef.py
-"""
+TRL 1.14 trains the aux term wherever the config's coefficient is non-zero (gpt-oss ships 0.9), under any mode."""
 
 import types
 from unittest.mock import patch

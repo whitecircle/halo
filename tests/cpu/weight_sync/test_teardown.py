@@ -1,26 +1,5 @@
-"""CPU tests for the SGLang weight-sync client's teardown contract.
-
-Five facts are load-bearing and invisible in a passing run:
-
-  * the engine-side release of the group name runs WHILE the local ``dist.destroy_process_group``
-    runs, not after it returns: under NCCL's cuMem transports each side's finalize waits for the
-    other, so a local-first order parks the local destroy forever;
-  * the atexit invocation must NOT enter ``dist.destroy_process_group``: the group's peers are
-    engine processes that never enter destroy, so with an interrupted sync in flight the destroy
-    BLOCKS rather than raises — wedging interpreter exit. The engine-side name release and the
-    rendezvous-store drop still run, or the server refuses every future join under the name;
-  * the explicit ``close_communicator()`` (the reconnect path) must keep the full local destroy,
-    or the c10d group name and rendezvous port leak and the next client to the same server cannot
-    form its group — unless a drain deadline aborted the group, after which torch has dropped its
-    bookkeeping and a destroy raises;
-  * that abort never raises: it runs inside the drain-deadline handler, where an escaping error
-    would replace the deadline error the operator needs;
-  * the quiesce this teardown has to lift is lifted on SGLang's OWN route, with the body its
-    handler requires — the class attributes that carry both are read once, on a failing path, where
-    a wrong value is a warning line and an engine left paused.
-
-    python tests/cpu/weight_sync/test_teardown.py
-"""
+"""The SGLang weight-sync client's teardown contract. Under NCCL's cuMem transports each side's finalize waits for the
+other, so the engine-side release runs during the local destroy. At exit the destroy is skipped, as it would block."""
 
 import atexit
 import logging
@@ -35,7 +14,6 @@ from tests.common.weight_sync import offline_client
 
 
 def _teardown_probe(client, monkeypatch) -> list[tuple[str, object]]:
-    """Records the local release as ``("destroy" | "drop", group)`` and the engine-side one as ``("remote", None)``."""
     calls: list[tuple[str, object]] = []
     monkeypatch.setattr(
         sglang_module,
@@ -47,10 +25,8 @@ def _teardown_probe(client, monkeypatch) -> list[tuple[str, object]]:
 
 
 def test_the_pause_is_lifted_on_sglangs_own_route_with_a_body(monkeypatch):
-    """``/continue_generation`` parses a request dataclass, so an empty body is REJECTED — and the
-    rejection surfaces only as a warning from ``_lift_pause``, leaving the engine quiesced and every
-    later rollout queued behind it. Route and body are both class attributes; neither is otherwise
-    exercised outside a live server."""
+    """``/continue_generation`` parses a request dataclass, so an empty body is rejected, which surfaces only as a
+    warning from ``_lift_pause`` and leaves the engine quiesced."""
     client = offline_client(SGLangWeightSyncClient)
     client._paused = True
     posts: list[tuple[str, dict]] = []
@@ -78,9 +54,7 @@ def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):
 
 
 def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch):
-    """The local destroy blocks until the engine drops its half, so the engine must already have been
-    asked by then. The fake destroy waits for the engine-side release to start; a client that only
-    releases the engine after the destroy returned never satisfies it."""
+    """The local destroy blocks until the engine drops its half, so the engine must already have been asked by then."""
     client = offline_client(SGLangWeightSyncClient)
     client._transport = (object(), None)
     remote_started = threading.Event()
@@ -101,8 +75,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
 
 
 def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
-    """After a drain deadline aborted the group torch has already removed its bookkeeping; a destroy
-    raises "Invalid process group", and the engine-side release must still run."""
+    """Torch has already removed its bookkeeping, so a destroy raises ``Invalid process group``."""
     client = offline_client(SGLangWeightSyncClient)
     group = object()
     client._transport = (group, None)
@@ -117,8 +90,7 @@ def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):
 
 
 def test_a_client_that_never_formed_its_group_does_not_ask_the_engine_to_release_one(monkeypatch):
-    """A failed or never-attempted formation already released the engine side; a second close would
-    only post a redundant release and delay the teardown by its timeout."""
+    """A failed or never-attempted formation already released the engine side; a second release delays the teardown."""
     client = offline_client(SGLangWeightSyncClient)
     calls = _teardown_probe(client, monkeypatch)
 
@@ -145,8 +117,7 @@ def test_the_atexit_invocation_skips_the_local_nccl_destroy(monkeypatch):
 
 
 def test_init_registers_the_no_destroy_close_at_atexit(monkeypatch):
-    """The exit hook decides whether interpreter exit can wedge, so its registration is the contract: the
-    client's own close, called with ``at_exit=True`` (the variant the test above pins as destroy-free)."""
+    """The exit hook decides whether interpreter exit can wedge, so its registration is the contract."""
     client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
     registered: list[tuple[object, tuple, dict]] = []
     monkeypatch.setattr(atexit, "register", lambda fn, *args, **kwargs: registered.append((fn, args, kwargs)))
@@ -177,8 +148,7 @@ def test_a_release_without_destroy_never_enters_the_nccl_destroy(monkeypatch):
 
 
 def test_a_failing_destroy_warns_and_still_drops_the_rank_map_entry(monkeypatch, caplog):
-    """The destroy runs against an engine that may already be gone; its failure must not mask the error
-    that triggered the teardown, and the group's rank map must not outlive it."""
+    """The engine may already be gone; the failure must not mask the error that triggered the teardown."""
 
     def failing_destroy(group):
         raise RuntimeError("Invalid process group")

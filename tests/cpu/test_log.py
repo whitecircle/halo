@@ -1,8 +1,5 @@
 """A training run's INFO root: ``configure_training_logging`` sets it, and ``parse_script_args`` and the GPU test
-harness call it before the process group starts.
-
-python tests/cpu/test_log.py
-"""
+harness call it before the process group starts."""
 
 import logging
 

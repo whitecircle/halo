@@ -1,28 +1,8 @@
 #!/usr/bin/env python
-"""PP save of a GptOss model whose sinks were dropped to None (the Hopper FA2 fine-tuning state).
+"""PP save of a GptOss model with sinks dropped to None (Hopper FA2) re-emits them neutralized under global names.
 
-Under FA2 the production loader sets every ``self_attn.sinks`` to None (``_reset_gpt_oss_sinks``),
-which removes them from ``named_parameters()``/``state_dict()``. The PP save must re-emit them
-neutralized (dtype min — zero softmax weight, the reset-sinks fine-tuning semantics) under global
-names: the helper names sinks by position in the stage's sliced layer list, so a missing
-``global_parameter_name`` remap would collide stage 1's re-emissions with stage 0's layers and the
-merged checkpoint would drop half the sinks (a from_pretrained meta-tensor error) or overwrite the
-wrong layers.
-
-The pipeline runs FA4, so the test skips off Blackwell. GptOss FA2 runs only on Hopper: transformers
-reroutes its flash_attention_2 to a hub FA3 kernel that has no Blackwell build. FA4's sink path
-passes ``sinks`` straight through and tolerates None — the same no-sink softmax, so the save branch
-under test is byte-identical to a Hopper FA2 run's. This test fails when:
-
-  * any of the 8 ``model.layers.{i}.self_attn.sinks`` keys is missing from the merged checkpoint
-    (re-emission skipped, or emitted under stage-local names)
-  * a re-emitted sink is not the neutralized dtype-min fill
-  * the checkpoint does not reload into the unsplit class with the exact reference key set
-  * the reloaded model (eager + neutralized sinks — mathematically the same no-sink softmax) fails
-    to reproduce the pipeline's probe loss on the final weights
-
-Topology: 4 GPUs, pp2 × dp2 (dense FSDP2 stages — MoE without EP). Run:
-    torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_gptoss_fa2_sinks_save.py
+Without the ``global_parameter_name`` remap, stage 1's re-emissions collide with stage 0's layers. Skips off Blackwell:
+FA4's sink pass-through tolerates None, so the save branch matches a Hopper FA2 run's.
 """
 
 import sys
@@ -56,8 +36,7 @@ def run(ctx):
 
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
 
-    # The Hopper FA2 production state (sinks=None), reproduced under FA4 — its sink pass-through
-    # tolerates None, and the save path only keys on the None state, not the attention impl.
+    # Reproduced under FA4: the save path keys only on the None state.
     model = build_gptoss_model()
     model.set_attn_implementation("flash_attention_4")
     _reset_gpt_oss_sinks(model, model.config, attn_implementation="flash_attention_2")
@@ -89,14 +68,13 @@ def run(ctx):
     checks["losses_finite"] = len(losses) == N_STEPS and bool(torch.isfinite(torch.tensor(losses)).all())
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    # Probe loss on the final weights: one more pipeline step with no optimizer update after it,
-    # so the reloaded model must reproduce this replica's loss on the same batch.
+    # One more pipeline step with no update, so the reload must reproduce this replica's loss on the same batch.
     probe_batch, probe_loss = probe_step(trainer, rows, 4)
     metrics["probe_loss"] = float(probe_loss)
 
     save_dir = shared_output_dir(ctx)
-    # The trainer synced config.pad/eos to the real Qwen tokenizer's ids, which exceed the tiny
-    # vocab — restore so from_pretrained can build the embedding.
+    # The trainer synced config.pad/eos to the real Qwen ids, which exceed the tiny vocab; restore so from_pretrained
+    # builds the embedding.
     trainer.model.config.pad_token_id, trainer.model.config.eos_token_id = 0, 1
     trainer.save_model(save_dir)
     dist.barrier()
@@ -107,7 +85,7 @@ def run(ctx):
     if ctx.rank == 0:
         try:
             reloaded = GptOssForCausalLM.from_pretrained(save_dir, dtype=torch.bfloat16)
-            reference_keys = set(build_gptoss_model().state_dict())  # eager reference — sinks present
+            reference_keys = set(build_gptoss_model().state_dict())  # Eager reference: sinks present.
             reloaded_keys = set(reloaded.state_dict())
             if reloaded_keys != reference_keys:
                 log(
@@ -126,8 +104,8 @@ def run(ctx):
             reload_ok = False
             sinks_neutralized_ok = False
         try:
-            # Eager forward with neutralized sinks = FA2's no-sink softmax (the sink column's
-            # exp(dtype min) underflows to 0), so the reloaded probe loss must match the pipeline's.
+            # Eager with neutralized sinks is FA2's no-sink softmax (exp(dtype min) underflows to 0), so the probe loss
+            # must match.
             values_ok = reload_reproduces_probe_loss(
                 reloaded.to(ctx.device), probe_batch, rows, config.data_parallel_size, probe_loss, ctx.device
             )

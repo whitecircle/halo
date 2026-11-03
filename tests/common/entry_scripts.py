@@ -1,7 +1,5 @@
-"""End-to-end runs of the training entry scripts through ``halo launch``: each method's tiny recipe under
-``tests/common/recipes/`` (laid out as ``scripts/training``), the data it trains on, the run config the recipe
-becomes, a row's arguments, and the launch, resume and export checks a run owes. A method that generates through a
-live engine trains the dense vLLM tier's served checkpoint; every other one a tiny local model."""
+"""End-to-end runs of the training entry scripts through ``halo launch``, each method's tiny recipe under
+``tests/common/recipes/``."""
 
 import argparse
 import json
@@ -25,23 +23,20 @@ from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, build
 from tests.common.tokenizers import load_cached_tokenizer
 
 RECIPES_DIR = REPO_ROOT / "tests" / "common" / "recipes"
-# The first launch trains this many steps, saving each; the resume continues to RESUMED_STEPS.
 FIRST_STEPS = 2
 RESUMED_STEPS = 3
 TRAIN_ROWS, TEST_ROWS = 32, 8
 SEED = 0
-# The line the resume resolution logs on global rank 0 when a run resumes.
+# Logged on global rank 0 when a run resumes.
 RESUME_LOG = "Resuming from checkpoint: "
-# The line global rank 0 logs after warming a loaded model's FA4 kernels, once per model whose attention resolved to
-# flash_attention_4 (the warm-up runs at world >= 2), and the line every rank logs when that warm-up failed.
+# Rank 0 logs the first once per model resolved to flash_attention_4 (the warm-up runs at world >= 2); every rank logs
+# the second on failure.
 FA4_WARMUP_LOG = "FA4 kernel warmup done"
 FA4_WARMUP_SKIPPED_LOG = "FA4 kernel warmup skipped"
-# A row's attention: the recipe's pinned backend, or none, leaving the script's own default.
 ATTENTION_SETTINGS = ("recipe", "unset")
-# Decoder layers of the tiny model a run trains, at the Qwen3 tokenizer's vocabulary.
+# At the Qwen3 tokenizer's vocabulary.
 TINY_LAYERS = 2
-# The tiny families a row's model can be (``--family``), the dense one by default: a MoE takes the grouped-GEMM
-# EP layers at the scripts' defaults.
+# A MoE takes the grouped-GEMM EP layers at the scripts' defaults.
 TINY_FAMILIES = {"qwen3": TINY_DENSE_FAMILY, "gpt_oss": TINY_MOE_FAMILIES["gpt_oss"]}
 DEFAULT_FAMILY = "qwen3"
 # The checkpoint the dense vLLM tier serves, which a method generating through it must train.
@@ -53,7 +48,6 @@ def _turn(role: str, content: str) -> dict:
 
 
 def _sums(low: int = 1, high: int = 50) -> list[tuple[str, str]]:
-    """A run's addition problems over operands in ``[low, high]``, as ``(question, answer)``."""
     rng = random.Random(SEED)
     pairs = []
     for _ in range(TRAIN_ROWS + TEST_ROWS):
@@ -128,9 +122,8 @@ def _graded_completions() -> DatasetDict:
 
 
 def _answered_prompts() -> DatasetDict:
-    """Three-digit sums asking for a boxed answer, the form both GRPO graders read. With thinking off, the served
-    model answers some samples of such a prompt outright and works others through the calculator, the split
-    the environmental recipe prices."""
+    """Three-digit sums asking for a boxed answer; with thinking off the served model answers some outright and works
+    others through the calculator."""
     return _split(
         [
             {"prompt": [_turn("user", f"{question} Put the final answer in \\boxed{{}}.")], "answer": answer}
@@ -145,15 +138,9 @@ def _sentence_pairs() -> DatasetDict:
 
 @dataclass(frozen=True)
 class EntryScriptCase:
-    """How one method's run is fed and its export read back.
-
-    ``model_fields`` are the recipe fields that name the trained checkpoint (a teacher distills from the same
-    tiny model); ``export`` is the class its last checkpoint loads back as. ``frozen_models`` counts the frozen
-    models a launch loads beside the policy, on the policy's attention request: a full fine-tune's DPO/KTO
-    reference, the distillation teacher.
-    ``server_fields`` names the rollout-server URL and weight-transfer port fields of a method that generates
-    through a live engine, which trains :data:`SERVED_MODEL`: the URL rides the run config, a port each launch.
-    """
+    """How one method's run is fed and its export read back. ``frozen_models`` counts models a launch loads beside the
+    policy (DPO/KTO reference, distillation teacher). ``server_fields`` names a live-engine method's URL and port
+    fields."""
 
     rows: Callable[[], DatasetDict]
     export: type = AutoModelForCausalLM
@@ -162,7 +149,6 @@ class EntryScriptCase:
     frozen_models: int = 0
 
 
-# Keyed by the ``halo launch`` name of every method under scripts/training.
 CASES: dict[str, EntryScriptCase] = {
     "classification": EntryScriptCase(_labelled_prompts, export=AutoModelForSequenceClassification),
     "distillation/self-distill": EntryScriptCase(lambda: _conversations("prompt", answer_field="answer")),
@@ -184,8 +170,7 @@ CASES: dict[str, EntryScriptCase] = {
 
 
 def row_parser(description: str | None = None) -> argparse.ArgumentParser:
-    """The arguments of an entry-script row: its method, its attention (:data:`ATTENTION_SETTINGS`) and its tiny
-    model's family (:data:`TINY_FAMILIES`)."""
+    """An entry-script row's arguments: method, attention and tiny family."""
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--method", choices=sorted(CASES), required=True)
     parser.add_argument("--family", choices=sorted(TINY_FAMILIES), default=DEFAULT_FAMILY)
@@ -208,7 +193,6 @@ def method_scripts() -> dict[str, Path]:
 
 
 def recipe_path(method: str) -> Path:
-    """The tiny recipe of ``method``, at its script's path under ``scripts/training``."""
     script = method_scripts()[method]
     return RECIPES_DIR / script.relative_to(REPO_ROOT / TRAINING_ROOT).with_suffix(".yaml")
 
@@ -222,10 +206,8 @@ def write_run_config(
     server_url: str | None = None,
     attention_unset: bool = False,
 ) -> Path:
-    """``method``'s recipe plus the run's own settings (the model, its dataset, ``scratch/output`` and, for a
-    method generating through an engine, the ``server_url``), written to ``scratch``; returns its path.
-    ``dataset`` cannot be a CLI override, so the run config carries them all. ``attention_unset`` drops the
-    recipe's ``attn_implementation``, which every recipe pins, so the script picks the backend itself."""
+    """``method``'s recipe plus the run's settings, written to ``scratch``; ``dataset`` cannot be a CLI override, so
+    the config carries them all."""
     case = CASES[method]
     config = yaml.safe_load(recipe_path(method).read_text())
     if attention_unset:
@@ -248,8 +230,7 @@ def launch_command(
     overrides: list[str],
     accelerate_config: Path | None = None,
 ) -> list[str]:
-    """``halo launch <method> <config> -n <nproc> [--port <port>] [--accelerate <config>] <overrides>`` as an
-    argv."""
+    """``halo launch <method> <config> -n <nproc> [--port <port>] [--accelerate <config>] <overrides>`` as an argv."""
     launcher = ["-n", str(nproc)] + ([] if port is None else ["--port", str(port)])
     if accelerate_config is not None:
         launcher += ["--accelerate", str(accelerate_config)]
@@ -257,8 +238,8 @@ def launch_command(
 
 
 def run_launch(argv: list[str]) -> subprocess.CompletedProcess:
-    """One launch, its output streamed to this process's stdout as it runs and returned whole. Unbounded here:
-    the GPU launcher's row timeout kills a hung launch, ranks included."""
+    """One launch, streamed to stdout and returned whole. Unbounded: the GPU launcher's row timeout kills a hung
+    launch."""
     lines = []
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as launch:
         for line in launch.stdout:
@@ -280,8 +261,8 @@ def checkpoint_dir(output_dir: Path, step: int) -> Path:
 
 
 def state_stamps(output_dir: Path, steps: range) -> dict[int, int]:
-    """Each step's ``trainer_state.json`` modification time. A resume leaves the checkpoints before it as they
-    were; a run that restarted from step 0 instead logs the same steps and rewrites them."""
+    """Each step's ``trainer_state.json`` mtime: a resume leaves earlier checkpoints alone, while a restart from step 0
+    rewrites them."""
     return {step: (checkpoint_dir(output_dir, step) / "trainer_state.json").stat().st_mtime_ns for step in steps}
 
 
@@ -290,24 +271,21 @@ def _log_history(checkpoint: Path) -> list[dict]:
 
 
 def logged_steps(checkpoint: Path) -> list[dict]:
-    """The training-step entries of a complete checkpoint's ``trainer_state.json`` log, in order."""
     return [entry for entry in _log_history(checkpoint) if "loss" in entry]
 
 
 def trained_steps(checkpoint: Path) -> list[int]:
-    """The steps a complete checkpoint's ``trainer_state.json`` logged a training loss at, in order."""
     return [entry["step"] for entry in logged_steps(checkpoint)]
 
 
 def had_a_learning_signal(checkpoint: Path) -> bool:
-    """Whether any step up to ``checkpoint`` logged a nonzero gradient norm. A GRPO step whose groups all tied
-    on reward has none, and a run without one leaves its export on the base weights."""
+    """Whether any step logged a nonzero gradient norm; a run of tied GRPO groups has none and leaves its export on the
+    base weights."""
     return any(entry.get("grad_norm", 0.0) > 0.0 for entry in _log_history(checkpoint))
 
 
 def build_tiny_model(path: Path, family: str) -> Path:
-    """The tiny model of ``family`` (:data:`TINY_FAMILIES`) a run trains, with the Qwen3 tokenizer and chat template,
-    saved at ``path``."""
+    """Save the tiny model of ``family`` a run trains, with the Qwen3 tokenizer and chat template, at ``path``."""
     build_tiny_family_checkpoint(
         TINY_FAMILIES[family],
         str(path),
@@ -318,12 +296,11 @@ def build_tiny_model(path: Path, family: str) -> Path:
 
 
 def export_checks(export: type, checkpoint: Path, base: str, *, learned: bool) -> dict[str, bool]:
-    """Whether ``checkpoint`` loads as ``export`` with every weight it should hold and, for a run that
-    ``learned`` (:func:`had_a_learning_signal`), holds weights training moved off the ``base`` checkpoint."""
+    """Whether ``checkpoint`` loads as ``export`` with every weight and, if ``learned``, holds weights moved off
+    ``base``."""
     base_state = AutoModelForCausalLM.from_pretrained(base).state_dict()
     if export is SentenceTransformer:
         backbone = SentenceTransformer(str(checkpoint), device="cpu")[0].auto_model
-        # The backbone is the causal model's decoder, whose names the causal model nests under ``model.``.
         trained = {f"model.{name}": tensor for name, tensor in backbone.state_dict().items()}
         decoder = {name for name in base_state if name.startswith("model.")}
         # The pipeline builds its backbone whatever the files hold; the files must hold every key of it.

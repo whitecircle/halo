@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""Attention LoRA SFT on Bailing Ring-mini under EP or pure ETP, saved and reloaded on a fresh unsharded base.
-
-The core tier's rows of :func:`tests.common.lora_sft_modes.run_lora_sft`; ``test_lora_sft_modes.py`` runs the
-others.
-
-Usage:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_bailing.py --mode etp
-"""
+"""Attention LoRA SFT on Bailing Ring-mini under EP or pure ETP, saved and reloaded on a fresh base: the core rows of
+``test_lora_sft_modes.py``'s body."""
 
 import argparse
 

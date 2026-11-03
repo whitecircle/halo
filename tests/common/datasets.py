@@ -1,10 +1,5 @@
-"""Synthetic dataset generators, and one real-text source, shared across test files.
-
-One generator per task shape (SFT, preference, offline GRPO, VLM preference, benchmark corpus), the
-tree's own prose as token rows for a real-text score, plus the writer of a text-mode ``prepare_dataset``
-artifact. A generator only one test needs, because its dataset shape is the subject of that test, stays
-inline in that file.
-"""
+"""Synthetic dataset generators and one real-text source shared across test files; a generator only one test needs
+stays in that file."""
 
 import random
 from datetime import datetime
@@ -20,14 +15,10 @@ from tests.common.models import QWEN3_0_6B
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
 
-# The clock every synthetic dataset and fixed batch is rendered against. gpt-oss's harmony template stamps
-# ``strftime_now("%Y-%m-%d")`` into its system message, so an unpinned render, and every loss threshold
-# measured against it, drifts with the calendar date. The value matters: it moves the rotated-expert
-# control's loss shift (``tests/common/ep_reference.py``), which at 2025-01-01 falls under
+# gpt-oss's harmony template stamps ``strftime_now`` into its system message, so an unpinned render and every loss
+# threshold drift with the date. The value matters: at 2025-01-01 the rotated-expert control falls under
 # ``control_min_loss_shift``.
 CHAT_TEMPLATE_NOW = datetime(2026, 8, 26)
-
-# Math Templates (shared across SFT and preference datasets)
 
 MATH_TEMPLATES = [
     {"q": "What is {a} + {b}?", "a": "The answer is {r}.", "op": "+"},
@@ -54,9 +45,8 @@ def _compute_result(a: int, b: int, op: str) -> int:
 
 
 def _apply_chat_template(tokenizer, messages, add_generation_prompt=False):
-    """Apply chat template with fallback for tokenizers without one. The template's clock reads
-    :data:`CHAT_TEMPLATE_NOW`: ``strftime_now`` is a jinja global transformers injects into every chat
-    template, and a same-named render kwarg shadows it, a no-op for templates that never call it."""
+    """Apply the chat template, with a fallback for tokenizers lacking one; a render kwarg ``strftime_now`` shadows the
+    jinja global to pin the clock."""
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
         return tokenizer.apply_chat_template(
             messages,
@@ -72,20 +62,13 @@ def _apply_chat_template(tokenizer, messages, add_generation_prompt=False):
     return sep.join(parts)
 
 
-# SFT Dataset
-
-
 def create_sft_dataset(
     num_samples: int,
     tokenizer,
     seed: int = 42,
     multi_turn_ratio: float = 0.3,
 ) -> Dataset:
-    """Create synthetic math SFT dataset with chat-templated text.
-
-    Returns Dataset with {"text": str} records. 30% multi-turn by default.
-    Matches the pattern used across 10+ trainer test files.
-    """
+    """Synthetic math SFT dataset of ``{"text": str}`` records, 30% multi-turn by default."""
     random.seed(seed)
     data = []
     for _ in range(num_samples):
@@ -113,15 +96,14 @@ def create_sft_dataset(
 
 
 def create_tokenized_sft_dataset(num_samples: int, tokenizer, seed: int = 42) -> Dataset:
-    """:func:`create_sft_dataset`'s rows tokenized as the SFT script tokenizes a rendered conversation, unpadded: the
-    rows its packing pass and its padding-free collator take."""
+    """:func:`create_sft_dataset`'s rows tokenized as the SFT script does, unpadded, for its packing pass and
+    padding-free collator."""
     rows = create_sft_dataset(num_samples, tokenizer, seed=seed)
     return rows.map(lambda row: dict(tokenize_rendered(tokenizer, row["text"])), remove_columns=rows.column_names)
 
 
-# Single-turn SFT dataset. Separate from ``create_sft_dataset`` because the multi-turn rows change
-# token counts and so the loss trajectory of the tests pinned on this data; the family SFT suites
-# that assert ``loss_decreased`` on a real checkpoint use the flat rows.
+# Separate from ``create_sft_dataset``: multi-turn rows change token counts and so the loss trajectory of suites pinned
+# on this data.
 
 SINGLE_TURN_TEMPLATES = (
     ("What is {a} + {b}?", "The answer is {result}."),
@@ -130,7 +112,7 @@ SINGLE_TURN_TEMPLATES = (
     ("What is the sum of {a} and {b}?", "The sum of {a} and {b} is {result}."),
 )
 
-# Longer answers (one or two extra clauses) for the suites that need more tokens per row.
+# Longer answers for suites that need more tokens per row.
 VERBOSE_MATH_TEMPLATES = (
     ("What is {a} + {b}?", "The answer is {result}. To calculate this, I added {a} and {b} together."),
     ("Calculate {a} * {b}.", "{a} times {b} equals {result}. This is found by multiplying the two numbers."),
@@ -151,11 +133,8 @@ def create_single_turn_sft_dataset(
     seed: int = 42,
     templates: tuple[tuple[str, str], ...] = SINGLE_TURN_TEMPLATES,
 ) -> Dataset:
-    """Create a synthetic single-turn math SFT dataset with chat-templated text.
-
-    Returns Dataset with {"text": str} records, one user/assistant pair each. The operator comes
-    from the instruction wording, so a new template must spell its operation the same way.
-    """
+    """Synthetic single-turn math SFT dataset; the operator comes from the instruction wording, so a new template must
+    spell it the same way."""
     random.seed(seed)
     data = []
     for _ in range(num_samples):
@@ -176,8 +155,6 @@ def create_single_turn_sft_dataset(
         data.append({"text": _apply_chat_template(tokenizer, messages)})
     return Dataset.from_list(data)
 
-
-# Preference Dataset (DPO / SMPO)
 
 PREFERENCE_TEMPLATES = [
     {
@@ -207,11 +184,7 @@ def create_preference_dataset(
     seed: int = 42,
     multi_turn_ratio: float = 0.3,
 ) -> Dataset:
-    """Create synthetic math preference dataset.
-
-    Returns Dataset with {"prompt": str, "chosen": str, "rejected": str}.
-    Matches the pattern used across DPO/SMPO test files.
-    """
+    """Synthetic math preference dataset of ``{"prompt", "chosen", "rejected"}`` strings."""
     random.seed(seed)
     data = []
     for _ in range(num_samples):
@@ -236,10 +209,7 @@ def create_preference_dataset(
     return Dataset.from_list(data)
 
 
-# Offline GRPO Dataset
-
-# Answer phrasings for the graded completions; a group samples them without replacement, so no two
-# completions in a group share a wording.
+# A group samples them without replacement, so no two completions in a group share a wording.
 GRPO_ANSWER_TEMPLATES = [
     "The answer is {val}.",
     "The result equals {val}.",
@@ -251,8 +221,8 @@ GRPO_ANSWER_TEMPLATES = [
     "Working it out, the answer is {val}.",
 ]
 
-# Quality ladder, best to worst: completion ``i`` drifts further from the correct value and earns
-# the matching reward, so a group's z-normalized advantages carry both signs.
+# Best to worst: completion ``i`` drifts further from the correct value, so a group's z-normalized advantages carry
+# both signs.
 GRPO_REWARDS = (1.0, 0.7, 0.3, 0.0)
 
 GRPO_FOLLOWUP_TEMPLATES = (
@@ -269,12 +239,8 @@ def create_offline_grpo_dataset(
     num_completions: int = 4,
     multi_turn_ratio: float = 0.0,
 ) -> Dataset:
-    """Create a synthetic math offline-GRPO dataset with graded completions.
-
-    Returns Dataset with ``{"prompt": str, "completions": list[str], "rewards": list[float]}``.
-    Completions and rewards are shuffled together within each group, so position never encodes
-    quality and a trainer that ignored the rewards could not score better than chance.
-    """
+    """Synthetic math offline-GRPO dataset; completions and rewards shuffle together, so position never encodes
+    quality."""
     rng = random.Random(seed)
     data = []
     for _ in range(num_samples):
@@ -309,9 +275,6 @@ def create_offline_grpo_dataset(
     return Dataset.from_list(data)
 
 
-# Variable-Length SFT Dataset (for collator comparison benchmarks)
-
-# Filler text used to pad responses to target token length.
 _FILLER_SENTENCE = " The quick brown fox jumps over the lazy dog."
 
 
@@ -322,29 +285,14 @@ def create_variable_length_sft_dataset(
     avg_ratio: float = 0.25,
     seed: int = 42,
 ) -> Dataset:
-    """Create variable-length SFT dataset for collator comparison benchmarks.
-
-    Generates chat-templated text with sequences whose average length is
-    ``avg_ratio * max_length`` tokens. Lengths are uniformly distributed
-    between ``avg_ratio * 0.5 * max_length`` and ``avg_ratio * 1.5 * max_length``.
-
-    Args:
-        tokenizer: HuggingFace tokenizer with chat template.
-        max_length: Maximum sequence length (used to compute target lengths).
-        num_samples: Number of samples to generate.
-        avg_ratio: Average sequence length as a fraction of max_length (0.25 = 25%).
-        seed: Random seed for reproducibility.
-
-    Returns:
-        Dataset with ``{"text": str}`` records.
-    """
+    """Variable-length SFT dataset for collator benchmarks; lengths are uniform over 0.5 to 1.5 of ``avg_ratio *
+    max_length`` tokens."""
     random.seed(seed)
 
     avg_tokens = int(max_length * avg_ratio)
     min_tokens = max(50, int(avg_tokens * 0.5))
     max_tokens = min(max_length - 50, int(avg_tokens * 1.5))
 
-    # Estimate tokens per character for filler sizing
     filler_toks = len(tokenizer.encode(_FILLER_SENTENCE))
     chars_per_token = len(_FILLER_SENTENCE) / max(filler_toks, 1)
 
@@ -358,7 +306,6 @@ def create_variable_length_sft_dataset(
         instruction = t["q"].format(a=a, b=b, r=r)
         response = t["a"].format(a=a, b=b, r=r)
 
-        # Build base message to estimate overhead tokens (chat template etc.)
         base_messages = [
             {"role": "user", "content": instruction},
             {"role": "assistant", "content": response},
@@ -366,7 +313,6 @@ def create_variable_length_sft_dataset(
         base_text = _apply_chat_template(tokenizer, base_messages)
         base_tokens = len(tokenizer.encode(base_text))
 
-        # Add filler text to reach target_tokens
         remaining = max(0, target_tokens - base_tokens)
         filler_chars = int(remaining * chars_per_token)
         filler = (_FILLER_SENTENCE * ((filler_chars // len(_FILLER_SENTENCE)) + 1))[:filler_chars]
@@ -381,18 +327,10 @@ def create_variable_length_sft_dataset(
     return Dataset.from_list(data)
 
 
-# Benchmark corpus (pre-tokenized, for profiling)
-
-
 def create_benchmark_dataset(tokenizer, seq_len: int, num_samples: int = 64, seed: int = 0) -> Dataset:
-    """The profiling benchmarks' corpus: ``num_samples`` rows of ``seq_len`` token ids drawn uniformly from the
-    tokenizer's regular vocabulary (``vocab_size``, no added special tokens) with a fixed seed, every token
-    attended and trained on, identical on every rank.
-
-    Uniform ids give a model nothing to fit, so an MoE model's routing, and with it each EP rank's load, step
-    time and peak memory, stays where it starts instead of drifting as the model fits its data, which it would
-    do differently on every run under non-deterministic dispatch.
-    """
+    """The profiling corpus: ``num_samples`` rows of ``seq_len`` uniform token ids from the regular vocabulary,
+    identical on every rank. Uniform ids give nothing to fit, so an MoE's routing, and each EP rank's load and step
+    time, stays where it starts."""
     rng = random.Random(seed)
     rows = [[rng.randrange(tokenizer.vocab_size) for _ in range(seq_len)] for _ in range(num_samples)]
     return Dataset.from_dict(
@@ -400,16 +338,9 @@ def create_benchmark_dataset(tokenizer, seq_len: int, num_samples: int = 64, see
     )
 
 
-# Real text (the tree's own prose)
-
-
 def repository_text_rows(tokenizer, rows: int, length: int) -> list[list[int]]:
-    """``rows`` consecutive windows of ``length`` token ids over real English prose: the tree's ``agent-docs``
-    pages in path order, each tokenized without special tokens. Every process of one tree reads the same rows.
-
-    Raises:
-        ValueError: the pages hold fewer than ``rows * length`` tokens.
-    """
+    """``rows`` consecutive windows of ``length`` token ids over the tree's ``agent-docs`` prose in path order. Raises
+    if too few tokens."""
     ids: list[int] = []
     for page in sorted((REPO_ROOT / "agent-docs").rglob("*.md"), key=str):
         ids += tokenizer(page.read_text(encoding="utf-8"), add_special_tokens=False)["input_ids"]
@@ -419,14 +350,14 @@ def repository_text_rows(tokenizer, rows: int, length: int) -> list[list[int]]:
 
 
 def digit_image(d: int, size: int = 64) -> Image.Image:
-    """A white tile carrying the digit ``d`` — the image half of the read-a-digit VLM tasks."""
+    """A white tile carrying the digit ``d``, the image half of the read-a-digit VLM tasks."""
     img = Image.new("RGB", (size, size), "white")
     ImageDraw.Draw(img).text((size // 3, size // 4), str(d), fill="black")
     return img
 
 
 def create_vlm_preference_dataset(n: int) -> Dataset:
-    """Synthetic vision preference triples (read-a-digit): chosen states the digit, rejected lies."""
+    """Synthetic read-a-digit vision preference triples: chosen states the digit, rejected lies."""
     rows = []
     for i in range(n):
         d = i % 10
@@ -444,14 +375,9 @@ def create_vlm_preference_dataset(n: int) -> Dataset:
     return Dataset.from_list(rows).cast_column("images", Sequence(HFImage()))
 
 
-# Prepared dataset (the ``prepare_dataset`` artifact)
-
-
 def write_prepared_text_dataset(output_dir, data: Dataset | DatasetDict, *, num_shards: int = 1) -> None:
-    """Write ``data`` (a ``text`` column) to ``output_dir`` as a text-mode ``prepare_dataset`` artifact.
-
-    Tokenizes with the cached Qwen3-0.6B tokenizer, so the calling test skips where it is not cached.
-    """
+    """Write ``data`` as a text-mode ``prepare_dataset`` artifact; uses the cached Qwen3-0.6B tokenizer, so the test
+    skips where it is not cached."""
     config = PreprocessingConfig(
         model_name_or_path=QWEN3_0_6B, mode="text", max_length=64, num_shards=num_shards, num_proc=1
     )

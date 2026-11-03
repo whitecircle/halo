@@ -20,8 +20,8 @@ _ENV_IS_MODE = "token_truncate"
 
 
 def reject_unverified_carried_reasoning(env, rollout_backend: str) -> None:
-    """Refuse ``carry_reasoning`` on SGLang, whose handling of an assistant message's ``reasoning_content`` is
-    unverified: a dropped thought would train rows on context the engine never saw."""
+    """SGLang's handling of an assistant message's ``reasoning_content`` is unverified: a dropped thought would train
+    rows on context the engine never saw."""
     if env.carry_reasoning and rollout_backend == SGLANG_BACKEND:
         raise ValueError(
             "carry_reasoning: true with rollout_backend: 'sglang' is not supported: whether SGLang's chat "
@@ -34,8 +34,8 @@ def reject_unverified_carried_reasoning(env, rollout_backend: str) -> None:
 def reject_straddling_train_groups(
     per_device_train_batch_size: int, steps_per_generation: int, num_generations: int
 ) -> None:
-    """Refuse a per-rank train round that splits a generation group: advantages are grouped per rank here,
-    while TRL only validates the global ``generation_batch_size % num_generations``."""
+    """Advantages are grouped per rank here, while TRL only validates the global ``generation_batch_size %
+    num_generations``."""
     per_rank_rows = per_device_train_batch_size * steps_per_generation
     if per_rank_rows % num_generations != 0:
         raise ValueError(
@@ -46,9 +46,8 @@ def reject_straddling_train_groups(
 
 
 def reject_straddling_eval_groups(args, async_config, num_generations_eval: int) -> None:
-    """In a run that evaluates, refuse a per-rank eval round (``eval_rollout_batch_size``, else
-    ``per_device_eval_batch_size``) that splits a generation group (TRL validates only the global eval batch), and an
-    ``eval_rollout_batch_size`` under ``dataloader_drop_last``, whose dropped tail is the whole eval."""
+    """A per-rank eval round must not split a generation group (TRL validates only the global eval batch), and
+    ``eval_rollout_batch_size`` under ``dataloader_drop_last`` would drop the whole eval."""
     if not uses_evaluation(args):
         return
     rows = async_config.eval_rollout_batch_size
@@ -73,8 +72,7 @@ def reject_straddling_eval_groups(args, async_config, num_generations_eval: int)
 
 
 def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
-    """Refuse a dataset with no :data:`ANSWER_KEY` column under an environment that grades against one: the
-    run would score one constant, every group at zero advantage. A dataset declaring no columns is warned."""
+    """Such a run would score one constant, every group at zero advantage. A dataset declaring no columns is warned."""
     if not env.requires_answer:
         return
     datasets = {}
@@ -102,11 +100,9 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
 
 
 def reject_inert_reasoning_terms(async_config, env, *, budgeted: bool, every_budget_soft: bool) -> None:
-    """A price with no level to read would charge nothing (a level the table misses too, and one it invents is
-    a typo), a floor in a run where no episode carries a thinking cap (``budgeted``) would never fire, and a
-    price past a budget prices nothing unless every drawable budget is soft (``every_budget_soft``). Nor may a
-    term waived in groups that earned no objective run under a reward that prices no success above zero: it
-    would charge no training episode."""
+    """A price with no level to read charges nothing, a floor where no episode carries a thinking cap never fires, and
+    a price past a budget prices nothing unless every drawable budget is soft. A term waived in groups that earned no
+    objective needs a reward that prices success above zero, or it charges no training episode."""
     terms_on = async_config.reasoning_price is not None or async_config.reasoning_floor > 0
     objective = env.objective_term if terms_on else None
     if terms_on and not async_config.reasoning_terms_in_failed_groups and (objective is None or objective.weight <= 0):
@@ -142,8 +138,8 @@ def reject_inert_reasoning_terms(async_config, env, *, budgeted: bool, every_bud
 
 
 def reject_off_policy_mask_threshold(args) -> None:
-    """Refuse TRL's ``off_policy_mask_threshold``: it masks on ``sampling_per_token_logps``, a key this
-    trainer's batch never carries, so it thresholds a KL of 0."""
+    """It masks on ``sampling_per_token_logps``, a key this trainer's batch never carries, so it thresholds a KL of
+    0."""
     if args.off_policy_mask_threshold is not None:
         raise ValueError(
             f"off_policy_mask_threshold={args.off_policy_mask_threshold} is a silent no-op in environmental "
@@ -154,9 +150,8 @@ def reject_off_policy_mask_threshold(args) -> None:
 
 
 def reject_vespo_loss(args) -> None:
-    """Refuse TRL's ``vespo`` loss in every config: its weight sums each row's log IS ratios, so one token this
-    trainer zeroes (a masked one, a forced close) silently drops the whole row. TRL's own check never runs here:
-    ``use_vllm`` is still off when its constructor reads it."""
+    """Its weight sums each row's log IS ratios, so one token this trainer zeroes silently drops the whole row. TRL's
+    own check never runs here: ``use_vllm`` is still off when its constructor reads it."""
     if args.loss_type == "vespo":
         raise ValueError(
             "loss_type='vespo' is not supported by environmental GRPO: VESPO weighs each turn row by the sum of its "
@@ -168,8 +163,7 @@ def reject_vespo_loss(args) -> None:
 
 
 def reject_unneutralized_forced_closes(forced_close_ids: tuple[int, ...] | None, is_correction: bool) -> None:
-    """Refuse forced reasoning closes without the IS correction that neutralizes them: they would train with the
-    episode's advantage and teach the model to stop closing its reasoning."""
+    """Forced closes would train with the episode's advantage and teach the model to stop closing its reasoning."""
     if forced_close_ids is not None and not is_correction:
         raise ValueError(
             "a vLLM thinking budget can be enforced but the importance-sampling correction is off "
@@ -179,8 +173,6 @@ def reject_unneutralized_forced_closes(forced_close_ids: tuple[int, ...] | None,
 
 
 def reject_inert_is_stages(is_mask_config, is_correction: bool, skip_update_masked_frac: float | None) -> None:
-    """Refuse an IS mask stage without the correction it masks, and a trust-region breaker without a mask
-    stage that could ever trip it."""
     if is_mask_config.any_stage_active and not is_correction:
         raise ValueError(
             "isr_geo_band/isr_veto/isr_opsm knobs require the importance-sampling "
@@ -222,10 +214,8 @@ def reject_unsupported_engine_reference(client_cls, async_config, is_correction:
 
 
 def reject_prefetch_past_retry_budget(client_cls, async_config, args) -> None:
-    """Refuse a prefetch whose rounds span more weight syncs than a turn's ``max_retries`` on an engine whose pause
-    aborts the turns in flight (``client_cls.PAUSE_ABORTS_IN_FLIGHT``): a turn aborted ``max_retries + 1`` times in
-    a row fails its episode. A round is in flight from the step that submits it to the one that trains it
-    ``prefetch_depth`` rounds later, and TRL generates a round every ``steps_per_generation × num_iterations``
+    """On an engine whose pause aborts turns in flight, a turn aborted ``max_retries + 1`` times fails its episode, and
+    a round stays in flight for ``prefetch_depth`` rounds of ``steps_per_generation × num_iterations``
     micro-batches."""
     if not client_cls.PAUSE_ABORTS_IN_FLIGHT or not async_config.prefetch_active():
         return
@@ -247,9 +237,8 @@ def reject_prefetch_past_retry_budget(client_cls, async_config, args) -> None:
 
 
 def reject_unread_grpo_knobs(args) -> None:
-    """Refuse a GRPOConfig knob this trainer does not honor set away from its default (read off the config
-    class): a sampling knob, TRL's weight-sync group port, the IS lower clip, an IS mode other than
-    :data:`_ENV_IS_MODE`."""
+    """A GRPOConfig knob this trainer does not honor, set away from its default: a sampling knob, TRL's weight-sync
+    group port, the IS lower clip, an IS mode other than :data:`_ENV_IS_MODE`."""
     defaults = {f.name: f.default for f in dataclasses.fields(type(args))}
 
     def changed(names: tuple[str, ...]) -> list[str]:

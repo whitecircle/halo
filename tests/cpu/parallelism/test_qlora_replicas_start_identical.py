@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Under QLoRA every rank's floating-point parameters start from rank 0's, on two gloo ranks, for every family of
-the tiny rosters.
-
-QLoRA skips FSDP2 (``fully_shard`` cannot wrap bnb's packed 4-bit storage), so every parameter is a whole copy on
-every rank and ``_sync_qlora_grads`` only averages the gradients: an adapter the ranks drew from their own RNG streams
-would keep each rank's draw for the whole run while every loss stays finite. The base model is drawn from one shared
-seed, as a checkpoint load gives every rank the same weights; the LoRA adapters on the attention projections and one
-row of the frozen input embedding (the row a vocabulary resize adds) are drawn from each rank's own stream. A frozen
-``uint8`` parameter stands in for the packed 4-bit weights, which turn the trainer's mode ladder onto the QLoRA sync.
-After the ladder every floating-point parameter is rank 0's, and the packed storage is each rank's own.
-
-Run: python tests/cpu/parallelism/test_qlora_replicas_start_identical.py
-"""
+"""Under QLoRA every rank's floating-point parameters start from rank 0's, on two gloo ranks across the tiny rosters.
+QLoRA skips FSDP2 and only averages gradients, so a per-rank adapter draw persists while losses stay finite."""
 
 import datetime
 import json
@@ -31,13 +20,13 @@ from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES
 
 WORLD = 2
 FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}
-# The stand-in for bnb's packed 4-bit storage: rank-specific bytes, so a broadcast of it would show.
+# Rank-specific bytes, so a broadcast of it would show.
 PACKED_SHAPE = (8, 4)
 PG_TIMEOUT = datetime.timedelta(seconds=120)
 
 
 def _qlora_ladder(rank: int, family: str) -> dict:
-    """Build, adapt, add the packed stand-in, run the trainer's mode ladder, and record."""
+    """Records after the trainer's mode ladder."""
     model = per_rank_lora_model(FAMILIES[family], rank)
     packed = torch.nn.Parameter(torch.full(PACKED_SHAPE, rank, dtype=torch.uint8), requires_grad=False)
     model.base_model.model.register_parameter("packed_4bit_stand_in", packed)

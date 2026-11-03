@@ -1,7 +1,5 @@
-"""SWE-agent style environment for software engineering tasks: each episode gets its own persistent
-:class:`SandboxSession`, so files written on one turn are visible on the next, and tools bind to the active episode's
-session through a ``ContextVar``, so one env instance serves concurrent rollouts. Every priced grade needs a grader —
-a ``test_function``, or the row's ``answer`` / ``validator``: completing the episode earns nothing."""
+"""SWE-agent style environment: each episode gets its own persistent :class:`SandboxSession`, bound through a
+``ContextVar`` so one env instance serves concurrent rollouts. Completing an episode alone earns nothing."""
 
 import logging
 from collections.abc import Callable, Iterator
@@ -29,11 +27,9 @@ _ACTIVE_SESSION: ContextVar = ContextVar("swe_env_active_session", default=None)
 
 
 class SweEnvironment(NativeToolUseEnvironment):
-    """Software-engineering environment: workspace file tools, a code-execution tool and a shell tool over a
-    per-episode :class:`SandboxSession`, so state carries across turns. Graded by ``test_function`` when given, else
-    against the row's ``validator`` or ``answer`` (``requires_answer`` then defaults on); ``requires_answer=False``
-    without a ``test_function`` is refused while the reward prices the environment's grade.
-    """
+    """Graded by ``test_function`` when given, else against the row's ``validator`` or ``answer`` (``requires_answer``
+    then defaults on); ``requires_answer=False`` without a ``test_function`` is refused while the reward prices the
+    environment's grade."""
 
     # An agentic edit-run-test loop needs more turns than the protocol's generic budget.
     DEFAULT_MAX_TURNS = 20
@@ -91,8 +87,6 @@ Tips:
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
-        """Bind the episode's persistent session so file/code tools operate on ITS workspace, inside
-        the protocol's own binding of the episode."""
         with super()._episode_binding(trajectory):
             token = _ACTIVE_SESSION.set(self._session_for(trajectory))
             try:
@@ -101,7 +95,6 @@ Tips:
                 _ACTIVE_SESSION.reset(token)
 
     def _session_for(self, trajectory: Trajectory) -> SandboxSession:
-        """Return (creating on first use) the persistent session for this episode."""
         episode_id = trajectory.info["episode_id"]
         session = self._sessions.get(episode_id)
         if session is None:
@@ -110,23 +103,19 @@ Tips:
         return session
 
     def _release_episode(self, episode_id: int) -> None:
-        """Close the episode's persistent session, freeing its temp dir."""
         session = self._sessions.pop(episode_id, None)
         if session is not None:
             session.close()
 
     def close(self) -> None:
-        """Close every outstanding session on environment teardown."""
         for session in self._sessions.values():
             session.close()
         self._sessions.clear()
         super().close()
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
-        """Grade by the test function, else by the protocol's answer path against the row's ``validator`` or
-        ``answer``; a row with neither raises, since running a command proves nothing. A reward without an
-        ``environment`` term takes no grade, which could only void the episode for a verdict no term reads.
-        """
+        """A row with no grader raises, since running a command proves nothing. A reward without an ``environment``
+        term takes no grade, which could only void the episode for a verdict no term reads."""
         if self.objective_term is None or not trajectory.info.get("completed"):
             return EpisodeGrade(0.0)
 

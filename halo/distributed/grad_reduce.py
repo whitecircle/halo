@@ -31,7 +31,6 @@ class _PendingChunk(NamedTuple):
 
 
 def _scale_and_write_back(buf: torch.Tensor, target: torch.Tensor, divisor: float | None) -> None:
-    """Divide the reduced ``buf`` by ``divisor`` if given, then copy it into ``target`` if separate."""
     if divisor is not None:
         buf.div_(divisor)
     if buf is not target:
@@ -46,11 +45,8 @@ def reduce_grad(
     group: dist.ProcessGroup | None = None,
     fp32: bool = False,
 ) -> None:
-    """All-reduce a gradient in place over ``group`` with ``op``, then scale by ``1 / divisor`` if given.
-
-    ``fp32`` reduces and scales an fp32 copy and writes it back in the original dtype (FSDP2's
-    ``reduce_dtype=fp32``: a bf16 reduce loses ~10^4x precision).
-    """
+    """All-reduce a gradient in place over ``group``, then divide by ``divisor`` if given. ``fp32`` reduces an fp32
+    copy (FSDP2's ``reduce_dtype=fp32``), since a bf16 reduce loses ~10^4x precision."""
     t = grad if grad.is_contiguous() else grad.contiguous()
     buf = t.float() if fp32 and t.dtype != torch.float32 else t
     dist.all_reduce(buf, op=op, group=group)
@@ -60,9 +56,8 @@ def reduce_grad(
 
 
 class SumAcrossGroup(torch.autograd.Function):
-    """In-place SUM all-reduce of ``x`` over ``group`` in forward, identity backward: the dual of
-    :class:`SumGradAcrossGroup`, for a partial output each rank of ``group`` holds a share of (a rowwise TP
-    linear's, expert-TP's combined MoE output). Hand it a tensor nothing else reads."""
+    """In-place SUM all-reduce in forward, identity backward, for a partial output each rank of ``group`` holds a share
+    of (a rowwise TP linear's, expert-TP's combined MoE output). Hand it a tensor nothing else reads."""
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, group):
@@ -76,10 +71,8 @@ class SumAcrossGroup(torch.autograd.Function):
 
 
 class SumGradAcrossGroup(torch.autograd.Function):
-    """Identity forward; SUM all-reduce of the gradient over ``group`` in backward, for an activation
-    whose consumers are sharded over ``group`` (expert-TP's MoE input, TP's MLA rope rows). At the
-    activation it runs once per backward; a hook on the weight would re-reduce ``.grad`` per micro-step.
-    """
+    """Identity forward; SUM all-reduce of the gradient in backward, for an activation whose consumers are sharded over
+    ``group`` (expert-TP's MoE input, TP's MLA rope rows). A hook on the weight would re-reduce per micro-step."""
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, group):
@@ -96,13 +89,9 @@ class SumGradAcrossGroup(torch.autograd.Function):
 def agree_grad_presence(
     params: list[torch.nn.Parameter], group: dist.ProcessGroup | None = None
 ) -> list[torch.nn.Parameter]:
-    """COLLECTIVE over ``group``: the ``params`` some rank produced a gradient for, each now holding one.
-
-    Grad presence is rank-local (a router tie-break, a text-only batch), so a sweep reducing only its
-    own grads would skip a collective its peers enter. A param some rank touched is zero-filled where
-    absent; one no rank touched keeps ``grad is None``, so the optimizer leaves it alone. ``params``
-    must be the same list on every rank.
-    """
+    """COLLECTIVE over ``group``: the ``params`` some rank has a gradient for, zero-filled where absent; the rest keep
+    ``grad is None``. Grad presence is rank-local (a router tie-break, a text-only batch), so a sweep reducing only its
+    own grads would skip a collective its peers enter. ``params`` must be the same list on every rank."""
     if not params:
         return []
     local = [p.grad is not None for p in params]
@@ -128,11 +117,8 @@ def agree_grad_presence(
 def _launch_flat_chunk(
     bucket: list[torch.Tensor], *, op: dist.ReduceOp, group: dist.ProcessGroup | None, fp32: bool
 ) -> _PendingChunk:
-    """Flatten one same-dtype chunk and start its all-reduce.
-
-    A lone contiguous gradient (a fused expert tensor above the bucket cap) is reduced in its own
-    storage: ``torch.cat`` always allocates, so flattening it would cost two full copies.
-    """
+    """Flatten one same-dtype chunk and start its all-reduce. A lone contiguous gradient (a fused expert above the
+    bucket cap) reduces in its own storage, since ``torch.cat`` would cost two full copies."""
     if len(bucket) == 1 and bucket[0].is_contiguous():
         flat, scatter = bucket[0].view(-1), False
     else:
@@ -143,7 +129,6 @@ def _launch_flat_chunk(
 
 
 def _finish_flat_chunk(pending: _PendingChunk, *, divisor: float | None) -> None:
-    """Wait for one chunk's all-reduce, then scale and scatter it back in place."""
     pending.work.wait()
     _scale_and_write_back(pending.buf, pending.flat, divisor)
     if not pending.scatter:
@@ -163,11 +148,8 @@ def reduce_grads_bucketed(
     group: dist.ProcessGroup | None = None,
     fp32: bool = False,
 ) -> None:
-    """Reduce many gradients sharing one (``op``, ``group``, ``divisor``) in few collectives per dtype.
-
-    Numerically identical to :func:`reduce_grad` per tensor. Every rank in ``group`` must pass grads
-    of matching shapes in the same order so chunk boundaries line up.
-    """
+    """Reduce many gradients in few collectives per dtype, numerically identical to :func:`reduce_grad` per tensor.
+    Every rank of ``group`` must pass matching shapes in the same order so chunk boundaries line up."""
     if not grads:
         return
     by_dtype: dict[torch.dtype, list[torch.Tensor]] = defaultdict(list)
@@ -180,7 +162,7 @@ def reduce_grads_bucketed(
         chunk: list[torch.Tensor] = []
         chunk_numel = 0
         for grad in by_dtype[dtype]:
-            # A param larger than the cap forms its own chunk (never split — offsets must align).
+            # A param above the cap forms its own chunk, never split, so offsets align.
             if chunk and chunk_numel + grad.numel() > max_numel:
                 chunks.append(chunk)
                 chunk, chunk_numel = [], 0

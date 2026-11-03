@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""
-Eval-mode fused-linear-cross-entropy test for DistributedSFTTrainer.
-
-Liger's ``lce_forward`` defaults ``skip_logits`` to ``self.training and labels
-is not None``, so evaluation falls back to materializing the full
-``[B, S, vocab]`` fp32 logits — ~43 GiB at 75k eval tokens x 155k vocab
-(GLM-4.7-Flash), an OOM on B300s. ``DistributedSFTTrainer.prediction_step``
-injects ``skip_logits=True`` for loss-only evaluation so the fused kernel is
-used in eval too.
-
-Test validates (tiny random-weights Glm4MoeLite, no downloads):
-1. Loss-only evaluation never invokes ``lm_head`` (the fused kernel consumes
-   ``lm_head.weight`` directly — full logits are never materialized).
-2. The fused eval loss matches the unfused (full-logits) eval loss.
-3. Eval loss is finite.
-
-Usage:
-    torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/sft/test_sft_eval_flce.py
-"""
+"""Loss-only eval uses the fused FLCE kernel: Liger's ``skip_logits`` defaults off in eval, materializing ~43 GiB of
+logits at 75k tokens x 155k vocab."""
 
 import torch
 from datasets import Dataset
@@ -37,15 +19,14 @@ from tests.common.rank_log import log
 
 VOCAB_SIZE = 4096
 SEQ_LENGTH = 256
-PROMPT_LENGTH = 64  # leading tokens masked to -100
+PROMPT_LENGTH = 64  # Leading tokens masked to -100.
 NUM_EVAL_SAMPLES = 4
 BATCH_SIZE = 2
 SEED = 42
-LOSS_ATOL = 0.02  # fused vs unfused CE: both bf16 matmul + fp32 reduction
+LOSS_ATOL = 0.02  # Both bf16 matmul + fp32 reduction.
 
 
 def create_tiny_glm4_moe_lite() -> Glm4MoeLiteForCausalLM:
-    """Random-weights Glm4MoeLite small enough for a seconds-scale eval test."""
     config = Glm4MoeLiteConfig(
         vocab_size=VOCAB_SIZE,
         hidden_size=64,
@@ -72,7 +53,6 @@ def create_tiny_glm4_moe_lite() -> Glm4MoeLiteForCausalLM:
 
 
 def create_pretokenized_dataset(num_samples: int) -> Dataset:
-    """Pre-tokenized samples: random ids, prompt prefix masked to -100."""
     generator = torch.Generator().manual_seed(SEED)
     rows = []
     for _ in range(num_samples):
@@ -96,7 +76,6 @@ def collate_pretokenized(features):
 
 
 def create_stub_tokenizer() -> PreTrainedTokenizerFast:
-    """Offline stand-in — the dataset is pre-tokenized, TRL just needs an object."""
     vocab = {"<pad>": 0, "<eos>": 1}
     return PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(WordLevel(vocab, unk_token="<pad>")),
@@ -115,9 +94,7 @@ def run(ctx) -> dict:
     model = create_tiny_glm4_moe_lite()
     log(f"Model: glm4_moe_lite, {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params")
 
-    # The REAL registered applier, driven the way production resolves it — same FLCE path
-    # GLM-4.7-Flash long-context runs take. Only the loss role is enabled: this suite is about the
-    # eval-time skip_logits injection, not the family's norm/GLU swaps.
+    # The real applier, on the FLCE path GLM-4.7-Flash long-context runs take; only the loss role is enabled.
     liger_applier("glm4_moe_lite")(
         cross_entropy=False,
         fused_linear_cross_entropy=True,
@@ -155,7 +132,7 @@ def run(ctx) -> dict:
         parallelism_config=ParallelismConfig(use_grouped_gemm=False),
     )
 
-    # FLCE-patched forward must expose skip_logits — Liger lce_forward contract changed?
+    # Fails if Liger's lce_forward contract changed.
     checks["forward_accepts_skip_logits"] = bool(trainer._forward_accepts_skip_logits)
 
     lm_head_calls = {"count": 0}
@@ -171,9 +148,7 @@ def run(ctx) -> dict:
     fused_lm_head_calls = lm_head_calls["count"]
     log(f"Fused eval_loss: {fused_loss:.6f}, lm_head calls: {fused_lm_head_calls}")
 
-    # TRL 1.14's SFTTrainer sets skip_logits itself (True for loss-only eval) whenever
-    # args.use_liger_kernel is set, so the reference must clear it too; lce_forward then defaults to
-    # the unfused full-logits path.
+    # TRL 1.14 sets skip_logits itself whenever args.use_liger_kernel is set, so the reference clears it too.
     log("\n--- Run B: unfused reference evaluation ---")
     trainer.__dict__["_forward_accepts_skip_logits"] = False
     trainer.args.use_liger_kernel = False
@@ -188,12 +163,10 @@ def run(ctx) -> dict:
 
     checks["fused_loss_finite"] = bool(torch.isfinite(torch.tensor(fused_loss)))
 
-    # lm_head invoked during loss-only eval == full [B, S, vocab] logits materialized instead of the
-    # fused FLCE path: the eval-mode OOM the fused path avoids.
+    # lm_head invoked means full logits materialized: the eval-mode OOM the fused path avoids.
     checks["fused_eval_skips_lm_head"] = fused_lm_head_calls == 0
 
-    # The reference run must take the unfused full-logits path (injection disabled); lm_head never
-    # invoked there would mean the comparison is vacuous.
+    # lm_head never invoked here would mean the comparison is vacuous.
     checks["unfused_reference_uses_lm_head"] = unfused_lm_head_calls > 0
 
     loss_diff = abs(fused_loss - unfused_loss)

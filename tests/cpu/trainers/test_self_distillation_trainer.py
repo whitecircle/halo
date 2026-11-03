@@ -1,18 +1,7 @@
 #!/usr/bin/env python
-"""The SDPG self-distillation trainer's objective (arXiv:2606.04036) on stub models, and its
-vision-feature reuse gate.
-
-``L = L_sft + beta(k) * L_OPD + alpha * L_ref``: each term a per-sample token mean, SFT and (under
-``confidence_weight_opd``) OPD weighted per sample by the confidence weights, OPD over the response
-tokens both branches supervise less EOS/stop under ``opd_exclude_eos``, and the teacher reading its
-own longer, hinted sequence. The oracle below pairs each branch's response positions by hand; the
-stub model scores a token by its position and its sequence's length, so the teacher's rows differ
-from the student's and a misaligned pairing lands on a different number.
-
-The divergences themselves are covered by test_distillation_divergences.py.
-
-Run: python tests/cpu/trainers/test_self_distillation_trainer.py
-"""
+"""The SDPG self-distillation trainer's objective (arXiv:2606.04036) on stub models, and its vision-feature reuse gate.
+``L = L_sft + beta(k) * L_OPD + alpha * L_ref``, each term a per-sample token mean.
+The stub scores a token by its position and sequence length, so a misaligned branch pairing lands on another number."""
 
 import types
 from unittest import mock
@@ -57,8 +46,7 @@ def _branch(rows, hinted):
 
 
 class _PositionTable(nn.Module):
-    """Logits from a random table keyed by token, position and sequence length, so the two branches
-    score a shared response token differently."""
+    """Keyed by token, position and sequence length, so the two branches score a shared response token differently."""
 
     def __init__(self, seed: int):
         super().__init__()
@@ -85,7 +73,6 @@ def _trainer(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_c
     trainer.state = types.SimpleNamespace(global_step=4, max_steps=10)
     trainer._warned_empty_labels = True
     trainer._vision_reuse_setup, trainer._vision_reuse_active = True, False
-    # Every (metrics, train_eval, rows) the trainer stores, passed on to StoredMetricsMixin's own store.
     trainer.stored = []
     mixin_store = trainer.store_metrics
     trainer.store_metrics = lambda metrics, train_eval="train", rows=1: (
@@ -96,11 +83,7 @@ def _trainer(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_c
 
 
 def _stored(trainer, train_eval: str = "train") -> dict:
-    """The latest value of each metric the trainer stored, the one ``log`` folds.
-
-    Recorded on the way into the mixin's ``store_metrics``, so a trainer that stops storing through it (or
-    stops inheriting it) fails here.
-    """
+    """The latest value of each metric stored. A trainer that stops storing through the mixin fails here."""
     return {key: value for metrics, mode, _ in trainer.stored if mode == train_eval for key, value in metrics.items()}
 
 
@@ -130,8 +113,7 @@ def _response_rows(logits, labels, exclude_eos):
 
 
 def _oracle(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_coef=ALPHA, real_rows=None):
-    """``(loss, sft, opd, ref)`` from per-row loops over the hand-paired response positions of the
-    batch's first ``real_rows`` rows."""
+    """``(loss, sft, opd, ref)`` from per-row loops over the hand-paired response positions of ``real_rows`` rows."""
     model, reference = _PositionTable(seed=0), _PositionTable(seed=1)
     inputs = _inputs()
     with torch.no_grad():
@@ -180,8 +162,7 @@ def test_the_loss_is_sft_plus_scheduled_opd_plus_the_reference_anchor(confidence
 
 
 def test_an_eval_split_s_padding_rows_leave_every_term():
-    """Row 2 pads the eval split's final round: each per-sample mean (SFT, OPD, the reference anchor)
-    runs over rows 0 and 1, and the metrics are stored with their two rows as the weight."""
+    """Row 2 pads the eval split's final round."""
     trainer = _trainer()
     trainer.model.eval()
     trainer.eval_split_rows = lambda num_rows: 2
@@ -197,7 +178,7 @@ def test_an_eval_split_s_padding_rows_leave_every_term():
 
 
 def test_a_rank_of_eval_padding_alone_scores_zero():
-    """Its every row pads the final round: each term means over no sample, which is 0, not NaN."""
+    """Each term means over no sample, which is 0, not NaN."""
     trainer = _trainer()
     trainer.model.eval()
     trainer.eval_split_rows = lambda num_rows: 0
@@ -206,8 +187,7 @@ def test_a_rank_of_eval_padding_alone_scores_zero():
 
 
 def test_backward_holds_no_fp32_vocab_plane(monkeypatch):
-    """Every term (SFT, OPD, the anchor) scores token chunks under a checkpoint: on bf16 logits autograd
-    keeps no fp32 ``[tokens, V]`` plane, two chunks per row here."""
+    """Each term scores token chunks under a checkpoint, so bf16 logits keep no fp32 ``[tokens, V]`` autograd plane."""
     monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 2 * VOCAB)
     trainer = _trainer()
     trainer.model.to(torch.bfloat16)
@@ -232,7 +212,6 @@ def test_the_anchor_is_off_at_a_zero_coefficient():
 
 
 def _opd(trainer, student_logits, student_labels, teacher_logits, teacher_labels, weights):
-    """The OPD term ``compute_loss`` adds: the divergence between the two branches' OPD positions."""
     return trainer._response_divergence(
         trainer.sdpg_loss_fn,
         student_logits,
@@ -244,8 +223,7 @@ def _opd(trainer, student_logits, student_labels, teacher_logits, teacher_labels
 
 
 def _loop_opd(student_logits, student_labels, teacher_logits, teacher_labels, weights, stop_ids):
-    """A per-row reference loop over each row's response rows, on batches whose two branches carry
-    equal per-row counts."""
+    """A per-row reference loop, on batches whose two branches carry equal per-row counts."""
     student_shift, teacher_shift = student_logits[:, :-1], teacher_logits[:, :-1]
     student_ids = student_labels[:, 1:]
     student_mask = student_ids != LABEL_IGNORE_INDEX
@@ -283,8 +261,7 @@ def test_the_masked_gather_matches_a_per_row_reference_loop(seed):
 
 @pytest.mark.parametrize("totals_match", [False, True], ids=["one-row-longer", "rows-swap-a-token"])
 def test_misaligned_branches_raise_instead_of_pairing_different_tokens(totals_match):
-    """Per row, not in total: a batch whose rows' counts differ with equal totals would pair rows
-    across samples without any raise."""
+    """Per row, not in total: counts that differ with equal totals would pair rows across samples without any raise."""
     trainer = _trainer(opd_exclude_eos=False)
     _, _, labels = _branch(ROWS, hinted=False)
     _, _, teacher_labels = _branch(ROWS, hinted=True)
@@ -299,8 +276,7 @@ def test_misaligned_branches_raise_instead_of_pairing_different_tokens(totals_ma
 
 
 def test_one_mask_on_both_sides_skips_the_count_check(monkeypatch):
-    """The reference term pairs the student with the reference over one mask; comparing it with itself
-    is a host sync for a verdict that cannot fail."""
+    """The reference term uses one mask for both sides, so comparing it with itself is a wasted host sync."""
     trainer = _trainer()
     _, _, labels = _branch(ROWS, hinted=False)
     logits = torch.zeros(len(ROWS), labels.size(1), VOCAB)
@@ -317,8 +293,7 @@ def test_one_mask_on_both_sides_skips_the_count_check(monkeypatch):
     "trainer_cls,flushes", [(DistributedSFTTrainer, 1), (DistributedSelfDistillationTrainer, 0)], ids=["sft", "self"]
 )
 def test_only_a_loss_recording_the_sft_metrics_flushes_them_per_log(trainer_cls, flushes):
-    """The self-distillation loss stores its terms through StoredMetricsMixin and records nothing for the SFT base's
-    per-log loss-metric flush, which would add a world collective carrying nothing to every log."""
+    """That loss records nothing for the per-log flush, which would add a world collective carrying nothing."""
     trainer = object.__new__(trainer_cls)
     trainer.model = types.SimpleNamespace(training=True)
     trainer._loss_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
@@ -328,10 +303,7 @@ def test_only_a_loss_recording_the_sft_metrics_flushes_them_per_log(trainer_cls,
 
 
 def _vision_reuse_probe(model_type):
-    """Run ``_install_vision_reuse`` against a fake VLM of ``model_type``.
-
-    Returns ``(activated, wrapper_installed)``.
-    """
+    """Returns ``(activated, wrapper_installed)`` for a fake VLM of ``model_type``."""
 
     def original_get_image_features(*args, **kwargs):
         return "features"
@@ -351,9 +323,8 @@ def _vision_reuse_probe(model_type):
 
 
 def test_vision_reuse_only_for_validated_families():
-    """The get_image_features cache replays the student's features on the teacher pass — sound only
-    where both passes are known to call it exactly once with identical inputs (LFM2-VL). Any other
-    VLM exposing get_image_features must be left alone."""
+    """Replaying the student's features on the teacher pass is sound only where both passes call ``get_image_features``
+    once with identical inputs (LFM2-VL)."""
     assert _vision_reuse_probe("lfm2_vl") == (True, True)
     for model_type in ("qwen3_vl", "gemma4", "mistral3", None):
         assert _vision_reuse_probe(model_type) == (False, False), model_type

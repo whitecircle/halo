@@ -1,29 +1,8 @@
 #!/usr/bin/env python
-"""
-Stock TRL/transformers SFT baseline — the "what you get without Halo" reference.
+"""Stock TRL/transformers SFT on an MoE, on the Halo benchmarks' dataset and EfficiencyCallback, so numbers compare.
 
-Runs the upstream `trl.SFTTrainer` on an MoE (default gpt-oss-20b) with
-transformers-native FSDP, the stock fp32-state optimizer, transformers' own
-grouped-GEMM expert kernel, FA4 + Liger. Shares the SAME synthetic dataset and
-the SAME `EfficiencyCallback` as the Halo benchmarks, so tokens/s/GPU and peak
-memory are measured identically and are directly comparable against
-`benchmark_sft_ep.py` / `benchmark_sft_dense.py`.
-
-Differences vs the Halo path (the things this baseline deliberately does NOT have):
-  - no Expert Parallelism (experts replicated, sharded only by FSDP — every rank computes all experts)
-  - stock optimizer (adamw_torch_fused, fp32 moments) instead of AdamWBF16/SR
-  - transformers-native FSDP instead of Halo's FSDP2 + EP layer
-
-Expert compute is transformers' OWN grouped GEMM (`torch.nn.functional.grouped_mm`, the default
-`experts_implementation` for gpt-oss) — the same grouped-GEMM CLASS as Halo, NOT an
-eager loop. So this is a grouped-vs-grouped baseline on the expert kernel; Halo's lead comes from EP
-token distribution + AdamWBF16 + FSDP2, not from "grouped GEMM vs loop". `--experts_impl eager` forces
-the slow per-expert loop for the loop-vs-grouped contrast.
-
-Usage (8x B300):
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_trl_baseline.py --seq 4096 --batch_size 1
-    # --no_grad_checkpoint disables GC; --no_liger disables Liger.
+Expert compute is transformers' own grouped GEMM, so Halo's lead comes from EP + AdamWBF16 + FSDP2, not grouped GEMM vs
+loop; ``--experts_impl eager`` forces the per-expert loop.
 """
 
 import sys
@@ -54,7 +33,7 @@ from tests.common.models import MODEL_CONFIGS
 from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
 
-# Decoder-layer class to wrap per architecture for FSDP auto-wrap.
+# Wrapped per architecture for FSDP auto-wrap.
 _LAYER_CLS = {
     "gpt-oss-20b": "GptOssDecoderLayer",
     "qwen3-30b-a3b": "Qwen3MoeDecoderLayer",
@@ -67,8 +46,6 @@ _LAYER_CLS = {
 
 
 class FlashAdamWSFTTrainer(SFTTrainer):
-    """Stock TRL trainer with Halo's explicit FlashAdamW OOM fallback."""
-
     def create_optimizer(self):
         if self.args.optim != "flash_adamw":
             return super().create_optimizer()
@@ -82,9 +59,8 @@ class FlashAdamWSFTTrainer(SFTTrainer):
                 master_weight_bits=24,
                 decay_parameters=set(self.get_decay_parameter_names(self.model)),
             )
-            # Accelerate snapshots the optimizer before the first step when preparing FSDP2.
-            # FlashAdamW's state_dict expects an entry for every parameter even before its
-            # lazy state initialization, unlike torch.optim.AdamW.
+            # Accelerate snapshots the optimizer before the first step, and FlashAdamW's state_dict expects an entry
+            # per parameter.
             for group in self.optimizer.param_groups:
                 for param in group["params"]:
                     self.optimizer.state[param] = {}
@@ -138,7 +114,7 @@ def main() -> int:
     log("  STOCK TRL/transformers SFT baseline (no Halo optimizations)")
     log(f"  Model: {model_name} ({full_params / 1e9:.1f}B, {num_experts} experts)")
     log(f"  seq={args.seq} bs={args.batch_size} steps={args.steps} warmup={args.warmup}")
-    reshard_after_fwd = args.fsdp_sharding == "full_shard"  # True = ZeRO-3, False = ZeRO-2 (FSDP2)
+    reshard_after_fwd = args.fsdp_sharding == "full_shard"  # True = ZeRO-3, False = ZeRO-2 (FSDP2).
     zero = (
         "ZeRO-1 (DDP + ZeroRedundancyOptimizer)" if args.zero1_ddp else ("ZeRO-3" if reshard_after_fwd else "ZeRO-2")
     )
@@ -160,9 +136,8 @@ def main() -> int:
 
         train_dataset = create_benchmark_dataset(tokenizer, args.seq, args.num_samples)
 
-        # ZeRO-1 takes the DDP path (no FSDP); the FSDP2 path sets ZeRO-2 vs ZeRO-3 by the reshard
-        # bool (transformers reads it from fsdp_config under the version=2 key — the string-derived
-        # default is unreliable). FSDP2 only, no v1.
+        # ZeRO-1 takes DDP; FSDP2 sets ZeRO-2 vs ZeRO-3 by the reshard bool under fsdp_config's version=2 key, since
+        # the string-derived default is unreliable.
         fsdp_str = "" if args.zero1_ddp else "full_shard auto_wrap"
         fsdp_cfg = (
             None
@@ -193,7 +168,7 @@ def main() -> int:
             dataloader_drop_last=True,
             dataloader_num_workers=0,
             include_num_input_tokens_seen=True,
-            # transformers-native FSDP2 (empty => DDP for ZeRO-1); reshard bool sets ZeRO-2 vs ZeRO-3.
+            # Empty means DDP for ZeRO-1.
             fsdp=fsdp_str,
             fsdp_config=fsdp_cfg,
         )
@@ -216,15 +191,15 @@ def main() -> int:
         )
         log(f"  loaded {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B | mem {gpu_mem_gb():.1f}GB")
 
-        # The baseline shards nothing: a default config is exactly world-wide data parallelism,
-        # which is the topology the callback's throughput math needs.
+        # The baseline shards nothing, and a default config is world-wide DP, the topology the callback's throughput
+        # math needs.
         efficiency_cb = EfficiencyCallback(
             ParallelismConfig(),
             n_warmup_steps=args.warmup,
             num_full_model_params=full_params,
         )
 
-        # ZeRO-1: shard only the optimizer state across ranks (params+grads stay replicated under DDP).
+        # ZeRO-1: only the optimizer state shards across ranks.
         optimizers = (None, None)
         if args.zero1_ddp:
             zero_opt = ZeroRedundancyOptimizer(

@@ -1,34 +1,6 @@
 #!/usr/bin/env python
-"""Env-GRPO prefetch pipeline: exactly-once training on misses + loud drop accounting.
-
-A prefetch MISS that collects the round's rollouts synchronously AND re-submits the same prompts
-makes the next hit train a second fresh rollout of a batch already trained, and every mid-stream
-miss grows the pipeline lag; a full input queue silently skips a dataset batch, and a full output
-queue silently discards completed rollouts. The contract:
-
-- a miss with submissions in flight BLOCKS for the in-flight batch (``_wait_for_inflight_prefetch``)
-  instead of duplicating it — only the documented cold-start round primes via a sync collection;
-- the first weight push and the prefetch thread start at TRAIN-BEGIN, after the resume restore —
-  started at component-init they would serve (and roll out) the pre-restore weights;
-- ``_submit_for_prefetch`` counts and warns on a queue-full skip instead of suppressing it;
-- the worker delivers exactly one output item per submission (results or a failure marker), so the
-  trainer's in-flight accounting never strands a blocking consumer;
-- a WEDGED pipeline is recorded on the ``_batch_errors`` fence and raised by its
-  ``reject``, never on the one rank that hit it — prefetch state is
-  per-rank, so a lone raise between two collectives parks every peer until the NCCL watchdog;
-- a checkpoint carries the rounds submitted but not trained, and a resume submits them first, oldest
-  first, so a resumed run trains the same batch sequence as an uninterrupted one at any depth;
-- at ``prefetch_depth`` N each step trains the round submitted N steps earlier, at most N rounds are in
-  flight, and the worker collects them together yet delivers them in submission order: collected one at
-  a time, a round could not start until the previous round's slowest episode finished;
-- the gate prefetches on two or more servers when ``enable_prefetch`` is unset and on any server count when it
-  is true; a one-server run that opts in steps exactly as a two-server one at the same depth (sync, pop,
-  submit, train), and one left unset collects and trains each round fresh;
-- the start log states the prefetch the trainer runs, and the single-server opt-in hint is said once, not
-  once per rank.
-
-    python tests/cpu/grpo/test_grpo_prefetch_exactly_once.py
-"""
+"""Env-GRPO prefetch pipeline: exactly-once training on misses and loud drop accounting. A miss that sync-collects and
+re-submits the same prompts would train a batch twice; a full queue must not silently drop a batch or its rollouts."""
 
 import asyncio
 import logging
@@ -55,8 +27,6 @@ from tests.common.repo import load_script_module
 
 
 class _Rollout(str):
-    """A stub rollout: its text, with no trajectory to count reasoning in."""
-
     trajectory = None
 
 
@@ -66,9 +36,8 @@ _TWO_ENGINES = [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}]
 
 
 class _Host(AsyncRolloutMixin, CheckpointingMixin):
-    """Minimal stand-in running the REAL prefetch decision flow with mocked rollout collection; the
-    checkpointing base gives the sidecar hooks the mixin's ``super()`` calls end in. The prefetch state,
-    queues included, is the real ``_init_async_state``'s for a two-server run at ``depth``."""
+    """The real prefetch decision flow with mocked rollout collection, over the real ``_init_async_state`` for a
+    two-server run at ``depth``."""
 
     _collect_and_score_rollouts = _T._collect_and_score_rollouts
     _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
@@ -89,7 +58,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         self._group_random_effort = False
         self._batch_errors = BatchBuildFence()
         self.num_generations = 1
-        # Every sync collection is recorded here — the duplication fingerprint.
+        # Every sync collection, the duplication fingerprint.
         self.sync_calls: list[list[str]] = []
         self.trained: list[list[str]] = []
         self._loop = types.SimpleNamespace(run_until_complete=lambda batch: batch)
@@ -114,7 +83,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         return self._collect_and_score_rollouts([{"prompt": p} for p in prompts])
 
     def worker_step(self):
-        """One synchronous stand-in for the prefetch worker: input batch → completed rollouts."""
+        """A synchronous stand-in for the prefetch worker."""
         prompts, _contexts = self._prefetch_input_queue.get_nowait()
         self._prefetch_queue.put_nowait((len(prompts), [_Rollout(f"prefetch:{p}") for p in prompts]))
 
@@ -147,8 +116,8 @@ def test_miss_with_inflight_waits_instead_of_duplicating():
     assert host.sync_calls == [["p0"]]
     assert host._prefetch_inflight == 1
 
-    # p1 is still in flight, so this round must block for it — sync-collecting p2 here would train
-    # p1's batch again on the next hit.
+    # p1 is still in flight, so this round must block for it; sync-collecting p2 here would train p1's batch again on
+    # the next hit.
     delivery = threading.Timer(0.2, host.worker_step)
     delivery.start()
     try:
@@ -186,12 +155,8 @@ def test_all_failed_inflight_returns_none_for_sync_fallback():
 
 
 def test_wedged_pipeline_is_recorded_for_the_uniform_fence_not_raised():
-    """A wedge must RECORD and fall back, so every rank raises together at the next fence.
-
-    Raising here — on the one rank whose prefetch wedged — leaves its peers (which took the hit
-    path) inside the collectives that follow, waiting out the whole NCCL watchdog while the only
-    informative traceback belongs to a process that already exited.
-    """
+    """A lone raise on the wedged rank leaves its peers, which took the hit path, in the collectives that follow until
+    the NCCL watchdog."""
     host = _Host()
     host.async_config.episode_timeout = 0.01
     host._prefetch_pending = _pending("pX")
@@ -200,7 +165,7 @@ def test_wedged_pipeline_is_recorded_for_the_uniform_fence_not_raised():
         assert host._wait_for_inflight_prefetch() is None, "the caller must fall back to sync collection"
 
     assert "wedged" in (host._batch_errors.reason or ""), "the wedge must be recorded for the fence to raise"
-    # The fence is what fails the job — and it fails on every rank, not just this one.
+    # The fence fails the job, on every rank.
     with pytest.raises(ValueError, match="wedged"):
         host._batch_errors.reject()
 
@@ -231,7 +196,7 @@ class _StubManager:
 
 
 class _LifecycleHost:
-    """Runs the REAL component-init / generation-start flow with Ray, the manager and the push stubbed."""
+    """The real component-init and generation-start flow with Ray, the manager and the push stubbed."""
 
     _init_async_components = _T._init_async_components
     _form_weight_sync_group = _T._form_weight_sync_group
@@ -266,7 +231,7 @@ class _LifecycleHost:
         self._rollout_stop_token_ids = None
         self._reasoning_end_ids = None
         self.callbacks: list = []
-        # What the engines were handed, in order — the fingerprint of WHICH weights they serve.
+        # What the engines were handed, in order: the fingerprint of which weights they serve.
         self.pushed: list[float] = []
         self.prefetch_starts = 0
 
@@ -285,13 +250,8 @@ class _LifecycleHost:
 
 
 def test_generation_starts_only_after_the_resume_restore(monkeypatch):
-    """The first push and the prefetch thread must follow the checkpoint restore.
-
-    ``_init_async_components`` runs before ``super().train()``, i.e. before the trainer restores
-    ``resume_from_checkpoint``. A push issued there ships the PRE-restore weights — on a resumed LoRA
-    run, the zero-init adapter merged into the base — and every rollout until the next scheduled sync
-    is drawn from a policy the trainer is not training.
-    """
+    """``_init_async_components`` runs before the trainer restores ``resume_from_checkpoint``. A push there ships the
+    pre-restore weights, on a resumed LoRA run the zero-init adapter merged into the base."""
     weight = torch.zeros(4)  # a freshly initialized adapter
     host = _LifecycleHost(weight)
     monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True, init=lambda **kw: None))
@@ -324,12 +284,10 @@ def test_generation_starts_only_after_the_resume_restore(monkeypatch):
 
 
 def _trained_batches(host: _Host) -> list[str]:
-    """The prompt each trained round's rollouts were drawn for, whichever path collected them."""
     return [batch[0].split(":", 1)[1] for batch in host.trained]
 
 
 def _run(host: _Host, batches: list[str]) -> None:
-    """One training round per batch, the worker finishing each submission before the next round."""
     for prompt in batches:
         if not host._prefetch_input_queue.empty():
             host.worker_step()
@@ -337,15 +295,11 @@ def _run(host: _Host, batches: list[str]) -> None:
 
 
 def _expected_order(depth: int, steps: int) -> list[str]:
-    """What ``steps`` rounds train at ``depth``: each of the first ``depth`` a cold round of its own batch,
-    then each the batch submitted ``depth`` rounds earlier."""
     return [f"b{k}" if k < depth else f"b{k - depth}" for k in range(steps)]
 
 
 @pytest.mark.parametrize("depth", [1, 2, 3])
 def test_each_round_trains_the_batch_submitted_depth_rounds_earlier(depth):
-    """Depth 1 is the one-round lag; a deeper pipeline trains its rounds in submission order, ``depth`` late,
-    never holding more than ``depth`` of them."""
     host = _Host(depth)
     inflight = []
     for prompt in [f"b{i}" for i in range(8)]:
@@ -362,10 +316,8 @@ def test_each_round_trains_the_batch_submitted_depth_rounds_earlier(depth):
 
 @pytest.mark.parametrize("depth", [1, 2, 3])
 def test_a_resumed_run_trains_the_batches_an_uninterrupted_one_does(tmp_path, depth):
-    """Each round trains the batch submitted ``depth`` rounds earlier, so at a save on a generation boundary
-    the last ``depth`` submitted batches have left the dataloader untrained. A resume that does not carry
-    every one of them, oldest first, skips batches and trains others twice (a cold round collects and
-    submits the same prompts)."""
+    """At a save on a generation boundary the last ``depth`` submitted batches have left the dataloader untrained. A
+    resume that does not carry them all, oldest first, skips batches and trains others twice."""
     batches = [f"b{i}" for i in range(depth + 4)]
     uninterrupted = _Host(depth)
     _run(uninterrupted, batches)
@@ -402,8 +354,8 @@ def test_a_resume_under_a_smaller_depth_resubmits_the_oldest_rounds_and_says_so(
 
 
 def test_a_resume_under_a_larger_depth_opens_with_cold_rounds_until_full(tmp_path):
-    """A depth-1 checkpoint holds one pending round; resumed at depth 2 the pipeline needs one more, so the first
-    step collects its own batch and submits it as well: that batch trains twice, and no batch is skipped."""
+    """Resumed at depth 2, a depth-1 checkpoint is one round short, so the first step collects its own batch and
+    submits it too: that batch trains twice and none is skipped."""
     before = _Host(1)
     _run(before, ["b0", "b1", "b2"])
     before._persist_trainer_sidecars(str(tmp_path))
@@ -437,8 +389,7 @@ def test_a_failed_oldest_round_leaves_the_step_its_own_prompts_and_the_pipeline_
 
 @pytest.mark.usefixtures("real_worker_waits")
 def test_a_failure_delivered_while_the_step_waits_leaves_the_younger_round_queued():
-    """The same contract when the failure marker lands during the step's wait rather than before it: the wait
-    returns the failure, not the younger round delivered right behind it."""
+    """The failure marker lands during the step's wait, which returns it and not the younger round right behind it."""
     host = _Host(2)
     host.round(["b0"])
     host.round(["b1"])
@@ -459,9 +410,8 @@ def test_a_failure_delivered_while_the_step_waits_leaves_the_younger_round_queue
 
 
 class _ConcurrentManager:
-    """An async ``collect_rollouts`` whose rounds finish only when the test releases them, the ``failing`` ones
-    by raising and the ``cancelled_inside`` ones by a cancel from within the collection; records which rounds
-    were collecting at once and which the stop cancelled."""
+    """Rounds finish only when the test releases them, the ``failing`` ones by raising, ``cancelled_inside`` ones by a
+    cancel from inside; records which rounds collected at once and which the stop cancelled."""
 
     def __init__(self, rounds: list[str], failing: frozenset[str] = frozenset(), cancelled_inside=frozenset()):
         self.release = {name: threading.Event() for name in rounds}
@@ -499,7 +449,7 @@ def _wait_until(condition, timeout: float = 5.0) -> None:
 
 @pytest.fixture
 def real_worker_waits(monkeypatch):
-    """Shortened worker waits: a lost delivery then fails the wait for it in seconds rather than a minute."""
+    """A lost delivery then fails its wait in seconds rather than a minute."""
     monkeypatch.setattr(async_mod, "_PREFETCH_POLL_TIMEOUT_S", 0.01)
     monkeypatch.setattr(async_mod, "_PREFETCH_SUBMIT_TIMEOUT_S", 2.0)
 
@@ -510,7 +460,6 @@ def _start_real_worker(host: _Host, manager: _ConcurrentManager) -> None:
 
 
 def _submit_slow_then_fast(host: _Host, manager: _ConcurrentManager) -> None:
-    """Submit r0 and r1, then finish r1 while r0 still collects, and check nothing was delivered for either."""
     host._submit_for_prefetch(["r0"], [None])
     host._submit_for_prefetch(["r1"], [None])
     _wait_until(lambda: manager.collecting == {"r0", "r1"})
@@ -522,9 +471,8 @@ def _submit_slow_then_fast(host: _Host, manager: _ConcurrentManager) -> None:
 
 @pytest.mark.usefixtures("real_worker_waits")
 def test_the_worker_collects_pending_rounds_together_and_delivers_them_in_submission_order():
-    """Round r0 is slow and r1 fast: r1 must start while r0 is still collecting (one round at a time, the
-    engines drain at r0's tail with r1 waiting), and still be delivered after it, since the trainer pairs
-    each output with its oldest pending round."""
+    """One round at a time, the engines would drain at r0's tail with r1 waiting. r1 is still delivered after r0, since
+    the trainer pairs each output with its oldest pending round."""
     host = _Host(2)
     manager = _ConcurrentManager(["r0", "r1"])
     _start_real_worker(host, manager)
@@ -550,10 +498,8 @@ def test_the_worker_collects_pending_rounds_together_and_delivers_them_in_submis
     ids=["raised", "cancelled"],
 )
 def test_a_failed_round_still_yields_one_output_in_its_place(caplog, failure, logged):
-    """A round that raises, or is cancelled while the worker runs, delivers a failure marker, and in order:
-    delivered ahead of the slower round before it, the trainer would pair the marker with that round and
-    train the failed round's slot on the other's rollouts; not delivered at all, every later output would
-    pair one round off."""
+    """Delivered ahead of the slower round before it, the marker would pair with that round; not delivered at all,
+    every later output would pair one round off."""
     host = _Host(2)
     manager = _ConcurrentManager(["r0", "r1"], **failure)
     _start_real_worker(host, manager)
@@ -573,10 +519,7 @@ def test_a_failed_round_still_yields_one_output_in_its_place(caplog, failure, lo
 @pytest.mark.usefixtures("real_worker_waits")
 @pytest.mark.parametrize("depth", [1, 2])
 def test_a_run_through_the_real_worker_trains_in_submission_order_at_most_depth_rounds_in_flight(depth):
-    """The step path over the real worker thread, each round released just before the step that trains it and
-    only once every younger pending round is collecting too, so the step takes it from the queue or waits on it:
-    the trained order is the depth order and no more than ``depth`` rounds ever collect at once. Depth 1 is the
-    default every prefetching run takes."""
+    """Each round is released just before the step that trains it, once every younger pending round is collecting."""
     batches = [f"b{i}" for i in range(6)]
     host = _Host(depth)
     manager = _ConcurrentManager(batches)
@@ -607,8 +550,7 @@ def test_a_run_through_the_real_worker_trains_in_submission_order_at_most_depth_
 
 @pytest.mark.usefixtures("real_worker_waits")
 def test_stopping_the_worker_cancels_the_rounds_still_collecting(caplog):
-    """Every pending round is dropped at the stop, so the worker cancels the rounds still collecting and
-    exits within the join instead of waiting them out."""
+    """Every pending round is dropped at the stop, so the worker exits within the join instead of waiting them out."""
     host = _Host(2)
     manager = _ConcurrentManager(["r0", "r1"])
     _start_real_worker(host, manager)
@@ -640,8 +582,8 @@ def test_stopping_the_worker_drops_the_rounds_no_later_step_consumes():
 
 
 def test_rounds_drawn_under_another_layout_are_not_resubmitted(tmp_path):
-    """A stage change from 8 to 12 generations regroups a round's rows across prompts: replayed, its
-    baseline would mix problems for a step. The resume drops them and opens cold instead."""
+    """A stage change from 8 to 12 generations regroups a round's rows across prompts; replayed, its baseline would mix
+    problems for a step."""
     before = _Host()
     _run(before, ["b0", "b1", "b2"])
     before._persist_trainer_sidecars(str(tmp_path))
@@ -696,8 +638,6 @@ def test_the_pending_rounds_are_durable_before_the_checkpoint_counts_as_written(
 
 
 class _LoadHost(CheckpointingMixin):
-    """The mixin's resume entry with the weight loader and the bias restore stubbed out."""
-
     def __init__(self):
         self.restored: list[str] = []
         self.parallelism_config = types.SimpleNamespace(is_pp_mode=False)
@@ -763,7 +703,6 @@ def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
 
 
 def _async_state(server_configs, enable_prefetch=None):
-    """Run the REAL ``_init_async_state`` over a config carrying ``server_configs``."""
     host = types.SimpleNamespace(
         async_config=AsyncRolloutConfig(rollout_server_configs=server_configs, enable_prefetch=enable_prefetch)
     )
@@ -788,8 +727,7 @@ _SERVERS = {"url": None, "one-entry-list": _TWO_ENGINES[:1], "two-servers": _TWO
     ],
 )
 def test_the_prefetch_gate(enable_prefetch, servers, prefetches):
-    """Unset follows the server count, which counts engines, not spellings (a one-entry list is one server);
-    an explicit value is taken as given, one server included."""
+    """Unset follows the server count, where a one-entry list is one server; an explicit value is taken as given."""
     host = _async_state(_SERVERS[servers], enable_prefetch)
     assert host.async_config.prefetch_active() is prefetches
     assert host._prefetch_enabled is prefetches
@@ -798,8 +736,7 @@ def test_the_prefetch_gate(enable_prefetch, servers, prefetches):
 @pytest.mark.parametrize("enable_prefetch", [None, True, False], ids=["unset", "true", "false"])
 @pytest.mark.parametrize("servers", list(_SERVERS))
 def test_the_start_log_states_the_prefetch_the_trainer_runs(servers, enable_prefetch):
-    """The start log reads the prefetch the trainer resolves (``prefetch_active``), not ``enable_prefetch``:
-    read off the knob, it would say "prefetch: disabled" on an unset run, which prefetches on two servers."""
+    """Read off the knob, it says ``prefetch: disabled`` on an unset run, which prefetches on two servers."""
     host = _async_state(_SERVERS[servers], enable_prefetch)
     lines = env_grpo_script.rollout_start_log({}, host.async_config)
     assert f"prefetch: {'depth 1' if host._prefetch_enabled else 'disabled'}" in lines
@@ -818,7 +755,6 @@ def test_the_start_log_states_the_configured_depth():
 def test_the_single_server_hint_is_said_once_and_only_when_unset(
     monkeypatch, caplog, main_process, enable_prefetch, servers, hinted
 ):
-    """An explicit value is the user's choice, not something to point at; the hint names the opt-in."""
     monkeypatch.setattr(async_mod, "is_global_main_process", lambda: main_process)
     with caplog.at_level(logging.INFO, logger=async_mod.logger.name):
         _async_state(_SERVERS[servers], enable_prefetch)
@@ -834,8 +770,6 @@ def test_the_client_shape_follows_the_list_not_the_server_count():
 
 
 class _SubmitLog(queue.Queue):
-    """The prefetch input queue, logging each submitted round."""
-
     def __init__(self, maxsize: int, events: list):
         super().__init__(maxsize)
         self.events = events
@@ -846,8 +780,6 @@ class _SubmitLog(queue.Queue):
 
 
 class _PopLog(queue.Queue):
-    """The prefetch output queue, logging each round a step takes."""
-
     def __init__(self, maxsize: int, events: list):
         super().__init__(maxsize)
         self.events = events
@@ -859,9 +791,8 @@ class _PopLog(queue.Queue):
 
 
 class _SteppingHost(_T):
-    """The REAL ``training_step`` and ``_collect_and_score_rollouts`` over the REAL ``_init_async_state``, the
-    engines, the worker thread and the batch build stubbed, logging sync, collect, submit, pop and train.
-    A short ``episode_timeout``, so a step that waits on a round never submitted fails in seconds."""
+    """The real ``training_step`` and ``_collect_and_score_rollouts`` with the engines, the worker thread and the batch
+    build stubbed. A short ``episode_timeout``, so a step that waits on a round never submitted fails in seconds."""
 
     def __init__(self, server_configs, enable_prefetch, depth=1):
         self.async_config = AsyncRolloutConfig(
@@ -887,7 +818,7 @@ class _SteppingHost(_T):
         self._routing_injector = None
         self._loop = types.SimpleNamespace(run_until_complete=lambda batch: batch)
         self._rollout_manager = types.SimpleNamespace(collect_rollouts=self._collect)
-        # Train-begin's forced push stamped step 0.
+        # What train-begin's forced push stamps.
         self._last_sync_attempt_step = 0
 
     def _collect(self, prompts, contexts):
@@ -909,15 +840,13 @@ class _SteppingHost(_T):
         pass
 
     def deliver(self):
-        """The prefetch worker's round, finished while the step that submitted it trained, delivered as the worker
-        delivers: a full output queue raises rather than waits."""
+        """Delivered as the worker delivers: a full output queue raises rather than waits."""
         prompts, _contexts = self._prefetch_input_queue.get_nowait()
         self._prefetch_queue.put_nowait((len(prompts), [_Rollout(f"prefetch:{p}") for p in prompts]))
 
 
 def _stepped_host(monkeypatch, server_configs, enable_prefetch, depth=1) -> _SteppingHost:
-    """One optimizer step per batch, its first microbatch generating the round as TRL's step does: ``depth`` cold
-    steps, then two that pop a prefetched round."""
+    """One optimizer step per batch: ``depth`` cold steps, then two that pop a prefetched round."""
     monkeypatch.setattr(
         DistributedTrainerMixin,
         "training_step",
@@ -974,8 +903,7 @@ _PREFETCHED_STEPS = {
 @pytest.mark.parametrize("depth", sorted(_PREFETCHED_STEPS))
 @pytest.mark.parametrize("servers", ["url", "one-entry-list"])
 def test_one_server_that_opts_in_steps_exactly_as_two_servers(monkeypatch, servers, depth):
-    """Sync, then pop the round submitted ``depth`` steps earlier, submit this step's, train the popped one: the
-    lone engine's prefetched rounds span the push the way N engines' do, and train ``depth`` steps stale."""
+    """The lone engine's prefetched rounds span the push the way N engines' do, and train ``depth`` steps stale."""
     one_server = _step_events(monkeypatch, _SERVERS[servers], enable_prefetch=True, depth=depth)
     assert one_server == _step_events(monkeypatch, _SERVERS["two-servers"], enable_prefetch=None, depth=depth)
     assert one_server == _PREFETCHED_STEPS[depth]
@@ -997,9 +925,7 @@ def test_one_server_left_unset_trains_each_round_fresh(monkeypatch):
 @pytest.mark.parametrize(("depth", "pending"), [(1, [["b2"]]), (2, [["b2"], ["b3"]])])
 @pytest.mark.parametrize("servers", ["url", "one-entry-list"])
 def test_one_server_that_opts_in_resumes_the_rounds_it_had_in_flight(monkeypatch, tmp_path, servers, depth, pending):
-    """A save after the last step carries the ``depth`` rounds it submitted untrained, and the resume takes them
-    back, oldest first, to submit first: else the one-server run skips those batches and trains the next ones
-    twice."""
+    """Without them back, oldest first, the one-server run skips those batches and trains the next ones twice."""
     before = _stepped_host(monkeypatch, _SERVERS[servers], enable_prefetch=True, depth=depth)
     before._persist_trainer_sidecars(str(tmp_path))
     resumed = _SteppingHost(_SERVERS[servers], enable_prefetch=True, depth=depth)

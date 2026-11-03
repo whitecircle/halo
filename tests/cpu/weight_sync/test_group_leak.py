@@ -1,21 +1,5 @@
-"""Both weight-sync clients must release what they already built when the SERVER half of group
-formation fails.
-
-``wait_for_calls`` raises the moment either half of the handshake errors, so the local half's
-product — SGLang's c10d group + rendezvous TCPStore, vLLM's ncclComm — can already exist while the
-client attribute that owns it is still ``None``. Leaking it is not a spare object: c10d keeps the
-process-global registration under the derived group name and the store keeps its listener on the
-group port, so a reconnect rebuilds the same name and torch refuses it ("The specified
-group name has already been created") — the server becomes permanently unreachable for weight sync
-without restarting the trainer. The vLLM twin leaks an ncclComm and the device memory NCCL pinned
-for it for the life of the process.
-
-The first two tests drive the failure with the local half completing FIRST (an event, not a sleep),
-which is exactly the window the release has to cover. The third covers the other end of that window:
-the local half never starting at all.
-
-    python tests/cpu/weight_sync/test_group_leak.py
-"""
+"""Both weight-sync clients must release what they built when the server half of group formation fails. A leaked c10d
+group makes torch refuse every reconnect under its name, and a leaked ncclComm pins device memory for the process."""
 
 import socket
 import threading
@@ -34,8 +18,6 @@ _SERVER_REFUSED = "server refused the group-init request"
 
 
 def _recording_destroy(destroyed: list):
-    """A ``release_weight_update_group`` that records each group it was asked to destroy."""
-
     def release(group, *, destroy):
         if destroy:
             destroyed.append(group)
@@ -44,7 +26,7 @@ def _recording_destroy(destroyed: list):
 
 
 def _failing_server_call(built: threading.Event):
-    """Stand-in for the engine's group-init POST: it fails only once the local half has succeeded."""
+    """The engine's group-init POST, failing only once the local half has succeeded."""
 
     def request(method, path, **kwargs):
         assert built.wait(timeout=30), "the local half never completed — test would not exercise the leak window"
@@ -82,10 +64,8 @@ def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatc
 
 
 def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeypatch):
-    """``AsyncCall.__init__`` starts a thread, and a thread-starved process (Ray actors + rollout
-    threads) raises there. The handler must still release and report THAT error — reading the
-    unbound call handle instead would raise UnboundLocalError, replacing the diagnosis and skipping
-    the release that keeps the group name reusable. The listener no store took is closed with it."""
+    """``AsyncCall.__init__`` starts a thread, and a thread-starved process (Ray actors + rollout threads) raises
+    there. Reading the unbound call handle instead would replace the diagnosis and skip the release."""
     port = free_port()
     client = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=port)
 

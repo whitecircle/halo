@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""Environmental GRPO's weight sync must never hand the engine a sharded or unmerged param.
-
-Forwarding ``named_parameters()`` untouched would hand over DTensors under FSDP2: a DTensor reports
-the GLOBAL shape/``numel()`` while ``data_ptr()`` addresses only the LOCAL shard, so the packed
-broadcast reads past the end of the shard; and for PEFT, unmerged ``lora_*`` tensors the engine cannot
-map. ``_sync_weights_to_engine`` has one path for every shape, single process and multi-server
-included: the gather, which materializes (``materialize_dtensor``) and folds the adapters before
-forwarding.
-
-A one-rank gloo mesh is enough: what is asserted is the TYPE and the value that reach the client, not
-the sharding arithmetic.
-
-Run: ``python tests/cpu/grpo/test_env_grpo_dense_sync_materializes.py`` (or ``pytest -m cpu``).
-"""
+"""Environmental GRPO's weight sync must never hand the engine a sharded or unmerged param. A DTensor reports the
+global shape while ``data_ptr()`` addresses only the local shard, so the packed broadcast would read past its end."""
 
 from __future__ import annotations
 
@@ -32,8 +20,7 @@ ROWS, COLS = 8, 4
 
 
 class _FSDPStyleModel(nn.Module):
-    """A model whose params are DTensors, as ``fully_shard`` leaves them (``nn.Parameter`` of a
-    DTensor stays a DTensor — that is what ``_ParameterMeta`` exists for)."""
+    """Params are DTensors, as ``fully_shard`` leaves them; ``nn.Parameter`` of a DTensor stays a DTensor."""
 
     def __init__(self, mesh):
         super().__init__()
@@ -46,8 +33,6 @@ class _FSDPStyleModel(nn.Module):
 
 
 class _RecordingClient:
-    """Records what the gather forwards, in place of the NCCL transport."""
-
     def __init__(self):
         self.sent: list[tuple[str, torch.Tensor]] = []
         self.flushed = False
@@ -63,7 +48,6 @@ class _RecordingClient:
 
 
 def _stub_trainer(model: nn.Module, client: _RecordingClient):
-    """The trainer's sync entrypoint, on the smallest object that satisfies it."""
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.model = model
     trainer.accelerator = SimpleNamespace(is_main_process=True, unwrap_model=lambda m: m)
@@ -98,7 +82,6 @@ def test_dense_sync_forwards_materialized_tensors(mesh):
 
 
 def test_dense_sync_forwards_the_full_tensor(mesh):
-    """Materializing must produce the whole weight, not rank 0's local shard under a global name."""
     model = _FSDPStyleModel(mesh)
     client = _RecordingClient()
 
@@ -114,8 +97,7 @@ def test_dense_sync_forwards_the_full_tensor(mesh):
 
 
 def test_a_peft_push_sends_merged_weights():
-    """``base_model.model.*`` / ``lora_A``-named tensors are names vLLM cannot map; the gather folds the
-    adapters into each base weight first."""
+    """vLLM cannot map ``base_model.model.*`` or ``lora_A`` names."""
 
     class _Tiny(nn.Module):
         def __init__(self):
@@ -135,7 +117,6 @@ def test_a_peft_push_sends_merged_weights():
 
 
 def test_plain_dense_model_still_syncs():
-    """Anti-over-rejection: the same branch must keep working for un-sharded params (no mesh)."""
     model = nn.Linear(COLS, ROWS, bias=False)
     client = _RecordingClient()
 
@@ -145,10 +126,8 @@ def test_plain_dense_model_still_syncs():
 
 
 def test_a_declined_sync_reports_that_it_did_not_push():
-    """The cadence gate declines most steps, and the trainer reads this verdict to decide whether the
-    step owes a post-sync barrier: reporting a push that never happened puts an every-microbatch
-    host-blocking barrier back on the step path (and would claim the engines hold weights nobody
-    sent them)."""
+    """The trainer reads this verdict to decide whether the step owes a post-sync barrier; a false push would put a
+    host-blocking barrier on every microbatch."""
     model = nn.Linear(COLS, ROWS, bias=False)
     client = _RecordingClient()
     trainer = _stub_trainer(model, client)

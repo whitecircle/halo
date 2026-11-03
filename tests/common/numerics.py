@@ -1,6 +1,5 @@
-"""Numerical comparisons the correctness tests bound: tensor error metrics, NaN-carrying extremes, equality
-across float dtypes, Muon's orthogonality on a controlled spectrum, the autograd graph a loss builds, and the
-deterministic weight perturbation a measured noise floor starts from."""
+"""Numerical comparisons the correctness tests bound: error metrics, NaN-carrying extremes, Muon orthogonality,
+autograd graphs."""
 
 import math
 from collections.abc import Callable, Iterable
@@ -15,20 +14,9 @@ _PERTURBATION_PHASE = 12345.678
 
 
 def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:
-    """Cosine similarity of two tensors, compared as flat fp64 vectors.
-
-    The direction half of a correctness comparison: a norm-preserving corruption (a wrong expert
-    bank, a permuted dispatch) reorients the vector while an absolute-difference bound on bf16
-    tensors has to be loose enough to absorb accumulation noise. fp64 because the cosine of two
-    bf16 vectors rounds its own accumulation, and a finite tensor near the bf16 range limit would
-    overflow an fp32 norm.
-
-    A zero-norm or non-finite operand raises, naming ``label``. A zero vector has no direction, and
-    any number returned for it passes one side of a threshold: 1.0 matches a dead gradient against a
-    live one, 0.0 lets a negative control whose gradient vanished read as decorrelated, and NaN slips
-    past every ``<`` and ``min`` tracker. A pair that is legitimately all-zero is the caller's to
-    handle explicitly.
-    """
+    """Cosine similarity of two tensors as flat fp64 vectors, since bf16 accumulation rounds and an fp32 norm can
+    overflow near the bf16 limit. A zero-norm or non-finite operand raises, naming ``label``: any number returned for
+    it passes one side of some threshold."""
     if not (torch.isfinite(a).all() and torch.isfinite(b).all()):
         raise ValueError(f"{label}: cosine of a non-finite tensor")
     a, b = a.double().flatten(), b.double().flatten()
@@ -39,22 +27,15 @@ def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:
 
 
 def max_abs_rel_err(actual: torch.Tensor, reference: torch.Tensor) -> float:
-    """Largest elementwise error, relative to the reference's largest magnitude (fp32).
-
-    Scaled by the peak rather than elementwise, so near-zero reference entries do not dominate. The
-    floor only keeps an all-zero reference finite: any nonzero ``actual`` then reads as a huge error.
-    NaN in either operand propagates, so a ``<`` bound fails on it.
-    """
+    """Largest elementwise error relative to the reference's peak (fp32); a zero reference reads as a huge error, and
+    NaN propagates."""
     diff = (actual.float() - reference.float()).abs().max()
     return (diff / reference.float().abs().max().clamp(min=1e-9)).item()
 
 
 def fro_rel_err(actual: torch.Tensor, reference: torch.Tensor) -> float:
-    """Frobenius norm of the error relative to the reference's (fp64).
-
-    A zero-norm reference raises: a relative error against it is undefined, and a fixture that
-    produces one tests nothing.
-    """
+    """Frobenius norm of the error relative to the reference's (fp64); a zero-norm reference raises, since such a
+    fixture tests nothing."""
     reference = reference.double()
     norm = reference.norm().item()
     if norm == 0.0:
@@ -63,11 +44,8 @@ def fro_rel_err(actual: torch.Tensor, reference: torch.Tensor) -> float:
 
 
 def relative_l2(actual: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]) -> float:
-    """``||actual - reference|| / ||reference||`` over two tensor dicts taken as one vector (fp32).
-
-    ``inf`` when ``reference`` is empty or all zero, or the two hold different keys, so a comparison
-    of nothing fails a bound instead of passing it; NaN in either operand propagates.
-    """
+    """``||actual - reference|| / ||reference||`` over two dicts as one vector (fp32); ``inf`` when empty, all zero or
+    the keys differ."""
     if not reference or set(actual) != set(reference):
         return math.inf
     num = sum(float((actual[key].float() - value.float()).pow(2).sum()) for key, value in reference.items())
@@ -76,13 +54,9 @@ def relative_l2(actual: dict[str, torch.Tensor], reference: dict[str, torch.Tens
 
 
 def worst_relative_l2(actual: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]) -> tuple[float, str | None]:
-    """The largest per-tensor ``||actual - reference|| / ||reference||`` over two tensor dicts (fp64), and its key.
-
-    Per tensor, unlike :func:`relative_l2`: a small tensor's error (a norm weight's gradient summed twice) does not
-    dissolve into a large one's. ``(inf, None)`` when ``reference`` is empty or the two hold different keys, so a
-    comparison of nothing fails a bound; a zero-norm reference counts any nonzero difference as ``inf``. NaN in
-    either operand returns NaN with its key.
-    """
+    """The largest per-tensor relative L2 over two dicts (fp64) and its key, so a small tensor's error does not
+    dissolve into a large one's. ``(inf, None)`` when empty or the keys differ. A zero-norm reference counts any
+    difference as ``inf``. NaN returns NaN with its key."""
     if not reference or set(actual) != set(reference):
         return math.inf, None
     worst, worst_key = -math.inf, None
@@ -105,30 +79,19 @@ def _extreme_or_nan(pick: Callable, values: Iterable[float], default: float | No
 
 
 def max_or_nan(values: Iterable[float], *, default: float | None = None) -> float:
-    """Largest of ``values``, or NaN when any of them is NaN.
-
-    The builtin ``max`` compares with ``>``, which is false against NaN, so a NaN survives only in first
-    position and is silently dropped anywhere else; a bound checked on the result must fail on it
-    instead. ``default`` is returned for an empty ``values``; without one, an empty input raises as
-    ``max`` does.
-    """
+    """Largest of ``values``, or NaN when any is NaN; the builtin ``max`` silently drops a NaN anywhere but first
+    position."""
     return _extreme_or_nan(max, values, default)
 
 
 def min_or_nan(values: Iterable[float], *, default: float | None = None) -> float:
-    """Smallest of ``values``, or NaN when any of them is NaN: :func:`max_or_nan` for the builtin ``min``,
-    which drops a NaN the same way."""
+    """Smallest of ``values``, or NaN when any is NaN: :func:`max_or_nan` for the builtin ``min``."""
     return _extreme_or_nan(min, values, default)
 
 
 def tensors_equal_at_narrower_dtype(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Bitwise equality of two tensors holding the same stored value at possibly different float dtypes.
-
-    The lazy loader casts float parameters to the run's dtype where ``from_pretrained`` honors a
-    family's fp32 pins, and keeps a float buffer at the checkpoint's dtype where ``from_pretrained``
-    casts it; either side rounds the one stored value, so they agree at the narrower dtype. Shapes
-    must match exactly.
-    """
+    """Bitwise equality at the narrower of two float dtypes; loaders round one stored value differently per dtype.
+    Shapes must match."""
     if a.shape != b.shape:
         return False
     if a.is_floating_point() and b.is_floating_point() and a.dtype != b.dtype:
@@ -138,18 +101,13 @@ def tensors_equal_at_narrower_dtype(a: torch.Tensor, b: torch.Tensor) -> bool:
 
 
 def params_off_dtype(model: torch.nn.Module, dtype: torch.dtype) -> list[str]:
-    """Names of the floating parameters of ``model`` not stored in ``dtype``."""
     return [name for name, param in model.named_parameters() if param.is_floating_point() and param.dtype != dtype]
 
 
 def log_spectrum_matrix(rows: int, cols: int, generator: torch.Generator, decades: float = 1.0) -> torch.Tensor:
-    """A random fp64 ``rows x cols`` matrix whose singular values are log-spaced from 1 down ``decades``.
-
-    Random orthonormal factors around a prescribed spectrum, so a test controls the conditioning an
-    iterative method sees instead of inheriting a Gaussian matrix's near-zero tail. At one decade and
-    a few hundred singular values the smallest stays above 1e-2 of the Frobenius norm, inside the Muon
-    band's domain on either Newton-Schulz path (``TOL.muon_band_domain_*``).
-    """
+    """A random fp64 ``rows x cols`` matrix with singular values log-spaced from 1 down ``decades``. At one decade and
+    a few hundred SVs the smallest stays above 1e-2 of the Frobenius norm, inside the Muon band's domain on either
+    path."""
     rank = min(rows, cols)
     spectrum = torch.logspace(0, -decades, rank, dtype=torch.float64)
     left, _ = torch.linalg.qr(torch.randn(rows, rank, generator=generator, dtype=torch.float64))
@@ -158,15 +116,9 @@ def log_spectrum_matrix(rows: int, cols: int, generator: torch.Generator, decade
 
 
 def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str) -> None:
-    """Assert ``update`` is Muon's orthogonalization of the matrix ``source``.
-
-    Two independent properties: every singular value sits in the Newton-Schulz band, and the update
-    points along ``source``'s own polar factor ``U V^T``. The band alone passes an update
-    orthogonalized from the wrong matrix, which is the failure a batched step's restack produces.
-    A ``source`` whose spectrum leaves the band's domain for its path (the standard iteration for a
-    square matrix, the Gram iteration otherwise, under the default ``ns_algorithm``) is a broken
-    fixture and fails as such.
-    """
+    """Assert ``update`` is Muon's orthogonalization of ``source``: SVs in the band, and aligned with ``source``'s
+    polar factor. The band alone passes an update from the wrong matrix, which is what a batched step's restack
+    produces. A ``source`` outside the band's domain is a broken fixture."""
     rows, cols = source.shape[-2:]
     domain = TOL.muon_band_domain_square if rows == cols else TOL.muon_band_domain_rectangular
     u, source_singular_values, vh = torch.linalg.svd(source.double(), full_matrices=False)
@@ -189,8 +141,7 @@ def assert_orthogonalized(update: torch.Tensor, source: torch.Tensor, label: str
 
 
 def autograd_nodes(tensor: torch.Tensor) -> list[torch.autograd.graph.Node]:
-    """Every autograd node reachable from ``tensor``'s ``grad_fn``, each once: the backward a loss or
-    kernel test reads its graph's shape off (which ops, how many, on what inputs)."""
+    """Every autograd node reachable from ``tensor``'s ``grad_fn``, each once."""
     nodes, seen, pending = [], set(), [tensor.grad_fn]
     while pending:
         node = pending.pop()
@@ -203,14 +154,9 @@ def autograd_nodes(tensor: torch.Tensor) -> list[torch.autograd.graph.Node]:
 
 
 def perturb_trainable(model: torch.nn.Module, relative: float) -> int:
-    """Scale every trainable element of ``model`` in place by ``1 + relative * sin(value * phase)``, computed in fp32
-    and stored back once at the parameter's dtype, and return how many stored elements changed.
-
-    The factor is a function of each element's own value, so ranks holding copies of one tensor (DP replicas of an
-    EP bank, a weight replicated across a TP or ETP split) perturb it alike without a collective; a DTensor changes
-    its local shard. A ``relative`` under half a ULP of the dtype rounds every element back (``5e-4`` in bf16), so
-    the count is the caller's proof that the perturbation took.
-    """
+    """Scale every trainable element by ``1 + relative * sin(value * phase)`` in place; returns how many stored
+    elements changed. A function of each element's own value, so replica ranks perturb alike with no collective. Under
+    half a ULP rounds back (``5e-4`` in bf16), hence the count."""
     changed = 0
     with torch.no_grad():
         for param in model.parameters():

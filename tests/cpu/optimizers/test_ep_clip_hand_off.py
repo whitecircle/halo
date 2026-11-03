@@ -1,10 +1,5 @@
-"""The EP clip applies its coefficient exactly once: an AdamWBF16 that steps the clipped parameters takes
-it as a pending scale and applies it inside its step, leaving the gradients unscaled; any other
-optimizer gets the gradients scaled in place. Either way the step equals clip-then-step.
-
-A clip that computes the coefficient and never hands it over trains unclipped with no other symptom, so
-the step itself is compared against a reference that clips first.
-"""
+"""The EP clip applies its coefficient once: a pending scale on AdamWBF16, or in place elsewhere, equal to
+clip-then-step. A coefficient never handed over trains unclipped with no other symptom."""
 
 from types import SimpleNamespace
 
@@ -19,7 +14,7 @@ MAX_NORM = 0.5
 
 
 class _EPTrainer(GradientClippingMixin):
-    """The attributes the EP clip reads, on one rank with EP layers and no TP."""
+    """On one rank with EP layers and no TP."""
 
     def __init__(self, optimizer):
         self.optimizer = optimizer
@@ -42,7 +37,7 @@ def _params(dtype: torch.dtype = torch.float32, seed: int = 0) -> list[nn.Parame
     generator = torch.Generator().manual_seed(seed)
     params = [nn.Parameter(torch.randn(8, 4, generator=generator).to(dtype)) for _ in range(3)]
     for p in params:
-        p.grad = (torch.randn(p.shape, generator=generator) * 3).to(dtype)  # well past MAX_NORM
+        p.grad = (torch.randn(p.shape, generator=generator) * 3).to(dtype)  # Well past MAX_NORM.
     return params
 
 
@@ -51,7 +46,6 @@ def _named(params: list[nn.Parameter]) -> list[tuple[str, nn.Parameter]]:
 
 
 def _clip_then_step(optimizer_cls, dtype: torch.dtype = torch.float32) -> torch.optim.Optimizer:
-    """The reference: clip the gradients in place, then step; returns the stepped optimizer."""
     params = _params(dtype)
     norm = torch.linalg.vector_norm(
         torch.stack([torch.linalg.vector_norm(p.grad, dtype=torch.float32) for p in params])
@@ -64,8 +58,7 @@ def _clip_then_step(optimizer_cls, dtype: torch.dtype = torch.float32) -> torch.
 
 
 def _assert_steps_match(optimizer: torch.optim.Optimizer, reference: torch.optim.Optimizer) -> None:
-    """Parameters and first moments equal the reference bit for bit. A first Adam step is nearly
-    scale-invariant (``m / sqrt(v)``), so the moment is what shows the scale the step applied."""
+    """A first Adam step is nearly scale-invariant (``m / sqrt(v)``), so the moment shows the scale applied."""
     got, want = optimizer.param_groups[0]["params"], reference.param_groups[0]["params"]
     for p, ref in zip(got, want, strict=True):
         assert torch.equal(p.detach(), ref.detach()), "the step did not apply the clip coefficient as the clip would"
@@ -75,9 +68,7 @@ def _assert_steps_match(optimizer: torch.optim.Optimizer, reference: torch.optim
 
 @pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16), ids=("fp32", "bf16"))
 def test_adamw_bf16_takes_the_scale_and_steps_as_if_clipped_first(dtype):
-    """Bit for bit, in both dtypes: for bf16 the clip's in-place multiply rounds the coefficient and the
-    product to bf16, and the deferred scale must round the same way (the coefficient here is not exact in
-    bf16)."""
+    """For bf16 the in-place multiply rounds to bf16, and the deferred scale must round the same way."""
     params = _params(dtype)
     grads_before = [p.grad.clone() for p in params]
     optimizer = AdamWBF16(_named(params), lr=1e-2)
@@ -88,7 +79,7 @@ def test_adamw_bf16_takes_the_scale_and_steps_as_if_clipped_first(dtype):
     assert torch.equal(optimizer._grad_scale, clip_coefficient(MAX_NORM, norm).reshape(()))
     for p, before in zip(params, grads_before, strict=True):
         assert torch.equal(p.grad, before), "the deferred path must leave the gradients unscaled"
-    assert optimizer._grad_scale.bfloat16().float() != optimizer._grad_scale  # premise: rounding matters
+    assert optimizer._grad_scale.bfloat16().float() != optimizer._grad_scale  # Premise: rounding matters.
     optimizer.step()
     _assert_steps_match(optimizer, _clip_then_step(AdamWBF16, dtype))
 
@@ -110,7 +101,7 @@ def test_another_optimizer_gets_the_gradients_scaled_in_place(optimizer_cls):
 
 
 def test_a_non_l2_norm_is_refused_rather_than_ignored():
-    """The clip sums squared L2 shard norms; an L1 or inf request would come back as the L2 norm."""
+    """The clip sums squared L2 shard norms, so an L1 or inf request would come back as L2."""
     params = _params()
     trainer = _EPTrainer(torch.optim.SGD(params, lr=1e-2))
 
@@ -119,7 +110,7 @@ def test_a_non_l2_norm_is_refused_rather_than_ignored():
 
 
 def test_installing_the_clip_on_a_model_without_ep_layers_raises():
-    """Every caller sets up an EP mode; a model without EP layers there has no expert grad sync at all."""
+    """A model without EP layers there has no expert grad sync at all."""
 
     class _NoEPLayers(_EPTrainer):
         def __init__(self):
@@ -132,7 +123,7 @@ def test_installing_the_clip_on_a_model_without_ep_layers_raises():
 
 
 def test_installing_the_clip_without_an_ep_config_raises():
-    """The norm's expert legs reduce over the EP config's groups; without it they would drop silently."""
+    """The expert legs reduce over its groups; without it they would drop silently."""
 
     class _NoEPConfig(_EPTrainer):
         def __init__(self):

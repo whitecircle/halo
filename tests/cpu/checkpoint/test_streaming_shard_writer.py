@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""The streaming shard writer must bound its own memory, not just split its output.
-
-safetensors has no append handle, so honouring ``save_max_shard_size`` and bounding the writer's
-host memory are one requirement: flush a part whenever the pending batch would overflow. A PP save
-that accumulates the whole stage in a dict before a single ``save_file`` peaks at
-``model_bytes / pp_size``, and on a single node the writers-per-node count cancels that divisor, so
-the entire model lands in one host's RAM regardless of ``pp_size``.
-
-The weakref assertion below is the honest one: an implementation that merely splits its OUTPUT but
-still holds every tensor would pass a size check and fail this.
-
-Run: pytest tests/cpu/checkpoint/test_streaming_shard_writer.py
-"""
+"""safetensors has no append handle, so honouring ``save_max_shard_size`` and bounding host memory are one requirement.
+Accumulating a stage before ``save_file`` lands the whole model in one host's RAM on a single node."""
 
 import json
 import os
@@ -31,16 +20,12 @@ PREFIX = "model-pp00000-of-00002"
 
 
 def _tensor(mb: int) -> torch.Tensor:
-    """A float32 tensor of roughly ``mb`` megabytes (1 MB = 250_000 float32 elements)."""
+    """1 MB = 250_000 float32 elements."""
     return torch.zeros(250_000 * mb, dtype=torch.float32)
 
 
 def test_writer_releases_each_tensor_once_its_part_is_flushed(tmp_path):
-    """Peak memory must track the shard limit, not the total written.
-
-    Every tensor handed in is dropped once the part containing it reaches disk, so the writer never
-    holds more than one part's worth. An accumulating writer keeps all 20 alive to the end.
-    """
+    """An accumulating writer keeps all 20 tensors alive to the end, which a size check would miss."""
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     refs = []
     for i in range(20):
@@ -56,7 +41,6 @@ def test_writer_releases_each_tensor_once_its_part_is_flushed(tmp_path):
 
 
 def test_parts_respect_the_size_limit_and_the_index_names_every_file(tmp_path):
-    """Each part stays under the limit, and the returned weight map matches what is on disk."""
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     for i in range(20):
         writer.add(f"w{i}", _tensor(1))
@@ -75,11 +59,7 @@ def test_parts_respect_the_size_limit_and_the_index_names_every_file(tmp_path):
 
 
 def test_a_single_oversized_tensor_still_gets_its_own_part(tmp_path):
-    """A tensor larger than the limit cannot be split, so it becomes one over-limit part alone.
-
-    Flushing BEFORE appending is what keeps it from dragging unrelated tensors over the limit
-    with it.
-    """
+    """Flushing before appending keeps it from dragging unrelated tensors over the limit."""
     writer = StreamingShardWriter(str(tmp_path), "2MB", enabled=True, filename_prefix=PREFIX)
     writer.add("small", _tensor(1))
     writer.add("huge", _tensor(8))
@@ -92,7 +72,7 @@ def test_a_single_oversized_tensor_still_gets_its_own_part(tmp_path):
 
 
 def test_disabled_writer_writes_nothing(tmp_path):
-    """Non-writer ranks share the call sites; they must produce no files and an empty fragment."""
+    """Non-writer ranks share the call sites."""
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=False, filename_prefix=PREFIX)
     writer.add("w", _tensor(1))
     assert writer.close() == ({}, 0)
@@ -101,13 +81,8 @@ def test_disabled_writer_writes_nothing(tmp_path):
 
 @pytest.mark.parametrize("flush_between", [False, True], ids=["same-part", "already-flushed"])
 def test_the_writer_refuses_a_key_staged_twice(tmp_path, flush_between):
-    """A streaming writer cannot resolve a second claim on a key the way a state-dict build does.
-
-    Once the first tensor is in a flushed part the checkpoint would carry the key twice at two
-    shapes — readable through the index, wrong to every tool that walks the shard FILES — and
-    ``total_size`` would count both. The pending batch is refused the same way: silently overwriting
-    there would leave the byte count of the dropped tensor in the part's budget.
-    """
+    """The checkpoint would carry the key twice at two shapes, wrong to every tool that walks the shard files, and
+    ``total_size`` would count both."""
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     writer.add("w", _tensor(1))
     if flush_between:
@@ -118,11 +93,7 @@ def test_the_writer_refuses_a_key_staged_twice(tmp_path, flush_between):
 
 
 def test_index_merge_rejects_a_key_two_stages_both_claim():
-    """A global parameter lives on exactly one stage.
-
-    Two claims resolving last-writer-wins double-count ``total_size`` and yield a checkpoint that
-    loads fine while holding the wrong stage's tensor.
-    """
+    """Last-writer-wins double-counts ``total_size`` and loads the wrong stage's tensor without complaint."""
     stage0 = ({"model.layers.0.weight": "model-pp00000-of-00002-00001.safetensors"}, 100)
     stage1 = ({"model.layers.0.weight": "model-pp00001-of-00002-00001.safetensors"}, 100)
 
@@ -131,17 +102,11 @@ def test_index_merge_rejects_a_key_two_stages_both_claim():
 
 
 def test_index_merge_counts_each_file_once_across_node_writers():
-    """On per-node storage every node of a stage writes the SAME filenames, so bytes must not re-fold.
-
-    ``is_pp_shard_writer`` widens to one writer per NODE when the filesystem is not shared, and each
-    of them emits its stage's shard under the identical ``model-pp{rank}-of-{size}`` name. Folding
-    every fragment's bytes would report ``total_size`` multiplied by the nodes per stage — 8x on a
-    64-node job at pp8 — in an index that otherwise round-trips.
-    """
+    """On per-node storage every node writes the same filenames; folding all bytes reports ``total_size`` 8x on a
+    64-node job at pp8."""
     fragment = ({"model.layers.0.weight": "model-pp00000-of-00002-00001.safetensors"}, 100)
     other_stage = ({"model.layers.9.weight": "model-pp00001-of-00002-00001.safetensors"}, 250)
 
-    # Two node-writers of stage 0 plus two of stage 1, the shape a 2-node-per-stage job produces.
     weight_map, total = merge_shard_index([fragment, fragment, other_stage, other_stage])
 
     assert total == 350, "each distinct shard file contributes its bytes exactly once"
@@ -149,9 +114,8 @@ def test_index_merge_counts_each_file_once_across_node_writers():
 
 
 def test_index_merge_rejects_a_replicated_key_two_ep_ranks_claim():
-    """The EP sharded save writes every replicated key from rank 0 alone (experts carry a per-rank
-    ``.shard_N`` suffix), so two ranks claiming one name means a replica was written per-rank — the
-    merged index would silently name one rank's copy while counting the bytes twice."""
+    """Experts carry a per-rank suffix, so two claims mean a replica written per-rank: one copy named, bytes counted
+    twice."""
     ep0 = ({"model.norm.weight": "model-00000-of-00002.safetensors"}, 100)
     ep1 = ({"model.norm.weight": "model-00001-of-00002.safetensors"}, 100)
 
@@ -160,7 +124,6 @@ def test_index_merge_rejects_a_replicated_key_two_ep_ranks_claim():
 
 
 def test_index_merge_sums_disjoint_stages():
-    """The non-colliding case must still fold cleanly, including a non-writer's ``None``."""
     stage0 = ({"a": "f0.safetensors"}, 100)
     stage1 = ({"b": "f1.safetensors"}, 250)
 
@@ -177,7 +140,6 @@ def _tensors(path) -> dict[str, torch.Tensor]:
 
 
 def test_written_parts_round_trip(tmp_path):
-    """Values must survive the split unchanged — the point of the writer is where bytes land."""
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     expected = {f"w{i}": torch.randn(1000) for i in range(10)}
     for key, tensor in expected.items():
@@ -199,13 +161,8 @@ def _stream(dir_path, state_dict, max_shard_size):
 
 
 def test_hf_finalize_is_readable_exactly_like_hfs_splitter(tmp_path):
-    """The streamed save must be READABLE like a save split by HF's own splitter — not identical.
-
-    What a reader needs is the HF naming, an index naming every key, the same total_size, and the same
-    bytes reachable through it. Part BOUNDARIES are deliberately not guaranteed — see the next test — so
-    asserting the same filenames or key→file map would pin a property the writer explicitly disclaims.
-    """
-    state_dict = {f"w{i}": torch.randn(250_000) for i in range(20)}  # 1 MB each, none over the cap
+    """Part boundaries are deliberately not guaranteed, so this asserts naming, index, total_size and bytes only."""
+    state_dict = {f"w{i}": torch.randn(250_000) for i in range(20)}
     split = split_torch_state_dict_into_shards(state_dict, max_shard_size="4MB")
 
     streamed_index = _stream(tmp_path / "streamed", state_dict, "4MB")
@@ -219,17 +176,11 @@ def test_hf_finalize_is_readable_exactly_like_hfs_splitter(tmp_path):
 
 
 def test_an_oversized_tensor_diverges_from_hf_but_still_round_trips(tmp_path):
-    """The one documented divergence, pinned so nobody "fixes" it back into a full-block peak.
-
-    HF gives a tensor over the limit its own shard and leaves the current block OPEN, continuing to
-    fill it; the writer flushes that block first. Keeping it open would hold a full block alongside
-    an oversized tensor — the peak this writer exists to bound. So the two produce different part
-    counts here, and both are correct. The fixture in the test above (uniform, all under the cap) is
-    exactly the family where this cannot show up.
-    """
+    """The one documented divergence, pinned so nobody restores a full-block peak: this writer flushes before an
+    oversized tensor, HF keeps its block open."""
     state_dict = {
         "small_a": torch.randn(250_000),
-        "big": torch.randn(2_000_000),  # 8 MB — over the 4 MB cap
+        "big": torch.randn(2_000_000),
         "small_b": torch.randn(250_000),
     }
     split = split_torch_state_dict_into_shards(state_dict, max_shard_size="4MB")
@@ -244,12 +195,7 @@ def test_an_oversized_tensor_diverges_from_hf_but_still_round_trips(tmp_path):
 
 
 def test_hf_finalize_writes_one_unsharded_file_and_no_index(tmp_path):
-    """A checkpoint that fits one part is ``model.safetensors`` with no index, exactly as HF writes it.
-
-    ``from_pretrained`` prefers that file over an index, so emitting a numbered part plus an index
-    here would still load — but a later single-file save into the same directory would then be
-    shadowed by this run's stale index.
-    """
+    """A numbered part plus an index would load, but would later shadow a single-file save into the same directory."""
     writer = StreamingShardWriter(str(tmp_path), "100MB", enabled=True)
     writer.add("w", _tensor(1))
     total = writer.close_as_hf_checkpoint()
@@ -260,12 +206,7 @@ def test_hf_finalize_writes_one_unsharded_file_and_no_index(tmp_path):
 
 
 def test_hf_finalize_removes_a_leftover_checkpoint_it_did_not_write(tmp_path):
-    """A previous save's files must not survive into this one.
-
-    ``from_pretrained`` prefers a single ``model.safetensors`` over any index, so a leftover from an
-    earlier (smaller) save would be loaded INSTEAD of the sharded checkpoint just written — silently
-    restoring stale weights. The streaming writer inherits the sweep HF's splitter does.
-    """
+    """``from_pretrained`` prefers a single ``model.safetensors`` over any index, silently restoring stale weights."""
     (tmp_path / "model.safetensors").write_bytes(b"stale")
     (tmp_path / "model-00001-of-00009.safetensors").write_bytes(b"stale from a 9-shard save")
 
@@ -282,9 +223,7 @@ def test_hf_finalize_removes_a_leftover_checkpoint_it_did_not_write(tmp_path):
 
 
 def test_an_abandoned_save_never_passes_for_a_checkpoint_and_the_next_finalize_sweeps_it(tmp_path):
-    """The default prefix is the single writer's in-flight name, so it must stay outside HF's shard
-    names (an interrupted save is never read as a checkpoint) and inside the ``model*`` sweep (the
-    next finalize removes what the interrupted one left)."""
+    """The prefix stays outside HF's shard names and inside the ``model*`` sweep."""
     abandoned = StreamingShardWriter(str(tmp_path), "4MB", enabled=True)
     for i in range(6):
         abandoned.add(f"w{i}", _tensor(1))
@@ -302,9 +241,8 @@ def test_an_abandoned_save_never_passes_for_a_checkpoint_and_the_next_finalize_s
 
 
 def test_a_crash_mid_resave_leaves_the_previous_checkpoint_intact(tmp_path, monkeypatch):
-    """Parts take HF's names only once all are on disk, so a re-save dying after part *k* cannot leave new
-    parts 1..k beside old parts k+1..N under the old index — which ``from_pretrained`` reads as one healthy
-    checkpoint holding half of each save."""
+    """Otherwise a re-save dying after part *k* leaves new and old parts that ``from_pretrained`` reads as one
+    healthy checkpoint."""
     out = tmp_path / "out"
     previous = _stream(out, {f"w{i}": torch.full((250_000,), 1.0) for i in range(3)}, "1MB")
     real_save = checkpoint_writing.save_safetensors_file
@@ -327,12 +265,7 @@ def test_a_crash_mid_resave_leaves_the_previous_checkpoint_intact(tmp_path, monk
 
 
 def test_hf_finalize_refuses_to_replace_a_checkpoint_with_nothing(tmp_path):
-    """An enabled writer that staged no tensors must raise, not sweep the directory clean.
-
-    The stale sweep exists to stop a previous save from shadowing this one; with zero parts it would
-    delete the previous checkpoint and write no index or weights in its place — turning a caller-side
-    gather bug into the loss of the last good checkpoint.
-    """
+    """With zero parts the stale sweep turns a caller-side gather bug into the loss of the last good checkpoint."""
     (tmp_path / "model.safetensors").write_bytes(b"the previous save")
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True)
 
@@ -342,7 +275,6 @@ def test_hf_finalize_refuses_to_replace_a_checkpoint_with_nothing(tmp_path):
 
 
 def test_hf_finalize_on_a_disabled_writer_touches_nothing(tmp_path):
-    """Non-writer ranks reach the same call site and must not delete the writer rank's output."""
     (tmp_path / "model.safetensors").write_bytes(b"written by the save rank")
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=False)
     writer.add("w", _tensor(1))
@@ -352,17 +284,13 @@ def test_hf_finalize_on_a_disabled_writer_touches_nothing(tmp_path):
 
 
 def test_the_index_writer_refuses_a_metadata_block_that_is_not_a_mapping(tmp_path):
-    """``metadata`` is written into the index verbatim, so a scalar — a bare ``total_size`` int —
-    produces ``{"metadata": 12345}``: an index every reader parses
-    without complaint and no reader can use."""
+    """``{"metadata": 12345}`` is an index every reader parses and no reader can use."""
     with pytest.raises(TypeError, match="must be a mapping"):
         write_merged_index(str(tmp_path), {"w": "model-00001-of-00002.safetensors"}, 12345)
     assert not os.listdir(tmp_path), "a refused index must not have swept the directory first"
 
 
 def test_written_files_claim_each_key_once(tmp_path):
-    """A file already on disk (an external table's part) and a staged tensor, or a second file, may not claim one
-    key: the index would name only one of them."""
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     writer.add("staged", _tensor(1))
     writer.add_written_files({"table.0": "model-table00-00001-of-00001.safetensors"}, 0)

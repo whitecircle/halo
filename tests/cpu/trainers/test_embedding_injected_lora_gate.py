@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """The embedding trainer refuses in-place-injected LoRA under expert parallelism and on the EP layers.
-
-The save folds the adapters over the backbone's own parameters, which under EP or expert TP hold this rank's
-expert shards under their local names, and on the grouped-GEMM EP layers at ``expert_parallel_size`` 1 the layers'
-own expert layout, so the folded checkpoint would load nowhere.
-
-Run: pytest tests/cpu/trainers/test_embedding_injected_lora_gate.py
-"""
+The save folds adapters over rank-local expert shards or the layers' own layout, so the checkpoint loads nowhere."""
 
 import ast
 import inspect
@@ -46,8 +40,7 @@ def test_injected_lora_passes_on_stock_experts_and_ep_passes_without_it():
 
 
 def test_the_gate_runs_in_the_trainers_init_on_the_models_own_ep_layers():
-    """The verdict reads the EP layers the model carries, not the config: ``use_grouped_gemm`` alone leaves a dense
-    or stock-expert MoE without them, where the fold writes the hub's names."""
+    """``use_grouped_gemm`` alone leaves dense or stock-expert MoEs without EP layers, and the fold uses hub names."""
     source = textwrap.dedent(inspect.getsource(EmbeddingTrainer.__init__))
     calls = [
         node

@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 """Train, ``save_model`` and reload a full checkpoint, for each dense and MoE parallelism mode on 2 GPUs.
 
-``--mode fsdp|tp2|cp2`` trains Qwen3-8B, ``--mode ep2|ep2_tp2|ep2_no_gmm|etp`` gpt-oss-20b. Every rank tears the
-process group down before rank 0 reloads the save: reloading two full checkpoints outlasts the NCCL watchdog.
+Every rank tears the process group down before rank 0 reloads: two full checkpoints outlast the NCCL watchdog.
 """
 
 import argparse
@@ -27,14 +26,12 @@ from tests.common.rank_log import log
 from tests.common.training_checks import training_run_checks
 
 MAX_STEPS = 3
-# Per-element bound on the re-save round trip, which must be lossless.
 WEIGHT_ATOL = 1e-6
 
 
 @dataclass(frozen=True)
 class RoundTripModel:
-    """A checkpoint under test: its attention backend, the parameter count a whole save carries, and whether
-    it has gpt-oss's 2D expert biases, which a save could drop and a reload would silently re-initialize."""
+    """``expert_biases``: gpt-oss's 2D expert biases, which a save could drop and a reload silently re-initialize."""
 
     name: str
     attn_implementation: str
@@ -53,15 +50,15 @@ MODES = {
     "cp2": (QWEN3, {"cp_size": 2}),
     "ep2": (GPT_OSS, {"ep_size": 2}),
     "ep2_tp2": (GPT_OSS, {"ep_size": 2, "tp_size": 2}),
-    # Off grouped_mm, the only route to the non-grouped expert-bias gather on SM90+.
+    # The only route to the non-grouped expert-bias gather on SM90+.
     "ep2_no_gmm": (GPT_OSS, {"ep_size": 2, "use_grouped_gemm": False}),
-    # Pure expert TP: the experts are reassembled across the ETP group before the HF-layout save.
+    # Pure expert TP: experts reassembled across the ETP group before the HF-layout save.
     "etp": (GPT_OSS, {"ep_size": 1, "expert_tp_size": 2}),
 }
 
 
 def train_and_save(ctx, spec: RoundTripModel, parallelism: dict, tokenizer, save_dir: str) -> dict[str, bool]:
-    """COLLECTIVE. Train ``MAX_STEPS`` and ``save_model`` to ``save_dir``; the shape and training checks."""
+    """COLLECTIVE."""
     parallelism_config = ParallelismConfig(**parallelism)
     if parallelism:
         model, _ = load_distributed_model(
@@ -106,7 +103,6 @@ def train_and_save(ctx, spec: RoundTripModel, parallelism: dict, tokenizer, save
 
 
 def inventory_checks(spec: RoundTripModel, model, state: dict[str, torch.Tensor]) -> dict[str, bool]:
-    """The whole model's parameter count, no NaN/Inf anywhere, and gpt-oss's expert biases on every MoE layer."""
     num_params = sum(p.numel() for p in model.parameters())
     low, high = spec.param_range
     nan = [name for name, tensor in state.items() if torch.isnan(tensor).any()]
@@ -131,7 +127,6 @@ def inventory_checks(spec: RoundTripModel, model, state: dict[str, torch.Tensor]
 
 
 def weights_changed(model_name: str, state: dict[str, torch.Tensor]) -> bool:
-    """Whether training moved any parameter off the pretrained checkpoint."""
     pretrained = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16, trust_remote_code=True)
     reference = pretrained.state_dict()
     compared = [key for key in state if key in reference and state[key].shape == reference[key].shape]
@@ -142,7 +137,6 @@ def weights_changed(model_name: str, state: dict[str, torch.Tensor]) -> bool:
 
 
 def forward_checks(model, tokenizer, device) -> dict[str, bool]:
-    """A forward of the reloaded model gives logits of the input's shape, finite and in a sane range."""
     text = tokenizer.apply_chat_template(
         [{"role": "user", "content": "What is 2 + 2?"}], tokenize=False, add_generation_prompt=True
     )
@@ -162,7 +156,6 @@ def forward_checks(model, tokenizer, device) -> dict[str, bool]:
 
 
 def resave_is_lossless(model, state: dict[str, torch.Tensor], roundtrip_dir: str) -> bool:
-    """Whether ``save_pretrained`` of the reloaded model reads back to the same tensors."""
     model.save_pretrained(roundtrip_dir, safe_serialization=True)
     again = AutoModelForCausalLM.from_pretrained(roundtrip_dir, dtype=torch.bfloat16, trust_remote_code=True)
     resaved = again.state_dict()
@@ -178,7 +171,7 @@ def resave_is_lossless(model, state: dict[str, torch.Tensor], roundtrip_dir: str
 
 
 def verify_checkpoint(ctx, spec: RoundTripModel, tokenizer, save_dir: str) -> dict[str, bool]:
-    """Rank 0, no collective: what the save holds, read back through a stock ``from_pretrained`` on CPU."""
+    """Rank 0, no collective: read back through a stock ``from_pretrained`` on CPU."""
     checks = model_save_checks(save_dir, ctx.rank)
     if not all(checks.values()):
         return checks
@@ -205,8 +198,7 @@ def run(ctx) -> dict:
     save_dir = os.path.join(shared_output_dir(ctx), "checkpoint")
     checks = train_and_save(ctx, spec, parallelism, tokenizer, save_dir)
     cleanup_memory()
-    # Down on every rank before the rank-0 reload, so no peer sits in a collective through it. Teardown's
-    # own collective is the rendezvous, and the harness's closing barrier and teardown then skip.
+    # Down on every rank before the rank-0 reload, so no peer sits in a collective through it.
     teardown_distributed()
     if ctx.rank == 0 and all(checks.values()):
         checks |= verify_checkpoint(ctx, spec, tokenizer, save_dir)

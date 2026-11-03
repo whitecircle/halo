@@ -1,42 +1,31 @@
-"""Argparse flags shared by the generation CLIs under ``scripts/inference``: the sampling and concurrency block,
-the prompt-row fields, the S3 prompt-dataset block with its ``--subfolder`` sentinel, and the Gradio server block
-the ``playground/`` apps bind and launch on. Flags and the two calls that read them back (the ``--subfolder``
-funnel and the Gradio launch); the runs they feed live in ``halo/entrypoints/``."""
+"""Argparse flags shared by the generation CLIs under ``scripts/inference``, and the two calls that read them back (the
+``--subfolder`` funnel and the Gradio launch)."""
 
 import argparse
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Annotation only: the generation CLIs import this module too, and gradio takes seconds to
-    # import.
+    # Annotation only: the generation CLIs import this module too, and gradio takes seconds to import.
     import gradio as gr
 
-# The documented "write at the bucket root" spelling for --subfolder. argparse hands it over as the
-# string "None", which would read and write s3://bucket/None/<key> and so resume against an output
-# it never finds, hence the :func:`parse_dataset_args` funnel.
+# The documented spelling for the bucket root. argparse hands it over as the string "None", which would read and
+# write s3://bucket/None/<key>, hence the :func:`parse_dataset_args` funnel.
 NO_SUBFOLDER_SENTINEL = "None"
 
-# Concurrency and resume cadence shared by the resumable generation CLIs. The scripts drive the
-# same local rollout server through the same async client, so the numbers are shared rather than set
-# per script: a lower concurrency halves a sibling's throughput and a rarer flush widens what an
-# interrupted run regenerates. Override per invocation with the flags.
+# Shared because these CLIs drive one rollout server through one async client: a lower concurrency halves a sibling's
+# throughput, a rarer flush widens what an interrupted run regenerates.
 DEFAULT_MAX_WORKERS = 32
 DEFAULT_CHECKPOINT_INTERVAL = 100
 DEFAULT_MAX_TOKENS = 3072
 
-# Loopback, for every Gradio app here: the UI drives a server-side client holding a live API key with
-# no auth in front, so binding every interface would expose that key's spend to anything that can
-# route to the host. `--host 0.0.0.0` still publishes, explicitly.
+# Loopback: the UI drives a server-side client holding a live API key with no auth in front. `--host 0.0.0.0` still
+# publishes, explicitly.
 DEFAULT_GRADIO_HOST = "127.0.0.1"
 
 
 def add_generation_args(parser: argparse.ArgumentParser, *, temperature_default: float) -> argparse.ArgumentParser:
-    """Add the sampling/concurrency block shared by the generation CLIs.
-
-    Only the temperature default is per-script (greedy for batched generation and reward-model
-    scoring, sampled for the rejection sampler, which needs distinct hypotheses); the concurrency bound
-    and the token cap are shared, for the reason :data:`DEFAULT_MAX_WORKERS` gives.
-    """
+    """Only the temperature default is per-script (greedy for batched generation and scoring, sampled for the rejection
+    sampler, which needs distinct hypotheses)."""
     parser.add_argument(
         "--max_workers", type=int, default=DEFAULT_MAX_WORKERS, help="Max parallel API requests (default: %(default)s)"
     )
@@ -53,7 +42,6 @@ def add_generation_args(parser: argparse.ArgumentParser, *, temperature_default:
 
 
 def add_checkpoint_interval_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the resume-store flush cadence of the batched generation CLI."""
     parser.add_argument(
         "--checkpoint_interval",
         type=int,
@@ -64,13 +52,8 @@ def add_checkpoint_interval_arg(parser: argparse.ArgumentParser) -> argparse.Arg
 
 
 def add_s3_dataset_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the S3 prompt-dataset block every checkpointing generation CLI reads its rows through.
-
-    A path is a full ``s3://bucket/key`` URI, used as given, or a bare key under ``--subfolder`` in
-    ``HALO_S3_DEFAULT_BUCKET`` (``build_s3_uri``); the field names are the ones
-    :func:`load_prompts_with_resume` and the record builders consume, so a script declaring its own
-    would resume against a differently-keyed output.
-    """
+    """A path is a full URI or a bare key under ``--subfolder`` in ``HALO_S3_DEFAULT_BUCKET``; the field names are the
+    ones resume and the record builders consume, so a script's own would resume against another output."""
     parser.add_argument(
         "--dataset",
         type=str,
@@ -95,8 +78,7 @@ def add_s3_dataset_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
 
 
 def add_prompt_field_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the prompt-row fields every generation CLI reads: the row id, the prompt, and the per-row
-    and global system prompts that ``resolve_system_prompt`` / ``build_base_prompt`` combine."""
+    """The row id, the prompt, and the per-row and global system prompts."""
     parser.add_argument("--id_field", type=str, default="id", help="Field holding the row's unique id")
     parser.add_argument(
         "--prompt_field", type=str, default="prompt", help="Field with the prompt as a list of message dicts"
@@ -114,11 +96,7 @@ def add_prompt_field_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
 
 
 def add_gradio_server_args(parser: argparse.ArgumentParser, *, port_default: int | None) -> argparse.ArgumentParser:
-    """Add the ``--host``/``--port``/``--share`` block every Gradio app here serves itself on.
-
-    One spelling and one bind policy, for the reason :data:`DEFAULT_GRADIO_HOST` gives. The port is
-    the only per-app part: ``None`` leaves the choice to Gradio's own free-port search.
-    """
+    """One bind policy for every Gradio app; a ``None`` port leaves the choice to Gradio's free-port search."""
     group = parser.add_argument_group("Server Configuration")
     group.add_argument(
         "--host",
@@ -137,10 +115,7 @@ def add_gradio_server_args(parser: argparse.ArgumentParser, *, port_default: int
 
 
 def launch_gradio(demo: "gr.Blocks", args: argparse.Namespace, *, theme: "gr.Theme | None" = None) -> None:
-    """Serve ``demo`` on the address :func:`add_gradio_server_args` parsed, requests queued.
-
-    The theme is a launch argument: Gradio 6 takes it here, not on the ``Blocks``.
-    """
+    """The theme is a launch argument: Gradio 6 takes it here, not on the ``Blocks``."""
     demo.queue().launch(server_name=args.host, server_port=args.port, share=args.share, theme=theme)
 
 

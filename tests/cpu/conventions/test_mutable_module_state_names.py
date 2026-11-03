@@ -34,7 +34,6 @@ def _starts_mutable_state(value: ast.expr) -> bool:
 
 
 def _upper_snake_mutable_bindings(source: str) -> list[str]:
-    """The module-level ``UPPER_SNAKE`` names ``source`` binds to an empty mutable container."""
     found = []
     for node in ast.parse(source).body:
         if isinstance(node, ast.Assign):

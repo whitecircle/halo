@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""``moe_balancing: auto`` may only resolve to a mode the ENABLED tree can actually serve.
-
-The window: a MoE checkpoint whose forward never takes ``output_router_logits`` (the multimodal
-wrappers, and every family reading the flag out of ``**kwargs``) loaded with no EP layer —
-``use_grouped_gemm: false``, or a launcher that never patches the layers. Nothing there accepts a
-routing bias and the aux-loss term can never reach the loss, so the model has NO balancing route at
-all: ``auto`` resolving to ``aux_loss`` hands the balancing strategy a mode it refuses, and the run
-dies on a ValueError the user did not ask for. It must resolve to ``none`` and say why.
-
-The refusal itself stays: an EXPLICIT ``aux_loss`` there is a user assertion about a model that
-cannot honour it, and it must fail loudly at config time rather than train unbalanced in silence.
-
-    python tests/cpu/models/test_balancing_auto_resolution.py
-"""
+"""``moe_balancing: auto`` may only resolve to a mode the enabled tree can serve.
+With no EP layer and a forward without ``output_router_logits`` no balancing route exists, so ``auto`` is ``none``."""
 
 import logging
 from types import MethodType
@@ -30,7 +18,7 @@ _RESOLVER_LOGGER = "halo.models.moe.balancing"
 
 
 class _MoEProbeConfig(PretrainedConfig):
-    """A tiny MoE config with a USABLE aux-loss coefficient — the branch that raises."""
+    """A usable aux-loss coefficient is the branch that raises."""
 
     model_type = "auto_balancing_probe"
 
@@ -42,8 +30,6 @@ class _MoEProbeConfig(PretrainedConfig):
 
 
 class _NoRouterLogitFlag(nn.Module):
-    """MoE weights, no EP layer, and a forward that never consults the router-logit flag."""
-
     def __init__(self):
         super().__init__()
         self.config = _MoEProbeConfig()
@@ -54,8 +40,6 @@ class _NoRouterLogitFlag(nn.Module):
 
 
 class _HonorsRouterLogitFlag(_NoRouterLogitFlag):
-    """The same tree whose forward DOES declare the flag — HF's config-backed parameter."""
-
     def forward(self, input_ids=None, output_router_logits=None, **kwargs):
         return input_ids
 
@@ -66,15 +50,11 @@ def _resolve(model):
 
 
 def test_auto_never_resolves_to_the_mode_this_tree_refuses():
-    """``auto`` must never pick ``aux_loss`` where the strategy then raises on it.
-
-    Pinned as the invariant rather than the string: whatever ``auto`` returns must survive
-    ``apply_balancing_mode``, the same call ``configure_moe_balancing`` makes.
-    """
+    """Whatever ``auto`` returns must survive ``apply_balancing_mode``, the call ``configure_moe_balancing`` makes."""
     model = _NoRouterLogitFlag()
     mode = _resolve(model)
     assert mode == "none", f"auto resolved to {mode!r} on a tree that can serve neither balancing route"
-    apply_balancing_mode(model, mode, is_moe=True)  # must not raise: auto's verdict is applicable
+    apply_balancing_mode(model, mode, is_moe=True)
 
 
 def test_auto_says_why_it_gave_up_on_balancing(caplog):
@@ -87,10 +67,8 @@ def test_auto_says_why_it_gave_up_on_balancing(caplog):
 
 
 def test_the_fused_loss_remedy_is_named_only_when_a_liger_head_replaced_the_forward(caplog):
-    """A Liger fused loss installs a forward without the parameter over a head that may declare it;
-    turning it off restores the family's head. On a forward that never declared the flag the remedy
-    would be false advice, so it must not be offered — and the probe must look through a PEFT
-    wrapper, whose own forward is never Liger's, at the base model that carries the patched head."""
+    """On a forward that never declared the flag the remedy is false advice.
+    The probe must look through a PEFT wrapper, whose own forward is never Liger's, at the patched base model."""
     with caplog.at_level(logging.WARNING, logger=_RESOLVER_LOGGER):
         _resolve(_NoRouterLogitFlag())
     assert "fused_linear_cross_entropy: false" not in caplog.text, (
@@ -109,11 +87,9 @@ def test_the_fused_loss_remedy_is_named_only_when_a_liger_head_replaced_the_forw
 
 
 def test_a_fused_loss_bound_on_the_instance_alone_is_seen():
-    """Liger binds the fused loss on the class at load, but on the INSTANCE alone when re-applied to
-    a built model (TRL's re-application). The class then still declares the flag while the forward
-    that runs does not: a verdict read off the class picks ``aux_loss``, the strategy enables
-    ``output_router_logits``, and a head that assembles its aux loss after the projection the fused
-    loss replaces raises on the first step. The resolver must read the forward that runs."""
+    """Re-applied to a built model (TRL does this), Liger binds the fused loss on the instance alone.
+    The class still declares the flag, so a verdict read off it picks ``aux_loss``, and a head that assembles
+    its aux loss after the projection the fused loss replaces raises on the first step."""
     model = _HonorsRouterLogitFlag()
     model.forward = MethodType(build_lce_forward(router_aux_loss_in_head=True), model)
     mode = _resolve(model)
@@ -125,7 +101,6 @@ def test_a_fused_loss_bound_on_the_instance_alone_is_seen():
 
 
 def test_auto_still_picks_aux_loss_where_the_forward_honours_the_flag():
-    """Anti-over-rejection: the resolution must not disarm balancing for the families that do honour it."""
     model = _HonorsRouterLogitFlag()
     assert _resolve(model) == "aux_loss"
     apply_balancing_mode(model, "aux_loss", is_moe=True)
@@ -133,11 +108,7 @@ def test_auto_still_picks_aux_loss_where_the_forward_honours_the_flag():
 
 
 def test_an_explicit_aux_loss_still_raises_loudly():
-    """The guard is not weakened: an explicit mode this model cannot honour dies at config time.
-
-    Config time, not step 1 — this is the call ``configure_moe_balancing`` makes while wiring the
-    callbacks, before any training step runs.
-    """
+    """Raised at config time: this is the call ``configure_moe_balancing`` makes while wiring the callbacks."""
     with pytest.raises(ValueError, match="does not take output_router_logits"):
         apply_balancing_mode(_NoRouterLogitFlag(), "aux_loss", is_moe=True)
 

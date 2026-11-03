@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""LoRA / QLoRA / native-expert-LoRA on the off-policy teacher-distillation trainer (+ adapter ckpt).
-
-``DistributedTeacherDistillationTrainer`` takes ``peft_config`` and wraps the student through
-``build_peft_model`` (k-bit prep, the QLoRA bf16 cast and its autocast), as the script passes it.
-The test asserts the adapter-only invariant, that the adapters move, and that an adapter checkpoint
-round-trips. Liger is left on (toolkit default) so the LoRA path is exercised with fused kernels.
-
-Modes (``--mode``): lora / qlora (dense Qwen3-0.6B, FSDP2) · lora_ep / expert_lora (GptOss-20B, EP=2).
-The teacher is the same architecture as the student, loaded frozen + unparallelized (full per rank).
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_teacher_distill.py --mode lora
-"""
+"""LoRA, QLoRA and native expert LoRA on the teacher-distillation trainer: adapter-only training and an adapter
+checkpoint round trip, with Liger on."""
 
 import argparse
 import math
@@ -74,12 +62,12 @@ def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     parallelism_config = ParallelismConfig(ep_size=ep) if mode in ("lora_ep", "expert_lora") else ParallelismConfig()
     attn = "flex_attention" if parallelism_config.has_ep_group else "sdpa"
-    # Student + adapter config via the production path; the trainer wraps it, as the script has it do.
+    # The trainer wraps it, as the script has it do.
     student, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
     expert_lora = is_expert_lora_active(student)
     log(f"  expert_lora_active={expert_lora}, peft_config={'set' if peft_config else 'None'}")
 
-    # Frozen teacher: same architecture, unparallelized (full copy per rank).
+    # Same architecture, unparallelized: a full copy per rank.
     teacher = AutoModelForCausalLM.from_pretrained(
         model_name_for(mode, parallelism_config),
         dtype=torch.bfloat16,

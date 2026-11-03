@@ -1,9 +1,5 @@
-"""Model-weight resume: :func:`load_resume_weights` reloads a checkpoint's weights into the live model for
-the active parallelism mode, or declines and leaves the reload to the base Trainer's own loader.
-
-Every whole-weight read maps the checkpoint onto the live names through
-:class:`~halo.checkpoint.hub_layout.ModuleLayoutView`, the inverse of the save-side revert.
-"""
+"""Model-weight resume: :func:`load_resume_weights` reloads a checkpoint into the live model for the active mode, or
+leaves the reload to the base Trainer's loader."""
 
 from __future__ import annotations
 
@@ -54,19 +50,15 @@ logger = logging.getLogger(__name__)
 
 
 def built_from_checkpoint_across_ranks(model, checkpoint: str) -> bool:
-    """COLLECTIVE. Rank 0's verdict on whether ``model``'s weights were read from ``checkpoint``: ``realpath``
-    resolves per node, so a per-rank answer would split the world on a non-shared filesystem."""
+    """COLLECTIVE. Rank 0's verdict, as ``realpath`` resolves per node and a per-rank answer splits the world."""
     return broadcast_from_rank0(built_from_checkpoint(weights_read_from(model), checkpoint))
 
 
 def resume_numel_coverage(model, checkpoint_keys: set[str]) -> tuple[bool, set[str], int, int]:
-    """``(coverage_ok, unmatched_names, matched_numel, total_numel)``: whether ``checkpoint_keys`` covers at
-    least half of ``model``'s live persistent tensors by LOGICAL element count, so a checkpoint under another
-    expert namespace (few keys, most of the bytes) fails and a DTensor shard counts at full weight.
-
-    Live names come from named_parameters/named_buffers: ``model.state_dict()`` reshards FSDP2 on the
-    calling rank alone.
-    """
+    """``(coverage_ok, unmatched_names, matched_numel, total_numel)``: whether ``checkpoint_keys`` covers half of the
+    live persistent tensors by LOGICAL element count, so another expert namespace (few keys, most bytes) fails and a
+    DTensor shard counts in full. Reads named_parameters/named_buffers, as ``state_dict()`` reshards FSDP2 on the
+    calling rank."""
     model = unwrap_framework_wrappers(model)
     non_persistent = {
         f"{prefix}.{name}" if prefix else name
@@ -96,8 +88,7 @@ def _coverage_refusal(mode: str, checkpoint: str, *, where: str, cause: str) -> 
 def _report_unmatched_coverage(
     mode: str, checkpoint: str, unmatched: set[str], matched_numel: int, total_numel: int
 ) -> None:
-    """Warn about the live tensors a resume above the coverage floor leaves at their init values: past the
-    floor the gaps are legitimate (a tied lm_head, a fresh task head), so they are named, not raised."""
+    """Warn about live tensors left at init above the coverage floor, where gaps are legitimate (a tied lm_head)."""
     if not unmatched:
         return
     logger.warning(
@@ -110,15 +101,10 @@ def _report_unmatched_coverage(
 def _resume_onto_constructed_model(
     ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_model: bool
 ) -> None:
-    """EP/CP: base weights only load at construction (the fused / wrapped modules cannot ingest HF keys),
-    so only the adapters reload here.
-
-    A ``merge_expert_lora_on_save`` checkpoint (marked) resumes its unmerged adapters onto a model built
-    from the BASE: its own weights already hold the delta. Any other checkpoint that ships base weights
-    must be what the model was built from, and its adapters, if any, sit at its root. Rank 0 probes
-    every input, in one broadcast, and the adapter read is a consensus, so each refusal fires on every
-    rank or none.
-    """
+    """EP/CP: base weights only load at construction (fused / wrapped modules cannot ingest HF keys), so only adapters
+    reload. A marked merged checkpoint resumes its adapters onto a model built from the BASE; any other checkpoint
+    shipping base weights must be what the model was built from. Rank 0 probes all inputs in one broadcast, so refusals
+    fire everywhere."""
     probe = (False, False, None, False)
     if is_global_main_process():
         read_failed, ships_base_weights = False, False
@@ -137,8 +123,7 @@ def _resume_onto_constructed_model(
         )
     built_from_ckpt, ships_base_weights, merged_resume_adapter, read_failed = broadcast_from_rank0(probe)
     if read_failed:
-        # Degrading to "no base weights" would take the adapter-only path and silently continue on
-        # base weights.
+        # Degrading to no base weights would take the adapter-only path and silently continue on base weights.
         raise RuntimeError(
             f"Unreadable checkpoint key set at {checkpoint} (torn index or safetensors header) — cannot decide "
             "whether it ships base weights. Repair or re-save the checkpoint, then resume."
@@ -179,8 +164,7 @@ def _resume_onto_constructed_model(
 
 
 def _rank0_module_layout(model, state_dict: dict, checkpoint: str) -> dict:
-    """COLLECTIVE. Rank 0's checkpoint dict under the live model's names (:class:`ModuleLayoutView`),
-    consumed as it converts; every other rank's stays empty, and a failed conversion raises everywhere."""
+    """COLLECTIVE. Rank 0's checkpoint dict under live names, consumed as it converts; a failure raises everywhere."""
     converted: dict = {}
     raise_rank0_failure(
         lambda: converted.update(
@@ -192,11 +176,9 @@ def _rank0_module_layout(model, state_dict: dict, checkpoint: str) -> dict:
 
 
 def _load_fsdp2(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_model: bool) -> bool:
-    """Load whole weights into an FSDP2-wrapped model, whose DTensor params plain ``load_state_dict()``
-    cannot write: ``set_model_state_dict`` distributes rank 0's full tensors into them. False when the
-    checkpoint has no readable weights."""
-    # Best-model loads run after the final eval left the tree unsharded; every branch below must
-    # write into the sharded DTensors, not the transient unsharded buffers.
+    """Load whole weights into DTensor params through ``set_model_state_dict``, which plain ``load_state_dict()``
+    cannot do. False when the checkpoint has no readable weights."""
+    # Best-model loads run after the final eval left the tree unsharded; every branch must write the sharded DTensors.
     reshard_fsdp2_modules(model)
     if not broadcast_from_rank0(has_whole_model_weight_file(checkpoint)):
         # PEFT runs save adapter-only checkpoints; route through the DTensor-aware restorer.
@@ -210,15 +192,15 @@ def _load_fsdp2(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_
         )
         return False
 
-    # A model CONSTRUCTED from this checkpoint holds exactly these weights; re-reading a 100B+ state
-    # dict is waste. A best-model load must still read: the live weights trained past it.
+    # A model constructed from this checkpoint holds these weights, so skip re-reading a 100B+ state dict; a best-model
+    # load must still read, since the live weights trained past it.
     if not for_best_model and built_from_checkpoint_across_ranks(model, checkpoint):
         if is_global_main_process():
             logger.info(f"FSDP2 resume: model was constructed from {checkpoint}; skipping re-load.")
         return True
 
-    # Only rank 0's dict is used under broadcast_from_rank0, but every rank must call in — agree on
-    # readability first, else a rank-0 raise strands peers in set_model_state_dict.
+    # Every rank must call in though only rank 0's dict is used, so agree on readability first or a rank-0 raise
+    # strands peers in set_model_state_dict.
     reject_ep_sharded_resume(checkpoint)
     read_ok = True
     state_dict: dict = {}
@@ -236,9 +218,9 @@ def _load_fsdp2(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_
         return False
     state_dict = _rank0_module_layout(model, state_dict, checkpoint)
 
-    # The load below is strict=False, so keys missing the live FQNs would apply as a no-op and resume
-    # BASE weights. Decided on rank 0 off the key sets: under broadcast_from_rank0 only rank 0 sees the
-    # real _IncompatibleKeys, and it reports a wholesale miss as `unexpected` with `missing_keys` empty.
+    # strict=False would no-op keys missing the live FQNs and resume BASE weights. Decided on rank 0 off the key sets,
+    # since only rank 0 sees the real _IncompatibleKeys, which report a wholesale miss as `unexpected` with
+    # `missing_keys` empty.
     coverage_ok = True
     if is_global_main_process():
         coverage_ok, unmatched, matched_numel, total_numel = resume_numel_coverage(model, set(state_dict))
@@ -261,8 +243,8 @@ def _load_fsdp2(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_
 def _copy_into_live(
     tensors: Iterable[tuple[str, torch.Tensor]], live: dict, hand_sliced: dict, tp_size: int, tp_rank: int
 ) -> None:
-    """Write every ``(live name, tensor)`` into this rank's live tensor: DTensors take their own
-    placements' shard, hand-sliced TP params this ``tp_rank``'s chunk, everything else the whole."""
+    """Write each tensor into this rank's live one: a DTensor takes its placements' shard, a hand-sliced TP param this
+    ``tp_rank``'s chunk, anything else the whole."""
     with torch.no_grad():
         for name, value in tensors:
             target = live[name]
@@ -274,15 +256,10 @@ def _copy_into_live(
 
 
 def _load_streamed(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_model: bool) -> bool:
-    """Load a gathered checkpoint into a model each rank holds whole or TP-sharded; False when rank 0
-    finds no readable weights.
-
-    Each rank streams its node's copy and ``distribute_tensor``s every full tensor to the live DTensor's
-    placements (collective-free with ``src_data_rank=None``), the inverse of either TP mechanism's
-    sharding; hand-sliced params (:func:`~halo.distributed.tensor_parallel.plain_params.hand_sliced_dims`)
-    are sliced by ``tp_rank``. TP+DP's strided 2-D placement does not invert, so it only resumes a model
-    built FROM the checkpoint. Every verdict is joined before any write, and a failed copy after them.
-    """
+    """Load a gathered checkpoint into a model each rank holds whole or TP-sharded, collective-free with
+    ``src_data_rank=None``; False when rank 0 finds no readable weights. TP+DP's strided 2-D placement does not invert,
+    so it only resumes a model built FROM the checkpoint. Every verdict is joined before any write, a failed copy
+    after."""
     mode = "TP" if ctx.parallelism_config.is_tp_mode else "Unsharded"
     reject_ep_sharded_resume(checkpoint)
     readable = False
@@ -298,8 +275,8 @@ def _load_streamed(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_be
         )
         return False
 
-    # The training scripts repoint model_name_or_path at the checkpoint on resume, so a model built from
-    # it already holds these weights. A best-model load must still read: the live weights trained past it.
+    # The training scripts repoint model_name_or_path at the checkpoint, so a model built from it holds these weights;
+    # a best-model load must still read, since the live weights trained past it.
     if not for_best_model and built_from_checkpoint_across_ranks(model, checkpoint):
         if is_global_main_process():
             logger.info(f"{mode} resume: model was constructed from {checkpoint}; skipping the weight reload.")
@@ -326,10 +303,9 @@ def _load_streamed(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_be
 
     with joined_streaming_reader(checkpoint, None, what=f"{mode} checkpoint") as reader:
         view = ModuleLayoutView(unwrapped, reader.available)
-        # The copy writes only the keys that match, so a checkpoint for another wrapper layout would
-        # resume BASE weights for most of the model. The key counts are agreed with rank 0's, on disk
-        # too (one fused tensor stands for every per-expert key), so a per-node copy short of keys
-        # cannot pass alone.
+        # The copy writes only matching keys, so another wrapper layout would resume BASE weights for most of the
+        # model. Key counts are agreed with rank 0's, on disk too (one fused tensor stands for every per-expert key),
+        # so a short per-node copy cannot pass alone.
         coverage_ok, unmatched, matched_numel, total_numel = resume_numel_coverage(model, view.keys)
         counts = (len(reader.available), len(view.keys))
         same_keys = counts == broadcast_from_rank0(counts)
@@ -362,31 +338,16 @@ def _load_streamed(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_be
 
 
 def _weight_files_present(checkpoint_dir: str) -> tuple[bool, bool]:
-    """Whether ``checkpoint_dir`` holds whole-model weights, and whether it holds an adapter weight file."""
     return has_whole_model_weight_file(checkpoint_dir), has_adapter_weight_file(checkpoint_dir)
 
 
 def load_resume_weights(
     ctx: CheckpointLoadContext, checkpoint_dir: str, model=None, *, for_best_model: bool = False
 ) -> bool:
-    """COLLECTIVE. Reload ``checkpoint_dir``'s weights into ``model`` (default ``ctx.model``) for the active
-    mode, in place; False leaves the reload to the base Trainer's own loader.
-
-    - PP: this stage's tensors from the merged index (:func:`restore_pp_stage_weights`).
-    - EP/CP (and their TP/ETP combinations): base weights were read at construction; adapters restore
-      (:func:`_resume_onto_constructed_model`).
-    - Mixin-managed FSDP2: ``set_model_state_dict`` distributes rank 0's full tensors.
-    - TP, and a single-process or DDP transformers model with whole weights: each rank streams its
-      node's copy into its own (possibly TP-sharded) params.
-    - A single-process or DDP PEFT model with an adapter-only checkpoint: its adapters restore in place
-      (:func:`restore_adapters`), at the live dtype, where the base loader's ``load_adapter`` would recast them
-      to fp32 before the optimizer is built over them.
-    - Anything else (accelerate-managed FSDP, sentence-transformers' own rebuild, a non-transformers model):
-      False.
-
-    ``for_best_model`` is ``load_best_model_at_end``: the constructed-from-checkpoint skips never apply,
-    since the live weights trained past it.
-    """
+    """COLLECTIVE. Reload ``checkpoint_dir``'s weights into ``model`` for the active mode, in place; False leaves the
+    reload to the base Trainer's loader. PP reads this stage's tensors; EP/CP restores adapters only; FSDP2 distributes
+    rank 0's tensors; TP and single-process/DDP stream the node's copy. A PEFT adapter-only checkpoint restores at the
+    live dtype, where the base's ``load_adapter`` would recast to fp32. ``for_best_model`` always reads."""
     model = model if model is not None else ctx.model
     if ctx.parallelism_config.is_pp_mode:
         # First: a stage's re-based local names misresolve under every other path.
@@ -399,9 +360,8 @@ def load_resume_weights(
         return _load_fsdp2(ctx, checkpoint_dir, model, for_best_model=for_best_model)
     if ctx.parallelism_config.is_tp_mode:
         return _load_streamed(ctx, checkpoint_dir, model, for_best_model=for_best_model)
-    # The base loader would reload an unsharded transformers model by raw key and an adapter-only checkpoint
-    # through an fp32 recast; a reload it owns (``base_owns_whole_weight_load``) and a non-transformers model
-    # stay with it.
+    # The base loader would reload an unsharded transformers model by raw key and an adapter-only checkpoint through an
+    # fp32 recast; a reload it owns and a non-transformers model stay with it.
     unwrapped = unwrap_framework_wrappers(model)
     trains_peft = find_peft_model(unwrapped) is not None
     if ctx.base_owns_whole_weight_load or not (trains_peft or isinstance(unwrapped, PreTrainedModel)):

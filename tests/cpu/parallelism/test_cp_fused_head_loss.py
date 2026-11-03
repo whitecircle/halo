@@ -1,16 +1,5 @@
-"""The CP wrapper's fused head loss: under ``fused_linear_cross_entropy`` a training forward scores each rank's
-chunk from its backbone hidden states, and must reproduce the fp32 logits loss it replaces.
-
-Two gloo ranks run every CP roster family twice on one seeded model, once without the request (the logits
-loss) and once with it, Liger's Triton kernel replaced by a plain-torch stand-in of its contract (Liger has no CPU
-kernel; the GPU tier runs the real one). Per rank the two runs must agree on the loss, every gradient and the router
-aux term, over labels that supervise the chunk boundary alone or leave one rank's chunk empty; the fused run must
-return no logits and the chunk's next-token accuracy. In process, the head refusals (an adapted output embedding, a
-forward without ``logits_to_keep``, an unverifiable head path, a logit scale over a bias) fall back to the logits
-loss with one warning, eval keeps the logits loss, and the kernel receives the family's head path.
-
-Run: python tests/cpu/parallelism/test_cp_fused_head_loss.py
-"""
+"""The CP wrapper's fused head loss reproduces the fp32 logits loss it replaces, on two gloo ranks over every CP
+family. A plain-torch stand-in replaces Liger's kernel, which has no CPU form."""
 
 import inspect
 import logging
@@ -43,21 +32,19 @@ from tests.common.parallelism import single_process_ep_config
 
 # Loud enough that a dropped or doubled aux term moves the loss far past the paths' fp32 agreement.
 MOE_AUX_OVERRIDES = {"output_router_logits": True, "router_aux_loss_coef": 0.1}
-# The two paths run the same fp32 math in different op orders (a logit scale folded onto the hidden states).
+# The same fp32 math in different op orders (a logit scale folded onto the hidden states).
 RELATIVE_TOLERANCE = 1e-5
 AUX_SHARE_MIN = 1e3 * RELATIVE_TOLERANCE
-# Remote-code forwards without ``logits_to_keep``, which keep the logits loss.
+# Remote-code forwards without ``logits_to_keep``.
 LOGITS_LOSS_FAMILIES = ("bailing_moe",)
-# The tiny MoE families whose forward returns ``aux_loss`` under ``output_router_logits``.
 AUX_LOSS_FAMILIES = ("gpt_oss", "qwen3_5_moe_text", "qwen3_moe")
 
 
 def torch_fused_linear_cross_entropy(
     input, weight, target, bias=None, *, ignore_index, reduction, softcap, accum_dtype, return_predicted_tokens
 ):
-    """Liger's ``liger_fused_linear_cross_entropy`` contract, for the keywords :func:`fused_head_ce_sum` passes, in
-    plain torch: the logits of ``input @ weight.T + bias`` softcapped, their fp32 cross-entropy and argmax, which
-    the kernel writes as ``-1`` at an ignored target."""
+    """Liger's ``liger_fused_linear_cross_entropy`` contract in plain torch; argmax is written as ``-1`` at an
+    ignored target."""
     assert accum_dtype is torch.float32 and return_predicted_tokens
     logits = F.linear(input, weight, bias).float()
     if softcap is not None:
@@ -68,8 +55,7 @@ def torch_fused_linear_cross_entropy(
 
 
 def _labels(pattern: str, vocab_size: int):
-    """``(input_ids, labels)``: every fourth label masked; or every label of rank 0's chunk masked bar the next
-    chunk's first, which only rank 0's boundary position targets; or rank 0's every target masked."""
+    """Rank 0's boundary position alone targets the next chunk's first label in the second pattern."""
     ids, labels = random_token_batch(vocab_size, BATCH, SEQ, "cpu", seed=SEED)
     if pattern == "boundary_only":
         labels[:, : SEQ // CP_SIZE] = LABEL_IGNORE_INDEX
@@ -128,8 +114,6 @@ def _relative_gap(head: torch.Tensor, reference: torch.Tensor) -> float:
 
 
 def _path_problems(runs: dict) -> list[str]:
-    """How the fused run departs from the logits run on one rank: loss, gradients, logits and the chunk accuracy.
-    A family whose forward takes no ``logits_to_keep`` (Bailing's remote code) keeps the logits loss."""
     logits_run, fused_run, targets = runs["logits"], runs["fused"], runs["targets"]
     problems = []
     if (
@@ -153,7 +137,7 @@ def _path_problems(runs: dict) -> list[str]:
         return problems
     if fused_run["logits"] is not None:
         problems.append("the fused run returned logits")
-    # The memory saving itself: the family forward honours logits_to_keep, so no [N, V] plane is built.
+    # The memory saving: no [N, V] plane is built.
     if fused_run["head_lengths"] != [1]:
         problems.append(f"the fused run projected {fused_run['head_lengths']} positions through the head, not [1]")
     supervised = targets != LABEL_IGNORE_INDEX
@@ -165,8 +149,6 @@ def _path_problems(runs: dict) -> list[str]:
 
 
 def _aux_problems(name: str, runs: dict) -> list[str]:
-    """The router aux term on both paths alike, at a share of the loss a dropped or doubled term would move past
-    the loss comparison."""
     logits_aux, fused_aux = runs["logits"]["aux"], runs["fused"]["aux"]
     if (logits_aux is None) != (fused_aux is None):
         return [f"{name}: aux term on one path only"]
@@ -181,7 +163,6 @@ def _aux_problems(name: str, runs: dict) -> list[str]:
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_every_family_and_label_pattern_matches_the_logits_loss_on_two_gloo_ranks(name, tmp_path):
-    """One spawn per family records its every label pattern on both paths."""
     run_gloo_ranks(_record_worker, CP_SIZE, name, str(tmp_path))
     recorded = {
         pattern: [torch.load(tmp_path / f"{pattern}-{rank}.pt", weights_only=False) for rank in range(CP_SIZE)]
@@ -198,7 +179,7 @@ def test_every_family_and_label_pattern_matches_the_logits_loss_on_two_gloo_rank
     assert problems == []
     assert (interleaved[0]["fused"]["aux"] is not None) == (name in AUX_LOSS_FAMILIES)
     assert interleaved[0]["takes_logits_to_keep"] == (name not in LOGITS_LOSS_FAMILIES)
-    # The patterns are what they claim: rank 0 scores the boundary target alone in each row, then nothing.
+    # Rank 0 scores the boundary target alone in each row, then nothing.
     boundary = recorded["boundary_only"][0]["targets"]
     assert ((boundary != LABEL_IGNORE_INDEX).nonzero()[:, 1] == SEQ // CP_SIZE - 1).all()
     assert (boundary != LABEL_IGNORE_INDEX).sum(dim=1).tolist() == [1] * BATCH
@@ -239,8 +220,7 @@ def test_eval_keeps_the_logits_loss_under_the_request():
 
 
 def _unlabelled_warnings(model: nn.Module, caplog, *, grad: bool) -> list[str]:
-    """The no-labels warnings two forwards without labels draw (a labelled one in between), each asserted to return
-    the chunk's full logits."""
+    """Each asserted to return the chunk's full logits."""
     wrapper = unpatched_cp_wrapper(model).train()
     ids, labels = random_token_batch(model.get_input_embeddings().num_embeddings, BATCH, SEQ, "cpu", seed=SEED)
     caplog.clear()
@@ -256,7 +236,7 @@ def _unlabelled_warnings(model: nn.Module, caplog, *, grad: bool) -> list[str]:
 
 
 def test_an_unlabelled_training_forward_under_the_request_warns_once(caplog):
-    """SMPO's forward under CP: the request cannot run without labels, which the log says once."""
+    """SMPO's forward under CP: the request cannot run without labels."""
     (warning,) = _unlabelled_warnings(_requested(_tiny_qwen3()), caplog, grad=True)
     assert "only a labelled forward (SFT) runs the fused loss" in warning
     assert _unlabelled_warnings(_tiny_qwen3(), caplog, grad=True) == []
@@ -296,7 +276,7 @@ def test_an_adapted_output_embedding_falls_back(peft_kwargs, caplog):
 
 
 def test_a_linear_subclass_with_its_own_forward_is_refused():
-    """A low-precision or otherwise re-implemented head computes what ``hidden @ weight.T`` would not."""
+    """A re-implemented head computes what ``hidden @ weight.T`` would not."""
 
     class OwnForwardLinear(nn.Linear):
         def forward(self, input):
@@ -310,8 +290,7 @@ def test_a_linear_subclass_with_its_own_forward_is_refused():
 
 
 def test_a_tuner_over_the_plain_output_embedding_is_refused():
-    """A PEFT-style tuner whose ``base_layer`` is the very linear ``get_output_embeddings`` returns: the tuner's delta
-    lives outside that linear."""
+    """The tuner's delta lives outside the linear ``get_output_embeddings`` returns."""
 
     class Tuner(nn.Module):
         def __init__(self, base_layer: nn.Linear):
@@ -325,7 +304,7 @@ def test_a_tuner_over_the_plain_output_embedding_is_refused():
 
 
 def test_the_kernel_call_binds_to_the_real_liger_signature():
-    """The CPU stand-in only checks the keywords against itself; the real function must accept the same call."""
+    """The CPU stand-in only checks the keywords against itself."""
     calls = []
 
     def recorder(*args, **kwargs):
@@ -370,8 +349,6 @@ def test_a_logit_scale_over_a_biased_head_is_refused():
     ids=["identity", "hidden_scale", "logit_scale", "softcap", "vocab_cut", "all"],
 )
 def test_the_kernel_scores_the_family_head_path(transform):
-    """:func:`fused_head_ce_sum` against ``transform.project`` and fp32 cross-entropy: loss, the argmax of every
-    supervised row and the hidden and weight gradients."""
     generator = torch.Generator().manual_seed(SEED)
     head = nn.Linear(16, 32, bias=False)
     hidden = (4 * torch.randn(24, 16, generator=generator)).requires_grad_()

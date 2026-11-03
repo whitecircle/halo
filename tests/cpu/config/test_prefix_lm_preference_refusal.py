@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""DPO, KTO and SMPO refuse image data on a prefix-LM checkpoint (PaliGemma) before any weight loads.
-
-No vision preference collator marks a completion as the causal suffix in ``token_type_ids``: TRL's (DPO, KTO) calls
-the PaliGemma processor on the completions without images, which raises a batch later, and SMPO's marks the whole
-row as prefix, so every completion would score with its own next tokens in view. Driven through each script's
-``main()`` with the checkpoint probe stubbed, so the refusal is pinned on the probe the script's run verdict reads.
-
-Run: ``python tests/cpu/config/test_prefix_lm_preference_refusal.py`` (or ``pytest -m cpu``).
-"""
+"""DPO, KTO and SMPO refuse image data on a prefix-LM checkpoint (PaliGemma) before any weight loads. No vision
+preference collator marks a completion as the causal suffix in ``token_type_ids``: TRL's raises a batch later,
+and SMPO's scores every completion with its own next tokens in view."""
 
 from __future__ import annotations
 
@@ -92,15 +86,15 @@ def test_the_script_refuses_a_prefix_lm_image_run_before_the_model_load(tmp_path
 
 @pytest.mark.parametrize("method", list(_SCRIPTS))
 def test_another_vlm_reaches_the_model_load(tmp_path, method):
-    """Anti-vacuity: the same image run on Gemma 3, which is no prefix LM, gets past the refusal."""
+    """The same image run on Gemma 3, which is no prefix LM, gets past the refusal."""
     with pytest.raises(_ModelLoadReached):
         _run(tmp_path, method, Gemma3Config())
 
 
 @pytest.mark.parametrize("checkpoint_config", [None, Gemma3Config()], ids=["unread-config", "gemma3"])
 def test_a_checkpoint_that_is_no_prefix_lm_passes(checkpoint_config):
-    """A config the probe could not read (``None``) is no prefix LM: the probe's own name fallback decides the
-    modality, and the refusal keys on the family alone."""
+    """A config the probe could not read (``None``) is no prefix LM: the probe's name fallback decides the modality
+    and the refusal keys on the family alone."""
     reject_prefix_lm_image_preference(checkpoint_config, _MODEL_ID, "DPO")
 
 

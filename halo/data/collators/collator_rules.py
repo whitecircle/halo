@@ -1,5 +1,5 @@
-"""The SFT collator option combinations no collator, or no attention kernel on its rows, can serve, refused before
-one is selected, and which rows reach FlashAttention's varlen kernel."""
+"""The SFT collator option combinations no collator or attention kernel can serve, and which rows reach
+FlashAttention's varlen kernel."""
 
 import logging
 
@@ -27,20 +27,16 @@ logger = logging.getLogger(__name__)
 def rows_reach_varlen_kernel(
     *, packing: bool, padding_free: bool, per_device_train_batch_size: int, per_device_eval_batch_size: int = 0
 ) -> bool:
-    """Whether the run's batches reach FlashAttention's varlen call whatever the model: packed and padding-free rows
-    hold several documents, and transformers unpads any batch holding a padding token, which more than one row per
-    batch does, a training batch or an evaluation one (``per_device_eval_batch_size``, :func:`evaluation_batch_size`).
-    A one-document batch reaches it only where the varlen kernels take the model's attention
-    (:func:`supports_one_document_varlen_set`)."""
+    """Whether batches reach the varlen call whatever the model: packed and padding-free rows hold several documents,
+    and transformers unpads any batch holding a padding token, which more than one row per batch (training or
+    evaluation) does. A one-document batch reaches it only where :func:`supports_one_document_varlen_set`."""
     return packing or padding_free or max(per_device_train_batch_size, per_device_eval_batch_size) > 1
 
 
 def supports_one_document_varlen_set(model_config) -> bool:
-    """Whether this model's one-document rows take their varlen set, running flash attention's varlen kernel where
-    transformers would test them for packing in every layer before its dense kernel: a flash backend, no other
-    mixer reading the set (:func:`~halo.models.segment_markers.segment_markers_for`: GatedDeltaNet's delta rule
-    would take its varlen path), and on FA4 varlen kernels that take the model's attention
-    (:func:`~halo.models.attention.selection.fa4_varlen_refusal`)."""
+    """Whether one-document rows take their varlen set, running the varlen kernel where transformers would test them
+    for packing in every layer before its dense kernel: a flash backend, no other mixer reading the set
+    (GatedDeltaNet's delta rule would take its varlen path), and on FA4 kernels taking the attention."""
     attn_impl = effective_attn_implementation(model_config)
     if not is_flash_attn_implementation(attn_impl) or segment_markers_for(model_config).cu_seq_lens:
         return False
@@ -48,14 +44,13 @@ def supports_one_document_varlen_set(model_config) -> bool:
 
 
 def evaluation_batch_size(training_args) -> int:
-    """The rows per device of the run's evaluation batches, 0 for a run that never evaluates."""
+    """0 for a run that never evaluates."""
     return training_args.per_device_eval_batch_size if training_args.eval_strategy != "no" else 0
 
 
 def reject_fa4_varlen_training(model_config, *, varlen_rows: bool, attn_impl: str | None = None) -> None:
-    """Refuse FA4 on batches that reach its varlen call (``varlen_rows``, training or evaluation) when the model's
-    attention needs what its varlen kernels are not validated with (:func:`fa4_varlen_refusal`). ``attn_impl`` is
-    the backend the load resolves, read off ``model_config`` when omitted."""
+    """Refuse FA4 on batches reaching its varlen call when the model's attention needs what those kernels are not
+    validated with. ``attn_impl`` is the backend the load resolves, read off ``model_config`` when omitted."""
     if attn_impl is None:
         attn_impl = effective_attn_implementation(model_config)
     if attn_impl != "flash_attention_4" or not varlen_rows:
@@ -73,16 +68,14 @@ def reject_fa4_varlen_training(model_config, *, varlen_rows: bool, attn_impl: st
 
 
 def has_dense_kernel_row_refusal(model_config, *, padding_free: bool, packing: bool) -> bool:
-    """Whether a dense attention kernel refuses these multi-document rows of ``model_config``: a padding-free row,
-    whose ``cu_seq_lens`` only a varlen kernel reads, or a packed row on a family whose dense forward attends across
-    its documents."""
+    """A padding-free row, whose ``cu_seq_lens`` only a varlen kernel reads, or a packed row on a family whose dense
+    forward attends across its documents."""
     return model_config is not None and (padding_free or (packing and has_dense_packing_leak(model_config)))
 
 
 def reject_dense_attention_rows(model_config, attn_impl: str | None, *, padding_free: bool, packing: bool) -> None:
-    """Refuse the multi-document rows a model whose decoder runs the dense kernel ``attn_impl`` cannot serve
-    (:func:`has_dense_kernel_row_refusal`). ``attn_impl`` is the loaded model's backend, or the one a script
-    resolves for its checkpoint before the load."""
+    """Refuse the multi-document rows a dense ``attn_impl`` cannot serve; it is the loaded model's backend, or the one
+    a script resolves before the load."""
     if is_flash_attn_implementation(attn_impl) or not has_dense_kernel_row_refusal(
         model_config, padding_free=padding_free, packing=packing
     ):
@@ -107,7 +100,7 @@ def reject_dense_attention_rows(model_config, attn_impl: str | None, *, padding_
 
 
 def _warn_dense_packed_rows(model_config, attn_impl: str | None, *, packing: bool) -> None:
-    """Warn that packed rows on the dense kernel ``attn_impl`` run as one sequence under a dense mask."""
+    """Packed rows on a dense kernel run as one sequence under a dense mask."""
     if model_config is None or not packing or is_flash_attn_implementation(attn_impl) or not is_global_main_process():
         return
     logger.warning(
@@ -125,8 +118,7 @@ def _warn_dense_packed_rows(model_config, attn_impl: str | None, *, packing: boo
 
 
 def reject_mrope_padding_free(model_config, *, padding_free: bool) -> None:
-    """Refuse ``padding_free`` on a decoder that rotates by M-RoPE (:func:`has_mrope_rotary`), on every backend:
-    its flattened row faults the flash varlen kernels, and no dense kernel serves one."""
+    """On every backend: M-RoPE's flattened row faults the flash varlen kernels, and no dense kernel serves one."""
     if not padding_free or model_config is None or not has_mrope_rotary(model_config):
         return
     raise ValueError(
@@ -138,8 +130,7 @@ def reject_mrope_padding_free(model_config, *, padding_free: bool) -> None:
 
 
 def reject_padding_free_conflicts(*, padding_free: bool, packing: bool, use_context_parallel: bool) -> None:
-    """Refuse padding_free beside packing or context parallelism, reading only the flags, so a script can run it
-    before the model load."""
+    """Reads only the flags, so a script can run it before the model load."""
     if packing and padding_free:
         raise ValueError(
             "Cannot use both 'packing' and 'padding_free' simultaneously. "
@@ -156,8 +147,7 @@ def reject_padding_free_conflicts(*, padding_free: bool, packing: bool, use_cont
 
 
 def resolve_multi_document_mode(*, packing: bool, padding_free: bool) -> str | None:
-    """The flag that asks for multi-document rows, ``"packing"`` or ``"padding_free"``, or ``None`` for one document
-    per row (:func:`reject_padding_free_conflicts` refuses both at once)."""
+    """``"packing"``, ``"padding_free"``, or ``None`` for one document per row."""
     if packing:
         return "packing"
     return "padding_free" if padding_free else None
@@ -172,13 +162,10 @@ def reject_multi_document_rows(
     keeps_packed_rows: bool,
     varlen_rows: bool,
 ) -> None:
-    """Refuse the rows ``model_config`` cannot keep apart, or no kernel it runs can serve: a multi-document row
-    (``mode``: ``"packing"`` or ``"padding_free"``, ``None`` for one document per row) on an M-RoPE decoder
-    (padding-free), on compressed-KV layers, on the dense kernel ``attn_impl`` (:func:`reject_dense_attention_rows`),
-    on GatedDeltaNet layers without their segment-aware kernels, or on linear attention no segment marker reaches
-    unless ``allow_cross_document_linear_attention``; a packed row a pipeline stage keeps (``keeps_packed_rows``);
-    and FA4 on rows that reach its varlen call (``varlen_rows``). ``attn_impl`` is the loaded model's backend, or the
-    one a script resolves for its checkpoint before the load."""
+    """Refuse the rows ``model_config`` cannot keep apart or no kernel can serve: a multi-document row on an M-RoPE
+    decoder (padding-free), compressed-KV layers, a dense ``attn_impl``, GatedDeltaNet layers without segment-aware
+    kernels, or linear attention no segment marker reaches unless ``allow_cross_document_linear_attention``; a packed
+    row a pipeline stage keeps; and FA4 on rows reaching its varlen call."""
     padding_free, packing = mode == "padding_free", mode == "packing"
     reject_mrope_padding_free(model_config, padding_free=padding_free)
     if mode is not None:
@@ -210,8 +197,7 @@ def reject_unsupported_collator_options(
     allow_cross_document_linear_attention: bool = False,
     per_device_eval_batch_size: int = 0,
 ) -> None:
-    """Refuse (or warn about) the option combinations no collator can serve, reading only the caller's
-    arguments, the model's attention backend and its segment markers."""
+    """Refuse (or warn about) what no collator can serve, reading only arguments, backend and segment markers."""
     reject_padding_free_conflicts(
         padding_free=padding_free, packing=packing, use_context_parallel=use_context_parallel
     )

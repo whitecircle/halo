@@ -1,14 +1,8 @@
 #!/usr/bin/env python
-"""The vLLM weight-sync path must not ratchet reserved memory, across syncs or across reconnects.
+"""The vLLM weight-sync path must not ratchet reserved memory, across syncs or reconnects.
 
-The caching allocator pools freed blocks per stream, and the producer packs on streams the client
-owns. A pack buffer or upload allocated on one of them stays in that stream's pool, which nothing
-else allocates from once the client closes: every reconnect (each builds a fresh stream pair)
-strands one sync's worth, and per-call streams strand it every sync. This drives the producer the
-way VLLMWeightSyncClient does and the client itself through repeated connect-sync-close cycles, and
-asserts reserved memory stops growing after the first.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_packed_broadcast_memory.py
+The allocator pools freed blocks per stream, and the producer packs on streams the client owns, so a closed client's
+pool strands one sync's worth per reconnect.
 """
 
 from types import SimpleNamespace
@@ -24,16 +18,15 @@ from tests.common.weight_sync import offline_client, push
 
 _SYNCS = 12
 _PARAMS_PER_SYNC = 24
-_PARAM_BYTES = 32 * 1024 * 1024  # 24 x 32MB per sync: several packs of mixed tensors per call
+_PARAM_BYTES = 32 * 1024 * 1024  # 24 x 32MB per sync: several packs of mixed tensors per call.
 _PACK_BYTES = 64 * 1024 * 1024
 _CLIENTS = 4
-# Host params, beside the device-resident ones, all in one chunk. offline_client never runs
-# init_communicator, so their snapshots stay on the host and the client lands them itself.
+# offline_client never runs init_communicator, so their snapshots stay on the host and the client lands them itself.
 _HOST_PARAMS = 4
 
 
 class _SinkGroup:
-    """Broadcast sink: consumes the packed buffer without a peer (memory behavior needs no wire)."""
+    """Consumes the packed buffer without a peer: memory behavior needs no wire."""
 
     def broadcast(self, tensor):
         torch.cuda.current_stream().synchronize()
@@ -67,8 +60,8 @@ def test_persistent_streams_bound_reserved_memory():
     streams = [torch.cuda.Stream() for _ in range(PACKED_NUM_BUFFERS)]
     reserved = _run_syncs(streams)
     first, last = reserved[0], reserved[-1]
-    # Identical per-sync allocation sequences on the same streams must reuse one pool: any growth
-    # after the first sync means pack allocations are stranding blocks again.
+    # Identical per-sync allocations on the same streams must reuse one pool; growth after the first means stranded
+    # blocks.
     growth = last - first
     assert growth <= _PACK_BYTES, (
         f"reserved memory ratcheted across syncs with persistent streams: "
@@ -78,9 +71,8 @@ def test_persistent_streams_bound_reserved_memory():
 
 
 def test_client_reuses_one_stream_pair_across_syncs():
-    """The client half of the contract: VLLMWeightSyncClient must lazily create ONE stream pair and
-    pass the same list into every producer call — dropping ``streams=``, or re-creating them per
-    sync, reintroduces the production ratchet while the producer-contract test stays green."""
+    """Dropping ``streams=`` or re-creating them per sync reintroduces the ratchet while the producer-contract test
+    stays green."""
     client = offline_client(VLLMWeightSyncClient)
     client._sync_device = torch.device("cuda", torch.cuda.current_device())
     client._transport = SimpleNamespace(device=client._sync_device, aborted=False)
@@ -107,9 +99,8 @@ def test_client_reuses_one_stream_pair_across_syncs():
 
 
 def test_reconnected_clients_reuse_one_pool():
-    """A closed client's pack buffer and uploads must return to the caller's pool: every reconnect builds
-    a fresh stream pair, so anything allocated on the old pair stays reserved with nothing left to
-    reuse it, about one chunk per reconnect."""
+    """Anything allocated on a closed client's stream pair stays reserved with nothing to reuse it, about one chunk per
+    reconnect."""
     device = torch.device("cuda", torch.cuda.current_device())
     params = [(f"p{i}", torch.randn(_PARAM_BYTES // 4, device=device)) for i in range(_PARAMS_PER_SYNC)]
     params += [(f"h{i}", torch.randn(_PARAM_BYTES // 4)) for i in range(_HOST_PARAMS)]

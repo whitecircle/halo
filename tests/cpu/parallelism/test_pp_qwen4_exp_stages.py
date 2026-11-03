@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Qwen3.8-Flash-Next (``qwen4_exp``) pipeline stages: the flat hyper-connection boundary, the token ids its per-layer
-embeddings re-read on a later stage, the segment markers a packed microbatch's stage rebuilds, and the external tables
-a stage saves and attaches under the unsplit model's names.
-
-The tiny model carries a per-layer-embedding (PLE) layer on each stage of the ``[2, 2]`` split (``ple_layer_ids`` 2
-and 3, layers 1 and 2, both GatedDeltaNet as the family requires), each with its own host n-gram table. The
-load-bearing check is BITWISE chained equivalence in fp32: stage 0 → boundary stream → stage 1 runs the unsplit
-model's ops in its order, so any drift means the boundary, the token ids or the markers lost state.
-
-    python tests/cpu/parallelism/test_pp_qwen4_exp_stages.py
-"""
+"""Qwen3.8-Flash-Next (``qwen4_exp``) pipeline stages. Chained stages must match bitwise in fp32, so any drift means
+state was lost at the boundary."""
 
 import copy
 import os
@@ -51,7 +42,7 @@ from tests.common.qwen4_exp import (
 )
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
-# A PLE layer on each stage of the [2, 2] split, and both on stage 1 of the off-period [1, 3] one.
+# On each stage of [2, 2], and both on stage 1 of the off-period [1, 3].
 PLE_LAYER_IDS = [2, 3]
 SPLITS = ([2, 2], [1, 3])
 SEQ = 24
@@ -76,7 +67,7 @@ def model(checkpoint):
 
 
 def _stages(model, pp_split):
-    # A deep copy shares the attached table views, as every rank on a node shares the page cache.
+    # A deep copy shares the attached table views, as a node's ranks share the page cache.
     return [
         build_pipeline_stage(copy.deepcopy(model), rank, len(pp_split), moe_balancing="none", pp_split=pp_split)
         for rank in range(len(pp_split))
@@ -86,7 +77,7 @@ def _stages(model, pp_split):
 def _input_ids(model, batch: int, length: int) -> torch.Tensor:
     vocab_size = model.config.get_text_config().vocab_size
     ids = torch.randint(2, vocab_size, (batch, length), generator=torch.Generator().manual_seed(3))
-    ids[:, length // 3] = EOS_TOKEN_ID  # the n-gram history restarts after eos on every stage alike
+    ids[:, length // 3] = EOS_TOKEN_ID  # The n-gram history restarts after eos on every stage alike.
     return ids
 
 
@@ -103,8 +94,7 @@ def _packed_row(model):
 
 
 def _chain(stages, input_ids, token_ids=None, **kwargs):
-    """``(boundary stream, logits)`` through the chained stages; later stages take ``token_ids`` (default: the
-    microbatch's own ids)."""
+    """Later stages take ``token_ids``, by default the microbatch's own ids."""
     activation, boundary = stages[0](input_ids, **kwargs), None
     for stage in stages[1:]:
         boundary = activation
@@ -130,8 +120,7 @@ def test_chained_stages_reproduce_the_unsplit_model_bitwise(model, pp_split, row
 
 
 def test_gradients_match_the_unsplit_model_through_the_boundary(model):
-    """The stream stays on the graph and every stage's gradient is the unsplit model's, by unsplit name; the QSA
-    indexer projection gets none on either side (its top-k is a boolean selection)."""
+    """The QSA indexer projection gets no gradient on either side (its top-k is a boolean selection)."""
     input_ids, kwargs = _packed_row(model)
     reference_model = copy.deepcopy(model)
     _reference(reference_model, input_ids, **kwargs).pow(2).mean().backward()
@@ -153,8 +142,7 @@ def test_gradients_match_the_unsplit_model_through_the_boundary(model):
 
 
 def test_a_later_stage_reads_the_token_ids_it_is_handed(model):
-    """Negative controls for the side channel: withheld, the stage refuses; others in their place change the
-    logits, which only the stage-1 PLE layer reads."""
+    """Withheld, the stage refuses; others in their place change the logits only the stage-1 PLE layer reads."""
     input_ids, kwargs = _padded_rows(model)
     stages = _stages(model, [2, 2])
     stream = stages[0](input_ids, **kwargs)
@@ -170,7 +158,7 @@ def test_a_later_stage_reads_the_token_ids_it_is_handed(model):
 
 
 def test_a_packed_stage_runs_on_the_markers_it_rebuilds(model):
-    """Without the stage's rebuilt ``seq_idx`` a packed row reaches the document forward unmarked, which refuses it."""
+    """Without the rebuilt ``seq_idx`` a packed row reaches the document forward unmarked, which refuses it."""
     input_ids, kwargs = _packed_row(model)
     stages = _stages(model, [2, 2])
     with mock.patch.object(stage_module, "packed_row_segment_kwargs", lambda position_ids, markers: {}):
@@ -187,7 +175,6 @@ def test_a_packed_stage_runs_on_the_markers_it_rebuilds(model):
 
 @pytest.fixture(scope="module")
 def composite(tmp_path_factory):
-    """The multimodal class over the same tiny text tower, loaded as a run loads it."""
     torch.manual_seed(0)
     directory = str(tmp_path_factory.mktemp("qwen4_exp_composite"))
     tiny_family_model(TINY_MOE_VLM_FAMILIES["qwen4_exp"]).save_pretrained(directory)
@@ -195,8 +182,7 @@ def composite(tmp_path_factory):
 
 
 def test_a_text_only_composite_splits_at_its_text_tower(composite):
-    """The multimodal class splits at its text tower: stages drive the tower directly and its text-only logits are the
-    composite's own, bitwise; the vision tower sits in no stage."""
+    """Stages drive the tower directly, and the vision tower sits in no stage."""
     first, last = _stages(composite, [2, 2])
     assert first.layout.backbone_prefix == "model.language_model"
     assert not any(name.startswith("model.visual") for name in first.state_dict()), "vision tower inside a stage"
@@ -227,12 +213,11 @@ def test_the_spec_registers_a_rebase_safe_family(model):
     spec = PP_SPEC_MAP["Qwen4ExpTextModel"]
     assert spec.validated and spec.layer_types_rebase_safe and spec.token_ids_kwarg == "ple_input_ids"
     reject_unsupported_pp_model(model, "none")
-    validate_partition(model, [(0, 1), (1, model.config.num_hidden_layers)])  # off the layer_types period
+    validate_partition(model, [(0, 1), (1, model.config.num_hidden_layers)])  # Off the layer_types period.
 
 
 def test_a_stage_saves_its_tables_under_unsplit_names_in_files_of_its_own(model, tmp_path):
-    """Stage 1's table is global layer 2's; its files carry the stage's part prefix, so stage 0's table00 files and
-    stage 1's never share a name in one directory."""
+    """Its files carry the stage's part prefix, so stage files never share a name in one directory."""
     stage = _stages(model, [2, 2])[1]
     prefix = pp_stage_part_prefix(1, 2)
     writer = StreamingShardWriter(str(tmp_path), "1GB", enabled=True, filename_prefix=prefix)
@@ -262,8 +247,7 @@ def _checkpoint_table(checkpoint: str, layer: int) -> list[torch.Tensor]:
 
 
 def test_a_later_stage_attaches_its_own_layers_table(checkpoint):
-    """The stage loader plans the attach in the checkpoint's key space: stage 1's local layer 0 is global layer 2. By
-    its stage-local name the same table would look for global layer 0's keys, which hold no table."""
+    """By its stage-local name the table would look for global layer 0's keys, which hold no table."""
     stage = _load_stage_lazy(
         checkpoint,
         1,
@@ -278,7 +262,7 @@ def test_a_later_stage_attaches_its_own_layers_table(checkpoint):
     expected = _checkpoint_table(checkpoint, 2)
     assert len(table.parts) == len(expected) and all(map(torch.equal, table.parts, expected))
 
-    table.parts = ()  # detached, as a fresh build is
+    table.parts = ()  # Detached, as a fresh build is.
     with pytest.raises(FileNotFoundError, match="holds no keys that load into"):
         attach_external_tables(stage, checkpoint)
 
@@ -288,9 +272,7 @@ def _save_dir(root: str, rank: int, per_node: bool) -> str:
 
 
 def _save_worker(rank: int, checkpoint: str, root: str, per_node: bool, writes_tables: bool = True) -> None:
-    """Save the stages through ``save_pp_checkpoint``, then rebuild each stage stage-aware from the directory its node
-    holds, as a resume does: every stage attaches its own layer's table from the files its stage writer wrote.
-    ``writes_tables=False`` is the save without its table write."""
+    """``writes_tables=False`` is the save without its table write."""
     if not writes_tables:
         mock.patch.object(pp_checkpoint, "write_external_tables", lambda *args, **kwargs: None).start()
     os.environ["LOCAL_RANK"] = str(rank % RANKS_PER_NODE)
@@ -331,8 +313,6 @@ def _probe_logits(directory: str) -> torch.Tensor:
 
 
 def test_a_pp_save_holds_every_stages_tables_and_reloads_unsplit(checkpoint, tmp_path):
-    """On a shared output filesystem one directory holds both stages' tables, each in files under its own stage's part
-    prefix and indexed under the unsplit model's names, and reloads with them as the source model."""
     run_gloo_ranks(_save_worker, WORLD_SIZE, checkpoint, str(tmp_path), False, env={"LOCAL_WORLD_SIZE": "2"})
     saved = str(tmp_path / "shared")
     weight_map = resolve_checkpoint_weights(saved).weight_map
@@ -347,8 +327,7 @@ def test_a_pp_save_holds_every_stages_tables_and_reloads_unsplit(checkpoint, tmp
 
 
 def test_without_its_table_write_the_saved_stage_cannot_resume(checkpoint, tmp_path):
-    """Negative control for the save: a PP save that writes no table leaves a checkpoint whose stages refuse to attach
-    one on resume."""
+    """Negative control."""
     with pytest.raises(Exception, match="holds no keys that load into"):
         run_gloo_ranks(
             _save_worker, WORLD_SIZE, checkpoint, str(tmp_path), False, False, env={"LOCAL_WORLD_SIZE": "2"}
@@ -356,8 +335,7 @@ def test_without_its_table_write_the_saved_stage_cannot_resume(checkpoint, tmp_p
 
 
 def test_per_node_pp_saves_merge_with_their_tables(checkpoint, tmp_path):
-    """Per-node storage: each node's directory holds only its own stage's table files, and the merge carries both into
-    a directory that reloads as the source model. A node directory missing its stage's table fails the merge."""
+    """A node directory missing its stage's table fails the merge."""
     run_gloo_ranks(
         _save_worker,
         WORLD_SIZE,

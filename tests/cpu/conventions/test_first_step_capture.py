@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""``tests.common.first_step`` captures every trainable parameter's gradient whole, whatever holds it.
-
-A CPU twin of the SMPO layouts suite's ep2tp2 row as its capture sees it, on two gloo ranks at DP 1: each tiny MoE
-with its blocks swapped for EP layers that hold the routers and experts plain, and its attention TP-sharded by the
-toolkit's plan, which leaves the norms, embedding and head plain replicas (and GPT-OSS's sinks hand-sliced plain).
-One first step goes through :func:`train_recording_first_step` after the trainer's TP sweep, against the stock model's
-under FSDP2, where every parameter is a DTensor. The capture holds exactly the reference parameters outside the
-routed path, each at full shape and equal to the reference's up to the reduction order, so
-:func:`dense_gradient_checks` passes. A parameter the capture leaves out fails its coverage check, and one left
-without a gradient at the optimizer step raises.
-
-Run: python tests/cpu/conventions/test_first_step_capture.py
-"""
+"""``tests.common.first_step`` captures every trainable parameter's gradient whole, whatever holds it. A CPU twin of
+the SMPO ep2tp2 row on two gloo ranks at DP 1: EP layers hold routers and experts plain, attention is TP-sharded,
+and the reference is the stock model under FSDP2."""
 
 import dataclasses
 import datetime
@@ -55,7 +45,7 @@ EXACT_RATIO_RTOL = 1e-6
 
 class _Trainer:
     """The trainer surface :func:`train_recording_first_step` reads; ``train()`` takes one optimizer step over
-    ``batches``: each microbatch's backward, then ``sweep`` (the post-backward gradient sync) before the step."""
+    ``batches``."""
 
     def __init__(self, model, batches, sweep):
         self.model = model
@@ -83,8 +73,8 @@ class _Trainer:
 
 
 def _sweep_tp_grads(model) -> None:
-    """COLLECTIVE over the TP group: the trainer's TP-replicated gradient sync over ``model``, as its clip seam runs
-    it once per optimizer step (per-head norms summed, other replicas averaged, hand-sliced ones left alone)."""
+    """COLLECTIVE over the TP group: the trainer's TP-replicated gradient sync, once per optimizer step (per-head
+    norms summed, other replicas averaged, hand-sliced ones left alone)."""
     expert_ids = {id(param) for _, layer in named_ep_layers(model) for _, param in layer.expert_named_params()}
     host = SimpleNamespace(
         _device_mesh=model._device_mesh,

@@ -1,26 +1,6 @@
 #!/usr/bin/env python
-"""Knobs a training script would overwrite or never read are refused at startup, not dropped.
-
-* SFT and self-distillation render ``conversation_field`` through their own processor and collator,
-  and ``disable_trl_dataset_prep`` hands TRL a ``dataset_kwargs`` of its own, so ``dataset_text_field``
-  and a YAML ``dataset_kwargs`` parse and do nothing.
-* ``eval_packing`` only narrows packing on SFT's raw-dataset path: ``true`` without ``packing`` packs
-  nothing, a pre-processed dataset is used as baked, and self-distillation refuses packing outright.
-* Environmental GRPO pins ``max_completion_length`` to ``rollout_max_tokens``; a third value would be
-  overwritten. The value equal to either the field default or ``rollout_max_tokens`` stays legal.
-* SFT refuses ``packing`` / ``padding_free`` for a checkpoint with compressed-KV layers, or with
-  linear-attention layers no document boundary reaches unless ``allow_cross_document_linear_attention``
-  admits them, off the config its modality probe already read, before the training setup and the model
-  load. Tree packing and self-distillation have no such row for that opt-in to admit, so they refuse it.
-  So are the flat rows the attention backend planned for that checkpoint cannot serve: ``padding_free`` on a
-  dense kernel, and ``packing`` there on a family whose dense forward attends across documents.
-
-Each refusal must fire before the training setup and the model load; the anti-over-rejection
-cases reach the first stubbed step past the guards instead.
-
-Usage:
-    python tests/cpu/config/test_dropped_knob_refusals.py
-"""
+"""Knobs a training script would overwrite or never read are refused at startup, before the training setup and the
+model load; the anti-over-rejection cases reach the first stubbed step past the guards."""
 
 import contextlib
 import sys
@@ -108,7 +88,6 @@ def test_sft_accepts_what_it_honors(config_body, tmp_path):
 
 
 def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> None:
-    """Run ``sft.py:main()`` through its dataset load, stopping at the step after it."""
     _run_main(
         "sft.py",
         config_body,
@@ -172,11 +151,9 @@ _CROSSING_OPT_IN = "allow_cross_document_linear_attention: true\n"
     ids=[*_FLAT_ROWS, *(f"{mode}-opted-in" for mode in _FLAT_ROWS), "tree_packing", "tree_packing-opted-in"],
 )
 def test_sft_refuses_unmarked_linear_attention_rows_before_the_setup(config_body, refusal, tmp_path):
-    """Ring's Lightning Attention-2 layers read no document boundary: a flat multi-document row is refused off
-    the config the probe read, on the flash backend that isolates its softmax layers, before the model load,
-    unless the run opts in. A tree row brings its own plan, so tree packing gets past this check without the
-    opt-in (the tree family gate after the setup is what admits the family) and is refused the opt-in it never
-    reads."""
+    """Ring's Lightning Attention-2 layers read no document boundary, so a flat multi-document row is refused before
+    the model load unless the run opts in. Tree packing brings its own plan, gets past this check without the
+    opt-in and is refused the opt-in it never reads."""
     run = partial(
         _run_main,
         "sft.py",
@@ -221,9 +198,8 @@ _PLANNED_BACKEND_ROWS = {
 
 @pytest.mark.parametrize("case", sorted(_PLANNED_BACKEND_ROWS))
 def test_sft_refuses_rows_its_planned_backend_cannot_serve_before_the_setup(case, tmp_path):
-    """The backend comes from the resolution the model load runs (``attn_implementation``, dtype, the family's
-    flash support), so a row the collator factory would refuse only after a minutes-long load is refused off
-    the probed config first, and the rows that backend serves get through."""
+    """The backend comes from the resolution the model load runs, so a row the collator factory would refuse after a
+    minutes-long load is refused off the probed config first."""
     build_config, config_body, refusal = _PLANNED_BACKEND_ROWS[case]
     checkpoint_config = build_config()
     run = partial(
@@ -273,8 +249,8 @@ def test_self_distill_accepts_the_defaults(tmp_path):
 
 
 def test_self_distill_refuses_a_loss_type_its_own_cross_entropy_is_not(tmp_path):
-    """The trainer computes its own nll, so TRL's loss_type never reaches the loss: ``dft`` would be
-    silently ignored."""
+    """The trainer computes its own nll, so TRL's loss_type never reaches the loss and ``dft`` would be silently
+    ignored."""
     with pytest.raises(ValueError, match="loss_type='dft' is not implemented for self-distillation"):
         _run_main("distillation/self_distill.py", "loss_type: dft\n", tmp_path, init_training_script=_stop)
 

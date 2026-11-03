@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Liger's fused loss trains the head transform each family declares on its ``HeadTransformSpec``.
-
-The fused loss replaces the ``lm_head`` projection, so whatever the family's forward applies between
-the projection and the loss must be carried through it or refused. Cohere's ``logit_scale`` folds onto
-the hidden state, read from the config the declaration reads; a softcap or a vocabulary cut cannot be
-folded, so the fused path refuses it instead of silently training a different head. The fused kernel
-is Triton-only, so the loss here is the same contraction computed by torch.
-
-    pytest -m cpu tests/cpu/model_loading/test_liger_head_transform.py
-"""
+"""Liger's fused loss trains the head transform each family declares on its ``HeadTransformSpec``, or refuses it.
+The kernel is Triton-only, so torch computes the same contraction here."""
 
 import types
 
@@ -25,7 +17,7 @@ from halo.model_loading.liger.fused_modules import apply_fused_modules_to_model
 from halo.models.head_transform import HeadTransform
 from tests.common.models import TINY_ALTERNATING_SLIDING_CONFIG, TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG
 
-# Four times the class default (0.0625), so a head reading a stale default would train a different loss.
+# Four times the class default (0.0625), so a stale default would train a different loss.
 LOGIT_SCALE = 0.25
 FAMILIES = {
     "cohere2": (Cohere2Config, Cohere2ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG),
@@ -35,7 +27,7 @@ FAMILIES = {
 
 
 def _torch_fused_loss(hidden_states, lm_head_weight, labels, hidden_size, shift_labels=None, **kwargs):
-    """``LigerForCausalLMLoss``'s contraction (hidden @ weightᵀ, then the causal-LM loss) on any device."""
+    """``LigerForCausalLMLoss``'s contraction on any device."""
     logits = hidden_states.reshape(-1, hidden_size) @ lm_head_weight.T
     logits = logits.view(*hidden_states.shape[:-1], -1)
     return ForCausalLMLoss(logits, labels, vocab_size=logits.shape[-1], shift_labels=shift_labels, **kwargs)

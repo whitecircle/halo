@@ -1,26 +1,9 @@
 #!/usr/bin/env python
-"""Pipeline parallelism through the real DistributedRewardTrainer (Bradley-Terry reward model).
+"""PP through the real DistributedRewardTrainer: interleaved pairs, the pair-count normalizer, the pair-alignment
+guard.
 
-The reward PP contract has three seams the generic SFT e2e test cannot cover, and this test fails
-when any of them breaks:
-
-  * the interleave: TRL collates ``[chosen ⧺ rejected]``; a microbatch split of that layout compares
-    unrelated examples. The step-1 loss is checked against the exact TRL objective (margin +
-    centering) computed on the captured interleaved batch by transformers' own pooled forward —
-    wrong pairing or wrong pooling both show as a loss mismatch, not a crash.
-  * the normalizer: the BT loss is a per-pair mean, so the runner must divide by the chain-local
-    pair count (spied per step), not the SFT token count.
-  * the pair-alignment guard: a batch that would split a pair across microbatches must raise.
-
-Also covers PP evaluation on the doubled-row preference batches (the trainer rescales the base
-row bound) against a reference computed with the init weights: a full eval, whose reported accuracy
-and prediction row count are both pinned (a mean is blind to duplicated rows, a row count is blind to
-which pairs they are), plus a partial batch of one pair driven straight through the prediction step —
-the only shape in which the inert row padding and the pair-unit trim actually execute.
-
-Topology: 4 GPUs as 2 simulated nodes of 2 (NVLink domain = 2), pp2 x dp2.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_reward_bt.py
+A microbatch split of TRL's ``[chosen ⧺ rejected]`` compares unrelated examples, which shows as a loss mismatch, not a
+crash. Eval pins accuracy and row count: a mean is blind to duplicated rows, a count to which pairs.
 """
 
 import sys
@@ -48,15 +31,13 @@ from tests.common.rank_log import log
 PP_SIZE = 2
 SEQ_LEN = 48
 N_STEPS = 10
-PAIRS_PER_RANK = 4  # per_device_train_batch_size counts pairs; the collator doubles the rows
+PAIRS_PER_RANK = 4  # per_device_train_batch_size counts pairs; the collator doubles the rows.
 MICROBATCHES = 2
 CENTER_COEF = 0.05
 LOSS_RTOL = 2e-4
 
 
 def build_dataset(vocab_size: int, n_rows: int, seed: int) -> Dataset:
-    """Pre-tokenized preference rows with ragged lengths (exercises the rightmost-non-pad pooling)
-    and a nonzero margin column (exercises the margin extra)."""
     g = torch.Generator().manual_seed(seed)
     rows = []
     for _ in range(n_rows):
@@ -79,7 +60,7 @@ def build_args(output_dir: str, **overrides) -> RewardConfig:
         **{
             "max_steps": N_STEPS,
             "per_device_train_batch_size": PAIRS_PER_RANK,
-            "gradient_accumulation_steps": MICROBATCHES,  # becomes the pipeline's microbatch count
+            "gradient_accumulation_steps": MICROBATCHES,  # Becomes the pipeline's microbatch count.
             "learning_rate": 8e-3,
             "max_length": SEQ_LEN,
             "gradient_checkpointing": False,
@@ -91,7 +72,6 @@ def build_args(output_dir: str, **overrides) -> RewardConfig:
 
 
 def reference_bt_loss(model, input_ids, attention_mask, margin_interleaved) -> float:
-    """TRL's exact objective on an interleaved batch, pooled by transformers' own seq-cls forward."""
     with torch.no_grad():
         pooled = model(input_ids=input_ids, attention_mask=attention_mask).logits.squeeze(-1).float()
     chosen, rejected = pooled[0::2], pooled[1::2]
@@ -101,12 +81,11 @@ def reference_bt_loss(model, input_ids, attention_mask, margin_interleaved) -> f
 
 
 def interleave_pairs(rows) -> list[list[int]]:
-    """``[c0, r0, c1, r1, ...]`` — the row order ``_pp_reward_batch_transform`` produces."""
     return [ids for pair in zip(rows["chosen_ids"], rows["rejected_ids"], strict=False) for ids in pair]
 
 
 def reference_pair_scores(model, rows, device) -> torch.Tensor:
-    """``[pairs, 2]`` pooled (chosen, rejected) scores — what the BT adapter's ``predictions_fn`` must produce."""
+    """``[pairs, 2]`` pooled scores, what the BT adapter's ``predictions_fn`` must produce."""
     with torch.no_grad():
         pooled = model(**right_pad(interleave_pairs(rows), SEQ_LEN, device))
     scores = pooled.logits.squeeze(-1).float()
@@ -121,9 +100,7 @@ def run(ctx):
 
     eval_dataset = build_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=2 * PAIRS_PER_RANK, seed=23)
 
-    # A preference metric consumes (chosen, rejected) scores. Without the adapter's predictions_fn
-    # the raw [rows, S, 1] per-token plane would arrive here instead — shaped nothing like a
-    # prediction — so recording the shape is what catches that regression.
+    # Without the adapter's predictions_fn the raw [rows, S, 1] plane arrives here, so the recorded shape catches that.
     seen_shapes: list[tuple[int, ...]] = []
 
     def pairwise_accuracy(eval_pred) -> dict:
@@ -151,10 +128,7 @@ def run(ctx):
 
     reference = build_seq_cls_model(num_labels=1).to(ctx.device).float().eval()
 
-    # ── Eval with the init weights (before any training step): the logged eval_loss must equal the
-    # mean over the two DP shards of TRL's per-batch BT loss, computed with transformers' own
-    # pooled forward. Covers the doubled-row frozen shape, the eval normalizer (= pair count via
-    # the labels markers), margins in eval, and the loss broadcast.
+    # Init-weights eval: the logged eval_loss equals the mean over the two DP shards of TRL's per-batch BT loss.
     eval_metrics = trainer.evaluate()
     shard_losses = []
     for lo in (0, PAIRS_PER_RANK):
@@ -169,25 +143,20 @@ def run(ctx):
     )
     metrics["eval_loss"], metrics["reference_eval"] = eval_metrics["eval_loss"], reference_eval
 
-    # compute_metrics must receive pooled pairwise scores, not the raw per-token plane. The shape is
-    # the assertion: [pairs, 2] is a prediction, [rows, S, 1] is not.
     checks["metrics_receive_pairwise_scores"] = bool(seen_shapes) and all(
         len(shape) == 2 and shape[1] == 2 for shape in seen_shapes
     )
     checks["pairwise_accuracy_reported"] = "eval_accuracy" in eval_metrics
-    # The value, not a range: ``0 <= accuracy <= 1`` holds for any input of any shape, so it passes
-    # on a predictions_fn that scores the wrong pairs, half of them, or inert padding.
+    # The value: ``0 <= accuracy <= 1`` passes on a predictions_fn that scores the wrong pairs, half of them, or
+    # padding.
     accuracy = eval_metrics.get("eval_accuracy")
-    # Recomputed from the dataset over every pair exactly once: a mean survives the per-stage duplication of
-    # the prediction rows, but not a dropped pair, nor an inert pad pair (a tie: argmax 0, counted correct).
+    # Over every pair once: a mean survives per-stage duplication, but not a dropped pair or an inert pad pair (a tie:
+    # argmax 0, counted correct).
     reference_scores = reference_pair_scores(reference, eval_dataset[:], ctx.device)
     reference_accuracy = float((reference_scores[:, 0] >= reference_scores[:, 1]).float().mean())
     checks["pairwise_accuracy_matches_reference"] = accuracy is not None and abs(accuracy - reference_accuracy) < 1e-6
-    # Every rank of a chain returns that chain's predictions, so a world gather would carry the
-    # dataset pp_size times; the metric gather is scoped to the data-parallel replicas, which is
-    # what makes this the dataset exactly once. Pinning the count is what makes a dropped or a
-    # duplicated batch visible: the mean above is blind to duplication, and blind to a tail replaced
-    # by pad pairs that score 1.0.
+    # Every rank of a chain returns its predictions, so a world gather carries the dataset pp_size times; the metric
+    # gather is scoped to the DP replicas. The count makes a dropped or duplicated batch visible.
     checks["metrics_see_every_pair_exactly_once"] = seen_shapes == [(len(eval_dataset), 2)]
     log(
         f"[rank {ctx.rank}] compute_metrics saw shapes={seen_shapes} eval_accuracy={accuracy} "
@@ -195,13 +164,11 @@ def run(ctx):
     )
     metrics["eval_accuracy"] = float(accuracy) if accuracy is not None else float("nan")
 
-    # ── A partial eval batch, driven straight through the prediction step. The exact-multiple set
-    # above arrives already at the frozen row count, so neither the inert row padding nor the pair-unit
-    # trim runs. One pair against the frozen 8 makes both: 3 inert pairs are appended and must be
-    # trimmed back off, or compute_metrics gets 4 pairs where 1 belongs, three of them ties scoring as
-    # correct. prediction_step keeps accelerate's gather out of it. Collective: every rank calls it.
+    # The exact-multiple set above arrives at the frozen row count, so neither inert padding nor the pair-unit trim
+    # runs. One pair against the frozen 8 makes both: 3 inert pairs must be trimmed back off. COLLECTIVE: every rank
+    # calls it.
     one_pair = eval_dataset[:1]
-    # The [chosen ⧺ rejected] concat TRL's collator emits, which the batch transform interleaves.
+    # TRL's concat, which the batch transform interleaves.
     partial_batch = right_pad(one_pair["chosen_ids"] + one_pair["rejected_ids"], SEQ_LEN, ctx.device)
     partial_batch["margin"] = torch.tensor(one_pair["margin"], device=ctx.device)
     _, partial_predictions, partial_labels = trainer.prediction_step(trainer.model, partial_batch, False)
@@ -221,9 +188,8 @@ def run(ctx):
     checks["normalizer_is_chain_pair_count"] = len(normalizers) == N_STEPS and all(
         abs(value - PAIRS_PER_RANK) < 1e-6 for value in normalizers
     )
-    # The plane carries the pooling: exactly one marker per row, at that row's last non-pad token
-    # (rows are right-padded with pad id 0 and data tokens start at 4, so length-1 is that position).
-    # Marking only the chosen rows would leave the rejected halves unpooled and unvalidated.
+    # One marker per row, at its last non-pad token (right-padded with id 0, data tokens from 4). Marking only the
+    # chosen rows would leave the rejected halves unpooled and unvalidated.
     marked = captured["labels"] != -100
     checks["plane_marks_every_row_at_pooled_position"] = bool(
         (marked.sum(dim=-1) == 1).all()
@@ -231,9 +197,7 @@ def run(ctx):
     )
     checks["no_input_ids_extra_target"] = "input_ids" not in trainer._pp_adapter.extra_target_keys
 
-    # ── Step-1 loss against the exact TRL objective on the captured batch (init weights). The
-    # logged loss is the world mean of the per-chain losses; each chain contributes pp_size times
-    # with identical values, so the mean over ranks equals the mean over chains.
+    # The logged loss is the world mean; each chain contributes pp_size times with identical values.
     expected = world_mean(
         reference_bt_loss(reference, captured["input_ids"], captured["attention_mask"], captured["margin"])
     )
@@ -249,9 +213,8 @@ def run(ctx):
 
     checks["losses_identical_across_ranks"] = losses_identical_across_ranks(losses)
 
-    # ── Negative check: a batch whose rows cannot be microbatched pair-aligned must raise. 6 rows
-    # (3 pairs) across 2 microbatches would split pair 1 — the runner validates before any
-    # collective, so every rank raises and catches locally with no desync.
+    # 6 rows (3 pairs) across 2 microbatches would split pair 1. The runner validates before any collective, so every
+    # rank raises and catches locally with no desync.
     bad_ids = torch.full((6, SEQ_LEN), 5, dtype=torch.long, device=ctx.device)
     raised = False
     try:

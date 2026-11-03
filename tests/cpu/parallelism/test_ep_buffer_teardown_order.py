@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""Which DeepEP buffers a rank frees, and in what order, is decided by state every rank of the group shares.
-
-Freeing a buffer is a collective: ``buffer.destroy()`` spins on that buffer's device-side NVLink barrier, so
-the ranks of a group must free the same buffers in the same order, or each spins in the barrier of a
-different buffer until the device timeout aborts the job (``DeepEP NVLink barrier timeout``, then
-``cudaErrorLaunchFailure``). Which dispatchers are still alive is not shared: a dispatcher dropped with its
-model gives up its claim when this rank's garbage collector reclaims it. Each test impersonates one rank
-whose buffers were built in the same order as on its peers, differing only in what its collector has
-reclaimed:
-
-- teardown frees every buffer in build order, whatever was reclaimed;
-- the unclaimed sweep frees a buffer only once no rank of that buffer's own group claims it;
-- destroying the live layers (``cleanup_ep``), or moving one to a buffer of a new determinism mode, frees
-  the old buffer only once no rank of the group claims it.
-
-The last test runs real ranks on gloo, two EP groups of two, where only one rank of each group has collected
-a dropped model, and gives each buffer a destroy that is a collective over its group: the ranks must free
-the same buffers in the same order, and a rank that skips a collective its peers enter times its group out.
-
-DeepEP is replaced by a recorder, so the dispatchers run their real sizing and arena logic on a CPU box.
-``tests/gpu/parallelism/ep/test_ep_buffer_gc_safety.py`` runs the sweep on real DeepEP buffers.
-
-Run: python tests/cpu/parallelism/test_ep_buffer_teardown_order.py
-"""
+"""Freeing a DeepEP buffer is a collective, so which are freed and in what order is decided by state every rank
+shares. DeepEP is a recorder here."""
 
 import datetime
 import gc
@@ -41,13 +19,12 @@ from halo.distributed.expert_parallel.deepep.capacity import capacity_scope
 from halo.runtime.consensus import RankConsensus
 from tests.common.gloo import new_groups, run_gloo_ranks
 
-# One EP group per model, each serving its own buffer, built in this order on every rank.
 MODELS = ("first", "second")
 LAYERS_PER_MODEL = 2
 NUM_EXPERTS, HIDDEN, TOP_K, TOKENS = 8, 256, 2, 64
-# What a rank's collector may have reclaimed by teardown: nothing, or the layers of one dropped model.
+# Nothing, or the layers of one dropped model.
 RECLAIMED = {"none": (), "first": ("first",), "second": ("second",)}
-# The gloo run: two EP groups of two ranks, each model on its own buffer of the group through its hidden size.
+# Two EP groups of two ranks, each model on its own buffer through its hidden size.
 GLOO_WORLD_SIZE = 4
 GLOO_EP_GROUPS = [[0, 1], [2, 3]]
 GLOO_HIDDEN = {"first": 256, "second": 512}
@@ -55,15 +32,13 @@ GLOO_PG_TIMEOUT = datetime.timedelta(seconds=60)
 
 
 class _Group:
-    """An EP group, named so the destroy log reads which buffer was freed."""
+    """Named so the destroy log reads which buffer was freed."""
 
     def __init__(self, name: str):
         self.name = name
 
 
 class _RecordingBuffer:
-    """Stands in for DeepEP's ElasticBuffer: logs the group of each buffer it destroys."""
-
     destroyed: list = []
 
     def __init__(self, group: _Group, **kwargs):
@@ -77,8 +52,7 @@ class _RecordingBuffer:
 
 
 class _GatheringBuffer(_RecordingBuffer):
-    """A buffer on a real group whose destroy is a collective over it, as DeepEP's is: it logs which buffer
-    every rank of the group was destroying in that collective."""
+    """Its destroy is a collective over a real group, as DeepEP's is."""
 
     def __init__(self, group: dist.ProcessGroup, *, hidden: int, **kwargs):
         self.group = group
@@ -91,8 +65,7 @@ class _GatheringBuffer(_RecordingBuffer):
 
 
 def _record_deep_ep(patcher: pytest.MonkeyPatch, buffer: type = _RecordingBuffer, collectives: bool = False) -> None:
-    """DeepEP replaced by ``buffer`` and registries of the test's own; without ``collectives`` the capacity
-    all-reduce is a no-op too."""
+    """Without ``collectives`` the capacity all-reduce is a no-op too."""
     _RecordingBuffer.destroyed = []
     patcher.setattr(backends_mod, "deep_ep", lambda: SimpleNamespace(ElasticBuffer=buffer))
     patcher.setattr(dispatcher_mod, "deep_ep_available", lambda: True)
@@ -110,12 +83,10 @@ def _record_deep_ep(patcher: pytest.MonkeyPatch, buffer: type = _RecordingBuffer
 
 @pytest.fixture(autouse=True)
 def recorded_deep_ep(monkeypatch):
-    """Every in-process test runs on recorded DeepEP with no collectives."""
     _record_deep_ep(monkeypatch)
 
 
 def _layer(group, hidden: int = HIDDEN) -> dispatcher_mod.DeepEPDispatcher:
-    """A layer's dispatcher on ``group`` that has dispatched once, claiming that group's buffer."""
     ep_config = SimpleNamespace(
         expert_tp_size=1, dispatch_ep_group=group, ep_size=2, spans_domains=False, ep_buffer_backend="elastic"
     )
@@ -125,8 +96,7 @@ def _layer(group, hidden: int = HIDDEN) -> dispatcher_mod.DeepEPDispatcher:
 
 
 def _rank_holding(groups: dict[str, _Group], reclaimed: tuple[str, ...]) -> dict[str, list]:
-    """Every model's layers built in :data:`MODELS` order, then the layers of ``reclaimed`` dropped and
-    collected: the live layers of a rank whose collector has reclaimed those models."""
+    """The live layers of a rank whose collector has reclaimed those models."""
     layers = {name: [_layer(groups[name]) for _ in range(LAYERS_PER_MODEL)] for name in MODELS}
     for name in reclaimed:
         del layers[name]
@@ -139,8 +109,7 @@ def _registered() -> list[str]:
 
 
 def _consensus(peer_unclaimed: dict[str, bool], asked: list[tuple[str, bool]]):
-    """``rank_consensus`` against a peer whose claims on each group's buffer are ``peer_unclaimed``,
-    logging each question as ``(group, this rank's answer)``."""
+    """Logs each question as ``(group, this rank's answer)``."""
 
     def consensus(local_ok: bool, group=None) -> RankConsensus:
         asked.append((group.name, local_ok))
@@ -163,7 +132,7 @@ def test_teardown_frees_every_buffer_in_build_order(reclaimed):
 
 
 def test_the_sweep_frees_only_what_no_rank_of_its_group_claims(monkeypatch):
-    """This rank has reclaimed every layer; a peer on the first group still claims that group's buffer."""
+    """This rank has reclaimed every layer; a peer on the first group still claims that buffer."""
     asked = []
     monkeypatch.setattr(backends_mod, "rank_consensus", _consensus({"first": False, "second": True}, asked))
     _rank_holding({name: _Group(name) for name in MODELS}, reclaimed=MODELS)
@@ -179,8 +148,7 @@ def test_the_sweep_frees_only_what_no_rank_of_its_group_claims(monkeypatch):
 
 
 def test_destroying_the_live_layers_frees_their_buffer_only_once_no_rank_claims_it(monkeypatch):
-    """A dropped model and the live one share a buffer on one group; this rank has reclaimed the dropped
-    model, a peer has not, so destroying the live layers leaves the buffer to teardown."""
+    """This rank reclaimed the dropped model, a peer has not, so the buffer is left to teardown."""
     asked = []
     monkeypatch.setattr(backends_mod, "rank_consensus", _consensus({"shared": False}, asked))
     group = _Group("shared")
@@ -202,8 +170,7 @@ def test_destroying_the_live_layers_frees_their_buffer_only_once_no_rank_claims_
 
 
 def test_a_mode_change_frees_the_old_buffer_only_once_no_rank_claims_it(monkeypatch):
-    """The live layer moves to a deterministic buffer while a peer still claims the old one for a model it
-    has not collected: the old buffer stays registered until teardown."""
+    """A peer still claims the old buffer for a model it has not collected."""
     asked = []
     monkeypatch.setattr(backends_mod, "rank_consensus", _consensus({"shared": False}, asked))
     group = _Group("shared")
@@ -225,8 +192,7 @@ def test_a_mode_change_frees_the_old_buffer_only_once_no_rank_claims_it(monkeypa
 
 
 def _teardown_rank(rank: int, out_dir: str) -> None:
-    """Build both models, drop the first, destroy the second's layers, sweep, tear down. Only the second
-    rank of each group collects the dropped model; the first still holds its claims at teardown."""
+    """Only the second rank of each group collects the dropped model."""
     group = new_groups(rank, GLOO_EP_GROUPS, GLOO_PG_TIMEOUT)
     with pytest.MonkeyPatch.context() as patcher:
         _record_deep_ep(patcher, buffer=_GatheringBuffer, collectives=True)
@@ -253,8 +219,7 @@ def _teardown_rank(rank: int, out_dir: str) -> None:
 def test_ranks_that_collected_differently_free_the_same_buffers_in_the_same_order(tmp_path):
     run_gloo_ranks(_teardown_rank, GLOO_WORLD_SIZE, str(tmp_path), pg_timeout=GLOO_PG_TIMEOUT)
 
-    # The second model's buffer goes as its last live layer is destroyed; the first's, which one rank of the
-    # group still claims, is left by the sweep to teardown.
+    # The first's, which one rank of the group still claims, is left by the sweep to teardown.
     expected = [["second", "second"], ["first", "first"]]
     for rank in range(GLOO_WORLD_SIZE):
         assert json.loads((tmp_path / f"rank{rank}.json").read_text()) == expected, f"rank {rank}"

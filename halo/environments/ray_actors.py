@@ -1,6 +1,5 @@
-"""Ray actors for async environmental-GRPO rollout collection: each :class:`EnvironmentActor` plays episodes
-against a rollout server's ``/v1/chat/completions`` (vLLM or SGLang), and :class:`RolloutManager` fans prompts
-across actors and server URLs under a bounded semaphore. Weight sync is separate (:mod:`halo.weight_sync`)."""
+"""Ray actors for async environmental-GRPO rollouts: :class:`EnvironmentActor` plays episodes against a rollout server,
+and :class:`RolloutManager` fans prompts across actors and server URLs under a bounded semaphore."""
 
 import asyncio
 import hashlib
@@ -37,22 +36,19 @@ from halo.inference.endpoints import is_loopback
 
 logger = logging.getLogger(__name__)
 
-# The engine-paused seconds a deadline credits: the count, or an awaitable of it (a read of the actor's Ray copy).
+# Engine-paused seconds, or an awaitable of them (a read of the actor's Ray copy).
 _PausedClock = Callable[[], float | Awaitable[float]]
 
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
 _MAX_RAY_TEMP_DIR_LEN = 40
-# Where the short link to a deep temp root's Ray dir goes.
 _RAY_LINK_PARENT = "/tmp"
 
-# In-flight rollouts per actor when ``max_concurrent_rollouts`` is unset: actors multiplex episodes on one loop,
-# so oversubscribing keeps the servers fed while a turn is graded.
+# Actors multiplex episodes on one loop, so oversubscribing keeps the servers fed while a turn is graded.
 _DEFAULT_ROLLOUTS_PER_WORKER = 4
 
 
 class RolloutHTTPError(RuntimeError):
-    """A non-200 from the rollout server, its status carried as data: the status decides retry versus abandon
-    (:func:`_should_giveup`), where re-parsing the server-controlled message could misread a quoted status."""
+    """A non-200, status carried as data: re-parsing the server-controlled message could misread a quoted status."""
 
     def __init__(self, status: int, backend: str, body: str):
         super().__init__(f"{backend} error (status {status}): {body}")
@@ -61,7 +57,7 @@ class RolloutHTTPError(RuntimeError):
 
 
 class DeadlineExpired(TimeoutError):
-    """A deadline that ran out of engine-serving time; ``paused_seconds`` is the engine pause it credited."""
+    """``paused_seconds`` is the engine pause the deadline credited."""
 
     def __init__(self, message: str, paused_seconds: float):
         super().__init__(message)
@@ -69,22 +65,19 @@ class DeadlineExpired(TimeoutError):
 
 
 def _is_shutdown_error(exc: BaseException) -> bool:
-    """A benign teardown error (the session or loop closed at shutdown under an in-flight rollout), matched on
-    the text aiohttp and Ray give it, since neither types it: retrying is pointless, and it logs quietly."""
+    """A benign teardown error, matched on text since neither aiohttp nor Ray types it; retrying is pointless."""
     s = str(exc)
     return "Session is closed" in s or "Event loop is closed" in s or "INTENDED_USER_EXIT" in s
 
 
 def _should_giveup(exc: BaseException) -> bool:
-    """Backoff give-up predicate: a benign shutdown error, or a genuine client 4xx read off
-    :class:`RolloutHTTPError`'s status, never its server-controlled message (429/408 and an engine fault retry)."""
+    """Backoff give-up: a shutdown error or a genuine client 4xx (429/408 and an engine fault retry)."""
     return (
         isinstance(exc, RolloutHTTPError) and is_terminal_client_status(exc.status, exc.body)
     ) or _is_shutdown_error(exc)
 
 
 def _http_url(url: str) -> str:
-    """A server URL as the client dials it: ``http://`` where it names no scheme."""
     return url if "://" in url else f"http://{url}"
 
 
@@ -100,8 +93,8 @@ async def _clock_reading(reading: float | Awaitable[float]) -> float:
 async def _await_with_deadline(
     awaitable, timeout: float, paused_clock: _PausedClock | None = None, *, what: str = "episode"
 ):
-    """Await ``awaitable`` under ``timeout`` seconds of engine-serving time, raising :class:`DeadlineExpired`: the
-    weight-sync pauses ``paused_clock`` reads are credited back, read only at the start and at expiry."""
+    """Await under ``timeout`` seconds of engine-serving time, raising :class:`DeadlineExpired`. The weight-sync pauses
+    ``paused_clock`` reads are credited back, read only at the start and at expiry."""
     loop = asyncio.get_running_loop()
     started = loop.time()
     at_start = paused_clock() if paused_clock is not None else 0.0
@@ -136,9 +129,8 @@ async def _await_with_deadline(
 
 
 class EnginePauseClock:
-    """Seconds the rollout engines have spent paused for weight syncs, an open window included. The trainer
-    thread opens and closes windows while the episode loops read them, so the total and the open window's start
-    live in one tuple, replaced whole: a read never pairs one state's total with another's window."""
+    """Seconds the engines spent paused for weight syncs, an open window included. The trainer thread writes while the
+    episode loops read, so total and window start live in one tuple replaced whole: a read never mixes two states."""
 
     def __init__(self):
         self._state: tuple[float, float | None] = (0.0, None)
@@ -147,7 +139,7 @@ class EnginePauseClock:
         self._state = (self._state[0], time.monotonic())
 
     def end(self, seconds: float) -> None:
-        """Close the window, crediting ``seconds`` in place of the open window's own measure."""
+        """Credit ``seconds`` in place of the open window's own measure."""
         self._state = (self._state[0] + seconds, None)
 
     def paused_seconds(self) -> float:
@@ -155,14 +147,14 @@ class EnginePauseClock:
         return total if opened_at is None else total + time.monotonic() - opened_at
 
 
-# The copy the actor processes read. A sync actor runs one submitter's calls in order, so a window's
-# begin never lands after its end; zero CPUs keeps it off the actor pool's slots.
+# A sync actor runs one submitter's calls in order, so a window's begin never lands after its end; zero CPUs keeps it
+# off the actor pool's slots.
 _RemoteEnginePauseClock = ray.remote(num_cpus=0, max_restarts=-1)(EnginePauseClock)
 
 
 @dataclass
 class _SyncExpiries:
-    """Request deadlines one episode saw expire on a request in flight across an engine pause."""
+    """Request deadlines one episode saw expire across an engine pause."""
 
     count: int = 0
 
@@ -172,9 +164,8 @@ class _SyncExpiries:
 
 
 def _short_ray_temp_dir() -> str | None:
-    """A short ``_temp_dir`` for a Ray temp root (``RAY_TMPDIR``, else the temp dir) too deep for Ray's socket
-    paths: a link under ``/tmp`` to ``<root>/ray``, so the sockets get a short path while the session's logs and
-    spilled objects stay on the root's volume. ``None`` when the root is short enough to use as is."""
+    """A short ``_temp_dir`` for a temp root too deep for Ray's socket paths: a link under ``/tmp`` to ``<root>/ray``,
+    so logs and spilled objects stay on the root's volume. ``None`` when the root is short enough."""
     root = os.environ.get("RAY_TMPDIR") or tempfile.gettempdir()
     if len(root) <= _MAX_RAY_TEMP_DIR_LEN:
         return None
@@ -188,8 +179,6 @@ def _short_ray_temp_dir() -> str | None:
 
 
 def ray_init_kwargs(**overrides) -> dict:
-    """Kwargs for ``ray.init``: the dashboard off and, under a temp root too deep for Ray's socket paths, a short
-    ``_temp_dir`` linked onto it (:func:`_short_ray_temp_dir`)."""
     # Dashboard off: unused by the RL actors and exposes Ray's jobs-API HTTP surface
     # (CVE-2023-48022 job-submission RCE, CVE-2025-62593 DNS rebinding).
     kwargs: dict = {"ignore_reinit_error": True, "include_dashboard": False, **overrides}
@@ -199,12 +188,10 @@ def ray_init_kwargs(**overrides) -> dict:
     return kwargs
 
 
-# Actors are stateless between episodes, so unlimited restarts are preferable to a permanent gap in
-# the round-robin, where every episode routed to a dead actor returns a masked row.
+# Stateless between episodes; a permanent gap in the round-robin would mask every episode routed to the dead actor.
 @ray.remote(max_restarts=-1)
 class EnvironmentActor:
-    """A Ray actor playing environment episodes against the rollout server's ``/v1/chat/completions`` (chat
-    template applied server-side); its env, HTTP session and tool schema are built on first use."""
+    """Plays episodes against a rollout server; its env, HTTP session and tool schema are built on first use."""
 
     def __init__(
         self,
@@ -213,8 +200,7 @@ class EnvironmentActor:
         env_config: dict[str, Any],
         pause_clock=None,
     ):
-        """``pause_clock`` is the manager's Ray copy of its :class:`EnginePauseClock`; each request's deadline
-        credits the pause it reads. Without one the deadline is wall-clock."""
+        """``pause_clock``: a Ray copy of the manager's :class:`EnginePauseClock`; none means wall-clock deadlines."""
         self.actor_id = actor_id
         self.env_type = env_type
         self.env_config = env_config
@@ -228,7 +214,6 @@ class EnvironmentActor:
 
     @cached_property
     def _tools_schema(self) -> list[dict] | None:
-        """OpenAI-format tools list, or None if the env has no tools. Static per run."""
         return self._env.get_tools_schema()
 
     @cached_property
@@ -236,8 +221,7 @@ class EnvironmentActor:
         # force_close: the server drops idle keepalives between batches, so a pooled socket
         # yields ServerDisconnectedError whose retries stall this rank at the next collective.
         connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
-        # No session timeout: aiohttp's would charge a weight-sync pause to the request, so each
-        # request runs under the pause-aware deadline in _generate instead.
+        # No session timeout: aiohttp's would charge a weight-sync pause; _generate's deadline credits it.
         return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), connector=connector)
 
     async def run_episode(
@@ -247,7 +231,7 @@ class EnvironmentActor:
         server_url: str,
         config: RolloutConfig,
     ) -> RolloutResult:
-        """Run a complete multi-turn episode; a fault anywhere in it comes back as an errored row."""
+        """A fault anywhere comes back as an errored row."""
         start = time.time()
         sync_expiries = _SyncExpiries()
         try:
@@ -255,8 +239,8 @@ class EnvironmentActor:
         except Exception as e:
             # exc_info: the traceback is all that localizes a fault this catch-all turns into a masked row.
             logger.error(f"Actor {self.actor_id} error: {e}", exc_info=True)
-            # The partial trajectory is dropped: ``error`` keeps the row out of the baseline and the step. Typed,
-            # never ``str(e)``: a bare ``TimeoutError`` stringifies to "", which the mask reads as no error.
+            # ``error`` keeps the row out of the baseline and the step. Typed, never ``str(e)``: a bare
+            # ``TimeoutError`` stringifies to "", which the mask reads as no error.
             return RolloutResult.errored(
                 prompt,
                 describe_exception(e),
@@ -273,7 +257,6 @@ class EnvironmentActor:
         start: float,
         sync_expiries: _SyncExpiries,
     ) -> RolloutResult:
-        """The episode played (:func:`play_episode`) under its bound effort, as the row the trainer reads."""
         env = self._env
         # Bound once per episode: every turn shares the level and its caps.
         effort = bind_episode_effort(
@@ -315,8 +298,7 @@ class EnvironmentActor:
         config: RolloutConfig,
         effort: EpisodeEffort,
     ) -> TurnGeneration:
-        """One turn under the shared retry policy (:func:`generate_turn`): a genuine client 4xx or a shutdown error
-        is terminal, any other transport or engine fault retried."""
+        """A genuine client 4xx or a shutdown error is terminal; any other transport or engine fault retries."""
         return await generate_turn(
             partial(
                 self._generate,
@@ -345,8 +327,8 @@ class EnvironmentActor:
         reasoning_budget: int | None = None,
         budget_soft: bool = False,
     ) -> TurnGeneration:
-        """One ``/v1/chat/completions`` request, and a ``/detokenize`` for a call cut at the cap, each under
-        ``config.request_timeout`` of engine-serving time; raw aiohttp, since the server URL is chosen per call."""
+        """One chat-completions request, and a ``/detokenize`` for a call cut at the cap, each under
+        ``config.request_timeout`` of engine-serving time. Raw aiohttp, since the server URL is chosen per call."""
         url = _http_url(server_url.rstrip("/"))
         payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget, budget_soft)
 
@@ -380,11 +362,10 @@ class EnvironmentActor:
         reasoning_budget: int | None = None,
         budget_soft: bool = False,
     ) -> dict[str, Any]:
-        """The turn's request payload, with this actor's env tool schema bound onto the wire format."""
         return build_payload(messages, config, reasoning_effort, self._tools_schema, reasoning_budget, budget_soft)
 
     async def shutdown(self):
-        """Close the HTTP session and the environment (idempotent; called by RolloutManager.shutdown)."""
+        """Idempotent; called by RolloutManager.shutdown."""
         client = self.__dict__.pop("_http_client", None)
         if client is not None:
             await client.close()
@@ -397,8 +378,7 @@ class EnvironmentActor:
 
 
 class RolloutManager:
-    """Coordinate parallel rollout collection across Ray actors and rollout servers: bounded
-    concurrency (asyncio.Semaphore) + round-robin scheduling over both actors and server URLs."""
+    """Parallel rollout collection: bounded concurrency plus round-robin over both actors and server URLs."""
 
     def __init__(
         self,
@@ -411,7 +391,7 @@ class RolloutManager:
         pool_replicas: int = 1,
     ):
         """``num_workers`` is the actor budget for the whole Ray cluster, divided among the ``pool_replicas`` peers
-        that build a pool against it (the DP size on a shared cluster, else 1)."""
+        building a pool against it (the DP size on a shared cluster, else 1)."""
         self.num_workers = max(1, num_workers // max(1, pool_replicas))
         self.env_type = env_type
         self.env_config = env_config
@@ -431,8 +411,7 @@ class RolloutManager:
         self._started = False
         self._actor_idx = 0
         self._url_idx = 0
-        # Credited back to every in-flight episode's deadline; the episodes' loop reads it. The actors
-        # run in their own processes, so their requests read a Ray copy this manager feeds alongside.
+        # Credited back to in-flight deadlines. Actors in their own processes read a Ray copy fed alongside.
         self._pause_clock = EnginePauseClock()
         self._actor_pause_clock = None
 
@@ -442,26 +421,25 @@ class RolloutManager:
         )
 
     def begin_engine_pause(self) -> None:
-        """Mark the engines paused for a weight sync: in-flight episode and request deadlines stop counting."""
+        """In-flight episode and request deadlines stop counting."""
         self._pause_clock.begin()
         if self._actor_pause_clock is not None:
             self._actor_pause_clock.begin.remote()
 
     def end_engine_pause(self, seconds: float) -> None:
-        """Close the pause window, crediting the ``seconds`` the forwarding rank measured for its push in place of
-        this rank's own estimate: the pause is the servers', timed where the push ran."""
+        """Credit the ``seconds`` the forwarding rank measured, not this rank's estimate: the pause is the servers',
+        timed where the push ran."""
         self._pause_clock.end(seconds)
         if self._actor_pause_clock is not None:
             self._actor_pause_clock.end.remote(seconds)
 
     @property
     def paused_seconds(self) -> float:
-        """Engine-paused seconds so far, an open window included."""
         return self._pause_clock.paused_seconds()
 
     def warn_if_servers_unreachable_from_actors(self, multinode: bool) -> None:
-        """Warn when a rollout-server URL is loopback on a multi-node job: placement only prefers this node, so an
-        actor elsewhere reaches no engine unless one runs on every node."""
+        """Warn on a loopback URL in a multi-node job: placement only prefers this node, so an actor elsewhere reaches
+        no engine unless one runs on every node."""
         urls = self.server_urls
         hosts = [urlparse(_http_url(u)).hostname or "" for u in urls]
         if not multinode or not any(is_loopback(host) for host in hosts):
@@ -478,12 +456,10 @@ class RolloutManager:
         )
 
     async def start(self):
-        """Init Ray (if needed) and spawn the actor pool, preferring this node."""
         if self._started:
             return
         if not ray.is_initialized():
-            # Local-mode fallback for direct library use: on every entry-script path the trainer's
-            # _init_async_components has already initialized Ray with the configured ray_address.
+            # Local-mode fallback for direct library use; entry scripts have already initialized Ray with ray_address.
             ray.init(**ray_init_kwargs())
         # Prefer this node, or a shared cluster scatters this rank's actors. `soft` alone pins an actor to a live
         # but saturated node indefinitely; `_spill_on_unavailable` makes the affinity a preference.
@@ -500,7 +476,6 @@ class RolloutManager:
         logger.info(f"Started {len(self._actors)} environment actors")
 
     async def shutdown(self):
-        """Shut down every actor (closing envs and HTTP sessions) and drop the pool."""
         if not self._started:
             return
         for actor in self._actors:
@@ -530,7 +505,6 @@ class RolloutManager:
         prompts: list[str],
         contexts: list[dict[str, Any]] | None = None,
     ) -> list[RolloutResult]:
-        """Collect rollouts for a batch of prompts (ordered results)."""
         if not self._started:
             await self.start()
         if contexts is None:
@@ -575,12 +549,10 @@ class RolloutManager:
         ]
 
     def _log_failure(self, idx: int, error: Exception) -> None:
-        """Log a rollout lost on the manager's side (its deadline, a shutdown, anything else) by its cause."""
         if isinstance(error, TimeoutError):
             logger.error(f"Rollout {idx} exceeded the {self.rollout_config.episode_timeout}s deadline")
         elif _is_shutdown_error(error):
             logger.debug(f"Rollout {idx} abandoned at shutdown: {error}")
         else:
-            # Same reasoning as the actor-side catch-all: an unclassified failure costs
-            # the whole rollout, and the traceback is what localizes it.
+            # An unclassified failure costs the whole rollout; the traceback is what localizes it.
             logger.error(f"Rollout {idx} failed: {error}", exc_info=True)

@@ -1,17 +1,5 @@
-"""CPU tests for the gathered-save preamble: every rank must issue the SAME gather collectives.
-
-A gathered save (FSDP2 / TP / CP and the injected-LoRA embedding save) resolves parameters, persistent
-buffers and the neutralized GptOss sinks, but only the writer keeps the host copies. Resolving a DTensor
-is ``full_tensor()`` — a mesh-wide collective — so a leg placed behind the ``retain`` gate hangs the
-save: the writer enters the all-gather and its peers never do, and the run dies on the NCCL watchdog
-with no diagnostic. Buffers are the leg at risk (no shipped family carries a DTensor persistent buffer,
-but nothing prevents one), so these tests count gather calls on both sides of ``retain`` rather than
-waiting for a live hang to prove it.
-
-Counting is done by replacing the gather primitives where every branch reads them — the pair
-``halo.runtime.dtensor.gather_full_tensors`` reads (``full_cpu_tensor`` / ``materialize_dtensor``). The
-tensors themselves stay plain, since a real DTensor needs an initialized process group.
-"""
+"""The gathered-save preamble: every rank issues the same gathers, since resolving a DTensor is a mesh-wide
+``full_tensor()``. Counted at the primitives, as real DTensors need a process group."""
 
 import pytest
 import torch
@@ -22,8 +10,6 @@ from halo.checkpoint.parallel.writing import chunked_saveable_tensors
 
 
 class _BufferModel(nn.Module):
-    """A parameter and a PERSISTENT buffer — the two legs a gathered save resolves."""
-
     def __init__(self):
         super().__init__()
         self.fc = nn.Linear(4, 4, bias=False)
@@ -32,7 +18,7 @@ class _BufferModel(nn.Module):
 
 
 def _count_gathers(monkeypatch):
-    """Count every gather any leg issues, retaining or not (all of them are collectives)."""
+    """All of them are collectives."""
     counter = {"n": 0}
 
     def counting(tensor, _real_resolve=dtensor_mod.full_cpu_tensor):
@@ -49,8 +35,7 @@ def _count_gathers(monkeypatch):
 
 
 def test_retain_does_not_change_the_number_of_gathers(monkeypatch):
-    """The writer and the non-writers must run the identical collective sequence: one gather for the
-    parameter and one for the persistent buffer, chunk by chunk."""
+    """One gather for the parameter and one for the persistent buffer, chunk by chunk."""
     model = _BufferModel()
 
     counter = _count_gathers(monkeypatch)
@@ -67,7 +52,7 @@ def test_retain_does_not_change_the_number_of_gathers(monkeypatch):
 
 
 def test_only_the_retaining_rank_keeps_the_tensors(monkeypatch):
-    """The point of the gate: peers join the collectives without holding a copy of the model."""
+    """Peers join the collectives without holding a copy of the model."""
     model = _BufferModel()
     _count_gathers(monkeypatch)
 

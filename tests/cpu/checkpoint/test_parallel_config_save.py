@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the config half of every parallel (EP/TP/FSDP2 gathered) save.
-
-The parallel save paths write the weights by hand and therefore never call ``save_pretrained`` — so
-everything else ``save_pretrained`` would have emitted has to be reproduced by ``save_model_config``.
-Two of those things are load-bearing and go missing silently when they are not written:
-
-* a remote-code model's ``modeling_*.py``, which its own ``auto_map`` names — without it the saved
-  directory raises ``OSError: does not appear to have a file named modeling_<x>.py`` for every
-  consumer (resume, export, the rollout servers);
-* ``model_type``, which ``PretrainedConfig.to_dict`` reads off the CLASS — empty for the vendor
-  config classes Bailing/Ling ship, so the key vanishes and every model-type-keyed reader
-  downstream (the sharded-EP merge, the hub key renames) sees no family at all.
-
-The converse holds for every writer: an ``auto_map`` an in-library load carried over from the hub
-config must not name modules the export does not ship.
-
-Run: ``pytest -m cpu tests/cpu/checkpoint/test_parallel_config_save.py``
-"""
+"""The config half of every parallel gathered save, which never calls ``save_pretrained``. A missing
+``modeling_*.py`` makes every consumer raise; ``to_dict`` reads an empty ``model_type`` on Bailing/Ling."""
 
 from __future__ import annotations
 
@@ -40,7 +24,7 @@ _LAGUNA_HUB_AUTO_MAP = {
 
 
 class _VendorConfig(PretrainedConfig):
-    """A remote-code config exactly as Bailing/Ling ships one: no class-level ``model_type``."""
+    """No class-level ``model_type``, as Bailing/Ling ship."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -54,11 +38,7 @@ class _VendorModel:
 
 
 def _dynamic_model(tmp_path, monkeypatch, module_name: str = "modeling_vendor_moe"):
-    """A model whose class lives in a ``transformers_modules`` module on disk, as remote code does.
-
-    Only that module is bound in ``sys.modules``, and only for the test: a stand-in ``transformers_modules``
-    package would shadow the real one, and every later remote-code load in the process would fail to import.
-    """
+    """Only that module is bound in ``sys.modules``: a stand-in package would break every later remote-code load."""
     tmp_path.mkdir(parents=True)
     source = tmp_path / f"{module_name}.py"
     source.write_text("class VendorForCausalLM:\n    def __init__(self, config):\n        self.config = config\n")
@@ -74,11 +54,7 @@ def _dynamic_model(tmp_path, monkeypatch, module_name: str = "modeling_vendor_mo
 
 
 def test_remote_code_modules_travel_with_the_checkpoint(tmp_path, monkeypatch):
-    """The module the config's ``auto_map`` names must be written beside it.
-
-    Without this the directory is loadable by nothing: ``from_pretrained`` resolves ``auto_map`` and
-    raises on the missing file, which lands after a full training run.
-    """
+    """``from_pretrained`` resolves ``auto_map`` and raises on the missing file, after a full training run."""
     model = _dynamic_model(tmp_path / "src", monkeypatch)
     out = tmp_path / "out"
     out.mkdir()
@@ -93,12 +69,8 @@ def test_remote_code_modules_travel_with_the_checkpoint(tmp_path, monkeypatch):
 
 
 def test_remote_code_modules_travel_from_an_fsdp2_sharded_model(tmp_path, monkeypatch):
-    """The same, after FSDP2 has rewritten ``model.__class__`` — the only way these models are saved.
-
-    ``fully_shard`` swaps in a dynamic ``FSDP<Name>`` subclass whose ``__module__`` is torch's, so a
-    check on the live class sees no remote code and skips the copy on every sharded run — i.e. exactly
-    the runs that produce real checkpoints.
-    """
+    """``fully_shard`` swaps in a ``FSDP<Name>`` subclass with torch's ``__module__``, so a live-class check skips
+    the copy on every sharded run."""
     model = _dynamic_model(tmp_path / "src", monkeypatch)
     original_cls = type(model)
     # How torch.distributed.fsdp._fully_shard._fsdp_init installs its subclass.
@@ -116,8 +88,7 @@ def test_remote_code_modules_travel_from_an_fsdp2_sharded_model(tmp_path, monkey
 
 
 def test_remote_code_modules_travel_from_a_stamped_stand_in(tmp_path, monkeypatch):
-    """A module that stands in for the cut model (a pipeline stage) is no remote-code class itself; the
-    class stamped on it at construction is what the save must copy."""
+    """A pipeline stage is no remote-code class itself; the class stamped at construction is what is copied."""
     source = _dynamic_model(tmp_path / "src", monkeypatch)
     stage = _VendorModel(source.config)
     setattr(stage, REMOTE_CODE_MODEL_CLASS_ATTR, type(source))
@@ -131,7 +102,6 @@ def test_remote_code_modules_travel_from_a_stamped_stand_in(tmp_path, monkeypatc
 
 
 def test_model_type_survives_a_vendor_config_with_no_class_attribute(tmp_path, monkeypatch):
-    """``to_dict`` reads ``model_type`` off the class, which these vendor configs leave empty."""
     model = _dynamic_model(tmp_path / "src", monkeypatch)
     assert type(model.config).model_type == "", "fixture no longer reproduces the empty class attribute"
     out = tmp_path / "out"
@@ -147,8 +117,6 @@ def test_model_type_survives_a_vendor_config_with_no_class_attribute(tmp_path, m
 
 
 def test_a_declared_model_type_is_left_alone(tmp_path):
-    """Anti-over-reach: the repair must not rewrite a config that serialized its family correctly."""
-
     class _DeclaredConfig(PretrainedConfig):
         model_type = "declared_moe"
 
@@ -160,8 +128,6 @@ def test_a_declared_model_type_is_left_alone(tmp_path):
 
 
 def test_a_plain_model_writes_no_remote_code(tmp_path):
-    """A first-party model has no ``auto_map``, so nothing extra may be emitted for it."""
-
     class _PlainConfig(PretrainedConfig):
         model_type = "plain"
 
@@ -173,8 +139,8 @@ def test_a_plain_model_writes_no_remote_code(tmp_path):
 
 
 def _in_library_laguna(source_dir):
-    """Laguna as a run without ``trust_remote_code`` loads it: the in-library classes, read off a
-    config.json whose ``auto_map`` names the release's remote modules."""
+    """Without ``trust_remote_code``: in-library classes, off a config.json whose ``auto_map`` names the release's
+    remote modules."""
     source_dir.mkdir()
     payload = LagunaConfig(**TINY_LAGUNA_CONFIG).to_dict() | {"auto_map": _LAGUNA_HUB_AUTO_MAP}
     (source_dir / "config.json").write_text(json.dumps(payload))
@@ -186,16 +152,15 @@ def _in_library_laguna(source_dir):
 
 
 def _save_pretrained_export(model, output_dir: str) -> None:
-    """The single-GPU / tool path: ``save_pretrained``, then the shared finalizer."""
+    """The single-GPU / tool path."""
     model.save_pretrained(output_dir)
     finalize_exported_config(model.config, output_dir, source=config_schema_source(model))
 
 
 @pytest.mark.parametrize("export", [save_model_config, _save_pretrained_export], ids=["parallel", "save_pretrained"])
 def test_an_in_library_load_exports_no_auto_map_naming_unshipped_modules(tmp_path, export):
-    """transformers ships remote code only for a class registered to an auto class, yet serializes
-    the hub ``auto_map``; the export then names modules it never wrote and a ``trust_remote_code``
-    reload (the checkpoint tools' default for a local source) raises on the missing file."""
+    """transformers serializes the hub ``auto_map`` without shipping the modules, so a ``trust_remote_code`` reload
+    raises."""
     model = _in_library_laguna(tmp_path / "src")
     out = tmp_path / "out"
     out.mkdir()
@@ -207,8 +172,7 @@ def test_an_in_library_load_exports_no_auto_map_naming_unshipped_modules(tmp_pat
 
 
 def test_only_the_unshipped_auto_map_entries_are_dropped(tmp_path):
-    """A shipped module, a cross-repo ``repo--module.Class`` reference and a tokenizer pair whose
-    shipped slot sits beside an absent one all still resolve on reload; only the dangling entry goes."""
+    """Only the dangling entry goes."""
     (tmp_path / "modeling_vendor.py").write_text("")
     (tmp_path / "tokenization_vendor.py").write_text("")
     kept = {

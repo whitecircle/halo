@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""A preprocessed SFT run must end with the chat template its rows were rendered with, the one it exports.
-
-``prepare_dataset.py --chat_template`` renders every row with the override, while a training run applies its own
-``chat_template`` only where the checkpoint ships none or ``force_chat_template`` is set, and the saved checkpoint
-carries the run's template. The bake records the template it rendered with, and the startup check holds the run's
-final tokenizer or processor to it. Driven through the real bake and the training tokenizer seam on cached
-tokenizers.
-
-    python tests/cpu/data/test_preprocessed_chat_template.py
-"""
+"""A preprocessed SFT run must end with the chat template its rows were rendered with, the one it exports. A run
+applies its own ``chat_template`` only where the checkpoint ships none or ``force_chat_template`` is set, so the
+startup check holds its final tokenizer or processor to the template the bake records."""
 
 import json
 import logging
@@ -99,8 +92,7 @@ def test_the_bake_records_the_template_it_rendered_with(tmp_path):
 
 
 def test_a_stated_override_without_force_is_refused(tmp_path):
-    """The reported shape: baked with --chat_template X, trained with chat_template: X alone. Every stated knob
-    matches the artifact, yet the run keeps the checkpoint's template and would export it."""
+    """Every stated knob matches the artifact, yet the run keeps the checkpoint's template and would export it."""
     metadata, _ = _bake_chat(tmp_path, chat_template=OVERRIDE)
     args = SFTScriptArguments(chat_template=OVERRIDE)
     tokenizer = _run_tokenizer(args)
@@ -122,8 +114,7 @@ def test_a_forced_override_trains_and_exports_the_rows_template(tmp_path):
 
 
 def test_an_unstated_template_against_an_override_bake_is_refused(tmp_path, caplog):
-    """Stating nothing keeps the checkpoint's template too; the warning's remedy has to name the force flag,
-    since stating chat_template alone changes nothing."""
+    """The warning's remedy names the force flag, since stating chat_template alone changes nothing."""
     metadata, _ = _bake_chat(tmp_path, chat_template=OVERRIDE)
     args = SFTScriptArguments()
 
@@ -143,8 +134,7 @@ def test_a_stock_bake_holds_the_run_to_the_template_its_rows_saw(tmp_path):
 
 
 def test_a_stamp_predating_the_recorded_template(tmp_path):
-    """Without the field, only a recorded override says what rendered (the bake applies it unconditionally); a
-    stock bake records nothing to compare, so it trains as before."""
+    """Without the field, only a recorded override says what rendered; a stock bake records nothing to compare."""
     _bake_chat(tmp_path / "stock")
     stock = _as_predating_the_recorded_template(tmp_path / "stock")
     args = SFTScriptArguments()
@@ -203,7 +193,7 @@ def test_a_vlm_run_is_held_to_the_template_its_processor_rendered_with(tmp_path)
 def test_a_vlm_stamp_predating_the_recorded_template_is_not_held_to_its_override(tmp_path):
     """Such a stamp's processor may have rendered with its own template despite the recorded override, so the
     override proves nothing about the rows and a run keeping the processor's template is not refused."""
-    load_cached_processor(QWEN3_5_9B)  # skips where the processor is not cached
+    load_cached_processor(QWEN3_5_9B)
     config = PreprocessingConfig(model_name_or_path=QWEN3_5_9B, is_vlm=True, chat_template=VLM_OVERRIDE)
     _bake(
         tmp_path,

@@ -1,6 +1,5 @@
-"""The generic environment eval's run: the examples read from a dataset's prompt, answer and context columns, every
-named column checked first, and the scored run of any registered environment over them. Behind
-``scripts/environments/inference/eval_env.py``."""
+"""The generic environment eval behind ``scripts/environments/inference/eval_env.py``: any registered environment over
+a dataset's prompt, answer and context columns."""
 
 import argparse
 import asyncio
@@ -25,15 +24,13 @@ from halo.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
 
-# The column naming an example when --id_field is not given; a dataset may carry none.
 DEFAULT_ID_FIELD = "id"
 
 
 def require_field_columns(args: argparse.Namespace, columns: list[str]) -> None:
-    """Refuse a field flag that names no column of the split, before a row is read: a mistyped
-    ``--prompt_field`` would skip every row, and a mistyped answer, context field, bucket or id would
-    vanish from every example. The default ``--answer_field`` and ``--id_field`` go unchecked: a dataset
-    may carry neither, and whether an answer is needed is the environment's ``requires_answer``."""
+    """Refuse a field flag naming no column, before a row is read: a mistyped ``--prompt_field`` would skip every row,
+    and other mistyped fields would vanish from every example. The default ``--answer_field`` and ``--id_field`` go
+    unchecked, since a dataset may carry neither."""
     named = [("--prompt_field", args.prompt_field)]
     named += [("--answer_field", args.answer_field)] if args.answer_field != DEFAULT_ANSWER_FIELD else []
     named += [("--context_fields", field) for field in args.context_fields]
@@ -47,7 +44,6 @@ def require_field_columns(args: argparse.Namespace, columns: list[str]) -> None:
 
 
 def build_column_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Read eval examples from the dataset's prompt/answer columns, every named field checked first."""
     split = load_dataset_split(args.dataset, split=args.split, config=args.config)
     require_field_columns(args, split.column_names)
     examples = []
@@ -76,8 +72,7 @@ def build_column_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def run_generic_env_eval(args: argparse.Namespace) -> None:
-    """Evaluate the environment ``args`` names, or its training contract does, over the dataset's columns, report
-    mean reward and success@k and write the results and trajectories."""
+    """Evaluate over the dataset's columns, report mean reward and success@k and write results and trajectories."""
     contract = load_training_contract(args.training_config)
     trained_env = contract.env_config.to_env_config() if contract is not None else {}
     env_type = resolve_setting(args.env_type, contract.env_config.environment_type if contract else None, None)

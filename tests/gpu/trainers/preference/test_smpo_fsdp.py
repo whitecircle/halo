@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""SMPO smoke test on plain FSDP2: Qwen3-0.6B, 10 steps, GC + Liger + bf16, padded or ``--mode padding_free``.
-
-Every configured step runs with finite losses, and the padding-free row trains padding-free. Neither row compares
-the objective against a reference; test_smpo_padding_free_segments.py pins padding-free per-document isolation.
-Run: torchrun --nproc_per_node=2 tests/gpu/trainers/preference/test_smpo_fsdp.py [--mode padding_free]
-"""
+"""SMPO smoke on plain FSDP2, padded or ``--mode padding_free``. Compares no objective against a reference;
+test_smpo_padding_free_segments.py pins per-document isolation."""
 
 import argparse
 
@@ -52,7 +48,7 @@ def run(ctx):
         learning_rate=5e-6,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # Already applied in load_distributed_model
+        use_liger_kernel=False,  # Already applied in load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",

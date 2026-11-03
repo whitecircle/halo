@@ -1,5 +1,5 @@
-"""Fold a saved PEFT adapter into its base model and write the merged checkpoint, behind the input gates
-every tool writing from a saved adapter shares; the causal-LM and classification merge drivers."""
+"""Fold a saved PEFT adapter into its base and write the merged checkpoint, behind the input gates every adapter tool
+shares; the causal-LM and classification merge drivers."""
 
 from __future__ import annotations
 
@@ -59,12 +59,8 @@ def load_base_for_adapter(
     excuse_task_head: bool,
     log,
 ) -> _AdapterBaseModel:
-    """The base loaded through the class whose module tree the adapter's keys address.
-
-    ``PeftModel.from_pretrained`` only warns when saved keys name no live module, then merges nothing. An
-    adapter trained through a multimodal checkpoint's text-only class is met through that class; a key set
-    neither class carries means the base does not belong to the adapter.
-    """
+    """The base loaded through the class the adapter's keys address, since ``PeftModel.from_pretrained`` only warns
+    when saved keys name no live module and then merges nothing. A key set neither class carries raises."""
     paths = adapter_module_paths(adapter_dir)
     base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
     absent = _paths_absent_from(base_model, paths)
@@ -90,8 +86,7 @@ def load_base_for_adapter(
 
 
 def _embedding_weights(model: torch.nn.Module) -> dict[str, torch.Tensor]:
-    """The weight the input embedding and the output head compute with, by role, a tied pair once; read through a
-    PEFT wrapper, whose ``weight`` is its base layer's or its trained copy's."""
+    """The weight the input embedding and output head compute with, by role, a tied pair once, through wrappers."""
     weights: dict[str, torch.Tensor] = {}
     for role, module in (
         ("input embedding", model.get_input_embeddings()),
@@ -103,14 +98,8 @@ def _embedding_weights(model: torch.nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _grown_vocabulary(model: PreTrainedModel, adapter_pc, base_pc) -> int | None:
-    """The length of the adapter directory's tokenizer (``adapter_pc``) where the run grew ``model``'s vocabulary to
-    it, else None; ``base_pc`` is the base's, each as :func:`load_processing_class` returns it.
-
-    :func:`~halo.model_loading.tokenizer_setup.configure_run_tokenizer` grows the embedding when added tokens take the
-    tokenizer past its rows, read here as a tokenizer with more ids than ``model`` has rows over a base whose own
-    tokenizer fits them. A base whose tokenizer already outruns its rows, or a directory without a tokenizer, records
-    no grow.
-    """
+    """The adapter tokenizer's length where the run grew ``model``'s vocabulary to it, else None: more ids than
+    ``model`` has rows, over a base whose own tokenizer fits them."""
     if adapter_pc is None:
         return None
     num_tokens = len(resolve_tokenizer(adapter_pc))
@@ -123,16 +112,10 @@ def _grown_vocabulary(model: PreTrainedModel, adapter_pc, base_pc) -> int | None
 
 
 def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_pc, base_pc, log) -> PeftModel:
-    """The saved adapter loaded onto ``model``, its base (:func:`load_base_for_adapter`), first grown to a vocabulary
-    the run grew (:func:`_grown_vocabulary`, over the adapter directory's and the base's processing classes), which
-    ``log`` reports, since the output then holds more rows than its base.
-
-    The rows a run adds exist in no base checkpoint, so its adapter carries them. They start as NaN, so a row the
-    adapter leaves unset is never served from uninitialized memory: an adapter saved before adapter saves carried a
-    grown vocabulary's rows has them rebuilt, with a warning, as the mean of the checkpoint's rows. The run drew them
-    by transformers' mean resizing (that mean, with 1e-9 of the rows' covariance) and an adapter run keeps them
-    frozen, so the rebuilt rows match the run's to within that draw.
-    """
+    """The saved adapter loaded onto ``model``, first grown to a vocabulary the run grew. The added rows start as NaN,
+    so an unset row is never served from uninitialized memory. An adapter lacking them has them rebuilt, with a
+    warning, as the checkpoint rows' mean, matching the run's frozen mean-resize draw (that mean plus 1e-9 of the rows'
+    covariance)."""
     num_tokens = _grown_vocabulary(model, adapter_pc, base_pc)
     if num_tokens is None:
         return PeftModel.from_pretrained(model, adapter_dir)
@@ -161,12 +144,8 @@ def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_pc, base_
 
 
 def adapter_input_gates(adapter_dir: str, output_dir: str) -> PeftConfig:
-    """Refuse a saved adapter a tool cannot convert into ``output_dir``, then return its config.
-
-    The gates every tool writing from a saved adapter shares, each covering a failure that raises
-    nothing: a partial directory (adapter and base), an output that is an input, and a native expert
-    adapter ``merge_and_unload`` would drop.
-    """
+    """Refuse a partial directory (adapter and base), an output that is an input, and a native expert adapter
+    ``merge_and_unload`` would drop, each of which raises nothing otherwise. Returns the adapter's config."""
     reject_partial_checkpoint(adapter_dir)
     reject_in_place_conversion(adapter_dir, output_dir)
     reject_expert_lora_adapter(adapter_dir)
@@ -191,12 +170,9 @@ def merge_adapter_into_base(
     prepare_for_save: Callable[[PreTrainedModel], None] | None = None,
     verbose: bool = True,
 ) -> PreTrainedModel:
-    """Fold a saved PEFT adapter into its base model and write the merged checkpoint.
-
-    The input gates run before any load. ``load_base_model`` may excuse a missing task head only when
-    the adapter's ``modules_to_save`` declares one. ``prepare_for_save`` mutates the merged model before
-    the save, which carries the base's aux files; the adapter's sidecars and config travel separately.
-    """
+    """Fold a saved PEFT adapter into its base and write the merged checkpoint. ``load_base_model`` may excuse a
+    missing task head only when ``modules_to_save`` declares one; ``prepare_for_save`` mutates the merged model before
+    the save."""
     log = logger.info if verbose else lambda message: None
 
     peft_config = adapter_input_gates(adapter_dir, output_dir)
@@ -258,15 +234,9 @@ def load_task_base_model(
     text_only: bool = False,
     trust_remote_code: bool = True,
 ):
-    """The base loaded as ``task`` through :func:`load_task_model`'s coverage gate, with the merge's load settings.
-
-    A base directory that is truncated, or whose keys do not match the architecture, otherwise
-    random-initializes the absent tensors with only a log line and the merge would ship those weights as a
-    finished model. Whether a seq-cls head may be absent, and whether a multimodal base loads as its text-only
-    class, is decided by :func:`merge_adapter_into_base` from the adapter's own declaration and keys. A
-    causal-LM base's head is always excused: its widest class adds one an encoder checkpoint (an embedding
-    run's) never carries.
-    """
+    """The base loaded as ``task`` through :func:`load_task_model`'s coverage gate, since a truncated directory would
+    random-initialize absent tensors and the merge ship them. A causal-LM base's head is always excused, since its
+    widest class adds one an encoder checkpoint never carries."""
     model_kwargs = {
         "dtype": dtype,
         "trust_remote_code": trust_remote_code,
@@ -298,21 +268,7 @@ def merge_peft_adapter(
     fp32_norms: bool = False,
     verbose: bool = True,
 ):
-    """Merge a PEFT adapter into its base model and save the result.
-
-    Args:
-        adapter_dir: Path to the PEFT adapter directory (contains adapter_model.safetensors)
-        output_dir: Path to save the merged model
-        task: Model task type ("causal_lm" or "classification")
-        dtype: Model dtype for loading/saving
-        device_map: Device map for loading large models (e.g., "auto", "cpu")
-        num_labels: Number of labels for classification models
-        max_shard_size: Maximum shard size for output safetensors
-        attn_implementation: Override attention implementation (e.g., "flash_attention_2", "sdpa")
-        trust_remote_code: Passed to the base-model and processor loads
-        fp32_norms: Write every normalization leaf in fp32 instead of ``dtype``
-        verbose: Log progress messages
-    """
+    """Merge a PEFT adapter into its base model and save the result; ``fp32_norms`` writes norm leaves in fp32."""
     if verbose:
         logger.info(f"Task: {task}, dtype: {dtype}")
 

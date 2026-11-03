@@ -31,8 +31,7 @@ def _malformed_card_message(card: Path, reason: Exception) -> str:
 
 
 class MalformedModelCardError(ValueError):
-    """A ``README.md`` whose tags cannot be rewritten: its metadata block is not a YAML mapping, or
-    its ``tags`` entry is neither a list nor a string."""
+    """A ``README.md`` whose metadata is not a YAML mapping, or whose ``tags`` is neither a list nor a string."""
 
     def __init__(self, card: Path, reason: Exception):
         self.card = card
@@ -41,7 +40,7 @@ class MalformedModelCardError(ValueError):
 
 
 def with_halo_tags(tags: str | list[str] | None) -> list[str]:
-    """``tags`` as a list, a bare string or ``None`` included, with :data:`HUB_TAGS` appended where absent."""
+    """``tags`` as a list, with :data:`HUB_TAGS` appended where absent."""
     tags = [tags] if isinstance(tags, str) else list(tags or [])
     return tags + [tag for tag in HUB_TAGS if tag not in tags]
 
@@ -58,8 +57,8 @@ def _is_hub_repo_id(name: str) -> bool:
 
 
 def _fresh_card_metadata(directory: Path) -> dict:
-    """What a new card declares besides the tags: ``library_name: peft`` and ``base_model`` for an adapter
-    stock PEFT loads, nothing otherwise, so the card claims no loader that would refuse the files."""
+    """``library_name: peft`` and ``base_model`` for an adapter stock PEFT loads, else nothing, so the card claims no
+    loader that would refuse the files."""
     config = read_checkpoint_config(directory, missing_ok=True, filename=ADAPTER_CONFIG_FILE)
     if config is None or config.get("peft_type") not in _STOCK_PEFT_TYPES:
         return {}
@@ -71,16 +70,9 @@ def _fresh_card_metadata(directory: Path) -> dict:
 
 
 def tag_model_card(output_dir: str) -> None:
-    """Add :data:`HUB_TAGS` to the ``README.md`` card in ``output_dir``, creating it if absent.
-
-    Only the ``tags`` value of an existing card changes (its YAML comments are lost to the re-dump), and a
-    fully tagged card is left alone. The write is staged and swapped in, which also replaces a symlinked
-    Hub-cache card instead of writing through it into the blob.
-
-    Raises:
-        MalformedModelCardError: the metadata block is not a mapping, or ``tags`` is neither a list nor
-            a string.
-    """
+    """Add :data:`HUB_TAGS` to ``output_dir``'s ``README.md``, creating it if absent; a malformed card raises. Only
+    ``tags`` changes (YAML comments are lost to the re-dump), and the staged swap replaces a symlinked Hub-cache card
+    instead of writing through it into the blob."""
     path = Path(output_dir) / REPOCARD_NAME
     exists = path.is_file()
     if exists:
@@ -102,14 +94,13 @@ def tag_model_card(output_dir: str) -> None:
             shutil.copyfile(path, staged)
         metadata_save(staged, metadata)
         if exists:
-            # After the write: a read-only source mode on the staged file would refuse metadata_save.
+            # After the write, since a read-only source mode on the staged file would refuse metadata_save.
             shutil.copymode(path, staged)
 
 
 def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -> None:
-    """:func:`tag_model_card` for an export, where a malformed card stays untagged with a warning instead
-    of failing a write whose weights are on disk; the warning names ``source_dir``'s card when it was
-    copied from there."""
+    """:func:`tag_model_card` for an export, where a malformed card stays untagged with a warning, since the weights
+    are already on disk; the warning names ``source_dir``'s card when it was copied from there."""
     try:
         tag_model_card(output_dir)
     except MalformedModelCardError as error:

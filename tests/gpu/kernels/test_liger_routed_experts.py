@@ -1,16 +1,8 @@
 #!/usr/bin/env python
-"""Routed experts Halo leaves unwrapped compute the family's own function, forward and backward.
+"""Routed experts Halo leaves unwrapped compute the family's own function, under identical routing.
 
-At ``ep_size: 1`` with ``use_grouped_gemm: false`` Halo installs no EP layer, so after Liger is
-applied the routed experts run whatever the model builds for them. Liger must not be that:
-``LigerExperts``, upstream liger-kernel's fused MoE kernel, computed the input gradient wrong on
-Blackwell until the fix that shipped in liger-kernel 0.8.3, while its forward and weight gradients
-stayed close — a silently wrong gradient into every layer below. This drives a Qwen3-MoE experts block through the path Halo
-selects (``ParallelismConfig`` → ``apply_liger_kernel`` → model build) and checks the forward, the
-input gradient, the routing-weight gradient and both weight gradients against the family's eager
-experts in fp32, with routing held identical so a near-tied top-k pick cannot move the result.
-
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_liger_routed_experts.py
+At ``ep_size: 1`` with ``use_grouped_gemm: false`` no EP layer exists. ``LigerExperts`` computed the input gradient
+wrong on Blackwell until the fix that shipped in liger-kernel 0.8.3, while its forward stayed close.
 """
 
 import copy
@@ -29,8 +21,7 @@ SEED = 0
 # Qwen3-30B-A3B's MoE geometry: 128 experts of width 768 over a 2048 hidden, top-8.
 HIDDEN, EXPERT_WIDTH, NUM_EXPERTS, TOP_K, TOKENS = 2048, 768, 128, 8, 8192
 INIT_STD = 0.02
-# Mean relative error against the fp32 oracle. bf16 storage puts every tensor near 6e-3 on the
-# path Halo selects; LigerExperts' input gradient on a B300 sat near 0.6 before that fix.
+# bf16 storage puts every tensor near 6e-3; LigerExperts' input gradient on a B300 sat near 0.6 before its fix.
 TOL = 2e-2
 GRADIENTS = ("fwd", "dx", "d_routing_weights", "d_gate_up_proj", "d_down_proj")
 
@@ -56,7 +47,7 @@ def _relative_error(actual: torch.Tensor, reference: torch.Tensor) -> float:
 
 
 def _forward_backward(experts, hidden, top_k_index, top_k_weights, grad_output) -> tuple[torch.Tensor, ...]:
-    """The block's output and the four gradients it feeds back: input, routing weights, both weights."""
+    """The output and the four gradients it feeds back: input, routing weights, both weights."""
     hidden = hidden.clone().requires_grad_(True)
     top_k_weights = top_k_weights.clone().requires_grad_(True)
     output = experts(hidden, top_k_index, top_k_weights)
@@ -72,7 +63,6 @@ def _check_the_experts_are_the_familys_own(selected, stock) -> None:
 
 
 def _check_numerics(selected, stock, config, device) -> None:
-    """The selected bf16 path against the family's eager experts in fp32, under identical routing."""
     oracle_config = copy.deepcopy(config)
     oracle_config._experts_implementation = "eager"
     torch.manual_seed(SEED)
@@ -105,7 +95,7 @@ def run(ctx) -> dict:
     torch.cuda.set_device(ctx.device)
     configure_float32_matmul_precision()
 
-    # Captured before Liger runs: an applier's class swap is process-global.
+    # An applier's class swap is process-global.
     stock = modeling_qwen3_moe.Qwen3MoeExperts
     parallelism = ParallelismConfig(use_grouped_gemm=False)
     assert not parallelism.needs_ep_layers, "ep_size 1 without grouped GEMM must leave the experts unwrapped"

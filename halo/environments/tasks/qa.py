@@ -12,18 +12,16 @@ from halo.environments.tools.definitions import NativeToolRegistry
 from halo.environments.tools.toolsets import build_python_tools, build_search_tools
 from halo.rewards.graders.matching import is_correct_answer
 
-# The choice letters :func:`multiple_choice_match` scores (MMLU-Pro tops out at 10 options).
-# ``ExamQAEnvironment``'s system prompt is built from this same range, so the instruction the model
-# reads matches what the grader accepts.
+# MMLU-Pro tops out at 10 options. ``ExamQAEnvironment``'s system prompt is built from this range, so the instruction
+# matches what the grader accepts.
 MULTIPLE_CHOICE_LETTERS = "ABCDEFGHIJ"
 
 _CHOICE_LETTER = f"[{MULTIPLE_CHOICE_LETTERS}]"
 # A choice already led by its own letter ("B: Jupiter", "(B) Jupiter", "B. Jupiter") is shown as written.
 _LETTER_LABEL = re.compile(rf"\(?({_CHOICE_LETTER})[).:]\s")
 
-# Priority order, most specific first: "The answer is A" / "(A)" / "A." / "Option A" / a bare letter. In
-# prose a choice is an uppercase letter standing alone: read case-insensitively or up to the next letter,
-# "the answer is a tie", "the answer is definitely C" and "e.g." would each name a choice. A bracketed or
+# Most specific first. In prose a choice is an uppercase letter standing alone: read case-insensitively or up to the
+# next letter, "the answer is a tie", "the answer is definitely C" and "e.g." would each name a choice. A bracketed or
 # bare letter is a choice in either case.
 _MULTIPLE_CHOICE_PATTERNS = [
     re.compile(pattern)
@@ -45,9 +43,8 @@ _QA_SEARCH_SYSTEM_PROMPT = (
 
 
 def render_choices(choices: list[Any]) -> str:
-    """One line per choice, each led by the letter :func:`multiple_choice_match` scores it as (an already-labelled
-    choice is kept): MMLU-style rows carry bare option texts, so without letters the model could not name a choice.
-    """
+    """One line per choice, led by its letter (an already-labelled choice is kept): MMLU-style rows carry bare option
+    texts, so without letters the model could not name a choice."""
     if len(choices) > len(MULTIPLE_CHOICE_LETTERS):
         raise ValueError(
             f"{len(choices)} choices, but only {MULTIPLE_CHOICE_LETTERS[0]}-{MULTIPLE_CHOICE_LETTERS[-1]} "
@@ -62,9 +59,7 @@ def render_choices(choices: list[Any]) -> str:
 
 
 def multiple_choice_match(predicted: str, expected: str) -> bool:
-    """Whether ``predicted`` names the choice letter ``expected`` ("A", "(A)", "The answer is A", "Option A", ...).
-    ``expected`` must already be a letter (:meth:`ExamQAEnvironment._expected_choice_letter` converts an index).
-    """
+    """``expected`` must already be a letter (:meth:`ExamQAEnvironment._expected_choice_letter` converts an index)."""
     pred = str(predicted).strip()
     exp = str(expected).strip().upper()
 
@@ -86,19 +81,13 @@ def build_qa_search_environment(
     system_prompt: str | None = None,
     **kwargs,
 ) -> NativeToolUseEnvironment:
-    """A factual-QA-with-search environment (SimpleQA/GAIA/TriviaQA/PopQA).
-
-    The final answer is validated against ``context["answer"]`` by the parent reward.
-    """
+    """A factual-QA-with-search environment (SimpleQA/GAIA/TriviaQA/PopQA)."""
     registry = build_search_tools(backend=search_backend)
     if include_python_tools:
         registry.merge(build_python_tools())
 
-    # Defaulted into kwargs, not passed as a keyword: the registry forwards the whole env_config, so
-    # a keyword here makes an explicit ``requires_answer`` in environment_kwargs a duplicate-keyword
-    # TypeError instead of an override. The answer is required because the parent grades against it
-    # only when a row carries one, and otherwise grades merely completing 1.
-    # ``None`` counts as unset, so a YAML ``requires_answer: null`` still gets this preset's answer.
+    # A kwargs default: the registry forwards the whole env_config, so a keyword would make an explicit
+    # ``requires_answer`` a TypeError. Required because the parent otherwise grades merely completing 1.
     if kwargs.get("requires_answer") is None:
         kwargs["requires_answer"] = True
     return NativeToolUseEnvironment(
@@ -109,10 +98,7 @@ def build_qa_search_environment(
 
 
 class ExamQAEnvironment(NativeToolUseEnvironment):
-    """Exam-style QA (GPQA/MMLU/ARC), multiple-choice and open-ended.
-
-    Closed-book (no tools) or open-book (search tools). ``choices`` in context triggers MC letter grading.
-    """
+    """Exam-style QA (GPQA/MMLU/ARC), closed-book or open-book. ``choices`` in context triggers MC letter grading."""
 
     # An exam answer needs one response plus limited lookup, fewer turns than the generic tool loop.
     DEFAULT_MAX_TURNS = 8
@@ -121,9 +107,8 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
     # parent's completion fallback grades any episode that answered at all 1.
     requires_answer = True
 
-    # The letter range is interpolated from the grader's constant rather than restated: an
-    # instruction narrower than what multiple_choice_match scores would steer the model away from
-    # valid options (E-J on a 10-choice MMLU-Pro row).
+    # Interpolated from the grader's constant: a narrower instruction would steer the model away from valid options
+    # (E-J on a 10-choice MMLU-Pro row).
     EXAM_SYSTEM_PROMPT = (
         "You are taking an exam. Answer the question{search_instruction}.\n\n"
         "For multiple-choice questions, clearly state your answer as a single letter from the "
@@ -167,7 +152,6 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         prompt: str | list[dict[str, str]],
         context: dict[str, Any] | None = None,
     ) -> Trajectory:
-        """Store expected answer and append choices to prompt."""
         traj = super()._reset_single(prompt, context)
         context = context or {}
 
@@ -187,10 +171,8 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
 
     @staticmethod
     def _expected_choice_letter(expected: Any, choices: Any) -> str:
-        """A multiple-choice row's expected answer as the letter :func:`multiple_choice_match` scores: a letter passes,
-        a 0-based integer index into ``choices`` becomes its letter, and any other shape raises at episode start — a
-        digit string too, since ARC labels some rows ``"1"``-``"5"``, 1-based, so no one reading of it is safe.
-        """
+        """A letter passes, a 0-based integer index becomes its letter, and any other shape raises at episode start, a
+        digit string too, since ARC labels some rows ``"1"``-``"5"``, 1-based, so no one reading of it is safe."""
         # bool is an int subclass, so True would otherwise index choice "B".
         if not isinstance(expected, bool):
             text = str(expected).strip()
@@ -222,7 +204,6 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         return trajectory.info.get("expected_answer")
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
-        """Grade the answer by multiple-choice letter match or the shared validation chain."""
         # Delegated first: the parent owns both the incomplete-episode and the no-expected-answer cases.
         expected = trajectory.info.get("expected_answer")
         if expected is None:

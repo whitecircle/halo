@@ -18,18 +18,14 @@ logger = logging.getLogger(__name__)
 
 _ALL_INTERFACES = "0.0.0.0"
 _BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
-# Any port: a UDP connect only asks the kernel for a route, and sends no packet.
+# Any port does, as a UDP connect only asks the kernel for a route and sends no packet.
 _ROUTE_PROBE_PORT = 9
 
 
 class RendezvousListener:
-    """An IPv4 socket listening on ``bind_address:port`` (0 = kernel-assigned), for a ``TCPStore`` master to
-    take over.
-
-    Held from the bind on, before the peers are told where to dial: a port probed and released first can be
-    taken in between, or handed to a retrying peer as its own source port. Until :meth:`start_store` hands it
-    over, :meth:`close` (or leaving the ``with`` block) frees the port.
-    """
+    """An IPv4 socket listening on ``bind_address:port`` (0 = kernel-assigned), for a ``TCPStore`` master to take over.
+    Held from the bind on, as a port probed and released first can be taken in between, or handed to a retrying peer
+    as its own source port."""
 
     def __init__(self, bind_address: str, port: int):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -48,7 +44,6 @@ class RendezvousListener:
         self._lock = threading.Lock()
 
     def start_store(self, host: str, world_size: int, *, timeout_s: float, **options) -> TCPStore:
-        """The master ``TCPStore`` of a ``world_size`` group serving on this listener; ``options`` are the store's own."""
         with self._handover() as listen_fd:
             return TCPStore(
                 host_name=host,
@@ -62,8 +57,8 @@ class RendezvousListener:
 
     @contextmanager
     def _handover(self) -> Iterator[int]:
-        """Yield the fd to the one ``TCPStore(master_listen_fd=...)`` call that owns it from then on, so the socket
-        is detached, not closed: closing it would abort a live store's daemon or a reused fd number."""
+        """Yield the fd to the one ``TCPStore(master_listen_fd=...)`` call that owns it from then on. The socket is
+        detached, as closing it would abort a live store's daemon or a reused fd number."""
         with self._lock:
             listener, self._socket = self._socket, None
             if listener is None:
@@ -76,7 +71,7 @@ class RendezvousListener:
             listener.detach()
 
     def close(self) -> None:
-        """Close the socket and free the port, unless a store took it over; idempotent."""
+        """Free the port unless a store took it over; idempotent."""
         with self._lock:
             listener, self._socket = self._socket, None
         if listener is not None:
@@ -90,8 +85,7 @@ class RendezvousListener:
 
 
 def _route_source_ip(host: str) -> str:
-    """This host's IPv4 address on the route to ``host``, the interface the kernel would send from; loopback
-    when no route reaches it (or the name does not resolve)."""
+    """This host's IPv4 address on the route to ``host``; loopback when no route reaches it or it does not resolve."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         try:
             s.connect((host, _ROUTE_PROBE_PORT))
@@ -101,7 +95,6 @@ def _route_source_ip(host: str) -> str:
 
 
 def _is_local_address(host: str) -> bool:
-    """True when ``host`` is a bindable address of this machine."""
     if is_loopback(host):
         return True
     try:
@@ -116,11 +109,10 @@ def _master_address(
     *, engine: str, server_url: str, server_host: str, advertised_host: str | None, host_env: str
 ) -> str:
     """The address the engine's workers dial back to: ``advertised_host``, else ``host_env``, else loopback for a
-    server on this machine, else this host's address on the route to the server. A remote server is never told
-    to dial loopback."""
+    server on this machine, else this host's address on the route to the server."""
     master_address = advertised_host or (env_str(host_env) if host_env else None)
     if not master_address:
-        # Same-host groups stay on loopback: firewalls drop hairpin traffic on the external NIC.
+        # Same-host groups stay on loopback, as firewalls drop hairpin traffic on the external NIC.
         master_address = "127.0.0.1" if _is_local_address(server_host) else _route_source_ip(server_host)
 
     if is_loopback(master_address) and not _is_local_address(server_host):
@@ -136,9 +128,8 @@ def _master_address(
 
 
 def _bind_address(master_address: str, *, engine: str, server_host: str, host_env: str) -> str:
-    """The IPv4 address the listener binds: ``master_address`` resolved once, since the unauthenticated store
-    listens only where the engine dials. ``HALO_WEIGHT_SYNC_BIND_ALL`` widens it to every interface for a
-    trainer behind NAT; otherwise an address that is not this host's own raises."""
+    """``master_address`` resolved once, since the unauthenticated store listens only where the engine dials.
+    ``HALO_WEIGHT_SYNC_BIND_ALL`` widens it to every interface for a trainer behind NAT."""
     host_knob = f"{host_env or 'the group host'} (or the per-server group_host)"
     try:
         bind_address = socket.gethostbyname(master_address)
@@ -176,12 +167,8 @@ def _bind_address(master_address: str, *, engine: str, server_host: str, host_en
 def open_group_rendezvous(
     *, engine: str, server_url: str, server_host: str, advertised_host: str | None, host_env: str, port: int
 ) -> tuple[str, RendezvousListener]:
-    """``(master address, listener)``: the group's rendezvous, listening before the engine hears of it.
-
-    The engine is sent the bound address, not the name it came from, which the server could resolve
-    elsewhere. A configured port another socket holds raises before the engine is asked anything. The caller
-    hands the listener to the store, or closes it.
-    """
+    """``(master address, listener)``, listening before the engine hears of it. The engine is sent the bound address,
+    as the server could resolve the name elsewhere. The caller hands the listener to the store, or closes it."""
     master_address = _master_address(
         engine=engine,
         server_url=server_url,

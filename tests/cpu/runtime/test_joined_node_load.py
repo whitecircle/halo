@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""``joined_node_load`` — the node-throttled eager weight load, joined across the world on the store.
-
-The throttle admits ``max_concurrent_loading`` ranks of a node at a time, so the batches finish at
-different times and the first collective after the load is where they meet. Two properties of that
-meeting, proven on real gloo groups:
-
-1. a rank-local load failure (one node's torn shard, the coverage gate) raises on EVERY rank: the
-   failing rank keeps its own exception type, every peer gets a ``RuntimeError`` naming it — instead
-   of the peers sitting in the next collective with no diagnostic;
-2. the first batch's wait for the last is a store wait: with a 5 s process-group timeout and an 8 s
-   second batch, a collective right after the load still succeeds on every rank. A plain throttle
-   followed by that collective dies at the watchdog — the 30-minute NCCL kill of eight serialized
-   ``max_concurrent_loading: 1`` loads of a large checkpoint, scaled down.
-
-    python tests/cpu/runtime/test_joined_node_load.py
-"""
+"""``joined_node_load``: the node-throttled eager load, joined across the world on the store, on real gloo groups.
+A torn shard raises on every rank; batches' skew is a store wait, where a collective dies at the watchdog."""
 
 import datetime
 import os
@@ -33,7 +19,7 @@ SLOW_BATCH_SEC = 8
 
 
 class TornShardError(ValueError):
-    """The failing rank's own exception, whose type must survive the join on that rank."""
+    """Its type must survive the join on the failing rank."""
 
 
 def _outcome(tmp_dir: str, rank: int, result: str) -> None:
@@ -47,7 +33,7 @@ def _failing_rank_worker(rank: int, tmp_dir: str) -> None:
             if rank == 1:
                 raise TornShardError("model-00002-of-00004.safetensors: incomplete metadata")
         result = "RETURNED"
-    except Exception as exc:  # the outcome under test is the raise itself
+    except Exception as exc:  # The outcome under test is the raise itself.
         result = f"{type(exc).__name__}: {exc}"
     _outcome(tmp_dir, rank, result)
 
@@ -57,7 +43,7 @@ def _skewed_batches_worker(rank: int, tmp_dir: str) -> None:
         with joined_node_load("Model load from /ckpt", max_concurrent=1):
             if rank == 1:
                 time.sleep(SLOW_BATCH_SEC)
-        # The first collective after the load, as the loaders' precision guard and EP buffers are.
+        # The first collective after the load.
         value = torch.ones(1)
         dist.all_reduce(value)
         result = "PASS" if value.item() == WORLD_SIZE else f"FAIL: all_reduce gave {value.item()}"

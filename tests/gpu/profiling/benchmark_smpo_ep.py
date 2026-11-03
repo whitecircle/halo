@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""SMPO throughput of ``SMPOTrainer`` on an EP (or EP+CP) MoE run: MFU, S-MFU, tok/s and peak memory.
-
-torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_smpo_ep.py --ep 8 --cp 2 --seq 4096 --steps 10
-"""
+"""SMPO throughput on an EP (or EP+CP) MoE run: MFU, S-MFU, tok/s and peak memory."""
 
 import gc
 import random
@@ -40,8 +37,6 @@ def create_smpo_dataset(
     num_samples: int = 100,
     seed: int = 42,
 ) -> Dataset:
-    """``num_samples`` chat-templated arithmetic prompts with a correct (chosen) and a wrong (rejected)
-    answer, each padded with filler text toward ``seq_len``."""
     random.seed(seed)
 
     prompt_len = seq_len // 3
@@ -231,7 +226,7 @@ def main() -> int:
             use_margin_schedule=False,
             chosen_sft_ratio=0.0,
         )
-        # Disable TRL re-application of Liger (we applied via load_distributed_model)
+        # Already applied via load_distributed_model.
         smpo_config.use_liger_kernel = False
 
         efficiency_callback = EfficiencyCallback(

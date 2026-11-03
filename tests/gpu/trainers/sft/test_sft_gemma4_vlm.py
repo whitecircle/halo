@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""
-Gemma4 VLM smoke test: one forward + backward with image inputs on the bare EP model (no trainer,
-no FSDP, no optimizer step).
-
-Mirrors test_sft_families.py --suite gemma4_moe but feeds image+text inputs through the
-processor instead of pure text. This exercises the vision encoder path
-alongside the EPGemma4MoELayer expert wrapping to confirm the two
-components coexist correctly under EP.
-
-Usage:
-    torchrun --nproc_per_node=2 \\
-        tests/gpu/trainers/sft/test_sft_gemma4_vlm.py
-
-Requirements:
-    - 2-8 B200/B300 GPUs (>=80GB)
-    - DeepEP installed
-    - Local checkpoint at $HALO_DATA_ROOT/models/gemma-4-26B-A4B-it-patched
-      (override via HALO_TEST_GEMMA4_MODEL env var)
-"""
+"""Gemma4 VLM smoke on the bare EP model: one forward + backward with image inputs, the vision path beside
+EPGemma4MoELayer."""
 
 import random
 
@@ -68,7 +51,7 @@ def run(ctx):
         parallelism_config=pc,
         dtype=torch.bfloat16,
         trust_remote_code=True,
-        attn_implementation="sdpa",  # Gemma4 global_head_dim=512 > FA2's 256 limit
+        attn_implementation="sdpa",  # Gemma4 global_head_dim=512 > FA2's 256 limit.
         use_liger_kernel=False,
     )
     log(f"GPU memory after load: {gpu_mem_gb():.1f}GB")
@@ -79,7 +62,6 @@ def run(ctx):
     if not checks["ep_layers_wrapped"]:
         return {"checks": checks}
 
-    # Build a single-image multimodal sample using the processor's chat template.
     img = make_random_image(ctx.rank)
     messages = [
         {
@@ -96,7 +78,6 @@ def run(ctx):
     ]
     templated = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
 
-    # Processor handles image tokenisation + insertion of <image> placeholders.
     inputs = processor(
         text=[templated],
         images=[img],
@@ -108,7 +89,7 @@ def run(ctx):
     labels = inputs["input_ids"].clone()
     if "attention_mask" in inputs:
         labels[inputs["attention_mask"] == 0] = -100
-    # Mask image tokens out of the loss; only train on text generation.
+    # Train only on text generation.
     for special in ("image_token_id",):
         tok_id = getattr(model.config, special, None)
         if tok_id is not None:
@@ -121,7 +102,7 @@ def run(ctx):
     model.train()
 
     log("Forward pass with image+text...")
-    # pixel_values must match model dtype (bf16 here).
+    # pixel_values must match the model dtype.
     if "pixel_values" in inputs and inputs["pixel_values"].dtype != torch.bfloat16:
         inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
 
@@ -136,7 +117,6 @@ def run(ctx):
     log("Backward...")
     out.loss.backward()
 
-    # Validate gradient health.
     nan_grads = []
     finite_count = 0
     for name, p in model.named_parameters():

@@ -1,6 +1,5 @@
-"""Offline GRPO's KL reference: where it comes from (:class:`ReferenceMode`), the run-start sweep that scores
-it, its ragged per-token payload in the shared frozen-reference checkpoint lifecycle, and evaluation's reuse
-of the original scores."""
+"""Offline GRPO's KL reference: where it comes from, the run-start sweep that scores it, its ragged payload in the
+checkpoint lifecycle, and evaluation's reuse of the original scores."""
 
 from __future__ import annotations
 
@@ -57,7 +56,7 @@ _TOKEN_COLUMNS = ("prompt_input_ids", "completion_input_ids")
 
 
 class ReferenceMode(Enum):
-    """Where an offline-GRPO policy's KL reference comes from; ``kl_beta`` 0 reads none of them."""
+    """``kl_beta`` 0 reads none of them."""
 
     # Full fine-tune: raw run-start scores, swept once before training and checkpointed.
     RUN_START = "run_start"
@@ -111,18 +110,15 @@ def attach_reference_column(dataset: Dataset, scores: MappedReferenceScores, dig
 
 
 class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
-    """Offline GRPO's frozen per-token reference over the DPO/KTO checkpoint lifecycle.
-
-    The host trainer sets ``_precompute_reference`` (whether this run sweeps a run-start reference) before
-    it trains or evaluates, and scores one swept batch per row in ``_score_reference_batch``.
-    """
+    """The host sets ``_precompute_reference`` before it trains or evaluates and scores one swept batch per row in
+    ``_score_reference_batch``."""
 
     REFERENCE_TOKEN_SETTINGS = "max_prompt_length, max_completion_length or drop_degenerate_groups"
     MAPS_SAVED_REFERENCE = True
 
     @staticmethod
     def _reference_mode(model, parallelism_config: ParallelismConfig | None, peft_config) -> ReferenceMode:
-        """The policy's KL reference source. ``model`` may still be a checkpoint id, never a PEFT model."""
+        """``model`` may still be a checkpoint id, never a PEFT model."""
         if peft_config is not None or (isinstance(model, nn.Module) and is_peft_model(model)):
             return ReferenceMode.ADAPTERS_OFF
         if getattr(parallelism_config, "expert_lora", None) is not None:
@@ -131,9 +127,8 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
 
     @classmethod
     def _holds_kl_reference(cls, model, kl_beta: float, parallelism_config: ParallelismConfig, peft_config) -> bool:
-        """Whether this run reads an external frozen reference: the run-start sweep scores one in place
-        of the policy, and native expert LoRA forwards its base per batch. CP and PP score the reference
-        through the policy's own distributed path."""
+        """Whether this run reads an external frozen reference. CP and PP score the reference through the policy's own
+        distributed path."""
         return (
             kl_beta != 0.0
             and cls._reference_mode(model, parallelism_config, peft_config) is not ReferenceMode.ADAPTERS_OFF
@@ -145,8 +140,8 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
     def sweeps_run_start_reference(
         cls, model, kl_beta: float, parallelism_config: ParallelismConfig | None, *, peft: bool
     ) -> bool:
-        """Whether the run scores its KL reference once at run start: a full fine-tune with ``kl_beta``
-        set. ``model`` may still be a checkpoint id; ``peft`` is whether attention adapters wrap it."""
+        """A full fine-tune with ``kl_beta`` set. ``model`` may still be a checkpoint id; ``peft`` is whether attention
+        adapters wrap it."""
         return (
             kl_beta != 0.0
             and not peft
@@ -228,7 +223,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         return self._restore_reference_split(dataset, split, (REF_PER_TOKEN_LOGPS_COLUMN,), identity)
 
     def _sweep_reference_logps(self, dataset, split: str) -> MappedReferenceScores:
-        """COLLECTIVE. Score contiguous DP shards of ``dataset`` in every mode and rebuild its row order."""
+        """COLLECTIVE. Score contiguous DP shards in every mode and rebuild the row order."""
         dp_size, dp_rank = self.dp_shard_geometry()
         loader = self._reference_sweep_loader(dataset, split, dp_size, dp_rank)
         # FSDP and EP peers may span DP shards; every rank must run the same number of forwards.
@@ -260,8 +255,8 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
             self.model.train(was_training)
 
     def _reference_sweep_loader(self, dataset, split: str, dp_size: int, dp_rank: int) -> DataLoader:
-        """COLLECTIVE. This DP rank's contiguous shard of ``dataset`` in full batches of ``(batch, real rows)``;
-        refuses, on every rank, a dataset that is not finite or leaves some rank no rows."""
+        """COLLECTIVE. Full batches of ``(batch, real rows)``; refuses on every rank a dataset that is not finite or
+        leaves some rank no rows."""
         reject_across_ranks(
             None if isinstance(dataset, Dataset) else f"Reference sweep needs a finite Dataset for '{split}'",
             f"Preparing the '{split}' reference sweep",
@@ -496,15 +491,14 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         reject_across_ranks(reason, "Validating the original evaluation reference", exc_type=ValueError)
 
     def _stored_references(self) -> Iterator[tuple[Mapping, Dataset, MappedReferenceScores]]:
-        """Every ``(identity, token rows, scores)`` the run holds: its checkpointed splits, then the rows
-        evaluation scored since."""
+        """Its checkpointed splits, then the rows evaluation scored since."""
         for name, identity in self._reference_logps_by_split.items():
             yield identity, self._reference_dataset_by_split[name], self._reference_storage_by_split[name]
         yield from self._evaluation_references
 
     def _score_evaluation_rows(self, dataset: Dataset, identity: Mapping, original_reference_model):
-        """Original scores for rows no stored set holds whole: copied row by row from the stored sets, or
-        swept with the caller's original policy where some row is unseen."""
+        """Copied row by row from the stored sets, or swept with the caller's original policy where some row is
+        unseen."""
         guard = DeferredRankFailure("Matching evaluation rows to the original reference", exc_type=ValueError)
 
         def match_rows():
@@ -558,8 +552,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         return scores
 
     def _sweep_with_original_reference(self, dataset: Dataset, model) -> MappedReferenceScores:
-        """Sweep ``dataset`` with the caller's original policy, placed on the policy's device for the sweep
-        and returned to its own device and ownership after it."""
+        """Placed on the policy's device for the sweep and returned to its own device and ownership after it."""
         devices = {tensor.device for tensor in (*model.parameters(), *model.buffers())}
         reject_across_ranks(
             "original_reference_model must reside on one device before temporary scoring placement"

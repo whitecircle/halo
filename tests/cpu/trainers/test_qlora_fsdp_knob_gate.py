@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """QLoRA rejects FSDP-shaping knobs it can never honor.
-
-QLoRA skips FSDP2 entirely (``fully_shard`` cannot wrap bnb's non-float Params4bit), so ``use_hsdp`` /
-``fsdp_reshard_after_forward`` / ``fsdp_reshard_after_backward`` / ``fsdp_defer_grad_sync`` have
-nothing to act on — a multi-node run asking for use_hsdp would otherwise do a flat replicated
-all-reduce with only an info line about FSDP2 being skipped.
-
-    python tests/cpu/trainers/test_qlora_fsdp_knob_gate.py
-"""
+It skips FSDP2 (``fully_shard`` cannot wrap bnb's non-float Params4bit), so ``use_hsdp`` runs a flat all-reduce."""
 
 import pytest
 

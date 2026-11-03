@@ -1,9 +1,5 @@
-"""Offline-GRPO trainer GPU-suite fixtures: an offline tokenizer and grouped rows, the trainer builders,
-and the independent full-logits oracles the suites grade the trainer by.
-
-The oracles score a model through its full-vocabulary logits (:func:`token_logps`), never through the
-trainer's chunked path, so a defect in that path cannot cancel out of the comparison.
-"""
+"""Offline-GRPO GPU-suite fixtures and full-logits oracles, never the trainer's chunked path, so its defects cannot
+cancel out."""
 
 import argparse
 import contextlib
@@ -46,24 +42,23 @@ OFFLINE_QWEN3_MOE_CONFIG = TINY_QWEN3_MOE_CONFIG | {
     "pad_token_id": OFFLINE_VOCAB["<pad>"],
     "eos_token_id": OFFLINE_VOCAB["<eos>"],
 }
-# The EP checkpoint loaders an EP suite runs one manifest row each for: ``ep_lazy_loading`` on and off.
 EP_LOADINGS = ("lazy", "eager")
-# The prompt an exported checkpoint must score to finite logits after a stock reload.
+# An exported checkpoint must score this to finite logits after a stock reload.
 EXPORT_PROBE_WORDS = ("question", "alpha", "answer", "yes", "<eos>")
 # Mismatching tensors an export comparison names before it stops listing.
 EXPORT_MISMATCH_PREVIEW = 12
 
 
 def ep_loading_parser() -> argparse.ArgumentParser:
-    """The ``--ep-loading`` flag of the offline-GRPO EP suites, read by the suite and by the CPU check
-    that their manifest rows cover both loaders."""
+    """The ``--ep-loading`` flag of the EP suites, read by the suite and the CPU check that manifest rows cover both
+    loaders."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--ep-loading", choices=EP_LOADINGS, default=EP_LOADINGS[0])
     return parser
 
 
 def make_offline_tokenizer():
-    """A local-only tokenizer whose IDs and EOS behavior match the tiny model checkpoint."""
+    """A local-only tokenizer whose IDs and EOS behavior match the tiny checkpoint."""
     tokenizer = Tokenizer(WordLevel(OFFLINE_VOCAB, unk_token="<unk>"))
     tokenizer.pre_tokenizer = Whitespace()
     return PreTrainedTokenizerFast(
@@ -100,11 +95,8 @@ def offline_grpo_dataset(groups, offset=0):
 
 
 def load_liger_class_patched_model(model_path, *, attn_implementation="flash_attention_4"):
-    """``model_path`` at bf16 with Liger's class-level patch (cross-entropy off) applied before the load.
-
-    A late instance patch misses Qwen3's q/k norms while later loads use the patched classes, so the
-    chunked-GRPO suite loads every policy, checkpoint oracle and export this way to compare like with like.
-    """
+    """``model_path`` at bf16 with Liger's class-level patch applied before the load; a late instance patch misses
+    Qwen3's q/k norms."""
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     apply_liger_kernel(config, liger_kernel_config={"cross_entropy": False, "fused_linear_cross_entropy": False})
     return AutoModelForCausalLM.from_pretrained(
@@ -129,9 +121,8 @@ def offline_grpo_config(
     save=True,
     **overrides,
 ) -> OfflineGRPOConfig:
-    """The suites' shared run: two rows per device, chunked log-probs, the ``grpo`` loss with REINFORCE,
-    no log-prob floor or gradient clip, one log/eval/save cadence per ``save_steps``; ``overrides`` sets
-    any other ``OfflineGRPOConfig`` field."""
+    """The suites' shared run: two rows per device, chunked log-probs, ``grpo`` with REINFORCE; ``overrides`` sets any
+    other field."""
     fields = {
         "output_dir": output_dir,
         "max_steps": steps,
@@ -168,11 +159,8 @@ def offline_grpo_config(
 def offline_grpo_trainer(
     ctx, model, parallelism, args, train, evaluation=None, *, checkpoint=None, tokenizer=None, **trainer_kwargs
 ) -> OfflineGRPOTrainer:
-    """``OfflineGRPOTrainer`` on ``model``, routing balancing off, resuming from ``checkpoint`` when given.
-
-    Its DeepEP buffers are released at teardown too, so a body that raises before :func:`finish_phase`
-    still frees them.
-    """
+    """``OfflineGRPOTrainer`` on ``model``, balancing off; DeepEP buffers are also released at teardown for a body that
+    raises early."""
     trainer = OfflineGRPOTrainer(
         model=model,
         args=args,
@@ -200,9 +188,8 @@ def build_offline_grpo_trainer(
     tokenizer=None,
     trust_remote_code: bool = False,
 ) -> OfflineGRPOTrainer:
-    """:func:`offline_grpo_trainer` on ``source`` loaded through the production loader at bf16 with FA2; a
-    resume (``checkpoint``) also requires every stored fp32 master to be restored. ``trust_remote_code`` for a
-    family whose classes the checkpoint ships."""
+    """:func:`offline_grpo_trainer` through the production loader at bf16 with FA2; a resume also requires every stored
+    fp32 master restored."""
     model, _ = load_distributed_model(
         model_name_or_path=source,
         parallelism_config=parallelism,
@@ -218,7 +205,7 @@ def build_offline_grpo_trainer(
 
 
 def token_logps(model, ids, attention_mask=None) -> torch.Tensor:
-    """fp32 log-probs of each next token of ``ids`` under ``model``'s full-vocabulary logits, ``[B, S-1]``."""
+    """fp32 log-probs of each next token under ``model``'s full-vocabulary logits, ``[B, S-1]``."""
     logits = model(input_ids=ids, attention_mask=attention_mask, use_cache=False).logits[:, :-1].float()
     return logits.log_softmax(-1).gather(-1, ids[:, 1:].unsqueeze(-1)).squeeze(-1)
 
@@ -231,9 +218,8 @@ def completion_logps(model, batch) -> torch.Tensor:
 
 
 def reference_oracle_rows(oracle) -> list[torch.Tensor]:
-    """Each training row's completion log-probs under ``oracle``'s model, CPU tensors in dataset order:
-    what a run-start reference sweep must reproduce. ``oracle`` is a ``kl_beta=0`` trainer built for
-    this; it is released here."""
+    """Each row's completion log-probs under ``oracle``, a ``kl_beta=0`` trainer released here: what a reference sweep
+    must reproduce."""
     batch = oracle._prepare_inputs(oracle.data_collator(list(oracle.train_dataset)))
     oracle.model.eval()
     with torch.no_grad():
@@ -247,8 +233,7 @@ def reference_oracle_rows(oracle) -> list[torch.Tensor]:
 
 
 def swept_reference_error(swept_rows, expected_rows) -> float:
-    """Worst per-token gap between a sweep's reference rows and the oracle's, NaN-propagating; infinite
-    when there are no rows to compare."""
+    """Worst per-token gap between a sweep's rows and the oracle's, NaN-propagating; infinite with no rows."""
     return max_or_nan(
         (
             (torch.as_tensor(swept, dtype=torch.float32) - expected).abs().max().item()
@@ -259,8 +244,8 @@ def swept_reference_error(swept_rows, expected_rows) -> float:
 
 
 def pure_kl_batch(trainer) -> dict:
-    """The trainer's first two training rows, collated and placed, with zero advantages: its loss on this
-    batch is the KL term alone."""
+    """The first two training rows, collated and placed, with zero advantages: the loss on this batch is the KL term
+    alone."""
     batch = trainer._prepare_inputs(trainer.data_collator([trainer.train_dataset[index] for index in range(2)]))
     batch["advantage"] = torch.zeros_like(batch["advantage"])
     return batch
@@ -268,8 +253,8 @@ def pure_kl_batch(trainer) -> dict:
 
 @contextlib.contextmanager
 def doubled_output_head(model):
-    """``model`` in eval mode with its output head doubled for the body, then restored: a policy away from
-    the run-start reference, so the KL term is nonzero."""
+    """``model`` in eval mode with its output head doubled for the body: a policy away from the reference, so the KL
+    term is nonzero."""
     reshard_fsdp2_modules(model)
     original = model.get_output_embeddings().weight.detach().clone()
     was_training = model.training
@@ -286,9 +271,8 @@ def doubled_output_head(model):
 
 
 def pure_kl_objective(policy, reference, valid, group_size, beta) -> torch.Tensor:
-    """The offline objective at zero advantage, written out independently: per-token ``k3`` KL with the
-    log-ratio capped by a detached ceiling, averaged per row over ``valid`` tokens, then over rows with
-    each weighted by ``1 / group_size``."""
+    """The offline objective at zero advantage, written out independently: per-token ``k3`` KL with a detached
+    log-ratio cap, weighted ``1 / group_size``."""
     delta = torch.minimum(reference, policy.detach() + KL_LOGRATIO_CLAMP) - policy
     per_row = ((delta.exp() - delta - 1) * valid).sum(1) / valid.sum(1).clamp(min=1)
     weights = group_size.float().reciprocal()
@@ -296,8 +280,7 @@ def pure_kl_objective(policy, reference, valid, group_size, beta) -> torch.Tenso
 
 
 def full_logits_kl(model, batch, beta) -> torch.Tensor:
-    """:func:`pure_kl_objective` of ``model``'s full-logits completion log-probs against the batch's
-    run-start reference column."""
+    """:func:`pure_kl_objective` of full-logits log-probs against the batch's run-start reference column."""
     return pure_kl_objective(
         completion_logps(model, batch),
         batch[REF_PER_TOKEN_LOGPS_COLUMN],
@@ -308,11 +291,8 @@ def full_logits_kl(model, batch, beta) -> torch.Tensor:
 
 
 def doubled_head_kl_verdict(trainer, batch, expected_fn, label) -> tuple[bool, bool]:
-    """``(oracle nonzero, trainer loss matches it)`` on the doubled head of :func:`doubled_output_head`.
-
-    ``expected_fn(model)`` returns the oracle KL, evaluated while the trainer's own head is doubled
-    (scoring that model) or ignoring the model (an oracle computed on a separate reload).
-    """
+    """``(oracle nonzero, trainer loss matches it)`` on the doubled head; ``expected_fn(model)`` may ignore the model
+    for a separate reload."""
     with doubled_output_head(trainer.model) as model, torch.no_grad():
         expected = expected_fn(model)
         actual = trainer.compute_loss(model, batch)
@@ -322,7 +302,6 @@ def doubled_head_kl_verdict(trainer, batch, expected_fn, label) -> tuple[bool, b
 
 
 def export_scores_finite(path, device) -> bool:
-    """Whether a stock eager ``from_pretrained`` of the export at ``path`` scores a prompt to finite logits."""
     model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, attn_implementation="eager").to(device)
     prompt = torch.tensor([[OFFLINE_VOCAB[word] for word in EXPORT_PROBE_WORDS]], device=device)
     with torch.no_grad():
@@ -333,12 +312,8 @@ def export_scores_finite(path, device) -> bool:
 
 
 def resumed_export_verdict(continuous, resumed, checkpoint, device) -> tuple[bool, bool, bool]:
-    """Rank 0's verdicts on a resumed run's export: ``(bit-exact to the uninterrupted run's export, moved
-    off the checkpoint it resumed from, scores finite after a stock reload)``.
-
-    The move is read at the export's dtype, so rounding the checkpoint's stored fp32 masters alone does
-    not count as an update.
-    """
+    """Rank 0's verdicts: ``(bit-exact to the continuous export, moved off the checkpoint, finite after a stock
+    reload)``. The move is read at the export's dtype, so rounding stored fp32 masters alone is not an update."""
     before, after = load_full_state_dict(continuous), load_full_state_dict(resumed)
     exact = before.keys() == after.keys() and all(torch.equal(before[name], after[name]) for name in before)
     if not exact:

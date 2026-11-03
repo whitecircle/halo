@@ -1,18 +1,9 @@
 #!/usr/bin/env python
 """Liger's rotary, as the toolkit binds it, is exact on every call at a production shape.
 
-Liger auto-selects its CuTe DSL RoPE ahead of Triton once a grad-carrying call reaches 131072 query rows (``bsz *
-heads * seq``) at ``head_dim >= 128``, and under ``CUTE_DSL_ENABLE_TVM_FFI`` that kernel is wrong from the second
-launch of a shape at the latest. The toolkit pins the op to Triton (``pin_liger_impls``). This binds Qwen3's rotary
-through ``apply_liger_kernel`` and checks several same-shape calls, forward and backward, against the family's own
-rotation in fp32, on fresh ``[batch, seq, heads, head_dim]`` projections viewed as ``[batch, heads, seq, head_dim]``
-the way the attention builds them.
-
-The control runs the CuTe DSL implementation directly at the same shape and must miss on a later call:
-that keeps the shape inside the defect, so the pinned check is not passing below the gate. Once the
-control stops missing, Liger has fixed the kernel and the pin can go.
-
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_liger_rope_repeated_calls.py
+Liger auto-selects its CuTe DSL RoPE at 131072 query rows and ``head_dim >= 128``, and under
+``CUTE_DSL_ENABLE_TVM_FFI`` it is wrong from the second launch of a shape, so ``pin_liger_impls`` pins Triton. The
+direct CuTe DSL control must miss; once it stops, Liger has fixed the kernel and the pin can go.
 """
 
 import os
@@ -28,12 +19,11 @@ from tests.common.numerics import max_abs_rel_err
 from tests.common.rank_log import log
 
 SEED = 42
-# Qwen3-8B's attention at 4096 tokens: 32 query heads x 4096 positions is exactly Liger's CuTe DSL gate.
+# Qwen3-8B at 4096 tokens: 32 query heads x 4096 positions is exactly Liger's CuTe DSL gate.
 BATCH, SEQ, Q_HEADS, KV_HEADS, HEAD_DIM = 1, 4096, 32, 8, 128
 ROPE_THETA = 1_000_000.0
 CALLS = 3
-# bf16 storage rounding against an fp32 rotation (the bound `test_liger_family_kernels.py` uses); a stale
-# buffer misses by the size of the activations.
+# bf16 storage rounding against an fp32 rotation; a stale buffer misses by the size of the activations.
 TOL_BF16 = 3e-2
 CUTEDSL_IMPL = "nvidia-cutedsl"
 
@@ -46,11 +36,8 @@ def _rotary_tables(device) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _residuals_per_call(rope, reference, device) -> list[dict[str, float]]:
-    """``max_abs_rel_err`` of q, k, dq and dk against ``reference`` for each of ``CALLS`` fresh inputs.
-
-    Liger's RoPE rotates in place, forward and backward, so the rotary gets a fresh projection-shaped copy of
-    each input and a clone of each incoming gradient, while the reference reads the untouched sources.
-    """
+    """Liger's RoPE rotates in place, so the rotary gets fresh copies and gradient clones while the reference reads the
+    untouched sources."""
     cos, sin = _rotary_tables(device)
     results = []
     for _ in range(CALLS):

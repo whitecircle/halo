@@ -1,8 +1,5 @@
-"""Argparse flags shared across the ``scripts/`` subtrees: the shard cap, the Hub-capable source block, the dtype
-and device-map pair, the head-class task, the remote-code switch and the OpenAI-compatible endpoint block.
-
-Defined once so the checkpoint tools chained over one artifact, and every CLI driving a served model, accept one
-spelling and one set of defaults. Flags only; the drivers they feed live in ``halo/``."""
+"""Argparse flags shared across the ``scripts/`` subtrees, so tools chained over one artifact and CLIs driving one
+served model accept one spelling and one set of defaults."""
 
 import argparse
 from collections.abc import Sequence
@@ -17,11 +14,7 @@ HUB_SOURCE_HELP = "Hub repo id or a local checkpoint directory"
 
 
 def add_max_shard_size_arg(parser: argparse.ArgumentParser, *, note: str = "") -> argparse.ArgumentParser:
-    """Add the ``--max_shard_size`` flag for a tool that writes a safetensors checkpoint.
-
-    Defaults to :data:`~halo.checkpoint.format.DEFAULT_MAX_SHARD_SIZE`. ``note`` appends a caveat for
-    outputs that ignore the cap (adapter files, single-file checkpoints rewritten in place).
-    """
+    """``note`` appends a caveat for outputs ignoring the cap (adapter files, checkpoints rewritten in place)."""
     parser.add_argument(
         "--max_shard_size",
         type=str,
@@ -35,12 +28,8 @@ def add_max_shard_size_arg(parser: argparse.ArgumentParser, *, note: str = "") -
 def add_hub_source_args(
     parser: argparse.ArgumentParser, *, source: str, default: str | None = None, revision: bool = True
 ) -> argparse.ArgumentParser:
-    """Add the ``--model_id`` flag of a tool whose source may be a Hub repo, and its revision pin.
-
-    ``source`` names what the tool reads there; ``default`` names the release a converter targets
-    and makes the flag optional; ``revision=False`` suits a tool that threads no revision, which
-    would otherwise advertise a pin it ignores.
-    """
+    """``default`` names the release a converter targets and makes the flag optional; ``revision=False`` suits a tool
+    threading no revision, which would otherwise advertise a pin it ignores."""
     parser.add_argument(
         "--model_id",
         type=str,
@@ -59,12 +48,9 @@ def add_hub_source_args(
 
 
 def add_trust_remote_code_arg(parser: argparse.ArgumentParser, *, default: bool = True) -> argparse.ArgumentParser:
-    """Add the ``--trust_remote_code`` flag, one spelling across the tools that load model code.
-
-    The default follows the source: a local checkpoint or adapter defaults on, since the remote-code families
-    (Bailing/Ling, Laguna) ship their modeling files inside it; a source that may be a Hub repo (``--model_id``)
-    defaults off, so a freshly downloaded third-party repo does not run its own code.
-    """
+    """The default follows the source: a local checkpoint defaults on, since remote-code families (Bailing/Ling,
+    Laguna) ship their modeling files inside it; a possible Hub repo (``--model_id``) defaults off, so a downloaded
+    third-party repo does not run its code."""
     parser.add_argument(
         "--trust_remote_code",
         action=argparse.BooleanOptionalAction,
@@ -82,8 +68,7 @@ def add_dtype_arg(
     flag: str = "--dtype",
     help: str = "Dtype of the output checkpoint (default: %(default)s).",
 ) -> argparse.ArgumentParser:
-    """Add a dtype flag, as :data:`DTYPE_BY_NAME` names it: ``--dtype`` for a tool that writes a
-    checkpoint, or ``flag``/``help`` for one whose dtype is another model's compute dtype."""
+    """``--dtype`` for a tool writing a checkpoint, or ``flag``/``help`` for another model's compute dtype."""
     parser.add_argument(flag, type=str, default="bfloat16", choices=list(DTYPE_BY_NAME), help=help)
     return parser
 
@@ -91,8 +76,7 @@ def add_dtype_arg(
 def add_task_arg(
     parser: argparse.ArgumentParser, *, tasks: Sequence[str] = tuple(TASK_MODEL_CLASSES)
 ) -> argparse.ArgumentParser:
-    """Add ``--task``, the head a checkpoint tool loads a checkpoint with, over ``tasks`` (default: every
-    :data:`~halo.checkpoint.tools.offline_export.TASK_MODEL_CLASSES` key)."""
+    """The head a checkpoint tool loads a checkpoint with, over ``tasks``."""
     parser.add_argument(
         "--task",
         choices=list(tasks),
@@ -105,7 +89,6 @@ def add_task_arg(
 
 
 def add_device_map_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add the ``--device_map`` flag for a tool that loads a whole model through ``from_pretrained``."""
     parser.add_argument(
         "--device_map",
         type=str,
@@ -118,13 +101,8 @@ def add_device_map_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
 def add_openai_endpoint_args(
     parser: argparse.ArgumentParser, *, model_help: str | None = None
 ) -> argparse.ArgumentParser:
-    """Add the OpenAI-compatible endpoint a generation, eval or playground CLI drives: ``--base_url``,
-    ``--api_key`` and, given ``model_help``, a required ``--model``.
-
-    One spelling and one key-resolution policy, since these CLIs point at the same served model and a
-    command line has to carry from one to the next. Without ``model_help`` no model flag is added,
-    for a CLI where the name is optional (its own flag) or typed into its UI.
-    """
+    """``--base_url``, ``--api_key`` and, given ``model_help``, a required ``--model``; one key-resolution policy,
+    since a command line has to carry from one CLI to the next."""
     parser.add_argument(
         "--base_url",
         type=str,

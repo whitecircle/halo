@@ -34,9 +34,8 @@ logger = logging.getLogger(__name__)
 
 _SLERP_DOT_THRESHOLD = 0.9995  # above this the vectors are ~colinear → lerp (slerp is unstable)
 
-# The range each scalar knob means something on. Outside it the ops do not raise, they merge something
-# else: a density outside (0, 1] skips the trim and keeps every delta, a t outside [0, 1] extrapolates
-# past both models, and a non-finite value writes non-finite weights.
+# Outside these ranges the ops merge something else without raising: a density outside (0, 1] keeps every delta, a t
+# outside [0, 1] extrapolates past both models, and a non-finite value writes non-finite weights.
 KNOB_DOMAINS: dict[str, tuple[Callable[[float], bool], str]] = {
     "t": (lambda value: 0.0 <= value <= 1.0, "in [0, 1]"),
     "density": (lambda value: 0.0 < value <= 1.0, "in (0, 1]"),
@@ -47,12 +46,8 @@ _KNOB_BY_TENSOR_ARG = {"weights": "models:weight", "base": "base_model"}
 
 
 def _parse_model_spec(spec: str) -> tuple[str, float | None]:
-    """``path`` or ``path:weight`` → (path, weight). ``None`` when no weight was given, so the
-    method/knob gate can tell an explicit ``:1.0`` from the default.
-
-    Splits on the last colon so absolute paths and ``hf/org/model`` ids are safe; the suffix must
-    parse as a float to be treated as a weight, otherwise the whole string is the path.
-    """
+    """``path`` or ``path:weight`` → (path, weight), ``None`` when no weight was given so the knob gate can tell an
+    explicit ``:1.0``. Splits on the last colon; a suffix that is not a float is part of the path."""
     if ":" in spec:
         head, _, tail = spec.rpartition(":")
         try:
@@ -67,8 +62,7 @@ class _TensorReader:
 
     def __init__(self, model_dir: str):
         self.model_dir = model_dir
-        # Keys come from the shards themselves rather than the index's ``weight_map``, so a checkpoint
-        # whose index has drifted from its files still merges the tensors that are actually there.
+        # Keys come from the shards themselves, so a checkpoint whose index drifted still merges the tensors there.
         self.weight_map = {key: shard for shard, _reader, key in iter_checkpoint_shard_entries(model_dir)}
         self._handles: dict[str, object] = {}
 
@@ -79,15 +73,12 @@ class _TensorReader:
         return self._handle(key).get_tensor(key)
 
     def nbytes(self, key: str) -> int:
-        """Storage size of ``key`` from the safetensors header alone — no tensor read."""
         return header_nbytes(self._handle(key).get_slice(key))
 
     def numel(self, key: str) -> int:
-        """Element count of ``key`` from the safetensors header alone — no tensor read."""
         return header_numel(self._handle(key).get_slice(key))
 
     def shape(self, key: str) -> tuple[int, ...]:
-        """Shape of ``key`` from the safetensors header alone — no tensor read."""
         return tuple(self._handle(key).get_slice(key).get_shape())
 
     def _handle(self, key: str):
@@ -100,24 +91,15 @@ class _TensorReader:
 
 
 def _reference_keys(readers: list[_TensorReader], base_reader: _TensorReader | None) -> list[str]:
-    """The key set to merge over. ``task_arithmetic``/``ties`` task vectors are relative to the base,
-    so iterate the BASE key set — iterating model[0] would silently drop any parameter present in the
-    base (and other models) but absent from model[0] (e.g. an untied ``lm_head.weight``), yielding an
-    incomplete, unloadable merged checkpoint. ``linear``/``slerp`` take no base (the knob gate
-    refuses one) → use model[0]."""
+    """The key set to merge over: the base's for ``task_arithmetic``/``ties``, since model[0]'s would silently drop a
+    parameter it lacks (an untied ``lm_head.weight``); model[0]'s otherwise."""
     return sorted((base_reader if base_reader is not None else readers[0]).keys())
 
 
 def _tied_head_key(reference: list[str], base_only: set[str], readers: list[_TensorReader], config) -> set[str]:
-    """The tied half of the base's head/embedding pair when the merged models rebuild it, else nothing.
-
-    A save under ``tie_word_embeddings`` writes the embedding alone and transformers rebuilds the head
-    from it at load, while some Hub checkpoints store both halves. A base of that kind carries a head
-    none of its fine-tunes do, and that head is the merged embedding again rather than a missing
-    tensor, provided every merged model stores the other half and the shipped config ties the pair at
-    both of its levels: a text-only class reads the text sub-config's flag, a multimodal wrapper its
-    own. The pair is the one ``reconcile_tie_word_embeddings`` compares.
-    """
+    """The tied half of the base's head/embedding pair when the merged models rebuild it, else nothing. That head is
+    the merged embedding again, provided every merged model stores the other half and the shipped config ties the pair
+    at both of its levels (a text-only class reads the text sub-config's flag, a multimodal wrapper its own)."""
     pair = [key for key in reference if is_tie_reconcile_key(key)]
     tied_away = [key for key in pair if key in base_only]
     kept = [key for key in pair if all(key in reader.weight_map for reader in readers)]
@@ -131,15 +113,9 @@ def _tied_head_key(reference: list[str], base_only: set[str], readers: list[_Ten
 def _excused_base_keys(
     reference: list[str], readers: list[_TensorReader], config_source: str, *, trust_remote_code: bool
 ) -> set[str]:
-    """The base keys no merged model stores and the shipped model never reads from a checkpoint.
-
-    Under ``task_arithmetic``/``ties`` the reference is the base's key set, and a Hub base stores
-    tensors its fine-tunes lack because their load rebuilt or dropped them. Judged against the config
-    the merge ships (``config_source``'s) and the class it loads through, two kinds qualify: the tied
-    head (:func:`_tied_head_key`), and keys the class drops at load
-    (``_keys_to_ignore_on_load_unexpected``: Qwen3.5/3.6's ``mtp.*``, GLM-4.7-Flash's
-    ``model.layers.47.*``), which every export of a fine-tune leaves out. The merge leaves them out too.
-    """
+    """Base keys no merged model stores and the shipped model never reads from a checkpoint: the tied head, and keys
+    the class drops at load (``_keys_to_ignore_on_load_unexpected``: Qwen3.5/3.6's ``mtp.*``, GLM-4.7-Flash's
+    ``model.layers.47.*``). Judged against the config the merge ships; the merge leaves them out too."""
     base_only = {key for key in reference if not any(key in reader.weight_map for reader in readers)}
     if not base_only:
         return set()
@@ -153,13 +129,9 @@ def _excused_base_keys(
 
 
 def _check_key_coverage(reference: set[str], contributors: list[_TensorReader], excused: set[str]) -> None:
-    """Refuse a contributor whose tensors do not match the merge's reference, before any output exists.
-
-    A reference key a contributor lacks has nothing to merge from it, and a key it carries beyond the
-    reference is never visited, so the merged checkpoint would silently drop it. A base key the
-    shipped model rebuilds or drops at load (``excused``) is neither. A shape that differs between
-    contributors has no merge either; read from the headers here rather than discovered mid-write.
-    """
+    """Refuse a contributor not matching the merge's reference before any output exists: a key it lacks has nothing to
+    merge, one beyond the reference would be silently dropped, and a shape differing between contributors has no
+    merge."""
     for reader in contributors:
         missing = sorted(reference - reader.keys())
         extra = sorted(reader.keys() - reference - excused)
@@ -180,12 +152,11 @@ def _check_key_coverage(reference: set[str], contributors: list[_TensorReader], 
             raise ValueError(f"shape mismatch for {key!r} across the merged checkpoints: {shapes}")
 
 
-# --- per-tensor merge ops (all compute in float32, caller casts the result) ---
+# The merge ops compute in float32; the caller casts the result.
 
 
 def _merge_linear(tensors: list[torch.Tensor], weights: list[float]) -> torch.Tensor:
-    # Always a weighted average, so divide by the weight sum: a raw sum (default weights 1.0) would
-    # scale every tensor by the model count without raising.
+    # A weighted average, as a raw sum (default weights 1.0) would scale every tensor by the model count silently.
     total = sum(weights)
     if total == 0:
         raise ValueError("linear merge weights sum to zero")
@@ -196,12 +167,9 @@ def _merge_linear(tensors: list[torch.Tensor], weights: list[float]) -> torch.Te
 
 
 def _merge_slerp(t0: torch.Tensor, t1: torch.Tensor, t: float) -> torch.Tensor:
-    """Per-tensor spherical interpolation between two tensors (flattened as one vector).
-
-    The direction cosine is taken on magnitude-normalized copies: a neutralized GptOss sink sits at
-    ``dtype.min`` (~3e38), whose square overflows fp32, so a raw norm reads ``inf``, the cosine of two
-    identical vectors reads 0, and the resulting arc sums to ``-inf`` where the input was finite.
-    """
+    """Per-tensor spherical interpolation, the cosine taken on magnitude-normalized copies: a neutralized GptOss sink's
+    ``dtype.min`` squared overflows fp32, so a raw norm reads ``inf`` and the arc sums to ``-inf`` from finite
+    input."""
     v0 = t0.float().flatten()
     v1 = t1.float().flatten()
     scale = torch.maximum(v0.abs().max(), v1.abs().max())
@@ -213,7 +181,7 @@ def _merge_slerp(t0: torch.Tensor, t1: torch.Tensor, t: float) -> torch.Tensor:
         return torch.lerp(t0.float(), t1.float(), t)
     dot = torch.dot(v0 / n0, v1 / n1).clamp(-1.0, 1.0)
     if dot.abs() > _SLERP_DOT_THRESHOLD:
-        return torch.lerp(t0.float(), t1.float(), t)  # ~colinear → linear is stable + ≈equal
+        return torch.lerp(t0.float(), t1.float(), t)
     theta0 = torch.acos(dot)
     sin0 = torch.sin(theta0)
     s0 = torch.sin((1.0 - t) * theta0) / sin0
@@ -256,10 +224,8 @@ def _merge_ties(
 
 
 class _MergeMethod(NamedTuple):
-    """One merge method's contract: the op, the per-key tensors the loop hands it, the scalar CLI
-    knobs it reads with their defaults, and its working set for the RAM preflight — the peak float32
-    copies of one tensor the op allocates beside its inputs, by model count. The ops declare no
-    defaults; the gate, the dispatch and ``--help`` all read them from this table."""
+    """One merge method's contract: the op, the per-key tensors it takes, its scalar CLI knobs with defaults, and its
+    RAM preflight working set (peak float32 copies of one tensor beside its inputs, by model count)."""
 
     op: Callable[..., torch.Tensor]
     tensor_args: tuple[str, ...]
@@ -284,7 +250,7 @@ KNOB_DEFAULTS: dict[str, float] = {knob: default for m in MERGE_METHODS.values()
 
 
 def knob_dest(knob: str) -> str:
-    """The Python identifier a knob is passed under — ``lambda`` → ``lambda_`` (PEP 8's escape)."""
+    """``lambda`` → ``lambda_`` (PEP 8's escape)."""
     return f"{knob}_" if keyword.iskeyword(knob) else knob
 
 
@@ -296,11 +262,7 @@ def _method_knobs(method: str) -> frozenset[str]:
 
 
 def _check_method_knobs(method: str, explicit: set[str]) -> None:
-    """Refuse any explicitly-passed knob the chosen method never reads.
-
-    An ignored knob (``--models a:0.1 b:0.9`` under slerp, ``--t`` under linear) would merge
-    something other than what was asked.
-    """
+    """Refuse any explicit knob the method never reads, which would merge something other than what was asked."""
     knobs = _method_knobs(method)
     ignored = sorted(explicit - knobs)
     if ignored:
@@ -312,7 +274,6 @@ def _check_method_knobs(method: str, explicit: set[str]) -> None:
 
 
 def _check_knob_domains(method: str, values: dict[str, float]) -> None:
-    """Refuse a knob value outside the range the method's op is meaningful on."""
     for knob in MERGE_METHODS[method].knobs:
         accepts, domain = KNOB_DOMAINS[knob]
         if not accepts(values[knob]):
@@ -326,8 +287,8 @@ def _validated_request(
     knobs: dict[str, float] | None,
     tokenizer_source: str | None,
 ) -> tuple[list[str], list[float], dict[str, float]]:
-    """``(model paths, their weights, every knob's value)`` for a merge request, refused before any I/O
-    when a knob is unknown, unread by ``method`` or out of its domain, or when the sources do not fit it."""
+    """``(model paths, their weights, every knob's value)``, refused before any I/O when a knob is unknown, unread by
+    ``method`` or out of its domain, or when the sources do not fit it."""
     parsed = [_parse_model_spec(s) for s in model_specs]
     paths = [p for p, _ in parsed]
     given_weights = [w for _, w in parsed]
@@ -336,7 +297,6 @@ def _validated_request(
     unknown = sorted(set(given_knobs) - set(KNOB_DEFAULTS))
     if unknown:
         raise ValueError(f"unknown merge knob(s) {unknown}; the merge ops declare {sorted(KNOB_DEFAULTS)}")
-    # Every knob the caller set has to be one the method consumes.
     explicit = set(given_knobs) | ({"base_model"} if base_model is not None else set())
     if any(w is not None for w in given_weights):
         explicit.add("models:weight")
@@ -353,8 +313,7 @@ def _validated_request(
         raise ValueError(f"{method} requires --base_model (the model the task vectors are relative to)")
     if len(paths) < 2 and method != "slerp":
         raise ValueError("need at least two --models to merge")
-    # Every source is a local directory, so --trust_remote_code's local default holds for all of them: a
-    # Hub repo here would run a third-party repo's own config code under a default meant for local files.
+    # A Hub repo here would run a third-party repo's config code under --trust_remote_code's local default.
     if tokenizer_source is not None and not os.path.isdir(tokenizer_source):
         raise ValueError(
             f"--tokenizer_source {tokenizer_source!r} is not a local directory. Download the repo first "
@@ -375,17 +334,14 @@ def _stream_merged_tensors(
     writer: StreamingShardWriter,
     verbose: bool,
 ) -> None:
-    """Merge ``ref_keys`` one at a time through ``method``'s op into ``writer``, so only one key's copies
-    are resident."""
-    # Dispatch by registry, and pass each op exactly the arguments the method table declares for it.
+    """Merge ``ref_keys`` one at a time through ``method``'s op, so only one key's copies are resident."""
     spec = MERGE_METHODS[method]
     op_knobs = {knob_dest(knob): knob_values[knob] for knob in spec.knobs}
     for i, key in enumerate(ref_keys):
         tensors = [r.get(key) for r in readers]
 
-        # Integer/bool entries are structure, not weights (DeepSeek-V4's int64 tid2eid, expert-count
-        # buffers), and averaging them into bf16 would corrupt the model. Pass through when they
-        # agree, else refuse.
+        # Integer/bool entries are structure (DeepSeek-V4's int64 tid2eid, expert-count buffers), and averaging them
+        # into bf16 would corrupt the model, so they pass through when they agree.
         if not tensors[0].is_floating_point():
             if any(not torch.equal(t, tensors[0]) for t in tensors[1:]):
                 raise ValueError(
@@ -403,8 +359,7 @@ def _stream_merged_tensors(
             per_key["base"] = base_reader.get(key)
         out = spec.op(**{name: per_key[name] for name in spec.tensor_args}, **op_knobs)
 
-        # Balancing tensors export at their trained dtype as on every merge/gather path (mirrors
-        # merge_ep_shards): casting the fp32 sign-update biases to --dtype quantizes the routing.
+        # Balancing tensors keep their trained dtype; casting the fp32 biases to --dtype quantizes the routing.
         writer.add(key, out.to(tensors[0].dtype if is_balancing_state_key(key) else out_dtype))
         # per_key holds the inputs too: left bound, they would sit beside the next key's reads.
         del out, tensors, per_key
@@ -421,24 +376,14 @@ def _copy_aux_files(
     allow_missing_tokenizer: bool,
     trust_remote_code: bool,
 ) -> None:
-    """Reproduce ``source_dir``'s non-weight files (config, tokenizer, processor, …) in ``output_dir``.
-
-    The merged model is the same architecture as the source, so all non-weight metadata is copied,
-    including the processor files for multimodal models (``preprocessor_config.json``,
-    ``processor_config.json``, ``chat_template.*``), ``generation_config.json`` and a remote-code
-    family's ``.py`` modules, none of which a config plus tokenizer re-save emits: re-saving the config
-    instead would write the source's ``auto_map`` while shipping none of the modules it names, leaving a
-    directory that raises ``does not appear to have a file named modeling_<x>.py``. Two files are
-    rewritten after the copy: the config's ``dtype`` is set to the merged dtype so ``from_pretrained``
-    loads it consistently, and the ``README.md`` card gains the Halo Hub tag, or is created holding it.
-    """
-    # No resume state (include_resume_sidecars=False): it describes a single training run, and an N-way
-    # merged artifact has none, so shipping one input's would seed a resume or serve with state the
-    # merged weights never trained under.
+    """Reproduce ``source_dir``'s non-weight files in ``output_dir``, since re-saving the config would write the
+    source's ``auto_map`` with none of the modules it names. The config's ``dtype`` is then set to the merged dtype and
+    the card tagged."""
+    # No resume state: it describes a single training run, so one input's would seed a resume with state the merged
+    # weights never trained under.
     copy_checkpoint_aux_files(source_dir, output_dir, include_resume_sidecars=False)
     if not any(name.startswith(("tokenizer", "vocab", "spiece", "merges")) for name in os.listdir(output_dir)):
-        # Raise rather than warn: a merged artifact with no usable tokenizer would fail at the next
-        # pipeline stage's load instead.
+        # A merged artifact with no usable tokenizer would fail at the next pipeline stage's load instead.
         if not allow_missing_tokenizer:
             raise RuntimeError(
                 f"{source_dir} shipped no tokenizer files, so the merged checkpoint in {output_dir} "
@@ -451,15 +396,12 @@ def _copy_aux_files(
     if verbose:
         logger.info(f"  copied config/tokenizer/processor files from {source_dir}")
 
-    # Keep the saved config's dtype consistent with the merged weights, and write the canonical torch
-    # name: `--dtype bf16` is accepted but `torch.bf16` does not exist, so a raw write would fail
-    # every from_pretrained.
+    # The canonical torch name: `--dtype bf16` is accepted but `torch.bf16` would break every from_pretrained.
     config = AutoConfig.from_pretrained(output_dir, trust_remote_code=trust_remote_code)
     config.dtype = str(DTYPE_BY_NAME[dtype]).removeprefix("torch.")
     config.save_pretrained(output_dir)
-    # The merged directory carries the same config contract as any other export: the merge tools and
-    # the pinned servers read a family-less vendor config (Bailing/Ling) and a source-schema family
-    # (Step-3.7) through those rewrites alone.
+    # The merge tools and pinned servers read a family-less vendor config (Bailing/Ling) and a source-schema family
+    # (Step-3.7) through these rewrites alone.
     finalize_exported_config(config, output_dir, source=source_dir)
 
 
@@ -476,13 +418,10 @@ def merge_models(
     trust_remote_code: bool = True,
     verbose: bool = True,
 ) -> None:
-    """Merge ``model_specs`` into ``output_dir``. ``knobs`` carries the scalar per-method settings
-    (``t`` / ``density`` / ``lambda``) the chosen method's op declares; anything the method does not
-    read is refused rather than ignored."""
+    """Merge ``model_specs`` into ``output_dir``; a knob the chosen method does not read is refused."""
     paths, weights, knob_values = _validated_request(model_specs, method, base_model, knobs, tokenizer_source)
 
-    # Every directory this merge reads from: writing the result into one of them would delete the
-    # source shards it does not overwrite (see reject_in_place_conversion).
+    # Writing the result into a source directory would delete the source shards it does not overwrite.
     for source in [*paths, base_model, tokenizer_source]:
         if source and os.path.isdir(source):
             reject_in_place_conversion(source, output_dir)
@@ -490,8 +429,7 @@ def merge_models(
     base_reader = _TensorReader(base_model) if base_model else None
     contributors = [*readers, *([base_reader] if base_reader is not None else [])]
 
-    # Reference key set to merge over, minus the base keys the shipped model rebuilds or drops at load;
-    # every contributor must then provide exactly these keys, at one shape.
+    # Minus the base keys the shipped model rebuilds or drops at load; every contributor must provide exactly these.
     aux_source = tokenizer_source or base_model or paths[0]
     ref_keys = _reference_keys(readers, base_reader)
     excused = _excused_base_keys(ref_keys, readers, aux_source, trust_remote_code=trust_remote_code)
@@ -505,9 +443,8 @@ def merge_models(
         logger.info(f"Merging {len(paths)} models via '{method}' over {len(ref_keys)} tensors → {output_dir}")
 
     with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:
-        # Peak RAM is the costliest key, every contributor's copy as stored plus the method's fp32 working
-        # set over it (an integer pass-through key counted as if merged), and the writer's staged output
-        # parts. On disk the artifact is one input's size.
+        # Peak RAM is the costliest key (every contributor's stored copy plus the method's fp32 working set) and the
+        # writer's staged parts. On disk the artifact is one input's size.
         working_bytes_per_element = MERGE_METHODS[method].fp32_copies(len(readers)) * torch.float32.itemsize
         costliest_key_bytes = max(
             (

@@ -1,7 +1,5 @@
-"""Frozen tables a module reads but does not hold as state, attached as zero-copy views of checkpoint tensors. An
-:class:`ExternalTable` is no parameter, buffer or state-dict entry, so no cast, wrap, optimizer or state-dict save
-reaches it: ``finalize_loaded_model`` attaches it, the gathered checkpoint writers write it themselves, and a
-state-dict-only save or a random-weight build of a model holding one is refused (``reject_random_init_tables``)."""
+"""Frozen tables a module reads but does not hold as state, attached as zero-copy views of checkpoint tensors. No cast,
+wrap, optimizer or state-dict save reaches one, so a state-dict-only save or random-weight build is refused."""
 
 from __future__ import annotations
 
@@ -15,15 +13,13 @@ import torch
 from safetensors import safe_open
 from torch import nn
 
-# The run-scoped config stamp under which a family's patched constructor builds an external table in place of
-# its stock module; every build without it keeps the stock class.
+# Under this run-scoped stamp a family's patched constructor builds an external table in place of its stock module.
 EXTERNAL_TABLES_STAMP = "_halo_external_tables"
 
 
 @dataclass(frozen=True)
 class TableFiles:
-    """Where a table's parts sit on disk: ``keys[i]`` in ``directory/files[i]``. ``table_only`` when those files
-    hold nothing but this table's parts, so a save can link them whole."""
+    """``table_only`` when the files hold nothing but this table's parts, so a save can link them whole."""
 
     directory: str
     files: tuple[str, ...]
@@ -32,11 +28,8 @@ class TableFiles:
 
 
 class ExternalTable(nn.Module):
-    """A frozen ``[rows, dim]`` table held as ``part_count`` row-contiguous parts outside the module state.
-
-    The parts are the checkpoint tensors transformers concatenates into the stock module's ``stock_key``, saved
-    under ``<module path>.<part_key(i)>``. A deep copy shares them.
-    """
+    """The parts are the checkpoint tensors transformers concatenates into the stock module's ``stock_key``, saved
+    under ``<module path>.<part_key(i)>``. A deep copy shares them."""
 
     stock_key = "weight"
     # ``str.format`` spelling of part ``index``'s key, relative to the module.
@@ -48,9 +41,8 @@ class ExternalTable(nn.Module):
         self.dim = dim
         self.part_count = part_count
         self.parts: tuple[torch.Tensor, ...] = ()
-        # Each part's exclusive end row.
         self.part_ends: torch.Tensor | None = None
-        # Where table-only copies of the parts were last read or written: what the next save links from.
+        # What the next save links from.
         self.files: TableFiles | None = None
 
     def __deepcopy__(self, memo):
@@ -68,12 +60,7 @@ class ExternalTable(nn.Module):
         return self.part_key_format.format(index=index)
 
     def attach(self, directory: str, weight_map: Mapping[str, str], keys: Sequence[str]) -> None:
-        """Take ``keys`` (part order) in ``directory`` as zero-copy views, which share the page cache across
-        processes.
-
-        Raises:
-            ValueError: the keys, part shapes or dtypes are not the table this module was built for.
-        """
+        """Take ``keys`` (part order) as zero-copy views, which share the page cache across processes."""
         if len(keys) != self.part_count:
             raise ValueError(
                 f"{type(self).__name__} is built for {self.part_count} parts but the checkpoint in {directory} "
@@ -109,7 +96,6 @@ class ExternalTable(nn.Module):
 
 
 def named_external_tables(model: nn.Module) -> Iterator[tuple[str, ExternalTable]]:
-    """Every :class:`ExternalTable` in ``model`` with its module path."""
     return ((name, module) for name, module in model.named_modules() if isinstance(module, ExternalTable))
 
 
@@ -118,8 +104,7 @@ def _table_names(model: nn.Module) -> str:
 
 
 def reject_state_dict_save(model: nn.Module) -> None:
-    """Refuse a save that writes ``model``'s state dict alone (transformers' ``save_pretrained``) while it holds an
-    external table, which no state dict carries: the checkpoint would load with a freshly initialized table."""
+    """No state dict carries an external table, so the checkpoint would load with a freshly initialized one."""
     names = _table_names(model)
     if names:
         raise RuntimeError(

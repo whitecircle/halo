@@ -1,8 +1,6 @@
-"""The balancing bias on EP MoE layers: the DeepSeek-V3 sign-updated bias, adopted into the family's own exported
-slot where one exists or kept in a transient side-buffer, and the expert-load counts
-:class:`~halo.callbacks.balancing.BalancingBiasCallback` steers it by. A bias outside the checkpoint leaves a served
-copy routing on the pretrained one, so ``moe_balancing: bias_update`` rejects a family that only holds the
-side-buffer; ``bias_update_transient`` opts into it."""
+"""The balancing bias on EP MoE layers: the DeepSeek-V3 sign-updated bias, adopted into the family's exported slot or
+kept in a transient side-buffer. A bias outside the checkpoint leaves a served copy routing on the pretrained one, so
+``moe_balancing: bias_update`` rejects a side-buffer-only family; ``bias_update_transient`` opts in."""
 
 from __future__ import annotations
 
@@ -29,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 class EPBalancingBiasMixin:
-    """Bias-update balancing state, mixed into :class:`EPMoELayerBase`. The family's spec declares where its bias
-    lives, the class whether a transient one would be read at all; :class:`EPRoutingMixin` applies it."""
+    """Bias-update balancing state. The family's spec declares where its bias lives, the class whether a transient one
+    would be read at all."""
 
     FAMILY: ClassVar[MoEFamilySpec]
     num_experts: int
@@ -50,9 +48,8 @@ class EPBalancingBiasMixin:
 
     @property
     def _native_balancing_attr(self) -> str | None:
-        """The live path of ``FAMILY.balancing_slot``, a checkpoint-persistent bias the family's own selection
-        already applies: adopted as the bias-update state so it exports, after which ``_balancing_bias`` returns
-        None (a second application would double-bias selection)."""
+        """The live path of ``FAMILY.balancing_slot``, a checkpoint-persistent bias the family's selection already
+        applies, so ``_balancing_bias`` returns None once adopted (a second application would double-bias)."""
         slot = self.FAMILY.balancing_slot
         return slot.attrs[0] if slot else None
 
@@ -62,42 +59,36 @@ class EPBalancingBiasMixin:
         return False
 
     def enable_bias_balancing(self) -> bool:
-        """Create bias-update balancing state, or no-op (returning False) for aux-loss families."""
         if not self.SUPPORTS_BIAS_BALANCING:
             return False
         self._ensure_balancing_bias()
         return True
 
     def can_adopt_native_balancing(self) -> bool:
-        """Whether bias-update balancing here lands in checkpoint-exported state: the declared native slot
-        exists or can be materialized. False leaves only the side-buffer, which strict ``bias_update`` rejects.
-        """
+        """Whether bias-update balancing here lands in checkpoint-exported state; False leaves only the side-buffer,
+        which strict ``bias_update`` rejects."""
         if not self.SUPPORTS_BIAS_BALANCING or not self._native_balancing_attr:
             return False
         return self._native_balancing_target() is not None or self._can_materialize_native_balancing_slot()
 
     def _can_materialize_native_balancing_slot(self) -> bool:
-        """Whether the family implements :meth:`_materialize_native_balancing_slot` (a config-gated slot, LFM-2
-        ``use_expert_bias``)."""
+        """Whether the family implements :meth:`_materialize_native_balancing_slot` (LFM-2 ``use_expert_bias``)."""
         return (
             type(self)._materialize_native_balancing_slot
             is not EPBalancingBiasMixin._materialize_native_balancing_slot
         )
 
     def _materialize_native_balancing_slot(self) -> bool:
-        """Create the declared native slot on an instance shipped without it; True on success, which the
-        base never claims."""
+        """Create the declared native slot on an instance shipped without it; True on success."""
         return False
 
     def _native_balancing_target(self) -> tuple[nn.Module, str] | None:
-        """``(owner_module, attr_name)`` of the declared native slot, None where it is undeclared or this
-        instance lacks it."""
+        """``(owner_module, attr_name)`` of the declared slot, None where undeclared or this instance lacks it."""
         return resolve_balancing_slot(self, self._native_balancing_attr)
 
     @staticmethod
     def _set_native_balancing_tensor(owner: nn.Module, name: str, value: torch.Tensor) -> None:
-        """Set the slot through its owner, keeping a ``nn.Parameter`` slot a Parameter (``nn.Module`` refuses a
-        plain tensor there)."""
+        """Set the slot through its owner, keeping a Parameter slot a Parameter (``nn.Module`` refuses a tensor)."""
         current = getattr(owner, name)
         if isinstance(current, nn.Parameter) and not isinstance(value, nn.Parameter):
             value = nn.Parameter(value, requires_grad=current.requires_grad)
@@ -112,9 +103,8 @@ class EPBalancingBiasMixin:
         if target is None and self._native_balancing_attr and self._materialize_native_balancing_slot():
             target = self._native_balancing_target()
         if target is None and self._native_balancing_attr and self._supports_transient_balancing_bias:
-            # Declared but absent and not materializable, typically an upstream rename. The
-            # fallback stops exporting the trained bias, which strict ``bias_update`` rejects at the
-            # strategy layer.
+            # Declared but absent and not materializable, typically an upstream rename. Strict ``bias_update`` rejects
+            # this fallback at the strategy layer.
             logger.warning(
                 f"{type(self).__name__}: declares '{self._native_balancing_attr}' as its native "
                 f"balancing slot, but this instance has no such tensor — falling back to the "
@@ -171,13 +161,11 @@ class EPBalancingBiasMixin:
 
     @property
     def balancing_biases(self) -> torch.Tensor:
-        """The adopted native tensor or the side-buffer; ``AttributeError`` until :meth:`enable_bias_balancing`,
-        since every consumer keys on its presence. Native mode reads the owner live, so in-place updates and
-        the sidecar restore reach the tensor the gate reads.
-        """
+        """The adopted native tensor or the side-buffer; ``AttributeError`` until :meth:`enable_bias_balancing`, since
+        every consumer keys on its presence. Native mode reads the owner live, the tensor the gate reads."""
         if self.__dict__.get(NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False):
             target = self._native_balancing_target()
-            if target is None:  # the slot was externally deregistered — absent, not a crash
+            if target is None:  # the slot was externally deregistered: absent, not a crash
                 raise AttributeError(BALANCING_BIASES_ATTR)
             return getattr(*target)
         if BALANCING_BIASES_ATTR in self.__dict__:
@@ -209,9 +197,7 @@ class EPBalancingBiasMixin:
         return bias
 
     def _record_expert_load(self, indices: torch.Tensor) -> None:
-        """Accumulate per-expert selection counts while training, once per microbatch in every checkpoint
-        mode (:func:`counts_toward_expert_load`), each selection at its token's weight
-        (:func:`~halo.models.moe.balancing.expert_load_token_weights`)."""
+        """Accumulate per-expert selection counts while training, once per microbatch in every checkpoint mode."""
         if getattr(self, BALANCING_BIASES_ATTR, None) is None or not self.training or not counts_toward_expert_load():
             return
         with torch.no_grad():

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """Which native EP expert-LoRA preference runs need ``precompute_ref_log_probs``.
-
-With an attention target left after the expert peel the run is PEFT-wrapped, and TRL scores the
-reference inside the ``PeftModel``'s ``disable_adapter()``, which also drops the expert adapters
-(``install_ep_aware_disable_adapter``; the GPU pin is
-``tests/gpu/trainers/preference/test_pref_ep_expert_lora_reference.py``). Such a run needs no
-precomputed reference. An expert-only run has no ``PeftModel``: TRL would build its own unsharded fp32
-dense reference on every rank, so the loader refuses it unless the reference log-probs are precomputed.
-
-    python tests/cpu/peft/test_preference_expert_lora_reference_gate.py
-"""
+A PEFT-wrapped run's ``disable_adapter()`` also drops the expert adapters; an expert-only run has no ``PeftModel``."""
 
 import types
 
@@ -20,8 +11,7 @@ from halo.model_loading.parallel.frozen_models import load_reference_model_for_p
 from halo.model_loading.parallel.peft_setup import wraps_in_peft_model
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 
-# What split_expert_lora_targets leaves behind: the attention targets of a mixed run, none of an
-# expert-only one.
+# What split_expert_lora_targets leaves: a mixed run's attention targets, none of an expert-only one.
 MIXED_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 EXPERT_ONLY_TARGETS: list[str] = []
 

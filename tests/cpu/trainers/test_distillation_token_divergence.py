@@ -1,17 +1,6 @@
 #!/usr/bin/env python
 """The chunked per-token reduction every distillation trainer scores its divergences through.
-
-``token_divergence`` runs a divergence one token chunk at a time under a non-reentrant checkpoint, so
-backward keeps the two logits planes and no fp32 ``[tokens, V]`` plane of the divergence; the gold-token
-gate and the hard-label cross-entropy chunk the same way. Chunking is only legitimate if the numbers do
-not move, so every divergence is held to the whole-plane form (values and student gradients, across
-several chunks, on the shifted views the trainers pass), and the saved-for-backward set is checked for
-fp32 vocab-wide tensors: the whole-plane form keeps several, the chunked one none. Teacher distillation's
-divergence and its hard-label cross-entropy share one chunked pass when both train, which scores and trains what
-two passes do while backward builds one student gradient plane instead of two.
-
-Run: pytest tests/cpu/trainers/test_distillation_token_divergence.py
-"""
+Chunks run under a non-reentrant checkpoint, so backward keeps no fp32 ``[tokens, V]`` plane; values must not move."""
 
 import multiprocessing
 
@@ -36,8 +25,7 @@ BATCH, SEQ, VOCAB = 2, 17, 37
 TEMPERATURE = 1.7
 # Token rows per chunk: SEQ - 1 = 16 shifted rows split into 4 chunks per sequence.
 CHUNK_ROWS = 4
-# The peak-memory comparison's planes: one bf16 [B, S, V] student plane is 128 MiB, so a whole gradient plane
-# stands far above the allocator's noise.
+# One bf16 [B, S, V] student plane is 128 MiB, so a whole gradient plane stands far above the allocator's noise.
 PEAK_SHAPE = (2, 1024, 32768)
 DISTILL_ALPHA = 0.5
 
@@ -62,8 +50,7 @@ def _whole_plane(loss_fn, student, teacher, labels):
 
 
 def _saved_fp32_planes(fn, *inputs):
-    """Run ``fn`` recording what autograd saves; return it and the shapes of the fp32 vocab-wide saved tensors
-    that are not views of ``inputs`` (the checkpoint keeps its chunk inputs, which allocate nothing)."""
+    """Excludes views of ``inputs``: the checkpoint keeps its chunk inputs, which allocate nothing."""
     saved = []
 
     def record(tensor):
@@ -83,8 +70,7 @@ def _saved_fp32_planes(fn, *inputs):
 
 @pytest.mark.parametrize("name", sorted(DIVERGENCES))
 def test_every_divergence_matches_the_whole_plane_on_the_shifted_view(name):
-    """Values and the student gradient equal the unchunked form within fp32 rounding, on the
-    ``logits[:, :-1]`` view the teacher and SDPG trainers pass."""
+    """On the ``logits[:, :-1]`` view the teacher and SDPG trainers pass."""
     loss_fn = DIVERGENCES[name]
     base, teacher, labels = _inputs()
     chunked_in = base.clone().requires_grad_(True)
@@ -103,8 +89,6 @@ def test_every_divergence_matches_the_whole_plane_on_the_shifted_view(name):
 
 @pytest.mark.parametrize("name", sorted(DIVERGENCES))
 def test_backward_holds_no_fp32_plane_of_any_divergence(name):
-    """On bf16 logits, as the trainers score them, the chunked form saves no fp32 vocab-wide tensor for
-    backward, where the whole-plane form saves its upcasts and log-softmax outputs."""
     loss_fn = DIVERGENCES[name]
     base, teacher, labels = _inputs(torch.bfloat16)
     student = base.clone().requires_grad_(True)
@@ -167,8 +151,7 @@ def test_the_hard_label_cross_entropy_holds_no_fp32_plane():
 
 
 def test_the_cross_entropy_scores_and_trains_what_the_log_prob_form_does():
-    """The hard-label cross-entropy runs ``cross_entropy`` per chunk; the selective log-prob form it replaced is
-    the oracle, bit for bit, values and student gradient."""
+    """The selective log-prob form is the oracle, bit for bit."""
     base, _, labels = _inputs(torch.bfloat16, seed=5)
     logits, oracle_in = base.clone().requires_grad_(True), base.clone().requires_grad_(True)
     supervised = labels != LABEL_IGNORE_INDEX
@@ -183,8 +166,6 @@ def test_the_cross_entropy_scores_and_trains_what_the_log_prob_form_does():
 
 @pytest.mark.parametrize("name", sorted(DIVERGENCES))
 def test_one_pass_scores_and_trains_what_two_passes_do(name):
-    """Bit for bit, on bf16 logits as the trainer scores them: both per-token terms and the student gradient of
-    their weighted sum."""
     loss_fn = DIVERGENCES[name]
     base, teacher, labels = _inputs(torch.bfloat16, seed=7)
     joint_in, split_in = base.clone().requires_grad_(True), base.clone().requires_grad_(True)
@@ -202,8 +183,7 @@ def test_one_pass_scores_and_trains_what_two_passes_do(name):
 
 
 def _peak_gradient_planes(one_pass: bool) -> float:
-    """Peak resident memory of one teacher-distillation loss and its backward at ``DISTILL_ALPHA``, above the
-    logits it reads, in student planes: in a fresh process, so no earlier allocation is reused."""
+    """In student planes, above the logits it reads. Runs in a fresh process so no earlier allocation is reused."""
     batch, seq, vocab = PEAK_SHAPE
     generator = torch.Generator().manual_seed(0)
     student = torch.randn(batch, seq + 1, vocab, generator=generator).to(torch.bfloat16).requires_grad_(True)
@@ -228,8 +208,7 @@ def _peak_gradient_planes(one_pass: bool) -> float:
 
 
 def test_one_pass_builds_one_student_gradient_plane_fewer():
-    """The two-pass form holds the divergence's whole student gradient while it builds the cross-entropy's and adds
-    them, about one plane more at its peak than one pass, whose chunks each build the gradient of both terms."""
+    """Two passes hold the divergence's student gradient while building the cross-entropy's, about one plane more."""
     with multiprocessing.get_context("spawn").Pool(1, maxtasksperchild=1) as pool:
         one_pass = pool.apply(_peak_gradient_planes, (True,))
     with multiprocessing.get_context("spawn").Pool(1, maxtasksperchild=1) as pool:

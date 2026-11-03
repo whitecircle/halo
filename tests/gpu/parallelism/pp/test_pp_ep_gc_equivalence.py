@@ -1,25 +1,9 @@
 #!/usr/bin/env python
-"""PP+EP with and without activation checkpointing must produce the same gradients (pp2 × ep2, 4 GPUs).
+"""PP+EP gives the same gradients with and without activation checkpointing (pp2 x ep2).
 
-The two runs differ only in ``gradient_checkpointing``: identical weights, identical batch, the same
-real ``DistributedSFTTrainer`` and pipeline schedule. Under checkpointing the stage's decoder layers
-run their body a second time inside the schedule-driven backward, and that recompute must replay the
-checkpoint frame's DeepEP dispatch/combine — a second dispatch reuses the same ``ElasticBuffer`` and
-invalidates the handle the original forward's backward node still holds, which corrupts every
-gradient in the stage without raising anything.
-
-Three legs make the comparison honest:
-
-  * leg A — no GC, batch A: the reference gradients;
-  * leg B — GC, batch A: must match leg A to :data:`GRAD_REL_TOL` (bf16 recompute is not bitwise),
-    with the checkpoint-engagement counter proving the GC gate actually ran;
-  * leg C — no GC, batch B: the anti-vacuity control. A different batch must fail the same
-    tolerance by a wide margin, so a tolerance that would pass anything is a failing test.
-
-Peak per-rank memory is reported for legs A and B (at this model size the frame caches dominate;
-the production memory win is a full-model measurement, not a tiny-model assertion).
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep_gc_equivalence.py
+The recompute must replay the frame's DeepEP dispatch: a second dispatch reuses the ``ElasticBuffer`` and invalidates
+the handle the backward node holds, which corrupts every gradient without raising. A control on a different batch must
+fail the same tolerance by a wide margin.
 """
 
 import math
@@ -40,14 +24,13 @@ GLOBAL_BATCH = 4
 PER_DEVICE_BATCH = 2
 N_MICROBATCHES = 2
 
-# bf16 recompute reproduces the forward to the last bits only; measured worst param 1.1e-3 here.
+# A bf16 recompute reproduces the forward to the last bits only; measured worst param 1.1e-3.
 GRAD_REL_TOL = 5e-3
-# The control must miss by far more than the tolerance, or the tolerance proves nothing.
+# Or the tolerance proves nothing.
 CONTROL_MIN_REL_ERR = 0.1
 
 
 def run_leg(ctx, config, rows, labels, *, gradient_checkpointing):
-    """One PP+EP training step; returns (loss, {global name: grad}, clip norm, peak GB, gc calls)."""
     model = ppeq.build_patched_moe_model(config)
     trainer = ppeq.build_pp_sft_trainer(
         ctx,
@@ -76,14 +59,13 @@ def run_leg(ctx, config, rows, labels, *, gradient_checkpointing):
 
 
 def worst_diff(test: dict, reference: dict) -> tuple[float, str, int]:
-    """Worst per-parameter relative gradient error and how many parameters were compared."""
     worst, name, compared = 0.0, "", 0
     for key, ref in reference.items():
         if ref.norm() == 0:
             continue
         compared += 1
         err = ppeq.rel_err(test[key], ref)
-        # A NaN compares false against every bound, so a non-finite error counts as infinite.
+        # A NaN compares false against every bound.
         err = err if math.isfinite(err) else math.inf
         if err > worst:
             worst, name = err, key
@@ -99,8 +81,8 @@ def run(ctx):
         world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, ep_size=EP_SIZE
     )
     rows_a, labels_a = ppeq.build_ragged_batch(GLOBAL_BATCH)
-    # Different tokens, same shapes — the pipeline's P2P buffers stay valid. Reordering the rows
-    # would not do: the compared gradients are DP-synced, so a permuted global batch reproduces them.
+    # Same shapes keep P2P buffers valid. Reordering wouldn't do: the compared gradients are DP-synced, so a permuted
+    # batch reproduces them.
     rows_b, labels_b = ppeq.build_ragged_batch(GLOBAL_BATCH, seed=99)
 
     loss_a, grads_a, clip_a, peak_a, _ = run_leg(ctx, config, rows_a, labels_a, gradient_checkpointing=False)

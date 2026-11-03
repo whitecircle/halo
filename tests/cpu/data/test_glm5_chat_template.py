@@ -1,21 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: ``jinja-templates/glm/glm5-chat.jinja`` renders a GLM-5 conversation as the hub template renders it.
-
-The SFT template trains GLM-5 Next (GLM-5.3-Flash) on the model's own non-thinking turn, so a served model has to be
-prompted with what it trained on. No GLM-5 snapshot sits in the HF cache, so the hub template is vendored byte for byte
-from ``zai-org/GLM-5.3-Flash`` at revision ``46a050bec13002ad29ee795c16e61cf4fa3c4a9c``, with its MIT license
-(``glm-5.3-flash-LICENSE.txt`` beside it). The SFT template departs from it in two places, by design:
-
-* it leaves out the hub's default ``<|system|>Reasoning Effort: Max`` line, which budgets a reasoning block these
-  turns do not have;
-* it ends the final assistant turn with ``<|endoftext|>``, the token a trained turn stops on.
-
-Every prefix of each conversation renders as the hub's does with those two differences, and the generation prompt
-followed by the answer is the hub's rendering of the answered conversation. A tool definition, tool call or tool
-result raises instead of vanishing from the rendered row.
-
-Run: python tests/cpu/data/test_glm5_chat_template.py  (or pytest)
-"""
+"""``jinja-templates/glm/glm5-chat.jinja`` renders a GLM-5 conversation as the hub template does, vendored from
+``zai-org/GLM-5.3-Flash`` at ``46a050bec13002ad29ee795c16e61cf4fa3c4a9c`` (MIT). By design it omits the default
+Reasoning Effort line and ends the final turn with ``<|endoftext|>``; tool data raises."""
 
 import hashlib
 

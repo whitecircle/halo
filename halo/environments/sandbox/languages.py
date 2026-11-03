@@ -8,18 +8,14 @@ INTERPRETER_PLACEHOLDER = "$INTERPRETER"
 
 @dataclass(frozen=True)
 class LanguageSpec:
-    """How a language's source is named, compiled, and launched inside a sandbox working dir.
-
-    ``compile_argv`` is ``None`` for interpreted languages. In ``run_argv``, the
-    :data:`INTERPRETER_PLACEHOLDER` token (if present) is replaced with the backend's interpreter.
-    """
+    """``compile_argv`` is ``None`` for interpreted languages. :data:`INTERPRETER_PLACEHOLDER` in ``run_argv`` is
+    replaced with the backend's interpreter."""
 
     name: str
     source_name: str
     run_argv: tuple[str, ...]
     compile_argv: tuple[str, ...] | None = None
     aliases: tuple[str, ...] = field(default_factory=tuple)
-    # The language's comment syntax, what the coding environments' comment stripping reads.
     line_comment: str = "#"
     block_comment: tuple[str, str] | None = None
 
@@ -66,7 +62,7 @@ LANGUAGES: dict[str, LanguageSpec] = {
 
 
 def find_language(language: str) -> LanguageSpec | None:
-    """Look up a :class:`LanguageSpec` by name or alias (case-insensitive); None if unknown."""
+    """By name or alias, case-insensitive."""
     key = (language or "").strip().lower()
     for spec in LANGUAGES.values():
         if key == spec.name or key in spec.aliases:
@@ -75,7 +71,6 @@ def find_language(language: str) -> LanguageSpec | None:
 
 
 def require_language(language: str) -> LanguageSpec:
-    """:func:`find_language`, raising ``ValueError`` instead of returning None for an unknown name."""
     spec = find_language(language)
     if spec is None:
         raise ValueError(f"unsupported language {language!r}; supported: {', '.join(LANGUAGES)}")
@@ -83,7 +78,6 @@ def require_language(language: str) -> LanguageSpec:
 
 
 def utf8_encodable(text: str) -> str:
-    """``text`` with what UTF-8 cannot carry (a lone surrogate in model-written code or stdin) replaced
-    by ``?``, as a text-mode pipe writes it: the program sees the replacement, and the host never fails
-    to hand its input over (a failure the grader books as infra, voiding the episode)."""
+    """Replaces what UTF-8 cannot carry (a lone surrogate in model-written code or stdin) with ``?``, so the host never
+    fails to hand its input over (a failure the grader books as infra, voiding the episode)."""
     return text.encode("utf-8", errors="replace").decode("utf-8")

@@ -1,12 +1,6 @@
-"""The one-document varlen sweep: a tiny family's forward fed an unpacked one-row batch with the varlen set the
-collator hands it, against the same batch without the set (so every attention layer tests the row for packing and
-runs the dense kernel), both through transformers' own flash dispatch on the CPU reference kernels of
-:mod:`tests.common.packed_flash_varlen`; a training step under gradient checkpointing, whose recompute must read the
-handed set; and a host-read probe over a model at the depth of the profiled dense row.
-
-Each entry point rebinds process-global state (the reference kernels, the family patches), so it runs in a fresh
-interpreter per case and reports through one ``FINDINGS:`` line (:func:`tests.common.packed_flash_varlen.report`).
-"""
+"""The one-document varlen sweep: an unpacked one-row batch with the collator's varlen set vs without it, plus a GC
+step and a host-read probe. Entry points rebind process-global state, so each runs in a fresh interpreter per case and
+reports through one ``FINDINGS:`` line."""
 
 import torch
 from torch.utils.checkpoint import CheckpointError
@@ -35,16 +29,15 @@ from tests.common.packed_flash_varlen import (
 )
 from tests.common.tiny_models import tiny_family_model
 
-# One unpacked training row, as a tokenized dataset hands it to the collator.
+# As a tokenized dataset hands it to the collator.
 ONE_DOCUMENT_ROW = {"input_ids": [5, 6, 7, 8, 9, 10, 11, 12, 13]}
 # The decoder depth of the dense benchmark model (Qwen3-8B).
 PROFILED_DEPTH = 36
 
 
 def one_document_batch(config, attn_implementation: str) -> dict:
-    """Resolve ``config`` to ``attn_implementation`` with its production family patches, and collate
-    :data:`ONE_DOCUMENT_ROW` through the collator an SFT run builds for a full-sequence row (TRL's own where the
-    factory leaves it to TRL)."""
+    """Resolve ``config`` with its production patches, and collate :data:`ONE_DOCUMENT_ROW` through the collator an SFT
+    run builds."""
     use_flash(config, attn_implementation)
     collator = select_data_collator(
         padding_tokenizer(), train_on_completions_only=False, model_config=config, emit_varlen_one_document=True
@@ -58,7 +51,7 @@ def without_set(batch: dict) -> dict:
 
 
 def wrong_boundary(batch: dict) -> dict:
-    """``batch`` with a varlen set that splits the row in two: a forward that reads the set trains another loss."""
+    """A varlen set splitting the row in two: a forward that reads the set trains another loss."""
     width = batch["input_ids"].shape[1]
     cu_seq_lens = torch.tensor([0, width // 2, width], dtype=torch.int32)
     longest = width - width // 2
@@ -76,8 +69,8 @@ def _flash_label(name: str) -> str:
 
 
 def family_findings(name: str) -> list[str]:
-    """What breaks when ``name``'s one-document row hands flash its varlen set, then a ``reach:`` entry counting the
-    attention calls that read it; a lone ``skip:`` entry for a family the change does not reach."""
+    """What breaks when ``name``'s row hands flash its varlen set, plus a ``reach:`` entry; a lone ``skip:`` if
+    unreached."""
     if name in SET_DROPPING_FAMILIES:
         return [f"{SKIP_PREFIX} its model forward drops the varlen set, so every attention layer tests the row"]
     torch.manual_seed(SEED)
@@ -108,7 +101,7 @@ def family_findings(name: str) -> list[str]:
         findings.append("the varlen set changed the logits")
     if handed_counts["_is_packed_sequence"] or handed_counts["_prepare_from_posids"] or handed_counts["_upad_input"]:
         findings.append(f"a layer still tested or unpadded the row: {handed_counts}")
-    # Anti-vacuity: without the set, every dense call follows a packed-row test.
+    # Without the set, every dense call follows a packed-row test.
     dense = [call for call in bare_calls if call[0] == "dense"]
     if not dense or bare_counts["_is_packed_sequence"] != len(dense) or len(dense) != len(bare_calls):
         findings.append(f"the batch without the set did not test every layer: {bare_calls} / {bare_counts}")
@@ -130,10 +123,9 @@ def family_findings(name: str) -> list[str]:
 
 
 def step_findings(name: str, gc_mode: str) -> list[str]:
-    """What breaks when a training step on ``name``'s one-document row, checkpointed per ``gc_mode``
-    (:data:`~tests.common.packed_flash_varlen.GC_MODES`), hands flash its varlen set: the loss and every gradient
-    must match the step without it bit for bit, no recompute may test the row again, and a set with a wrong boundary
-    must train another loss, the same with checkpointing as without (the recompute reads the handed set)."""
+    """What breaks when a GC step hands flash its set: loss and gradients must match without it bitwise, and no
+    recompute may test the row again. A set with a wrong boundary must train another loss, the same with checkpointing
+    as without."""
     torch.manual_seed(SEED)
     model = tiny_family_model(PACKING_FAMILIES[name]).train()
     batch = one_document_batch(model.config, _flash_label(name))
@@ -189,9 +181,8 @@ def step_findings(name: str, gc_mode: str) -> list[str]:
 
 
 def host_read_findings() -> list[str]:
-    """The packed-row tests and host reads one reentrant-checkpointed training step of a :data:`PROFILED_DEPTH`-layer
-    Qwen3 makes on its one-document row, without the set and with it, as ``reads:<without>:<with>`` and
-    ``tests:<without>:<with>`` entries, after any failure."""
+    """Packed-row tests and host reads of one reentrant-GC step at :data:`PROFILED_DEPTH` layers, as
+    ``reads:<without>:<with>`` and ``tests:`` entries."""
     torch.manual_seed(SEED)
     config = Qwen3Config(**{**TINY_QWEN3_CONFIG, "num_hidden_layers": PROFILED_DEPTH})
     model = Qwen3ForCausalLM(config).train()

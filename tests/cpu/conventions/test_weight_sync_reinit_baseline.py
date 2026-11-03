@@ -1,10 +1,5 @@
-"""The re-init suite restores the served policy even when an earlier row left trained weights served.
-
-The vLLM and SGLang re-init suites share one long-lived server with the on-policy rows of their tier,
-and those rows leave their trained weights served. The suite's restore re-pushes only the tensor its
-cycles perturb, so its baseline must be taken over the checkpoint it loaded: the suite pushes that
-checkpoint whole first. Driven here against an in-memory server whose every tensor starts trained.
-"""
+"""The re-init suite restores the served policy even when an earlier row left trained weights served. Its restore
+re-pushes only the tensor its cycles perturb, so its baseline is taken after pushing the loaded checkpoint whole."""
 
 import types
 
@@ -78,7 +73,7 @@ def test_restore_reaches_the_baseline_over_a_trained_server(served):
 
 
 def test_without_the_checkpoint_push_the_restore_misses(served, monkeypatch):
-    """Anti-vacuity: the baseline taken over the trained weights is out of the restore's reach."""
+    """The baseline taken over the trained weights is out of the restore's reach."""
     monkeypatch.setattr(weight_sync_reinit, "serve_the_checkpoint", lambda *args, **kwargs: None)
     assert not _restored()
 

@@ -1,5 +1,3 @@
-"""Online GRPO script arguments."""
-
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -27,20 +25,14 @@ class OnlineGRPOScriptArguments(
     CommonScriptArguments,
     SDPGArguments,
 ):
-    """Arguments for RLVR (Reinforcement Learning with Verifiable Rewards) Online GRPO.
-
-    The reward is the ``rewards`` list of terms (:mod:`halo.rewards.terms`): the ``accuracy`` and
-    ``format`` graders, a generative ``judge``, a served ``reward_model`` — each ``weight * score ** exponent``.
-
-    RLRR (arXiv:2601.23058, :class:`RLRRArguments`) replaces the group-normalized advantages with
-    relative-ranking ones, so the trainer refuses it beside the std floor or the degenerate-group drop.
-    """
+    """RLVR Online GRPO. The reward is the ``rewards`` list of terms (:mod:`halo.rewards.terms`), each
+    ``weight * score ** exponent``. RLRR (arXiv:2601.23058) replaces group-normalized advantages with relative-ranking
+    ones, so the trainer refuses it beside the std floor or the degenerate-group drop."""
 
     PROJECT_NAME: ClassVar[str] = "rlvr-online-grpo"
 
-    # The tunables ``use_sdpg`` gates, each under the name the trainer takes it by: the shared block
-    # plus the advantage gate, declared here rather than on SDPGArguments because the offline
-    # self-distillation arm has no advantages to gate on.
+    # The tunables ``use_sdpg`` gates, by trainer name; the advantage gate is here because offline self-distillation
+    # has no advantages to gate on.
     SDPG_TUNABLES: ClassVar[tuple[str, ...]] = (*SDPGArguments.sdpg_field_names(), "opd_positive_advantage_only")
 
     answer_field: str = field(
@@ -50,8 +42,7 @@ class OnlineGRPOScriptArguments(
     system_prompt: str | None = field(
         default=None, metadata={"help": "System prompt prepended to every conversation."}
     )
-    # Literal, not str: an unknown level would reach the chat template as an unrecognized string most
-    # templates ignore, leaving the run with no steer.
+    # An unknown level would reach the chat template as a string most templates ignore, leaving the run with no steer.
     reasoning_effort: ReasoningEffortChoice | None = field(
         default=None,
         metadata={
@@ -69,8 +60,7 @@ class OnlineGRPOScriptArguments(
             "See agent-docs/training-methods/grpo/rewards/README.md."
         },
     )
-    # SDPG (arXiv:2606.04036): privileged-teacher reverse-KL OPD term on positive-advantage
-    # rollouts — the same model re-run with a gold-answer hint — added atop the GRPO loss.
+    # SDPG (arXiv:2606.04036): the model re-run with a gold-answer hint adds reverse-KL on positive-advantage rows.
     use_sdpg: bool = field(
         default=False,
         metadata={"help": "Enable SDPG: a privileged-teacher reverse-KL OPD term on positive-advantage rollouts."},
@@ -88,28 +78,26 @@ class OnlineGRPOScriptArguments(
         super().__post_init__()
 
     def build_sdpg_kwargs(self) -> dict:
-        """SDPG trainer kwargs from these args (empty when SDPG is disabled)."""
         if not self.use_sdpg:
             return {}
         return {
             **self.sdpg_kwargs(),
             "opd_positive_advantage_only": self.opd_positive_advantage_only,
-            # process_for_rlvr normalizes the answer column to "answer", so use that, not answer_field.
+            # process_for_rlvr normalizes the answer column to "answer".
             "sdpg_answer_field": "answer",
         }
 
     @property
     def reward_terms(self) -> tuple[RewardTerm, ...]:
-        """The typed reward terms of ``rewards``, parsed and validated (also at parse time). A veto
-        judge (one listing ``checks``) gates an environment objective, which this arm's independent
-        TRL reward functions have none of, so it is refused."""
+        """A veto judge (one listing ``checks``) gates an environment objective, which this arm's independent TRL
+        reward functions lack, so it is refused."""
         terms = parse_reward_terms(self.rewards, RLVR_REWARD_SOURCES)
         reject_veto_judges(terms, where="the online arm")
         return terms
 
     def _validate_hint_template(self) -> None:
-        # With use_sdpg off a null template is a value set beside the closed gate, which the script's
-        # gate refusal names as such; a template that is set is held to its placeholders either way.
+        # With use_sdpg off, a null template is a value beside the closed gate, which the script's refusal names; a set
+        # template is still held to its placeholders.
         if self.use_sdpg or self.sdpg_hint_template is not None:
             super()._validate_hint_template()
 

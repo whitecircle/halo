@@ -1,6 +1,5 @@
-"""Async rollout plumbing for environmental GRPO: Ray actors, the prefetch thread and engine weight sync. Under
-prefetch each round trains ``prefetch_depth`` rounds late, so a checkpoint carries the submitted rounds a resume
-submits again, oldest first."""
+"""Async rollout plumbing for environmental GRPO. Under prefetch each round trains ``prefetch_depth`` rounds late, so a
+checkpoint carries the submitted rounds a resume submits again."""
 
 import asyncio
 import contextlib
@@ -46,9 +45,8 @@ _PREFETCH_JOIN_TIMEOUT_S = 5.0
 
 
 class _RolloutStartCallback(TrainerCallback):
-    """Starts generation at train-begin, the first hook past both resume restores and still ahead of
-    ``eval_on_start``, on every rank: a push from ``_init_async_components`` would ship pre-restore weights.
-    Weak, since the push needs the trainer only while it trains."""
+    """Starts generation at train-begin, the first hook past both resume restores and ahead of ``eval_on_start``, on
+    every rank: a push from ``_init_async_components`` would ship pre-restore weights."""
 
     def __init__(self, trainer):
         self._trainer = weakref.ref(trainer)
@@ -65,15 +63,11 @@ class _RolloutStartCallback(TrainerCallback):
 
 
 class AsyncRolloutMixin:
-    """Ray-actor rollout collection, prefetch overlap and engine weight sync for the environmental GRPO
-    trainer, its state set by :meth:`_init_async_state`."""
-
     # Whether the weight-sync group is formed, held alike on every rank (the client itself is the main
     # process's alone): set by the fenced formation, cleared first thing by the cleanup.
     _weight_sync_group_formed: bool = False
 
     def _init_async_state(self):
-        """Rollout-manager, weight-sync-client and prefetch state, before any of them is built."""
         self._rollout_manager = None
         self._weight_sync_client = None  # one engine client, or a WeightSyncPool over several
         # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference).
@@ -96,14 +90,12 @@ class AsyncRolloutMixin:
         depth = self.async_config.prefetch_depth
         self._prefetch_queue = queue.Queue(maxsize=depth)
         self._prefetch_input_queue = queue.Queue(maxsize=depth)
-        # The running worker's own stop event, made by each start.
         self._prefetch_stop_event: threading.Event | None = None
 
         self._prefetch_hits = 0
         self._prefetch_misses = 0
         # The (prompts, contexts) of each submitted, unconsumed round, oldest first; trainer thread only.
         self._prefetch_pending: deque[tuple[list[str], list[dict | None]]] = deque()
-        # The pending rounds a resumed checkpoint carried, submitted once generation starts.
         self._resumed_prefetch_rounds: list[tuple[list[str], list[dict | None]]] = []
         self._prefetch_input_skips = 0
         # The step the sync path was last entered at, not the step the engines hold.
@@ -112,8 +104,8 @@ class AsyncRolloutMixin:
         self._rollout_generation_started = False
 
     def _init_async_components(self):
-        """COLLECTIVE. Start every rank's rollout components, then form the weight-sync group, each failure
-        deferred to a verdict all ranks join so none is raised on one rank while its peers wait."""
+        """COLLECTIVE. Each failure is deferred to a verdict all ranks join, so none is raised on one rank while its
+        peers wait."""
         if self._rollout_manager is not None:
             return
 
@@ -128,8 +120,6 @@ class AsyncRolloutMixin:
             self.add_callback(self._rollout_start_callback)
 
     def _start_rank_rollout_components(self) -> None:
-        """This rank's half of :meth:`_init_async_components`: Ray, the rollout manager and its actors,
-        and under ``isr_engine_reference`` the score-only clients the engine re-score fans out over."""
         if not ray.is_initialized():
             ray.init(**ray_init_kwargs(address=self.async_config.ray_address))
 
@@ -158,8 +148,8 @@ class AsyncRolloutMixin:
             self._engine_rescore_clients = self._build_engine_rescore_clients()
 
     def _reject_eval_round_over_cap(self, max_concurrent: int) -> None:
-        """Refuse an eval round above the in-flight cap: its serial waves hold the peers at the post-round
-        collective for several ``episode_timeout``s."""
+        """An eval round above the in-flight cap runs in serial waves that hold the peers at the post-round collective
+        for several ``episode_timeout``s."""
         rows = self.async_config.eval_rollout_batch_size
         if rows is not None and rows > max_concurrent:
             raise ValueError(
@@ -168,8 +158,8 @@ class AsyncRolloutMixin:
             )
 
     def _build_engine_rescore_clients(self) -> list[WeightSyncClientBase]:
-        """This rank's score-only clients for the engine re-score, one per server a round's trajectories reach
-        (trajectory ``t`` on server ``t mod N``); HTTP only, no communicator."""
+        """One per server a round's trajectories reach (trajectory ``t`` on server ``t mod N``); HTTP only, no
+        communicator."""
         client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
         return [
             client_cls(base_url=url, connection_timeout=self.async_config.rollout_connection_timeout)
@@ -177,8 +167,7 @@ class AsyncRolloutMixin:
         ]
 
     def _form_weight_sync_group(self) -> None:
-        """COLLECTIVE while it forms. Form the engine weight-sync group unless formed; the main process's client
-        failure raises on every rank."""
+        """COLLECTIVE while it forms. The main process's client failure raises on every rank."""
         if self._weight_sync_group_formed:
             return
         guard = DeferredRankFailure("Weight-sync client formation")
@@ -187,7 +176,6 @@ class AsyncRolloutMixin:
         self._weight_sync_group_formed = True
 
     def _init_weight_sync_client(self):
-        """The main process's engine weight-sync client(s), built once under :meth:`_form_weight_sync_group`."""
         if self._weight_sync_client is not None:
             return
 
@@ -237,9 +225,8 @@ class AsyncRolloutMixin:
         self._resumed_prefetch_rounds = []
 
     def _sync_weights_to_engine_fenced(self, force: bool = False) -> bool:
-        """COLLECTIVE. :meth:`_sync_weights_to_engine` with whatever a rank raises out of the push raised on every
-        rank. The push duration is broadcast first, so every rank credits the servers' pause to its in-flight
-        episodes' deadlines whether or not the push failed."""
+        """COLLECTIVE. A push failure raises on every rank. The duration is broadcast first, so every rank credits the
+        servers' pause to its in-flight episodes' deadlines even if the push failed."""
         manager = self._rollout_manager
         if manager is not None:
             manager.begin_engine_pause()
@@ -254,12 +241,11 @@ class AsyncRolloutMixin:
 
     @property
     def _rollout_engine_name(self) -> str:
-        """The configured rollout engine's display name, which every user-facing string here reads."""
         return resolve_weight_sync_client(self.async_config.rollout_backend).BACKEND_NAME
 
     def _sync_weights_to_engine(self, force: bool = False) -> bool:
-        """COLLECTIVE. Push the trainer's weights to every rollout engine unless the cadence gate declines (``force``
-        overrides it), forming the group first where none is; returns whether weights went out."""
+        """COLLECTIVE. Push to every engine unless the cadence gate declines (``force`` overrides it); returns whether
+        weights went out."""
         # Evaluated alike on every rank: the push it gates is a collective gather.
         if not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0:
             return False
@@ -269,8 +255,8 @@ class AsyncRolloutMixin:
         return True
 
     def _start_prefetch_thread(self):
-        """Start the background prefetch thread with a stop event of its own: a previous worker still in its
-        round past the stop's bounded join keeps its set one, so this start cannot revive it."""
+        """A stop event of its own: a previous worker still in its round past the stop's bounded join keeps its set
+        one, so this start cannot revive it."""
         if self._prefetch_thread is not None:
             return
 
@@ -285,7 +271,6 @@ class AsyncRolloutMixin:
         logger.info("Prefetch thread started for async overlap")
 
     def _prefetch_worker(self, stop: threading.Event):
-        """The prefetch thread until ``stop`` is set, its rounds collecting on an event loop of its own."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -295,9 +280,8 @@ class AsyncRolloutMixin:
             loop.close()
 
     async def _prefetch_rounds(self, stop: threading.Event):
-        """Start each submitted round's collection as it arrives, so up to ``prefetch_depth`` rounds collect
-        together: a later round's episodes keep the engines busy while an earlier round's longest ones finish.
-        Rounds still collecting at ``stop`` are cancelled, since no later step consumes them."""
+        """Start each round's collection as it arrives, so a later round's episodes keep the engines busy while an
+        earlier round's longest ones finish. Rounds still collecting at ``stop`` are cancelled."""
         loop = asyncio.get_running_loop()
         collecting: set[asyncio.Task] = set()
         previous: asyncio.Task | None = None
@@ -324,9 +308,8 @@ class AsyncRolloutMixin:
         previous: asyncio.Task | None,
         stop: threading.Event,
     ) -> None:
-        """Collect one round, then deliver it once ``previous`` (the round submitted before it) has delivered: the
-        trainer pairs each output with its oldest pending round. Every round yields exactly one output item, its
-        rollouts or a ``(prompt_count, None)`` failure marker, so the in-flight accounting stays exact."""
+        """Deliver once ``previous`` has delivered, since the trainer pairs each output with its oldest pending round.
+        Every round yields exactly one output, its rollouts or a ``(prompt_count, None)`` failure marker."""
         results = None
         start_time = time.time()
         try:
@@ -345,8 +328,7 @@ class AsyncRolloutMixin:
             logger.debug(f"Prefetched {len(results)} rollouts in {time.time() - start_time:.2f}s")
 
     def _put_prefetch_output(self, item: tuple[int, list[RolloutResult] | None], stop: threading.Event):
-        """Deliver a prefetch item; only shutdown abandons one (logged). Rounds deliver in order and at most
-        ``prefetch_depth`` are unconsumed, so the queue holds a slot for this one: a full queue raises instead of
+        """Only shutdown abandons an item. At most ``prefetch_depth`` are unconsumed, so a full queue raises instead of
         waiting, since a wait on the worker's event loop would freeze every other round's collection."""
         if stop.is_set():
             logger.warning(f"Prefetch stopping; abandoning delivery of a {item[0]}-prompt rollout batch (shutdown)")
@@ -361,13 +343,9 @@ class AsyncRolloutMixin:
             raise
 
     def _acquire_prefetched_round(self) -> list[RolloutResult] | None:
-        """The oldest pending round's rollouts once ``prefetch_depth`` rounds are in flight, else ``None``.
-
-        Below that depth the step is a cold round, counted as a miss: it collects its own prompts and submits
-        them too, deepening the pipeline by one, so a run opens with ``prefetch_depth`` of them. At depth, a round
-        not yet delivered is waited for; one delivered as a failure is popped, and the step collects its own
-        prompts instead, keeping the younger rounds for the steps they belong to.
-        """
+        """The oldest round once ``prefetch_depth`` are in flight, else ``None``: a cold step collects its own prompts
+        and submits them too, deepening the pipeline. A round delivered as a failure is popped and the step collects
+        its own."""
         depth = self.async_config.prefetch_depth
         if self._prefetch_inflight < depth:
             self._prefetch_misses += 1
@@ -393,9 +371,8 @@ class AsyncRolloutMixin:
         return results
 
     def _wait_for_inflight_prefetch(self) -> list[RolloutResult] | None:
-        """Wait for the oldest in-flight round rather than re-collect it, so each dataset batch trains once;
-        ``None`` when that round failed or the worker is wedged past the episode deadline. A wedge is recorded on
-        the ``_batch_errors`` fence, not raised: prefetch state is per rank."""
+        """Wait rather than re-collect, so each dataset batch trains once; ``None`` on failure or a wedge past the
+        episode deadline. A wedge is recorded on the ``_batch_errors`` fence, since prefetch state is per rank."""
         timeout = self.async_config.episode_timeout + _PREFETCH_SUBMIT_TIMEOUT_S
         try:
             _count, results = self._prefetch_queue.get(timeout=timeout)
@@ -413,7 +390,6 @@ class AsyncRolloutMixin:
 
     @property
     def _prefetch_inflight(self) -> int:
-        """Submitted prefetch rounds whose output no step has consumed (one output item each)."""
         return len(self._prefetch_pending)
 
     def _submit_for_prefetch(
@@ -421,7 +397,7 @@ class AsyncRolloutMixin:
         prompts: list[str],
         contexts: list[dict | None],
     ):
-        """Submit a round for prefetching; a skipped one is warned, since its prompts then never train."""
+        """A skipped round is warned, since its prompts then never train."""
         try:
             self._prefetch_input_queue.put((prompts, contexts), timeout=_PREFETCH_SUBMIT_TIMEOUT_S)
         except queue.Full:
@@ -446,8 +422,8 @@ class AsyncRolloutMixin:
         return metrics
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
-        """Write this rank's pending prefetch rounds, oldest first, which a resume submits again first: they left
-        the dataloader untrained, and the resumed one starts past them."""
+        """Write this rank's pending rounds, oldest first, which a resume submits again first: they left the dataloader
+        untrained, and the resumed one starts past them."""
         super()._persist_trainer_sidecars(checkpoint_dir)
         if not self._prefetch_enabled:
             return
@@ -469,11 +445,9 @@ class AsyncRolloutMixin:
         }
 
     def _restore_trainer_sidecars(self, checkpoint: str) -> None:
-        """Load this rank's pending prefetch rounds for :meth:`_start_rollout_generation` to submit; rounds drawn
-        under another layout are dropped on every rank together. ``weights_only=False``: they carry context values.
-
-        A smaller ``prefetch_depth`` keeps the oldest rounds it holds: each step trains one round and draws one, so
-        the pipeline would never shed the surplus. A larger one opens with cold rounds until it is full."""
+        """Rounds of another layout are dropped on every rank together. ``weights_only=False``: they carry context
+        values. A smaller ``prefetch_depth`` keeps the oldest rounds, since the pipeline would never shed the
+        surplus."""
         super()._restore_trainer_sidecars(checkpoint)
         payload, path = consensus_read(
             os.path.join(checkpoint, prefetch_pending_filename(get_global_rank(), get_global_world_size())),
@@ -514,7 +488,7 @@ class AsyncRolloutMixin:
         self._resumed_prefetch_rounds = rounds[:depth]
 
     def _cleanup_async_components(self):
-        """Cleanup Ray actors and the engine weight-sync client(s). Run by every rank."""
+        """Run by every rank."""
         # First, on every rank: the client below is the main process's alone, and a teardown step that
         # raises must not leave the ranks disagreeing on whether the next push forms the group.
         self._weight_sync_group_formed = False
@@ -531,7 +505,6 @@ class AsyncRolloutMixin:
                 logger.warning(f"Error closing the {self._rollout_engine_name} weight-sync client: {e}")
             self._weight_sync_client = None
 
-        # Score-only clients formed no communicator; their HTTP sessions are what they hold.
         if self._engine_rescore_clients is not None:
             for client in self._engine_rescore_clients:
                 client.close_session()
@@ -544,8 +517,8 @@ class AsyncRolloutMixin:
         self._last_sync_attempt_step = -1
 
     def _stop_prefetch_thread(self):
-        """Stop the background prefetch thread: it sees its stop event within a poll slice and cancels the rounds
-        still collecting, and nothing is queued for it, so a later start begins on an empty input queue."""
+        """It sees its stop event within a poll slice and cancels the rounds still collecting, so a later start begins
+        on an empty input queue."""
         if self._prefetch_thread is None:
             return
 

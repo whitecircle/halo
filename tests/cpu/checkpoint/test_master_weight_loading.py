@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""Real pre-wrap dense/CP/EP1 loads and 1-D TP replay retain off-BF16-grid checkpoint masters.
-
-The actual loader, key planner and streamed reads run. Only GPU placement and native communication
-buffers are substituted on CPU. Gloo ranks exercise native HF TP construction, packed placements,
-tied owner replacement, and a one-rank read failure after the real node loading throttle.
-"""
+"""Pre-wrap dense/CP/EP1 loads and 1-D TP replay retain off-bf16-grid checkpoint masters.
+Only GPU placement and native buffers are substituted on CPU."""
 
 import datetime
 from pathlib import Path
@@ -169,7 +165,7 @@ def test_native_tp_load_preserves_checkpoint_masters_and_local_storage(tmp_path,
 
 def _placement_rank(rank, path, stored_fp32):
     mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
-    # Packed row order must differ from an ordinary contiguous Shard(0) oracle.
+    # Packed row order must differ from a contiguous Shard(0) oracle.
     expected = torch.arange(64).reshape(8, 8).float() / 16 + (1e-5 if stored_fp32 else 0)
     for placement in (Shard(0), Shard(1), Replicate(), _StridedShard(0, split_factor=2)):
         model = nn.Module()
@@ -192,8 +188,7 @@ def _placement_rank(rank, path, stored_fp32):
             local = expected
         assert torch.equal(model.weight.to_local().detach(), local)
         if isinstance(placement, _StridedShard):
-            # This synthetic 1-D packed placement has no TP/DP shard_order for full_tensor().
-            # Reconstruct independently through Gloo: ranks own [chunk0, chunk2]/[chunk1, chunk3].
+            # This 1-D packed placement has no TP/DP shard_order for full_tensor(), so it is rebuilt through Gloo.
             gathered = [torch.empty_like(local) for _ in range(2)]
             dist.all_gather(gathered, model.weight.to_local().detach())
             left, right = (shard.chunk(2, dim=0) for shard in gathered)
@@ -322,7 +317,7 @@ def test_fused_master_replay_preserves_live_device_instead_of_staging_device(tmp
         )
     ]
     with master_loading.StreamingCheckpointReader(str(tmp_path), state) as reader:
-        # A distinct requested device catches relocation even on a CPU-only test runner.
+        # A distinct requested device catches relocation on a CPU-only runner.
         restored = ExpertFuser(0, 2).execute(
             tasks, model, str(tmp_path), torch.float32, "meta", reader=reader, preserve_parameters=True
         )
@@ -365,12 +360,8 @@ def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path)
 
 @pytest.mark.parametrize("deserialize_first", (False, True))
 def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_path, deserialize_first):
-    """The real HF broad deserializer also matches plain weights, which it leaves unchanged.
-
-    Packed floating-storage Params4bit and their quantization statistics come from a real bnb
-    serialization. The streamed master replay must leave them intact without dropping a separate
-    recorded vendor rename or rounding the ordinary master's checkpoint value.
-    """
+    """HF's broad deserializer also matches plain weights; the replay leaves packed Params4bit and their statistics
+    intact."""
     model = module_with_weight_keys(["norm.weight"]).to(torch.bfloat16)
     model.config = SimpleNamespace(model_type="qwen3")
     model.quantized = Linear4bit(64, 64, bias=False, quant_storage=torch.bfloat16, quant_type="nf4")
@@ -396,7 +387,7 @@ def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_p
     model._weight_conversions = [deserialize, rename] if deserialize_first else [rename, deserialize]
     model.norm.weight.data.copy_(original)
     assert not torch.equal(model.norm.weight.float(), original)
-    # The actual op's identity branch is the premise for skipping only this storage conversion.
+    # The op's identity branch is the premise for skipping this conversion.
     assert deserialize.operations[0].convert({"weight": original})["weight"] is original
 
     master_loading.restore_fp32_master_parameters(model, str(tmp_path), keep_non_ep=True, strict=True)

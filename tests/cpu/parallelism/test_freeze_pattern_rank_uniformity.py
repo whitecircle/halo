@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""A freeze/unfreeze pattern that misses on ONE stage must abort every rank — on a real group.
-
-``freeze_modules_by_patterns`` / ``unfreeze_modules_by_patterns`` route their verdict through
-:func:`~halo.runtime.consensus.reject_across_ranks` because the patterns are matched
-against the LIVE module tree, which under pipeline parallelism is this rank's stage only. A pattern
-naming a layer that lives on stage 0 misses on stage 1 — so the verdict is genuinely rank-local, and
-a bare ``raise`` there takes one rank out while its peers block in the next collective until the
-watchdog fires, with the real diagnostic printed nowhere.
-
-``tests/cpu/models/test_freeze_patterns.py`` pins the verdicts (which patterns raise, what the
-message says), but every one of its cases takes ``reject_across_ranks``'s ``world_size <= 1`` early
-return, which degenerates to a plain local raise. Replacing both call sites with
-``if reason: raise ValueError(reason)`` passes all of them. This is the test that fails for that
-mutation: two ranks, real gloo, the pattern matching on rank 0 only.
-
-The process-group timeout is deliberately short so a bare local raise FAILS instead of stalling the suite.
-
-Run: python tests/cpu/parallelism/test_freeze_pattern_rank_uniformity.py  (or pytest -m cpu)
-"""
+"""A freeze/unfreeze pattern missing on one stage aborts every rank, on real gloo.
+``tests/cpu/models/test_freeze_patterns.py`` takes the single-rank early return, so a bare raise passes there."""
 
 from __future__ import annotations
 
@@ -32,13 +15,12 @@ from halo.model_loading.parallel.freeze_patterns import freeze_modules_by_patter
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
-# Far below any plausible real wait: with a stage-local raise the surviving rank can only end in a
-# gloo timeout at the modelled next collective, and the suite must not sit on it.
+# With a stage-local raise the surviving rank ends in a gloo timeout at the modelled next collective.
 PG_TIMEOUT_SEC = 15
 
 
 class _Stage(nn.Module):
-    """A two-stage pipeline split: each rank holds the block named for it, never both."""
+    """Each rank holds the block named for it."""
 
     def __init__(self, rank: int):
         super().__init__()
@@ -46,7 +28,6 @@ class _Stage(nn.Module):
 
 
 def _worker(rank: int, tmp_dir: str, which: str, pattern: str) -> None:
-    """Apply the pattern to this rank's stage, then enter the collective a real load would next hit."""
     model = _Stage(rank)
     reached_next_collective = False
     try:
@@ -54,8 +35,7 @@ def _worker(rank: int, tmp_dir: str, which: str, pattern: str) -> None:
             freeze_modules_by_patterns(model, [pattern])
         else:
             unfreeze_modules_by_patterns(model, [pattern])
-        # Stands in for the next collective the loading path enters (an FSDP shard, a barrier): the
-        # rank that did NOT raise arrives here alone under a stage-local raise.
+        # The rank that did not raise arrives here alone under a stage-local raise.
         dist.barrier()
         reached_next_collective = True
         outcome = "NO RAISE"
@@ -79,8 +59,7 @@ def _results(tmp_path, which: str, pattern: str) -> list[tuple[bool, str]]:
 
 
 def test_a_freeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_path):
-    """``block_0.*`` names a parameter only rank 0 holds. Rank 0's own verdict is clean, so it is the
-    rank a stage-local raise would strand — it must raise too, with rank 1's real reason."""
+    """Rank 0's own verdict is clean, so it is the rank a stage-local raise would strand."""
     results = _results(tmp_path, which="freeze", pattern="block_0.*")
 
     for rank, (reached, outcome) in enumerate(results):
@@ -96,8 +75,7 @@ def test_a_freeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_path):
 
 
 def test_an_unfreeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_path):
-    """Its counterpart: ``block_0`` leaves rank 1 with nothing trainable, and that rank's stage —
-    not the world — is what the predicate can see."""
+    """``block_0`` leaves rank 1 with nothing trainable, which its stage alone can see."""
     results = _results(tmp_path, which="unfreeze", pattern="block_0")
 
     for rank, (reached, outcome) in enumerate(results):
@@ -110,8 +88,7 @@ def test_an_unfreeze_pattern_that_misses_one_stage_takes_every_rank_down(tmp_pat
 
 
 def test_a_pattern_every_stage_carries_raises_on_nobody(tmp_path):
-    """Anti-vacuity: the seam must not be a raise-always. ``block_*`` matches on both stages, so both
-    ranks proceed through the next collective."""
+    """Anti-vacuity: the seam must not raise always."""
     results = _results(tmp_path, which="freeze", pattern="block_*")
     for rank, (reached, outcome) in enumerate(results):
         assert outcome == "NO RAISE", f"rank {rank} raised on a pattern its stage carries: {outcome}"
@@ -119,8 +96,7 @@ def test_a_pattern_every_stage_carries_raises_on_nobody(tmp_path):
 
 
 def test_the_local_verdict_is_unchanged_by_the_routing():
-    """The seam must not have moved the decision: single-process, a hit still freezes and a miss
-    still raises ``ValueError`` (the type every caller and config gate matches on)."""
+    """``ValueError`` is the type every caller and config gate matches on."""
     model = _Stage(0)
     freeze_modules_by_patterns(model, ["block_0.*"])
     assert not any(p.requires_grad for p in model.parameters())

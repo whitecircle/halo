@@ -1,4 +1,4 @@
-"""Package init: the process-wide defaults that must be set before torch/transformers import."""
+"""Process-wide defaults that must be set before torch and transformers import."""
 
 import os
 
@@ -20,6 +20,5 @@ transformers.logging.set_verbosity_info()
 transformers.logging.enable_default_handler()
 transformers.logging.enable_explicit_format()
 
-# Install the device-aware dispatch shim before any toolkit module imports a transformers modeling
-# module, which binds the hub-kernel fallback factory at import time.
+# Must precede any transformers modeling import, which binds the hub-kernel fallback factory at import time.
 import halo.kernels.hub_kernel_dispatch  # noqa: E402, F401

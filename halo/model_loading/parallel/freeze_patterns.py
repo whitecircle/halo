@@ -8,9 +8,8 @@ from halo.runtime.consensus import reject_across_ranks
 
 
 def _pins_a_decoder_layer_index(pattern: str) -> bool:
-    """Whether an fnmatch pattern selects decoder layers by position: the segment after a decoder-layer
-    list carries a digit (character-class ranges included), while ``*.mlp.experts.0.*`` and
-    ``model.layers.*`` mean the same on every stage."""
+    """Whether a pattern selects decoder layers by position: the segment after a layer list carries a digit, while
+    ``*.mlp.experts.0.*`` and ``model.layers.*`` mean the same on every stage."""
     segments = pattern.split(".")
     return any(
         segment in DECODER_LAYER_LIST_ATTRS and any(char.isdigit() for char in next_segment)
@@ -34,12 +33,8 @@ def _reject_layer_indexed_patterns_under_pp(model, patterns, flag: str) -> None:
 
 
 def freeze_modules_by_patterns(model, patterns):
-    """COLLECTIVE: freeze the parameters whose full names match an fnmatch pattern, e.g.
-    ``["*.self_attn.sinks", "model.layers.0.mlp.*"]``.
-
-    Raises on every rank when a pattern matches nothing: freezing is additive, so a typo would leave
-    what it meant to hold still training with no other symptom.
-    """
+    """COLLECTIVE: freeze parameters whose full names match an fnmatch pattern. Raises on every rank when a pattern
+    matches nothing, as a typo would leave what it meant to hold still training with no other symptom."""
     _reject_layer_indexed_patterns_under_pp(model, patterns, "freeze_layers_patterns")
     unmatched = set(patterns)
     for param_name, param in model.named_parameters():
@@ -63,11 +58,8 @@ def freeze_modules_by_patterns(model, patterns):
 
 
 def unfreeze_modules_by_patterns(model, patterns):
-    """COLLECTIVE: freeze every parameter, then unfreeze the modules whose full names match an fnmatch
-    pattern, e.g. ``["*.mlp.up_proj", "score", "model.layers.0.self_attn.*"]``.
-
-    Raises on every rank when nothing is left trainable: the optimizer accepts empty parameter groups.
-    """
+    """COLLECTIVE: freeze every parameter, then unfreeze modules whose full names match an fnmatch pattern. Raises on
+    every rank when nothing is left trainable, as the optimizer accepts empty parameter groups."""
     _reject_layer_indexed_patterns_under_pp(model, patterns, "unfreeze_layers_patterns")
     for param in model.parameters():
         param.requires_grad = False

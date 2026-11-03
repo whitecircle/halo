@@ -1,27 +1,6 @@
 #!/usr/bin/env python
-"""Checkpoint rotation must run only after the toolkit's optimizer sidecars are complete.
-
-HF Trainer's ``_save_checkpoint`` ends by rotating old checkpoints (an rmtree, honoring
-``save_total_limit``); the mixin then writes its own sidecars — scheduler.pt under
-``save_only_model`` or beside per-rank shards, the trainer's own (``_persist_trainer_sidecars``: the
-precomputed DPO/KTO reference log-probs), and the per-rank optimizer shards a sharded save writes in
-place of the base's optimizer.pt. With ``save_total_limit: 1`` that ordering opens a window where the
-previous checkpoint is already deleted and the new one has no optimizer state yet — a preemption
-there leaves exactly one checkpoint that warm-restarts the optimizer of a multi-day run. The mixin
-therefore neutralizes the base's rotation (``save_total_limit=None`` for the duration of the
-``super()`` call) and rotates itself as the true last step — and not at all when the save failed,
-because after a failed save the old checkpoints are the only good ones. A
-``merge_expert_lora_on_save`` checkpoint's resume adapter is one more such sidecar. The base's
-checkpoint push to the Hub, a background upload of the directory as it stands, waits for the
-complete checkpoint the same way.
-
-The trainer here is a stub over ``BaseTrainerSave``, HF's save in its own order (the checkpoint
-directory, optimizer.pt/.bin where the mixin lets the base write it, the trainer state, then the real
-rotation — rotation-last being the hazard under test), and the real ``OptimizerShardStore`` writes
-the shards, recording the window its write begins in.
-
-    python tests/cpu/checkpoint/test_checkpoint_rotation_ordering.py
-"""
+"""Checkpoint rotation runs only after the toolkit's optimizer sidecars are complete. HF rotates before the mixin
+writes them, so with ``save_total_limit: 1`` a preemption there warm-restarts a multi-day run's optimizer."""
 
 import os
 import time
@@ -42,8 +21,7 @@ OPTIMIZER_FILES = ("optimizer.pt", "optimizer.bin")
 
 
 class _RecordingStore(OptimizerShardStore):
-    """The real shard store, recording what the world looked like when its write began (the preemption
-    window under test)."""
+    """Records what the world looked like when its write began, the preemption window under test."""
 
     def __init__(self, trainer, *, fsdp_wrapped: bool, fail: bool):
         super().__init__(stepped_store_context(fsdp_wrapped=fsdp_wrapped))
@@ -64,7 +42,7 @@ class _RecordingStore(OptimizerShardStore):
 
 
 class _BaseOptimizerSave(BaseTrainerSave):
-    """The base save's optimizer files, in both spellings: rank 0's whole optimizer view."""
+    """Both spellings: rank 0's whole optimizer view."""
 
     def _save_optimizer_and_scheduler(self, output_dir):
         for name in OPTIMIZER_FILES:
@@ -73,8 +51,6 @@ class _BaseOptimizerSave(BaseTrainerSave):
 
 
 class _Trainer(DistributedTrainerMixin, _BaseOptimizerSave):
-    """The mixin's _save_checkpoint over HF's save — no heavy trainer construction."""
-
     def __init__(self, run_dir, *, fsdp_wrapped=True, fail_shards=False, store=None, merge_expert_lora_on_save=False):
         self.run_dir = run_dir
         self.events = []
@@ -94,18 +70,16 @@ class _Trainer(DistributedTrainerMixin, _BaseOptimizerSave):
         self._shard_store = store or _RecordingStore(self, fsdp_wrapped=fsdp_wrapped, fail=fail_shards)
 
     def save_model(self, output_dir=None, _internal_call=False):
-        """The base save's first step, recording the rotation limit the base save runs under."""
+        """Records the rotation limit the base save runs under."""
         self.events.append(("base_save", self.args.save_total_limit))
         self._mark_model_save_collectives_done()
 
     def _push_from_checkpoint(self, checkpoint_folder):
-        """Stands in for the base's Hub push, which uploads the directory in the background as it
-        stands when called: records that listing."""
+        """Records the listing the base's background upload would send."""
         self.events.append(("push", sorted(os.listdir(checkpoint_folder))))
 
     def _persist_trainer_sidecars(self, checkpoint_dir):
-        """Where the trainer-sidecar hook lands in the window: which directory it was handed, and
-        whether the previous checkpoint was still on disk when it wrote."""
+        """Records which directory it was handed and whether the previous checkpoint was still on disk."""
         self.events.append(
             (
                 "trainer_sidecars",
@@ -122,8 +96,6 @@ class _Trainer(DistributedTrainerMixin, _BaseOptimizerSave):
 
 
 def _plant_previous_checkpoint(run_dir) -> str:
-    """A complete back-dated checkpoint-1 — the good checkpoint rotation is allowed to remove only
-    once its successor is whole."""
     previous = os.path.join(run_dir, "checkpoint-1")
     os.makedirs(previous)
     for name in ("model.safetensors", "optimizer_shard_00000.pt", "optimizer_meta.pt", "scheduler.pt"):
@@ -136,8 +108,7 @@ def _plant_previous_checkpoint(run_dir) -> str:
 
 
 def _record_rotation(monkeypatch, events):
-    """Route the mixin's deferred rotation through a recorder that still performs the real thing.
-    raising=False: where the symbol is absent the patch is a no-op and the ordering asserts fail."""
+    """raising=False: where the symbol is absent the patch is a no-op and the ordering asserts fail."""
 
     def recording_rotate(**kwargs):
         events.append(("rotate", kwargs["save_total_limit"]))
@@ -153,9 +124,8 @@ def test_rotation_runs_after_the_optimizer_shards_are_on_disk(tmp_path, monkeypa
 
     trainer._save_checkpoint(model=None, trial=None)
 
-    # The whole window, in order: the base saved with rotation NEUTRALIZED and no optimizer.pt; the
-    # shards were written while the previous checkpoint still existed (nothing to lose at any
-    # preemption point); only then did rotation run, at the caller's real limit.
+    # Base save with rotation neutralized, shards while the previous checkpoint exists, then rotation at the real
+    # limit.
     assert trainer.events == [
         ("base_save", None),
         ("trainer_sidecars", "checkpoint-2", True),
@@ -175,9 +145,7 @@ def test_rotation_runs_after_the_optimizer_shards_are_on_disk(tmp_path, monkeypa
 
 
 def test_a_failed_shard_write_keeps_the_previous_checkpoint(tmp_path, monkeypatch):
-    """A failure where the preemption would land: the shard write dies. Rotation must NOT run —
-    the previous checkpoint is the only one with optimizer state, and rotating would delete it in
-    favor of the incomplete newcomer."""
+    """The previous checkpoint is the only one with optimizer state."""
     trainer = _Trainer(str(tmp_path), fail_shards=True)
     previous = _plant_previous_checkpoint(str(tmp_path))
     _record_rotation(monkeypatch, trainer.events)
@@ -190,8 +158,7 @@ def test_a_failed_shard_write_keeps_the_previous_checkpoint(tmp_path, monkeypatc
 
 
 def test_non_sharded_modes_still_rotate_after_the_super_call(tmp_path, monkeypatch):
-    """The early-return branch (no FSDP2/pure-TP): the base's rotation was neutralized, so the
-    deferred rotation must run there too — and the base's optimizer.pt stays, it IS the artifact."""
+    """The base's rotation was neutralized, so the deferred one must run here too; optimizer.pt is the artifact."""
     trainer = _Trainer(str(tmp_path), fsdp_wrapped=False)
     previous = _plant_previous_checkpoint(str(tmp_path))
     _record_rotation(monkeypatch, trainer.events)
@@ -209,9 +176,8 @@ def test_non_sharded_modes_still_rotate_after_the_super_call(tmp_path, monkeypat
     ids=["sharded-optimizer", "base-optimizer", "save_only_model"],
 )
 def test_the_checkpoint_push_uploads_the_complete_checkpoint(tmp_path, monkeypatch, fsdp_wrapped, save_only_model):
-    """``hub_strategy: checkpoint`` uploads the checkpoint directory from the base save, before the mixin
-    commits the trainer state and writes the optimizer shards. The push must start once, after the
-    commit and before rotation, on the directory as a resume would read it."""
+    """``hub_strategy: checkpoint`` uploads from the base save, before the commit and shards; the push must start
+    after the commit and before rotation."""
     trainer = _Trainer(str(tmp_path), fsdp_wrapped=fsdp_wrapped)
     trainer.args.push_to_hub = True
     trainer.args.save_only_model = save_only_model
@@ -235,11 +201,8 @@ def _real_store_over_a_stepped_optimizer() -> OptimizerShardStore:
 
 
 def test_an_unproducible_optimizer_state_keeps_the_previous_checkpoint(tmp_path, monkeypatch):
-    """The other half of the same window, and the silent one: the shard save does not fail, it finds
-    it has NOTHING to write (``get_optimizer_state_dict`` refuses the live sharding — FlashAdamW on
-    unevenly-sharded DTensors does this on every save). Skipping the write and returning lets this
-    rotation delete the last checkpoint that HAD optimizer state, in favour of one that has none, at
-    exit code 0. It must fail the checkpoint instead."""
+    """FlashAdamW on uneven DTensors finds nothing to write on every save, which would rotate away the last
+    checkpoint with state at exit code 0."""
 
     def refuse(*args, **kwargs):
         raise RuntimeError("FlashAdamW: unevenly-sharded DTensors have no state_dict")
@@ -258,12 +221,8 @@ def test_an_unproducible_optimizer_state_keeps_the_previous_checkpoint(tmp_path,
 
 @pytest.mark.parametrize("save_only_model", [False, True], ids=["exact-resume", "save_only_model"])
 def test_a_merged_checkpoint_gets_its_resume_adapter_before_rotation(tmp_path, monkeypatch, save_only_model):
-    """A ``merge_expert_lora_on_save`` checkpoint resumes from its unmerged adapters, a sidecar like
-    the optimizer shards: written into the new checkpoint while the previous one still exists, and
-    under ``save_only_model`` too, where the adapters are still the only exact trained weights. The
-    save first unmarks the step's directory, before the base save writes anything into it: a resumed
-    run saving a step it already saved rewrites that checkpoint, whose old marker would otherwise
-    vouch for the old adapter until the new one lands."""
+    """The save unmarks the directory first: a re-saved step's old marker would vouch for the old adapter until the
+    new one lands."""
     trainer = _Trainer(str(tmp_path), merge_expert_lora_on_save=True)
     trainer.args.save_only_model = save_only_model
     previous = _plant_previous_checkpoint(str(tmp_path))
@@ -289,11 +248,8 @@ def test_a_merged_checkpoint_gets_its_resume_adapter_before_rotation(tmp_path, m
 
 
 def test_a_torn_resave_of_a_saved_step_does_not_vouch_for_the_abandoned_save(tmp_path, monkeypatch):
-    """A run resumed from an earlier checkpoint saves a step it saved before, in place. Stopped after
-    the base save but before its own optimizer shards, the directory would hold this save's weights beside
-    the abandoned save's trainer state, shard and meta. Those must be gone before anything is written: left
-    in place, the resume detection takes the directory for complete and the optimizer restore loads the
-    abandoned run's moments under this run's weights. What is left holds no optimizer state at all."""
+    """Left in place, resume detection takes the directory as complete and restores the abandoned run's moments
+    under this run's weights."""
     run_dir = str(tmp_path)
     abandoned = os.path.join(run_dir, "checkpoint-2")
     os.makedirs(abandoned)

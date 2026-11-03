@@ -1,11 +1,5 @@
-"""No first-party code reads a RoPE parameter as a flat config attribute.
-
-transformers 5 keeps ``rope_theta``, ``partial_rotary_factor`` and the scaling spec in
-``config.rope_parameters``, and from 5.20 it moves them there for remote-code configs written against
-v4 as well, so ``config.partial_rotary_factor`` raises ``AttributeError`` on every config the toolkit
-loads. The GPU scripts are never imported on CPU, so a flat read there surfaces only on a GPU run; this
-sweep finds one statically in every Python file under ``halo/``, ``scripts/`` and ``tests/``.
-"""
+"""No first-party code reads a RoPE parameter as a flat config attribute. transformers 5 keeps them in
+``config.rope_parameters`` (from 5.20 for v4 remote-code configs too), so a flat read raises ``AttributeError``."""
 
 import ast
 
@@ -38,7 +32,6 @@ def test_no_flat_rope_attribute_reads():
 
 
 def test_the_sweep_sees_a_flat_read(tmp_path, monkeypatch):
-    """Anti-vacuity: the parent tree's GPU-script spelling is caught."""
     monkeypatch.setattr("tests.cpu.conventions.test_flat_rope_attributes.REPO_ROOT", tmp_path)
     script = tmp_path / "probe.py"
     script.write_text("rotary_dim = int(config.head_dim * config.partial_rotary_factor)\n")

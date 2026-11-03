@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for vision-language Bradley-Terry reward modeling.
-
-The DATA path follows the RUN, not the checkpoint: a text preference recipe on a natively-multimodal
-checkpoint (Gemma 4, Qwen3.5/3.6) must reach TRL's own tokenize map with a plain TOKENIZER, while a
-run that declares image data loads an ``AutoProcessor`` — the object that puts
-``processor_config.json`` beside the exported weights — and takes the vision map + collator.
-
-Driven through ``rewards.py:main()`` rather than a restatement of the branch: the seam is only
-correct if the script reaches it with the dataset in hand, after the model load.
-
-Also pinned here:
-* the trainer builds the vision collator for a processor and none for a tokenizer (collator and
-  ``_prepare_dataset`` are one contract and must not be paired by hand);
-* the vision columns survive HF's signature-column pruning;
-* the checkpoint context hands the PROCESSOR to the save;
-* a multimodal family with no sequence-classification head is refused before the distributed init,
-  off the same config-modality predicate the run-time probe uses;
-* pipeline parallelism still refuses a multimodal checkpoint through the shared gate.
-
-Run: python tests/cpu/trainers/test_reward_vlm.py  (or pytest)
-"""
+"""Vision-language Bradley-Terry reward modeling.
+A text recipe on a multimodal checkpoint gets a plain tokenizer; a run with image data loads an ``AutoProcessor``."""
 
 import sys
 from types import SimpleNamespace
@@ -87,10 +68,7 @@ def _image_dataset(column: str = "images") -> DatasetDict:
 
 def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=None):
     """Run ``rewards.py:main()`` to trainer construction.
-
-    Returns ``(captured trainer kwargs, tokenizer, processor, processor_loader)`` — the loader is a
-    mock so a test can assert the text branch never builds a processor at all.
-    """
+    The processor loader is a mock, so a test can assert the text branch never builds a processor."""
     module = load_script_module("scripts/training/reward/reward_model.py", "halo_test_rewards_dispatch")
 
     config = tmp_path / "config.yaml"
@@ -153,22 +131,16 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
     return captured, tokenizer, processor, processor_loader
 
 
-# --- the run dispatch -----------------------------------------------------------------------------
-
-
 def test_image_dataset_on_a_multimodal_checkpoint_hands_the_trainer_the_processor(tmp_path):
     captured, tokenizer, processor, _loader = _run_rewards(tmp_path, _image_dataset())
 
     assert captured["processing_class"] is processor
-    # install_resolved_tokenizer is what makes the processor tokenize with the run's resolved,
-    # right-padded tokenizer rather than the checkpoint's own.
+    # install_resolved_tokenizer makes the processor tokenize with the run's resolved, right-padded tokenizer.
     assert processor.tokenizer is tokenizer
 
 
 def test_text_dataset_on_a_multimodal_checkpoint_still_hands_the_trainer_a_tokenizer(tmp_path):
-    """Anti-vacuity for the dispatch: the text path must reach TRL with a TOKENIZER, and must not
-    build a processor at all — TRL's tokenize map calls get_vocab/pad_token, which a processor
-    does not carry."""
+    """TRL's tokenize map calls get_vocab/pad_token, which a processor does not carry."""
     captured, tokenizer, _processor, processor_loader = _run_rewards(tmp_path, _dataset())
 
     assert captured["processing_class"] is tokenizer
@@ -176,8 +148,7 @@ def test_text_dataset_on_a_multimodal_checkpoint_still_hands_the_trainer_a_token
 
 
 def test_images_field_declares_the_run_and_aliases_the_column(tmp_path):
-    """A hub column under another name: the alias is what keeps the run verdict and the map's column
-    the same one."""
+    """A hub column under another name: the alias keeps the run verdict and the map's column the same one."""
     captured, _tokenizer, processor, _loader = _run_rewards(
         tmp_path, _image_dataset(column="pictures"), yaml_body="images_field: pictures\n"
     )
@@ -191,11 +162,7 @@ def test_mistyped_images_field_raises_before_training(tmp_path):
         _run_rewards(tmp_path, _image_dataset(), yaml_body="images_field: nope\n")
 
 
-# --- trainer construction -------------------------------------------------------------------------
-
-
 def _construct(processing_class, max_length=64, data_collator=None):
-    """Run the real ``DistributedRewardTrainer.__init__`` body with the bases stubbed out."""
     captured: dict = {}
 
     def fake_reward_init(self, *args, **kwargs):
@@ -236,11 +203,8 @@ def test_an_explicit_collator_is_not_overridden():
 
 
 def test_trl_gets_the_tokenizer_while_the_trainer_keeps_the_processor():
-    """TRL's reward ctor settles the pad token through ``pad_token``/``get_vocab`` — attributes no
-    real ProcessorMixin carries (verified against Qwen3VLProcessor), so handing it the processor
-    raises AttributeError before the first batch. It must therefore see the inner tokenizer, while
-    ``self.processing_class`` ends up the processor: that object is what ``save_pretrained`` writes,
-    and without it the export ships no processor_config.json."""
+    """TRL's reward ctor settles the pad token through ``pad_token``/``get_vocab``, which no ProcessorMixin carries.
+    ``self.processing_class`` stays the processor, since ``save_pretrained`` writes it into processor_config.json."""
     processor = StubProcessor(StubTokenizer())
 
     trainer, kwargs = _construct(processor)
@@ -248,9 +212,6 @@ def test_trl_gets_the_tokenizer_while_the_trainer_keeps_the_processor():
     assert kwargs["processing_class"] is processor.tokenizer
     assert trainer.processing_class is processor
     assert trainer._processor is processor
-
-
-# --- dataset preparation ---------------------------------------------------------------------------
 
 
 def _bare_trainer(is_vlm: bool, processor=None):
@@ -304,8 +265,8 @@ def test_vlm_prepare_drops_rows_over_the_text_budget():
 
 
 def test_vlm_prepare_raises_when_the_budget_empties_the_split():
-    """The verdict is agreed across ranks before the raise: on a presharded corpus the split is a
-    per-rank fact, and a lone raise would strand the peers in the trainer's construction collectives."""
+    """On a presharded corpus the split is a per-rank fact, and a lone raise would strand the peers in the construction
+    collectives."""
     processor = StubProcessor(StubTokenizer())
     dataset = Dataset.from_list([make_row()])
     probes: list[bool] = []
@@ -325,7 +286,6 @@ def test_vlm_prepare_raises_when_the_budget_empties_the_split():
 
 
 def test_text_prepare_still_runs_trls_own_tokenize_map(tmp_path, monkeypatch):
-    """Anti-vacuity: the text branch must produce TRL's chosen_ids/rejected_ids, not our columns."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_datasets"))
     tokenizer = StubTextTokenizer()
     dataset = Dataset.from_dict({"prompt": [_PROMPT], "chosen": [_CHOSEN], "rejected": [_REJECTED]})
@@ -340,8 +300,7 @@ def test_text_prepare_still_runs_trls_own_tokenize_map(tmp_path, monkeypatch):
 
 
 def test_signature_columns_keep_the_vision_columns():
-    """TRL names only chosen_ids/rejected_ids/margin; without the collator's declaration every
-    column the vision collator reads is pruned before the first batch."""
+    """TRL names only chosen_ids/rejected_ids/margin; undeclared vision columns are pruned before the first batch."""
     trainer = _bare_trainer(True)
     trainer._signature_columns = None
     trainer.data_collator = DataCollatorForVLMPreference(processor=StubProcessor(StubTokenizer()))
@@ -352,12 +311,8 @@ def test_signature_columns_keep_the_vision_columns():
     assert {"chosen_ids", "rejected_ids", "margin"} <= set(trainer._signature_columns)
 
 
-# --- export -----------------------------------------------------------------------------------------
-
-
 def test_the_checkpoint_context_hands_the_processor_to_the_save():
-    """The processor IS the saved processing class — that is what writes processor_config.json
-    next to the weights, without which the exported reward model cannot be served on images."""
+    """The processor writes processor_config.json next to the weights; without it the export cannot serve images."""
     processor = StubProcessor(StubTokenizer())
     model = nn.Linear(2, 2)
     trainer = _bare_trainer(True)
@@ -382,9 +337,6 @@ def test_the_checkpoint_context_hands_the_processor_to_the_save():
     assert ctx.tokenizer is processor
 
 
-# --- family and parallelism gates ---------------------------------------------------------------------
-
-
 def _model_config(name: str):
     return SimpleNamespace(model_name_or_path=name, trust_remote_code=False, model_revision=None)
 
@@ -394,7 +346,7 @@ def test_multimodal_family_without_a_score_head_is_refused(model_type):
     with mock.patch.object(AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
         with pytest.raises(ValueError, match="no sequence-classification head") as excinfo:
             model_setup.reject_multimodal_model_without_seq_cls_head(_model_config(f"stub/{model_type}"))
-    # Actionable: the message names the families that DO work, off the live registry.
+    # The message names the families that work, off the live registry.
     assert "gemma4" in str(excinfo.value)
 
 
@@ -405,12 +357,9 @@ def test_supported_and_text_only_families_pass_the_gate(model_type):
 
 
 def test_both_spellings_of_a_declared_vision_tower_classify_the_same():
-    """The roster reads config CLASSES while the run-time probe reads config INSTANCES, and the two
-    spell a vision tower differently: a class declares it in ``sub_configs``, while a remote-code
-    config is in neither that nor the ITT mapping and only builds ``self.vision_config``. One
-    predicate must see both spellings, or the gate above refuses a family the loader then routes to
-    the VLM path — or passes one whose images it drops.
-    """
+    """The roster reads config classes (``sub_configs``), the run-time probe reads instances (``self.vision_config``).
+    One predicate must see both, or the gate refuses a family the loader routes to the VLM path, or passes one whose
+    images it drops."""
 
     class _DeclaredOnTheClass:
         model_type = "halo_test_unregistered_vlm"
@@ -427,9 +376,8 @@ def test_both_spellings_of_a_declared_vision_tower_classify_the_same():
 
 
 def test_a_text_backbone_registered_under_image_text_to_text_stays_text_only():
-    """mistral4's ITT entry resolves to ``Mistral4ForCausalLM`` — a text backbone registered there as
-    an upstream quirk. Reading that entry without the ``*ForCausalLM`` exception routes it to
-    AutoProcessor/VLM setup, which fails outright on a family that ships no processor."""
+    """mistral4's ITT entry resolves to ``Mistral4ForCausalLM``, an upstream quirk.
+    Routed to AutoProcessor/VLM setup, it fails outright on a family that ships no processor."""
     mistral4 = CONFIG_MAPPING["mistral4"]
     assert MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES["mistral4"].endswith("ForCausalLM"), "premise"
 
@@ -439,8 +387,7 @@ def test_a_text_backbone_registered_under_image_text_to_text_stays_text_only():
 
 
 def test_the_seq_cls_roster_holds_the_multimodal_families_and_no_text_one():
-    """Anti-drift on the shared predicate's blast radius: this roster is what the refusal above
-    offers as the way forward, so a family gained or lost here changes a user-facing gate."""
+    """The refusal above offers this roster as the way forward, so a change here changes a user-facing gate."""
     roster = set(multimodal_sequence_classification_model_types())
 
     assert {"gemma4", "qwen3_5", "qwen3_5_moe"} <= roster
@@ -448,8 +395,7 @@ def test_the_seq_cls_roster_holds_the_multimodal_families_and_no_text_one():
 
 
 def test_pipeline_parallelism_refuses_a_multimodal_reward_run_fed_images():
-    """The shared PP gate binds through the mixin — the stage split keeps only the text backbone, so
-    a multimodal checkpoint fed image data is refused (a text-only run of it is admitted)."""
+    """The stage split keeps only the text backbone; a text-only run of the same checkpoint is admitted."""
     trainer = _bare_trainer(True)
     trainer.parallelism_config = SimpleNamespace(is_pp_mode=True)
     trainer.save_sharded_ep = False
@@ -472,7 +418,7 @@ def test_pipeline_parallelism_refuses_a_multimodal_reward_run_fed_images():
 
 
 def test_reward_trainer_declares_no_context_parallel_support():
-    """CP would split the sequence the score head pools; the declaration IS the gate."""
+    """CP would split the sequence the score head pools; the declaration is the gate."""
     assert DistributedRewardTrainer.SUPPORTS_CP is False
 
 

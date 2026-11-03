@@ -12,8 +12,7 @@ from peft.tuners.lora.variants import (
 )
 from peft.tuners.tuners_utils import BaseTunerLayer
 
-# The PEFT layers whose merge :func:`lora_folded` reproduces. Exact types: a subclass (torchao, Intel
-# Neural Compressor) overrides the merge.
+# Exact types, as a subclass (torchao, Intel Neural Compressor) overrides the merge.
 _FOLDABLE_LORA_LAYERS = (Linear, Embedding, Conv1d, Conv2d, Conv3d, ParamWrapper)
 
 # ``id`` of each base tensor a LoRA merge rewrites → the layers folding into it (:func:`lora_fold_targets`).
@@ -21,8 +20,7 @@ LoraFolds = dict[int, list[LoraLayer]]
 
 
 def tuner_adapter_param_ids(model: torch.nn.Module) -> set[int]:
-    """``id`` of every parameter a PEFT tuner layer in ``model`` holds beside the module it wraps (LoRA
-    factors, embedding adapters, DoRA magnitudes); structural, so a backbone's own ``lora_A`` stays base."""
+    """Structural, so a backbone's own ``lora_A`` stays base."""
     adapters: set[int] = set()
     for module in model.modules():
         if isinstance(module, BaseTunerLayer):
@@ -32,13 +30,11 @@ def tuner_adapter_param_ids(model: torch.nn.Module) -> set[int]:
 
 
 def _lora_weight(layer: LoraLayer) -> torch.nn.Parameter:
-    """The base tensor ``layer``'s merge adds its delta to."""
     return layer.get_param() if isinstance(layer, ParamWrapper) else layer.get_base_layer().weight
 
 
 def _adapters_to_fold(layer: LoraLayer) -> list[str]:
-    """The adapters a merge of ``layer`` folds: active ones not merged already (PEFT's
-    ``check_adapters_to_merge``), that this layer carries."""
+    """Active ones not merged already (PEFT's ``check_adapters_to_merge``), that this layer carries."""
     merged = set(layer.merged_adapters)
     return [
         adapter
@@ -48,7 +44,6 @@ def _adapters_to_fold(layer: LoraLayer) -> list[str]:
 
 
 def _unfoldable(layer: BaseTunerLayer) -> str | None:
-    """What makes ``layer``'s merge one :func:`lora_folded` cannot reproduce, or None."""
     if type(layer) not in _FOLDABLE_LORA_LAYERS:
         return f"tuner layer {type(layer).__name__}"
     if isinstance(layer, (Conv1d, Conv2d, Conv3d)) and layer.get_base_layer().groups > 1:
@@ -60,10 +55,7 @@ def _unfoldable(layer: BaseTunerLayer) -> str | None:
 
 
 def lora_fold_targets(model: torch.nn.Module) -> LoraFolds:
-    """``id`` of every base tensor PEFT's ``merge_adapter`` would rewrite → the LoRA layers folding
-    into it, in merge order. Keyed by identity, so a tied weight listed under its other name still gets
-    its delta; raises on a tuner layer whose merge :func:`lora_folded` cannot reproduce.
-    """
+    """In merge order. Keyed by identity, so a tied weight listed under its other name still gets its delta."""
     targets: LoraFolds = {}
     for name, module in model.named_modules():
         if not isinstance(module, BaseTunerLayer):
@@ -88,10 +80,8 @@ def lora_fold_targets(model: torch.nn.Module) -> LoraFolds:
 
 @torch.no_grad()
 def lora_folded(param: torch.nn.Parameter, layers: list[LoraLayer]) -> torch.Tensor:
-    """A new tensor holding what PEFT's merge of ``layers`` would write into ``param``, which is not
-    touched: the in-place merge's arithmetic on ``param``'s own placement, so a DTensor folds shard by
-    shard and the delta's redistribution is a collective every rank must enter.
-    """
+    """A new tensor holding what PEFT's merge would write into ``param``. A DTensor folds shard by shard, and the
+    delta's redistribution is a collective every rank must enter."""
     folded = param.detach().clone()
     for layer in layers:
         folds_weight = param is _lora_weight(layer)
@@ -113,7 +103,6 @@ def lora_folded(param: torch.nn.Parameter, layers: list[LoraLayer]) -> torch.Ten
 
 
 def lora_folded_data(param: torch.nn.Parameter, folds: LoraFolds | None) -> torch.Tensor:
-    """``param``'s data with its LoRA delta folded in out of place (:func:`lora_folded`) when ``folds``
-    (:func:`lora_fold_targets`) names it, else the live data. Collective for a folded DTensor."""
+    """Collective for a folded DTensor."""
     layers = folds.get(id(param)) if folds else None
     return lora_folded(param, layers) if layers else param.data

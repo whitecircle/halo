@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The headline ``reward`` / ``reward_std`` / ``reward/within_group_std`` are computed over the VALID
-episodes — the rows that train.
-
-An infra-errored or env-invalid episode carries a forced failure reward that says nothing about the
-policy and is already excluded from the group baseline; averaged into the headline it would read a
-grader outage as a policy collapse, and its spread against valid siblings as group contrast the advantage
-never sees. A step with no valid episode logs none of them rather than a NaN or a zero that would fold
-into the logging window.
-
-    python tests/cpu/grpo/test_env_trainer_headline_reward.py
-"""
+"""The headline ``reward``, ``reward_std`` and ``reward/within_group_std`` read the valid episodes only: a forced
+failure reward averaged in would read a grader outage as a policy collapse. A step with no valid episode logs none."""
 
 from collections import defaultdict
 
@@ -47,8 +38,7 @@ def test_a_step_with_no_valid_episode_logs_no_headline():
 
 
 def test_within_group_std_reads_the_valid_members_the_advantage_divides_by():
-    """Group A ties on its three valid members, so its advantages are zero: the invalid member's forced
-    0.0 must not read as contrast. Group B's spread is the sample std of its valid members only."""
+    """Group A ties on its three valid members; the invalid member's forced 0.0 must not read as contrast."""
     host = _host()
     rewards = torch.tensor([1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.5, -1.0])
     valid = torch.tensor([True, True, True, False, True, True, True, False])
@@ -82,8 +72,7 @@ def test_within_group_std_with_every_episode_valid_is_the_plain_group_std():
     ids=["groups-of-one", "ragged-batch"],
 )
 def test_no_within_group_std_without_whole_groups_of_several(rewards, num_generations):
-    """A group of one has no spread to log (it would read as a 0.0 that folds into the window), and a batch
-    that is not whole groups (a ragged eval batch) has no groups to read; the headline still logs."""
+    """A group of one would log a 0.0 that folds into the window; a ragged eval batch has no groups to read."""
     host = _host()
     host._log_headline_rewards(torch.tensor(rewards), torch.ones(3, dtype=torch.bool), num_generations, "train")
     assert "reward/within_group_std" not in host._metrics["train"]

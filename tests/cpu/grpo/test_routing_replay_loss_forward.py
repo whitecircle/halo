@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Routing replay over the environmental trainer's gradient forward replays only the positions it attends.
-
-The step's batch build drops a degenerate group (and an invalid episode, and a masked truncation) from the loss by
-zeroing its rows' ``completion_mask``, which is also the attention mask TRL's loss forward concatenates: those
-completions ride the forward as attention padding, in a context other than the one their routing was recorded in
-(the engine's under ``rollout``, the no-grad recompute's under ``recompute``). Neither they nor ordinary padding may
-be replayed there, or ``routing/replay_flip_rate`` counts that noise as flips. The batch here is the trainer's real
-batch build over stub rows, the forward TRL's real ``compute_loss`` into a scorer whose router reproduces the
-engine's selection wherever it attends and returns a context-free one on attention padding.
-
-    python tests/cpu/grpo/test_routing_replay_loss_forward.py
-"""
+"""Routing replay over the environmental trainer's gradient forward replays only the positions it attends. A dropped
+row's completion rides that forward as attention padding, and replaying it would count noise as flips."""
 
 from collections import defaultdict
 from typing import NamedTuple
@@ -42,8 +32,7 @@ _LOSS_PATHS = pytest.mark.parametrize("dense", [False, True], ids=["padded", "de
 
 
 class _LossForward(NamedTuple):
-    """One gradient forward: its flip rate, the (token, layer) selections it forced, the batch it trained and the
-    selections its layers routed."""
+    """One gradient forward: flip rate, forced (token, layer) selections, trained batch, routed selections."""
 
     rate: float | None
     forced: int
@@ -65,8 +54,7 @@ def _engine_routing(prompt: list[int], completion: list[int]) -> torch.Tensor:
 
 
 def _rows(corrupt: tuple[int, int] | None = None) -> list[TurnRow]:
-    """The step's rows with their engine routing; ``corrupt`` = ``(row, position)`` moves that one engine pick off
-    what the trainer's router computes there."""
+    """``corrupt`` = ``(row, position)`` moves that one engine pick off what the trainer's router computes there."""
     rows = []
     for r, (prompt, completion) in enumerate(zip(_PROMPTS, _COMPLETIONS, strict=True)):
         routing = _engine_routing(prompt, completion)
@@ -85,9 +73,7 @@ def _rows(corrupt: tuple[int, int] | None = None) -> list[TurnRow]:
 
 
 def _forwarding_scorer(injector: RoutingReplayInjector, dense: bool, routed: list[torch.Tensor]):
-    """The policy forward as the EP layers see it: per layer, the router's pick on every forwarded token, put
-    through the layer's replay and, while capturing, recorded as dispatched; the routed selection is appended to
-    ``routed``. The padded path forwards the rows whole, the dense path each row's real span."""
+    """The policy forward as the EP layers see it. The padded path forwards rows whole, the dense path each span."""
 
     def picks(ids: torch.Tensor, attended: torch.Tensor, layer: int) -> torch.Tensor:
         positions = attended.long().cumsum(-1) - 1
@@ -115,8 +101,7 @@ def _forwarding_scorer(injector: RoutingReplayInjector, dense: bool, routed: lis
 
 
 def _host(rows: list[TurnRow], *, replay: str, dense: bool, routed: list[torch.Tensor]):
-    """The trainer's real batch build and loss forward over ``rows`` under ``routing_replay=replay``, its EP layers
-    bare; every forward's routing is appended to ``routed``."""
+    """The trainer's real batch build and loss forward over ``rows``, its EP layers bare."""
     width = max(len(c) for c in _COMPLETIONS)
     host = batch_host(rows, torch.zeros(len(rows), width), training=True)
     injector = RoutingReplayInjector(
@@ -149,7 +134,6 @@ def _host(rows: list[TurnRow], *, replay: str, dense: bool, routed: list[torch.T
 
 
 def _loss_forward(*, replay: str, dense: bool, corrupt: tuple[int, int] | None = None) -> _LossForward:
-    """One gradient forward through the trainer's ``compute_loss`` over the built step."""
     routed: list[torch.Tensor] = []
     host, injector = _host(_rows(corrupt), replay=replay, dense=dense, routed=routed)
     batch = build(host, [episode(reward) for reward in _REWARDS])
@@ -180,8 +164,7 @@ def test_the_step_drops_its_tied_group_into_attention_padding(replay, dense):
 
 
 def test_the_padded_recompute_capture_records_ordinary_padding():
-    """The padded no-grad pass routes every position it forwards, so its capture also records the padding no
-    forward attends: arming it whole would force those positions too."""
+    """The padded no-grad pass also records padding no forward attends; arming it whole would force those positions."""
     batch = _loss_forward(replay="recompute", dense=False).batch
     assert not batch["prompt_mask"].all(), "the prompts should differ in length, so the batch left-pads some"
     assert (batch[ROUTING_MASKS_KEY] >= 0).all()
@@ -190,8 +173,7 @@ def test_the_padded_recompute_capture_records_ordinary_padding():
 @_REPLAY_MODES
 @_LOSS_PATHS
 def test_a_dropped_rows_completion_is_not_replayed_or_counted(replay, dense):
-    """A router that agrees with the recorded routing wherever it reads context flips nothing, and the forward
-    forces exactly the attended positions the mask records."""
+    """A router that agrees with the recorded routing wherever it reads context flips nothing."""
     forward = _loss_forward(replay=replay, dense=dense)
     recorded, on_padding = _recorded_positions(forward.batch)
     assert forward.rate == 0.0
@@ -209,7 +191,6 @@ def test_a_genuine_flip_on_an_attended_position_is_still_counted(dense):
 
 @_REPLAY_MODES
 def test_the_padded_forward_routes_a_dropped_completion_by_its_own_pick(replay):
-    """The padded forward hands each dropped completion token the router's own pick back, not the recorded one."""
     forward = _loss_forward(replay=replay, dense=False)
     prompt_width = forward.batch["prompt_ids"].size(1)
     first_layer = forward.routed[0].view(len(_REWARDS), -1, _TOP_K)[:, prompt_width:]

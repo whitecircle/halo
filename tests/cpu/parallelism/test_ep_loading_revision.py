@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Revision pinning on the EP / EP+TP / EP+CP weight-loading paths.
-
-The lazy loaders read ``ModelSource.local_dir``, the snapshot ``resolve_model_source`` agreed at the
-pinned revision, and the ``from_pretrained`` fallback must receive the same revision, or it silently
-trains on hub ``main`` weights against the pinned config. The commit below is an opaque sentinel —
-what is under test is that it arrives, not which repo it names.
-
-Run: python tests/cpu/parallelism/test_ep_loading_revision.py
-"""
+"""Revision pinning on the EP / EP+TP / EP+CP load paths: an unpinned fallback silently trains hub ``main`` weights
+against the pinned config."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,7 +23,7 @@ _SOURCE = ModelSource("org/repo", _REVISION, "/fake/pinned/snapshot")
 
 
 def _make_ep_config() -> EPConfig:
-    """EPConfig valid in single-process mode (no torch.distributed)."""
+    """Valid in single-process mode."""
     return EPConfig(ep_size=2, stage_world_size=2, nvlink_domain_size=2, experts_fsdp_managed=False)
 
 
@@ -39,15 +32,14 @@ def _ep_pc(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**{**fields, "max_concurrent_loading": 1, **overrides})
 
 
-# The loaders take the dispatcher's already-loaded config; every load here is patched out, so what
-# it is never matters — only that it is threaded through.
+# Every load here is patched out, so only its threading matters.
 _MODEL_CONFIG = SimpleNamespace()
 _KWARGS = {"config": _MODEL_CONFIG, "revision": _REVISION}
 
 
 def test_lazy_fallback_level_separates_a_family_property_from_an_environment_failure():
-    """``lazy_incompatible_expert_layout`` is class-declared and supported, so it logs at INFO;
-    missing safetensors means the lazy path was WANTED and lost, so it warns."""
+    """``lazy_incompatible_expert_layout`` is declared and supported (INFO); missing safetensors lost a wanted lazy
+    path (warn)."""
 
     def _run(*, has_safetensors: bool):
         with (
@@ -69,7 +61,6 @@ def test_lazy_fallback_level_separates_a_family_property_from_an_environment_fai
 
 
 def test_load_ep_model_threads_revision():
-    """The ``from_pretrained`` fallback loads the agreed source at the pinned revision."""
     seen = {}
 
     def fake_hf_load(source, pc, ep_config, model_class, from_pretrained_kwargs, **kwargs):
@@ -86,7 +77,6 @@ def test_load_ep_model_threads_revision():
 
 
 def test_load_ep_model_lazy_path_reads_pinned_snapshot():
-    """The lazy safetensors loader reads the revision-pinned snapshot dir, not the source's name."""
     seen = {}
 
     def fake_lazy(local_dir, ep_config, config, **kwargs):
@@ -94,7 +84,7 @@ def test_load_ep_model_lazy_path_reads_pinned_snapshot():
         return nn.Linear(2, 2)
 
     with (
-        # The rank-0 verdict, not the probes behind it: this test's subject is the revision pin.
+        # The rank-0 verdict, since this test's subject is the revision pin.
         patch(f"{_EP_LOADING}.resolve_lazy_checkpoint", return_value=True),
         patch(f"{_EP_LOADING}.load_ep_model_lazy", fake_lazy),
     ):
@@ -103,11 +93,7 @@ def test_load_ep_model_lazy_path_reads_pinned_snapshot():
     assert seen["lazy_dir"] == "/fake/pinned/snapshot"
 
 
-# EP+CP and EP+TP call sites
-
-
 def test_load_ep_cp_model_threads_revision():
-    """load_ep_cp_model forwards the source and its revision pin into load_ep_model."""
     seen = {}
 
     def fake_load_ep_model(source, pc, model_class, from_pretrained_kwargs, **kwargs):
@@ -131,7 +117,6 @@ def test_load_ep_cp_model_threads_revision():
 
 
 def test_load_ep_tp_model_threads_revision():
-    """load_ep_tp_model forwards the source and its revision pin into load_ep_model."""
     seen = {}
 
     def fake_load_ep_model(source, pc, model_class, from_pretrained_kwargs, **kwargs):

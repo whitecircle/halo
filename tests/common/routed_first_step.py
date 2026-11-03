@@ -1,16 +1,6 @@
-"""The routed half of a first-step comparison (:mod:`tests.common.first_step`): what a run's EP layers computed, against
-a stock reference model routed on the run's own top-k picks.
-
-:mod:`tests.common.first_step` compares every other parameter, leaving out the routers and routed experts EP and
-expert TP hold as plain FSDP-ignored tensors, and on a tiny random-init MoE the routed output reaches the loss and the
-other gradients too weakly to show a combine or expert-TP fault. Here the routed path is compared where it is computed:
-:func:`capturing_routed_forwards` records each EP layer's picks and output per forward, :func:`gather_routed_grads`
-its router and expert gradients whole (every EP slice and expert-TP shard, in the stock container's layout), and
-:func:`record_routed_first_step` arms both over a trainer's first optimizer step. :func:`pinned_reference_routing` runs
-a reference's stock MoE blocks on those picks, so a bf16 near-tie cannot move a token between experts, recording their
-outputs and how far each pick sits below the stock router's own top-k; :func:`routed_first_step_checks` compares. The
-EP family comparison pins its stock model through the same capture and pin.
-"""
+"""The routed half of a first-step comparison: what a run's EP layers computed, vs a stock reference routed on the
+run's own picks. On a tiny MoE the routed output reaches the loss too weakly to show a combine or expert-TP fault, so
+it is compared where it is computed. Pinning the picks stops a bf16 near-tie moving tokens between experts."""
 
 import collections
 import contextlib
@@ -39,38 +29,36 @@ from tests.common.numerics import max_or_nan, min_or_nan, worst_relative_l2
 from tests.common.rank_log import log, log_all
 from tests.common.tolerances import TOL
 
-# A stock router's gate weights at given top-k picks, off its own logits: ``(router, logits, picks) -> weights``.
+# ``(router, logits, picks) -> weights``.
 GateWeights = Callable[[torch.nn.Module, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 @dataclass
 class RoutedStep:
-    """What a run's EP layers did over the forwards recorded, on the host, keyed by layer path in module order."""
+    """What a run's EP layers did over the forwards recorded, on the host, by layer path in module order."""
 
     layer_classes: dict[str, type] = field(default_factory=dict)
-    # Per forward: the ``[tokens, top_k]`` global expert ids the layer dispatched on, and its output.
+    # Per forward: the ``[tokens, top_k]`` global expert ids dispatched on, and the output.
     picks: dict[str, list[torch.Tensor]] = field(default_factory=dict)
     outputs: dict[str, list[torch.Tensor]] = field(default_factory=dict)
-    # The router parameters' gradients under their stock names, and each layer's expert banks by stock container key.
+    # Under their stock names, and each layer's expert banks by stock container key.
     router_grads: dict[str, torch.Tensor] = field(default_factory=dict)
     expert_grads: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
 
     def duplicate_pick_tokens(self) -> int:
-        """The tokens, over every layer and forward, whose picks name one expert more than once: a reference pinned on
-        them routes alike, so only this count shows them."""
+        """Tokens whose picks name one expert twice: a reference pinned on them routes alike, so only this count shows
+        them."""
         return sum(duplicate_pick_tokens(picks) for chunks in self.picks.values() for picks in chunks)
 
 
 @dataclass
 class PinnedReference:
-    """What a reference's stock MoE blocks did on a :class:`RoutedStep`'s picks."""
-
     outputs: dict[str, list[torch.Tensor]] = field(default_factory=dict)
-    # Each layer's expert container under its stock path, which names the reference's expert gradients.
+    # Names the reference's expert gradients.
     expert_paths: dict[str, str] = field(default_factory=dict)
-    # Per router call: the largest shortfall of a pinned pick below the stock router's own k-th logit.
+    # Per router call: the largest shortfall of a pinned pick below the stock router's k-th logit.
     regrets: list[float] = field(default_factory=list)
-    # Picks left unconsumed per layer once the context exits: a reference that ran fewer forwards.
+    # Left unconsumed per layer: a reference that ran fewer forwards.
     unconsumed: dict[str, int] = field(default_factory=dict)
 
 
@@ -81,7 +69,6 @@ def _host(output) -> torch.Tensor:
 
 @contextlib.contextmanager
 def capturing_routed_forwards(model: torch.nn.Module, routed: RoutedStep):
-    """Append each EP layer's top-k picks and output to ``routed`` for every forward inside."""
     layers = named_ep_layers(model)
     if not layers:
         raise AssertionError(f"{type(model).__name__} holds no EP layer to record")
@@ -102,8 +89,8 @@ def capturing_routed_forwards(model: torch.nn.Module, routed: RoutedStep):
 
 
 def gather_routed_grads(model: torch.nn.Module, routed: RoutedStep) -> None:
-    """COLLECTIVE (every EP layer's expert gather, a sharded router's ``full_tensor``): each EP layer's router and
-    expert gradients into ``routed``, whole and on the host."""
+    """COLLECTIVE (expert gathers, a sharded router's ``full_tensor``): each EP layer's router and expert gradients
+    into ``routed``, whole on the host."""
     for path, layer in named_ep_layers(model):
         for name, param in layer._live_router_module().named_parameters():
             routed.router_grads[f"{path}.{layer._ROUTER_ATTR}.{name}"] = full_grad(param).cpu()
@@ -123,9 +110,8 @@ class _RoutedGradRecorder(TrainerCallback):
 
 
 def record_routed_first_step(trainer) -> RoutedStep:
-    """Arm ``trainer``'s EP layers for its first optimizer step and return the :class:`RoutedStep` it fills: the
-    picks and outputs of the training microbatches ``compute_loss`` sees, and at the optimizer step (after the clip
-    seam's EP sync) the routed gradients. Call before ``trainer.train()``."""
+    """Arm ``trainer``'s EP layers for its first optimizer step and return the :class:`RoutedStep` it fills. Call
+    before ``trainer.train()``."""
     routed = RoutedStep()
     microbatches = trainer.args.gradient_accumulation_steps
     compute_loss = trainer.compute_loss
@@ -145,8 +131,8 @@ def record_routed_first_step(trainer) -> RoutedStep:
 
 
 def _qwen3_moe_gate_weights(router: torch.nn.Module, logits: torch.Tensor, picks: torch.Tensor) -> torch.Tensor:
-    """``Qwen3MoeTopKRouter``'s gate weights at ``picks``: its fp32 softmax over every expert, renormalized over the
-    picks under its ``norm_topk_prob``, at the logits' dtype."""
+    """``Qwen3MoeTopKRouter``'s gate weights at ``picks``: fp32 softmax over every expert, renormalized under
+    ``norm_topk_prob``."""
     weights = F.softmax(logits, dtype=torch.float, dim=-1).gather(-1, picks)
     if router.norm_topk_prob:
         weights = weights / weights.sum(dim=-1, keepdim=True)
@@ -154,11 +140,10 @@ def _qwen3_moe_gate_weights(router: torch.nn.Module, logits: torch.Tensor, picks
 
 
 def _gpt_oss_gate_weights(router: torch.nn.Module, logits: torch.Tensor, picks: torch.Tensor) -> torch.Tensor:
-    """``GptOssTopKRouter``'s gate weights at ``picks``: the softmax over the selected logits, at their dtype."""
+    """``GptOssTopKRouter``'s gate weights at ``picks``: the softmax over the selected logits."""
     return F.softmax(logits.gather(-1, picks), dim=-1, dtype=logits.dtype)
 
 
-# Stock routers a reference can be pinned on, by class: their gate weights at given picks, off their own logits.
 PINNED_GATE_WEIGHTS: dict[type, GateWeights] = {
     Qwen3MoeTopKRouter: _qwen3_moe_gate_weights,
     GptOssTopKRouter: _gpt_oss_gate_weights,
@@ -166,7 +151,7 @@ PINNED_GATE_WEIGHTS: dict[type, GateWeights] = {
 
 
 def _gate_weights_for(path: str, router: torch.nn.Module | None) -> GateWeights:
-    """The pinned gate of ``router``'s class, matched by ``isinstance`` so an FSDP2-wrapped router keeps it."""
+    """Matched by ``isinstance`` so an FSDP2-wrapped router keeps its gate."""
     for router_cls, gate_weights in PINNED_GATE_WEIGHTS.items():
         if isinstance(router, router_cls):
             return gate_weights
@@ -174,8 +159,6 @@ def _gate_weights_for(path: str, router: torch.nn.Module | None) -> GateWeights:
 
 
 def _pin(path: str, queue: collections.deque, gate_weights: GateWeights, regrets: list[float]):
-    """A forward hook making a stock ``(logits, weights, indices)`` router select the next of ``queue``'s picks."""
-
     def hook(module, args, output):
         if not queue:
             raise RuntimeError(f"{path}: the reference ran more forwards than the run recorded")
@@ -192,8 +175,8 @@ def _pin(path: str, queue: collections.deque, gate_weights: GateWeights, regrets
 
 @contextlib.contextmanager
 def pinned_reference_routing(model: torch.nn.Module, routed: RoutedStep):
-    """Inside, ``model``'s stock MoE blocks at ``routed``'s layer paths route each forward on the next recorded picks;
-    yields the :class:`PinnedReference` their outputs and pick shortfalls fill."""
+    """Inside, stock MoE blocks route each forward on the next recorded picks; yields the :class:`PinnedReference` they
+    fill."""
     pinned = PinnedReference()
     queues, handles = {}, []
     try:
@@ -217,13 +200,12 @@ def pinned_reference_routing(model: torch.nn.Module, routed: RoutedStep):
 
 
 def _layer_outputs(outputs: dict[str, list[torch.Tensor]]) -> dict[str, torch.Tensor]:
-    """Each layer's recorded forwards as one flat ``[tokens, hidden]`` tensor."""
     return {path: torch.cat([o.reshape(-1, o.shape[-1]) for o in chunks]) for path, chunks in outputs.items()}
 
 
 def _grad_pairs(routed: RoutedStep, pinned: PinnedReference, reference_grads: dict[str, torch.Tensor]):
-    """``name -> (run gradient, reference gradient)`` for every router and every expert of every bank, the stock names
-    each covers, and the experts both sides left at exactly zero (a cosine has no direction there) or only one did."""
+    """``name -> (run, reference)`` gradients for every router and expert, the covered stock names, and experts zero on
+    both sides or one."""
     pairs, covered, zero_both, zero_one = {}, set(), [], []
     for name, grad in routed.router_grads.items():
         pairs[name] = (grad, reference_grads.get(name))
@@ -249,8 +231,7 @@ def _grad_pairs(routed: RoutedStep, pinned: PinnedReference, reference_grads: di
 
 
 def _score_pairs(pairs, *, cos_min: float, ratio_band: tuple[float, float]):
-    """``(every pair matches, its metrics)`` for ``pairs``; a pair whose reference is missing or misshapen fails
-    without a score."""
+    """``(every pair matches, its metrics)``; a pair whose reference is missing or misshapen fails with no score."""
     checks, metrics = {}, {}
     scorable = {name: (got, want) for name, (got, want) in pairs.items() if want is not None}
     score_ep_grad_pairs(scorable, checks, metrics, cos_min=cos_min, ratio_band=ratio_band)
@@ -268,15 +249,9 @@ def routed_first_step_checks(
     grad_ratio_band: tuple[float, float] = TOL.routed_grad_norm_ratio_band,
     regret_max: float = TOL.router_near_tie_logit_abs,
 ) -> tuple[dict[str, bool], dict[str, float]]:
-    """The routed checks on a recorded step against its pinned reference, and the metrics behind them. The forward,
-    output and pick verdicts are world-wide (COLLECTIVE over the default group): each rank compares the forwards it ran.
-
-    Every layer's output, as one vector over the step's forwards, holds ``output_rtol`` relative L2; each router and
-    each expert's gate-up and down slice holds the direction ``grad_cos_min`` and the norm ratio ``grad_ratio_band``,
-    an expert zero on one side only failing; every pick sits within ``regret_max`` of the stock router's own top-k, and
-    no token names one expert twice. The reference's routing parameters (:data:`ROUTING_DEPENDENT_PARAM`) must all be
-    compared.
-    """
+    """Routed checks on a recorded step against its pinned reference. Forward, output and pick verdicts are world-wide
+    (COLLECTIVE). An expert zero on one side only fails, and no token may name one expert twice. Every
+    :data:`ROUTING_DEPENDENT_PARAM` must be compared."""
     forwards = {path: len(chunks) for path, chunks in routed.outputs.items()}
     pinned_forwards = {path: len(chunks) for path, chunks in pinned.outputs.items()}
     all_pinned = (

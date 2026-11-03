@@ -1,9 +1,5 @@
-"""The router aux-loss gradient of reentrant-checkpointed MoE layers.
-
-A reentrant checkpoint runs a layer under ``no_grad`` and recomputes it uncollected, so the aux loss on
-``outputs.router_logits`` adds no router gradient. :func:`install_router_aux_gradient` keeps the gradient each such
-tensor receives and injects it into the router's live logits in the recompute; graph-carrying tensors keep their own.
-"""
+"""The router aux-loss gradient of reentrant-checkpointed MoE layers. A reentrant checkpoint runs a layer under
+``no_grad`` and recomputes it uncollected, so a collected tensor's gradient is kept and injected in the recompute."""
 
 from __future__ import annotations
 
@@ -17,7 +13,6 @@ from peft.utils.other import AuxiliaryTrainingWrapper
 from halo.models.gradient_checkpointing import current_graph_task
 from halo.models.moe.router_logits import ROUTER_LOGITS_KEY, declared_routers, declares_router_logits
 
-# The attribute marking a backbone as already carrying the hooks, so a second install is a no-op.
 _INSTALLED_ATTR = "_router_aux_gradient"
 
 # Module levels between a router and the block that calls it which never run the block's forward:
@@ -27,20 +22,15 @@ _PASS_THROUGH_LEVELS = (nn.ModuleDict, nn.ModuleList, AuxiliaryTrainingWrapper)
 
 @dataclass(eq=False)
 class _BackboneForward:
-    """One grad-enabled backbone forward: the collected tensors a checkpoint's ``no_grad`` pass
-    produced, by ``id`` to their router, then the gradient the loss hands back for each router."""
+    """``producers`` maps a checkpoint's ``no_grad`` tensors, by ``id``, to their router."""
 
     producers: dict[int, nn.Module] = field(default_factory=dict)
     gradients: dict[nn.Module, torch.Tensor] = field(default_factory=dict)
 
 
 class _KeepCollectedGradient(torch.autograd.Function):
-    """Identity on a collected ``no_grad`` router-logits tensor whose backward keeps its gradient.
-
-    ``anchor`` is the backbone output. Taking it as an input gives the carrier a graph, and it makes
-    the backbone's own backward wait for every carrier, so each kept gradient exists before the first
-    checkpointed layer recomputes rather than by the engine's scheduling order.
-    """
+    """Taking the backbone output ``anchor`` as an input gives the carrier a graph and makes the backbone's backward
+    wait for every carrier, so each kept gradient exists before the first checkpointed layer recomputes."""
 
     @staticmethod
     def forward(ctx, logits, anchor, keeper, record, router):
@@ -68,8 +58,7 @@ class _InjectRouterGradient(torch.autograd.Function):
 
 
 def _inject(output, logits: torch.Tensor, gradient: torch.Tensor):
-    """``output`` with the injection node on its hidden-state tensor (a block returning a tuple leads
-    with it, as GPT-OSS's ``(hidden_states, router_scores)`` does)."""
+    """A block returning a tuple leads with its hidden state, as GPT-OSS's ``(hidden_states, router_scores)`` does."""
     if isinstance(output, torch.Tensor):
         return _InjectRouterGradient.apply(output, logits, gradient)
     if type(output) is tuple and output and isinstance(output[0], torch.Tensor):
@@ -81,7 +70,6 @@ def _inject(output, logits: torch.Tensor, gradient: torch.Tensor):
 
 
 def _owning_block(root: nn.Module, router_name: str) -> nn.Module:
-    """The nearest ancestor of the router at ``router_name`` whose forward calls it."""
     parts = router_name.split(".")
     for depth in range(len(parts) - 1, -1, -1):
         owner = root.get_submodule(".".join(parts[:depth]))
@@ -91,12 +79,8 @@ def _owning_block(root: nn.Module, router_name: str) -> nn.Module:
 
 
 class _RouterAuxGradient:
-    """The hooks and per-backward state of one collecting backbone.
-
-    Routers and their owning blocks are resolved at the first forward rather than at install:
-    installation precedes the trainer, and a PEFT ``modules_to_save`` wrap applied there replaces
-    the router the forward calls with a copy.
-    """
+    """Routers and owning blocks resolve at the first forward, as installation precedes the trainer and a PEFT
+    ``modules_to_save`` wrap replaces the router the forward calls with a copy."""
 
     def __init__(self, backbone: nn.Module):
         self._backbone = backbone
@@ -134,7 +118,7 @@ class _RouterAuxGradient:
         if current_graph_task() != -1:
             self._live[router] = logits
         elif self._open is not None and not torch.is_grad_enabled():
-            # A no_grad router inside a grad-enabled backbone forward: a reentrant checkpoint's first pass.
+            # A no_grad router inside a grad-enabled backbone forward is a reentrant checkpoint's first pass.
             self._open.producers[id(logits)] = router
 
     def _on_backbone_output(self, backbone, args, output):
@@ -168,7 +152,6 @@ class _RouterAuxGradient:
         output[ROUTER_LOGITS_KEY] = tuple(carried)
 
     def keep(self, record: _BackboneForward, router: nn.Module, gradient: torch.Tensor) -> None:
-        """Hold ``gradient`` for ``router``'s recompute in the backward now running."""
         task = current_graph_task()
         if task != self._task:
             self._task, self._task_forwards = task, []
@@ -206,7 +189,6 @@ class _RouterAuxGradient:
         return output
 
     def _finish(self, task: int) -> None:
-        """End of the backward: every kept gradient must have reached its router's recompute."""
         if task != self._task:
             return
         unreached = sorted(self._names[router] for record in self._task_forwards for router in record.gradients)
@@ -222,8 +204,7 @@ class _RouterAuxGradient:
 
 
 def _collecting_backbones(model: nn.Module) -> list[nn.Module]:
-    """The module whose forward collects each declared router's logits: its innermost ancestor
-    declaring ``router_logits`` (a causal-LM head inherits the declaration without collecting)."""
+    """Each router's innermost ancestor declaring the capture; a causal-LM head inherits it without collecting."""
     declaring = {name: module for name, module in model.named_modules() if declares_router_logits(module)}
     backbones: dict[str, nn.Module] = {}
     for router in declared_routers(model):
@@ -235,11 +216,7 @@ def _collecting_backbones(model: nn.Module) -> list[nn.Module]:
 
 
 def install_router_aux_gradient(model: nn.Module) -> int:
-    """Route the router aux-loss gradient through reentrant-checkpointed MoE layers of ``model``.
-
-    Idempotent. Returns the number of collecting backbones now carrying the hooks; ``0`` means no
-    module declares a ``router_logits`` capture, so there is nothing to route.
-    """
+    """Idempotent. Returns the collecting backbones now carrying the hooks; ``0`` means nothing declares a capture."""
     backbones = _collecting_backbones(model)
     for backbone in backbones:
         if getattr(backbone, _INSTALLED_ATTR, None) is None:

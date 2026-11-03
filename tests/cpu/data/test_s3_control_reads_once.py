@@ -1,18 +1,6 @@
-"""An S3 dataset's control files are read once per launch, not once per rank per probe.
-
-A script's dataset load reads ``metadata.json`` and each split's ``shard_index.json`` several times on every rank
-(the preprocessed and sharded probes, the shard loader, the metadata check), and each read rewrote the local
-mirror; at thousands of ranks that is tens of thousands of GETs on one prefix. Global rank 0 now reads them once
-for the launch and each node's local rank 0 mirrors them. Proven on four gloo ranks laid out as two nodes, against
-a fake S3 that counts every GET per rank:
-
-1. rank 0 makes the three reads, the other ranks none, and only one rank per node writes the mirror, while every
-   rank still loads its own shards;
-2. a key rank 0 cannot read is read by every rank itself, as before;
-3. (in one process) each read the launch-wide one serves is a copy: a caller editing its payload leaves the next read whole.
-
-    python tests/cpu/data/test_s3_control_reads_once.py
-"""
+"""An S3 dataset's control files are read once per launch: at thousands of ranks the per-rank probes are tens of
+thousands of GETs on one prefix. Proven on four gloo ranks as two nodes against a fake S3: rank 0 reads, one rank
+per node mirrors, a key rank 0 cannot read is read by every rank, and each served read is a copy."""
 
 import collections
 import datetime

@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""Two fail-loud guards on the way into the rank math; without them both failures are LATE and
-per-rank.
-
-1. ``requested_nvlink_domain_size`` must not hand ``NVLINK_DOMAIN_SIZE`` back verbatim. ``0`` is also
-   ``ParallelismConfig``'s own "unset" sentinel, so it slips past every domain validator (``0 %
-   gpus_per_node == 0``) and dies as a bare ``ZeroDivisionError`` inside ``world_size %
-   nvlink_domain_size``; a negative value silently builds garbage groups.
-
-2. ``build_dp_mesh`` must guard its 1-D branch against a sub-world ``dp_size``, not only its 2-D
-   (HSDP) one. On the 1-D branch ``init_device_mesh`` numbers the mesh ``0..dp_size-1``, so the
-   ranks OUTSIDE it raise a bare ``IndexError: list index out of range`` while the ranks inside
-   proceed and then block forever on collectives their peers never reach — a rank-dependent failure
-   with no usable message. The sub-world caller (a pipeline stage) is supposed to pass its process
-   group as ``dp_group``.
-
-    python tests/cpu/parallelism/test_domain_and_mesh_guards.py
-"""
+"""Two fail-loud guards ahead of the rank math. ``NVLINK_DOMAIN_SIZE=0`` passes every validator and divides by zero; a
+sub-world 1-D ``build_dp_mesh`` raises on some ranks while others block forever."""
 
 from __future__ import annotations
 
@@ -31,13 +16,13 @@ from halo.distributed.nvlink import requested_nvlink_domain_size
 
 @pytest.mark.parametrize("bad", ["0", "-4", "seventy-two"])
 def test_unusable_nvlink_domain_size_reads_as_unset(monkeypatch, bad):
-    """A non-positive or malformed domain must not reach the rank math, where it divides by zero."""
+    """It must not reach the rank math."""
     monkeypatch.setenv("NVLINK_DOMAIN_SIZE", bad)
     assert requested_nvlink_domain_size() is None
 
 
 def test_a_non_positive_domain_warns_once(monkeypatch):
-    """The reader runs on every ParallelismConfig construction (tens of thousands in a config sweep)."""
+    """The reader runs on every ParallelismConfig construction, tens of thousands in a sweep."""
     monkeypatch.setenv("NVLINK_DOMAIN_SIZE", "0")
     monkeypatch.setattr(nvlink_mod, "_warned_domain_sizes", set())
     with patch.object(nvlink_mod, "logger") as logger:
@@ -58,7 +43,7 @@ def test_unset_nvlink_domain_size_reads_as_unset(monkeypatch):
 
 
 def test_1d_dp_mesh_rejects_a_sub_world_dp_size(monkeypatch):
-    """Without dp_group, a 1-D mesh narrower than the world is built from ranks 0..dp_size-1."""
+    """Without dp_group, a narrower mesh is built from ranks 0..dp_size-1."""
     monkeypatch.setattr(mesh_mod.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(mesh_mod.dist, "get_world_size", lambda: 8)
     with pytest.raises(ValueError, match="must span the whole world"):
@@ -66,7 +51,7 @@ def test_1d_dp_mesh_rejects_a_sub_world_dp_size(monkeypatch):
 
 
 def test_2d_dp_mesh_rejects_a_sub_world_dp_size(monkeypatch):
-    """The sibling branch's guard, pinned alongside so the two cannot drift apart."""
+    """Pinned alongside so the two branches cannot drift apart."""
     monkeypatch.setattr(mesh_mod.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(mesh_mod.dist, "get_world_size", lambda: 8)
     with pytest.raises(ValueError, match="must span the whole world"):
@@ -74,7 +59,6 @@ def test_2d_dp_mesh_rejects_a_sub_world_dp_size(monkeypatch):
 
 
 def test_full_world_1d_dp_mesh_is_accepted(tmp_path):
-    """Anti-vacuity: the ordinary single-node case must still build."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         assert mesh_mod.build_dp_mesh(1, device_type="cpu").size() == 1

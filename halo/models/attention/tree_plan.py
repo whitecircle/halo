@@ -1,6 +1,5 @@
-"""The tree-attention plan of a tree-packed row: its nodes recovered from the two per-token layout columns (path
-position, node depth) and the index tensors that give every token exactly its own root-to-leaf path in each
-sequence mixer. Nodes are laid out depth-first, so a node's ancestors always precede it in the row."""
+"""The tree-attention plan of a tree-packed row: its nodes, recovered from two per-token layout columns, and the index
+tensors giving every token its own root-to-leaf path. Nodes are depth-first, so ancestors precede a node."""
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -10,20 +9,17 @@ from typing import Literal, get_args
 import numpy as np
 import torch
 
-# The batch key the collator emits the plan under and the model's sequence mixers read it from.
 TREE_ATTENTION_KEY = "tree_attention"
 
-# The two forms full-attention layers read a tree in (:mod:`halo.models.attention.tree`).
 FullAttentionForm = Literal["split", "gather"]
 FULL_ATTENTION_FORMS = get_args(FullAttentionForm)
 
-# Gathered keys one attention call takes. The gather form repeats a prefix once per node below it, so a wide
-# tree gathers fan-out x prefix keys, and a GQA backward expands its key and value gradients to every query head.
+# The gather form repeats a prefix once per node below it, so a wide tree gathers fan-out x prefix keys, and a GQA
+# backward expands its key and value gradients to every query head.
 GATHER_KEYS_PER_CALL = 1 << 19
 
 
 def resolve_node_depths(parents: Iterable[int]) -> list[int]:
-    """Depth of every node of a depth-first layout, from each node's parent index (-1 for a root)."""
     depths: list[int] = []
     for parent in parents:
         depths.append(0 if parent == -1 else depths[parent] + 1)
@@ -32,8 +28,6 @@ def resolve_node_depths(parents: Iterable[int]) -> list[int]:
 
 @dataclass(frozen=True)
 class NodeTable:
-    """Nodes of a flattened batch, in row order: first token, token count and parent of each."""
-
     starts: np.ndarray
     lengths: np.ndarray
     parents: np.ndarray
@@ -44,14 +38,8 @@ class NodeTable:
 
 
 def build_node_table(position_ids: torch.Tensor, depth: torch.Tensor) -> NodeTable:
-    """Recover the nodes of a row from its two per-token columns, refusing anything but a depth-first layout.
-
-    A node starts where the depth changes or the position does not continue. A sibling restarts at
-    its parent's end, at or before the previous sibling's last position, so the second test never
-    misses one. Depth-first order makes a node's parent the nearest earlier node one level up, and a
-    child must continue that parent's last position: a row that was truncated, split or reordered
-    below tree granularity fails this check instead of attending across trees.
-    """
+    """A node starts where the depth changes or the position does not continue. A child must continue its parent's last
+    position, so a row truncated, split or reordered below tree level raises instead of attending across trees."""
     position_ids, depth = position_ids.flatten().numpy(), depth.flatten().numpy()
     boundary = np.ones(len(position_ids), dtype=bool)
     boundary[1:] = (depth[1:] != depth[:-1]) | (position_ids[1:] != position_ids[:-1] + 1)
@@ -79,7 +67,6 @@ def build_node_table(position_ids: torch.Tensor, depth: torch.Tensor) -> NodeTab
 
 
 def _expand(runs: list[tuple[int, int]]) -> np.ndarray:
-    """Token indices of ``(start, length)`` runs, concatenated."""
     if not runs:
         return np.empty(0, dtype=np.int64)
     starts, lengths = np.asarray(runs, dtype=np.int64).T
@@ -87,8 +74,7 @@ def _expand(runs: list[tuple[int, int]]) -> np.ndarray:
 
 
 def _varlen(sequences: list[list[tuple[int, int]]], side: str = "k") -> dict[str, torch.Tensor | int]:
-    """Gather index and cumulative lengths of varlen sequences given as lists of token runs, named
-    for the side of the kernel call they feed (``q`` or ``k``)."""
+    """Gather index and cumulative lengths, named for the side of the kernel call they feed (``q`` or ``k``)."""
     lengths = [sum(length for _, length in runs) for runs in sequences]
     return {
         f"{side}_index": torch.from_numpy(_expand([run for runs in sequences for run in runs])),
@@ -98,7 +84,6 @@ def _varlen(sequences: list[list[tuple[int, int]]], side: str = "k") -> dict[str
 
 
 def _tail(runs: list[tuple[int, int]], budget: int) -> list[tuple[int, int]]:
-    """The last ``budget`` tokens of consecutive runs, as runs."""
     kept: list[tuple[int, int]] = []
     for start, length in reversed(runs):
         if budget <= 0:
@@ -112,8 +97,7 @@ def _tail(runs: list[tuple[int, int]], budget: int) -> list[tuple[int, int]]:
 def _behind_tail(
     ancestors: list[list[tuple[int, int]]], runs: list[tuple[int, int]], budget: int | None
 ) -> dict[str, torch.Tensor | int]:
-    """One gathered sequence per node: the last ``budget`` tokens above it on its path (all of them
-    for ``None``), then the node."""
+    """One gathered sequence per node: the last ``budget`` tokens above it on its path (all for ``None``), then it."""
     return _varlen(
         [
             [*(above if budget is None else _tail(above, budget)), run]
@@ -123,9 +107,7 @@ def _behind_tail(
 
 
 def _with_call_chunks(part: dict, node_lengths: np.ndarray) -> dict:
-    """``part`` plus, when its gathered keys exceed :data:`GATHER_KEYS_PER_CALL`, the runs of whole
-    nodes that each fit (a node over the budget runs alone) under ``chunks``: per run, its query and
-    key token spans and the varlen bounds and maxima of one call over it."""
+    """Past :data:`GATHER_KEYS_PER_CALL`, adds the runs of whole nodes that each fit under ``chunks``."""
     key_bounds = part["cu_seqlens_k"].numpy().astype(np.int64)
     if key_bounds[-1] <= GATHER_KEYS_PER_CALL:
         return part
@@ -152,11 +134,8 @@ def _with_call_chunks(part: dict, node_lengths: np.ndarray) -> dict:
 
 
 def _levels(runs: list[tuple[int, int]], parents: list[int]) -> tuple[list[dict], torch.Tensor, torch.Tensor]:
-    """The nodes one depth at a time: the row's tokens in that order, the permutation from that order back to
-    row order, and per depth its nodes' varlen bounds (``cu_seqlens``, and as python ints ``cu_seqlens_host``,
-    which a batch transport leaves on the host) and, below the roots, every node's ``parent`` slot in the
-    level above.
-    """
+    """Per depth its varlen bounds (``cu_seqlens_host`` as python ints, which a batch transport leaves on the host) and
+    each node's ``parent`` slot in the level above, plus the row's tokens in depth order and the permutation back."""
     depths = resolve_node_depths(parents)
     levels: list[dict] = []
     in_depth_order: list[tuple[int, int]] = []
@@ -175,9 +154,8 @@ def _levels(runs: list[tuple[int, int]], parents: list[int]) -> tuple[list[dict]
 
 
 def _path_links(table: NodeTable, parents: list[int]) -> dict[str, torch.Tensor]:
-    """Per token: its predecessor on its own path (``-1`` at a root), the row end of its node's subtree,
-    its path position and the row start of its tree. The subtree of a depth-first layout is contiguous,
-    so a key at ``e`` precedes a query at ``q`` on the query's path exactly when ``e <= q < subtree_end[e]``."""
+    """A depth-first subtree is contiguous, so a key at ``e`` precedes a query at ``q`` on the query's path exactly
+    when ``e <= q < subtree_end[e]``."""
     starts, lengths = table.starts.astype(np.int64), table.lengths.astype(np.int64)
     ends = starts + lengths
     subtree_end, path_start, tree_start = ends.copy(), np.zeros(len(starts), dtype=np.int64), starts.copy()
@@ -208,41 +186,10 @@ def build_tree_attention_plan(
     conv_kernel: int | None = None,
     sparse_attention: bool = False,
 ) -> dict:
-    """The index tensors a model's sequence mixers need to give every token its own path as context.
-
-    Always present: ``cu_seqlens_q`` / ``max_seqlen_q`` (the nodes as varlen query sequences) and
-    ``leaf_count``, per token the number of examples its node belongs to — how often the token would
-    occur with every example laid out on its own, which per-token statistics weight by.
-
-    Softmax attention, only where the row holds a branch (plain documents need nothing beyond their
-    position resets):
-
-    - ``sliding``: per node, the keys of one gathered sequence (``k_index``, ``cu_seqlens_k``,
-      ``max_seqlen_k``) — the last ``sliding_window - 1`` tokens above it, then the node.
-    - ``full``, form ``gather``: the same with every token above it.
-    - Either gather part over more than :data:`GATHER_KEYS_PER_CALL` keys also carries ``chunks``,
-      runs of whole nodes that each fit, which the layer attends one call at a time.
-    - ``full``, form ``split``: per parent, its children's tokens as queries (``q_index``,
-      ``cu_seqlens_q``, ``max_seqlen_q``) and the path down to it as keys (``k_index``, ...).
-
-    A family with stateful linear-attention layers (``conv_kernel``, the width of their causal
-    convolution), on every row:
-
-    - ``conv``: each node behind the last ``conv_kernel - 1`` tokens above it (``index``), the
-      gathered sequences kept apart by ``seq_idx``; ``own`` picks the nodes' outputs back out.
-    - ``levels``: per tree depth, its nodes' varlen bounds (``cu_seqlens``, and ``cu_seqlens_host``
-      as python ints for the kernel's host-side chunk indices) and each node's ``parent`` slot in the
-      level above; ``depth_order`` lists the row's tokens depth by depth, and ``restore`` returns that
-      order to row order.
-
-    A family whose softmax layers select their keys per query (``sparse_attention``, GLM-5 Next's
-    DeepSeek sparse attention), on every row and in place of the softmax parts above: ``sparse``, the
-    per-token path links of :func:`_path_links`, from which those layers build their candidates on the
-    device.
-
-    Maxima are python ints, the bound the FA4 warm-up compiles its varlen kernels for: a tensor one runs another
-    head_dim-256 variant (``patch_transformers_flash_varlen_int_seqlen``).
-    """
+    """Always ``cu_seqlens_q``, ``max_seqlen_q`` and ``leaf_count``, per token the number of examples its node belongs
+    to. Softmax attention, only where the row holds a branch: ``sliding`` and ``full``. A stateful linear-attention
+    family, on every row: ``conv``, ``levels``, ``depth_order``, ``restore``. A sparse family, in place of the softmax
+    parts: ``sparse``. Maxima are python ints, the bound the FA4 warm-up compiles its varlen kernels for."""
     runs = list(zip(table.starts.tolist(), table.lengths.tolist(), strict=True))
     parents = table.parents.tolist()
     ancestors: list[list[tuple[int, int]]] = []

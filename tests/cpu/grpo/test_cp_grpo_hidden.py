@@ -50,8 +50,7 @@ def _wrapper(model, cp_size, cp_rank):
 
 @pytest.mark.parametrize("cp_size", [1, 2, 4])
 def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
-    """CP2/4 cover rank-ordering: each rank's backbone sees its own chunk at its global positions, and no mask,
-    which only a router aux loss reads outside the attention CP replaces."""
+    """Each rank's backbone sees no mask, which only a router aux loss reads outside the attention CP replaces."""
     torch.manual_seed(18)
     model = _Model()
     ids = torch.randint(1, 32, (2, SEQ))

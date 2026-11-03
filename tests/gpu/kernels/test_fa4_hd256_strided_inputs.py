@@ -1,18 +1,9 @@
 #!/usr/bin/env python
-"""FA4's head_dim-256 path, called as transformers calls it, is as accurate as FA2 on the strided q/k/v the
-head_dim-256 families hand it.
+"""FA4's head_dim-256 path is as accurate as FA2 on those families' strided q/k/v, against an fp64 reference.
 
-A head-major q/k (Qwen3.5's partial-rotary ``torch.cat``, GLM-4.7-Flash's MLA), a v sliced off a fused K/V tensor
-(MLA), or q, k and v each sliced off the one buffer a Ulysses all-to-all receives at batch 1 (heads packed, the token
-stride their summed width) reach the kernel with every stride but the last one unpacked; flash-attn-4 4.0.0b16 built
-its head_dim-256 layouts with packed strides and read them scrambled. Against an fp64 reference on those exact
-layouts, dense and varlen, at the Qwen3.5 (16:2) and GLM-4.7-Flash MLA (20:20) head counts: the entry points' output
-and dq/dk/dv must stay within 1.5x of FA2's error, and so must a second backward handed the output gradient
-head-major. Fails on a kernel that misreads any of q, k, v or dout, as 4.0.0b16's does. Also measured, not gated:
-whether the head_dim-256 backward with ``deterministic=True`` runs and repeats bit for bit, which the resolver does
-not rely on (a deterministic run keeps head_dim-256 attention off FA4).
-
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_fa4_hd256_strided_inputs.py
+Head-major q/k, a v sliced off a fused K/V, or a Ulysses receive buffer reach the kernel with every stride but the last
+unpacked; flash-attn-4 4.0.0b16 read those scrambled. ``deterministic=True`` is measured, not gated: a deterministic
+run keeps head_dim-256 attention off FA4.
 """
 
 import torch
@@ -27,16 +18,14 @@ D = FA4_DEDICATED_HEAD_DIM
 HEAD_COUNTS = ((16, 2), (20, 20))
 DOCUMENT_LENGTHS = (700, 900, 448)
 S = sum(DOCUMENT_LENGTHS)
-# FA4's error may exceed FA2's (two bf16 kernels, different accumulation order) by this factor; a misread is O(1).
+# Two bf16 kernels, different accumulation order; a misread is O(1).
 FA2_ERROR_RATIO = 1.5
 # "head_major": q/k head-major and v off a fused K/V; "one_buffer": the Ulysses all-to-all's received buffer.
 LAYOUTS = ("head_major", "one_buffer")
 
 
 def _strided_inputs(heads: int, kv_heads: int, *, varlen: bool, seed: int, layout: str = "head_major"):
-    """q, k and v ``[.., S, H, D]`` with the last dim contiguous and every other stride not the packed one: under
-    ``head_major`` q and k transposed from ``[.., H, S, D]`` and v the second half of a fused ``[.., S, KV, 2D]``
-    tensor; under ``one_buffer`` each a slice of one ``[.., S, (H + 2 KV) D]`` buffer."""
+    """q, k and v ``[.., S, H, D]`` with the last dim contiguous and every other stride not the packed one."""
     torch.manual_seed(seed)
     lead = () if varlen else (1,)
     if layout == "one_buffer":
@@ -64,7 +53,6 @@ def _varlen_kwargs():
 
 
 def _reference(q, k, v, *, varlen: bool):
-    """fp64 causal attention, per document under ``varlen``, in the input's own layout."""
     heads, kv_heads = q.shape[-2], k.shape[-2]
     q, k, v = (t.double().reshape(S, t.shape[-2], D) for t in (q, k, v))
     k, v = (t.repeat_interleave(heads // kv_heads, dim=1) for t in (k, v))
@@ -86,8 +74,7 @@ def _attend(fn, q, k, v, *, varlen: bool, **kwargs):
 
 
 def _errors(fn, heads, kv_heads, *, varlen: bool, layout: str, head_major_dout: bool = False) -> dict[str, float]:
-    """Output and dq/dk/dv error of ``fn`` against the fp64 reference on the same strided leaves of ``layout``, the
-    output gradient handed to ``fn``'s backward contiguous or, with ``head_major_dout``, head-major."""
+    """Against the fp64 reference on the same leaves; ``head_major_dout`` hands the output gradient head-major."""
     q, k, v = (t.requires_grad_(True) for t in _strided_inputs(heads, kv_heads, varlen=varlen, seed=0, layout=layout))
     out = _attend(fn, q, k, v, varlen=varlen)
     q64, k64, v64 = (t.detach().double().requires_grad_(True) for t in (q, k, v))
@@ -106,8 +93,8 @@ def _errors(fn, heads, kv_heads, *, varlen: bool, layout: str, head_major_dout: 
 
 
 def _deterministic_backward_repeats(fn, heads, kv_heads) -> float:
-    """1.0 when two ``deterministic=True`` backwards over the same strided leaves give bitwise-equal dq/dk/dv, 0.0
-    when they differ, -1.0 when the kernel refuses the flag."""
+    """1.0 when two ``deterministic=True`` backwards are bitwise-equal, 0.0 when they differ, -1.0 when the kernel
+    refuses the flag."""
     q, k, v = (t.requires_grad_(True) for t in _strided_inputs(heads, kv_heads, varlen=False, seed=1))
     dout = torch.randn(q.shape, device="cuda", dtype=q.dtype)
     grads = []

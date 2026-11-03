@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""What each engine's weight-sync client sends through its public lifecycle, pinned against the
-request-transcript golden: every request with its route, body, timeout and session, what goes on the
-NCCL wire, the local group's fate and the at-exit hooks, in scenarios succeeding and failing at each step.
-
-Run: python tests/cpu/weight_sync/test_request_transcript.py
-"""
+"""What each engine's weight-sync client sends through its public lifecycle, pinned against a golden: requests, the
+NCCL wire, the local group's fate and the at-exit hooks, in scenarios succeeding and failing at each step."""
 
 import dataclasses
 import json
@@ -27,7 +23,6 @@ SCENARIO = {scenario.key: scenario for scenario in SCENARIOS}
 
 
 def _routes(record: list[dict]) -> list[tuple[str, list[str]]]:
-    """Each step with the method and path of every request it sent."""
     return [(step["step"], [" ".join(line.split(" ", 2)[:2]) for line in step["requests"]]) for step in record]
 
 
@@ -45,8 +40,7 @@ def test_the_client_sends_the_golden_transcript(engine, scenario):
 
 
 def test_a_retried_session_request_counts_every_receipt():
-    """Anti-vacuity: the session retries below the call the recorder sees, so only the engine's receipt
-    count shows the retry a refused quiesce takes."""
+    """The session retries below the call the recorder sees, so only the engine's receipt count shows the retry."""
 
     def refuse_the_first_pause(engine, server):
         server.replies["/pause"] = deque([503])
@@ -61,9 +55,7 @@ def test_a_retried_session_request_counts_every_receipt():
 
 
 def test_a_collective_rpc_sent_through_the_retrying_session_breaks_the_transcript(monkeypatch):
-    """Anti-vacuity: a retry of a blocking engine call queues a second collective RPC and wedges the
-    engine, so routing the single-shot posts through the session must read as a different transcript
-    although every route is the same."""
+    """A retry of a blocking engine call queues a second collective RPC and wedges the engine."""
     request = WeightSyncClientBase.request
 
     def over_the_session(self, method, path, *, retry, **kwargs):
@@ -77,8 +69,7 @@ def test_a_collective_rpc_sent_through_the_retrying_session_breaks_the_transcrip
 
 
 def test_a_session_that_no_longer_retries_a_server_error_breaks_the_transcript(monkeypatch):
-    """Anti-vacuity: the session's retry policy is recorded field by field, so dropping 500 from the codes
-    it retries must read as a different transcript although every request still goes out once."""
+    """The retry policy is recorded field by field, so the transcript differs although every request goes out once."""
 
     def without_500(max_retries: Retry) -> HTTPAdapter:
         codes = [code for code in max_retries.status_forcelist if code != 500]
@@ -92,8 +83,7 @@ def test_a_session_that_no_longer_retries_a_server_error_breaks_the_transcript(m
 
 
 def test_an_exit_hook_that_destroys_the_local_group_breaks_the_transcript(monkeypatch):
-    """Anti-vacuity: at interpreter exit the engine never enters the destroy, so the hook must only forget
-    the local group; one that destroys it reads as a different transcript."""
+    """At interpreter exit the engine never enters the destroy, so the hook must only forget the local group."""
     close = SGLangWeightSyncClient.close_communicator
     monkeypatch.setattr(SGLangWeightSyncClient, "close_communicator", lambda self, **kwargs: close(self))
     record = scenario_record("sglang", SCENARIO["at exit after a sync"])
@@ -103,9 +93,8 @@ def test_an_exit_hook_that_destroys_the_local_group_breaks_the_transcript(monkey
 
 
 def test_no_client_overrides_the_chunk_accounting():
-    """Every chunk is counted, and its failure judged, in ``WeightSyncClientBase._transmit_chunk``: the
-    count behind ``can_replay_sync`` and the verdict that keeps a partly written engine paused. A client
-    overriding it would bypass both while every transcript above still passes."""
+    """``WeightSyncClientBase._transmit_chunk`` holds the count behind ``can_replay_sync`` and the verdict that keeps a
+    partly written engine paused. An override would bypass both while every transcript still passes."""
     clients = [cls for cls in iter_subclasses(WeightSyncClientBase) if cls.__module__.startswith("halo.")]
     assert {VLLMWeightSyncClient, SGLangWeightSyncClient, TrlVLLMClient} <= set(clients)
     assert [cls.__qualname__ for cls in clients if "_transmit_chunk" in vars(cls)] == []

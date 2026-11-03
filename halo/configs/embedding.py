@@ -1,5 +1,3 @@
-"""Embedding script arguments and ``EmbeddingConfig`` (sentence-transformers losses)."""
-
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
@@ -16,9 +14,6 @@ class EmbeddingScriptArguments(CommonScriptArguments):
 
 @dataclass
 class EmbeddingConfig(ValidatedConfig, SentenceTransformerTrainingArguments):
-    r"""SentenceTransformerTrainingArguments for [`EmbeddingTrainer`] (loss, pooling,
-    normalization); per-field docs are in each field's ``help`` metadata."""
-
     loss_type: Literal[
         "mnrl",
         "cached_mnrl",

@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""The shared PEFT merge must run its input gates in order, before anything is loaded or written.
-
-``merge_peft_adapters`` folds a saved adapter into its base through ``merge_adapter_into_base``. Every
-gate in front of that fold answers a failure that is silent without it — a per-rank EP directory whose
-real expert keys read as MISSING and get randomly initialized, an ``--output_dir`` aimed at an input
-whose weight files the save then deletes, a native expert-LoRA adapter whose deltas ``merge_and_unload``
-drops — and each is only worth having if it runs BEFORE the base model is loaded and the output directory
-created. The base directory is re-checked separately because under a merge the WEIGHTS come from the
-base, so the adapter-side gates alone would cover the wrong directory.
-
-Its gates (``adapter_input_gates``) also front the ``convert_to_bf16 --peft`` re-save, whose adapter a
-later merge reads. These assertions pin that single copy — its gates, their order, and the point they
-run at — and fail if a tool grows its own.
-
-Run: ``python tests/cpu/checkpoint/test_merge_adapter_gates.py`` (or ``pytest -m cpu``).
-"""
+"""The shared PEFT merge runs its input gates in order, before anything is loaded or written. The base is re-checked
+since under a merge the weights come from it; ``adapter_input_gates`` also front ``convert_to_bf16 --peft``."""
 
 from __future__ import annotations
 
@@ -35,7 +21,7 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.tools import adapter_merge, bf16_conversion
 
-# The gates that must run for real: each one is the check under test, not a stand-in for it.
+# Each one is the check under test.
 _REAL_GATES = (
     "reject_partial_checkpoint",
     "reject_in_place_conversion",
@@ -45,8 +31,6 @@ _REAL_GATES = (
 
 
 class _Merged:
-    """The merged model, reduced to what the merge itself touches."""
-
     def merge_and_unload(self):
         return self
 
@@ -58,7 +42,6 @@ class _FakePeftModel:
 
 
 def _adapter_dir(tmp_path: Path, base: Path, *, peft_type: str = "LORA") -> str:
-    """A PEFT adapter directory naming ``base`` as its base model."""
     adapter = tmp_path / "adapter"
     adapter.mkdir()
     (adapter / ADAPTER_CONFIG_FILE).write_text(
@@ -81,11 +64,7 @@ def _names(calls: list[tuple[str, str]]) -> list[str]:
 
 
 def _instrument(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]) -> None:
-    """Record ``(step, the directory it was given)``: real gates wrapped, the heavy edges stubbed out.
-
-    The directory rides along because it is half the contract — the two directory gates must see the
-    BASE as well as the adapter, and a transcript of names alone cannot tell the two calls apart.
-    """
+    """The directory rides along since the two directory gates must see the base as well as the adapter."""
     for name in _REAL_GATES:
         real = getattr(adapter_merge, name)
 
@@ -120,9 +99,7 @@ def _load_base_model(calls: list[tuple[str, str]]):
 
 
 def test_every_gate_runs_before_the_load_on_both_the_adapter_and_the_base(tmp_path, monkeypatch):
-    """The contract the shared merge owes, stated as what is observable rather than as a transcript:
-    every gate has run by the time the base is read, each input directory has been through the two
-    directory gates, and the write happens after the load with its sidecars last."""
+    """Stated as what is observable rather than a transcript of names."""
     base = tmp_path / "base"
     base.mkdir()
     adapter = _adapter_dir(tmp_path, base)
@@ -146,18 +123,15 @@ def test_every_gate_runs_before_the_load_on_both_the_adapter_and_the_base(tmp_pa
         assert checked == {str(adapter), str(base)}, (
             f"{gate} saw {checked}: a merge takes its WEIGHTS from the base, so both inputs owe it"
         )
-    # The write follows the load, and the adapter's sidecars follow the write.
     assert load_at < names.index("save_full_checkpoint") < names.index("copy_training_sidecars")
-    # The adapter's own config is relocated, never left beside the merged weights where every
-    # from_pretrained-based tool downstream would read the merged model as an unmerged adapter.
+    # Left beside the merged weights, every from_pretrained-based tool reads the merged model as an unmerged adapter.
     relocated = tmp_path / "out" / MERGED_ADAPTER_CONFIG_DIR / ADAPTER_CONFIG_FILE
     assert relocated.is_file(), "the adapter config was not relocated beside the merged output"
 
 
 @pytest.mark.parametrize("side", ["adapter", "base"])
 def test_an_output_aimed_at_an_input_is_refused_before_the_load(tmp_path, monkeypatch, side):
-    """The save deletes the weight files it does not overwrite, so this must fire before anything
-    is read — writing into either input destroys that input."""
+    """The save deletes the weight files it does not overwrite."""
     base = tmp_path / "base"
     base.mkdir()
     adapter = _adapter_dir(tmp_path, base)
@@ -177,8 +151,7 @@ def test_an_output_aimed_at_an_input_is_refused_before_the_load(tmp_path, monkey
 
 
 def test_a_per_rank_sharded_base_is_refused_before_the_load(tmp_path, monkeypatch):
-    """Its experts would load randomly initialized — a warning, never a raise — and the adapter
-    would be merged into those."""
+    """Its experts would load randomly initialized, a warning only."""
     base = tmp_path / "base"
     base.mkdir()
     (base / "model-00001-of-00002.safetensors").write_bytes(b"")
@@ -204,8 +177,7 @@ def test_a_per_rank_sharded_base_is_refused_before_the_load(tmp_path, monkeypatc
 
 
 def test_a_native_expert_lora_adapter_is_refused_before_the_load(tmp_path, monkeypatch):
-    """``merge_and_unload`` cannot fold grouped expert adapters: it drops every expert delta and
-    yields a base-quality model that looks merged."""
+    """``merge_and_unload`` drops every expert delta and yields a base-quality model that looks merged."""
     base = tmp_path / "base"
     base.mkdir()
     adapter = _adapter_dir(tmp_path, base, peft_type=EXPERT_LORA_PEFT_TYPE)
@@ -223,16 +195,10 @@ def test_a_native_expert_lora_adapter_is_refused_before_the_load(tmp_path, monke
 
 @pytest.mark.parametrize("weights_file", ADAPTER_WEIGHT_NAMES)
 def test_an_unmarked_expert_adapter_is_caught_in_either_weight_file(tmp_path, weights_file):
-    """The verdict is the SHAPE, so the tensor scan must read whichever file PEFT wrote.
-
-    ``adapter_model.bin`` is the fallback the saver takes when the safetensors write fails, and a
-    reader that hand-builds only the safetensors name reads such an adapter as plain — handing
-    ``merge_and_unload`` an expert adapter whose every delta it drops, for a base-quality model that
-    looks merged.
-    """
+    """``adapter_model.bin`` is the saver's fallback; a safetensors-only reader reads such an adapter as plain."""
     base = tmp_path / "base"
     base.mkdir()
-    adapter = Path(_adapter_dir(tmp_path, base))  # peft_type LORA: unmarked, so only the keys tell
+    adapter = Path(_adapter_dir(tmp_path, base))  # Unmarked, so only the keys tell.
     expert_tensor = {"base_model.model.layers.0.mlp.experts.gate_up_proj.lora_A": torch.zeros(2, 2)}
     if weights_file.endswith(".safetensors"):
         save_file(expert_tensor, str(adapter / weights_file))
@@ -244,8 +210,7 @@ def test_an_unmarked_expert_adapter_is_caught_in_either_weight_file(tmp_path, we
 
 
 def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch):
-    """A tool that re-grew its own load→merge→save path would carry none of the gates above, so the
-    tool's own entry point is driven here and must arrive at the shared merge."""
+    """A tool re-growing its own load→merge→save carries none of these gates."""
     base = tmp_path / "base"
     base.mkdir()
     adapter = _adapter_dir(tmp_path, base)
@@ -263,8 +228,7 @@ def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("side", ["adapter", "base"])
 def test_an_unmerged_adapter_conversion_runs_the_shared_gates(tmp_path, monkeypatch, side):
-    """``convert_to_bf16 --peft`` re-saves an adapter a later merge reads,
-    so it owes the merge's gates, taken from the one sequence rather than a copy of it."""
+    """A later merge reads the re-saved adapter, so it owes the same gates."""
     assert bf16_conversion.adapter_input_gates is adapter_merge.adapter_input_gates
 
     base = tmp_path / "base"

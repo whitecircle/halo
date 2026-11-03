@@ -1,8 +1,5 @@
-"""Materializing a planned safetensors checkpoint onto a meta shell, key by key.
-
-A :class:`WeightPlan` per checkpoint key says how it loads: this rank's expert slice, the whole tensor, or
-nothing. How expert weights are laid out on disk is the EP planner's knowledge; it arrives here as plans.
-"""
+"""Materializing a planned safetensors checkpoint onto a meta shell, key by key; the expert disk layout is the EP
+planner's knowledge and arrives here as plans."""
 
 from __future__ import annotations
 
@@ -29,8 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 class WeightAction(Enum):
-    """How a single checkpoint key should be loaded."""
-
     EXPERT_SHARD = "expert_shard"
     REPLICATE = "replicate"
     IGNORE = "ignore"
@@ -38,8 +33,6 @@ class WeightAction(Enum):
 
 @dataclass
 class WeightPlan:
-    """Loading plan for a single checkpoint key."""
-
     action: WeightAction
     shard_file: str
     disk_key: str
@@ -70,7 +63,6 @@ def materialize_weight_plan(plan: WeightPlan, read: Callable[[str, WeightPlan], 
 
 
 def _resolve_owner(model: nn.Module, key: str) -> tuple[nn.Module, str]:
-    """The module holding ``key``'s tensor, and the tensor's attribute name on it."""
     owner, _, attr = key.rpartition(".")
     return model.get_submodule(owner), attr
 
@@ -92,13 +84,9 @@ def verify_loaded_shape(
     shard_dim: int | None = None,
     shard_len: int | None = None,
 ) -> None:
-    """Refuse a materialized tensor whose shape disagrees with the live target's.
-
-    The lazy path installs the disk tensor as the new parameter, so without this gate the checkpoint's shape
-    would win over the config's (``from_pretrained`` raises instead). ``shard_dim``/``shard_len`` replace an
-    expert-sharded target's full expert count with this rank's slice, which also catches a checkpoint holding
-    fewer experts than the config declares: a ranged read past the end returns fewer rows instead of raising.
-    """
+    """Refuse a tensor whose shape disagrees with the live target's, since the lazy path installs the disk tensor and
+    the checkpoint's shape would win. ``shard_dim``/``shard_len`` also catch a checkpoint with fewer experts than the
+    config, where a ranged read past the end returns fewer rows instead of raising."""
     live = _target_tensor(model, model_key)
     if not isinstance(live, torch.Tensor):
         raise RuntimeError(
@@ -137,11 +125,8 @@ def assign_tensor_to_model(model: nn.Module, key: str, tensor: torch.Tensor, *, 
 
 
 class SafetensorsWeightLoader:
-    """Materializes weight plans out of a safetensors checkpoint whose index is ``weight_map``.
-
-    The shard files the plans name are opened before any tensor is read, so a missing one fails first; a
-    shard a plan reaches only through a fan-in sibling opens on first use.
-    """
+    """Materializes weight plans from a checkpoint whose index is ``weight_map``. Plan-named shards open before any
+    read, so a missing one fails first; a shard reached only through a fan-in sibling opens on first use."""
 
     def __init__(self, model_path: str, weight_map: dict[str, str], device: str = "cpu"):
         self._model_path = model_path
@@ -156,12 +141,9 @@ class SafetensorsWeightLoader:
         dtype: torch.dtype | None = None,
         keep_fp32: frozenset[str] = frozenset(),
     ):
-        """Assign every non-``IGNORE`` plan's tensor, shape-checked against the live target.
-
-        Every float parameter takes ``dtype`` (FSDP2 rejects mixed dtypes in one shard group), except the
-        ``keep_fp32`` model keys, the fp32 masters. A float buffer keeps its stored dtype (Zaya's balancing
-        biases are fp32 by design) unless the family pins it, which loads it fp32 as ``from_pretrained`` does.
-        """
+        """Assign every non-``IGNORE`` plan's tensor, shape-checked. Float parameters take ``dtype`` (FSDP2 rejects
+        mixed dtypes in one shard group) except the ``keep_fp32`` masters; a float buffer keeps its stored dtype unless
+        the family pins it."""
         pinned = fp32_pinned_names(model, include_buffers=True)
         live = [plan for plan in plans if plan.action != WeightAction.IGNORE]
         try:
@@ -228,11 +210,8 @@ class SafetensorsWeightLoader:
 
 
 def materialize_empty_like(model: nn.Module, key: str, device: str, dtype: torch.dtype | None) -> None:
-    """Give ``key`` real (uninitialized) storage shaped like its current (meta) tensor.
-
-    A float parameter follows the run's dtype as the loaded ones do; a buffer keeps its own, since an integer
-    buffer (routing tables, position ids) would have its indices corrupted and a float one may be fp32 by design.
-    """
+    """Give ``key`` uninitialized storage shaped like its meta tensor. A float parameter takes the run's dtype; a
+    buffer keeps its own, since integer indices would be corrupted and a float one may be fp32 by design."""
     owner, attr = _resolve_owner(model, key)
     old = getattr(owner, attr)
     follows_run_dtype = dtype is not None and old.is_floating_point() and isinstance(old, nn.Parameter)
@@ -248,13 +227,9 @@ def init_checkpoint_absent_modules(
     *,
     dtype: torch.dtype | None = None,
 ) -> list[str]:
-    """Random-init the live tensors the checkpoint does not carry (``from_pretrained``'s missing set), the
-    same values on every rank; returns their keys. ``context`` names the caller in every message.
-
-    Only modules whose state is entirely absent are initialized: ``_init_weights`` writes every parameter of
-    the module it is handed, so a partially loaded one raises instead. An absence inside the pretrained
-    backbone raises through :func:`verify_checkpoint_coverage`.
-    """
+    """Random-init live tensors the checkpoint lacks, identically on every rank; returns their keys. A partially absent
+    module raises, as ``_init_weights`` writes all its parameters; an absence in the backbone raises through the
+    coverage gate."""
     # keep_vars, so a tied tensor is one object under both names: the post-load tie_weights() restores the
     # shadow, and drawing it here would allocate a second vocab-sized tensor only to discard it.
     state = model.state_dict(keep_vars=True)
@@ -314,10 +289,8 @@ def stream_planned_weights(
     run: Callable[[Callable[[], object]], object],
     label: str,
 ) -> None:
-    """A lazy load's tail: random-init what the checkpoint lacks (``planned`` is every key the load covers,
-    fusions included), then stream ``plans``. Each step goes through ``run``, the caller's deferred-failure
-    guard, since both raise rank-locally between the caller's collectives.
-    """
+    """A lazy load's tail: random-init what the checkpoint lacks, then stream ``plans``. Each step goes through
+    ``run``, the caller's deferred-failure guard, since both raise rank-locally between its collectives."""
     # Before the stream, with the planned set final: a task head the checkpoint lacks (``score`` on a CausalLM
     # base) is nobody else's to initialize, and the trainer's meta sweep would hand it per-rank garbage.
     run(partial(init_checkpoint_absent_modules, model, planned, device, label, dtype=dtype))

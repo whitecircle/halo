@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""The SGLang image's edit table must rewrite exactly the upstream code it names, and refuse anything else.
-
-``docker/sglang/patches/patch_sglang.py`` runs at image build against the pinned sglang; the
-fixtures below are the verbatim upstream code of that pin, so the build's pre-image assertions are
-exercised here without the image. What is pinned:
-
-  * the GLM gate, which upstream now holds in fp32 and reads live, is asserted and never rewritten,
-    and a gate that caches its weight again fails the build;
-  * the Gemma 4 router rewrite gives ``scale`` a loader that releases the fold latch, and the build
-    fails once the loader it calls is no longer imported;
-  * the prefill-loop rewrite steps the log-prob offset over a skipped request before ``continue``;
-  * ``--verify`` refuses the unpatched file.
-
-The replace-once and pre/post-image mechanics are pinned in ``test_engine_source_patch.py``.
-
-    python tests/cpu/grpo/test_rollout_server_sglang_patches.py
-"""
+"""The SGLang image's edit table must rewrite exactly the upstream code it names and refuse anything else.
+Fixtures are the pin's verbatim upstream code; replace-once mechanics are pinned in ``test_engine_source_patch.py``."""
 
 import pytest
 

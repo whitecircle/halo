@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Every toolkit override of a TRL ``GRPOTrainer`` method takes the arguments TRL's signature declares.
-
-TRL calls its own methods with its own signature: when a release adds a parameter (1.14's
-``num_generations`` on ``_generate_single_turn``), an override still spelled to the old one raises
-``TypeError`` on every rollout, and a toolkit method that happens to share a TRL name shadows it for
-TRL's internal calls. Each override is bound against TRL's declared parameters: the required ones
-positionally, the rest by keyword. A TRL method taking ``*args`` cannot be bound this way; its
-override has its own test.
-
-    python tests/cpu/grpo/test_grpo_override_signatures.py
-"""
+"""Every toolkit override of a TRL ``GRPOTrainer`` method takes the arguments TRL's signature declares. A release that
+adds a parameter would raise ``TypeError`` on every rollout. An override of a ``*args`` method has its own test."""
 
 import inspect
 
@@ -37,7 +28,6 @@ def _trl_call(trl_method) -> tuple[list, dict] | None:
 
 
 def _overrides(trainer_cls):
-    """``(owner, name, method)`` for every toolkit method in the MRO that TRL's GRPOTrainer also defines."""
     for owner in trainer_cls.__mro__:
         if owner.__module__.startswith(("trl.", "transformers.")) or owner is object:
             continue

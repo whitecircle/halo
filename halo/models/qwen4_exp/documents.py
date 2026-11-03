@@ -1,6 +1,5 @@
-"""Document boundaries of a ``qwen4_exp`` training row (``seq_idx``), and the per-layer embedding (PLE) computed
-within them: the n-gram history restarts at every document start as well as after eos, and the dilated conv's taps
-stop at the document start, so each packed document computes what it would alone. Uncached rows only."""
+"""Document boundaries of a ``qwen4_exp`` training row (``seq_idx``) and the per-layer embedding computed within them,
+so each packed document computes what it would alone. Uncached rows only."""
 
 import math
 
@@ -14,8 +13,7 @@ from halo.models.segment_markers import document_boundaries, document_starts
 
 
 def reject_unmarked_documents(position_ids: torch.Tensor | None, seq_idx: torch.Tensor | None) -> None:
-    """Refuse a row whose text ``position_ids`` restart at 0 (a packed row) unless ``seq_idx`` marks the same
-    documents: the QSA indexer, the PLE n-gram history and its conv read documents from ``seq_idx`` alone."""
+    """The QSA indexer, the PLE n-gram history and its conv read documents from ``seq_idx`` alone."""
     if position_ids is None and seq_idx is None:
         return
     reference = seq_idx if seq_idx is not None else position_ids
@@ -43,9 +41,7 @@ def reject_unmarked_documents(position_ids: torch.Tensor | None, seq_idx: torch.
 def shift_within_documents(
     token_ids: torch.Tensor, shift: int, eos_token_id: int, starts: torch.Tensor
 ) -> torch.Tensor:
-    """``token_ids`` moved ``shift`` places right, ``eos_token_id`` wherever the source token lies before the
-    token's document start or before the eos that ends the previous segment: transformers'
-    ``Qwen4ExpTextNGramEmbedding._shift_right_ignore_eos`` with a document start as a second reset."""
+    """transformers' ``_shift_right_ignore_eos`` with a document start as a second reset."""
     if shift == 0:
         return token_ids
     positions = torch.arange(token_ids.shape[1], device=token_ids.device)
@@ -58,8 +54,7 @@ def shift_within_documents(
 
 
 def document_ngram_ids(embedding: nn.Module, input_ids: torch.Tensor, starts: torch.Tensor) -> torch.Tensor:
-    """The ``[batch, length, ngram_heads]`` hashed n-gram table rows of a ``Qwen4ExpTextNGramEmbedding`` for an
-    uncached row, its history reset at document ``starts`` (:func:`shift_within_documents`)."""
+    """The ``[batch, length, ngram_heads]`` hashed table rows, the history reset at document ``starts``."""
     input_ids = input_ids.long()
     shifted = [
         shift_within_documents(input_ids, shift, embedding.eos_token_id, starts)
@@ -78,8 +73,6 @@ def document_ngram_ids(embedding: nn.Module, input_ids: torch.Tensor, starts: to
 
 
 def ngram_rows(embedding: nn.Module, ngram_ids: torch.Tensor) -> torch.Tensor:
-    """The concatenated table rows of ``ngram_ids`` on their device: a :class:`HostNGramTable`'s own lookup, or the
-    stock embedding read where its weight lives, as the stock forward reads it."""
     table = embedding.ngram_embedding
     if isinstance(table, HostNGramTable):
         return table(ngram_ids).flatten(-2)
@@ -88,12 +81,8 @@ def ngram_rows(embedding: nn.Module, ngram_ids: torch.Tensor) -> torch.Tensor:
 
 
 def document_short_conv(conv: nn.Module, hidden_states: torch.Tensor, starts: torch.Tensor) -> torch.Tensor:
-    """``silu`` of the PLE dilated depthwise causal conv over ``[batch, length, channels]`` states, every tap that
-    reaches before its token's document start reading zero, as at a row start.
-
-    One multiply-add per tap over a view of the left-padded states keeps the backward to that one padded copy and
-    off cuDNN; taps accumulate in fp32 and the sum returns in the states' dtype, as the conv's own output does.
-    """
+    """``silu`` of the PLE conv, every tap reaching before its document start reading zero. One multiply-add per tap,
+    accumulated in fp32, over a view of the left-padded states keeps the backward to one padded copy and off cuDNN."""
     if (
         not isinstance(conv, nn.Conv1d)
         or conv.bias is not None
@@ -129,8 +118,7 @@ def document_ple_forward(
     seq_idx: torch.Tensor | None,
     conv_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``Qwen4ExpTextPLELayer.forward`` for an uncached row, with the n-gram history and the conv kept inside each
-    ``seq_idx`` document (:func:`document_ngram_ids`, :func:`document_short_conv`)."""
+    """``Qwen4ExpTextPLELayer.forward`` for an uncached row, the n-gram history and conv kept inside each document."""
     batch, length = input_ids.shape
     starts = document_starts(seq_idx, batch, length, input_ids.device)
     embeddings = ngram_rows(ple.ple_embedding, document_ngram_ids(ple.ple_embedding, input_ids, starts))

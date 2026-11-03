@@ -1,11 +1,4 @@
-"""CPU tests for the sharded-save guard.
-
-``reject_unmergeable_ep_sharded_save`` must fire BEFORE training, not at (or after) the first save:
-(a) a ``model_type`` no registered EP layer class claims can never merge its per-rank shards into a
-loadable checkpoint; (b) ``merge_expert_lora_on_save=True`` is incompatible with the sharded save;
-(c) a run with no EP layers reads the flag nowhere — a refusal, not a no-op; (d) a multi-node job on
-per-node local disks scatters the shards where the merge never sees a complete set.
-"""
+"""``reject_unmergeable_ep_sharded_save`` fires before training, not at the first save."""
 
 from types import SimpleNamespace
 
@@ -30,23 +23,19 @@ def _fake_model(model_type):
 
 
 def _fake_ep_model(model_type, world_size=1):
-    """A model of ``model_type`` holding one EP layer on a single EP group spanning ``world_size``."""
     model = _fake_model(model_type)
     model.mlp = _FakeEPLayer(world_size)
     return model
 
 
 def _ep_config(world_size, expert_tp_size=1):
-    """ep_config satisfying the topology checks: a single global EP group, no expert TP."""
+    """A single global EP group, no expert TP."""
     return SimpleNamespace(expert_tp_size=expert_tp_size, ep_group_size=world_size, num_ep_groups=1)
 
 
 class _FakeEPLayer(EPMoELayerBase):
-    """A real ``EPMoELayerBase`` instance, which is what ``named_ep_layers`` keys on.
-
-    The validator reads only ``ep_config`` and the expert-LoRA predicate, so the heavy base
-    ``__init__`` (process groups, DeepEP buffers) is deliberately skipped.
-    """
+    """The validator reads only ``ep_config`` and the expert-LoRA predicate, so the heavy base ``__init__`` is
+    skipped."""
 
     def __init__(self, world_size, expert_tp_size=1):
         nn.Module.__init__(self)
@@ -58,15 +47,15 @@ class _FakeEPLayer(EPMoELayerBase):
 
 
 def _non_shared_two_node_fs(monkeypatch, ranks_per_node=8):
-    """Non-shared output FS on a 2-node shape (16 ranks / 8 per node), consensus memo cleared."""
+    """16 ranks / 8 per node, consensus memo cleared."""
     reset_shared_filesystem_consensus()
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "0")
     monkeypatch.setattr(ep_saving_mod, "get_local_world_size", lambda: ranks_per_node)
 
 
 def test_ep_sharded_rejected_on_non_shared_multi_node_fs(monkeypatch):
-    """Per-node local disks: the shards are keyed by GLOBAL rank and scatter across the nodes while
-    each node's index names all of them, so merge_ep_shards.py never sees a complete set."""
+    """Shards scatter across nodes while each index names all of them, so merge_ep_shards.py never sees a complete
+    set."""
     _non_shared_two_node_fs(monkeypatch)
     model = _fake_model("gpt_oss")
     model.mlp = _FakeEPLayer(world_size=16)
@@ -75,7 +64,7 @@ def test_ep_sharded_rejected_on_non_shared_multi_node_fs(monkeypatch):
 
 
 def test_ep_sharded_allowed_on_non_shared_single_node(monkeypatch):
-    """Anti-over-rejection: one node holds every shard plus the index, so a local disk is complete."""
+    """One node holds every shard plus the index."""
     _non_shared_two_node_fs(monkeypatch)
     model = _fake_model("gpt_oss")
     model.mlp = _FakeEPLayer(world_size=8)
@@ -83,22 +72,19 @@ def test_ep_sharded_allowed_on_non_shared_single_node(monkeypatch):
 
 
 def test_ep_sharded_rejects_merge_expert_lora_at_construction():
-    """``merge_expert_lora_on_save`` is gathered-only, and must fail at trainer construction."""
+    """Gathered-only."""
     with pytest.raises(ValueError, match="gathered EP save"):
         reject_unmergeable_ep_sharded_save(_fake_model("gpt_oss"), world_size=1, merge_expert_lora_on_save=True)
 
 
 def test_ep_sharded_rejected_without_ep_layers():
-    """``save_sharded_ep=True`` on a run with no EP layers must not no-op: every save then silently
-    falls through to the gathered writer while the merge step the user planned waits for shards that
-    never exist. A set value that nothing reads is a config that does not do what it says."""
+    """Every save falls through to the gathered writer while the planned merge waits for shards that never exist."""
     with pytest.raises(ValueError, match="no EP MoE layers"):
         reject_unmergeable_ep_sharded_save(_fake_model("gpt_oss"), world_size=1)
 
 
 def test_ep_sharded_allowed_with_ep_layers(monkeypatch):
-    """Anti-over-rejection twin: the real EP shape the flag exists for must pass the same validator.
-    Without it the guard above is satisfied by a validator that rejects EVERY run."""
+    """Otherwise a validator rejecting every run satisfies the guard above."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     model = _fake_model("gpt_oss")
     model.mlp = _FakeEPLayer(world_size=8)
@@ -107,7 +93,6 @@ def test_ep_sharded_allowed_with_ep_layers(monkeypatch):
 
 @pytest.mark.parametrize("model_type", ["gemma4_moe", ""])
 def test_ep_sharded_rejects_unclaimed_model_type(model_type):
-    """A model_type no EP layer class claims would train into unmergeable shards — must raise."""
     with pytest.raises(ValueError, match="no MoE family spec claims"):
         reject_unmergeable_ep_sharded_save(_fake_ep_model(model_type))
 
@@ -121,8 +106,7 @@ def test_ep_sharded_accepts_mergeable_family(model_type):
 
 
 def test_ep_sharded_family_gate_runs_on_a_valid_topology(monkeypatch):
-    """The family gate is not shadowed by the topology checks: an unclaimed family on a valid
-    single-group topology is refused, and a supported one on the same topology passes."""
+    """The family gate is not shadowed by the topology checks."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     with pytest.raises(ValueError, match="no MoE family spec claims"):
         reject_unmergeable_ep_sharded_save(_fake_ep_model("nope", world_size=8), world_size=8)
@@ -133,16 +117,14 @@ def test_model_type_resolves_to_the_declaring_family_spec():
     assert find_moe_family_spec("glm4_moe_lite") is EPGlm4MoELayer.FAMILY
     assert find_moe_family_spec("bailing_moe_linear") is EPBailingMoELayer.FAMILY
     assert find_moe_family_spec("bailing_moe") is EPBailingMoELayer.FAMILY
-    # Qwen3.6 resolves through the 3.5 types it actually ships under, not a 3.6 spelling.
+    # Qwen3.6 resolves through the 3.5 types it ships under.
     assert find_moe_family_spec("qwen3_5_moe") is EPQwen3_5MoELayer.FAMILY
     assert find_moe_family_spec("qwen3_5_moe_text") is EPQwen3_5MoELayer.FAMILY
     assert find_moe_family_spec("zaya") is EPZayaMoELayer.FAMILY
 
 
 def test_laguna_shares_the_glm4_layout_and_is_merge_supported():
-    """Laguna has its OWN wrapper (its router normalizes the top-k weights, GLM-4's does not) but the
-    identical expert layout, so its spec declares GLM-4's ``ExpertLayout`` and save_sharded_ep=True is
-    valid for it."""
+    """Its own wrapper (the router normalizes top-k weights), with GLM-4's ``ExpertLayout``."""
     laguna = find_moe_family_spec("laguna")
     assert laguna is not EPGlm4MoELayer.FAMILY
     assert laguna.expert_layout == EPGlm4MoELayer.FAMILY.expert_layout
@@ -150,8 +132,7 @@ def test_laguna_shares_the_glm4_layout_and_is_merge_supported():
 
 
 def test_unclaimed_model_type_is_rejected_not_guessed():
-    """No spelling heuristic: an unclaimed model_type must fail the gate rather than be routed onto
-    some other family's expert layout."""
+    """No spelling heuristic."""
     assert find_moe_family_spec("qwen3_next_moe") is None
     with pytest.raises(ValueError, match="no MoE family spec claims"):
         reject_unmergeable_ep_sharded_save(_fake_ep_model("qwen3_next_moe"))

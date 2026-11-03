@@ -1,18 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for effort-conditional interaction budgets and the failures-only verdict.
-
-``reasoning_effort_profiles`` binds an effort level to a thinking budget and optional per-episode
-``max_submissions``/``max_test_calls``, stamped at reset from a deterministic level (context-supplied
-— the trainer stamps one per GRPO group — or a concrete env setting) as the per-tool caps the protocol
-enforces. Nothing states them to the model: not the task message, not the tool descriptions, not a
-reply — a call past its cap is refused with the spent-budget reply, which names no count. The grading
-verdict lists only non-passing tests, one entry per distinct verdict, capped at ``_MAX_FAILURE_DETAILS``.
-
-These drive ``CodeContestsEnvironment`` against a stub sandbox whose ``run`` returns a canned
-result (no subprocesses, no network), through the protocol's tool dispatch.
-
-Run: python tests/cpu/environments/test_effort_interaction_budgets.py  (or pytest)
-"""
+"""Effort-conditional interaction budgets and the failures-only verdict. ``reasoning_effort_profiles`` binds a level
+to a thinking budget and optional per-episode tool caps, stamped at reset and stated to the model nowhere: a call
+past its cap gets the spent-budget reply, which names no count. Runs against a stub sandbox."""
 
 import json
 import logging
@@ -112,8 +101,8 @@ def test_budgets_stamp_from_context_level_and_enforce_submission_cap():
 
 
 def test_the_cap_still_ends_the_episode_at_the_last_graded_submission():
-    """Unstated is not unenforced: under ``low`` the second graded submission ends the episode, completed,
-    with no budget statement anywhere in the conversation it leaves."""
+    """Under ``low`` the second graded submission ends the episode, with no budget statement anywhere in the
+    conversation."""
     env = _make_env()
     ids, _ = env.reset(["solve it"], [{"reasoning_effort": "low", **_FAILING_ANSWER}])
     first = _step_call(env, ids, SUBMIT_TOOL)
@@ -141,8 +130,7 @@ def test_scratchpad_cap_reads_episode_budget():
 
 
 def test_the_scratchpad_refusal_reads_the_same_whatever_is_left_to_submit():
-    """The refusal states the spent budget and the way out, never how many submissions remain: a
-    spent submission changes nothing in it."""
+    """The refusal never says how many submissions remain."""
     env = _make_env()
     traj = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
     call_tool(env, traj, "submit_solution")
@@ -152,9 +140,8 @@ def test_the_scratchpad_refusal_reads_the_same_whatever_is_left_to_submit():
 
 
 def test_resubmission_penalty_prices_each_graded_submission_after_the_first():
-    """Three graded submissions of which only the last counts make the judge a free test oracle: the
-    penalty prices every probe after the first, a single submission pays nothing, and the component
-    stays inside the decomposition the trainer's residue check sums."""
+    """Free submissions make the judge a test oracle: the penalty prices every probe after the first, inside the
+    decomposition the residue check sums."""
     profiles = {"high": {"max_submissions": 3, "max_test_calls": 6}}
     # The stub prints X, so a hidden test expecting Y fails every submission and none is an accept.
     failing = {"answer": {"tests": [{"input": "", "output": "Y"}]}}
@@ -197,8 +184,7 @@ def test_over_cap_call_classifies_as_tool_error_not_paid_success():
 
 
 def test_a_refused_over_cap_call_logs_no_traceback(caplog):
-    """An exhausted budget is expected control flow (2 submissions / 5 test calls in a 15-turn
-    episode), so it must not emit the WARNING+traceback that marks a tool which actually broke."""
+    """An exhausted budget is expected control flow, so it emits no WARNING+traceback."""
     env = _make_env()
     traj = reset_episode(env, {"reasoning_effort": "low", **SINGLE_TEST_ANSWER})
 
@@ -266,8 +252,7 @@ def test_concrete_env_level_applies_without_context():
     ids=["interaction-profiles", "class-caps", "one-submission-no-scratchpad", "cpp"],
 )
 def test_tool_descriptions_state_no_budget_whatever_binds_it(knobs):
-    """The descriptions name what each tool does and the way to be graded, never how many calls the
-    episode gets: no deferral to the task message, no count, no "only" or "disabled" spelling of a cap."""
+    """The descriptions name what each tool does, never how many calls the episode gets."""
     env = _make_env(**knobs)
     submit = env.registry.get(SUBMIT_TOOL).description
     scratchpad = env.registry.get(env.test_tool_name).description
@@ -279,9 +264,8 @@ def test_tool_descriptions_state_no_budget_whatever_binds_it(knobs):
 
 
 def test_effort_binding_caps_the_reasoning_channel_and_leaves_the_turn_total():
-    """The level's budget caps the reasoning channel of every turn, clamped by the run's cap; the turn's
-    total stays the run's ``max_tokens``, so the answer room is what the cap leaves of it. A level
-    whose budget fills the turn would leave no room, and is refused."""
+    """The level's budget caps the reasoning channel, clamped by the run's cap; the turn total stays ``max_tokens``.
+    A budget filling the turn is refused."""
     env = _make_env(reasoning_effort_profiles={"low": {"thinking_tokens": 4096}, "high": {"thinking_tokens": 30000}})
     bound = bind_episode_effort({"reasoning_effort": "low"}, env, max_tokens=20000, max_thinking_tokens=18000)
     assert (bound.thinking_budget, bound.max_tokens) == (4096, 20000)
@@ -328,9 +312,8 @@ def test_every_turn_runs_under_the_levels_cap_whatever_was_generated():
 
 
 def test_an_output_budget_narrows_a_turns_caps_from_the_reasoning_side_first():
-    """70000 for the episode over 30000-token turns with an 18000-token reasoning cap (12000 of answer
-    room): a turn with 20000 left asks for 20000 and reasons 8000, one with exactly the room left
-    keeps one reasoning token (never a cap of 0), and one token less leaves no turn to start."""
+    """70000 for the episode over 30000-token turns with an 18000-token cap (12000 of room): 20000 left asks for
+    20000 and reasons 8000, exactly the room keeps one reasoning token, one token less starts no turn."""
     high = _bind_level("high", max_episode_tokens=70000)
     assert high.episode_tokens == 70000
     assert high.turn_caps(40000) == {"max_tokens": 30000, "max_thinking_tokens": 18000}
@@ -352,10 +335,8 @@ def _gen(token_ids):
 
 
 def test_sampled_reasoning_tokens_counts_through_the_marker_and_is_absent_without_ids_or_marker():
-    """The marker is the last reasoning token counted (on a forced close, the count is the budget vLLM
-    enforced: its counter takes the prompt's token after ``<think>`` but not the close); a turn cut
-    before it closed spent every sampled id on reasoning. Without the ids, or without the marker's id,
-    there is nothing exact to count and the count is absent rather than zero."""
+    """The marker is the last reasoning token counted (on a forced close, the budget vLLM enforced); a turn cut
+    before closing spent every sampled id on reasoning. Without ids or the marker's id the count is absent."""
     assert sampled_reasoning_tokens([11, 12, 13, _END, 14], _END) == 4
     assert sampled_reasoning_tokens([11, 12, 13, 14, 15], _END) == 5
     assert sampled_reasoning_tokens([], _END) == 0
@@ -364,10 +345,8 @@ def test_sampled_reasoning_tokens_counts_through_the_marker_and_is_absent_withou
 
 
 def test_a_turns_step_context_carries_its_cap_and_the_reasoning_it_sampled():
-    """``episode/thinking_cap_turns`` reads the pair off each turn: the cap the turn's level set, and the
-    reasoning the turn sampled, counted as the budget counts it (the close included; a cut turn's every id).
-    Without the ids or the marker's id the count is absent rather than zero, which would read as a turn
-    under its cap."""
+    """The cap the level set and the reasoning sampled, counted as the budget counts it. Without ids or the marker's
+    id the count is absent, since zero reads as under its cap."""
     closed = step_context_from_generation(
         None, _gen([11, 12, _END, 14]), thinking_cap=18000, reasoning_end_token_id=_END
     )
@@ -427,9 +406,8 @@ def test_a_reasoning_count_ends_only_at_a_one_token_close_this_tokenizer_writes(
 
 
 def test_stamp_records_output_budget_exhaustion_only_under_an_output_budget():
-    """The exhaustion flag is the driver's verdict on what the episode generated against its output
-    budget, so it exists only where one was set — and the metric follows the flag, absent rather than
-    0.0 otherwise. The level and its per-turn cap are stamped either way."""
+    """The flag exists only where an output budget was set, and the metric follows it. The level and its per-turn
+    cap are stamped either way."""
     env = _make_env(reasoning_effort_profiles=_PROFILED)
 
     def stamped(max_episode_tokens, generated):

@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """PEFT knobs the native EP expert adapters cannot honour must fail loud, never half-apply.
-
-``ExpertLoraSpec`` carries r/alpha/dropout/projections/use_rslora and nothing else, so every other
-``LoraConfig`` knob would reach the attention adapters of a mixed run and silently miss the expert
-half. These tests drive the real ``ModelArguments`` (not a stand-in): its ``__post_init__`` over TRL's
-decides the form a one-entry ``lora_target_modules`` reaches the peel in.
-
-Run: pytest tests/cpu/peft/test_peft_config_not_silent.py
-"""
+``ExpertLoraSpec`` carries only r/alpha/dropout/projections/use_rslora; any other knob would miss the expert half."""
 
 import math
 import types
@@ -28,7 +21,7 @@ from tests.common.ep_stubs import StubEPLayerBase
 
 @contextmanager
 def _as_moe(is_moe: bool = True):
-    """The peel loads the model's AutoConfig to gate on MoE — stub it so these stay pure-logic."""
+    """Stub the AutoConfig load the peel gates on, so these stay pure logic."""
     with (
         patch.object(model_source.AutoConfig, "from_pretrained", return_value=object()),
         patch.object(model_info, "has_routed_experts", return_value=is_moe),
@@ -61,16 +54,9 @@ def _model_with_ep_layer() -> nn.Module:
     return model
 
 
-# One entry: a one-entry list and a bare string
-
-
 @pytest.mark.parametrize("spelling", [["experts"], "experts"], ids=["one-entry-list", "bare-string"])
 def test_a_lone_expert_target_peels(spelling):
-    """A lone expert target peels, written as a one-entry list or as a bare string (which, as the PEFT regex a
-    string is, would fullmatch no module).
-
-    Skipping it would leave the spec None (no expert LoRA, and no realized-check to catch that) and
-    hand PEFT a target that matches nothing."""
+    """Skipping it would leave no expert LoRA, no realized-check to catch that, and a PEFT target matching nothing."""
     config = _model_config(lora_target_modules=spelling)
 
     with _as_moe():
@@ -83,16 +69,12 @@ def test_a_lone_expert_target_peels(spelling):
 
 @pytest.mark.parametrize("target", ["all-linear", "o_proj"])
 def test_a_lone_non_expert_target_is_left_to_peft(target):
-    """The ``all-linear`` sentinel and a lone attention target name no expert weight: each survives the peel
-    as the one-entry list given, which PEFT adapts by name."""
+    """Each survives the peel as the one-entry list given, which PEFT adapts by name."""
     config = _model_config(lora_target_modules=[target])
 
     with _as_moe():
         assert split_expert_lora_targets(config) is None
     assert config.lora_target_modules == [target]
-
-
-# Knobs that would apply to attention only
 
 
 def test_rslora_reaches_the_expert_scaling():
@@ -126,7 +108,6 @@ def test_dora_with_expert_targets_raises():
 
 
 def test_dora_without_expert_targets_is_allowed():
-    """Attention-only DoRA is stock PEFT and must keep working."""
     config = _model_config(lora_target_modules=["q_proj", "k_proj"], use_dora=True)
 
     with _as_moe():
@@ -134,8 +115,7 @@ def test_dora_without_expert_targets_is_allowed():
 
 
 def test_lora_target_parameters_raises_under_ep():
-    """PEFT wraps the module OWNING the parameter — the EP layer itself, so it lands outside the EP
-    gradient sync and outside both EP validators."""
+    """PEFT wraps the EP layer owning the parameter, which lands outside the EP gradient sync and both validators."""
     config = _model_config(lora_target_parameters=["gate_up_proj"])
 
     with pytest.raises(ValueError, match="lora_target_parameters"):
@@ -143,19 +123,14 @@ def test_lora_target_parameters_raises_under_ep():
 
 
 def test_lora_target_parameters_allowed_without_ep_layers():
-    """Without EP layers (ep_size<=1 + use_grouped_gemm: false, the accelerate route) the experts are
-    ordinary modules and this is stock PEFT working as designed — rejecting it would be a regression."""
+    """Without EP layers (ep_size<=1 + use_grouped_gemm: false) the experts are ordinary modules."""
     config = _model_config(lora_target_modules=["q_proj"], lora_target_parameters=["gate_up_proj"])
 
     assert configure_adapter_training(_args(), _Dense(), config) is not None
 
 
-# configure_adapter_training: no adapter is an error, not a full fine-tune
-
-
 def test_use_peft_with_no_resulting_adapter_raises():
-    """``use_peft: true`` + an empty target list must raise: returning with every param trainable is
-    a full fine-tune at the LoRA learning rate, silently."""
+    """Returning with every param trainable is a silent full fine-tune at the LoRA learning rate."""
     config = _model_config(lora_target_modules=[])
     model = _Dense()
 
@@ -164,7 +139,6 @@ def test_use_peft_with_no_resulting_adapter_raises():
 
 
 def test_use_peft_false_still_full_finetunes():
-    """The raise must not leak into deliberate full fine-tuning."""
     config = ModelArguments(model_name_or_path="dummy/moe", use_peft=False, lora_target_modules=[])
     model = _Dense()
 
@@ -193,11 +167,11 @@ def test_expert_only_run_without_modules_to_save_is_fine():
     assert not any(p.requires_grad for p in model.parameters()), "the base must be frozen"
 
 
-# The live-config gate: a custom peft_config never passes through the peel
+# A custom peft_config never passes through the peel.
 
 
 def test_spec_reports_rslora_split_against_a_live_peft_config():
-    """The knob a user is most likely to set globally, and the one that splits worst (8x at r=64)."""
+    """The knob most likely set globally, and the one that splits worst (8x at r=64)."""
     spec = ExpertLoraSpec(r=64, alpha=128)  # peeled without use_rslora
     conflicts = spec.peft_config_conflicts(LoraConfig(r=64, lora_alpha=128, use_rslora=True))
 
@@ -215,7 +189,6 @@ def test_spec_reports_knobs_with_no_grouped_implementation():
 
 
 def test_spec_accepts_a_matching_config():
-    """r/alpha/dropout/use_rslora are exactly what the grouped adapters express — no false positives."""
     spec = ExpertLoraSpec(r=64, alpha=128, dropout=0.05, use_rslora=True)
     matching = LoraConfig(r=64, lora_alpha=128, lora_dropout=0.05, use_rslora=True)
 

@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""classification.py must validate its input columns and labels BEFORE the model load.
-
-``tokenize_classification_row`` reads a pre-built ``prompt`` conversation, falling back to
-``text_field`` — with neither column present the failure surfaces as a per-row ``KeyError`` deep in
-the dataset map, after the full (possibly multi-node) model load. The config-time guard raises
-first, naming what is missing.
-
-A single-label ``-1`` "no label" row has no class id: refused in a split the run reads, and the
-split holding it left untokenized when the run never reads it (a GLUE-style unlabeled test split
-with evaluation off).
-
-Run: pytest tests/cpu/config/test_classification_input_columns.py
-"""
+"""classification.py validates its input columns and labels before the model load; a missing column would otherwise
+surface as a per-row ``KeyError`` deep in the dataset map. A single-label ``-1`` row is refused in a split the
+run reads, and that split is left untokenized when the run never reads it."""
 
 import contextlib
 import sys
@@ -64,8 +54,8 @@ def test_a_multi_label_sentinel_is_absence_in_every_split(classification):
     [("train", r"dataset\.filter"), ("test", r"dataset: <hub id>@train\) and cut the eval split")],
 )
 def test_a_single_label_sentinel_in_a_read_split_is_refused_by_name(classification, split, remedy):
-    """A single-label ``-1`` row has no class: passed through it is an out-of-range cross-entropy
-    target, and its string spelling a KeyError in the map, both after the model load."""
+    """A single-label ``-1`` row passed through is an out-of-range cross-entropy target, and its string spelling a
+    KeyError in the map, both after the model load."""
     labels = {"train": {"a", "b"}, "test": {"a", "b"}}
     labels[split] = labels[split] | {"-1"}
     with pytest.raises(ValueError, match=rf"The '{split}' split .*'no label' sentinel.*{remedy}"):
@@ -83,16 +73,15 @@ def test_an_eval_only_label_joins_the_classes(classification):
 
 
 def test_an_empty_split_contributes_no_labels(classification):
-    """A pre-sharded eval split can leave a rank without rows; that rank must still reach the
-    label-set gather rather than raise before it while its peers wait."""
+    """A rank without rows must still reach the label-set gather and not raise before it while its peers wait."""
     empty = Dataset.from_dict({"prompt": [], "label": []})
     ds = DatasetDict({"train": Dataset.from_dict({"prompt": [_TURNS], "label": [0]}), "test": empty})
     assert classification.labels_in_split(ds, "test") == []
 
 
 def test_an_empty_presharded_train_shard_is_refused_before_its_label_type_is_read(classification):
-    """The label type is read from the first train row; a pre-sharded rank without one is refused
-    with a reason, on every rank, rather than raising alone ahead of the label-set gather."""
+    """The label type is read from the first train row; a pre-sharded rank without one is refused on every rank, not
+    alone ahead of the label-set gather."""
     empty = Dataset.from_dict({"prompt": [], "label": []})
     ds = DatasetDict({"train": empty})
     with pytest.raises(ValueError, match="train shard holds no rows"):

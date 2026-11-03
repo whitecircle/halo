@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""Equivalence pins for the GRPO advantage-application seam (online + environmental).
-
-Both GRPO trainers apply the same post-reward bookkeeping: drop degenerate (all-equal-reward)
-groups out of the loss masks, recompute the gathered-global DAPO normalizer from the post-drop
-loss mask (``clamp(min=1)``), and — on the environmental side — expand per-trajectory tensors to
-per-turn rows (``turns_per_traj`` + zero-filled dummy rows). These tests pin the exact numerics of
-that seam on fixed reward/mask tensors:
-
-* the ONLINE path drives the real ``DistributedOnlineGRPOTrainer._apply_degenerate_group_drop`` hook
-  (with ``_gathered_rewards`` / ``_local_slice`` bound, gather = identity);
-* the ENVIRONMENTAL path drives the real ``_step_advantages`` and ``_narrow_masks_and_normalizer`` on a
-  fake self;
-* every scenario asserts hand-derived constants (masks, num_items, advantages), so any refactor of
-  the shared seam must reproduce them bit-for-bit.
-
-    python tests/cpu/grpo/test_grpo_advantage_application_equivalence.py
-"""
+"""Equivalence pins for the GRPO advantage-application seam (online + environmental). Every scenario asserts
+hand-derived constants, so a refactor of the seam must reproduce them bit-for-bit."""
 
 import types
 from collections import defaultdict
@@ -29,16 +14,9 @@ from halo.trainers.grpo.objective.loss_inputs import expand_traj_to_rows
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
-# --- Online trainer: fake-self driving the real _apply_degenerate_group_drop hook ---
-
 
 def _online_fake_self(rewards_per_func: torch.Tensor, num_generations: int, drop: bool = True):
-    """Stand-in exposing exactly what the online degenerate-drop hook reads.
-
-    ``accelerator.gather`` is identity (single process, process_index 0); the real
-    ``_gathered_rewards`` / ``_local_slice`` helpers are bound so the production
-    stash-aggregation and group-integrity code runs, not a mock.
-    """
+    """``accelerator.gather`` is identity; the real ``_gathered_rewards`` and ``_local_slice`` helpers are bound."""
     me = types.SimpleNamespace(
         _drop_degenerate_groups=drop,
         _last_rewards_per_func=rewards_per_func,
@@ -78,12 +56,11 @@ def test_online_drop_pins_masks_and_num_items():
 
 
 def test_online_drop_with_tool_mask_narrows_both_and_normalizes_by_product():
-    # TRL counts num_items_in_batch over completion_mask * tool_mask, so the hook must narrow both
-    # masks and renormalize from the product.
+    # TRL counts num_items_in_batch over completion_mask * tool_mask.
     rewards_per_func = torch.tensor([[1.0], [0.0], [1.0], [0.5], [0.5], [0.5]])
     me = _online_fake_self(rewards_per_func, num_generations=3)
     tool_mask = torch.ones(6, 5, dtype=torch.long)
-    tool_mask[0, 1] = 0  # tool-output token inside a KEPT row's completion span
+    tool_mask[0, 1] = 0  # tool-output token inside a kept row's completion span
     result = {
         "completion_mask": _mask_of_lengths([4, 2, 3, 5, 1, 2], max_len=5),
         "tool_mask": tool_mask,
@@ -97,7 +74,7 @@ def test_online_drop_with_tool_mask_narrows_both_and_normalizes_by_product():
     expected_tool[0, 1] = 0
     expected_tool[3:] = 0
     assert torch.equal(result["tool_mask"], expected_tool)
-    # (4 - 1) + 2 + 3 over completion ∧ tool — 9 would mean completion_mask alone.
+    # (4 - 1) + 2 + 3 over completion ∧ tool; 9 would mean completion_mask alone.
     assert result["num_items_in_batch"].item() == 8
 
 
@@ -123,7 +100,7 @@ def test_online_drop_no_degenerate_groups_recomputes_but_keeps_masks():
     DistributedOnlineGRPOTrainer._apply_degenerate_group_drop(me, result)
 
     assert torch.equal(result["completion_mask"], before)
-    # The normalizer recompute is unconditional (rank-uniform gate → collective-safe).
+    # The normalizer recompute is unconditional, a rank-uniform gate and so collective-safe.
     assert result["num_items_in_batch"].item() == 10
     assert me._metrics["train"]["sampling/degenerate_group_frac"] == [0.0]
 
@@ -138,11 +115,7 @@ def test_online_drop_disabled_is_noop():
     assert result["num_items_in_batch"].item() == 4
 
 
-# --- Environmental trainer: the REAL _narrow_masks_and_normalizer on a fake self ---
-
-
 def _rollouts(truncated: list[bool], rewards: list[float], valid: list[bool] | None = None):
-    """Rollout stand-ins exposing exactly what the narrow phase reads off them."""
     valid = [True] * len(truncated) if valid is None else valid
     return [
         types.SimpleNamespace(trajectory=types.SimpleNamespace(truncated=t), counts_toward_baseline=v, total_reward=r)
@@ -167,12 +140,8 @@ def _env_application(
     negative_only: torch.Tensor | None = None,
     mode: str = "train",
 ):
-    """Drive the REAL ``_narrow_masks_and_normalizer`` (plus the caller's own row expansion) on a
-    fake self, so the constants below pin production rather than a transcription of it.
-
-    Returns ``(local_advantages, completion_mask, tool_mask, num_items_in_batch, degenerate_frac, metrics)``;
-    ``gather`` is identity (single process). ``negative_only`` tags rows (default: none).
-    """
+    """Drive the real ``_narrow_masks_and_normalizer`` on a fake self; returns ``(local_advantages, completion_mask,
+    tool_mask, num_items_in_batch, degenerate_frac, metrics)``."""
     rollout_results = _rollouts(truncated.tolist(), rewards.tolist(), valid)
     rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, train_on_sampled_tokens)
     me = attach_world_metrics(
@@ -198,11 +167,8 @@ def _env_application(
 
 
 def _env_scenario():
-    """6 trajectories (2 groups of 3), multi-turn rows + dummy padding rows.
-
-    Group A rewards [1, 0, 1] (kept), group B [0.5, 0.5, 0.5] (degenerate → dropped);
-    trajectory 1 truncated (→ dropped). turns_per_traj [1, 2, 1, 1, 1, 1] → 7 rows, +2 dummy = 9.
-    """
+    """Group A rewards [1, 0, 1] (kept), group B all 0.5 (degenerate, dropped), trajectory 1 truncated (dropped); the
+    turns give 7 rows, plus 2 dummy."""
     rewards = torch.tensor([1.0, 0.0, 1.0, 0.5, 0.5, 0.5])
     truncated = torch.tensor([False, True, False, False, False, False])
     turns_per_traj = [1, 2, 1, 1, 1, 1]
@@ -213,8 +179,7 @@ def _env_scenario():
 
 
 def _env_compute_advantages(rewards, num_generations, valid=None):
-    """The per-trajectory advantages of the REAL ``_step_advantages`` on a fake self: ``scale_rewards='none'``,
-    no std floor, one row per trajectory; ``valid`` marks the episodes in the baseline (default: all)."""
+    """The per-trajectory advantages of the real ``_step_advantages``: ``scale_rewards='none'``, no std floor."""
     me = types.SimpleNamespace(
         args=types.SimpleNamespace(scale_rewards="none"),
         async_config=types.SimpleNamespace(scale_rewards_std_floor=0.0),
@@ -317,13 +282,8 @@ def test_env_application_no_drops_keeps_masks_and_counts_loss_tokens():
 
 
 def test_an_invalid_episode_is_dropped_and_excluded_from_degeneracy():
-    """The two things a transcription of this block misses: the drop set is SEEDED with the
-    invalid episodes, and degeneracy is judged over the VALID members only.
-
-    Rewards [1, 1, 0] with the last episode invalid: counting it would make the group non-degenerate
-    (spread 1) and keep every row; excluding it leaves the two valid members tied, so the whole group
-    drops. Its own rows go either way — invalid or degenerate.
-    """
+    """The drop set is seeded with the invalid episodes and degeneracy is judged over the valid members only. Rewards
+    [1, 1, 0] with the last invalid: counting it would give spread 1 and keep every row."""
     rewards = torch.tensor([1.0, 1.0, 0.0])
     traj_advantages = _env_compute_advantages(rewards, num_generations=3, valid=[True, True, False])
 
@@ -346,13 +306,9 @@ def test_an_invalid_episode_is_dropped_and_excluded_from_degeneracy():
     assert frac == 1.0
 
 
-# --- negative-only rows (untrainable turns) train only under a negative advantage ---
-
-
 def _negative_only_application(rewards: list[float], mode: str = "train"):
-    """Two trajectories of one group, two rows each (an untagged row, then a tagged one) plus one dummy
-    row; row lengths [2, 3, 4, 5, 1]. Degenerate-group dropping is off so a zero advantage reaches
-    the narrowing itself."""
+    """Two trajectories of one group, two rows each (untagged, then tagged), plus one dummy row. Degenerate-group
+    dropping is off so a zero advantage reaches the narrowing itself."""
     rewards = torch.tensor(rewards)
     return _env_application(
         _env_compute_advantages(rewards, num_generations=2),
@@ -373,8 +329,6 @@ def _negative_only_application(rewards: list[float], mode: str = "train"):
 
 @pytest.mark.parametrize("mode", ["train", "eval"])
 def test_a_negative_only_row_trains_under_a_negative_advantage_only(mode):
-    """Rewards [1, 0]: trajectory 0's tagged row (advantage +0.5) leaves the loss mask, trajectory 1's
-    (advantage -0.5) stays; untagged rows train either way, in both modes."""
     adv, comp, tool, num_items, _frac, metrics = _negative_only_application([1.0, 0.0], mode)
     assert adv.tolist() == [0.5, 0.5, -0.5, -0.5, 0.0]
     assert tool.sum(dim=1).tolist() == [2, 0, 4, 5, 1]
@@ -384,13 +338,12 @@ def test_a_negative_only_row_trains_under_a_negative_advantage_only(mode):
 
 
 def test_the_normalizer_counts_only_the_kept_negative_only_rows():
-    """The dropped row's 3 tokens are out of the DAPO normalizer, not only out of the loss: 2 + 4 + 5 + 1."""
+    """The dropped row's 3 tokens leave the DAPO normalizer too: 2 + 4 + 5 + 1."""
     *_, num_items, _frac, _metrics = _negative_only_application([1.0, 0.0])
     assert num_items.item() == 12
 
 
 def test_a_zero_advantage_negative_only_row_does_not_train():
-    """Strictly negative: at a zero advantage (a tied group) both tagged rows leave the loss."""
     _adv, _comp, tool, num_items, _frac, metrics = _negative_only_application([0.5, 0.5])
     assert tool.sum(dim=1).tolist() == [2, 0, 4, 0, 1]
     assert num_items.item() == 7
@@ -398,8 +351,7 @@ def test_a_zero_advantage_negative_only_row_does_not_train():
 
 
 def test_a_negative_only_row_of_a_dropped_episode_is_not_counted_as_trained():
-    """The trained share is read after every drop: an invalid episode's tagged row never reaches the loss
-    however negative its advantage."""
+    """The trained share is read after every drop."""
     rewards = torch.tensor([1.0, 0.0])
     _adv, _comp, tool, _num_items, _frac, metrics = _env_application(
         torch.tensor([0.5, -0.5]),

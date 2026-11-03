@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Packed-document isolation for remote modeling files built on transformers v4's Llama flash template
-(Ling 2.0, ``inclusionAI/Ling-mini-2.0``).
-
-The file's flash class calls its own mask-only ``_flash_attention_forward``, its ``ATTENTION_CLASSES``
-table and support flag know only ``flash_attention_2``, and its SDPA/eager mask never reads
-``position_ids``: unpatched, a packed row is one causal sequence on every backend. The flash kernels cannot
-run on CPU, so a per-document SDPA reference stands in for the varlen kernel behind transformers' dispatch,
-backward and gradient-checkpointing recomputes included; only the device check of transformers' flash gate is
-lifted, its ``_supports_flash_attn`` check stays live.
-Every Bailing file's dense mask, Ling 3.0's included, leaks the same way, so the family refuses packing there.
-
-    python tests/cpu/models/test_remote_flash_packed_isolation.py
-"""
+"""Packed-document isolation for remote files on transformers v4's Llama flash template (Ling 2.0). Unpatched, a packed
+row is one causal sequence on every backend. A per-document SDPA reference stands in for the varlen kernel on CPU."""
 
 import sys
 import types
@@ -36,7 +25,6 @@ from tests.common.tokenizers import load_cached_config
 SEED = 0
 DOC_A, DOC_B = 12, 9
 VOCAB = 1024
-# The file's gradient checkpointing: off, then each recompute torch offers (use_reentrant).
 GC_MODES = {"gc_off": None, "non_reentrant": False, "reentrant": True}
 # One position ramp over both documents puts ~1e2 of doc B's gradient on doc A's embeddings.
 LEAK_FLOOR = 1.0
@@ -85,7 +73,6 @@ def _reference_dense(q, k, v, causal=False, softmax_scale=None):
 
 @pytest.fixture
 def reference_varlen(monkeypatch):
-    """The reference kernel behind transformers' flash dispatch for every label."""
     kernel = _ReferenceVarlen()
     monkeypatch.setattr(
         flash_utils,
@@ -132,9 +119,8 @@ def _packing_options(model_config) -> dict:
 
 @pytest.mark.parametrize("label", VARLEN_ATTN_IMPLEMENTATIONS)
 def test_flash_label_isolates_packed_documents(reference_varlen, label):
-    """Every flash label builds, and doc B of a packed row reads as doc B alone: unchanged when doc A
-    changes, equal to its own forward. Unpatched, a flash label raises at build and FA2 (the one label
-    the table knows) runs the packed row as one causal sequence."""
+    """Unpatched, a flash label raises at build and FA2 (the one label the table knows) runs the packed row as one
+    causal sequence."""
     model = _tiny_ling(label)
     attention = model.model.layers[0].attention
     assert type(attention).__name__ == "BailingMoeV2FlashAttention2"
@@ -152,9 +138,8 @@ def test_flash_label_isolates_packed_documents(reference_varlen, label):
 
 @pytest.mark.parametrize("label", VARLEN_ATTN_IMPLEMENTATIONS)
 def test_flash_label_matches_the_files_sdpa_on_one_document(reference_varlen, label):
-    """On one document the patched flash call computes the file's own SDPA attention, with the same
-    weights: the causal flag and the softmax scale reach the kernel. The packed-row tests above compare
-    the flash path with itself and cannot see either."""
+    """The causal flag and the softmax scale reach the kernel. The packed-row tests compare the flash path with itself
+    and cannot see either."""
     flash = _tiny_ling(label)
     sdpa = _tiny_ling("sdpa")
     sdpa.load_state_dict(flash.state_dict())
@@ -179,10 +164,8 @@ def _doc_b_gradient_on_doc_a(model, reference_varlen, position_ids) -> tuple[flo
 @pytest.mark.parametrize("gc", GC_MODES)
 @pytest.mark.parametrize("label", VARLEN_ATTN_IMPLEMENTATIONS)
 def test_flash_label_isolates_packed_document_gradients(reference_varlen, label, gc):
-    """Doc B's loss puts no gradient on doc A's embeddings, with gradient checkpointing off and through
-    either recompute, which re-runs every layer's varlen call on the position_ids the attention forward
-    stashes again. The forward checks above cannot see a recompute that runs the row as one causal
-    sequence. One position ramp over both documents must leak, or the zero would be vacuous."""
+    """The forward checks cannot see a recompute that runs the row as one causal sequence. One position ramp over both
+    documents must leak, or the zero would be vacuous."""
     model = _tiny_ling(label).train()
     use_reentrant = GC_MODES[gc]
     if use_reentrant is not None:
@@ -199,10 +182,8 @@ def test_flash_label_isolates_packed_document_gradients(reference_varlen, label,
 
 @pytest.mark.parametrize("label", VARLEN_ATTN_IMPLEMENTATIONS)
 def test_a_padded_batch_matches_the_files_sdpa(reference_varlen, label):
-    """A batch with a right- and a left-padded row computes the file's SDPA logits at every real token on
-    each flash label: the model's padding-mask switch holds for every flash label, so the flash call unpads
-    the 2D mask through the varlen kernel. The left-padded row's real tokens follow its pads, so a flash call
-    that drops the mask moves their logits. The packed rows above carry no attention_mask and cannot see it."""
+    """The left-padded row's real tokens follow its pads, so a flash call that drops the mask moves their logits. The
+    packed rows above carry no attention_mask and cannot see it."""
     flash = _tiny_ling(label)
     sdpa = _tiny_ling("sdpa")
     sdpa.load_state_dict(flash.state_dict())
@@ -220,7 +201,6 @@ def test_a_padded_batch_matches_the_files_sdpa(reference_varlen, label):
 
 
 def _ling_step(model, inputs: dict) -> dict[str, torch.Tensor]:
-    """The loss, logits and every gradient of one training step on ``inputs``."""
     model.zero_grad(set_to_none=True)
     outputs = model(**inputs, use_cache=False)
     outputs.loss.backward()
@@ -231,11 +211,8 @@ def _ling_step(model, inputs: dict) -> dict[str, torch.Tensor]:
 
 @pytest.mark.parametrize("gc", GC_MODES)
 def test_ling_derives_a_packed_rows_varlen_set_once_per_step(reference_varlen, monkeypatch, gc):
-    """Ling 2.0's remote forward passes its layers no extra kwargs, so the packing collator's varlen set never
-    reaches attention (the packed varlen sweep skips the family for this, ``SET_DROPPING_FAMILIES``). The flash seam
-    derives it from the stashed position_ids once for a whole training step, every layer and either checkpoint
-    recompute included, and no layer runs transformers' own derivation, the packed-row test and the nonzero each
-    layer would otherwise read back; the step trains what that per-layer derivation trains."""
+    """Ling 2.0's remote forward passes its layers no extra kwargs, so the collator's varlen set never reaches
+    attention. The flash seam derives it once per step, recomputes included, matching a per-layer derivation."""
     model = _tiny_ling("flash_attention_4").train()
     use_reentrant = GC_MODES[gc]
     if use_reentrant is not None:
@@ -267,7 +244,7 @@ def test_ling_derives_a_packed_rows_varlen_set_once_per_step(reference_varlen, m
 
     monkeypatch.setattr(remote_flash_attention, "_packed_row_varlen", TensorMemo(lambda _position_ids: {}))
     per_layer = _ling_step(model, batch)
-    # Anti-vacuity: without the handed set, every layer's forward, and a reentrant recompute, derives it again.
+    # Without the handed set, every layer's forward and a reentrant recompute derive it again.
     passes = 1 if use_reentrant is None else 2
     assert transformers_derivations["_prepare_from_posids"] == passes * len(model.model.layers), (
         transformers_derivations
@@ -276,8 +253,7 @@ def test_ling_derives_a_packed_rows_varlen_set_once_per_step(reference_varlen, m
 
 
 def test_rows_with_other_documents_read_their_own_varlen_set(reference_varlen):
-    """Two packed rows of one length and different documents, one after the other through the same model: every
-    varlen call of the second reads the second row's boundaries, not the set derived for the first."""
+    """Two packed rows of one length and different documents, one after the other through the same model."""
     model = _tiny_ling("flash_attention_4")
     doc_a, _, doc_b = _documents()
     rows = [(DOC_A, DOC_B), (DOC_B, DOC_A)]
@@ -291,11 +267,9 @@ def test_rows_with_other_documents_read_their_own_varlen_set(reference_varlen):
 
 
 def test_sdpa_leaks_and_packing_is_refused_there(reference_varlen):
-    """Each file's dense path is its own (its mask ignores position_ids), so packing is refused there for the
-    whole family and accepted on Ling 2.0's flash label. Ling 3.0 runs all-MLA: its KDA layers cross
-    documents on every backend and would hide what the mask does. Ring's forward needs CUDA, so its release
-    config is checked alone. If an sdpa drift ever reads ~0, that file builds a packed mask now: revisit
-    ``BAILING.dense_packing_leaks``."""
+    """Packing is refused on every Bailing file's dense path, whose mask ignores position_ids. Ling 3.0 runs all-MLA
+    because its KDA layers cross documents on every backend. Ring's forward needs CUDA, so its release config is
+    checked alone. If a drift reads ~0, that file builds a packed mask now: revisit ``BAILING.dense_packing_leaks``."""
     doc_a, doc_a_changed, doc_b = _documents()
     for name, family in (("Ling 2.0", TINY_MOE_FAMILIES["bailing_moe"]), ("Ling 3.0", TINY_BAILING_LING3_MLA_FAMILY)):
         sdpa = _tiny(family, "sdpa")
@@ -312,7 +286,6 @@ def test_sdpa_leaks_and_packing_is_refused_there(reference_varlen):
 
 
 def test_patch_marks_only_the_template_and_is_idempotent(reference_varlen):
-    """The loaded Ling module is patched once; a flash method with another signature is left alone."""
     model = _tiny_ling("flash_attention_2")
     module = sys.modules[type(model).__module__]
     flash_cls = module.ATTENTION_CLASSES["flash_attention_2"]

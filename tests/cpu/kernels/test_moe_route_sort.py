@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""The counting sort behind the EP grouped-GEMM routing (``halo/kernels/moe_route_sort.py``) against the torch
-construction it replaces on CUDA: every output and the gate-weight gradient bit for bit, over the roster's EP shapes
-(top_k 1 to 10, 1 to 128 local experts, an idle expert, rows with no local slot, a receive with none at all, a
-zero-token rank) and at ``ep_size`` 1 (every slot local, no receive counts, 256 and 512 experts), at the launch's tiling
-and at one that spreads each receive over many blocks and scan chunks; and every launch's Triton specialization over a
-sweep of row, block and slot counts, with counts and without, against the layer warm-up's, so the binaries the warm-up
-compiles serve every dispatch; and every kernel the gate-weight backward launches over the same sweep against the
-warm-up's, so none is loaded mid-step. On CUDA every sort is the counting sort, with receive counts or without, and off
-CUDA the torch construction; at ``ep_size`` 1 an id outside the local range raises in both.
-
-The kernels run under Triton's interpreter in a fresh process (``TRITON_INTERPRET`` is read when a kernel is defined).
-The CUDA leg is ``tests/gpu/parallelism/ep/test_ep_sort_sync_free.py``, and
-``tests/gpu/parallelism/ep/test_ep_receive_counts.py`` runs it on DeepEP's own counts. The compile check builds the
-three kernels for sm_90, sm_100 and sm_103 at every case's shape, without a GPU.
-
-Run: python tests/cpu/kernels/test_moe_route_sort.py
-"""
+"""The counting sort behind EP grouped-GEMM routing (``halo/kernels/moe_route_sort.py``) against the torch
+construction it replaces, bit for bit, under Triton's interpreter in a fresh process."""
 
 import pytest
 import torch
@@ -29,8 +14,8 @@ from tests.common.repo import probe_findings
 from tests.common.route_sort_reference import CASES
 
 _MARKER = "ROUTE_SORT_MISMATCHES:"
-# The launch's tiling, and one of 64-slot blocks and one-block scan chunks: every receive then spans several blocks
-# and the scan carries its running offsets across chunks.
+# 64-slot blocks and one-block scan chunks: every receive spans several blocks and the scan carries offsets across
+# chunks.
 _TILINGS = {"launch": "", "many_blocks": "moe_route_sort._BLOCK_SLOTS = 64\nmoe_route_sort._SCAN_TILE = 1\n"}
 _PROBE = """
 import os
@@ -56,17 +41,15 @@ def test_the_comparison_and_the_count_check_hold_their_controls():
 
 
 def test_every_dispatch_size_launches_the_binaries_the_warm_up_compiled():
-    """A launch whose specialization the layer warm-up did not compile builds its binary between a dispatch and its
-    combine, stalling every peer in DeepEP's barrier. Over the roster's EP layouts, expert TP included, every row,
-    block and slot count launches the warm-up's key. The 64-slot tiling keeps the sixteen-block receives cheap to
-    interpret and moves only the tile constants, which every launch of a layout shares."""
+    """An uncompiled specialization builds between a dispatch and its combine, stalling every peer in DeepEP's
+    barrier. The 64-slot tiling keeps interpreted receives cheap."""
     probe = _PROBE.format(setup=_TILINGS["many_blocks"], check="launch_key_findings", marker=_MARKER, args="")
     assert probe_findings(probe, _MARKER) == []
 
 
 def test_the_launch_key_check_fails_its_negative_control():
-    """The placement kernel rebuilt with every integer argument specialized, at gpt-oss's layout under expert TP: its
-    row and slot counts class apart from the warm-up's (1, a multiple of 16, neither), and the check names them."""
+    """Every integer specialized at gpt-oss's layout under expert TP: row and slot counts class apart from the
+    warm-up's."""
     rebuild = "import triton\nmoe_route_sort._place_kernel = triton.jit(moe_route_sort._place_kernel.fn)\n"
     probe = _PROBE.format(
         setup=_TILINGS["many_blocks"] + rebuild, check="launch_key_findings", marker=_MARKER, args="((4, 8),)"
@@ -77,17 +60,13 @@ def test_the_launch_key_check_fails_its_negative_control():
 
 
 def test_every_receive_size_backward_launches_only_kernels_the_warm_up_loaded():
-    """The gate-weight backward runs between a dispatch and its combine, where a kernel's first launch (CUDA lazy
-    loading) stalls every peer: over the sweep of receives, one local slot to many, it launches only kernels the layer
-    warm-up launched at the same layout."""
+    """A kernel's first launch between dispatch and combine stalls every peer."""
     probe = _PROBE.format(setup=_TILINGS["many_blocks"], check="backward_kernel_findings", marker=_MARKER, args="")
     assert probe_findings(probe, _MARKER) == []
 
 
 def test_the_backward_kernel_check_fails_its_negative_control():
-    """The backward's gather read through ``index_select`` instead, which takes a separate kernel for an index of up to
-    16 rows: the warm-up's one-row receive launches that one, every receive past 16 slots the other, and the check
-    names it."""
+    """``index_select`` takes a separate kernel for an index of up to 16 rows."""
     rebind = "import torch\ntorch.Tensor.gather = lambda self, dim, index: self.index_select(dim, index)\n"
     probe = _PROBE.format(
         setup=_TILINGS["many_blocks"] + rebind, check="backward_kernel_findings", marker=_MARKER, args=""
@@ -97,7 +76,7 @@ def test_the_backward_kernel_check_fails_its_negative_control():
 
 
 class _ReportsCuda(torch.Tensor):
-    """A CPU tensor that reports itself on CUDA, so the sort's dispatch takes its CUDA branch without a GPU."""
+    """Takes the sort's CUDA branch without a GPU."""
 
     @property
     def is_cuda(self) -> bool:
@@ -106,8 +85,7 @@ class _ReportsCuda(torch.Tensor):
 
 @pytest.mark.parametrize("counts", ((2, 0), None), ids=("receive_counts", "ep_size_1"))
 def test_on_cuda_every_sort_is_the_counting_sort(monkeypatch, counts):
-    """The torch construction's argsort picks its kernels by the slot count, so on CUDA the counting sort serves every
-    receive, at ``ep_size`` 1 (no counts) too; off CUDA the torch construction does."""
+    """The torch construction's argsort picks kernels by slot count."""
     calls = []
     for name in ("_counting_sort", "_argsort_routing"):
         monkeypatch.setattr(moe_route_sort, name, lambda *args, _name=name: calls.append((_name, args[3])))

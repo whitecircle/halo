@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """DPO and KTO sum their sequence log-probs in fp32, on TRL's loss path and in the reference sweep.
-
-TRL's ``selective_log_softmax`` returns bf16 per-token log-probs for bf16 logits, and TRL sums them
-into a bf16 sequence log-prob: at ``|logp|`` in [8192, 16384) the bf16 grid is 64 nats. Every KTO
-run and nearly every DPO run takes that path rather than TRL's Liger loss.
-
-Each test drives the real trainer method — ``_compute_loss`` with a live reference model, or the
-precompute sweep — over :class:`TableLM`, whose bf16 logits are known exactly, on completions long
-enough to land in that range, and holds every sequence log-prob the trainer produces to a float64
-recomputation within ``TOLERANCE_NATS``. The bf16 sums miss by tens of nats.
-
-    python tests/cpu/trainers/test_preference_fp32_logprobs.py
+TRL sums in bf16, whose grid at ``|logp|`` in [8192, 16384) is 64 nats, missing float64 by tens of nats.
 """
 
 from collections import defaultdict
@@ -29,16 +19,15 @@ from tests.common.preference_precompute import column, precompute_trainer
 
 VOCAB = 256
 PROMPT_TOKENS = 6
-# Two completions at ~6 nats per token (random targets under unit-scale logits over 256 tokens): both
-# sums sit in [8192, 16384), where bf16 rounds to a 64-nat grid.
+# At ~6 nats per token (random targets under unit-scale logits over 256 tokens) both sums sit in the 64-nat band.
 LONG_COMPLETIONS = (1700, 1500)
 TOLERANCE_NATS = 1e-2
 BETA = 0.1
 
 
 class TableLM(torch.nn.Module):
-    """A causal LM whose logits at a position are a fixed row picked by the token there, exactly
-    representable in bf16 so the float64 recomputation sees the logits the trainer saw."""
+    """Logits at a position are a fixed row picked by the token there, exact in bf16, so the float64 recomputation sees
+    the logits the trainer saw."""
 
     is_gradient_checkpointing = False
 
@@ -58,7 +47,7 @@ def _token_ids(seed: int, n: int) -> list[int]:
 
 
 def _float64_token_logps(table: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
-    """``[B, T-1]`` log-probs of each next token under a float64 copy of a :class:`TableLM` table."""
+    """``[B, T-1]`` log-probs of each next token."""
     logits = table[input_ids[:, :-1]]
     return torch.log_softmax(logits, dim=-1).gather(-1, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
 
@@ -86,7 +75,6 @@ def _trainer(kind: str, **kwargs):
 
 
 def _loss_trainer(kind: str, policy: TableLM, reference: TableLM, **attrs):
-    """:func:`_trainer` plus what TRL's ``_compute_loss`` reads, with a live reference."""
     trainer = _trainer(kind, ref_model=reference)
     trainer.model = policy
     trainer.accelerator.gather = trainer.accelerator.gather_for_metrics
@@ -111,7 +99,6 @@ def _loss_trainer(kind: str, policy: TableLM, reference: TableLM, **attrs):
 
 
 def _dpo_rows(completions=LONG_COMPLETIONS) -> list[dict]:
-    """One pair whose chosen and rejected completions have the ``completions`` lengths."""
     chosen_len, rejected_len = completions
     return [
         {
@@ -209,8 +196,7 @@ def test_kto_loss_sequence_logps_match_float64():
 
 @pytest.mark.parametrize("name", ["selective_log_softmax", "selective_log_softmax_and_entropy"])
 def test_a_trl_that_no_longer_reads_its_log_prob_functions_is_refused(monkeypatch, name):
-    """The fp32 path rebinds the names TRL's loss reads its log-probs through; were TRL to bind another
-    function there, the loss would keep its bf16 sums unnoticed, so it must refuse instead."""
+    """Were TRL to bind another function under the rebound names, the loss would keep its bf16 sums unnoticed."""
     monkeypatch.setattr(trl_dpo, name, lambda logits, index, **kwargs: logits[..., 0])
     policy = TableLM(seed=0)
     trainer = _loss_trainer("dpo", policy, TableLM(seed=1))
@@ -221,8 +207,6 @@ def test_a_trl_that_no_longer_reads_its_log_prob_functions_is_refused(monkeypatc
 
 
 def test_trl_log_softmax_is_restored_when_the_loss_raises():
-    """The swap is scoped to TRL's call: a raising forward must leave TRL's own function in place."""
-
     class Raising(TableLM):
         def forward(self, input_ids, attention_mask=None, **kwargs):
             raise RuntimeError("forward failed")
@@ -238,8 +222,6 @@ def test_trl_log_softmax_is_restored_when_the_loss_raises():
 
 
 def test_a_reference_pass_nested_in_the_loss_stays_fp32():
-    """A reference pass entered while the loss already routes TRL through fp32 keeps that routing,
-    and leaving both restores TRL's own function."""
     reference = TableLM(seed=1)
     ref_batch = DataCollatorForPreference(pad_token_id=0)(_dpo_rows())
     nested = []
@@ -262,7 +244,6 @@ def test_a_reference_pass_nested_in_the_loss_stays_fp32():
 
 
 def _swept(kind: str, rows: list[dict], collator) -> tuple[Dataset, TableLM, object]:
-    """The precompute sweep over ``rows``, run by the real trainer's reference forward of a TableLM."""
     trainer = _trainer(kind)
     trainer.model = TableLM(seed=0)
     trainer.data_collator = collator

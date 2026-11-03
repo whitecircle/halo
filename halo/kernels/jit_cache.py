@@ -10,22 +10,18 @@ import warnings
 
 logger = logging.getLogger(__name__)
 
-# Liger ops pinned to one implementation, through the per-op variable Liger's dispatcher reads on every call ahead of
-# every global setting. Its CuTe DSL RoPE, auto-selected ahead of Triton at production shapes, caches one TMA handle per
-# shape and swaps the handle's data pointer per call; under CUTE_DSL_ENABLE_TVM_FFI the launch passes the tensor the
-# handle was built from instead, so from the second same-shape launch at the latest, backward included, it rotates a
-# stale buffer.
+# Liger's CuTe DSL RoPE, auto-selected at production shapes, caches one TMA handle per shape and swaps its data pointer
+# per call; under CUTE_DSL_ENABLE_TVM_FFI the launch passes the tensor the handle was built from, so from the second
+# same-shape launch at the latest, backward included, it rotates a stale buffer.
 _PINNED_LIGER_IMPLS = {"rope": "nvidia-triton"}
 
 
 def silence_cute_dsl_deprecations() -> None:
-    """Mute the CuTe DSL's ``DeprecationWarning``, which each FA4 compile re-emits under a fresh warning
-    registry; scoped to that package and category, so every other warning still surfaces."""
+    """Each FA4 compile re-emits the ``DeprecationWarning`` under a fresh warning registry."""
     warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"cutlass(\.|$)")
 
 
 def _accepts_writes(path: str) -> bool:
-    """Whether ``path`` is a writable directory, or can be created under its nearest existing ancestor."""
     path = os.path.abspath(path)
     while not os.path.lexists(path):
         path = os.path.dirname(path)
@@ -33,11 +29,7 @@ def _accepts_writes(path: str) -> bool:
 
 
 def anchor_jit_cache_dir(var: str, subdir: str) -> None:
-    """Point JIT cache variable ``var`` at ``HF_HOME/subdir`` (else the temp dir) unless already set.
-
-    The library defaults are ephemeral in a ``--rm`` container. An unwritable location is skipped with a
-    warning, and with none writable the variable stays unset for the library's own default.
-    """
+    """Point ``var`` at ``HF_HOME/subdir`` (else the temp dir) unless set; defaults die with a ``--rm`` container."""
     if var in os.environ:
         return
     hf_home = os.environ.get("HF_HOME")
@@ -62,9 +54,8 @@ def anchor_jit_cache_dir(var: str, subdir: str) -> None:
 
 
 def pin_liger_impls() -> None:
-    """Pin every op in :data:`_PINNED_LIGER_IMPLS` through ``LIGER_KERNEL_IMPL_<OP>``, which an empty value leaves
-    unset for Liger. A value naming that implementation (full or bare-DSL spelling) is kept; any other, in that
-    variable or its legacy ``LIGER_KERNEL_BACKEND_<OP>`` spelling, raises."""
+    """Through ``LIGER_KERNEL_IMPL_<OP>``, read ahead of every global setting. A value naming that implementation is
+    kept; any other, in that variable or its legacy ``LIGER_KERNEL_BACKEND_<OP>`` spelling, raises."""
     for op, impl in _PINNED_LIGER_IMPLS.items():
         accepted = (impl, impl.split("-", 1)[1])
         pinned_var = f"LIGER_KERNEL_IMPL_{op.upper()}"
@@ -81,9 +72,7 @@ def pin_liger_impls() -> None:
 
 
 def ensure_fa4_kernel_cache_env() -> None:
-    """Enable FA4's persistent kernel cache and TVM-FFI, pin the Liger ops TVM-FFI breaks (:func:`pin_liger_impls`)
-    and mute the DSL's deprecations. Must run before the first ``import flash_attn.cute``, which reads the
-    environment. Idempotent."""
+    """Must run before the first ``import flash_attn.cute``, which reads the environment. Idempotent."""
     silence_cute_dsl_deprecations()
     os.environ.setdefault("FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED", "1")
     os.environ.setdefault("CUTE_DSL_ENABLE_TVM_FFI", "1")

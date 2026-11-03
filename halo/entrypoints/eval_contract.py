@@ -1,6 +1,5 @@
-"""The environment evals' training contract and run plumbing: an environmental-GRPO training YAML read the way the
-training run reads it (``--training_config``), the generation contract an eval samples under, the default split, the
-trajectory path and the output writer. The episode loop itself is :mod:`halo.environments.eval_runner`."""
+"""The environment evals' training contract and run plumbing: a training YAML read the way the run reads it, the
+generation contract, the trajectory path and the output writer."""
 
 import argparse
 import json
@@ -31,12 +30,9 @@ from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
-# The training script's config classes an eval reads its contract from: the environment's, the rollout's, and the
-# model's (its tokenizer resolves the stop tokens and the reasoning close). The YAML's other keys (training
-# arguments, dataset fields) belong to classes the eval never instantiates.
+# The config classes an eval reads its contract from; the YAML's other keys belong to classes it never instantiates.
 TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncRolloutConfig, ModelArguments)
 
-# The sampling flags an explicit CLI value lays over the training config, by ``RolloutConfig`` field.
 _SAMPLING_FLAGS = ("temperature", "top_p", "max_tokens", "request_timeout")
 
 # The split an eval reads when --split is omitted, unless its dataset ships a single split of its own.
@@ -45,8 +41,8 @@ DEFAULT_SPLIT = "test"
 
 @dataclass(frozen=True)
 class TrainingContract:
-    """What a training YAML fixes about generation and the environment, parsed with the training script's own
-    config classes, so the eval reads the YAML the way the run did rather than through a subset of its keys."""
+    """What a training YAML fixes about generation and the environment, parsed with the script's own config classes, so
+    the eval reads it as the run did."""
 
     path: str
     env_config: EnvironmentConfig
@@ -59,11 +55,10 @@ class TrainingContract:
         return cls(path, *parser.parse_yaml_file(path, allow_extra_keys=True))
 
     def rollout_config(self, env: EnvironmentBase) -> RolloutConfig:
-        """The training run's own ``RolloutConfig`` for an eval of ``env``, its stop tokens resolved by the trained
-        model's tokenizer. A vLLM thinking budget some level of ``env`` draws is refused where vLLM cannot enforce
-        it, and has the eval capture the sampled ids to count each turn's reasoning as training does; the routing
-        is never captured. The eval joins no process group, so the NCCL watchdog bound on the timeouts does not
-        apply."""
+        """The run's ``RolloutConfig`` for an eval of ``env``, stop tokens resolved by the trained tokenizer. A vLLM
+        thinking budget a level of ``env`` draws is refused where vLLM cannot enforce it, and has the eval capture
+        sampled ids to count reasoning as training does; routing is never captured. The eval joins no process group, so
+        no NCCL watchdog bound."""
         cfg, model = self.async_config, self.model_config
         efforts = efforts_by_level(
             env,
@@ -100,7 +95,6 @@ class TrainingContract:
 
 
 def load_training_contract(path: str | None) -> TrainingContract | None:
-    """:meth:`TrainingContract.load` for an optional ``--training_config``; ``None`` without the flag."""
     return TrainingContract.load(path) if path else None
 
 
@@ -119,9 +113,8 @@ def rollout_config_from_args(
     default_temperature: float,
     default_max_tokens: int,
 ) -> RolloutConfig:
-    """The generation contract an eval of ``env`` samples under: the training run's own :class:`RolloutConfig`
-    under ``--training_config``, else one built from the script's defaults, with the served model name and every
-    explicitly passed sampling flag laid over it."""
+    """The training run's :class:`RolloutConfig` under ``--training_config``, else one from the script's defaults, with
+    the served model name and every explicit sampling flag laid over it."""
     if contract is not None:
         base = contract.rollout_config(env)
     else:
@@ -136,8 +129,7 @@ def rollout_config_from_args(
 
 
 def resolve_trajectory_path(args: argparse.Namespace, *parts: str) -> str | None:
-    """The JSONL file this run records trajectories to, or ``None``: an explicit ``--save_trajectories``, else one
-    file under ``--trajectory_dir`` named from the model and ``parts``, the knobs identifying the run."""
+    """An explicit ``--save_trajectories``, else a file under ``--trajectory_dir`` named from the model and parts."""
     if args.save_trajectories is not None:
         return args.save_trajectories
     if args.trajectory_dir:
@@ -157,8 +149,8 @@ def write_eval_outputs(
     num_samples: int,
     meta_extra: dict[str, Any] | None = None,
 ) -> None:
-    """Write the ``--output_path`` JSON dump and the trajectory JSONL, whose meta line records the run's whole contract
-    plus ``meta_extra`` (what an offline re-grade needs); only :func:`add_eval_args`' flags are read."""
+    """Write the ``--output_path`` dump and the trajectory JSONL, whose meta line records the run's whole contract plus
+    ``meta_extra``; only :func:`add_eval_args`' flags are read."""
     if args.output_path:
         # Written after every episode ran, so a missing parent directory must not discard the run.
         os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)

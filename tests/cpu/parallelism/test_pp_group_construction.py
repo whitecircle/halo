@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""Pipeline chain/stage groups, and EP/CP process-group construction under PP (stage base-rank threading).
-
-PP splits the world into ``pp_size`` contiguous blocks of ``stage_world_size``; ``EPConfig`` /
-``CPConfig`` receive ONE block's width plus its base global rank (``stage_base_rank``) and must
-
-  * do all coordinate math in block-local rank space (subtract the offset), and
-  * emit GLOBAL rank lists to ``dist.new_group`` (add the offset back), and
-  * create the groups of EVERY block, in one order, keeping only their own.
-
-The last point is the deadlock invariant: ``dist.new_group`` is a collective over the default process
-group, so a rank that only created its own stage's groups would issue a different call sequence than
-the other stage and hang the job before the first step.
-
-These tests drive the REAL ``EPConfig`` / ``CPConfig`` / ``ParallelismConfig`` with
-``torch.distributed`` stubbed (``new_group`` records and returns the rank tuple), so a regression in
-the rank math or the enumeration order fails here rather than on 16 GPUs.
-
-Run: python tests/cpu/parallelism/test_pp_group_construction.py
-"""
+"""Pipeline chain/stage groups and EP/CP group construction under PP. ``dist.new_group`` is a collective over the
+default group, so every rank creates every stage's groups in one order."""
 
 import pytest
 
@@ -29,9 +12,7 @@ from tests.common.parallelism import make_parallelism_config, stubbed_process_gr
 
 
 def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
-    """Build the REAL ``EPConfig`` for ``rank`` of a ``world_size`` job split into stage-wide blocks, its
-    distributed experts outside FSDP2. Returns ``(config, calls)``, ``calls`` being the ordered ``new_group``
-    rank lists this rank issued."""
+    """Returns ``(config, calls)``, ``calls`` being the ordered ``new_group`` rank lists this rank issued."""
     calls: list = []
     stage_base_rank = (rank // stage_world_size) * stage_world_size
     with stubbed_process_groups(world_size, rank, calls):
@@ -42,7 +23,6 @@ def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
 
 
 def _ep_over_world(*, world_size: int, stage_world_size: int, **kwargs):
-    """Build the EPConfig of every rank of the job. Returns ``{rank: (config, calls)}``."""
     return {
         rank: _make_ep(rank, world_size=world_size, stage_world_size=stage_world_size, **kwargs)
         for rank in range(world_size)
@@ -50,8 +30,6 @@ def _ep_over_world(*, world_size: int, stage_world_size: int, **kwargs):
 
 
 def _cp_config(rank: int, *, world_size: int, stage_world_size: int, cp_size: int):
-    """The REAL ``CPConfig`` of ``rank`` in a ``world_size`` job of 8-GPU domains split into stage-wide blocks,
-    and the ordered ``new_group`` rank lists it issued."""
     calls: list = []
     with stubbed_process_groups(world_size, rank, calls):
         config = CPConfig(
@@ -64,29 +42,22 @@ def _cp_config(rank: int, *, world_size: int, stage_world_size: int, cp_size: in
 
 
 def _assert_partitions_world(groups: set, world_size: int, stage_world_size: int):
-    """The distinct groups tile the world exactly and none straddles a stage boundary."""
     flat = [r for g in groups for r in g]
-    assert sorted(flat) == list(range(world_size)), sorted(flat)  # union == world AND disjoint
+    assert sorted(flat) == list(range(world_size)), sorted(flat)
     for g in groups:
         assert len({r // stage_world_size for r in g}) == 1, g
 
 
-# Pipeline chain and stage groups
-
-
 def _pp_groups(rank: int, *, world_size: int, pp_size: int):
-    """``(chain group, stage group, ordered new_group calls, config)`` as ``rank`` of a PP job.
-
-    The stub returns the rank tuple as the handle, so each returned "group" IS the membership the
-    real ``dist.new_group`` would have been given.
-    """
+    """The stub returns the rank tuple as the handle, so each returned group is the membership ``dist.new_group``
+    got."""
     config = make_parallelism_config(world_size=world_size, gpus_per_node=8, rank=rank, pp_size=pp_size)
     calls: list = []
     with stubbed_process_groups(world_size, rank, calls):
         return build_pipeline_group(config), build_stage_group(config), calls, config
 
 
-# Every chain of the job, by intra-stage position: one rank per stage, ``stage_world_size`` (8) apart.
+# By intra-stage position: one rank per stage, ``stage_world_size`` (8) apart.
 _EXPECTED_CHAINS = {
     (16, 2): [(0, 8), (1, 9), (2, 10), (3, 11), (4, 12), (5, 13), (6, 14), (7, 15)],
     (32, 4): [
@@ -104,13 +75,8 @@ _EXPECTED_CHAINS = {
 
 @pytest.mark.parametrize(("world_size", "pp_size"), sorted(_EXPECTED_CHAINS))
 def test_pipeline_groups_are_the_expected_chains_and_stage_blocks(world_size, pp_size):
-    """Each rank's chain group is the literal chain of its intra-stage position, and its stage group
-    its own contiguous block.
-
-    The trainer broadcasts the last stage's loss from ``pp_chain_ranks()[-1]`` OVER the group built
-    here, so the two must also agree on every rank: a drift would name a rank outside the group and
-    hang the chain.
-    """
+    """The trainer broadcasts the last stage's loss from ``pp_chain_ranks()[-1]`` over this group; a drift names a
+    rank outside it and hangs the chain."""
     expected = _EXPECTED_CHAINS[(world_size, pp_size)]
     for rank in range(world_size):
         chain, stage, _, config = _pp_groups(rank, world_size=world_size, pp_size=pp_size)
@@ -121,11 +87,6 @@ def test_pipeline_groups_are_the_expected_chains_and_stage_blocks(world_size, pp
 
 
 def test_pipeline_group_creation_sequence_is_identical_on_every_rank():
-    """``dist.new_group`` is collective: every rank must issue the same calls in the same order.
-
-    Both group families are created by every rank (each keeps only its own), so the recorded
-    sequence must match rank for rank, and together the chains must tile the world exactly.
-    """
     built = {rank: _pp_groups(rank, world_size=16, pp_size=2) for rank in range(16)}
     reference = built[0][2]
     for rank, (_, _, calls, _) in built.items():
@@ -143,16 +104,12 @@ def test_pipeline_groups_are_absent_without_pp():
     assert build_stage_group(config) is None
 
 
-# (ep_size, groups per stage) on world=16 = 2 stages x 8 ranks, NVLink domain 8.
+# On world=16 = 2 stages x 8 ranks, NVLink domain 8.
 _NODE_LOCAL_EP_SHAPES = [(8, 1), (4, 2), (2, 4)]
 
 
 def test_ep_every_rank_selects_a_group_containing_itself():
-    """Every rank of every stage lands in an EP group it is a member of.
-
-    Without this, stage-1 ranks match no created group and EPConfig raises
-    "EP group selection inconsistency".
-    """
+    """Otherwise stage-1 ranks match no created group and EPConfig raises."""
     for ep_size, groups_per_stage in _NODE_LOCAL_EP_SHAPES:
         built = _ep_over_world(
             world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
@@ -161,12 +118,10 @@ def test_ep_every_rank_selects_a_group_containing_itself():
             assert cfg.num_ep_groups == groups_per_stage, (ep_size, rank, cfg.num_ep_groups)
             assert cfg.process_group is not None, (ep_size, rank)
             assert rank in cfg._my_ep_group_ranks, (ep_size, rank, cfg._my_ep_group_ranks)
-            # The stub returns the rank tuple, so the handle IS this rank's group.
             assert cfg.process_group == tuple(cfg._my_ep_group_ranks), (ep_size, rank)
 
 
 def test_ep_groups_are_stage_confined_and_tile_the_world():
-    """The EP groups partition all 16 ranks and none straddles the stage-0 / stage-1 boundary."""
     for ep_size, groups_per_stage in _NODE_LOCAL_EP_SHAPES:
         built = _ep_over_world(
             world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
@@ -177,7 +132,6 @@ def test_ep_groups_are_stage_confined_and_tile_the_world():
 
 
 def test_ep_new_group_sequence_identical_on_every_rank():
-    """Every rank issues the SAME ``new_group`` calls in the SAME order (the deadlock invariant)."""
     for ep_size, _ in _NODE_LOCAL_EP_SHAPES:
         built = _ep_over_world(
             world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
@@ -186,16 +140,14 @@ def test_ep_new_group_sequence_identical_on_every_rank():
         reference = sequences[0]
         for rank, seq in sequences.items():
             assert seq == reference, (ep_size, rank, seq, reference)
-        # Both stages' groups are actually created (not just this rank's own block).
         created = {r for call in reference for r in call}
         assert created == set(range(16)), (ep_size, reference)
 
 
 def test_ep_pinned_call_sequence_ep2_two_stages():
-    """Pin the exact ordered sequence for ep_size=2 on world=16, pp=2 (routing, replica, DP-scope)."""
+    """Routing, replica, DP-scope."""
     _, calls = _make_ep(12, world_size=16, stage_world_size=8, ep_size=2, nvlink_domain_size=8, node_local=True)
     assert calls == [
-        # Routing groups, block-major.
         (0, 1),
         (2, 3),
         (4, 5),
@@ -204,22 +156,21 @@ def test_ep_pinned_call_sequence_ep2_two_stages():
         (10, 11),
         (12, 13),
         (14, 15),
-        # Expert-replica groups: same ep_rank across the stage's groups.
         (0, 2, 4, 6),
         (1, 3, 5, 7),
         (8, 10, 12, 14),
         (9, 11, 13, 15),
-        # DP-scope groups: one per rank block (replicated-param averaging domain).
+        # One per rank block (the replicated-param averaging domain).
         (0, 1, 2, 3, 4, 5, 6, 7),
         (8, 9, 10, 11, 12, 13, 14, 15),
     ], calls
 
 
 def test_ep_expert_replica_sets_are_stage_confined():
-    """Cross-group expert-grad replica sets never span stages (a different stage owns other layers)."""
+    """A different stage owns other layers."""
     for ep_size, groups_per_stage in _NODE_LOCAL_EP_SHAPES:
         if groups_per_stage == 1:
-            continue  # single group per stage → no cross-group sync
+            continue
         built = _ep_over_world(
             world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
         )
@@ -231,15 +182,8 @@ def test_ep_expert_replica_sets_are_stage_confined():
             assert {r // 8 for r in replicas} == {rank // 8}, (ep_size, rank, replicas)
 
 
-# Cross-node (global-scope) EP under PP
-
-
 def test_ep_cross_node_scope_under_pp():
-    """world=32, 4 NVLink domains of 8, pp=2 → each stage runs the column-block layout on its 16 ranks.
-
-    Stage 0 groups are [0-3, 8-11] / [4-7, 12-15]; stage 1's are the same shifted by 16. A group that
-    straddled the boundary would put PP-incompatible ranks in one DeepEP dispatch group.
-    """
+    """A straddling group would put PP-incompatible ranks in one DeepEP dispatch group."""
     built = _ep_over_world(world_size=32, stage_world_size=16, ep_size=8, nvlink_domain_size=8, node_local=False)
     for rank, (cfg, _) in built.items():
         assert cfg.num_ep_groups == 2, (rank, cfg.num_ep_groups)
@@ -261,15 +205,7 @@ def test_ep_cross_node_scope_under_pp():
         assert calls == reference, (rank, calls, reference)
 
 
-# EP + expert TP under PP (the second group-creation call site)
-
-
 def test_ep_etp_groups_stage_confined_under_pp():
-    """ep_size=4 + expert_tp_size=2 (one EP group of 8 per stage): ETP and dispatch groups too.
-
-    ``_build_expert_tp_groups`` enumerates the same all-block EP group list, so its groups must be
-    stage-local, contain their rank, and be created in an identical order on every rank.
-    """
     built = _ep_over_world(
         world_size=16, stage_world_size=8, ep_size=4, expert_tp_size=2, nvlink_domain_size=8, node_local=True
     )
@@ -285,7 +221,7 @@ def test_ep_etp_groups_stage_confined_under_pp():
     _assert_partitions_world(etp_groups, 16, 8)
     _assert_partitions_world(dispatch_groups, 16, 8)
     assert dispatch_groups == {(0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11), (12, 13, 14, 15)}, dispatch_groups
-    assert (8, 12) in etp_groups, etp_groups  # strided ETP pair inside stage 1
+    assert (8, 12) in etp_groups, etp_groups
 
     reference = built[0][1]
     for rank, (_, calls) in built.items():
@@ -293,7 +229,7 @@ def test_ep_etp_groups_stage_confined_under_pp():
 
 
 def test_pp1_ep_construction_is_unchanged():
-    """Without PP (offset defaulted, world == stage) the created groups are exactly the pre-PP ones."""
+    """World == stage reproduces the pre-PP groups."""
     calls: list = []
     with stubbed_process_groups(8, 3, calls):
         cfg = EPConfig(
@@ -307,8 +243,7 @@ def test_pp1_ep_construction_is_unchanged():
 
 
 def test_misaligned_stage_base_rank_raises_before_any_group():
-    """A stage base off a rank-block boundary raises on every rank before the first ``new_group``, so no
-    rank is left waiting in a collective its peers skipped."""
+    """No rank is left waiting in a collective its peers skipped."""
     calls: list = []
     with (
         stubbed_process_groups(16, 3, calls),
@@ -320,7 +255,7 @@ def test_misaligned_stage_base_rank_raises_before_any_group():
 
 @pytest.mark.parametrize("missing", ["stage_world_size", "nvlink_domain_size"])
 def test_stage_width_and_domain_are_required(missing):
-    """EPConfig never guesses its stage width or locality unit from the launcher's environment."""
+    """EPConfig never guesses these from the launcher's environment."""
     sizes = {"stage_world_size": 8, "nvlink_domain_size": 8}
     del sizes[missing]
     with pytest.raises(TypeError, match=missing):
@@ -328,7 +263,6 @@ def test_stage_width_and_domain_are_required(missing):
 
 
 def test_pp1_cp_construction_is_unchanged():
-    """Same no-op guarantee for CP: default offset reproduces the pre-PP group list."""
     calls: list = []
     with stubbed_process_groups(8, 5, calls):
         cfg = CPConfig(2, stage_world_size=8, stage_base_rank=0, nvlink_domain_size=8)
@@ -339,15 +273,8 @@ def test_pp1_cp_construction_is_unchanged():
     assert (cfg.cp_rank, cfg.cp_group_idx) == (1, 2)
 
 
-# CP under PP
-
-
 def test_cp_groups_under_pp():
-    """CP groups are stage-confined, tile the world, and are created in one identical order.
-
-    ``ParallelismConfig`` currently rejects PP + CP (the loss normalizer is unvalidated), so this
-    drives ``CPConfig`` directly — the rank math must already be right when that gate lifts.
-    """
+    """``ParallelismConfig`` rejects PP + CP today, so this drives ``CPConfig`` directly for when that gate lifts."""
     for cp_size, groups_per_stage in ((2, 4), (4, 2), (8, 1)):
         built = {rank: _cp_config(rank, world_size=16, stage_world_size=8, cp_size=cp_size) for rank in range(16)}
         for rank, (cfg, _) in built.items():
@@ -365,16 +292,12 @@ def test_cp_groups_under_pp():
 
 
 def _make_parallelism_config(rank: int, **kwargs) -> ParallelismConfig:
-    """Two 8-GPU nodes (one NVLink domain each) — the smallest world a pipeline can span."""
+    """Two 8-GPU nodes, the smallest world a pipeline can span."""
     return make_parallelism_config(world_size=16, gpus_per_node=8, rank=rank, **kwargs)
 
 
 def test_parallelism_config_passes_stage_base_rank_to_ep_config():
-    """``ep_config`` must hand EPConfig this stage's base rank, not just its width.
-
-    Without the offset a stage-1 rank builds stage-0's group list and EPConfig raises; with it, the
-    EPConfig membership is this stage's block.
-    """
+    """Without the offset a stage-1 rank builds stage-0's group list and EPConfig raises."""
     for rank in (0, 5, 8, 12):
         pc = _make_parallelism_config(rank, pp_size=2, ep_size=8, ep_scope="node")
         assert pc.stage_base_rank == (rank // 8) * 8

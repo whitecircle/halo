@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""Native EP8 expert LoRA: KL stays anchored to the configured base through resume/export.
-
-Uses the training script's reference loader and a local tiny Qwen3-MoE, with no Hub downloads.
-Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_expert_lora_kl.py
-"""
+"""Native EP8 expert LoRA: KL stays anchored to the configured base through resume and export, on a local tiny
+Qwen3-MoE."""
 
 import math
 import os

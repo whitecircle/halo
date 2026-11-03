@@ -1,6 +1,5 @@
-"""Gradient clipping for the distributed trainers: the ``clip_grad_norm_`` each parallel mode installs, the
-true global L2 norm they reduce across EP/TP/FSDP/PP shards, and the primitives every clip path shares.
-"""
+"""Gradient clipping: the ``clip_grad_norm_`` each parallel mode installs, the true global L2 norm they reduce across
+EP/TP/FSDP/PP shards, and the primitives every clip path shares."""
 
 from __future__ import annotations
 
@@ -18,8 +17,8 @@ from halo.trainers.parallelism.ep_layers import require_ep_config
 
 
 def require_l2(norm_type, path: str) -> None:
-    """Raise unless ``norm_type`` is 2: every distributed clip sums squared L2 shard norms across
-    ranks, so any other norm would come back silently wrong. ``path`` names the clip in the error."""
+    """Every distributed clip sums squared L2 shard norms across ranks, so any other norm would come back silently
+    wrong."""
     if norm_type != 2:
         raise ValueError(
             f"{path} gradient clipping sums squared L2 norms across shards and supports norm_type=2 only, "
@@ -28,32 +27,27 @@ def require_l2(norm_type, path: str) -> None:
 
 
 def trainable_clip_params(parameters) -> list[nn.Parameter]:
-    """The trainable parameters of a clip call, whose ``parameters`` HF/accelerate pass as a module or a
-    one-shot iterable. Empty is returned, not short-circuited on: the distributed clips issue
-    collectives, so the caller answers with a zero norm rather than skip."""
+    """``parameters`` may be a module or a one-shot iterable. Returns empty rather than short-circuit: the distributed
+    clips issue collectives, so the caller answers with a zero norm."""
     if hasattr(parameters, "parameters"):
         parameters = parameters.parameters()
     return [p for p in parameters if p.requires_grad]
 
 
 def is_clipping_enabled(max_norm) -> bool:
-    """HF's convention: ``max_grad_norm <= 0`` (or unset) disables clipping, where scaling by
-    ``0 / norm`` would zero every gradient. The infinite threshold of transformers' norm-only pass at
-    ``max_grad_norm <= 0`` clips nothing either, so it skips a pass multiplying every gradient by 1."""
+    """``max_grad_norm <= 0`` or unset disables clipping (HF's convention), where scaling by ``0 / norm`` would zero
+    every gradient. transformers' infinite threshold at ``<= 0`` clips nothing either, so it skips the pass."""
     return bool(max_norm) and 0 < max_norm < math.inf
 
 
 def local_grad_shards(params) -> list[torch.Tensor]:
-    """The local tensors of ``params``' gradients: ``_foreach`` ops refuse DTensors and plain tensors together."""
+    """``_foreach`` ops refuse DTensors and plain tensors together."""
     return [g.to_local() if isinstance(g, DTensor) else g for g in (p.grad for p in params) if g is not None]
 
 
 def local_grad_norm_sq(shards: list[torch.Tensor], *, device) -> torch.Tensor:
-    """Sum of the squared L2 norms of ``shards`` — this rank's contribution, 0-dim fp32 on ``device``.
-
-    Each per-tensor norm accumulates in fp32 rather than the shard's bf16. An empty list returns a zero
-    rather than skipping, since every caller reduces the result across ranks.
-    """
+    """This rank's summed squared L2 norms, 0-dim on ``device``, accumulated in fp32 rather than the shard's bf16. An
+    empty list returns a zero, since every caller reduces the result across ranks."""
     if not shards:
         return torch.zeros((), device=device, dtype=torch.float32)
     norms = torch._foreach_norm(shards, dtype=torch.float32)
@@ -61,26 +55,23 @@ def local_grad_norm_sq(shards: list[torch.Tensor], *, device) -> torch.Tensor:
 
 
 def clip_coefficient(max_norm: float | torch.Tensor, total_norm: torch.Tensor) -> torch.Tensor:
-    """``min(1, max_norm / total_norm)``, device-resident. ``nan_to_num`` runs before the clamp, so a NaN
-    norm leaves the gradients untouched; the epsilon guards an all-zero step, as torch's own clip does."""
+    """``min(1, max_norm / total_norm)``, device-resident. ``nan_to_num`` before the clamp leaves gradients untouched
+    on a NaN norm; the epsilon guards an all-zero step, as torch's own clip does."""
     return torch.nan_to_num(max_norm / (total_norm + 1e-6), nan=1.0).clamp(max=1.0)
 
 
 def scale_shards_to_max_norm_(
     shards: list[torch.Tensor], max_norm: float | torch.Tensor, total_norm: torch.Tensor
 ) -> None:
-    """Scale local grad shards in place by the clamped clip coefficient, unconditionally, so no path pays
-    a host sync to decide whether to clip; ``max_norm`` is taken as given for the same reason."""
+    """Scale unconditionally, so no path pays a host sync to decide whether to clip; ``max_norm`` is taken as given for
+    the same reason."""
     if shards:
         torch._foreach_mul_(shards, clip_coefficient(max_norm, total_norm))
 
 
 def pp_clip_grad_norm(parameters, max_norm, norm_type=2) -> torch.Tensor:
-    """The pipeline stage's ``clip_grad_norm_`` when every parameter is a DTensor (dense and ep1-FSDP stages).
-
-    Every parameter is sharded across exactly one stage's DP group, so the world sum of the local squared
-    norms is the global one; plain-tensor EP expert shards take the EP clip instead.
-    """
+    """For a stage whose every parameter is a DTensor, each sharded across exactly one stage's DP group, so the world
+    sum of local squared norms is the global one."""
     require_l2(norm_type, "Pipeline-parallel")
     shards = local_grad_shards(trainable_clip_params(parameters))
     local = local_grad_norm_sq(shards, device=current_device())
@@ -92,14 +83,9 @@ def pp_clip_grad_norm(parameters, max_norm, norm_type=2) -> torch.Tensor:
 
 
 class GradientClippingMixin:
-    """The ``clip_grad_norm_`` replacements of :class:`DistributedTrainerMixin` and the global norm they reduce."""
-
     def _install_ep_clip(self) -> None:
-        """Install the EP clip: the deferred sweep, the EP+TP replicated sync, then the true global norm.
-
-        A model without EP layers here is a load that skipped EP patching, whose experts would drift apart
-        silently, so it raises once at install, as does a missing EP config the norm's expert legs read.
-        """
+        """A model without EP layers here skipped EP patching and its experts would drift apart silently, so it raises
+        at install, as does a missing EP config."""
         if not self._ep_layers():
             raise RuntimeError(
                 "EP gradient clipping is being installed on a model with no EP-patched layers, so expert "
@@ -119,9 +105,8 @@ class GradientClippingMixin:
         self.accelerator.clip_grad_norm_ = self._global_norm_clip("Expert-parallel", sync, defer_to_optimizer=True)
 
     def _install_tp_clip(self) -> None:
-        """Install the TP clip: TP mixes DTensor params with plain replicated ones (norms, embeddings,
-        ``lm_head``), which accelerate's ``torch._foreach_norm`` refuses together. Replicated grads are
-        TP-averaged first, else the weights and the norm diverge across the TP group."""
+        """TP mixes DTensor params with plain replicated ones, which accelerate's ``torch._foreach_norm`` refuses
+        together. Replicated grads are TP-averaged first, else the weights and the norm diverge across the TP group."""
         self.accelerator.clip_grad_norm_ = self._global_norm_clip(
             "Tensor-parallel", self._sync_tp_replicated_grads, defer_to_optimizer=False
         )
@@ -138,9 +123,8 @@ class GradientClippingMixin:
         self.accelerator.clip_grad_norm_ = qlora_clip_grad_norm_
 
     def _global_norm_clip(self, path: str, sync: Callable[[list], None], *, defer_to_optimizer: bool):
-        """A ``clip_grad_norm_`` that runs ``sync`` on the trainable params, then clips them to their global
-        L2 norm; with ``defer_to_optimizer`` the coefficient goes to :meth:`_grad_scale_deferring_optimizer`
-        instead of a pass over the grads. ``path`` names the clip in the norm-type refusal."""
+        """A ``clip_grad_norm_`` that runs ``sync``, then clips to the global L2 norm; with ``defer_to_optimizer`` the
+        coefficient goes to :meth:`_grad_scale_deferring_optimizer` instead of a pass over the grads."""
 
         def clip_grad_norm_(parameters, max_norm, norm_type=2) -> torch.Tensor:
             require_l2(norm_type, path)
@@ -163,12 +147,9 @@ class GradientClippingMixin:
         return clip_grad_norm_
 
     def _grad_scale_deferring_optimizer(self, params: list):
-        """The optimizer that will apply the clip coefficient inside its own step, or ``None``.
-
-        Only an optimizer exposing ``defer_grad_scale`` (AdamWBF16) whose parameters with gradients are
-        exactly the clipped ones qualifies, read off its current ``param_groups`` on every call: any other
-        set would leave a clipped parameter unclipped or scale one the clip did not select.
-        """
+        """Only an optimizer exposing ``defer_grad_scale`` (AdamWBF16) whose parameters with gradients are exactly the
+        clipped ones qualifies; any other set would leave a clipped parameter unclipped or scale one the clip did not
+        select."""
         optimizer = getattr(self, "optimizer", None)
         optimizer = getattr(optimizer, "optimizer", optimizer)  # accelerate's AcceleratedOptimizer wrapper
         if optimizer is None or not hasattr(optimizer, "defer_grad_scale"):
@@ -178,14 +159,8 @@ class GradientClippingMixin:
         return optimizer if clipped == stepped else None
 
     def _compute_global_grad_norm(self, params: list[nn.Parameter]) -> torch.Tensor:
-        """COLLECTIVE: the global L2 gradient norm of ``params`` for every EP and TP clip, a 0-dim device tensor.
-
-        Each bucket of :meth:`_bucket_grad_shards` reduces over the group that tiles its shards once:
-        ``expert`` over the expert-TP then the dispatch group (EP-group replicas are already identical,
-        since the clip sweeps first), ``fsdp_full`` over the FSDP shard group, the TP buckets per
-        :meth:`_reduce_shard_norm_buckets`, ``other`` locally. Every reduce is gated on config, never on
-        which grads exist; under PP each is stage-scoped and the chain sum adds the disjoint stages.
-        """
+        """COLLECTIVE. Each bucket reduces over the group that tiles its shards once. Every reduce is gated on config,
+        never on which grads exist; under PP each is stage-scoped and the chain sum adds the disjoint stages."""
         device = current_device()
         norm_sq = {
             name: local_grad_norm_sq(shards, device=device)
@@ -227,9 +202,8 @@ class GradientClippingMixin:
         return total_norm_sq.sqrt()
 
     def _bucket_grad_shards(self, params: list[nn.Parameter]) -> dict[str, list[torch.Tensor]]:
-        """``params``' local grad shards by bucket, every bucket declared so an empty one still joins its reduce:
-        ``expert`` (EP/ETP-distributed expert shards only), ``fsdp_full`` (EP-only / EP+CP FSDP2 shards, no
-        device mesh), the TP buckets (DTensor or hand-sliced grads under a mesh), ``other`` (replicated)."""
+        """Every bucket is declared so an empty one still joins its reduce: ``expert`` (EP/ETP-distributed shards),
+        ``fsdp_full`` (EP-only / EP+CP FSDP2, no device mesh), the TP buckets, ``other`` (replicated)."""
         expert_ids = self._get_sharded_expert_param_ids()
         # Plain tensors the TP plan sharded by hand (GptOss sinks): disjoint slices, not replicas.
         tp_sharded_plain_ids = self._tp_sharded_plain_param_ids()
@@ -255,10 +229,9 @@ class GradientClippingMixin:
 
     @staticmethod
     def _sharded_grad_bucket(grad: torch.Tensor, tp_disjoint: bool) -> str:
-        """The TP bucket whose group tiles ``grad`` once: ``"tp1d"`` (1D ``tp`` mesh, or a plain TP-disjoint
-        slice under pure TP), ``"tp2d"`` (2D ``(dp, tp)`` mesh, or a hand-sliced sink FSDP-sharded over
-        ``dp``), ``"dp"`` (a 1D ``dp`` shard replicated across TP). ``tp_disjoint`` separates the last two,
-        both 1D ``dp`` DTensors after the FSDP2 wrap."""
+        """``"tp1d"`` (1D ``tp`` mesh, or a plain TP-disjoint slice under pure TP), ``"tp2d"`` (2D ``(dp, tp)`` mesh,
+        or a hand-sliced sink FSDP-sharded over ``dp``), ``"dp"`` (a 1D ``dp`` shard replicated across TP);
+        ``tp_disjoint`` separates the last two."""
         dims = mesh_dim_names(getattr(grad, "device_mesh", None))
         if MeshDim.TP in dims:
             return "tp2d" if len(dims) > 1 else "tp1d"
@@ -269,10 +242,8 @@ class GradientClippingMixin:
     def _reduce_shard_norm_buckets(
         self, tp1d_sq: torch.Tensor, tp2d_sq: torch.Tensor, dp_sq: torch.Tensor
     ) -> torch.Tensor:
-        """COLLECTIVE: each TP/DP shard-norm bucket summed over the ranks that tile it, and their total:
-        ``tp1d`` over the TP group, ``dp`` over the DP group, ``tp2d`` over the ``(dp, tp)`` plane, which is
-        the pipeline stage (``None``, the world, without PP), since other stages hold other layers.
-        """
+        """COLLECTIVE. Each bucket summed over the ranks that tile it, and their total: ``tp1d`` over TP, ``dp`` over
+        DP, ``tp2d`` over the ``(dp, tp)`` plane, which is the pipeline stage since other stages hold other layers."""
         if (group := tp_group(self._device_mesh)) is not None:
             dist.all_reduce(tp1d_sq, op=dist.ReduceOp.SUM, group=group)
         if (group := dp_group(self._device_mesh)) is not None:
@@ -282,8 +253,7 @@ class GradientClippingMixin:
 
     @staticmethod
     def _fsdp_shard_group(mesh) -> dist.ProcessGroup:
-        """The group summing FSDP shard norms over ``mesh``: the DP group of a 1D full-shard mesh, the
-        ``dp_shard`` sub-group of a 2D HSDP mesh (replicas hold identical shards). Any other shape raises
+        """The DP group of a 1D full-shard mesh, the ``dp_shard`` sub-group of a 2D HSDP mesh. Any other shape raises
         rather than fall back to the world group, which under PP spans every stage."""
         if mesh.ndim == 1:
             return mesh.get_group()
@@ -296,7 +266,6 @@ class GradientClippingMixin:
         )
 
     def _has_mixed_mesh_grads(self, model) -> bool:
-        """Always ``False``, so HF's clip and its unclipped norm both go through ``accelerator.clip_grad_norm_``:
-        HF would send mixed DTensor/plain gradients to its own per-mesh norm instead, bypassing the EP/TP/QLoRA
-        clips that carry the global norm and the grad sweeps."""
+        """Always ``False``: HF would send mixed DTensor/plain gradients to its own per-mesh norm, bypassing the
+        EP/TP/QLoRA clips that carry the global norm and the grad sweeps."""
         return False

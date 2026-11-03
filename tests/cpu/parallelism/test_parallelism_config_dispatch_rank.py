@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""EP+ETP dispatch-rank agreement between ``ParallelismConfig`` and ``EPConfig``.
-
-Under expert TP, an EP group splits into ``expert_tp_size`` dispatch (sub-EP) chunks; ETP partners
-share a ``dispatch_ep_rank`` and therefore a DP batch, so ``ParallelismConfig.get_data_parallel_rank``
-and ``EPConfig._build_expert_tp_groups`` must derive the SAME dispatch rank from ``ep_rank`` —
-node-local (contiguous dispatch chunks of ``ep_size``) and cross-node (one ETP group per NVLink
-domain) use different formulas. A divergence would give ETP partners different batches and desync
-the token-space ``SumAcrossGroup`` all-reduce.
-
-Drives the REAL ``EPConfig`` group construction with ``torch.distributed`` stubbed (``new_group``
-returns the rank list) and the REAL ``ParallelismConfig`` rank math, for every rank of several
-shapes across both layouts, and asserts the two agree.
-
-    python tests/cpu/parallelism/test_parallelism_config_dispatch_rank.py
-"""
+"""EP+ETP dispatch-rank agreement between ``ParallelismConfig`` and ``EPConfig``, across node-local and cross-node
+formulas. A divergence gives ETP partners different batches and desyncs the ``SumAcrossGroup`` all-reduce."""
 
 import pytest
 
@@ -22,18 +9,18 @@ from halo.distributed.group_layout import ep_layout
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
-# (world_size, domain, ep_size, expert_tp_size, node_local) — shapes BOTH classes accept.
+# (world_size, domain, ep_size, expert_tp_size, node_local) of shapes both classes accept.
 SHAPES = [
-    (8, 8, 4, 2, True),  # single node-local group of 8 (the verified EP+ETP shape)
-    (8, 8, 2, 2, True),  # two node-local groups of 4, one domain
-    (8, 8, 2, 4, True),  # single node-local group of 8, ETP-major
-    (16, 8, 2, 8, False),  # cross-node: one EP group spanning 2 domains, ETP = domain block
+    (8, 8, 4, 2, True),  # The verified EP+ETP shape.
+    (8, 8, 2, 2, True),
+    (8, 8, 2, 4, True),  # ETP-major.
+    (16, 8, 2, 8, False),  # Cross-node: one EP group spanning 2 domains, ETP = domain block.
 ]
 
-# EPConfig-only superset: the multi-domain multi-group shapes ParallelismConfig rejects.
+# The multi-domain multi-group shapes ParallelismConfig rejects.
 EP_SHAPES = SHAPES + [
-    (16, 8, 2, 4, True),  # two nodes, one node-local group of 8 each
-    (16, 8, 2, 4, False),  # cross-node: two EP groups of 8, one ETP group per domain half
+    (16, 8, 2, 4, True),
+    (16, 8, 2, 4, False),  # Cross-node: two EP groups of 8, one ETP group per domain half.
 ]
 
 
@@ -42,7 +29,7 @@ def _make_parallelism_config(rank: int, world_size: int, gpus_per_node: int, **k
 
 
 def _make_ep_config(rank: int, world_size: int, gpus_per_node: int, **kwargs) -> EPConfig:
-    """Build the REAL EPConfig for ``rank`` with distributed stubbed (new_group → rank tuple)."""
+    """new_group returns the rank tuple."""
     with stubbed_process_groups(world_size, rank):
         return EPConfig(
             stage_world_size=world_size, nvlink_domain_size=gpus_per_node, experts_fsdp_managed=False, **kwargs
@@ -50,7 +37,6 @@ def _make_ep_config(rank: int, world_size: int, gpus_per_node: int, **kwargs) ->
 
 
 def test_dispatch_rank_agreement_across_layouts():
-    """Both call sites must derive the same dispatch_ep_rank (hence DP rank) for every rank/shape."""
     for world_size, gpus_per_node, ep_size, expert_tp_size, node_local in SHAPES:
         for rank in range(world_size):
             ep = _make_ep_config(
@@ -66,7 +52,7 @@ def test_dispatch_rank_agreement_across_layouts():
             )
             coords = pc.ep_layout.rank_and_group(pc.stage_local_rank)
             assert coords == (ep.ep_rank, ep.ep_group_idx), (rank, world_size, ep_size, expert_tp_size, node_local)
-            # DP rank keys on EPConfig's dispatch layout: partners sharing dispatch_ep_rank share a batch.
+            # Partners sharing dispatch_ep_rank share a batch.
             expected_dp = ep.dispatch_ep_rank * ep.num_ep_groups + ep.ep_group_idx
             assert pc.get_data_parallel_rank() == expected_dp, (
                 rank,
@@ -80,9 +66,7 @@ def test_dispatch_rank_agreement_across_layouts():
 
 
 def test_expert_replica_ranks_agree_with_ep_config():
-    """``EPConfig.expert_replica_ranks``, the membership the deferred cross-replica expert-grad sweep
-    reduces over, is the replica set of ``ParallelismConfig.ep_layout``. A divergence averages expert
-    grads over the wrong ranks: silently wrong weights, no error."""
+    """A divergence averages expert grads over the wrong ranks: silently wrong weights."""
     for world_size, gpus_per_node, ep_size, expert_tp_size, node_local in SHAPES:
         for rank in range(world_size):
             ep = _make_ep_config(
@@ -107,7 +91,6 @@ def test_expert_replica_ranks_agree_with_ep_config():
 
 
 def test_dispatch_rank_partition_is_balanced():
-    """Across each shape, every DP rank is claimed by exactly expert_tp_size ranks (the ETP partners)."""
     for world_size, gpus_per_node, ep_size, expert_tp_size, node_local in EP_SHAPES:
         claims = {}
         for rank in range(world_size):
@@ -123,21 +106,15 @@ def test_dispatch_rank_partition_is_balanced():
 
 
 def test_ep_config_dispatch_formulas_pinned():
-    """Pin the two layout formulas at concrete ranks (a silent formula swap must fail here)."""
-    # Node-local ep4+etp2, one group of 8: dispatch = ep_rank % 4, expert_tp = ep_rank // 4.
     ep = _make_ep_config(6, 8, 8, ep_size=4, expert_tp_size=2, node_local=True)
     assert (ep.ep_rank, ep.dispatch_ep_rank, ep.expert_tp_rank) == (6, 2, 1)
-    # Cross-node ep2+etp8 over 2 domains: expert_tp = ep_rank % 8, dispatch = ep_rank // 8.
     ep = _make_ep_config(11, 16, 8, ep_size=2, expert_tp_size=8, node_local=False)
     assert (ep.ep_rank, ep.dispatch_ep_rank, ep.expert_tp_rank) == (11, 1, 3)
 
 
 def test_leaf_function_matches_group_construction():
-    """``etp_partition`` must agree with the INDEPENDENT indexing the real group construction uses:
-    the ranks ``_build_expert_tp_groups`` put in this rank's expert-TP group (captured via the
-    stubbed ``new_group``) are exactly the EP-group members the layout assigns this rank's dispatch
-    coordinate. EPConfig assigns its own coords THROUGH the layout, so comparing those would certify
-    nothing — the constructed membership is the only independent spelling."""
+    """EPConfig assigns its own coords through the layout, so the constructed membership is the only independent
+    spelling."""
     for world_size, gpus_per_node, ep_size, expert_tp_size, node_local in EP_SHAPES:
         layout = ep_layout(
             world_size=world_size,

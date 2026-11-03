@@ -1,24 +1,9 @@
 #!/usr/bin/env python
-"""PP checkpoint resume through the real DistributedSFTTrainer (pp2 × dp2, tiny dense Qwen3).
+"""PP checkpoint resume through the real DistributedSFTTrainer (pp2 x dp2): bitwise restore and a replay of the
+unbroken run.
 
-Scope under test (identical-topology resume): run A trains 8 steps straight; run B trains 4, saves
-at step 4, and a new trainer resumes from that checkpoint and trains 4 more. The seams that must
-hold, each with a check that fails when it breaks:
-
-  * the global→local weight remap (post-load stage weights bitwise equal the checkpoint tensors —
-    a shifted remap or dropped key resumes from base weights)
-  * the scripts' resume construction: ``load_distributed_model`` pointed at the checkpoint (the PP
-    stage-loader dispatch, its rank-0 lazy-load verdict and joined gates) builds a stage bitwise
-    equal to the checkpoint
-  * per-rank optimizer-shard restore (live moments bitwise equal the shard content)
-  * training continuity (B's resumed steps 5-8 reproduce A's losses within rel 1e-3 — catches a
-    silently warm-restarted optimizer, a re-warmed LR schedule, or desynced data order)
-  * the negative gates: a shifted pp_stage_partition raises, a deleted optimizer shard raises
-    (torn), a fingerprint pp_size mismatch raises — never a silent warm restart under PP.
-
-Topology: 4 GPUs as 2 simulated nodes of 2 (NVLink domain = 2), pipeline crossing the boundary.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_resume.py
+A shifted global-to-local remap resumes from base weights. A shifted partition, a deleted optimizer shard and a
+fingerprint mismatch must raise, never warm-restart silently.
 """
 
 import os
@@ -50,7 +35,7 @@ SAVE_STEP = 4
 
 
 def _expect_raise(fn, *args) -> bool:
-    """True when fn raised on every rank (the gates must be rank-uniform, no silent survivor)."""
+    """True when fn raised on every rank: the gates must be rank-uniform, no silent survivor."""
     raised = False
     try:
         fn(*args)
@@ -66,7 +51,7 @@ def run(ctx):
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
 
-    # The PP checkpoint is a multi-writer single-directory format: all ranks must share one root.
+    # Multi-writer single-directory format: all ranks share one root.
     root = shared_output_dir(ctx)
 
     def build_trainer(subdir: str, max_steps: int, save_steps: int | None = None, model=None) -> DistributedSFTTrainer:
@@ -88,13 +73,11 @@ def run(ctx):
             parallelism_config=config,
         )
 
-    # ── run A: 8 straight steps (the reference loss curve) ──────────────────────────────────────
     trainer_a = build_trainer("runA", N_STEPS)
     trainer_a.train()
     losses_a = [e["loss"] for e in trainer_a.state.log_history if "loss" in e]
     checks["run_a_completed"] = trainer_a.state.global_step == N_STEPS and len(losses_a) == N_STEPS
 
-    # ── run B: 4 steps, checkpoint at step 4 ────────────────────────────────────────────────────
     trainer_b = build_trainer("runB", SAVE_STEP, save_steps=SAVE_STEP)
     trainer_b.train()
     ckpt = os.path.join(root, "runB", f"checkpoint-{SAVE_STEP}")
@@ -105,8 +88,8 @@ def run(ctx):
         and os.path.isfile(os.path.join(ckpt, f"optimizer_shard_{rank:05d}.pt"))
         and os.path.isfile(os.path.join(ckpt, "optimizer_meta.pt"))
     )
-    # The recorded partition must be the live per-stage split (never a formula recompute) — each
-    # rank checks its own stage's entry; the MIN all-reduce across ranks covers the whole partition.
+    # The recorded partition must be the live split, never a formula recompute; the MIN all-reduce covers the whole
+    # partition.
     meta = torch.load(os.path.join(ckpt, "optimizer_meta.pt"), map_location="cpu", weights_only=False)
     saved_partition = [tuple(entry) for entry in meta.get("pp_stage_partition", [])]
     stage_b = unwrap_toolkit_wrappers(trainer_b.model)
@@ -114,7 +97,6 @@ def run(ctx):
         len(saved_partition) == PP_SIZE and saved_partition[config.pp_rank] == stage_b.layer_range
     )
 
-    # ── bitwise restore checks on a fresh trainer ───────────────────────────────────────────────
     trainer_c = build_trainer("runC", N_STEPS)
     trainer_c._load_from_checkpoint(ckpt)
     stage = unwrap_toolkit_wrappers(trainer_c.model)
@@ -125,7 +107,7 @@ def run(ctx):
     init_state = build_dense_model().state_dict()
     moved = 0
     for local, value in sorted(local_state.items()):
-        full = full_cpu_tensor(value).cpu()  # collective inside the stage mesh — sorted order
+        full = full_cpu_tensor(value).cpu()  # COLLECTIVE inside the stage mesh: sorted order.
         reference = saved[stage.global_parameter_name(local)]
         weights_ok &= torch.equal(full, reference)
         n_compared += 1
@@ -133,11 +115,10 @@ def run(ctx):
         if global_name in init_state and not torch.equal(full, init_state[global_name]):
             moved += 1
     checks["post_load_weights_bitwise_equal_checkpoint"] = weights_ok and n_compared == len(local_state)
-    # Guard against a vacuous pass (checkpoint == init would hide a no-op load).
+    # Checkpoint == init would hide a no-op load.
     checks["checkpoint_weights_differ_from_init"] = moved > n_compared * 0.9
     log(f"[rank {ctx.rank}] weights compared={n_compared} moved_from_init={moved}")
 
-    # ── the scripts' resume construction: the stage is loaded from the checkpoint ──────────────
     resumed_model, _ = load_distributed_model(
         ckpt,
         config,
@@ -149,7 +130,7 @@ def run(ctx):
     stage_e = unwrap_toolkit_wrappers(build_trainer("runE", N_STEPS, model=resumed_model).model)
     built_ok, n_built = True, 0
     for local, value in sorted(stage_e.state_dict().items()):
-        full = full_cpu_tensor(value).cpu()  # collective inside the stage mesh — sorted order
+        full = full_cpu_tensor(value).cpu()  # COLLECTIVE inside the stage mesh: sorted order.
         reference = saved.get(stage_e.global_parameter_name(local))
         built_ok &= reference is not None and torch.equal(full, reference)
         n_built += 1
@@ -161,12 +142,10 @@ def run(ctx):
         stage, trainer_c.optimizer, ckpt, rank
     )
 
-    # ── run D: resume from the checkpoint, steps 5-8 must reproduce run A ───────────────────────
     losses_b = [e["loss"] for e in trainer_b.state.log_history if "loss" in e]
     trainer_d = build_trainer("runD", N_STEPS)
     trainer_d.train(resume_from_checkpoint=ckpt)
-    # Resume restores log_history from trainer_state.json, so trainer_d carries run B's steps 1-4
-    # followed by the freshly trained steps 5-8.
+    # Resume restores log_history, so trainer_d carries run B's steps 1-4 then the fresh steps 5-8.
     losses_d = [e["loss"] for e in trainer_d.state.log_history if "loss" in e]
     checks["resume_trained_remaining_steps"] = trainer_d.state.global_step == N_STEPS and len(losses_d) == N_STEPS
     checks["resume_restored_trainer_state_history"] = losses_d[:SAVE_STEP] == losses_b
@@ -181,7 +160,7 @@ def run(ctx):
     metrics["losses_a_tail"] = ", ".join(f"{v:.5f}" for v in losses_a[SAVE_STEP:])
     metrics["losses_d_resumed"] = ", ".join(f"{v:.5f}" for v in resumed)
 
-    # ── negative gates (each on a tampered copy; must raise on every rank) ──────────────────────
+    # Each on a tampered copy; must raise on every rank.
     def shift_partition(dest):
         meta_path = os.path.join(dest, "optimizer_meta.pt")
         tampered = torch.load(meta_path, map_location="cpu", weights_only=False)
@@ -202,7 +181,7 @@ def run(ctx):
         ("deleted_shard_raises", drop_shard),
         ("fingerprint_pp_size_mismatch_raises", wrong_pp_size),
     ):
-        # Rank 0 copies the checkpoint and tampers with the copy; every rank waits for it.
+        # Rank 0 tampers with a copy; every rank waits for it.
         tampered_dir = os.path.join(root, f"tampered_{name}")
         if rank == 0:
             shutil.copytree(ckpt, tampered_dir, dirs_exist_ok=True)

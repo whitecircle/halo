@@ -1,18 +1,7 @@
 #!/usr/bin/env python
-"""Text-only training methods must REFUSE an image-carrying dataset, not quietly drop it.
-
-RLVR online GRPO, embedding training, environmental GRPO, offline GRPO and classification have no
-vision path at all, and each prunes its dataset to the columns it names
-(``remove_unused_columns``, the trainer's signature filter, an explicit ``remove_columns``,
-env-GRPO's ``keep_columns``). A vision dataset handed to one of them therefore trains on the rows'
-text alone — no warning, full cost, a checkpoint that never saw a pixel. The guard reads the shared
-``VLM_IMAGE_COLUMNS`` spellings, so it refuses exactly what a VLM-capable method routes on.
-
-Driven through each ``main()``: the guard is only worth anything where the script reaches it with
-the dataset in hand, before the map that drops the column.
-
-Run: pytest tests/cpu/config/test_text_only_image_column_refusal.py
-"""
+"""Text-only training methods refuse an image-carrying dataset. Each prunes its dataset to the columns it names, so
+a vision dataset would train on its text alone with no warning. Driven through each ``main()``, before the map
+that drops the column."""
 
 import sys
 import types
@@ -31,7 +20,7 @@ _TEXT_TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content
 
 
 class _PastTheGuard(Exception):
-    """Raised by the first stub past the guard — the dataset was accepted."""
+    """Raised by the first stub past the guard: the dataset was accepted."""
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +75,6 @@ def _run(module, tmp_path, config_body: str, patches: list) -> None:
 
 
 def _run_online_grpo(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``grpo/online.py:main()`` to its dataset stage."""
     module = _script_module("grpo/online.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
@@ -105,7 +93,6 @@ def _run_online_grpo(tmp_path, dataset: DatasetDict) -> None:
 
 
 def _run_embedding(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``embedding.py:main()`` to its dataset stage."""
     module = _script_module("embedding.py")
 
     patches = [
@@ -117,7 +104,6 @@ def _run_embedding(tmp_path, dataset: DatasetDict) -> None:
 
 
 def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``grpo/environmental.py:main()`` to its dataset stage."""
     module = _script_module("grpo/environmental.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
@@ -137,7 +123,6 @@ def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
 
 
 def _run_offline_grpo(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``grpo/offline.py:main()`` to its dataset stage."""
     module = _script_module("grpo/offline.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
@@ -183,12 +168,8 @@ _CASES = {
 
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_image_column_is_refused_before_it_can_be_pruned(case, tmp_path):
-    """Every method that cannot serve images refuses a declared image column in its own pipeline.
-
-    One representative spelling per script: the refusal is a single shared set-intersection against
-    ``VLM_IMAGE_COLUMNS`` (``reject_image_columns``), so the spelling axis is swept once below
-    rather than per script.
-    """
+    """One spelling per script: the refusal is a shared intersection against ``VLM_IMAGE_COLUMNS``, so the spelling
+    axis is swept once below."""
     runner, columns, method = _CASES[case]
     with pytest.raises(ValueError, match=f"{method} is text-only"):
         runner(tmp_path, _dataset(columns, VLM_IMAGE_COLUMNS[0]))
@@ -196,7 +177,6 @@ def test_image_column_is_refused_before_it_can_be_pruned(case, tmp_path):
 
 @pytest.mark.parametrize("column", VLM_IMAGE_COLUMNS)
 def test_every_image_column_spelling_is_refused(column, tmp_path):
-    """The spelling set is policed on one representative script (shared intersection, see above)."""
     runner, columns, method = _CASES["classification"]
     with pytest.raises(ValueError, match=f"{method} is text-only"):
         runner(tmp_path, _dataset(columns, column))
@@ -204,7 +184,6 @@ def test_every_image_column_spelling_is_refused(column, tmp_path):
 
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_clean_text_dataset_still_reaches_training(case, tmp_path):
-    """Anti-vacuity: the guard rejects image columns, not datasets."""
     runner, columns, _ = _CASES[case]
     with pytest.raises(_PastTheGuard):
         runner(tmp_path, _dataset(columns, None))

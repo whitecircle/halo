@@ -1,15 +1,4 @@
-"""Gradio chat UI for a model served behind an OpenAI-compatible API (vLLM, ...).
-
-Async streaming, configurable generation parameters, and system prompts.
-
-Usage:
-    python scripts/inference/playground/gradio_openai_chatbot.py \\
-        --model my-model --base_url http://localhost:8000/v1
-
-    # Serving the model:
-    make build-vllm   # or set VLLM_IMAGE to the public image
-    VLLM_MODEL=Qwen/Qwen3-8B docker compose -f docker-compose.vllm.yml up vllm-server
-"""
+"""Gradio chat UI for a model served behind an OpenAI-compatible API (vLLM, ...), with async streaming."""
 
 import argparse
 from collections.abc import AsyncGenerator
@@ -23,7 +12,6 @@ from scripts.inference.inference_arguments import add_gradio_server_args, launch
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The chat UI's CLI: the served model it talks to, plus the shared server block."""
     parser = argparse.ArgumentParser(description="OpenAI-compatible chat interface")
     add_openai_endpoint_args(parser)
     # No stand-in default: a made-up name 404s on every request, while omitting the field lets a
@@ -47,7 +35,6 @@ def build_messages(
     message: str,
     system_prompt: str,
 ) -> list[dict[str, str]]:
-    """Build OpenAI messages list from Gradio chat history."""
     messages = []
     if system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt})
@@ -58,7 +45,7 @@ def build_messages(
 
 
 def create_demo(client: AsyncOpenAI, model: str | None, stop_token_ids: list[int]):
-    """Create Gradio chat demo with async streaming; ``model=None`` sends no model field."""
+    """``model=None`` sends no model field."""
 
     async def predict(
         message: str,

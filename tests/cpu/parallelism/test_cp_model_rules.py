@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""Ulysses CP's model gate on a wrapped attention class: a flash attention label, a resolvable head count on each
-side, and head counts ``cp_size`` divides. Each refusal fires on its own condition, named by its mechanism, and
-the supported model passes.
-
-Run: python tests/cpu/parallelism/test_cp_model_rules.py
-"""
+"""Ulysses CP's model gate on a wrapped attention class: a flash label, a resolvable head count on each side, head
+counts ``cp_size`` divides."""
 
 from types import SimpleNamespace
 
@@ -22,8 +18,7 @@ Q_HEADS, KV_HEADS = 4, 2
 
 
 def _qwen3(attn_label: str = SUPPORTED_ATTN_IMPLEMENTATIONS[0]) -> Qwen3ForCausalLM:
-    """A tiny Qwen3 built eager, with ``attn_label`` as the backend the gate reads: transformers refuses to build
-    a flash tree on a CPU host, and no attention kernel is called here."""
+    """Built eager, as transformers refuses a flash tree on CPU; no attention kernel is called here."""
     torch.manual_seed(0)
     config = Qwen3Config(
         vocab_size=32,
@@ -42,14 +37,14 @@ def _qwen3(attn_label: str = SUPPORTED_ATTN_IMPLEMENTATIONS[0]) -> Qwen3ForCausa
 
 
 def _without_q_heads() -> Qwen3ForCausalLM:
-    """A model config that names no Q heads (the strict config class refuses ``None``, so a stand-in)."""
+    """The strict config class refuses ``None``, so a stand-in."""
     model = _qwen3()
     model.config = SimpleNamespace(model_type="qwen3", _attn_implementation=SUPPORTED_ATTN_IMPLEMENTATIONS[0])
     return model
 
 
 def _without_kv_heads() -> Qwen3ForCausalLM:
-    """The attention module's config no longer names its KV heads, which the wrapper reads them off."""
+    """The wrapper reads KV heads off the attention module's config."""
     model = _qwen3()
     model.model.layers[0].self_attn.config = SimpleNamespace()
     return model
@@ -65,7 +60,7 @@ def test_every_flash_label_with_dividing_head_counts_passes(label):
     [
         (lambda: _qwen3("eager"), 2, r"Ulysses CP requires Flash Attention. Got attn_implementation='eager'"),
         (lambda: _qwen3("sdpa"), 2, r"Ulysses CP requires Flash Attention. Got attn_implementation='sdpa'"),
-        # A hub kernel label names a kernel the CP attention never loads: it calls the flash_attn build.
+        # A hub kernel label names a kernel the CP attention never loads.
         (
             lambda: _qwen3("kernels-community/flash-attn2"),
             2,

@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""The temperature-softened distillation losses share one fp32 log-prob path.
-
-``softened_log_probs`` upcasts the logits before dividing by ``T``, and ``temperature_rescaled``
-applies Hinton's ``T**2``. Pinned against independent spellings of each loss:
-
-- the OPD losses (reverse, forward, unnormalized KL) equal the upcast-then-divide formulas bit for
-  bit, values and student gradients, at every temperature, for bf16 and fp32 logits;
-- the teacher arm's ``kl_divergence``, ``soft_cross_entropy`` and ``jensen_shannon`` agree with the
-  ``kl_div`` / ``softmax`` spellings to fp32 rounding;
-- a ``-inf`` logit (padded vocabulary, a top-k-truncated teacher) is a zero-probability entry that adds
-  exactly 0, not NaN, to the value and the gradient;
-- the student's backward keeps one fp32 ``[..., V]`` plane (``log_softmax``'s output): flooring the
-  ``-inf`` logits keeps a boolean mask, not a second fp32 copy of the logits.
-
-    python tests/cpu/trainers/test_distillation_softened_log_probs.py
-"""
+"""Temperature-softened distillation losses share one fp32 log-prob path; pinned against independent spellings.
+A ``-inf`` logit (padded vocabulary, top-k-truncated teacher) adds exactly 0 to the value and the gradient."""
 
 import pytest
 import torch
@@ -175,7 +161,7 @@ def test_opd_losses_ignore_a_vocabulary_padded_on_both_sides(loss_fn, temperatur
 @pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
 @pytest.mark.parametrize("name", TEACHER_SOFTENED_LOSSES)
 def test_teacher_losses_score_a_top_k_truncated_teacher(name, temperature):
-    """The truncated entries add exactly what ``kl_div``/``softmax`` give a zero probability: 0."""
+    """Truncated entries add 0, as ``kl_div``/``softmax`` give a zero probability."""
     student, teacher = _logits(torch.float32, seed=4)
     teacher = _top_k_truncated(teacher)
     value, grad = _finite_value_and_grad(_teacher_loss(name), student, teacher, temperature)

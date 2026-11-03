@@ -1,9 +1,5 @@
-"""Attention-implementation selection: the flash vocabulary, the backend resolver and its validator.
-
-Picks ``attn_implementation`` (FA4/FA3, then FA2, SDPA, flex, eager) by GPU capability, the model class's
-support flags and what each kernel carries: GptOss's live sinks, attention logit softcapping, FA4's
-head_dim-256 kernel limits and its varlen kernels'.
-"""
+"""Attention-implementation selection: FA4/FA3, then FA2, SDPA, flex, eager, by GPU capability, the model class's
+support flags and what each kernel carries (live sinks, logit softcapping, FA4's head_dim-256 and varlen limits)."""
 
 from __future__ import annotations
 
@@ -49,12 +45,11 @@ _FLASH_KERNEL_MODULES = {
     "flash_attention_4": ("flash_attn.cute",),
 }
 
-# Varlen backends consume cu_seqlens from packed position_ids. Dense backends isolate packed
-# documents only where the model plumbs position_ids into its mask — see agent-docs/data/collators.md.
+# Varlen backends consume cu_seqlens from packed position_ids; dense backends isolate packed documents only where the
+# model plumbs position_ids into its mask.
 VARLEN_ATTN_IMPLEMENTATIONS = tuple(_FLASH_KERNEL_MODULES)
 
-# The two names transformers forwards a learnable sink under: FA3's ``s_aux`` and its
-# ``_flash_api_alternative_names`` entry, FA4's ``learnable_sink``.
+# The names transformers forwards a learnable sink under: FA3's ``s_aux``, FA4's ``learnable_sink``.
 FLASH_SINK_PARAM_NAMES = ("s_aux", "learnable_sink")
 
 # The widest head FA2 takes; FA4's SM100 kernel overflows tensor memory past it.
@@ -66,15 +61,12 @@ FLASH_ATTENTION_DETERMINISTIC_ENV = "FLASH_ATTENTION_DETERMINISTIC"
 
 
 def is_flash_attn_implementation(attn_impl: str | None) -> bool:
-    """Whether ``attn_impl`` names a FlashAttention backend (the varlen kernels)."""
     return attn_impl in VARLEN_ATTN_IMPLEMENTATIONS
 
 
 def flash_kernel(attn_impl: str, *, varlen: bool = True):
-    """The ``flash_attn_varlen_func`` (or, with ``varlen=False``, ``flash_attn_func``) transformers
-    dispatches for ``attn_impl``; ``ImportError`` when no installed build has it. Varlen by default:
-    transformers reads the capabilities of both calls off ``_flash_varlen_fn`` alone.
-    """
+    """``ImportError`` when no installed build has it. Varlen by default, as transformers reads the capabilities of
+    both calls off ``_flash_varlen_fn`` alone."""
     if attn_impl == "flash_attention_4":
         ensure_fa4_kernel_cache_env()
     name = "flash_attn_varlen_func" if varlen else "flash_attn_func"
@@ -89,7 +81,6 @@ def flash_kernel(attn_impl: str, *, varlen: bool = True):
 
 
 def _flash_build_imports(attn_impl: str) -> bool:
-    """Whether an installed build provides ``attn_impl``'s kernels (:func:`flash_kernel`)."""
     try:
         flash_kernel(attn_impl)
     except ImportError:
@@ -98,8 +89,7 @@ def _flash_build_imports(attn_impl: str) -> bool:
 
 
 def preferred_flash_impl(*, allow_fa4: bool = True) -> str:
-    """The flash backend this GPU's architecture runs: FA4 on Blackwell (unless ``allow_fa4`` is False), FA3
-    on Hopper, else FA2. Whether its build imports is each caller's own probe."""
+    """By GPU architecture alone; whether its build imports is each caller's own probe."""
     if allow_fa4 and is_blackwell_gpu():
         return "flash_attention_4"
     if is_hopper_gpu():
@@ -108,9 +98,7 @@ def preferred_flash_impl(*, allow_fa4: bool = True) -> str:
 
 
 def _detect_attention_impl() -> str:
-    """:func:`preferred_flash_impl` when its build imports, else FA2, in one line naming it this GPU's flash backend,
-    which the model-level checks may still move. A broken (not absent) build warns instead, since nothing else would
-    report the slower kernel."""
+    """A broken (not absent) build warns, since nothing else would report the slower kernel."""
     if not torch.cuda.is_available():
         return "flash_attention_2"  # CPU host; the choice is re-validated against the model downstream
     preferred = preferred_flash_impl()
@@ -136,8 +124,7 @@ def _detect_attention_impl() -> str:
 
 
 def effective_attn_implementation(model_config) -> str | None:
-    """The attention backend this config's decoder runs, or ``None`` when none is recorded. Read off the
-    text sub-config first: composite wrappers record it there and only sometimes mirror it upward."""
+    """Read off the text sub-config first, as composite wrappers record it there and only sometimes mirror it up."""
     if model_config is None:
         return None
     return getattr(text_config(model_config), "_attn_implementation", None) or getattr(
@@ -146,29 +133,23 @@ def effective_attn_implementation(model_config) -> str | None:
 
 
 def has_head_dim_beyond_flash(model_config) -> bool:
-    """Whether the widest attention head is past :data:`FLASH_MAX_HEAD_DIM` (Gemma 4's 512-wide global
-    heads), where no flash kernel runs; ``False`` on an attention-free config (Mamba)."""
+    """Gemma 4's 512-wide global heads; ``False`` on an attention-free config (Mamba)."""
     return declares_attention_heads(model_config) and resolve_head_dim(model_config) > FLASH_MAX_HEAD_DIM
 
 
 def has_attention_logit_softcap(model_config) -> bool:
-    """Whether the config softcaps its attention scores (Gemma 2's ``attn_logit_softcapping``), which
-    transformers' SDPA path drops without a word."""
+    """Gemma 2's softcap, which transformers' SDPA path drops without a word."""
     return bool(get_config_field(model_config, "attn_logit_softcapping", per_layer_reduce=max))
 
 
 def uses_fa4_dedicated_head_dim(model_config) -> bool:
-    """Whether FA4 trains the attention on its dedicated head_dim-256 backward: a :data:`FA4_DEDICATED_HEAD_DIM`-wide
-    query/key head, MLA's nope + RoPE split counted (GLM-4.7-Flash's 192 + 64). The value width is not read:
-    transformers' flash path pads values up to the query/key width."""
+    """MLA's nope + RoPE split counted (GLM-4.7-Flash's 192 + 64). The value width is not read, as transformers' flash
+    path pads values up to the query/key width."""
     return declares_attention_heads(model_config) and resolve_qk_v_head_dims(model_config)[0] == FA4_DEDICATED_HEAD_DIM
 
 
 def fa4_dedicated_kernel_refusal(model_config) -> str | None:
-    """Why FA4's dedicated head_dim-256 kernel does not train this model's attention, or ``None`` where FA4 runs it on
-    another kernel or the dedicated one trains it: the kernel asserts on Gemma 2's softcap and Gemma 3's sliding
-    windows, and multi-head latent attention (:func:`has_latent_attention`, GLM-4.7-Flash) stays on FA2 as a
-    precaution."""
+    """It asserts on Gemma 2's softcap and Gemma 3's sliding windows; latent attention stays on FA2 as a precaution."""
     if not uses_fa4_dedicated_head_dim(model_config):
         return None
     if has_attention_logit_softcap(model_config):
@@ -181,14 +162,12 @@ def fa4_dedicated_kernel_refusal(model_config) -> str | None:
 
 
 def fa4_varlen_refusal(model_config) -> str | None:
-    """What this model's attention needs that FA4's varlen kernels are not validated with, or ``None``: Gemma 2's
-    softcap, so only the dense call runs it. Packed, padding-free and padded batches all reach the varlen kernels."""
+    """Gemma 2's softcap is unvalidated on the varlen kernels, which packed, padding-free and padded batches reach."""
     return "attention logit softcapping" if has_attention_logit_softcap(model_config) else None
 
 
 def flash_attention_2_in_place_of_fa4(reason: str) -> str:
-    """``flash_attention_2`` for a model FA4 cannot train, ``reason`` naming the kernel limit; raises where no FA2
-    build imports, since what is left either drops a softcap (SDPA) or cannot compile under EP (flex)."""
+    """Raises without an FA2 build, as the rest either drops a softcap (SDPA) or cannot compile under EP (flex)."""
     if not is_flash_attn_2_available():
         raise ValueError(
             f"{reason}, and no FlashAttention-2 build imports to run it instead. Install flash-attn, or set "
@@ -200,37 +179,28 @@ def flash_attention_2_in_place_of_fa4(reason: str) -> str:
 
 
 def flash_attention_deterministic() -> bool:
-    """Whether transformers calls its flash kernels with ``deterministic=True``, by its own read of
-    :data:`FLASH_ATTENTION_DETERMINISTIC_ENV` (only ``"1"`` turns it on)."""
+    """By transformers' own read of the variable: only ``"1"`` turns it on."""
     return os.environ.get(FLASH_ATTENTION_DETERMINISTIC_ENV, "0") == "1"
 
 
 def enable_flash_attention_deterministic() -> None:
-    """Turn :data:`FLASH_ATTENTION_DETERMINISTIC_ENV` on, in the spelling :func:`flash_attention_deterministic` and
-    transformers read."""
     os.environ[FLASH_ATTENTION_DETERMINISTIC_ENV] = "1"
 
 
 def supports_fa4_backward(model_config) -> bool:
-    """Whether FA4 can train this model in this process: not where its dedicated head_dim-256 kernel does not train
-    the attention (:func:`fa4_dedicated_kernel_refusal`), and not when transformers asks its kernels for a
-    deterministic backward (:func:`flash_attention_deterministic`) and the attention runs that kernel
-    (:func:`uses_fa4_dedicated_head_dim`), whose deterministic mode is not validated here."""
+    """The dedicated kernel's deterministic mode is unvalidated, so a run asking for it takes FA4 off that kernel."""
     if fa4_dedicated_kernel_refusal(model_config) is not None:
         return False
     return not (flash_attention_deterministic() and uses_fa4_dedicated_head_dim(model_config))
 
 
 def is_fa4_demoted_by_determinism(model_config) -> bool:
-    """Whether the run's deterministic backward alone takes FA4 off this model: its dedicated head_dim-256 kernel
-    trains the attention (:func:`fa4_dedicated_kernel_refusal`, which moves the model to FA2 instead), but not with
-    the deterministic backward the run asks for (:func:`supports_fa4_backward`)."""
+    """Whether the deterministic backward alone takes FA4 off; a dedicated-kernel refusal moves it to FA2 instead."""
     return fa4_dedicated_kernel_refusal(model_config) is None and not supports_fa4_backward(model_config)
 
 
 def _attn_impl_handles_sinks(attn_impl: str) -> bool:
-    """Whether an implementation carries the learnable sink column into the softmax. A flash kernel's
-    verdict is read off its signature, so a flash-attn build that adds sink support needs no code change."""
+    """A flash kernel's verdict is read off its signature, so a build that adds sink support needs no code change."""
     if attn_impl in ("eager", "flex_attention"):
         return True
     if not is_flash_attn_implementation(attn_impl):
@@ -243,21 +213,17 @@ def _attn_impl_handles_sinks(attn_impl: str) -> bool:
 
 
 def declared_model_class(model_config) -> type | None:
-    """The transformers class declaring this config's ``_supports_*`` flags: the CausalLM class, else, for a
-    composite VLM with no CausalLM sibling, the image-text one. None for a remote-code config."""
+    """The class declaring this config's ``_supports_*`` flags. None for a remote-code config."""
     return mapped_model_class(model_config, AutoModelForCausalLM, AutoModelForImageTextToText)
 
 
 def declares_attention_backends(model_config) -> bool:
-    """Whether :func:`validate_attn_implementation` reads this config's backend flags off a class. It cannot for a
-    remote-code config, so a flash label that class refuses (Bailing's v4-era code) raises only at the model build."""
+    """False for a remote-code config; a flash label its class refuses (Bailing's v4-era code) raises at the build."""
     return declared_model_class(model_config) is not None
 
 
 def declares_flash_attention(model_config) -> bool:
-    """Whether the model runs a flash label: its class accepts one (``_supports_flash_attn``; a remote-code config is
-    taken to, and its build raises if it does not) and its decoder is no prefix LM (:func:`has_prefix_lm_attention`),
-    whose mask no flash kernel reads, so its trained tokens would attend to the tokens they are scored on."""
+    """No flash kernel reads a prefix LM's mask, so its trained tokens would attend to those they are scored on."""
     if has_prefix_lm_attention(model_config):
         return False
     return getattr(declared_model_class(model_config), "_supports_flash_attn", True)
@@ -266,11 +232,9 @@ def declares_flash_attention(model_config) -> bool:
 def validate_attn_implementation(
     model_config, attn_impl: str, sinks_policy: SinksPolicy | None = None, *, dtype: torch.dtype | None = None
 ) -> str:
-    """Return ``attn_impl`` or the first fallback the model class's ``_supports_*`` flags and the sink
-    matrix accept. A neutralized ``sinks_policy`` allows SDPA on a sinks model (the dropped column is 0),
-    a live one never; ``None`` re-validates against the verdict already recorded on this config. SDPA never
-    runs a softcapped model. A float32 ``dtype`` keeps the fallback off FA3 and FA2, which are half-precision only.
-    """
+    """``attn_impl`` or the first fallback the class's flags and the sink matrix accept. A neutralized ``sinks_policy``
+    allows SDPA on a sinks model (the dropped column is 0), a live one never; ``None`` re-validates against the verdict
+    recorded on this config. A float32 ``dtype`` keeps the fallback off FA3 and FA2, which are half-precision only."""
     has_sinks = uses_gpt_oss_sinks(model_config)
     sinks_reset = None if sinks_policy is None else not sinks_policy.live
     if attn_impl == "sdpa" and has_sinks and sinks_reset:
@@ -287,7 +251,7 @@ def validate_attn_implementation(
     supports_sdpa = getattr(resolved_class, "_supports_sdpa", True)
     supports_flash = declares_flash_attention(model_config)
 
-    # sdpa drops sinks and the softcap: valid only without either, or once the sinks were reset (here or earlier).
+    # sdpa drops sinks and the softcap, so it is valid only without either, or once the sinks were reset.
     softcapped = has_attention_logit_softcap(model_config)
     sdpa_ok = supports_sdpa and not softcapped and (not has_sinks or recorded_reset is True)
 
@@ -354,19 +318,15 @@ def validate_attn_implementation(
 
 
 def revalidate_attn_kwarg(model_kwargs: dict, model_config) -> None:
-    """Re-validate a ``from_pretrained`` kwargs' ``attn_implementation`` against ``model_config`` in
-    place, so a family whose ``_supports_*`` flags refuse the policy's choice fails before the load."""
+    """So a family whose ``_supports_*`` flags refuse the policy's choice fails before the load."""
     attn_impl = model_kwargs.pop("attn_implementation", None)
     if attn_impl is not None:
         model_kwargs["attn_implementation"] = validate_attn_implementation(model_config, attn_impl)
 
 
 def verify_live_sinks_carried(model) -> None:
-    """Raise when a built GptOss model's attention implementation drops live sinks it holds.
-
-    Read off the built model, so it holds for a backend no validator chose; such a kernel shifts every logprob by
-    nats with nothing logged. Neutralized sinks (``None``, ``dtype.min``) carry no softmax mass and pass.
-    """
+    """Read off the built model, so it holds for a backend no validator chose. Neutralized sinks (``None``,
+    ``dtype.min``) carry no softmax mass and pass."""
     config = getattr(model, "config", None)
     if config is None or not uses_gpt_oss_sinks(config):
         return
@@ -389,13 +349,9 @@ def resolve_attn_implementation(
     sinks_policy: SinksPolicy,
     fa4_fallback: str = "sdpa",
 ) -> str:
-    """The attention backend for ``model_config``: auto-detected when ``attn_implementation`` is None,
-    narrowed by the per-family kernel limits (fp32, FA4's head_dim-256 kernel and its unvalidated deterministic
-    backward, DeepSeek-V4, heads past the flash cap), then validated. Parallelism-specific overrides stay with the
-    caller that knows the topology, among them ``fa4_fallback``, the label taken in place of FA4 where
-    :func:`supports_fa4_backward` refuses it. FA4's varlen limit (:func:`fa4_varlen_refusal`) and the kernel taken
-    in place of a deterministic FA4 on multi-document rows depend on the rows, so the scripts' requests apply them.
-    """
+    """Auto-detected when None, narrowed by the per-family kernel limits, then validated. ``fa4_fallback`` is taken in
+    place of FA4 where :func:`supports_fa4_backward` refuses it. FA4's varlen limit and the kernel taken in place of a
+    deterministic FA4 on multi-document rows depend on the rows, so the scripts' requests apply them."""
     attn_implementation = attn_implementation or _detect_attention_impl()
 
     if dtype == torch.float32 and is_flash_attn_implementation(attn_implementation):
@@ -409,8 +365,7 @@ def resolve_attn_implementation(
             )
         attn_implementation = fp32_fallback
 
-    # FA4's limits bind only a class that runs a flash label; the validator moves any other off flash. FA2 takes
-    # head_dim 256 with a softcap and a window, where SDPA would drop the softcap, so the dedicated kernel's
+    # FA2 takes head_dim 256 with a softcap and a window, where SDPA would drop the softcap, so the dedicated kernel's
     # refusal runs ahead of the deterministic-backward fallback, which would hand such a model SDPA.
     runs_fa4 = attn_implementation == "flash_attention_4" and declares_flash_attention(model_config)
     if runs_fa4 and (refused := fa4_dedicated_kernel_refusal(model_config)):

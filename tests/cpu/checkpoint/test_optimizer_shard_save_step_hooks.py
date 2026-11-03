@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Saving or restoring a stateless optimizer's shards runs no grad-sync step-pre-hook.
-
-The per-rank shard save reads the optimizer through ``get_optimizer_state_dict``, and the restore writes it through
-``set_optimizer_state_dict``; both first take a zero-LR step on an optimizer holding no state, and plain SGD holds
-none at every save. The trainer backs its post-backward sweeps with step-pre-hooks. A hook that ran on that step
-would sweep and claim the step just finished, the one the next step's clip sweeps: the deferred EP sweep then
-raises "ran twice", and the TP and QLoRA sweeps skip that step. The trainer here runs the mixin's
-``_save_checkpoint`` and ``_load_optimizer_and_scheduler`` over the real shard store, with the deferred EP sweep's
-hook registered as ``create_optimizer`` registers it.
-
-    python tests/cpu/checkpoint/test_optimizer_shard_save_step_hooks.py
-"""
+"""Saving or restoring a stateless optimizer's shards runs no grad-sync step-pre-hook. Torch's zero-LR step on such
+an optimizer would sweep the finished step, and the deferred sweep raises "ran twice"."""
 
 import os
 from types import SimpleNamespace
@@ -30,9 +20,8 @@ SHARD_FILE = "optimizer_shard_00000.pt"
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
-    """The checkpointing mixin over HF's save order, training plain SGD (momentum 0, so no per-param state) with
-    the deferred EP sweep's backstop hook registered; the sweep records the step it ran at and claims it as the
-    real one does."""
+    """Plain SGD (momentum 0, so no per-param state); the sweep records the step it ran at and claims it as the real
+    one does."""
 
     def __init__(self, run_dir: str):
         self.run_dir = run_dir
@@ -60,8 +49,6 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
             raise RuntimeError(f"the deferred sweep ran twice at global_step={self.state.global_step}")
 
     def train_step(self) -> None:
-        """One optimizer step as the trainer takes it: the clip sweeps, the backstop hook finds the step swept,
-        and the step counter moves on."""
         for param in self.model.parameters():
             param.grad = torch.ones_like(param)
         self._sync_deferred_expert_grads()
@@ -79,7 +66,6 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
 
 
 def _trained_and_saved(run_dir: str) -> _Trainer:
-    """A trainer one step in, its checkpoint saved."""
     trainer = _Trainer(run_dir)
     assert trainer._deferred_ep_grad_sync_hook_registered, "premise: the sweep's backstop hook is registered"
     trainer.train_step()

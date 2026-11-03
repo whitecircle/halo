@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""The deferred remote-code patch fires on the module transformers loads, and says so when it can't.
-
-A ``trust_remote_code`` family's modeling module does not exist when Liger is applied, so its patch
-is armed on the shared ``get_class_in_module`` funnel hook and fires later
-(:func:`halo.model_loading.liger.applier.patch_remote_modules`). It is the ONLY path by which Ling/Ring get any fused kernel
-and the one Laguna's released repos load through. Three silent failure modes are worth pinning: the
-hook never firing, a revision that renamed one of the spec's classes being skipped without a word, and
-a native family's spec patching only the in-library module its hub code bypasses.
-
-The funnel is driven for real — a modeling file written to a temp dir, then loaded through
-transformers' own ``get_class_in_module`` — because a hand-called ``_fire`` would not prove the hook
-is installed where transformers looks.
-
-    pytest -m cpu tests/cpu/model_loading/test_liger_remote_modules.py
-"""
+"""The deferred remote-code patch fires on the module transformers loads, and warns when it can't. Through the real
+``get_class_in_module``, to prove the hook sits where transformers looks."""
 
 from __future__ import annotations
 
@@ -41,8 +28,7 @@ _MODULE_SOURCE = textwrap.dedent(
     """
 )
 
-# The classes Laguna's spec patches, as the released repos' own `modeling_laguna.py` declares them
-# (constructor signatures and the MLP's `act_fn` included); everything else in that file is omitted.
+# As the released repos' own `modeling_laguna.py` declares them; everything else in that file is omitted.
 _LAGUNA_HUB_MODULE_SOURCE = textwrap.dedent(
     """
     import torch
@@ -76,7 +62,7 @@ _LAGUNA_HUB_MODULE_SOURCE = textwrap.dedent(
 
 @pytest.fixture
 def armed():
-    """Restore the module-global arm list so a probe cannot leak into another test."""
+    """Restore the module-global arm list so a probe cannot leak."""
     original = list(applier._armed)
     yield applier._armed
     applier._armed.clear()
@@ -84,18 +70,14 @@ def armed():
 
 
 def _load_through_transformers(tmp_path: Path, class_name: str, suffix: str):
-    """Write a modeling file and load a class from it the way transformers loads remote code.
-
-    No import-path setup: ``get_class_in_module`` resolves the file by location, which is exactly
-    why the hook has to sit on that function rather than on an import.
-    """
+    """``get_class_in_module`` resolves the file by location, why the hook sits on that function rather than an
+    import."""
     module_file = tmp_path / f"modeling_probe_{suffix}.py"
     module_file.write_text(_MODULE_SOURCE, encoding="utf-8")
     return transformers.dynamic_module_utils.get_class_in_module(class_name, module_file)
 
 
 def test_the_patch_fires_when_transformers_loads_the_module(armed, tmp_path):
-    """The whole point: arming before the file exists still patches it once it is loaded."""
     seen = []
     applier.patch_remote_modules(("ProbeRemoteAlpha", "ProbeRemoteBeta"), seen.append)
     assert seen == [], "nothing is loaded yet, so nothing may have been patched"
@@ -108,10 +90,7 @@ def test_the_patch_fires_when_transformers_loads_the_module(armed, tmp_path):
 
 
 def test_a_renamed_class_warns_instead_of_skipping_silently(armed, tmp_path, caplog):
-    """A revision that renames one declared class must not leave the run quietly unfused.
-
-    The applier has already logged that it armed the patch, so silence here reads as success.
-    """
+    """The applier already logged that it armed the patch, so silence reads as success."""
     seen = []
     applier.patch_remote_modules(("ProbeRemoteAlpha", "ProbeRemoteGone"), seen.append)
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
@@ -124,11 +103,7 @@ def test_a_renamed_class_warns_instead_of_skipping_silently(armed, tmp_path, cap
 
 
 def test_an_unrelated_module_is_left_alone(armed, tmp_path, caplog):
-    """Anti-vacuity: sharing NONE of the declared names must be silent, not a warning.
-
-    Every remote class in the process funnels through this hook, so warning on modules that were
-    never a candidate would bury the real drift signal.
-    """
+    """Every remote class funnels through this hook, so warning here would bury the real drift signal."""
     seen = []
     applier.patch_remote_modules(("ProbeRemoteMissingOne", "ProbeRemoteMissingTwo"), seen.append)
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
@@ -138,7 +113,7 @@ def test_an_unrelated_module_is_left_alone(armed, tmp_path, caplog):
 
 
 def test_arming_twice_does_not_stack(armed, tmp_path):
-    """Liger is applied at model load and may be re-applied; the patch must run once per module."""
+    """Liger may be re-applied at model load."""
     seen = []
     for _ in range(3):
         applier.patch_remote_modules(("ProbeRemoteAlpha", "ProbeRemoteBeta"), seen.append)
@@ -147,12 +122,8 @@ def test_arming_twice_does_not_stack(armed, tmp_path):
 
 
 def test_lagunas_hub_modeling_code_takes_the_library_swaps(tmp_path):
-    """Laguna's released repos load their own modeling file under ``trust_remote_code``.
-
-    Its norm, MLP and head are the in-library classes verbatim, so the family spec has to reach both
-    modules: one naming only ``transformers.models.laguna`` logs every kernel as applied while the
-    classes the run actually builds stay eager. Subprocess: the applier swaps classes process-wide.
-    """
+    """A spec naming only ``transformers.models.laguna`` logs every kernel applied while the built classes stay eager.
+    Subprocess: the applier swaps classes process-wide."""
     module_file = tmp_path / "modeling_laguna.py"
     module_file.write_text(_LAGUNA_HUB_MODULE_SOURCE, encoding="utf-8")
     script = f"""
@@ -183,8 +154,8 @@ print("PROBLEMS:" + "|".join(problems))
 
 
 def test_a_remote_spec_identifies_its_module_by_every_class_it_patches():
-    """A module missing an identifying class is reported and left unpatched; one missing a class the
-    roles swap but the identifying set omits would fail its model load instead."""
+    """A module missing an identifying class is reported; one missing a class the roles swap would fail its model
+    load."""
     with pytest.raises(ValueError, match="without listing them in remote_classes"):
         LigerFamilySpec(
             model_types=("probe",),
@@ -198,16 +169,8 @@ def test_a_remote_spec_identifies_its_module_by_every_class_it_patches():
 
 @pytest.mark.parametrize("liger_first", [False, True])
 def test_the_hook_composes_with_the_remote_code_compat_shims(liger_first):
-    """Both register on ONE shared funnel wrapper, and every registrant runs whatever the order.
-
-    ``remote_code`` binds names a remote file uses without importing; dropping that callback
-    would turn a Ling forward into a ``NameError`` the moment Liger armed a patch, and conversely.
-    Two independent wrappers would nest, so a re-application stacks another — the funnel must be
-    wrapped exactly once and re-registering must not change it.
-
-    Subprocess per order: both registrars are process-global and guarded against re-installing, so a
-    second order cannot be exercised in a process that already ran the first.
-    """
+    """Dropping the ``remote_code`` callback is a ``NameError`` in a Ling forward once Liger arms a patch.
+    Subprocess per order: both registrars are process-global and one-shot."""
     script = f"""
 import transformers.dynamic_module_utils as dmu
 from halo.model_loading.liger.applier import _fire, patch_remote_modules

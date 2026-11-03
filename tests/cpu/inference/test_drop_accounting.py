@@ -1,17 +1,5 @@
 #!/usr/bin/env python
-"""Every dropped row must be counted, and an interrupted run must not exit 0.
-
-Each path below reports partial or failed work as clean work unless the accounting holds:
-
-* ``reward_model/score.py`` must count each per-row failure, or neither its own summary nor the
-  guard's tally can say how many rows the endpoint lost.
-* ``resumable_generation.run_async_cli``'s signal handler must not exit 0: a SIGTERM'd (or Ctrl-C'd) job then
-  reports success to whatever ran it and the next pipeline stage consumes a partial output dataset.
-* ``rejection_sampling.join_worker_queue`` must not race a queue drain against its worker —
-  reading the drain first drops the worker's exception whenever the two complete together.
-
-Run: pytest tests/cpu/inference/test_drop_accounting.py
-"""
+"""Every dropped row must be counted, and an interrupted run must not exit 0."""
 
 import argparse
 import asyncio
@@ -35,12 +23,7 @@ def _prompt_rows(count: int) -> list[dict]:
     return [{"id": i, "prompt": [{"role": "user", "content": f"q{i}"}]} for i in range(count)]
 
 
-# --- score: per-row failures reach the guard's tally ----------------------------------------------
-
-
 class _DeadClient:
-    """A client whose every generation call fails, as a dead endpoint or wrong model name does."""
-
     def __init__(self):
         async def _create(**_kwargs):
             raise RuntimeError("simulated endpoint failure")
@@ -49,8 +32,8 @@ class _DeadClient:
 
 
 def test_score_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path):
-    """A guard firing on "nothing produced" cannot say why; the failure count is what points at the
-    endpoint rather than at the input columns."""
+    """A guard firing on an empty result cannot say why; the failure count points at the endpoint and clears the
+    input columns."""
     prompts = tmp_path / "prompts.jsonl"
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
@@ -110,8 +93,7 @@ def _rm_args(**overrides):
 
 
 def test_generate_chat_message_reports_the_finish_reason():
-    """The reason is part of the contract: without it the scoring scripts cannot tell a finished
-    answer from a fragment cut at --max_tokens."""
+    """Without the reason the scoring scripts cannot tell a finished answer from a fragment cut at --max_tokens."""
     message, finish_reason = asyncio.run(
         reward_scoring.generate_chat_message(
             _TruncatingClient(), [{"role": "user", "content": "q"}], _rm_args(), {"type": "text"}
@@ -122,8 +104,7 @@ def test_generate_chat_message_reports_the_finish_reason():
 
 
 def test_generate_chat_message_names_a_reply_without_choices():
-    """An aggregator can answer 200 with no choices; that is a named per-row failure carrying the
-    reply's error body, never an ``IndexError`` from indexing the empty list."""
+    """An aggregator can answer 200 with no choices, which is a named per-row failure and never an ``IndexError``."""
 
     class _EmptyClient:
         def __init__(self):
@@ -141,8 +122,7 @@ def test_generate_chat_message_names_a_reply_without_choices():
 
 
 def test_score_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_path):
-    """A hypothesis cut at the token cap is a fragment; scoring it writes a reward for text the
-    policy never finished, so the row is dropped and named in the tally."""
+    """Scoring a fragment writes a reward for text the policy never finished."""
     prompts = tmp_path / "prompts.jsonl"
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
@@ -173,8 +153,7 @@ def test_score_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_path):
 
 
 def test_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
-    """Fewer than two usable hypotheses cannot form a preference pair, so the row never reaches the
-    scorer — counted, not silently queued with a fragment as the chosen or rejected side."""
+    """Fewer than two usable hypotheses cannot form a preference pair, so the row never reaches the scorer."""
     stats = {"failed": 0, "truncated": 0, "skipped_truncated": 0}
     queue = asyncio.Queue()
     row = pd.Series({"id": 7, "prompt": [{"role": "user", "content": "q"}]})
@@ -196,13 +175,9 @@ def test_score_output_path_helper_is_the_one_under_test(tmp_path):
     assert reward_scoring.build_output_path(str(tmp_path), "p.jsonl", "m", "reward_scoring").parent == tmp_path
 
 
-# --- run_async_cli: an interrupted run is not a successful one ------------------------------------
-
-
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_an_interrupt_exits_with_the_shell_convention_for_a_signalled_process(signum):
-    """128 + signo, not 0: a wrapper script, a CI step or a ``&&`` chain reads 0 as "the dataset is
-    complete" and proceeds to consume a partially written output."""
+    """A wrapper, a CI step or a ``&&`` chain reads 0 as a complete dataset and consumes a partial output."""
     with pytest.raises(SystemExit) as excinfo:
         resumable_generation._signal_handler(signum, None)
 
@@ -217,17 +192,10 @@ def test_the_saved_progress_hint_survives(caplog):
     assert any("resume by re-running" in message for message in caplog.messages), caplog.messages
 
 
-# --- rejection_sample: a dying worker is never mistaken for a drained queue -----------------------
-
-
 def test_a_worker_that_dies_on_the_last_item_still_surfaces_its_exception():
-    """``task_done`` runs in the worker's ``finally``, so a worker raising on the FINAL item drains
-    the queue on its way out and BOTH tasks land in ``done`` together.
-
-    Reading the drain first there returns cleanly and discards the worker's exception — the CLI then
-    reports a successful run over an output file that stops at the row the write failed on, which is
-    the exact silent-truncation this join exists to prevent.
-    """
+    """``task_done`` runs in the worker's ``finally``, so a worker raising on the final item drains the queue on its
+    way out and both tasks land in ``done`` together. Reading the drain first would discard the exception and
+    report success over a truncated output."""
 
     async def scenario():
         queue = asyncio.Queue()
@@ -251,8 +219,7 @@ def test_a_worker_that_dies_on_the_last_item_still_surfaces_its_exception():
 
 
 def test_a_drained_queue_with_a_live_worker_returns():
-    """Anti-over-rejection: the ordinary end of a run must still return rather than hang on the
-    worker, which loops forever waiting for items that will never come."""
+    """The ordinary end of a run must return and not hang on a worker that loops forever waiting for items."""
 
     async def scenario():
         queue = asyncio.Queue()
@@ -272,12 +239,8 @@ def test_a_drained_queue_with_a_live_worker_returns():
 
 
 def test_the_fixture_rows_carry_the_fields_the_cli_actually_reads():
-    """Guards the drivers above, which key their rows by hand.
-
-    A rename of the CLI's id or prompt field would leave every driver feeding rows the real code
-    path skips, so the accounting assertions would read their expected counts off a run that scored
-    nothing. Taken from the shared parser's own defaults, not from a literal repeated here.
-    """
+    """A renamed id or prompt field would leave every driver feeding rows the real code path skips, so the
+    accounting would read counts off a run that scored nothing."""
     parser = argparse.ArgumentParser()
     inference_arguments.add_s3_dataset_args(parser)
     defaults = parser.parse_args(["--dataset", "in", "--output_path", "out"])

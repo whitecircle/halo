@@ -1,6 +1,5 @@
-"""What a scorer reads of a finished episode (:class:`ScoringSample`), and the text a judge reads of each view of
-it — the final answer, the full transcript or a digest: numbered turns, the reasoning set apart, every tool call with
-its arguments and every result under its call, cut and wasted turns marked as such, and no prompt tag spelled."""
+"""What a scorer reads of a finished episode (:class:`ScoringSample`), and the text a judge reads of each view of it:
+the final answer, the full transcript or a digest."""
 
 import contextlib
 import json
@@ -12,42 +11,35 @@ from typing import Any
 from halo.inference.response import get_reasoning_text
 from halo.rewards.terms import View
 
-# Each part of a judge's prompt goes between tags of its own, the view last, and a view sets a turn's reasoning apart
-# in a block of its own: a task's markdown headings and a program's comments would read as the prompt's own sections
-# under markdown ones. Text the prompt quotes spells none of these tags (:func:`escape_tags`).
+# Each part of a judge's prompt goes between its own tags: a task's markdown headings and a program's comments would
+# read as the prompt's own sections under markdown ones. Quoted text spells none of these tags (:func:`escape_tags`).
 VIEW_TAGS = {View.FINAL: "final_answer", View.FULL: "transcript", View.DIGEST: "transcript_digest"}
 _PART_TAGS = ("setting", "policy_instructions", "task", "policy_tools", "reference_answer", *VIEW_TAGS.values())
 _REASONING_TAG = "reasoning"
-# The ``<`` that opens or closes one of them, in any case and with any attributes: a judge reads each as the tag.
+# The ``<`` that opens or closes one of them, in any case and with any attributes.
 _PROMPT_TAG = re.compile(rf"<(?=/?(?:{'|'.join((*_PART_TAGS, _REASONING_TAG))})\b)", re.IGNORECASE)
 
-# The turn flags an environment stamps on a sample message, each with the note a judge reads for it.
+# Turn flags an environment stamps on a sample message, with the note a judge reads for each.
 TURN_FLAG_NOTES = {
     "reasoning_capped": "its reasoning ran to the turn's cap and the engine closed it, so what follows was written past it",
     "truncated": "cut by the engine at its length limit",
     "empty": "ended with neither visible text nor a tool call",
     "calls_rejected": "every tool call named a tool that does not exist or was refused unrun",
 }
-# The sample-message key an environment puts the calls of a turn the engine cut while writing them under, and
-# the note each renders with. They never ran, so they stay apart from ``tool_calls``, which the chat wire reads.
+# Calls of a turn the engine cut while writing them; they never ran, so they stay apart from ``tool_calls``.
 CUT_TOOL_CALLS_KEY = "cut_tool_calls"
 CUT_CALL_NOTE = "cut by the engine before the turn closed; never run"
-# The sample-message key an environment lists the ids of a turn's calls it refused unrun under, and the note each
-# such call renders with, so a judge reads a refused call as never run (it spent nothing) though the policy wrote it.
+# Ids of a turn's calls refused unrun, so a judge reads each as never run though the policy wrote it.
 REFUSED_CALL_IDS_KEY = "refused_call_ids"
 REFUSED_CALL_NOTE = "refused unrun; never run"
-# The keys of a message as the chat wire spells it; a sample message's other keys (the reasoning under
-# either engine's spelling, the turn flags, a cut turn's calls) are the sample's own.
+# A message's keys on the chat wire; any other sample-message key is the sample's own.
 WIRE_KEYS = ("role", "content", "name", "tool_calls", "tool_call_id")
 
-# How a cut text marks what it dropped: the head and the tail stay, so the answer or submission at
-# the end of a long transcript is never what the cut removes.
+# Head and tail stay, so the answer or submission at the end of a long transcript is never what the cut removes.
 CUT_MARKER = "\n…[{dropped} chars cut here]…\n"
-# The share of a cut text kept before the marker; the rest of the budget keeps the end.
 _CUT_HEAD_SHARE = 2 / 3
 
-# The digest's per-item budgets, enough to see what each turn did, not what it said at length: one for a
-# turn's reasoning, text and tool result, a shorter one for a tool call's arguments.
+# Digest per-item budgets: one for a turn's reasoning, text and tool result, a shorter one for a call's arguments.
 DIGEST_CHARS = 400
 DIGEST_INLINE_CHARS = 160
 
@@ -58,10 +50,8 @@ _SampleMessage = dict[str, Any]
 
 @dataclass(frozen=True)
 class ScoringSample:
-    """One completion to score: the ``prompt`` the policy was given, its ``completion`` turns after it, the
-    ``final_answer`` the episode delivered (``None`` without one), the row's ``reference``, the ``tools`` the policy
-    could call, and the episode ``facts`` the environment establishes, which a judge check stands exempt under.
-    """
+    """One completion to score. ``final_answer`` is ``None`` when the episode delivered none; ``facts`` are what the
+    environment establishes, which a judge check stands exempt under."""
 
     prompt: list[_SampleMessage]
     completion: list[_SampleMessage]
@@ -72,7 +62,7 @@ class ScoringSample:
 
 
 def _text(content: Any) -> str:
-    """Message content as text: a string as is, a content-part list by its text parts, else its JSON."""
+    """A string as is, a content-part list by its text parts, else its JSON."""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -84,7 +74,6 @@ def _text(content: Any) -> str:
 
 
 def final_assistant_text(messages: Sequence[_SampleMessage]) -> str:
-    """The visible text of the last assistant message, or ``""`` when there is none."""
     for message in reversed(messages):
         if message.get("role") == "assistant":
             return _text(message.get("content"))
@@ -92,20 +81,16 @@ def final_assistant_text(messages: Sequence[_SampleMessage]) -> str:
 
 
 def task_text(prompt: Sequence[_SampleMessage]) -> str:
-    """The user turns of the prompt, the task as the policy read it, without the system prompt."""
     return "\n\n".join(_text(message.get("content")) for message in prompt if message.get("role") == "user")
 
 
 def system_text(prompt: Sequence[_SampleMessage]) -> str:
-    """The system turns of the prompt, the instructions the policy was given."""
     return "\n\n".join(_text(message.get("content")) for message in prompt if message.get("role") == "system")
 
 
 def scored_messages(sample: ScoringSample, view: View) -> list[_SampleMessage]:
-    """The conversation a scorer reads as messages: the prompt plus the whole completion (``full``) or
-    plus one assistant message holding the final answer (``final``; empty when the episode delivered
-    none, never a fragment), as the chat wire spells them — the sample-only keys (turn flags, a cut turn's
-    calls, reasoning) dropped."""
+    """The prompt plus the whole completion (``full``) or one assistant message holding the final answer (``final``;
+    empty when the episode delivered none, never a fragment), with only the chat wire's keys."""
     if view is View.FULL:
         messages = [*sample.prompt, *sample.completion]
     else:
@@ -119,8 +104,7 @@ def scored_messages(sample: ScoringSample, view: View) -> list[_SampleMessage]:
 
 
 def view_text(sample: ScoringSample, view: View, *, include_reasoning: bool, max_chars: int) -> str:
-    """The text of one view of the sample, what it quotes escaped (:func:`escape_tags`), cut to ``max_chars`` with
-    its end kept (:func:`cut_middle`)."""
+    """What it quotes is escaped (:func:`escape_tags`); cut to ``max_chars`` with its end kept."""
     if view is View.FINAL:
         text = render_final_answer(sample)
     elif view is View.FULL:
@@ -133,8 +117,6 @@ def view_text(sample: ScoringSample, view: View, *, include_reasoning: bool, max
 
 
 def shows_reasoning(sample: ScoringSample, view: View, *, include_reasoning: bool) -> bool:
-    """Whether :func:`view_text` shows any of the sample's reasoning: a ``full`` or ``digest`` view shows each turn's
-    with ``include_reasoning`` on, a ``final`` view never does."""
     return include_reasoning and view is not View.FINAL and any(map(get_reasoning_text, sample.completion))
 
 
@@ -143,13 +125,12 @@ def _head(text: str, max_chars: int) -> str:
 
 
 def _argument_text(value: Any, max_chars: int | None) -> str:
-    """An argument as the policy wrote it (a non-string as JSON), cut to its head past ``max_chars``."""
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     return text if max_chars is None else _head(text, max_chars)
 
 
 def _call_arguments(call: Any) -> Any:
-    """A tool call's arguments, a JSON string decoded (an empty one as ``{}``); text that does not parse stays text."""
+    """A JSON string decoded (an empty one as ``{}``); text that does not parse stays text."""
     function = call.get("function", call) if isinstance(call, Mapping) else {}
     arguments = function.get("arguments", "")
     if isinstance(arguments, str):
@@ -159,8 +140,7 @@ def _call_arguments(call: Any) -> Any:
 
 
 def _acted_text(message: _SampleMessage, *, digest: bool) -> str:
-    """One message's share of :func:`render_actions`: an assistant turn's visible text and its calls' arguments, a
-    tool result; a user turn (an environment's nudge) has none."""
+    """An assistant turn's visible text and its calls' arguments, or a tool result; a user turn (a nudge) has none."""
     role = message.get("role")
     content = _text(message.get("content"))
     if role == "tool":
@@ -176,10 +156,8 @@ def _acted_text(message: _SampleMessage, *, digest: bool) -> str:
 
 
 def render_actions(sample: ScoringSample, view: View, *, max_chars: int) -> str:
-    """What the policy wrote as its actions and the tool results it received, as ``view`` shows them (every argument of
-    every call, a cut call's included), without its reasoning or the environment's notes, so a quote of either is never
-    taken for an action; under ``final``, the answer or the last assistant text. Cut to ``max_chars`` like the view.
-    """
+    """The policy's actions and the tool results it received, without its reasoning or the environment's notes, so a
+    quote of either is never taken for an action. Under ``final``, the answer or the last assistant text."""
     if view is View.FINAL:
         text = sample.final_answer if sample.final_answer is not None else final_assistant_text(sample.completion)
     elif view in (View.FULL, View.DIGEST):
@@ -194,9 +172,8 @@ def render_actions(sample: ScoringSample, view: View, *, max_chars: int) -> str:
 
 
 def render_final_answer(sample: ScoringSample) -> str:
-    """The episode's final answer, or a note that there is none with the last assistant text after it,
-    so a judge reads a fragment or a tool-call turn as what it is, never as the answer; either escaped
-    (:func:`escape_tags`)."""
+    """The final answer, or a note that there is none with the last assistant text after it, so a judge reads a
+    fragment or a tool-call turn as what it is."""
     if sample.final_answer is not None:
         return escape_tags(sample.final_answer)
     last = escape_tags(final_assistant_text(sample.completion))
@@ -204,8 +181,6 @@ def render_final_answer(sample: ScoringSample) -> str:
 
 
 def render_tools(tools: Sequence[dict[str, Any]]) -> str:
-    """Each tool as the policy read it: its name and parameters, its description, then each described
-    parameter's description on its own line."""
     blocks = []
     for tool in tools:
         function = tool.get("function", tool) if isinstance(tool, Mapping) else {}
@@ -227,8 +202,7 @@ def _call_id(call: Any) -> str | None:
 
 
 def _render_call(call: Any, argument_chars: int | None, *, note: str | None = None) -> str:
-    """``→ name`` with the call id and ``note`` beside it, then every argument cut to its head past
-    ``argument_chars`` (``None`` keeps each whole)."""
+    """``→ name`` with the call id and ``note``, then every argument; ``argument_chars=None`` keeps each whole."""
     function = call.get("function", call) if isinstance(call, Mapping) else {}
     call_id = _call_id(call)
     tags = "; ".join(tag for tag in (f"call {call_id}" if call_id else None, note) if tag)
@@ -238,8 +212,8 @@ def _render_call(call: Any, argument_chars: int | None, *, note: str | None = No
         return f"{head}: {_argument_text(arguments, argument_chars)}"
     if not arguments:
         return head
-    # Every argument verbatim, a multi-line one on its own lines: a quote from a program the policy
-    # submitted must match the text as the policy wrote it, not a JSON-escaped copy.
+    # Verbatim, a multi-line argument on its own lines: a quote from a program the policy submitted must match the text
+    # as written, not a JSON-escaped copy.
     lines = [head]
     for key, value in arguments.items():
         text = _argument_text(value, argument_chars)
@@ -248,7 +222,6 @@ def _render_call(call: Any, argument_chars: int | None, *, note: str | None = No
 
 
 def _reasoning(message: _SampleMessage) -> str:
-    """A turn's reasoning as a view quotes it (:func:`escape_tags`), ``""`` when it has none."""
     return escape_tags(get_reasoning_text(message) or "")
 
 
@@ -292,8 +265,7 @@ def _render_turn(
 
 
 def _even_shares(lengths: Sequence[int], budget: int) -> list[int]:
-    """``budget`` split over items of ``lengths``: each gets all of itself or an even share of what the shorter
-    ones leave, whichever is less."""
+    """Each item gets all of itself or an even share of what the shorter ones leave, whichever is less."""
     shares = [0] * len(lengths)
     left = budget
     order = sorted(range(len(lengths)), key=lengths.__getitem__)
@@ -306,11 +278,8 @@ def _even_shares(lengths: Sequence[int], budget: int) -> list[int]:
 def render_transcript(
     messages: Sequence[_SampleMessage], *, include_reasoning: bool, max_chars: int | None = None
 ) -> str:
-    """Every turn whole: numbered, the reasoning set apart, each tool call with its arguments (a cut
-    turn's after them, marked :data:`CUT_CALL_NOTE`), each tool result under its name and call id.
-
-    Past ``max_chars`` the reasoning gives way first: every turn's is cut to its head and tail (:func:`cut_middle`)
-    within an even share of what the rest of the transcript leaves, so no action is cut to make room for a thought."""
+    """Every turn whole. Past ``max_chars`` the reasoning gives way first: every turn's is cut to its head and tail
+    within an even share of what the rest leaves, so no action is cut to make room for a thought."""
     turns = [_render_turn(i, m, include_reasoning, digest=False) for i, m in enumerate(messages, 1)]
     text = "\n\n".join(turns)
     if not include_reasoning or max_chars is None or len(text) <= max_chars:
@@ -326,17 +295,15 @@ def render_transcript(
 
 
 def render_digest(sample: ScoringSample, *, include_reasoning: bool) -> str:
-    """Every turn compactly — the head of each reasoning and text, each tool call with its arguments cut
-    to their heads (verbatim, so a quote from a program matches), the head and tail of each result —
-    then the final answer whole, the artifact an audit reads."""
+    """Every turn compactly, call arguments cut verbatim so a quote from a program matches, then the final answer
+    whole, the artifact an audit reads."""
     turns = [_render_turn(i, m, include_reasoning, digest=True) for i, m in enumerate(sample.completion, 1)]
     final = escape_tags(sample.final_answer) if sample.final_answer is not None else NO_FINAL_ANSWER
     return "\n\n".join([*turns, f"Final answer:\n{final}"])
 
 
 def cut_middle(text: str, max_chars: int) -> str:
-    """``text`` cut to about ``max_chars`` with its head and its tail kept and the cut marked
-    (:data:`CUT_MARKER`), so a reader sees how the text began and how it ended."""
+    """Head and tail kept and the cut marked, so a reader sees how the text began and how it ended."""
     if len(text) <= max_chars:
         return text
     head = int(max_chars * _CUT_HEAD_SHARE)
@@ -345,8 +312,8 @@ def cut_middle(text: str, max_chars: int) -> str:
 
 
 def escape_tags(text: str) -> str:
-    """``text`` with the ``<`` of every prompt tag it spells (:data:`_PART_TAGS`, :data:`_REASONING_TAG`, in any case)
-    written ``&lt;``: a judge still reads it, but it neither opens nor closes a part or a reasoning block."""
+    """The ``<`` of every prompt tag it spells becomes ``&lt;``: a judge still reads it, but it neither opens nor
+    closes a part or a reasoning block."""
     return _PROMPT_TAG.sub("&lt;", text)
 
 
@@ -359,9 +326,8 @@ def _as_messages(value: Any, role: str) -> list[_SampleMessage]:
 def samples_from_completions(
     prompts: Sequence[Any], completions: Sequence[Any], references: Sequence[Any] | None = None
 ) -> list[ScoringSample]:
-    """Samples from TRL's shapes: each prompt or completion is a message list (conversational) or a
-    plain string, which becomes one user or assistant message; the final answer is the last
-    assistant text."""
+    """Each prompt or completion is a message list (conversational) or a plain string, which becomes one user or
+    assistant message."""
     if references is None:
         references = [None] * len(prompts)
     samples = []

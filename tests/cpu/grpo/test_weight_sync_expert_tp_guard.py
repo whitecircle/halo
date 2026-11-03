@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""The expert gather's merge_lora refusal must reject a real FOLD under expert TP, not the request.
-
-``_send_ep_expert_weights`` asks every EP layer to gather with ``merge_lora=True`` unconditionally —
-it cannot know which layers carry native grouped adapters, and the gather no-ops the fold on an
-adapter-less weight. A guard keyed on the flag alone therefore rejects every
-vLLM-syncing GRPO run at ``expert_tp_size > 1``, including a plain full fine-tune with no PEFT
-anywhere. The predicate is :attr:`EPMoELayerBase.has_expert_lora` — what ``_init_expert_lora`` built.
-
-All three cells are pinned, because a "fix" that deleted the guard would satisfy only the first:
-
-* no adapters + ``expert_tp_size > 1`` → the sync completes and forwards reassembled expert tensors;
-* real adapters + ``expert_tp_size > 1`` → ``NotImplementedError``. Defense in depth: ``EPConfig``
-  already refuses this pairing at construction, so a production run cannot reach it — but the
-  sharded layout has no fold seam, and a gather that folded nothing would ship the FROZEN base
-  experts to vLLM and run the generator off-policy with no error;
-* real adapters + ``expert_tp_size == 1`` → the fold still happens (value-checked), so the guard
-  cannot be neutered into suppressing the merge everywhere.
-
-Run: ``python tests/cpu/grpo/test_weight_sync_expert_tp_guard.py`` (or ``pytest -m cpu``).
-"""
+"""The expert gather's merge_lora refusal must reject a real fold under expert TP. ``_send_ep_expert_weights`` asks
+every layer for ``merge_lora=True``, so a guard on the flag alone rejects every sync at ``expert_tp_size > 1``."""
 
 from __future__ import annotations
 
@@ -42,15 +24,8 @@ LORA_R, LORA_ALPHA = 8, 16
 
 
 class _EPLayerStub(EPMoELayerBase):
-    """An EP MoE layer running the REAL base gather (and therefore the real guard) on one CPU process.
-
-    Stores the same two layouts the production sharding produces — fused ``gate_up_proj`` at
-    ``expert_tp_size == 1``, split ``gate_proj``/``up_proj``/``down_proj`` under expert TP — and builds
-    its adapters through the production ``_init_expert_lora``. Two things are stubbed, neither on the
-    path under test: ``all_gather_cat`` (pure transport, by the autouse fixture) and the gather's
-    destination device (the sync hardcodes ``"cuda"``, which no CPU tier has). The guard, the fold and
-    the layout math stay real.
-    """
+    """An EP MoE layer running the real base gather and guard on one CPU process. Stubbed, off the path under test:
+    ``all_gather_cat`` (pure transport) and the gather's destination device (the sync hardcodes ``"cuda"``)."""
 
     FAMILY = MoEFamilySpec(model_types=())
 
@@ -85,14 +60,12 @@ class _EPLayerStub(EPMoELayerBase):
         return hidden_states
 
     def gather_expert_state_dict(self, *, device="cpu", merge_lora: bool = False, retain: bool = True) -> dict:
-        """The real gather, pinned to CPU — the sync asks for ``"cuda"``."""
+        """The real gather, pinned to CPU."""
         return super().gather_expert_state_dict(device="cpu", merge_lora=merge_lora, retain=retain)
 
 
 @pytest.fixture(autouse=True)
 def single_process_all_gather(monkeypatch):
-    """Single-process stand-in for the EP / expert-TP all-gather: same shapes, no transport."""
-
     def all_gather_cat(tensor, dim, group, world_size):
         return tensor if world_size <= 1 else torch.cat([tensor] * world_size, dim=dim)
 
@@ -129,7 +102,6 @@ def _sync(layer: nn.Module) -> _RecordingSender:
 
 
 def test_full_finetune_syncs_under_expert_tp():
-    """No PEFT anywhere + expert_tp_size > 1 must reach vLLM, not raise at the first sync."""
     layer = _EPLayerStub(expert_tp_size=2, expert_lora=False)
     assert not layer.has_expert_lora
 
@@ -138,7 +110,7 @@ def test_full_finetune_syncs_under_expert_tp():
     assert f"{LAYER_PATH}.experts.gate_up_proj" in sender.sent, "expert weights never reached the client"
     assert f"{LAYER_PATH}.experts.down_proj" in sender.sent
 
-    # Values, not just shapes: a swapped [up; gate] order or a shipped local slice keeps the shape.
+    # Values too: a swapped [up; gate] order or a shipped local slice keeps the shape.
     tp = layer.expert_tp_size
     expected_gate_up = torch.cat([layer.gate_proj.detach()] * tp + [layer.up_proj.detach()] * tp, dim=2)
     expected_down = torch.cat([layer.down_proj.detach()] * tp, dim=1)
@@ -150,12 +122,8 @@ def test_full_finetune_syncs_under_expert_tp():
 
 
 def test_expert_lora_under_expert_tp_still_raises():
-    """Anti-over-rejection control: with adapters actually present the fold IS ambiguous under expert
-    TP, so the sync must still fail loud rather than serve the frozen base experts.
-
-    Through the sync's rank-uniform verdict, which is what the retaining gather runs under: the
-    refusal reaches every rank with its original type and text carried in the message.
-    """
+    """With adapters the fold is ambiguous under expert TP, so the sync must fail loud instead of serving frozen base
+    experts, on every rank through its rank-uniform verdict, the original type and text carried in the message."""
     layer = _EPLayerStub(expert_tp_size=2, expert_lora=True)
     assert layer.has_expert_lora, "the stub built no adapters — the test would be vacuous"
 
@@ -186,10 +154,9 @@ def test_expert_lora_without_expert_tp_still_folds():
 @pytest.mark.parametrize("expert_tp_size", [1, 2])
 @pytest.mark.parametrize("expert_lora", [False, True])
 def test_guard_raises_only_on_a_real_fold_under_expert_tp(expert_tp_size, expert_lora):
-    """The guard's predicate, through the gather: merge_lora alone is not enough — an adapter must exist."""
     layer = _EPLayerStub(expert_tp_size=expert_tp_size, expert_lora=expert_lora)
 
-    layer.gather_expert_state_dict(merge_lora=False)  # never raises without a fold request
+    layer.gather_expert_state_dict(merge_lora=False)
     if expert_lora and expert_tp_size > 1:
         with pytest.raises(NotImplementedError):
             layer.gather_expert_state_dict(merge_lora=True)

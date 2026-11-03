@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""The vLLM weight sync must forward the HUB key spelling, exactly like a gathered checkpoint.
-
-vLLM loads by hub name and **silently skips** an unknown one, so a family whose live module tree is
-spelled differently from its hub checkpoint (Laguna: ``mlp.gate.e_score_correction_bias`` and
-``mlp.shared_experts.*``) loses precisely those tensors from every sync — the served policy keeps its
-initial router correction bias and shared expert while the trainer moves on, with no error anywhere.
-
-``gather_layer_state_dict`` already applies the family's ``export_key_renames``; the sync path builds
-its keys itself, so the pin here is EQUIVALENCE — the sync's key set must equal what a gathered
-checkpoint of the same module would contain (plus the non-EP params, which no rename touches). That is
-what keeps the two paths from drifting.
-
-Run: ``python tests/cpu/grpo/test_weight_sync_hub_key_names.py`` (or ``pytest -m cpu``).
-"""
+"""The vLLM weight sync must forward the hub key spelling, as a gathered checkpoint does. vLLM silently skips an
+unknown name, so a renamed family (Laguna) would lose those tensors from every sync with no error."""
 
 from __future__ import annotations
 
@@ -30,14 +18,8 @@ NUM_EXPERTS, HIDDEN, INTERMEDIATE = 2, 6, 4
 
 
 class _LagunaEPLayerStub(EPMoELayerBase):
-    """A gatherable stand-in for the EP-wrapped Laguna MoE block.
-
-    Built on the base (``EPLagunaMoELayer.__init__`` needs live EP process groups) but carrying the
-    family's own rename declaration and the module names the real wrapper holds: the router at
-    ``gate`` with a frozen ``e_score_correction_bias`` Parameter, and the shared expert at
-    ``shared_experts``. ``gather_expert_state_dict`` ignores the requested device — this CPU test
-    asserts key spelling, and the real per-family gathers are covered by the checkpoint tests.
-    """
+    """A gatherable stand-in for the EP-wrapped Laguna block, built on the base (``EPLagunaMoELayer.__init__`` needs
+    live EP process groups). ``gather_expert_state_dict`` ignores the device, since this test asserts key spelling."""
 
     FAMILY = MoEFamilySpec(model_types=(), export_key_renames=EPLagunaMoELayer.FAMILY.export_key_renames)
 
@@ -84,8 +66,6 @@ class _Model(nn.Module):
 
 
 class _RecordingSender:
-    """Records what the sync forwards (the real client buffers by name for a later broadcast)."""
-
     def __init__(self):
         self.sent: dict[str, torch.Tensor] = {}
 
@@ -105,7 +85,6 @@ def _sync(layer: nn.Module) -> tuple[_RecordingSender, _Model]:
 
 
 def test_sync_keys_equal_the_gathered_checkpoint_keys():
-    """The equivalence pin: what vLLM receives is what a gathered checkpoint would carry."""
     layer = _LagunaEPLayerStub()
     sender, _model = _sync(layer)
 
@@ -118,7 +97,7 @@ def test_sync_keys_equal_the_gathered_checkpoint_keys():
 
 
 def test_renamed_modules_are_forwarded_under_the_hub_spelling():
-    """The two Laguna renames, named explicitly: these are the tensors vLLM drops under the module spelling."""
+    """vLLM drops these tensors under the module spelling."""
     sender, _model = _sync(_LagunaEPLayerStub())
 
     assert f"{LAYER_PATH}.experts.e_score_correction_bias" in sender.sent
@@ -143,7 +122,6 @@ def test_renaming_moves_the_key_not_the_payload():
 
 
 def test_a_family_without_renames_is_untouched():
-    """Anti-over-rejection: every other family forwards the gathered checkpoint's names unrenamed."""
     layer = _PlainEPLayerStub()
     sender, _model = _sync(layer)
 
@@ -153,7 +131,6 @@ def test_a_family_without_renames_is_untouched():
 
 
 def test_dense_only_model_forwards_live_names():
-    """A model with no EP layer at all is unaffected by the rewrite."""
     model = _Model(nn.Linear(HIDDEN, HIDDEN, bias=False))
     sender = _RecordingSender()
     gather_and_send_weights(model, sender)

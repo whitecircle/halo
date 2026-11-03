@@ -1,8 +1,5 @@
-"""Stage-aware loads for pipeline parallelism: every rank plans the whole checkpoint against a meta shell of
-the full model, keeps only its stage's decoder layers re-based to 0, and streams exactly those tensors, so the
-load ceiling falls with ``pp_size``. Embeddings, the final norm and the head load on every stage and are
-dropped at the stage build: O(vocab x hidden) once, while the layers scale with depth.
-"""
+"""Stage-aware loads for pipeline parallelism: every rank plans the whole checkpoint against a full meta shell, keeps
+only its stage's layers re-based to 0, and streams those tensors, so the load ceiling falls with ``pp_size``."""
 
 from __future__ import annotations
 
@@ -60,7 +57,6 @@ class StageKeyFilter:
         self.layer_root = layer_root
 
     def owns(self, model_key: str) -> bool:
-        """Whether this stage loads ``model_key``."""
         parts = split_layer_path(model_key, self.layer_root)
         return parts is None or self.lo <= parts[0] < self.hi
 
@@ -73,7 +69,6 @@ class StageKeyFilter:
         return rebase_layer_index(stage_key, self.layer_root, self.layer_root, self.lo) or stage_key
 
     def filter(self, plans: list[WeightPlan]) -> list[WeightPlan]:
-        """This stage's plans, with their model keys re-based."""
         return [replace(plan, model_key=self.stage_key(plan.model_key)) for plan in plans if self.owns(plan.model_key)]
 
 
@@ -112,10 +107,8 @@ def _split_missing_shard_plans(
     model_path: str,
     pp_rank: int,
 ) -> tuple[list[WeightPlan], list[str], str | None]:
-    """``(loadable_plans, dropped_keys, reason)``: the plans whose shard files this filesystem lacks dropped
-    when they are all under the ``droppable`` module paths the stage build drops (a per-node pipeline save),
-    else the stage-local ``reason`` the caller joins across ranks.
-    """
+    """``(loadable_plans, dropped_keys, reason)``: plans on absent shards drop when all sit under the ``droppable``
+    paths the stage build drops (a per-node pipeline save), else the stage-local ``reason`` the caller joins."""
     if not missing_files:
         return plans, [], None
     missing = set(missing_files)
@@ -178,9 +171,7 @@ def _unresolved_plans_reason(model: nn.Module, plans: list[WeightPlan], pp_rank:
 
 
 def _unmaterialized_reason(model: nn.Module, model_path: str, pp_rank: int, lo: int, hi: int) -> str | None:
-    """Why a tensor of the stage's ``state_dict`` (what a checkpoint carries) is still on meta, or ``None``:
-    the checkpoint lacks it or the re-base dropped its plan, which identical layer shapes would hide until
-    the first forward."""
+    """Why a stage ``state_dict`` tensor is still on meta, or ``None``; equal layer shapes hide it until forward."""
     stranded = sorted(name for name, tensor in model.state_dict().items() if tensor is not None and tensor.is_meta)
     if not stranded:
         return None
@@ -199,9 +190,8 @@ def _plan_stage(
     pp_split: list[int] | None,
     fuser: ExpertFuser | None,
 ) -> tuple[list[WeightPlan], list[str], list[FusionTask], list[tuple[int, int]], StageKeyFilter]:
-    """COLLECTIVE: this stage's plans in its own numbering, the cross-stage keys it drops, its fusion tasks,
-    the partition and the stage's key filter; slices the shell to the stage. Every stage-local verdict is joined
-    across ranks on the meta shell, before any rank pays for a weight."""
+    """COLLECTIVE: this stage's plans, dropped keys, fusion tasks, partition and key filter; slices the shell.
+    Stage-local verdicts are joined on the meta shell, before any rank pays for a weight."""
     model, missing_files = base.model, base.missing_shard_files
     if missing_files:
         logger.info(
@@ -259,9 +249,8 @@ def _load_stage_lazy(
     preserve_checkpoint_precision: bool = False,
     **model_kwargs,
 ) -> nn.Module:
-    """COLLECTIVE: a ``*ForCausalLM`` holding only this stage's layers re-based to 0, streamed from ``model_path``,
-    its partition on ``PP_STAGE_PARTITION_ATTR``. fp32 masters are read or fused at fp32, the EP layers' only read
-    (the PP resume reload skips them); ``preserve_checkpoint_precision`` requires every one restored."""
+    """COLLECTIVE: a ``*ForCausalLM`` holding only this stage's layers re-based to 0, its partition on
+    ``PP_STAGE_PARTITION_ATTR``; ``preserve_checkpoint_precision`` requires every fp32 master restored."""
     rank = get_global_rank()
     base = lazy_load_prologue(
         model_path,
@@ -301,9 +290,8 @@ def _load_stage_lazy(
             f"{len({plan.shard_file for plan in live})}/{len(base.shard_files)} shards"
         )
 
-    # Stage-dependent raises (a shape mismatch or a missing expert in one stage's layers) defer to the fence
-    # instead of stranding the other stages. The masters are captured after the slice, in the stage's own
-    # numbering, as the plans now are.
+    # Stage-dependent raises defer to the fence instead of stranding the other stages. Masters are captured after the
+    # slice, in the stage's own numbering, as the plans now are.
     weights_already_sharded = load_planned_weights(
         base,
         plans,
@@ -320,8 +308,7 @@ def _load_stage_lazy(
     )
 
     if ep_config is not None:
-        # The EP layers run over this stage's layers alone, so any failure is stage-local and reaches the peers
-        # through the join. ``weights_already_sharded`` is derived, never asserted, as in load_ep_model_lazy.
+        # Any failure is stage-local and reaches the peers through the join.
         reason = None
         try:
             apply_ep_layers(model, ep_config, weights_already_sharded=weights_already_sharded)
@@ -345,8 +332,7 @@ def load_pp_stage_model(
 ) -> nn.Module:
     """COLLECTIVE: this pipeline stage's decoder layers only, streamed per rank from safetensors, MoE stages
     already EP- or grouped-GEMM-wrapped (``wraps_experts``); ``build_pipeline_stage`` finishes the split."""
-    # Before the lazy gate: ep_config() issues new_group on every rank, so a per-rank filesystem decision
-    # must never come first.
+    # Before the lazy gate: ep_config() issues new_group on every rank, which no per-rank file probe may precede.
     ep_config = pc.ep_config() if wraps_experts else None
     if not resolve_lazy_checkpoint(source, lazy_requested=True, layout_supported=is_lazy_loadable):
         raise ValueError(

@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""A trainer refuses ``full_determinism`` where the run cannot honor it, before ``Trainer.__init__`` turns
-the mode on.
-
-Both refusals come from the shared ``_init_distributed_config``, which runs before ``super().__init__``:
-
-* Once the flex-sliding warm-up compiled its graphs without the mode. Dynamo guards on it, so the
-  FlexAttention graphs ``warm_flex_sliding_kernels`` compiled at load would recompile rank by rank at
-  each rank's first long masked call, mid-forward, with EP peers waiting in DeepEP's dispatch. A
-  process that warmed nothing (a single-rank run, or ``HALO_FLEX_SLIDING=0``), one whose warm-up already
-  ran deterministic, and a run without ``full_determinism`` construct normally.
-* On an EP group spanning NVLink domains, whose DeepEP dispatch has no deterministic mode. The entry
-  scripts refuse it before the load (``tests/cpu/parallelism/test_cross_domain_determinism_gate.py``);
-  this is the backstop for a hand-built config.
-
-The construction is cut short right after that setup (TRL's own ctor needs a live model and, for GRPO,
-a server).
-
-    python tests/cpu/trainers/test_full_determinism_gates.py
-"""
+"""A trainer refuses ``full_determinism`` after a non-deterministic flex-sliding warm-up or on a cross-domain EP group.
+Its graphs would recompile mid-forward with EP peers waiting; DeepEP's cross-domain dispatch has no such mode."""
 
 import types
 
@@ -93,8 +76,7 @@ def test_runs_that_keep_the_warmed_mode_construct(warmed_deterministic, full_det
 
 
 def test_a_warmup_that_compiles_nothing_records_no_mode(monkeypatch):
-    """A model whose only layers are wide-head global ones is built with the flex-sliding implementation, but
-    its warm-up has no graph to compile, so it must leave nothing for ``full_determinism`` to be refused over."""
+    """Flex-sliding implementation, but wide-head global layers alone leave the warm-up no graph to compile."""
     monkeypatch.setattr(sdpa_flex_sliding, "_warmed_deterministic", None)
     config = Gemma4TextConfig(**TINY_GEMMA4_WIDE_HEAD_CONFIG, layer_types=["full_attention", "full_attention"])
     config._attn_implementation = sdpa_flex_sliding.register_flex_sliding_attention()

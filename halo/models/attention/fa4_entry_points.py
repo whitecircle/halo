@@ -17,13 +17,9 @@ _ENTRY_POINTS = (("flash_attn_varlen_func", "_flash_varlen_fn", True), ("flash_a
 
 
 def install_fa4_entry_point_wrapper(marker: str, wrap: Callable[[Callable, bool], Callable], description: str) -> bool:
-    """Replace both entry points with ``wrap(entry_point, varlen)``, and the references transformers already
-    cached to them, once per ``marker`` (idempotent). False when ``flash_attn.cute`` is not importable.
-
-    A wrapper must keep its entry point's signature (``functools.wraps``): transformers decides off it which
-    optional kwargs (window, softcap, sink) it forwards at all. The ``__dict__`` that copies carries an inner
-    wrapper's marker outward, so installs stack in either order.
-    """
+    """Replace both entry points and transformers' cached references, once per ``marker``. A wrapper must keep its
+    entry point's signature (``functools.wraps``), as transformers decides off it which optional kwargs it forwards.
+    The copied ``__dict__`` carries an inner wrapper's marker outward, so installs stack in either order."""
     ensure_fa4_kernel_cache_env()
     try:
         import flash_attn.cute as cute  # noqa: PLC0415 — optional, Blackwell-only dependency

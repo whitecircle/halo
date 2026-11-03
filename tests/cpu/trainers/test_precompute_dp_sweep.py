@@ -1,11 +1,5 @@
 """``TRLPreferenceMixin`` pins TRL's reference sweep to the data-parallel axis.
-
-The sweep builds its loader with ``accelerator.prepare`` and reassembles the results with
-``accelerator.gather_for_metrics``, both keyed on the GLOBAL rank. It runs inside TRL's ``__init__``,
-when the model already carries its load-time TP attention shards and EP/ETP layers, so
-siblings forwarding different rows hit shape-coupled collectives. These tests drive the mixin's sweep
-over a stub reference forward.
-"""
+Inside TRL's ``__init__``, siblings forwarding different rows hit shape-coupled TP and EP collectives."""
 
 from types import SimpleNamespace
 
@@ -27,8 +21,7 @@ WORLD_SIZE = 8
 TP_SIZE = 2
 DATASET_SIZE = 32
 BATCH_SIZE = 2
-# Global rank 2 has DP rank 1 under tp2, so DP sharding and global-rank sharding disagree on it —
-# rank 0 would pass either way.
+# Global rank 2 has DP rank 1 under tp2, so DP and global-rank sharding disagree on it; rank 0 would pass either way.
 PROBE_RANK = 2
 
 
@@ -49,8 +42,8 @@ def _fake_dataset() -> Dataset:
 
 
 class _ReferenceForward:
-    """Stands in for TRL's per-batch reference forward: each row's log-prob is its row index, and
-    the rows this rank forwarded are recorded. The KL term is ``None``, as on a KL-free KTO loss."""
+    """Each row's log-prob is its row index, and the rows this rank forwarded are recorded.
+    The KL term is ``None``, as on a KL-free KTO loss."""
 
     _signature_columns = ["prompt_ids", "ref_logps"]
     model = None
@@ -106,7 +99,7 @@ class _Trainer(TRLPreferenceMixin, DataParallelLoaderMixin, _ReferenceForward):
         return [_parallelism_config(rank).get_data_parallel_rank() for rank in range(WORLD_SIZE)]
 
     def _unpinned_prepare_data_loader(self, loader, device_placement=None, slice_fn_for_dispatch=None):
-        """What accelerate would do untouched: shard by GLOBAL rank over the whole world."""
+        """What accelerate does untouched: shard by global rank over the whole world."""
         return self._prepare_dataloader(
             loader, num_processes=WORLD_SIZE, process_index=self.parallelism_config.global_rank
         )
@@ -143,7 +136,6 @@ def test_sweep_loader_shards_by_dp_rank_not_global_rank():
         )
     ]
     assert trainer.observed_rows == expected
-    # The un-pinned path would have handed this rank the global-rank shard instead.
     unpinned = trainer._unpinned_prepare_data_loader(_dataloader())
     assert trainer.observed_rows != [int(row) for batch in unpinned for row in batch]
 
@@ -175,15 +167,8 @@ def test_presharded_dataset_is_rejected():
 
 @pytest.mark.parametrize("kind", sorted(TRAINERS))
 def test_preference_trainers_supply_the_sweep_the_mixin_enters(kind):
-    """``_Trainer`` above stubs only the TRL base — it composes the REAL two mixins, so everything
-    this file proves is proved about that pairing, and the production trainers must be that pairing.
-    ``_precompute_ref_logps`` enters ``self.data_parallel_sweep()``, which the precompute mixin does
-    not define: a trainer without the dataloader mixin dies with an AttributeError inside TRL's
-    ``__init__``, and one that shadowed the sweep would silently run on the global-rank axis.
-
-    The other half of the wiring — the mixin's MRO position ahead of the concrete TRL trainer — is
-    pinned by ``test_precompute_in_memory_attach.py::test_the_trainers_route_the_precompute_through_the_mixin``.
-    """
+    """A trainer without the dataloader mixin dies with an AttributeError inside TRL's ``__init__``, and one that
+    shadowed the sweep would silently run on the global-rank axis."""
     trainer_cls, _ = TRAINERS[kind]
     assert issubclass(trainer_cls, DataParallelLoaderMixin)
     assert trainer_cls.data_parallel_sweep is DataParallelLoaderMixin.data_parallel_sweep

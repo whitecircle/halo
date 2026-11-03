@@ -1,15 +1,5 @@
-"""CPU tests for the adapter writer's ``.bin`` fallback.
-
-Every reader prefers ``adapter_model.safetensors`` over ``adapter_model.bin`` — the loader's
-``restore_adapters``, ``reject_expert_lora_adapter`` and ``PeftModel.from_pretrained`` all probe
-the safetensors name first. So when the safetensors save fails and the writer falls back to the
-``.bin``, a leftover safetensors file (this attempt's partial write, or a previous save's complete
-one) would silently shadow the state that was just saved: a resume or merge then reads the PREVIOUS
-adapter. The fallback must therefore remove the safetensors leftover after the ``.bin`` lands —
-the same contract the gathered-checkpoint writer holds for its own fallback.
-
-    python tests/cpu/peft/test_adapter_bin_fallback_sweep.py
-"""
+"""The adapter writer's ``.bin`` fallback must remove a leftover safetensors file, which every reader prefers.
+A leftover would shadow the state just saved, so a resume or merge reads the previous adapter."""
 
 import os
 
@@ -40,9 +30,7 @@ def test_bin_fallback_removes_the_stale_safetensors(tmp_path, monkeypatch):
 
 
 def test_a_non_contiguous_adapter_tensor_still_writes_safetensors(tmp_path):
-    """safetensors refuses a non-contiguous tensor, and the adapter file is written as one dict —
-    so a single view (a gathered DTensor adapter, a ``modules_to_save`` clone) would cost the whole
-    adapter the ``.bin`` fallback, which every reader then has to be told about."""
+    """safetensors refuses a non-contiguous tensor, and one view would cost the whole adapter the ``.bin`` fallback."""
     adapters_mod.write_adapter_file({"w": torch.ones(4, 2).t()}, str(tmp_path))
 
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).exists()
@@ -50,9 +38,7 @@ def test_a_non_contiguous_adapter_tensor_still_writes_safetensors(tmp_path):
 
 
 def test_tensors_sharing_a_storage_still_write_safetensors(tmp_path):
-    """A tied embedding saved under both of its names is one storage under two keys, which safetensors refuses:
-    a grown tied vocabulary's CP save would cost the whole adapter the ``.bin`` fallback. Each key reads back its
-    own copy of the shared values."""
+    """A tied embedding under both names is one storage, which safetensors refuses; each key reads back a copy."""
     shared = torch.arange(6, dtype=torch.float32).reshape(3, 2)
     adapters_mod.write_adapter_file({"embed": shared, "head": shared, "lora": torch.ones(2)}, str(tmp_path))
 

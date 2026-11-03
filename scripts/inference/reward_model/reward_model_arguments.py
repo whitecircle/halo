@@ -1,5 +1,4 @@
-"""The flag surface of the reward-model scorers (``score`` / ``rejection_sample``): the endpoint,
-prompt-row, generation and reward-model blocks on one parser; the runs live in ``halo/entrypoints/``."""
+"""The flag surface of the reward-model scorers (``score`` / ``rejection_sample``)."""
 
 import argparse
 
@@ -8,15 +7,10 @@ from scripts.inference.inference_arguments import add_generation_args, add_promp
 
 
 def build_generation_parser(description: str, *, temperature_default: float) -> argparse.ArgumentParser:
-    """The CLI parser shared by the RM inference scripts: API, data, generation, and RM arguments.
-
-    Scripts add their own extras (``--n_hypos``, ``--output_format``, ``--rm_max_batch_size``, …)
-    on the returned parser.
-    """
+    """API, data, generation and RM arguments; scripts add their extras on the returned parser."""
     parser = argparse.ArgumentParser(description=description)
     add_openai_endpoint_args(parser, model_help="Model name for API requests")
 
-    # Data configuration
     parser.add_argument("--dataset", type=str, required=True, help="Local JSONL file with the prompts.")
     parser.add_argument(
         "--output_dir",
@@ -39,10 +33,8 @@ def build_generation_parser(description: str, *, temperature_default: float) -> 
         help="Row field with the ground-truth answer shown to the reward model (default: %(default)s).",
     )
 
-    # Generation configuration
     add_generation_args(parser, temperature_default=temperature_default)
 
-    # Reward model configuration
     parser.add_argument(
         "--rm_model_id", type=str, required=True, help=f"The sequence-classification reward model — {HUB_SOURCE_HELP}."
     )

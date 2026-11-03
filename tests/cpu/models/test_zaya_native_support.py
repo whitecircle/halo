@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Upstream Zaya (transformers >= 5.14) + the toolkit patches that make it trainable.
-
-The hub modeling ships the native ``balancing_biases`` buffer but no load recording, allows
-gradient checkpointing that faults in cuDNN on the training image, and never hands
-``position_ids`` to its attention layers or CCA convolutions, so a packed row's documents mix.
-``apply_zaya_patches`` closes all three at model load; these tests pin each mechanism, the CCA
-rewrite's equality with upstream on single-document rows, and that the registration is not shadowed.
-
-    python tests/cpu/models/test_zaya_native_support.py
-"""
+"""Upstream Zaya and the toolkit patches that make it trainable. The hub modeling has no load recording, allows GC that
+faults in cuDNN, and hands ``position_ids`` to neither its attention nor its CCA convs, so packed documents mix."""
 
 import pytest
 import torch
@@ -51,8 +43,7 @@ def _upstream(forward):
 
 @pytest.fixture
 def upstream_zaya():
-    """Start from the upstream forwards the isolation patch wraps (an earlier test may have applied it,
-    process-wide), and restore whatever was installed afterwards."""
+    """An earlier test may have applied the process-wide isolation patch; restores what was installed afterwards."""
     model_cls, cca_cls = zaya_modeling.ZayaModel, zaya_modeling.ZayaCCAProjection
     saved = (model_cls.forward, cca_cls.forward, zaya_modeling.ALL_ATTENTION_FUNCTIONS)
     model_cls.forward, cca_cls.forward = _upstream(model_cls.forward), _upstream(cca_cls.forward)
@@ -74,18 +65,15 @@ def _doc_b_drift(model, lens: tuple[int, int]) -> tuple[float, float]:
 
 
 def test_native_registration_is_not_shadowed():
-    """The compat shims must leave the native zaya registration alone — a vendored copy registering
-    over it (exist_ok=True) silently runs 5.11-era code against 5.14 checkpoints."""
+    """A vendored copy registering over it (exist_ok=True) silently runs 5.11-era code against 5.14 checkpoints."""
     apply_remote_code_compat_shims()
     assert CONFIG_MAPPING["zaya"].__module__.startswith("transformers.")
 
 
 def test_balancing_auto_resolves_bias_update_only_with_the_patch():
-    """Unpatched, the router lacks the ``expert_load_counter`` slot, detection yields nothing, and
-    ``auto`` silently trains WITHOUT balancing — the patch is load-bearing, not cosmetic."""
+    """Unpatched, the router lacks the ``expert_load_counter`` slot and ``auto`` silently trains without balancing."""
     model = _tiny_model()
-    # The patch mutates the hub class process-wide, and any earlier suite may have applied it, so
-    # restore upstream first: skipping the unpatched half would leave only the trivial direction.
+    # An earlier suite may have applied the process-wide patch, and the unpatched half must still run.
     router_cls = zaya_modeling.ZayaRouter
     router_cls.forward = getattr(router_cls.forward, "__wrapped__", router_cls.forward)
     for stamped in ("expert_load_counter", "balancing_active", "_has_discard_expert_slot"):
@@ -98,8 +86,7 @@ def test_balancing_auto_resolves_bias_update_only_with_the_patch():
 
 
 def test_load_recording_counts_expert_selections():
-    """The recorder creates its own counter (step-0 microbatches must not be lost to the callback's
-    lazy init) and every token lands somewhere: top_k=1 → one count per token."""
+    """Step-0 microbatches must not be lost to the callback's lazy init, so the recorder creates its own counter."""
     patch_zaya_router_load_recording()
     model = _tiny_model().train()
     router = model.model.layers[1].mlp.gate  # layer 0's router has no EDA but records the same
@@ -107,29 +94,28 @@ def test_load_recording_counts_expert_selections():
 
     input_ids, position_ids = _packed_inputs((5, 4))
     model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
-    # Zaya's native buffer always exists, so recording keys on the callback's arming stamp —
-    # a moe_balancing=none run must not accumulate counts nothing consumes.
+    # The native buffer always exists, so recording keys on the callback's arming stamp: a moe_balancing=none run must
+    # not accumulate counts nothing consumes.
     assert router.expert_load_counter is None
 
     router.balancing_active = True  # BalancingBiasCallback stamps this at train begin
     model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
-    assert router.expert_load_counter is not None  # created by the recorder, not the callback
+    assert router.expert_load_counter is not None
     assert router.expert_load_counter.sum().item() == input_ids.shape[1]
 
     model.eval()
     before = router.expert_load_counter.clone()
     model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
-    assert torch.equal(router.expert_load_counter, before)  # eval forwards must not pollute loads
+    assert torch.equal(router.expert_load_counter, before)
 
 
 def test_discarded_tokens_count_toward_the_discard_slot():
-    """The router masks discarded tokens to INDEX 0 before returning — counting them as expert-0
-    load would drive the balancing callback to starve expert 0. The recorder routes them back to
-    the last slot, which the bias update excludes."""
+    """The router masks discarded tokens to index 0; counting them as expert-0 load would make the balancing callback
+    starve expert 0. The bias update excludes the last slot."""
     patch_zaya_router_load_recording()
     model = _tiny_model().train()
     router = model.model.layers[1].mlp.gate
-    router.balancing_active = True  # BalancingBiasCallback stamps this at train begin
+    router.balancing_active = True
     with torch.no_grad():  # force every token onto the discard slot
         router.balancing_biases.fill_(-1e9)
         router.balancing_biases[-1] = 1e9
@@ -149,9 +135,8 @@ def test_gradient_checkpointing_is_refused():
 
 
 def test_flash_interface_receives_position_ids_only_with_the_patch(upstream_zaya):
-    """Upstream ``ZayaModel.forward`` never forwards position_ids into its layers, so flash varlen
-    packing silently degrades to one dense sequence. If the UNPATCHED half fails, transformers
-    fixed it upstream — retire the attention half of ``patch_zaya_packed_document_isolation``."""
+    """Upstream ``ZayaModel.forward`` never forwards position_ids into its layers, so flash varlen packing degrades to
+    one dense sequence."""
     model = _tiny_model()
     input_ids, position_ids = _packed_inputs((5, 4, 3))
 
@@ -184,10 +169,9 @@ def test_flash_interface_receives_position_ids_only_with_the_patch(upstream_zaya
 
 @pytest.mark.parametrize(("lens", "kernels"), [((6, 6), (2, 2)), ((1, 7), (2, 2)), ((2, 5), (2, 2)), ((3, 6), (3, 3))])
 def test_cca_isolates_packed_documents_only_with_the_patch(upstream_zaya, lens, kernels):
-    """Upstream, doc B's logits move when doc A changes although the packed attention mask is correct:
-    the CCA conv taps and the delayed value read doc A's last tokens. Patched, packed doc B reads as
-    doc B alone, at every document length the 2-token receptive field and the delay can straddle. If the
-    UNPATCHED half reads ~0, upstream made the CCA document-aware: retire the CCA half of the patch."""
+    """Upstream, the CCA conv taps and the delayed value read doc A's last tokens, at every document length the 2-token
+    receptive field and the delay can straddle. If the unpatched half reads ~0, upstream made the CCA document-aware:
+    retire the CCA half of the patch."""
     # fp64 (the grouped expert GEMM takes no fp64, so eager experts), so a leak through a single tap reads
     # far above the reduction-order noise.
     model = _tiny_model(cca_time0=kernels[0], cca_time1=kernels[1], experts_implementation="eager").double()
@@ -215,8 +199,7 @@ def test_cca_isolates_packed_documents_only_with_the_patch(upstream_zaya, lens, 
     ],
 )
 def test_cca_same_document_masks_match_a_per_token_reference(rows):
-    """Per shift, token ``t`` keeps token ``t - s`` exactly when no position restart lies in ``(t - s, t]``:
-    packed rows, one-token documents, a batch and a row that opens mid-document."""
+    """Per shift, token ``t`` keeps token ``t - s`` exactly when no position restart lies in ``(t - s, t]``."""
     position_ids = torch.tensor(rows)
     max_shift = 4
     masks = _same_document_masks(position_ids, position_ids.shape[1], max_shift, position_ids.device)
@@ -235,8 +218,7 @@ def test_cca_same_document_masks_match_a_per_token_reference(rows):
 
 @pytest.mark.parametrize("kernels", [(2, 2), (3, 2), (2, 4)])
 def test_patched_cca_equals_upstream_on_one_document(upstream_zaya, kernels):
-    """On a single-document row the rewrite is upstream's conv pair and delayed value: q/k/v and every
-    parameter gradient match in fp64 on the projection alone, at the release's kernel sizes and others."""
+    """q/k/v and every parameter gradient match in fp64 on the projection alone, at the release's kernel sizes too."""
     torch.manual_seed(SEED)
     config = ZayaConfig(**{**TINY_ZAYA_CONFIG, "cca_time0": kernels[0], "cca_time1": kernels[1]})
     projection = zaya_modeling.ZayaCCAProjection(config, layer_idx=0).double()
@@ -264,10 +246,8 @@ def test_patched_cca_equals_upstream_on_one_document(upstream_zaya, kernels):
 
 @pytest.mark.parametrize("positions", ["generate", "unset"])
 def test_patched_cca_equals_upstream_on_a_left_padded_batch(upstream_zaya, positions):
-    """A left-padded batch gives the same logits on every real token as upstream, which zeroes the pads
-    through its ``conv_mask``. Generation's positions (pads at 1, the first real token at 0) start a
-    document at the first real token; unset positions leave one document per row, where the zeroed pads
-    alone keep the row start clean."""
+    """Upstream zeroes the pads through its ``conv_mask``. Generation's positions (pads at 1, the first real token at
+    0) start a document at the first real token; unset positions leave one document per row."""
     model = _tiny_model(experts_implementation="eager").double()
     model.config._attn_implementation = "sdpa"
     for module in model.modules():
@@ -293,8 +273,7 @@ def test_patched_cca_equals_upstream_on_a_left_padded_batch(upstream_zaya, posit
 
 
 def test_patched_cca_prefill_keeps_the_decode_cache(upstream_zaya):
-    """A cache prefill through the rewrite leaves upstream's conv and recurrent state: the next decode step
-    (upstream's own path) reads the same logits."""
+    """A cache prefill through the rewrite leaves upstream's conv and recurrent state for the next decode step."""
     model = _tiny_model()
     model.config._attn_implementation = "sdpa"
     input_ids, _ = _packed_inputs((11,))
@@ -322,9 +301,8 @@ def test_patched_cca_refuses_an_adapted_conv(upstream_zaya):
 
 
 def test_loader_seam_dispatches_the_zaya_patches(monkeypatch):
-    """``apply_family_patches`` is the seam both production loaders call; if its zaya
-    gate is dropped, training silently loses bias-update balancing, accepts GC into the cuDNN
-    fault, and leaks across packed documents — with every direct-call test still green."""
+    """Both production loaders call this seam; a dropped zaya gate loses bias-update balancing, accepts GC into the
+    cuDNN fault and leaks across packed documents, with every direct-call test still green."""
     calls = []
     monkeypatch.setattr(model_preparation, "apply_zaya_patches", lambda: calls.append("zaya"))
 
@@ -337,8 +315,7 @@ def test_loader_seam_dispatches_the_zaya_patches(monkeypatch):
 
 
 def test_loader_seam_installs_the_document_isolation(upstream_zaya):
-    """Through the seam the loaders call, the CCA projection is the document-isolated one: a dropped
-    ``patch_zaya_packed_document_isolation`` in ``apply_zaya_patches`` leaves every direct-call test green."""
+    """Dropping ``patch_zaya_packed_document_isolation`` from ``apply_zaya_patches`` leaves direct-call tests green."""
     assert not is_zaya_cca_document_isolated()
     model_preparation.apply_family_patches(ZayaConfig(**TINY_ZAYA_CONFIG), "sdpa")
     assert is_zaya_cca_document_isolated()

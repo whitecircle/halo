@@ -1,5 +1,4 @@
-"""Conversation shaping shared by the text and VLM pipelines: JSON columns, image parts, system-prompt folding
-and template kwargs."""
+"""Conversation shaping shared by the text and VLM pipelines."""
 
 import json
 from typing import Any
@@ -10,8 +9,8 @@ IMAGE_PART_PAYLOAD_KEY = "image"
 
 
 def resolve_json_value(value):
-    """A JSON-encoded string parsed, any other value (an invalid JSON string included) unchanged: a mis-specified
-    column then fails in the chat template, not as an opaque ``JSONDecodeError`` in a map worker."""
+    """Parse a JSON string; any other value (invalid JSON included) passes, so a mis-specified column fails in the chat
+    template, not as an opaque ``JSONDecodeError`` in a map worker."""
     if isinstance(value, str):
         try:
             return json.loads(value)
@@ -21,16 +20,14 @@ def resolve_json_value(value):
 
 
 def as_conversation(prompt: Any) -> Any:
-    """A plain-string prompt as a single user turn; any other value (a message list, or a malformed
-    prompt the caller refuses) passes through unchanged."""
+    """A plain string as a single user turn; anything else passes through for the caller to refuse."""
     if isinstance(prompt, str):
         return [{"role": "user", "content": prompt}]
     return prompt
 
 
 def conversation_carries_images(conversation: Any) -> bool:
-    """Whether a conversation (or its JSON string) embeds image parts in its message content; anything that is not
-    a message list reads as text, left for the renderer to refuse."""
+    """Anything that is not a message list reads as text, left for the renderer to refuse."""
     conversation = resolve_json_value(conversation)
     if not isinstance(conversation, list):
         return False
@@ -43,8 +40,8 @@ def conversation_carries_images(conversation: Any) -> bool:
 
 
 def reject_image_content(conversation: Any, source: str) -> None:
-    """Refuse a conversation carrying image parts on a text renderer, which would train their placeholder tokens
-    with no pixels behind them: the per-row backstop for what the run-intent dispatch cannot see."""
+    """Refuse image parts on a text renderer, which would train placeholder tokens with no pixels: the per-row backstop
+    for what the run-intent dispatch cannot see."""
     if not conversation_carries_images(conversation):
         return
     raise ValueError(
@@ -56,7 +53,6 @@ def reject_image_content(conversation: Any, source: str) -> None:
 
 
 def chat_template_kwargs(row: dict[str, Any], interleaved_thinking: bool, tools_field: str | None) -> dict:
-    """The ``apply_chat_template`` kwargs every text render shares: the interleaved-thinking flag and parsed tools."""
     template_kwargs = {"clear_thinking": False} if interleaved_thinking else {}
     if tools_field and tools_field in row:
         tools = resolve_json_value(row[tools_field])
@@ -66,7 +62,6 @@ def chat_template_kwargs(row: dict[str, Any], interleaved_thinking: bool, tools_
 
 
 def _content_as_text(content: Any) -> str:
-    """Plain text of message content: pass a str through, join the text parts of a parts-list."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -75,7 +70,6 @@ def _content_as_text(content: Any) -> str:
 
 
 def _prefix_text_to_content(text: str, content: Any) -> Any:
-    """Prefix ``text`` + newline onto message content, handling str and parts-list forms."""
     if isinstance(content, list):
         return [{"type": "text", "text": text + "\n"}, *content]
     return text + "\n" + content
@@ -87,13 +81,10 @@ def fold_system_into_conversation(
     model_supports_system_role: bool,
     demote_existing_system: bool = True,
 ) -> list[dict[str, Any]]:
-    """Apply ``system_prompt``, folding it into the conversation when the model has no system role; folded-into
-    messages are mutated in place (rows here are per-map copies).
-
-    Text (``demote_existing_system``) prepends a system turn unless one leads, and without system-role support
-    merges the leading one into the next user turn or demotes it to ``user``. VLM folds only the configured
-    prompt, onto a leading system or user turn, and leaves a dataset-borne system turn alone.
-    """
+    """Apply ``system_prompt``, folding it in when the model has no system role; folded messages are mutated in place
+    (rows here are per-map copies). Text (``demote_existing_system``) prepends a system turn unless one leads, and
+    without system-role support merges it into the next user turn or demotes it to ``user``. VLM folds only the
+    configured prompt, onto a leading system or user turn, and leaves a dataset-borne system turn alone."""
     if demote_existing_system:
         if system_prompt and (not messages or messages[0]["role"] != "system"):
             messages = [{"role": "system", "content": system_prompt}, *messages]
@@ -116,8 +107,7 @@ def fold_system_into_conversation(
 
 
 def _is_missing(value: Any) -> bool:
-    """Whether ``value`` is a null sentinel: ``None``, ``NaN`` and ``pd.NaT`` are unequal to themselves, and
-    ``pd.NA``'s comparison raises on ``bool()``."""
+    """``None``, ``NaN`` and ``pd.NaT`` are unequal to themselves, and ``pd.NA``'s comparison raises on ``bool()``."""
     if value is None:
         return True
     try:
@@ -127,8 +117,7 @@ def _is_missing(value: Any) -> bool:
 
 
 def resolve_system_prompt(row, local_field: str, global_prompt: str | None) -> str | None:
-    """A row's system prompt (``row`` a pandas Series or a dict): its own non-null ``local_field`` value, else
-    the run-wide one."""
+    """``row`` (a Series or a dict)'s own non-null ``local_field`` value, else the run-wide one."""
     value = row.get(local_field)
     if not _is_missing(value):
         return value
@@ -136,7 +125,6 @@ def resolve_system_prompt(row, local_field: str, global_prompt: str | None) -> s
 
 
 def build_base_prompt(row, prompt_field: str, system_prompt: str | None) -> list[dict]:
-    """The row's prompt messages (``row`` a pandas Series or a dict) with ``system_prompt`` prepended when set."""
     messages = list(row[prompt_field])
     if system_prompt:
         messages = [{"role": "system", "content": system_prompt}, *messages]

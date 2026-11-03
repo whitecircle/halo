@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""EP+CP checkpoint save must operate on the inner model, never the CP wrapper.
-
-``UlyssesModel`` overrides ``named_parameters()``/``state_dict()`` to yield inner-model
-names but not ``named_modules()``. A save that walks the wrapper therefore sees EP-layer module
-paths prefixed with the wrapper's ``model.`` level while parameter names stay clean, so the
-expert classification in ``save_ep_gathered_checkpoint`` never matches: every expert param takes the non-EP
-branch (the rank-local shard is written under the canonical key), the gathered full experts land
-under doubled bogus keys, and persistent buffers save under wrapper-prefixed keys that never
-reload. ``save_ep_gathered_checkpoint`` must unwrap the CP wrapper; ``reject_unmergeable_ep_sharded_save`` must reject
-sharded EP saves on a CP-patched model (the sharded path has no CP key remap).
-
-Run: ``python tests/cpu/checkpoint/test_ep_cp_save_wrapper_seam.py`` (or ``pytest -m cpu``).
-"""
+"""EP+CP checkpoint save operates on the inner model. ``UlyssesModel`` overrides ``state_dict()`` but not
+``named_modules()``, so a walk through it misclassifies every expert param."""
 
 from __future__ import annotations
 
@@ -31,7 +20,7 @@ from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
 
 NUM_EXPERTS = 4
-NUM_LOCAL_EXPERTS = 2  # simulates an ep2 rank: local params hold E/ep experts, the gather returns E
+NUM_LOCAL_EXPERTS = 2  # Simulates an ep2 rank: local params hold E/ep experts, the gather returns E.
 HIDDEN = 8
 INTER = 6
 
@@ -42,8 +31,6 @@ class _StubConfig(SimpleNamespace):
 
 
 class _StubEPLayer(StubEPLayerBase):
-    """Minimal EP layer: local expert shards as params, full-expert gather, no collectives."""
-
     def __init__(self):
         super().__init__()
         self.gate_up_proj = nn.Parameter(torch.randn(NUM_LOCAL_EXPERTS, HIDDEN, 2 * INTER))
@@ -64,7 +51,7 @@ class _StubEPLayer(StubEPLayerBase):
 
 
 class _StubUlyssesAttention(UlyssesAttention):
-    """CP-patched attention marker (skips base init — only the isinstance matters here)."""
+    """Skips base init; only the isinstance matters here."""
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -72,7 +59,7 @@ class _StubUlyssesAttention(UlyssesAttention):
 
 
 def _build_inner(cp_patched_attention: bool = False) -> nn.Module:
-    """`inner.model.layers.0.{self_attn,mlp}` — the HF-shaped tree an EP+CP trainer holds."""
+    """The HF-shaped tree an EP+CP trainer holds."""
     inner = nn.Module()
     backbone = nn.Module()
     layer = nn.Module()
@@ -86,7 +73,7 @@ def _build_inner(cp_patched_attention: bool = False) -> nn.Module:
 
 
 def _wrap(inner: nn.Module) -> UlyssesModel:
-    """A real UlyssesModel around ``inner`` without attention patching (needs no groups)."""
+    """Without attention patching, which needs groups."""
     wrapper = UlyssesModel.__new__(UlyssesModel)
     nn.Module.__init__(wrapper)
     wrapper.model = inner
@@ -94,8 +81,6 @@ def _wrap(inner: nn.Module) -> UlyssesModel:
 
 
 def test_unwrap_model_peels_declared_wrappers():
-    """The unwrap protocol is class-declared: the CP wrapper's ``_toolkit_inner_model_attr``
-    descends to the inner model; an undeclared module passes through unchanged."""
     inner = _build_inner()
     wrapper = _wrap(inner)
     assert unwrap_toolkit_wrappers(wrapper) is inner
@@ -103,8 +88,6 @@ def test_unwrap_model_peels_declared_wrappers():
 
 
 def test_gathered_ep_save_unwraps_cp_wrapper(tmp_path):
-    """Saving through the CP wrapper must produce exactly the inner model's canonical keys with
-    FULL expert tensors — no wrapper-prefixed keys, no rank-local expert shards."""
     inner = _build_inner()
     wrapper = _wrap(inner)
 
@@ -129,24 +112,21 @@ def test_gathered_ep_save_unwraps_cp_wrapper(tmp_path):
     }
     assert set(saved) == expected, f"saved keys {sorted(saved)} != expected {sorted(expected)}"
 
-    # Experts must be the FULL gathered [E, ...] tensors, not this rank's local [E/ep, ...] shard.
+    # Not this rank's local [E/ep, ...] shard.
     assert saved["model.layers.0.mlp.experts.gate_up_proj"].shape[0] == NUM_EXPERTS
     assert saved["model.layers.0.mlp.experts.down_proj"].shape[0] == NUM_EXPERTS
 
 
 def test_sharded_ep_save_rejected_under_cp():
-    """A CP-patched model must be rejected for sharded EP saves — the sharded path has no CP key
-    remap, so the shards would carry raw '.original_attention.' keys the merge cannot fix."""
+    """The sharded path has no CP key remap, so shards would carry raw '.original_attention.' keys."""
     with pytest.raises(ValueError, match="Context Parallelism"):
         reject_unmergeable_ep_sharded_save(_build_inner(cp_patched_attention=True), world_size=2)
-    # Same check through the CP wrapper (the trainer validates before any save).
+    # The trainer validates through the CP wrapper before any save.
     with pytest.raises(ValueError, match="Context Parallelism"):
         reject_unmergeable_ep_sharded_save(_wrap(_build_inner(cp_patched_attention=True)), world_size=2)
 
 
 def test_sharded_ep_save_allowed_without_cp():
-    """Control: the identical topology without CP patching passes the CP gate (and the rest of the
-    sharded-save validation for a supported family / single spanning EP group)."""
     reject_unmergeable_ep_sharded_save(_build_inner(cp_patched_attention=False), world_size=2)
 
 

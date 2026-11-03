@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """load_expert_lora_adapters matches every saved key and shape to the live expert adapters before it loads any.
-
-A total-consumed check catches only the case where NO saved key matches any EP layer. A PARTIAL miss — one layer's
-adapters unmatched (wrapper-prefixed save path, renamed layer) while other layers match — slips through it: the
-missed layer's adapters resume from zero-init. A file holding no expert tensors for a run that trains them is the
-same miss, layer for layer. Each must raise, naming the keys, before any layer loads.
-
-Run: pytest tests/cpu/peft/test_ep_lora_apply_miss.py
-"""
+A partial miss would resume the missed layer's adapters from zero-init."""
 
 from types import SimpleNamespace
 
@@ -21,8 +14,7 @@ from tests.common.ep_stubs import StubEPLayerBase
 
 
 class _StubEPLoraLayer(StubEPLayerBase):
-    """An EP layer holding expert LoRA on ``gate_up_proj`` for all of its two experts; records what the apply walk
-    hands it."""
+    """Expert LoRA on ``gate_up_proj`` for its two experts; records what the apply walk hands it."""
 
     def __init__(self):
         super().__init__()
@@ -38,7 +30,7 @@ class _StubEPLoraLayer(StubEPLayerBase):
 
 
 def _model_with_ep_layers() -> nn.Module:
-    """``model.layers.{0,1}.mlp`` — two EP layers with expert LoRA under an HF-shaped tree."""
+    """Two EP layers with expert LoRA at ``model.layers.{0,1}.mlp``, an HF-shaped tree."""
     root = nn.Module()
     backbone = nn.Module()
     layers = nn.ModuleList()
@@ -57,21 +49,17 @@ def _adapter_keys(layer_idx: int) -> dict[str, torch.Tensor]:
 
 
 def test_stock_peft_expert_keys_are_not_claimed_as_native():
-    """Per-expert ``nn.ModuleList`` families (Bailing/Ling) let stock PEFT adapt the experts directly
-    when no EP layer is built. Those keys carry ``.experts.`` too, so a substring predicate would
-    route them into the EP loader — which has nowhere to put them, and which strips them from the
-    attention state so PEFT never sees them either."""
+    """Bailing/Ling keys carry ``.experts.`` too; a substring predicate would lose them to the EP loader."""
     peft_key = "base_model.model.model.layers.0.mlp.experts.3.gate_proj.lora_A.default.weight"
     assert not is_expert_lora_key(peft_key)
     assert not is_expert_lora_key("base_model.model.model.layers.0.mlp.experts.3.gate_proj.lora_B.weight")
-    # The native namespace ends AT the adapter — no tuner suffix.
+    # The native namespace ends at the adapter, with no tuner suffix.
     assert is_expert_lora_key("model.layers.0.mlp.experts.gate_up_proj.lora_A")
     assert is_expert_lora_key("model.layers.0.mlp.experts.down_proj.lora_B")
 
 
 def test_expert_keys_with_no_ep_layer_to_receive_them_raise():
-    """A checkpoint whose expert adapters nothing can consume must fail loudly: the walk below finds no
-    layer to miss, so without this the deltas are dropped and the resume reports success."""
+    """The walk finds no layer to miss, so without this the deltas are dropped and the resume reports success."""
     model = _model_with_ep_layers()
     for layer in model.model.layers:
         layer.mlp._expert_lora_attrs = frozenset()  # a run that builds no expert adapters
@@ -89,7 +77,7 @@ def test_all_layers_matched_loads_every_layer():
 
 
 def test_full_miss_raises():
-    """Keys under a foreign path (e.g. an unstripped wrapper prefix) match no layer → raise."""
+    """Keys under a foreign path (an unstripped wrapper prefix) match no layer."""
     model = _model_with_ep_layers()
     foreign = {f"wrapper.{k}": v for k, v in _adapter_keys(0).items()}
     with pytest.raises(RuntimeError, match=r"missing from the file .*wrapper\."):
@@ -97,8 +85,7 @@ def test_full_miss_raises():
 
 
 def test_partial_miss_raises_naming_missed_layer():
-    """One layer matched, the other not: must raise (naming the missed layer) instead of silently
-    resuming the missed layer's adapters from zero-init — and must not partially load the model."""
+    """The missed layer's adapters would resume from zero-init; nothing may load partially."""
     model = _model_with_ep_layers()
     with pytest.raises(RuntimeError, match=r"model\.layers\.1\.mlp"):
         load_expert_lora_adapters(model, _adapter_keys(0))  # layer 1 gets zero keys
@@ -107,8 +94,7 @@ def test_partial_miss_raises_naming_missed_layer():
 
 
 def test_no_expert_tensors_for_a_run_that_trains_expert_lora_raise():
-    """A file without the expert half (an attention-only save resumed by a mixed run) would resume every expert
-    adapter from zero-init."""
+    """An attention-only save resumed by a mixed run would resume every expert adapter from zero-init."""
     model = _model_with_ep_layers()
     with pytest.raises(RuntimeError, match=r"model\.layers\.0\.mlp\.experts\.gate_up_proj\.lora_A"):
         load_expert_lora_adapters(model, {})

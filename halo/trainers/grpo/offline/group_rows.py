@@ -26,8 +26,6 @@ def tokenize_offline_grpo_rows(
     eos_token_ids: frozenset[int] = frozenset(),
     drop_degenerate_groups: bool = False,
 ) -> dict[str, list]:
-    """Tokenize a batch, expanding each ``(prompt, completions, rewards)`` group into one training row per
-    completion with its computed advantage and group metadata."""
     tokenizer = resolve_tokenizer(processing_class)
     columns = {
         name: [] for name in ("prompt_input_ids", "completion_input_ids", "group_id", "group_size", "advantage")
@@ -75,7 +73,6 @@ def tokenize_offline_grpo_rows(
 
 
 def tokenize_offline_splits(train_dataset, eval_dataset, args, processing_class, model_config):
-    """``(train, eval)`` tokenized and expanded per completion; ``eval_dataset`` may be ``None``."""
     num_proc = resolve_map_num_proc(args.dataset_num_proc)
     # In fn_kwargs, not closed over: the map fn must stay picklable, and the cache key fingerprints fn_kwargs.
     tokenize_kwargs = {
@@ -111,8 +108,8 @@ def tokenize_offline_splits(train_dataset, eval_dataset, args, processing_class,
 
 
 def verify_degenerate_drop(args, dataset, num_groups_in: int, what: str) -> None:
-    """Report ``drop_degenerate_groups``' effect and refuse an all-degenerate dataset, which would otherwise
-    surface steps later as an opaque dataloader error and reads the same as a mis-scored dataset."""
+    """Refuse an all-degenerate dataset, which would otherwise surface steps later as an opaque dataloader error and
+    reads the same as a mis-scored dataset."""
     if not args.drop_degenerate_groups:
         return
     num_groups_kept = len(set(dataset["group_id"])) if len(dataset) else 0

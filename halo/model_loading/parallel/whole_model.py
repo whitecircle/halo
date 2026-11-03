@@ -34,12 +34,8 @@ _LOAD_ARGUMENTS_NAMING_CONFIG_FIELDS = frozenset({"dtype", "torch_dtype", "quant
 
 
 def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep_wrapped: bool) -> None:
-    """:func:`cast_parameters_to_run_dtype` on a freshly loaded model, EP-aware.
-
-    ``keep_fp32`` (``fp32_non_ep_params``) keeps stored fp32 values for the parameters the trainer's fp32
-    upcast covers, which skips EP parameters: with ``ep_wrapped`` a parameter inside a block the EP
-    layers take trains at the run dtype.
-    """
+    """:func:`cast_parameters_to_run_dtype` on a fresh model, EP-aware: ``keep_fp32`` skips EP parameters in the
+    trainer's upcast, so with ``ep_wrapped`` those blocks train at the run dtype."""
     cast_parameters_to_run_dtype(model, dtype, keep_fp32=keep_fp32)
     if keep_fp32 and ep_wrapped:
         for _path, block in ep_claimed_blocks(model):
@@ -67,15 +63,9 @@ def load_whole_model(
     before_move: Callable[[torch.nn.Module], torch.nn.Module] | None = None,
     **from_pretrained_kwargs,
 ) -> torch.nn.Module:
-    """COLLECTIVE: ``from_pretrained`` a node's ranks at a time (``pc.max_concurrent_loading``), cast to the
-    run dtype with the FP32 masters restored.
-
-    ``ep_config`` is the EP layers' config when they will take the MoE blocks, else None. Loads on CPU
-    unless ``from_pretrained_kwargs`` names a ``device_map``; with ``place_on_device`` the model then moves
-    onto this rank's device after ``before_move`` (the EP patch). A failed restore raises on every rank
-    only once all have left the node-serialized region, where a world collective would wait on queued
-    ranks.
-    """
+    """COLLECTIVE: ``from_pretrained`` a node's ranks at a time, cast to the run dtype with fp32 masters restored, on
+    CPU unless ``device_map`` is named. A failed restore raises on every rank only after all leave the node-serialized
+    region, where a world collective would wait on queued ranks."""
     from_pretrained_kwargs.setdefault("device_map", "cpu")
     precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {source.name}")
     with joined_node_load(f"{load_phase} from {source.name}", pc.max_concurrent_loading):
@@ -105,9 +95,8 @@ def load_whole_model(
 
 
 def _apply_config_field_kwargs(config: PretrainedConfig, model_init_kwargs: dict) -> dict:
-    """Set on ``config`` each ``model_init_kwargs`` entry naming one of its fields, as ``from_pretrained`` does to a
-    config it reads itself, and return the rest, the load's own arguments: a build handed ``config`` passes every
-    keyword it does not read to the model's ``__init__``."""
+    """Set each ``model_init_kwargs`` entry naming a config field, as ``from_pretrained`` does, and return the rest,
+    since a build handed ``config`` passes every keyword it does not read to ``__init__``."""
     fields = {
         key: value
         for key, value in model_init_kwargs.items()
@@ -119,15 +108,8 @@ def _apply_config_field_kwargs(config: PretrainedConfig, model_init_kwargs: dict
 
 
 def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig | None, model_class=None):
-    """COLLECTIVE for a path string: the model a trainer constructor was handed, loaded from the agreed
-    source, cast and its attention kernels warmed when it is a path.
-
-    Every load takes the family patches the policy loader applies, on the config the build receives with the
-    ``model_init_kwargs`` entries that name its fields; a pinned ``attn_implementation`` also takes the
-    backend-keyed ones and builds with what they return. The cast keeps stored fp32 values where
-    ``parallelism_config`` (None without one) sets ``fp32_non_ep_params``. ``model_class`` None takes the
-    widest Auto class. An instantiated model must come without ``model_init_kwargs``.
-    """
+    """COLLECTIVE for a path string: a trainer constructor's model, loaded from the agreed source with family patches,
+    cast and warmed. An instantiated model must come without ``model_init_kwargs``."""
     if not isinstance(model, str):
         if args is not None and getattr(args, "model_init_kwargs", None) is not None:
             raise ValueError(
@@ -174,13 +156,9 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
 
 
 def _warm_then_join(*warmups: Callable[[], None]) -> None:
-    """COLLECTIVE: run rank-local kernel warm-ups on every rank behind :func:`barrier_on_exit`, so one rank's
-    failed compile raises on every rank. No-op below world 2.
-
-    A first-use JIT compile (~10s) on one rank lets its peers race ahead into the next collective. World
-    size is the only condition every rank evaluates identically: the resolved backend and an FA4 build
-    are per-rank, and returning on either would skip a join peers already wait in.
-    """
+    """COLLECTIVE: run rank-local warm-ups behind :func:`barrier_on_exit`, a no-op below world 2. A first-use JIT
+    (~10s) lets peers race into the next collective; world size is the only condition every rank evaluates
+    identically."""
     if get_global_world_size() <= 1:
         return
     with barrier_on_exit("Attention kernel warm-up"):
@@ -189,14 +167,12 @@ def _warm_then_join(*warmups: Callable[[], None]) -> None:
 
 
 def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> None:
-    """COLLECTIVE: pre-compile this model's FA4 or FlexAttention kernels on every rank, the warm-up joined across
-    ranks so one rank's failed compile raises on every rank."""
+    """COLLECTIVE: pre-compile FA4 or FlexAttention kernels, joined so one rank's failed compile raises everywhere."""
     _warm_then_join(
         partial(warm_fa4_kernels, model, dtype=dtype), partial(warm_flex_sliding_kernels, model, dtype=dtype)
     )
 
 
 def warm_tree_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype, full_form: FullAttentionForm) -> None:
-    """COLLECTIVE: pre-compile the kernels tree attention adds on every rank, the warm-up joined across ranks so
-    one rank's failed compile raises on every rank."""
+    """COLLECTIVE: pre-compile the kernels tree attention adds, joined so a failed compile raises everywhere."""
     _warm_then_join(partial(warm_tree_kernels, model, dtype=dtype, full_form=full_form))

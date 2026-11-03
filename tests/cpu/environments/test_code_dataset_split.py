@@ -1,9 +1,5 @@
-"""A code-contest eval reads, and records, the split its dataset actually ships.
-
-LiveCodeBench ships only ``test`` and HLCE only ``train``; their loaders read that split whatever
-they are passed. A run naming another split would record it in the trajectory meta while scoring
-the source's own, so the adapter resolves the split and refuses a mismatch before anything loads.
-"""
+"""A code-contest eval reads and records the split its dataset ships: LiveCodeBench ships only ``test``, HLCE only
+``train``, so the adapter resolves the split and refuses a mismatch before anything loads."""
 
 import sys
 

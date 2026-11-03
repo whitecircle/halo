@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for ``convert_to_bf16.py --verify``: it must read the STORED dtypes, by parameter share.
-
-Two ways for this check to be useless:
-
-* Reloading the saved directory through ``from_pretrained`` casts every tensor to ``config.dtype`` on
-  the way in, so a checkpoint whose tensors are all fp32 comes back 100% bfloat16 and the check can
-  never FAIL.
-* Counting TENSORS rather than parameters can never PASS: the conversion deliberately keeps every norm
-  leaf in fp32, and on a dense model those are ~36% of the tensor COUNT (never above 43% on the
-  roster, 1-2% on MoE) while being under 0.01% of the parameters.
-
-So the fixtures here are built from real configs and a real PEFT adapter — a hand-picked tensor mix is
-exactly what hides the second failure mode, and the third: PEFT restores LoRA A/B to fp32 as it saves,
-so an unmerged adapter is 100% fp32 by design and must not be failed for it.
-
-Run: ``python tests/cpu/checkpoint/test_convert_to_bf16_verify.py`` (or ``pytest -m cpu``).
-"""
+"""``convert_to_bf16.py --verify`` reads stored dtypes, by parameter share. ``from_pretrained`` would cast everything
+to ``config.dtype``, and fp32 norms are ~36% of tensors on a dense model but under 0.01% of parameters."""
 
 from __future__ import annotations
 
@@ -37,7 +22,7 @@ from halo.checkpoint.tools.bf16_conversion import (
     verify_model_conversion,
 )
 
-# Small enough to build on CPU in a test, wide enough that the norm-to-weight ratio is a real model's.
+# Wide enough that the norm-to-weight ratio is a real model's.
 _TINY = {
     "hidden_size": 32,
     "intermediate_size": 64,
@@ -51,19 +36,17 @@ _TINY = {
 
 
 def _fp32_checkpoint(path, model_type="qwen3", **overrides):
-    """A real (randomly initialized) fp32 checkpoint of ``model_type`` — the conversion's input."""
     config = AutoConfig.for_model(model_type, **{**_TINY, **overrides})
     AutoModelForCausalLM.from_config(config).save_pretrained(str(path))
     return str(path)
 
 
 def _stored_dtype_counts(path):
-    """(tensor count, parameter count) per stored dtype of ``path``'s model.safetensors."""
     return _stored_dtype_counts_of(os.path.join(path, "model.safetensors"))
 
 
 def _stored_dtype_counts_of(safetensors_path):
-    """(tensor count, parameter count) per stored dtype — the two weightings the check can use."""
+    """(tensor count, parameter count) per stored dtype."""
     tensors, params = {}, {}
     with safe_open(str(safetensors_path), framework="pt") as reader:
         for key in reader.keys():  # noqa: SIM118
@@ -76,18 +59,15 @@ def _stored_dtype_counts_of(safetensors_path):
 
 @pytest.mark.parametrize("model_type", ["qwen3", "llama"])
 def test_verify_accepts_what_the_conversion_itself_produces(tmp_path, model_type):
-    """The check must pass on the tool's own output. Counting TENSORS instead of parameters fails here
-    on every dense model, because the fp32 norms it deliberately keeps outnumber the weights."""
+    """Counting tensors fails here on every dense model."""
     src = _fp32_checkpoint(tmp_path / f"{model_type}_src", model_type=model_type)
     out = tmp_path / f"{model_type}_out"
-    convert_to_bf16(src, str(out), "causal_lm", verify=True)  # raises if verification fails
+    convert_to_bf16(src, str(out), "causal_lm", verify=True)  # Raises if verification fails.
 
 
 @pytest.mark.parametrize("model_type", ["qwen3", "llama"])
 def test_converted_checkpoint_is_mostly_fp32_tensors_but_mostly_bf16_parameters(tmp_path, model_type):
-    """Anti-vacuity for the test above: it only means something if the two weightings really disagree
-    on a real architecture — a fixture whose norms are a small share of the tensor count would pass
-    either way."""
+    """Anti-vacuity: the two weightings must really disagree on a real architecture."""
     src = _fp32_checkpoint(tmp_path / f"{model_type}_src", model_type=model_type)
     out = tmp_path / f"{model_type}_out"
     convert_to_bf16(src, str(out), "causal_lm")
@@ -100,8 +80,8 @@ def test_converted_checkpoint_is_mostly_fp32_tensors_but_mostly_bf16_parameters(
 
 
 def test_verify_fails_on_a_checkpoint_still_stored_in_fp32(tmp_path):
-    """The artifact --verify exists to catch: nothing is cast, while config.json claims bfloat16. A
-    check that reloads through ``from_pretrained`` reads it back as 100% BF16."""
+    """Nothing is cast while config.json claims bfloat16; a check reloading through ``from_pretrained`` reads 100%
+    BF16."""
     src = _fp32_checkpoint(tmp_path / "src")
     config = json.loads((tmp_path / "src" / "config.json").read_text())
     config["dtype"] = "bfloat16"
@@ -111,9 +91,8 @@ def test_verify_fails_on_a_checkpoint_still_stored_in_fp32(tmp_path):
 
 
 def test_verify_fails_a_conversion_that_left_the_embedding_in_fp32(tmp_path):
-    """A partial conversion, not a missing one — and the shape that decides how tight the bar has to
-    be. Embedding + lm_head are single-digit percent of the parameters (less on a larger model), so a
-    loose bar accepts them and what passes ends up depending on model size rather than on the bug."""
+    """Embedding + lm_head are single-digit percent of parameters, so a loose bar makes the verdict depend on model
+    size."""
     src = _fp32_checkpoint(tmp_path / "src")
     out = tmp_path / "out"
     convert_to_bf16(src, str(out), "causal_lm")
@@ -132,8 +111,7 @@ def test_verify_fails_a_conversion_that_left_the_embedding_in_fp32(tmp_path):
 
 
 def test_verify_ignores_non_float_tensors(tmp_path):
-    """An integer buffer can never be bf16; counting it would fail a correct conversion once the
-    checkpoint carries enough of them."""
+    """An integer buffer can never be bf16."""
     src = _fp32_checkpoint(tmp_path / "src")
     out = tmp_path / "out"
     convert_to_bf16(src, str(out), "causal_lm")
@@ -146,7 +124,7 @@ def test_verify_ignores_non_float_tensors(tmp_path):
 
 
 def _lora_adapter(tmp_path, base_dir):
-    """A real PEFT save over ``base_dir``, whose LoRA A/B PEFT writes in fp32."""
+    """PEFT writes LoRA A/B in fp32."""
     model = AutoModelForCausalLM.from_pretrained(base_dir)
     adapter_dir = tmp_path / "adapter"
     get_peft_model(model, LoraConfig(r=4, target_modules=["q_proj", "v_proj"])).save_pretrained(str(adapter_dir))
@@ -154,7 +132,7 @@ def _lora_adapter(tmp_path, base_dir):
 
 
 def _refuse_model_loads(monkeypatch):
-    """Fail any model load the conversion makes: an adapter converts from its weights file alone."""
+    """An adapter converts from its weights file alone."""
 
     def _refused(*_args, **_kwargs):
         raise AssertionError("the adapter conversion loaded a model")
@@ -164,14 +142,13 @@ def _refuse_model_loads(monkeypatch):
 
 
 def test_a_peft_conversion_writes_the_adapter_at_bf16_without_loading_the_base(tmp_path, monkeypatch):
-    """The conversion casts the adapter's tensors, not a base it never needs: loading the whole base to
-    re-save an adapter that PEFT then wrote back in fp32 left a bf16 input upcast."""
+    """Loading the base to re-save an adapter PEFT wrote back in fp32 left a bf16 input upcast."""
     adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
     assert set(_stored_dtype_counts_of(os.path.join(adapter, "adapter_model.safetensors"))[0]) == {"F32"}
     _refuse_model_loads(monkeypatch)
     out = tmp_path / "out"
 
-    convert_to_bf16(adapter, str(out), "causal_lm", is_peft=True, verify=True)  # raises if verification fails
+    convert_to_bf16(adapter, str(out), "causal_lm", is_peft=True, verify=True)  # Raises if verification fails.
 
     assert set(_stored_dtype_counts_of(out / "adapter_model.safetensors")[0]) == {"BF16"}
     assert (out / "adapter_config.json").is_file(), "the adapter's config must travel with its weights"
@@ -193,19 +170,17 @@ def test_a_bf16_adapter_keeps_its_weights_bit_for_bit(tmp_path, monkeypatch):
 
 
 def test_an_unmerged_peft_save_verifies_its_adapter_not_a_stale_model(tmp_path):
-    """A --peft save writes adapter files only, so an --output_dir that held an earlier fp32 full save
-    still carries its model.safetensors. Verifying that stale file would fail the adapter the run just
-    wrote (and a stale bf16 one would pass it unchecked)."""
+    """A stale model.safetensors in --output_dir would fail the adapter just written, or pass it unchecked."""
     adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
     out = _fp32_checkpoint(tmp_path / "out")
-    convert_to_bf16(adapter, out, "causal_lm", is_peft=True, verify=True)  # raises if verification fails
+    convert_to_bf16(adapter, out, "causal_lm", is_peft=True, verify=True)
 
     assert os.path.isfile(os.path.join(out, "adapter_model.safetensors"))
     assert set(_stored_dtype_counts(out)[0]) == {"F32"}, "premise: the stale fp32 model is still there"
 
 
 def test_verify_rejects_an_empty_adapter(tmp_path):
-    """An adapter with no tensors loads as a silent no-op, so "nothing to assert" is not a pass."""
+    """An adapter with no tensors loads as a silent no-op."""
     adapter_dir = tmp_path / "empty_adapter"
     os.makedirs(adapter_dir)
     save_file({}, os.path.join(adapter_dir, "adapter_model.safetensors"), metadata={"format": "pt"})
@@ -214,8 +189,7 @@ def test_verify_rejects_an_empty_adapter(tmp_path):
 
 
 def test_verify_threshold_is_strict_at_the_boundary(tmp_path):
-    """Exactly at the bar is a FAIL, so the comparison cannot be relaxed to >= unnoticed — and the bar
-    itself has to be tight enough that a wholly fp32 embedding (a few % of parameters) is caught."""
+    """Exactly at the bar is a fail, so the comparison cannot be relaxed to >= unnoticed."""
     ckpt = tmp_path / "boundary"
     os.makedirs(ckpt)
     at_threshold = round(_BF16_VERIFY_MIN_FRACTION * 100)
@@ -231,7 +205,7 @@ def test_verify_threshold_is_strict_at_the_boundary(tmp_path):
 
 
 def test_verify_raises_when_nothing_float_is_stored(tmp_path):
-    """No float tensors means the share is undefined; returning True there would be a silent pass."""
+    """Returning True there would be a silent pass."""
     ckpt = tmp_path / "ints"
     os.makedirs(ckpt)
     save_file({"model.counts": torch.zeros(4, dtype=torch.int64)}, os.path.join(ckpt, "model.safetensors"))

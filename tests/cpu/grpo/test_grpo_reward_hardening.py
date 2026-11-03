@@ -1,17 +1,5 @@
-"""CPU tests for the GRPO reward/advantage hardening that holds an env-GRPO chat template together.
-
-Each test pins one run-degrading failure mode:
-
-* structural (special) tokens must always receive policy gradient under ``top_entropy_quantile`` —
-  they are the lowest-entropy tokens, so an unprotected quantile filter excludes them entirely and
-  the chat template rots until every tool call stops parsing;
-* a GRPO group whose completions all score alike carries no signal and must be droppable;
-* a non-finite reward must fail the step on every rank rather than be zeroed into its advantages;
-* identical rewards must never be turned into a full-scale advantage — offline GRPO must not
-  fabricate a ±1 ranking out of a zero-variance group.
-
-    python tests/cpu/grpo/test_grpo_reward_hardening.py
-"""
+"""The GRPO reward and advantage hardening that holds an env-GRPO chat template together. Each test pins one
+run-degrading failure mode."""
 
 import logging
 
@@ -27,8 +15,6 @@ from halo.trainers.grpo.objective.advantages import (
     degenerate_group_mask,
     group_relative_advantages,
 )
-
-# --- top_entropy_quantile must never exclude structural tokens ---
 
 SPECIAL_IDS = [100, 101]  # <|channel|>, <|call|>: near-deterministic, so the lowest-entropy tokens
 
@@ -91,13 +77,10 @@ def test_protected_mask_still_respects_padding():
     harness = _Harness()
     completion_ids = torch.tensor([[100, 7, 101]])
     entropies = torch.tensor([[0.01, 5.0, 0.02]])
-    mask = torch.tensor([[1, 1, 0]])  # the padded position carries a special id — protection must not override it
+    mask = torch.tensor([[1, 1, 0]])  # the padded position carries a special id
     harness._get_per_token_logps_and_entropies(None, completion_ids, mask, completion_ids.size(1))
     got = harness.get_high_entropy_mask(entropies, mask, 0.8)
     assert not bool(got[0, 2]), "padding must never enter the loss, special id or not"
-
-
-# --- Degenerate (zero-spread) groups ---
 
 
 def test_degenerate_group_mask_flags_only_zero_spread_groups():
@@ -116,31 +99,28 @@ def test_degenerate_group_mask_refuses_a_split_group():
 
 
 def test_singleton_groups_count_as_degenerate():
-    """One completion has nothing to compare against: the "fewer than two" rule the docstring states."""
+    """One completion has nothing to compare against."""
     assert degenerate_group_mask(torch.tensor([0.3, 0.9]), num_generations=1).all()
-
-
-# --- scale_rewards semantics ---
 
 
 def test_advantages_subtract_the_group_mean():
     rewards = torch.tensor([0.0, 1.0, 0.0, 1.0])
     got = group_relative_advantages(rewards, num_generations=2, scale_rewards="none")
     assert torch.allclose(got, torch.tensor([-0.5, 0.5, -0.5, 0.5]))
-    # A group that does not sum to zero leaves a net "reinforce/suppress everything" push in the gradient.
+    # A group that does not sum to zero leaves a net push on everything in the gradient.
     assert torch.allclose(got.view(-1, 2).sum(dim=1), torch.zeros(2), atol=1e-6)
 
 
 def test_none_is_not_treated_as_truthy():
-    # "none" is a truthy STRING: a bare `if scale_rewards` would scale anyway and silently discard Dr.GRPO.
+    # "none" is a truthy string: a bare `if scale_rewards` would scale anyway and silently discard Dr.GRPO.
     rewards = torch.tensor([0.0, 1.0])
     unscaled = group_relative_advantages(rewards, 2, "none")
     assert torch.allclose(unscaled, torch.tensor([-0.5, 0.5])), "scale_rewards='none' must not rescale"
 
 
 def test_group_scaling_amplifies_a_near_degenerate_group_but_batch_does_not():
-    # Why "batch": per-group std division rescales each group to unit variance, so group 0's 0.01 of
-    # shaping jitter becomes as influential as group 1's real signal.
+    # Per-group std division rescales each group to unit variance, so group 0's 0.01 of shaping jitter becomes as
+    # influential as group 1's real signal.
     rewards = torch.tensor([0.00, 0.01, 0.0, 1.0])
 
     by_group = group_relative_advantages(rewards, 2, "group")
@@ -182,15 +162,12 @@ def test_a_peer_ranks_non_finite_reward_raises_here_too(monkeypatch):
         group_relative_advantages(torch.tensor([0.0, 1.0]), 2, "group")
 
 
-# --- Offline GRPO must not fabricate advantages from a zero-variance group ---
-
-
 _NO_EMPHASIS = 0.0  # emphasis off, so the advantage is pure ranking
 
 
 @pytest.mark.parametrize("rewards", [[0.5, 0.5], [0.4, 0.4, 0.4, 0.4]])
 def test_quantile_uniform_gives_zero_advantage_on_identical_rewards(rewards):
-    # Spreading tied rewards over [-1, 1] would rank completions by array position — signal from nothing.
+    # Spreading tied rewards over [-1, 1] would rank completions by array position.
     got = compute_group_advantages(rewards, "quantile_uniform", _NO_EMPHASIS)
     assert np.allclose(got, 0.0), f"zero-variance group must yield zero advantage, got {got}"
 
@@ -201,8 +178,6 @@ def test_quantile_uniform_still_ranks_a_real_spread():
 
 
 class _NoSpecialsTokenizer:
-    """A tokenizer exposing nothing to protect — the branch that warns."""
-
     all_special_ids: list[int] = []
 
     def get_added_vocab(self):
@@ -215,12 +190,8 @@ class _NoSpecialsHarness(ProtectedTokenEntropyMixin, _BaseTrainer):
 
 
 def test_unprotected_warning_is_emitted_once_not_per_microbatch(caplog):
-    """The 'nothing to protect' answer must be cached like any other.
-
-    Returning early without caching re-resolves the tokenizer on every call, so the warning repeats
-    once per micro-batch for the whole run — in the one configuration (top_entropy_quantile < 1)
-    where a user is watching that log.
-    """
+    """Returning early without caching re-resolves the tokenizer on every call, so the warning repeats once per
+    micro-batch for the whole run."""
     harness = _NoSpecialsHarness()
     with caplog.at_level(logging.WARNING):
         for _ in range(5):

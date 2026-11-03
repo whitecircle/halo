@@ -69,24 +69,22 @@ from tests.common.repo import REPO_ROOT
 
 CHECKS = ("renames", "definitions", "public_names", "string_literals", "raise_templates", "side_effects", "goldens")
 DEFAULT_MIN_SIMILARITY = 90
-# The repository's Python outside the wheel's packages that the kit compares by default.
 TOOL_ROOTS = ("scripts",)
 # Where a dotted name or a repo path in a string may start, besides the wheel's packages.
 TEXT_ROOTS = tuple(root for root in FIRST_PARTY if root != PACKAGE)
 GOLDENS_DIR = Path(tests.common.goldens.__file__).parent.relative_to(REPO_ROOT)
-# The qualname a module's docstring is compared under, beside its definitions.
+# The qualname a module's docstring is compared under.
 MODULE_DOCSTRING = "__doc__"
 _SIDE_EFFECT_IMPORT = re.compile(r"#\s*noqa:[^#\n]*\b(?:F401|E402)\b")
 _DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-# Starts the name the canonical form puts in an import's place; a real name never holds a space.
+# A real name never holds a space.
 _IMPORT_MARK = "import "
 
 
 @dataclass(frozen=True)
 class RenameMap:
-    """What a change declares beyond what git and the definitions' own names show: file renames by repo
-    path, symbol renames and added definitions spelled ``module:qualname`` (a carved module's logger or
-    docstring), and the golden files it changes on purpose, by file name."""
+    """What a change declares beyond what git and definitions show: file renames, symbol renames and added definitions
+    (``module:qualname``), and changed goldens."""
 
     files: Mapping[str, str] = field(default_factory=dict)
     symbols: Mapping[str, str] = field(default_factory=dict)
@@ -110,15 +108,13 @@ class RenameMap:
 
 
 def module_name(relative: Path) -> str:
-    """The dotted module a repo-relative ``.py`` path defines."""
     parts = relative.with_suffix("").parts
     return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
 
 
 @dataclass(frozen=True)
 class Checkout:
-    """One commit's tree on disk: its Python under the compared roots, each module by dotted name and its
-    file."""
+    """One commit's tree on disk: its Python under the compared roots, each module by dotted name and file."""
 
     root: Path
     packages: tuple[str, ...]
@@ -126,8 +122,7 @@ class Checkout:
 
     @classmethod
     def read(cls, root: Path, roots: tuple[str, ...] | None = None) -> Checkout:
-        """The checkout at ``root``; ``roots`` defaults to the wheel's packages (``pyproject.toml``) and
-        :data:`TOOL_ROOTS`."""
+        """The checkout at ``root``; ``roots`` defaults to the wheel's packages and :data:`TOOL_ROOTS`."""
         pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
         packages = tuple(pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"])
         modules = {
@@ -143,8 +138,8 @@ class Checkout:
 
     @cached_property
     def python_files(self) -> frozenset[str]:
-        """Every Python file under the packages and :data:`TEXT_ROOTS`, by repo path: what a path in a
-        string may name."""
+        """Every Python file under the packages and :data:`TEXT_ROOTS`, by repo path: what a path in a string may
+        name."""
         return frozenset(
             path.relative_to(self.root).as_posix()
             for top in (*self.packages, *TEXT_ROOTS)
@@ -153,8 +148,7 @@ class Checkout:
 
 
 def _directory_renames(path_renames: Mapping[str, str], base_files: Iterable[str]) -> dict[str, str]:
-    """Each directory whose ``base_files`` all move, at their relative paths, under one new directory: a
-    package moved whole, which a string may name by its directory path."""
+    """Each directory whose ``base_files`` all move under one new directory, which a string may name by its path."""
     candidates = set()
     for old, new in path_renames.items():
         old_parts, new_parts = PurePosixPath(old).parts, PurePosixPath(new).parts
@@ -172,8 +166,8 @@ def _directory_renames(path_renames: Mapping[str, str], base_files: Iterable[str
 
 @dataclass(frozen=True)
 class _Spelling:
-    """How one tree's first-party names read in head terms: as they are for the head, through the renames
-    for the base."""
+    """How one tree's first-party names read in head terms: as they are for the head, through the renames for the
+    base."""
 
     modules: frozenset[str]
     text_roots: tuple[str, ...]
@@ -195,8 +189,7 @@ class _Spelling:
         return sorted(self.directory_renames, key=len, reverse=True)
 
     def symbol(self, dotted: str) -> str:
-        """``dotted`` as ``module:qualname`` in head terms, a bare module as its name, and a name outside
-        this tree's modules as it is."""
+        """``dotted`` as ``module:qualname`` in head terms, a bare module as its name, an outside name as it is."""
         parts = dotted.split(".")
         cut = next((cut for cut in range(len(parts), 0, -1) if ".".join(parts[:cut]) in self.modules), 0)
         if not cut:
@@ -210,8 +203,8 @@ class _Spelling:
         return f"{module}:{'.'.join(qualname)}" if qualname else module
 
     def path(self, path: str) -> str:
-        """``path`` in head terms: an exact file rename first, else the longest renamed directory it lies
-        in. A full stop ending a sentence is not part of the lookup."""
+        """``path`` in head terms: an exact file rename first, else the longest renamed directory it lies in. A
+        sentence's full stop is ignored."""
         named = path.rstrip(".")
         if named in self.path_renames:
             return self.path_renames[named] + path[len(named) :]
@@ -221,15 +214,13 @@ class _Spelling:
         return path
 
     def text(self, text: str) -> str:
-        """``text`` with each first-party dotted name and repo path in it spelled in head terms."""
         text = self._dotted_pattern.sub(lambda match: self.symbol(match.group(0)).replace(":", "."), text)
         return self._path_pattern.sub(lambda match: self.path(match.group(0)), text)
 
 
 class _Canonical(ast.NodeTransformer):
-    """A module's syntax with each first-party name it reads, each string and each import spelled in head
-    terms, so two trees' copies of the same code dump alike. A name a function, lambda or comprehension
-    binds hides the module-level one inside it."""
+    """A module's syntax with first-party names, strings and imports in head terms, so two trees' copies of the same
+    code dump alike. A name a function, lambda or comprehension binds hides the module-level one inside it."""
 
     def __init__(self, bindings: Mapping[str, str], import_sources: Mapping[int, str], spelling: _Spelling):
         self.bindings = bindings
@@ -282,16 +273,14 @@ def _has_docstring(node: ast.AST) -> bool:
 
 
 def _import_mark(statement: ast.stmt) -> str | None:
-    """The canonical text of an import :class:`_Canonical` rewrote; None for any other statement."""
     if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Name):
         return statement.value.id if statement.value.id.startswith(_IMPORT_MARK) else None
     return None
 
 
 def _definitions(statements: list[ast.stmt], prefix: str = "") -> Iterator[tuple[str, ast.AST]]:
-    """``(qualname, what its digest covers)`` for each function and method (without its own name), class
-    header (its body without the definitions in it, and without its name) and, at module level, each name
-    an assignment binds (its value and annotation)."""
+    """``(qualname, what its digest covers)`` for each function, method, class header and, at module level, each bound
+    name."""
     for node in block_statements(statements):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             unnamed = copy.copy(node)
@@ -311,9 +300,8 @@ def _definitions(statements: list[ast.stmt], prefix: str = "") -> Iterator[tuple
 
 
 def _module_definitions(module: ast.Module) -> Iterator[tuple[str, ast.AST]]:
-    """The module's docstring as :data:`MODULE_DOCSTRING`, then each of its :func:`_definitions`, numbered
-    where a qualname repeats (a definition in each branch of a module-level ``if``: ``name#2``, ``name#3``
-    in file order)."""
+    """The module's docstring as :data:`MODULE_DOCSTRING`, then its :func:`_definitions`, numbered where a qualname
+    repeats (``name#2``)."""
     pairs = ([(MODULE_DOCSTRING, module.body[0])] if _has_docstring(module) else []) + list(_definitions(module.body))
     seen = Counter()
     for qualname, node in pairs:
@@ -322,15 +310,13 @@ def _module_definitions(module: ast.Module) -> Iterator[tuple[str, ast.AST]]:
 
 
 def _calls_first_party(node: ast.AST) -> bool:
-    """Whether evaluating ``node`` calls first-party code, which the canonical form spells
-    ``module:qualname``."""
+    """Whether evaluating ``node`` calls first-party code, which the canonical form spells ``module:qualname``."""
     return any(isinstance(call, ast.Call) and ":" in (dotted_name(call.func) or "") for call in ast.walk(node))
 
 
 def _side_effect(statement: ast.stmt, source_lines: list[str]) -> str | None:
-    """The canonical text of a module-level statement that does more than bind a name; None otherwise. A
-    library's work (a dataclass, a cache, a compiled pattern) is its definition's business: only first-party
-    code may register as it runs."""
+    """Canonical text of a module-level statement doing more than binding a name, else None; only first-party code may
+    register as it runs."""
     if (mark := _import_mark(statement)) is not None:
         lines = "\n".join(source_lines[statement.lineno - 1 : statement.end_lineno])
         return mark if _SIDE_EFFECT_IMPORT.search(lines) else None
@@ -357,9 +343,7 @@ def _parse(path: Path) -> ast.Module:
 
 @dataclass
 class _ModuleFacts:
-    """What the kit compares in one module, read off its canonical form."""
-
-    definitions: dict[str, str] = field(default_factory=dict)  # qualname -> digest
+    definitions: dict[str, str] = field(default_factory=dict)
     strings: Counter = field(default_factory=Counter)
     raises: Counter = field(default_factory=Counter)
     side_effects: list[str] = field(default_factory=list)
@@ -368,8 +352,8 @@ class _ModuleFacts:
 def _module_facts(
     checkout: Checkout, module: str, spelling: _Spelling, *, ignore_docstrings: bool = False
 ) -> _ModuleFacts:
-    """What ``module`` of ``checkout`` defines, says, raises and runs at import, every first-party name
-    spelled through ``spelling``."""
+    """What ``module`` defines, says, raises and runs at import, every first-party name spelled through
+    ``spelling``."""
     path = checkout.modules[module]
     source = path.read_text(encoding="utf-8")
     syntax = ast.parse(source, filename=str(path))
@@ -409,7 +393,6 @@ def _module_facts(
 
 
 def _qualnames(checkout: Checkout) -> list[tuple[str, str]]:
-    """Every ``(module, qualname)`` definition of ``checkout``, in file order."""
     return [
         (module, qualname)
         for module, path in checkout.modules.items()
@@ -431,12 +414,8 @@ def _spelled(key: tuple[str, str]) -> str:
 def _pair_definitions(
     base: Checkout, head: Checkout, module_renames: Mapping[str, str], renames: RenameMap
 ) -> tuple[dict[tuple[str, str], tuple[str, str]], dict[tuple[str, str], tuple[str, str]]]:
-    """Where each base definition lives in head, and which of those placements are moves.
-
-    A definition goes where the declared symbol renames say, else to its module's renamed location. One
-    that head lacks there pairs with the one head definition of its qualname that no base definition
-    reaches, when it is the only unplaced base definition of that qualname too.
-    """
+    """Where each base definition lives in head, and which placements are moves. Declared symbol renames first, else
+    the module's renamed location, else the only unplaced head definition of its qualname."""
     base_keys, head_keys = _qualnames(base), set(_qualnames(head))
     declared_keys = {_split_symbol(old): _split_symbol(new) for old, new in renames.symbols.items()}
     absent = sorted(set(map(_spelled, declared_keys)) - set(map(_spelled, base_keys)))
@@ -551,8 +530,8 @@ def _side_effects_check(
 
 
 def run_golden_checks(root: Path) -> dict[str, str]:
-    """Each golden of the tree at ``root`` checked by its generator against that tree's own code, in a fresh
-    interpreter so no import order but the generator's own reaches it: ``pass``, or why not."""
+    """Each golden checked by its generator against the tree's own code, in a fresh interpreter so no other import
+    order reaches it."""
     outcomes = {}
     for golden in sorted((root / GOLDENS_DIR).glob("*.json")):
         generator = golden.with_suffix(".py")
@@ -588,8 +567,8 @@ def _goldens_check(
 
 
 def _patch_review(head: Checkout, touched: set[str]) -> dict:
-    """Each patch in head's Python, its tests included, on a name that a touched module binds only by an
-    import: the patch replaces that module's binding while the defining module keeps its own."""
+    """Each patch in head's Python on a name a touched module binds only by import: it replaces that binding, not the
+    defining module's."""
     index = head.index
     rows = []
     files = {*head.modules.values(), *(path for top in TEXT_ROOTS for path in (head.root / top).rglob("*.py"))}
@@ -626,9 +605,7 @@ def compare_trees(
     ignore_docstrings: bool = False,
     golden_checks: Mapping[str, str] | None = None,
 ) -> dict[str, dict]:
-    """Every check of the module docstring from ``base`` to ``head``, ``detected`` being the renames git found
-    between them and ``golden_checks`` what :func:`run_golden_checks` found in head, when it ran: each
-    check's verdict and findings."""
+    """Every check of the module docstring from ``base`` to ``head``: each check's verdict and findings."""
     renames = renames or RenameMap()
     path_renames = {rename.old: rename.new for rename in detected} | dict(renames.files)
     module_renames = {
@@ -702,9 +679,8 @@ def verify_move(
     roots: tuple[str, ...] | None = None,
     check_goldens: bool = False,
 ) -> dict[str, dict]:
-    """:func:`compare_trees` over the commits ``base`` and ``head`` of ``repo``, each exported from git;
-    ``check_goldens`` also runs :func:`run_golden_checks` in head, which imports head's code and so needs
-    the image."""
+    """:func:`compare_trees` over two commits of ``repo``; ``check_goldens`` imports head's code and so needs the
+    image."""
     with tempfile.TemporaryDirectory() as scratch:
         base_root = export_tree(repo, base, Path(scratch, "base"))
         head_root = export_tree(repo, head, Path(scratch, "head"))
@@ -720,7 +696,6 @@ def verify_move(
 
 
 def overall_verdict(checks: Mapping[str, dict], required: Iterable[str] = CHECKS) -> str:
-    """``pass`` when every required check passes."""
     return _verdict(any(checks[name]["verdict"] != "pass" for name in required))
 
 

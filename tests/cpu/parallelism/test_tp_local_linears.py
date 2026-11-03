@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""TP linears on their local shards compute what DTensor dispatch computed, bit for bit, on every TP family.
-
-Both TP mechanisms run each colwise / rowwise projection as ``F.linear`` on ``weight.to_local()`` with
-explicit c10d collectives (``halo/distributed/tensor_parallel/local_linears.py``) in place of DTensor
-dispatch. Two gloo ranks build each tiny-roster TP family twice, once on DTensor dispatch (transformers'
-own forward for an HF-native load, torch's ``ColwiseParallel`` / ``RowwiseParallel`` for the selective
-attention plan) and once on the local path, then compare the logits, the loss, the gradient into the
-decoder stack, every parameter gradient (local shard and placement), the no-grad and inference-mode logits
-and a three-step SGD loss trajectory, plain, under FSDP2 at dp 2 x tp 2, under activation checkpointing and
-with the dense MLP projections retyped by ``lowp_precision``.
-The selective plan's second rank starts from perturbed projections, which its shard must take from rank 0.
-
-Bitwise wherever no rowwise projection carries a bias: the local path adds that bias once after the SUM,
-where DTensor added half of it to each rank's partial (GPT-OSS ``o_proj``), so those families compare
-to fp32 rounding. The negative controls drop one collective of the local path at a time, hand a rank
-its neighbour's slice or shard each rank's own values, and must be caught.
-
-    python tests/cpu/parallelism/test_tp_local_linears.py
-"""
+"""TP linears on local shards (``halo/distributed/tensor_parallel/local_linears.py``) compute what DTensor dispatch
+computed, bitwise unless a rowwise projection has a bias (GPT-OSS ``o_proj``)."""
 
 from __future__ import annotations
 
@@ -64,7 +47,7 @@ BATCH, SEQ = 2, 16
 # fp32 rounding of the one reassociated bias add, on activations and gradients of order one.
 BIAS_REORDER_TOL = 1e-5
 
-# Every dense family the roster carries, on the HF-native plan; qwen3 tied adds the vocab-parallel tie.
+# qwen3 tied adds the vocab-parallel tie.
 HF_FAMILIES = {
     **TINY_SLIDING_DENSE_FAMILIES,
     **TINY_DENSE_ATTENTION_FAMILIES,
@@ -75,7 +58,6 @@ HF_CASES = sorted([*HF_FAMILIES, *HF_OVERRIDES])
 
 
 def _hf_styles(model: nn.Module) -> dict[str, str]:
-    """Each plain ``nn.Linear`` the model's HF plan styles under a local style, by module name."""
     plan = model._tp_plan
     return {
         name: style
@@ -86,7 +68,6 @@ def _hf_styles(model: nn.Module) -> dict[str, str]:
 
 
 def _selective_styles(model: nn.Module) -> dict[str, str]:
-    """Each attention projection the selective plan shards, with its style, by module name."""
     layers = set(decoder_layers(backbone_with_layers(model)))
     styles = {}
     for layer_name, layer in model.named_modules():
@@ -106,7 +87,6 @@ def _has_rowwise_bias(model: nn.Module, styles: dict[str, str]) -> bool:
 
 
 def _expectation(model: nn.Module, styles: dict[str, str]) -> dict:
-    """The styles a comparison runs and whether it compares bitwise, as its result reports them."""
     return {"styles": sorted(set(styles.values())), "bitwise": not _has_rowwise_bias(model, styles)}
 
 
@@ -126,7 +106,7 @@ def _selective_expected(model_type: str) -> dict:
     return _expectation(model, _selective_styles(model))
 
 
-# The remote-code Bailing models, whose attention the plan names no class of, are not built.
+# The plan names no attention class of the remote-code Bailing models.
 SELECTIVE_CASES = sorted(
     model_type
     for model_type, family in TINY_MOE_FAMILIES.items()
@@ -136,9 +116,7 @@ SELECTIVE_CASES = sorted(
 
 @dataclass(frozen=True)
 class Variant:
-    """How a comparison runs: ``dp`` FSDP2 replicas over the TP pair, ``gc`` activation checkpointing
-    (``"reentrant"`` / ``"non_reentrant"``), ``lowp`` the ``lowp_precision`` the dense MLP projections are
-    retyped to, ``broken`` a negative control from :data:`_BREAKS`."""
+    """``gc``: ``"reentrant"`` / ``"non_reentrant"``. ``broken``: a negative control from :data:`_BREAKS`."""
 
     dp: int = 1
     gc: str | None = None
@@ -150,8 +128,6 @@ PLAIN = Variant()
 
 
 class _Identity(torch.autograd.Function):
-    """A collective-shaped no-op: identity forward and backward."""
-
     @staticmethod
     def forward(ctx, x, group):
         return x
@@ -181,8 +157,7 @@ def _break(broken: str | None) -> None:
 
 
 def _randomize_biases(model: nn.Module) -> None:
-    """Random-init zeroes every bias, which would hide where the rowwise bias is added; a release carries them
-    learned."""
+    """Random-init zeroes every bias, which would hide where the rowwise bias is added."""
     with torch.no_grad():
         for name, param in model.named_parameters():
             if name.endswith("bias"):
@@ -194,7 +169,6 @@ def _local(t: torch.Tensor | None) -> torch.Tensor | None:
 
 
 def _forward_backward(model: nn.Module, ids: torch.Tensor) -> dict:
-    """One forward and backward: logits, loss, the gradient into the decoder stack and every parameter's."""
     captured = {}
 
     def keep_grad(_module, _args, out):
@@ -212,7 +186,7 @@ def _forward_backward(model: nn.Module, ids: torch.Tensor) -> dict:
 
 
 def _train(model: nn.Module, ids: torch.Tensor, tp_group) -> list[torch.Tensor]:
-    """``STEPS`` SGD steps, the per-head norms SUMmed over the TP group as the trainer does; the losses."""
+    """Per-head norms SUMmed over the TP group as the trainer does."""
     optimizer = torch.optim.SGD(model.parameters(), lr=LR, foreach=False)
     summed = set(per_head_norm_param_names(model))
     losses = []
@@ -235,7 +209,6 @@ def _prepare(model: nn.Module, variant: Variant) -> None:
 
 
 def _compare(reference: nn.Module, local: nn.Module, tp_mesh, *, bitwise: bool, dp_rank: int = 0) -> dict:
-    """``{"mismatches": [...], "max_abs": float}`` of ``local`` against ``reference`` on this DP rank's batch."""
     vocab = reference.config.get_text_config().vocab_size
     ids = torch.randint(0, vocab, (BATCH, SEQ), generator=torch.Generator().manual_seed(dp_rank))
     expected, actual = {}, {}
@@ -264,8 +237,7 @@ def _compare(reference: nn.Module, local: nn.Module, tp_mesh, *, bitwise: bool, 
 
 
 def _compare_counting(reference: nn.Module, local: nn.Module, styles: dict[str, str], tp_mesh, **kwargs) -> dict:
-    """:func:`_compare`, also counting the forwards of ``local``'s first rowwise decoder projection, which a
-    checkpointed layer reruns in backward."""
+    """Also counts forwards of the first rowwise decoder projection, which a checkpointed layer reruns in backward."""
     name = next(name for name, style in styles.items() if style == "rowwise" and ".layers." in f".{name}")
     calls = []
     handle = local.get_submodule(name).register_forward_hook(lambda *_: calls.append(1))
@@ -275,7 +247,6 @@ def _compare_counting(reference: nn.Module, local: nn.Module, styles: dict[str, 
 
 
 def _localized(model: nn.Module, names) -> list[str]:
-    """The modules of ``names`` running the local-shard forward."""
     return [
         name
         for name in names
@@ -284,15 +255,13 @@ def _localized(model: nn.Module, names) -> list[str]:
 
 
 def _lowp_localized(model: nn.Module) -> int:
-    """How many low-precision projections run the local-shard forward."""
     return len(
         _localized(model, [name for name, module in model.named_modules() if isinstance(module, LowPrecisionLinear)])
     )
 
 
 def _retype_lowp(reference: nn.Module, local: nn.Module, precision: str) -> dict:
-    """Retype both models' dense MLP projections to ``precision``; the reference's conversion re-installs
-    transformers' forward around them, as it did before the local path covered them."""
+    """The reference's conversion re-installs transformers' forward around them."""
     spec = LowpSpec(precision=precision)
     local_styles, lowp_compute.LINEAR_TP_STYLES = lowp_compute.LINEAR_TP_STYLES, {}
     try:
@@ -348,7 +317,6 @@ def _hf_worker(rank: int, checkpoint: str, load_class, variant: Variant, out_pat
 
 
 def _dtensor_shard(linear: nn.Linear, style_name: str, tp_mesh, *, name: str) -> None:
-    """The selective plan's former sharding: torch's own TP style on the projection."""
     style = ColwiseParallel() if local_linears.LINEAR_TP_STYLES[style_name].colwise else RowwiseParallel()
     parallelize_module(linear, tp_mesh, style)
 
@@ -402,7 +370,6 @@ def _results(out_path: str, world: int = TP) -> list[dict]:
 
 
 def _assert_matches(results: list[dict], expected: dict, *, checkpointed: bool = False) -> None:
-    """Every rank matched, over the styles and in the comparison mode ``expected`` derives off the family."""
     # Two no-grad forwards, then one forward per backward, plus its recompute under checkpointing.
     forwards = 2 + (1 + STEPS) * (2 if checkpointed else 1)
     for rank, result in enumerate(results):
@@ -438,7 +405,7 @@ def test_hf_native_plan_matches_dtensor_dispatch(case, hf_checkpoints, tmp_path)
 
 @pytest.mark.parametrize("case", ["qwen3", "qwen3_tied"])
 def test_hf_native_plan_under_fsdp2_matches_dtensor_dispatch(case, hf_checkpoints, tmp_path):
-    """dp=2 x tp=2: FSDP2 hands the forward its unsharded TP DTensors and reduce-scatters the grads over dp."""
+    """FSDP2 hands the forward its unsharded TP DTensors and reduce-scatters the grads over dp."""
     family_key = HF_OVERRIDES.get(case, (case,))[0]
     out = str(tmp_path / "result")
     variant = Variant(dp=DP)
@@ -456,8 +423,6 @@ def test_hf_native_plan_under_checkpointing_matches_dtensor_dispatch(gc, hf_chec
 
 @pytest.mark.parametrize("precision", sorted(LOWP_RECIPES))
 def test_hf_native_plan_with_lowp_mlps_matches_dtensor_dispatch(precision, hf_checkpoints, tmp_path):
-    """``lowp_precision`` retypes the MLP projections; the local path computes their fake-quant matmul on each
-    rank's shard as transformers' forward did on the DTensors."""
     out = str(tmp_path / "result")
     variant = Variant(lowp=precision)
     run_gloo_ranks(_hf_worker, TP, hf_checkpoints("qwen3"), HF_FAMILIES["qwen3"].load_class, variant, out)
@@ -478,7 +443,7 @@ def test_selective_attention_plan_matches_dtensor_dispatch(model_type, tmp_path)
 
 @pytest.mark.parametrize("model_type", ["gpt_oss", "qwen3_moe"])
 def test_selective_attention_plan_under_fsdp2_matches_dtensor_dispatch(model_type, tmp_path):
-    """dp=2 x tp=2, the EP+TP layout: FSDP2 shards the projections over dp beside the replicated experts."""
+    """The EP+TP layout: FSDP2 shards the projections over dp beside the replicated experts."""
     out = str(tmp_path / "result")
     run_gloo_ranks(_selective_worker, DP * TP, model_type, Variant(dp=DP), out)
     _assert_matches(_results(out, DP * TP), _selective_expected(model_type))
@@ -492,9 +457,7 @@ def test_selective_attention_plan_under_checkpointing_matches_dtensor_dispatch(g
 
 
 def test_the_roster_covers_every_style_and_a_rowwise_bias():
-    """Anti-vacuity: the HF cases run all four local styles (only OLMo 3 splits a rowwise input), the selective
-    cases include both MLA families, and GPT-OSS's biased ``o_proj`` runs the tolerance mode; every comparison
-    asserts it ran the styles and mode derived here."""
+    """Anti-vacuity: only OLMo 3 splits a rowwise input, and GPT-OSS's biased ``o_proj`` runs the tolerance mode."""
     covered = set().union(*(_hf_expected(case)["styles"] for case in HF_CASES))
     assert covered == {"colwise", "colwise_gather_output", "rowwise", "rowwise_split_input"}, covered
     assert covered == set(local_linears.LINEAR_TP_STYLES), sorted(local_linears.LINEAR_TP_STYLES)
@@ -521,7 +484,6 @@ def test_negative_control_selective_breaks_are_caught(broken, tmp_path):
 
 
 def _placed(linear: nn.Linear, mesh, weight, bias) -> nn.Linear:
-    """``linear`` with its weight and bias distributed into the given placements, as a load leaves them."""
     for pname, placement in (("weight", weight), ("bias", bias)):
         param = getattr(linear, pname)
         setattr(linear, pname, nn.Parameter(distribute_tensor(param, mesh, [placement], src_data_rank=None)))
@@ -570,7 +532,7 @@ def test_install_refuses_a_linear_with_its_own_forward():
     ("style_name", "in_features", "out_features"), [("colwise_gather_output", 8, 6), ("rowwise_split_input", 6, 8)]
 )
 def test_install_refuses_a_full_width_dim_the_group_does_not_divide(style_name, in_features, out_features):
-    """The gather and the split move equal slices; an uneven one would fail the first collective instead."""
+    """An uneven slice would fail the first collective instead."""
     style = local_linears.LINEAR_TP_STYLES[style_name]
     with fake_process_group_mesh(rank=0, world_size=4) as mesh:
         linear = _placed(nn.Linear(in_features, out_features), mesh, **style.placements)
@@ -579,8 +541,8 @@ def test_install_refuses_a_full_width_dim_the_group_does_not_divide(style_name, 
 
 
 def test_rowwise_bias_keeps_the_matmul_dtype_under_autocast():
-    """An fp32 rowwise bias under bf16 autocast leaves the output bf16, as a biased ``F.linear`` (DTensor's
-    ``addmm``) returns it, rather than promoting the SUM to fp32."""
+    """An fp32 rowwise bias under bf16 autocast stays bf16, as DTensor's ``addmm`` returns it, rather than promoting
+    the SUM."""
     with fake_process_group_mesh(rank=0, world_size=TP) as mesh:
         linear = _placed(nn.Linear(8, 8), mesh, **local_linears.LINEAR_TP_STYLES["rowwise"].placements)
         local_linears.install_local_forward(linear, "rowwise")
@@ -591,8 +553,7 @@ def test_rowwise_bias_keeps_the_matmul_dtype_under_autocast():
 
 
 def test_a_deepcopy_computes_with_its_own_parameters():
-    """The forward is bound to its module, so a copy's projection reads the copy's shards and its gradient
-    lands on them, not on the original's."""
+    """The forward is bound to its module."""
     with fake_process_group_mesh(rank=0, world_size=TP) as mesh:
         linear = _placed(nn.Linear(8, 8), mesh, **local_linears.LINEAR_TP_STYLES["colwise"].placements)
         local_linears.install_local_forward(linear, "colwise")
@@ -608,8 +569,7 @@ def test_a_deepcopy_computes_with_its_own_parameters():
 
 
 def test_forward_refuses_parameters_fsdp2_left_sharded():
-    """Called past its FSDP unit's unshard, a projection holds FSDP2's (dp, tp) shard, whose local slice would
-    compute part of the output; it raises instead."""
+    """FSDP2's (dp, tp) shard would compute part of the output."""
     with fake_process_group(rank=0, world_size=DP * TP):
         mesh = build_dp_tp_mesh(TP, DP, device_type="cpu")
         linear = _placed(nn.Linear(8, 8), tp_submesh(mesh), Shard(0), Shard(0))
@@ -624,8 +584,8 @@ def test_forward_refuses_parameters_fsdp2_left_sharded():
 
 
 def test_load_finish_diagnoses_a_tied_pair_the_plan_disagrees_with():
-    """A planned head whose tied weight loaded replicated gets the tie check's diagnosis from the load finish,
-    ahead of the local-forward install, which would only refuse the head's plain weight."""
+    """The load finish diagnoses it ahead of the local-forward install, which would only refuse the head's plain
+    weight."""
     model = tiny_family_model(HF_FAMILIES["qwen3"], overrides={"tie_word_embeddings": True})
     assert model.lm_head.weight is model.model.embed_tokens.weight
     with fake_process_group_mesh(rank=0, world_size=TP) as mesh:
@@ -640,8 +600,6 @@ def test_load_finish_diagnoses_a_tied_pair_the_plan_disagrees_with():
 
 
 def test_install_planned_leaves_embeddings_and_other_styles_on_their_forward():
-    """Only an ``nn.Linear`` under a local style moves; the vocab-parallel embedding keeps transformers' path."""
-
     class _Model(nn.Module):
         def __init__(self):
             super().__init__()

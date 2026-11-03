@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""Tests for Environmental-GRPO multi-turn trajectory tokenization + masking.
-
-`_tokenize_trajectory` must (1) train on assistant tokens across *every* turn — not
-collapse to turn 1 at the first per-turn ``<|im_end|>`` EOS — and (2) mask out
-environment-injected tool/user tokens so they never receive policy gradient. These are
-pure tokenizer mechanics, so they run on CPU against a real chat tokenizer (Qwen3, whose
-EOS ``<|im_end|>`` doubles as the turn delimiter — the exact case a first-EOS
-heuristic mis-handles). Run: ``pytest tests/cpu/environments/test_trajectory_masking.py``.
-"""
+"""Environmental-GRPO trajectory tokenization: ``_tokenize_trajectory`` trains assistant tokens across every turn
+and masks tool and user tokens. Runs on Qwen3, whose EOS ``<|im_end|>`` doubles as the turn delimiter, the case a
+first-EOS heuristic mis-handles."""
 
 from collections import defaultdict
 from types import MethodType, SimpleNamespace
@@ -30,9 +24,8 @@ def tokenizer():
 
 
 def _stub(tokenizer):
-    """Minimal object exposing the attributes _tokenize_trajectory reads. The real
-    ``_render_messages_to_ids`` is bound so the render goes through the genuine chat-template path
-    (see the sibling stub in tests/cpu/grpo/test_token_id_training.py)."""
+    """Minimal object with the attributes _tokenize_trajectory reads; the real ``_render_messages_to_ids`` is bound,
+    as in tests/cpu/grpo/test_token_id_training.py."""
     stub = SimpleNamespace(
         processing_class=tokenizer,
         max_completion_length=2048,
@@ -67,7 +60,6 @@ def _tokenize(stub, result):
 
 
 def test_multi_turn_assistant_tokens_all_trainable(tokenizer):
-    # Both assistant turns stay trainable even though the first ends in <|im_end|> (EOS == delimiter).
     stub = _stub(tokenizer)
     messages = [
         Message.user("What is 2+2? Use the calculator."),
@@ -119,8 +111,7 @@ def test_empty_trajectory_fallback(tokenizer):
     assert completion_mask.numel() == 1
 
 
-# Reasoning (CoT) capture/gating contract: the final turn's CoT must be trainable, yet never reach a
-# vLLM generation request (unknown field → 400, and prior-turn CoT must stay out of context).
+# The final turn's CoT must be trainable yet never reach a generation request (unknown field: 400).
 
 
 def test_to_dict_includes_reasoning_only_when_requested():
@@ -148,8 +139,7 @@ def test_add_action_message_carries_reasoning_from_context():
 
 
 def test_add_action_message_caps_tool_calls_to_execution_limit():
-    """The stored assistant tool_calls must be capped to max_tool_calls_per_turn — else the message
-    advertises more calls than there are tool-result messages, a structural mismatch."""
+    """Otherwise the message advertises more calls than there are tool-result messages."""
     traj = Trajectory()
     ctx = {"tool_calls": [{"id": f"c{i}"} for i in range(8)]}
     EnvironmentBase._add_action_message(SimpleNamespace(max_tool_calls_per_turn=5), traj, "act", ctx)
@@ -157,12 +147,8 @@ def test_add_action_message_caps_tool_calls_to_execution_limit():
 
 
 class _EffortRecordingTokenizer:
-    """Records the reasoning_effort kwarg every apply_chat_template render receives.
-
-    Renders a minimal per-message template and tokenizes one id per character, so span location
-    SUCCEEDS: a stand-in whose render ignored its messages would return the same ids for every probe,
-    and the recorded efforts would then only prove the effort reached a failed location.
-    """
+    """Records the reasoning_effort each render receives. Renders per message, one id per character, so span
+    location succeeds and the recorded efforts are from real locations."""
 
     eos_token_id = 1
     pad_token_id = 0
@@ -251,7 +237,7 @@ def test_episode_generation_tokens_mean_max_p90():
     host._metrics = {"train": defaultdict(list)}
     host._log_rollout_metrics(results, "train", [[] for _ in vals])
     m = host._metrics["train"]
-    assert m["episode/generation_tokens"] == [55.0]  # mean, NOT the max/last
+    assert m["episode/generation_tokens"] == [55.0]  # mean, not the max/last
     assert m["episode/generation_tokens_max"] == [100.0]
     # nearest-rank p90 of 10 sorted values -> ceil(0.9 * 10) = 9th = 90
     assert m["episode/generation_tokens_p90"] == [90.0]

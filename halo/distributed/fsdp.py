@@ -1,8 +1,5 @@
-"""FSDP2 (``fully_shard``) data-parallel gradient sync for every torchrun mode, plus the sharding-state helpers.
-The DP entry point builds its mesh and the TP one takes the loader's ``(dp, tp)`` mesh; both run one wrap body, so
-a policy knob cannot drift between them. A multi-layer unit's forward hooks and
-:func:`complete_fsdp2_post_backward` drive FSDP2 internals of the installed torch (``FSDPState``,
-``FSDPParamGroup``)."""
+"""FSDP2 (``fully_shard``) data-parallel gradient sync for every torchrun mode, plus sharding-state helpers. A
+multi-layer unit's hooks and :func:`complete_fsdp2_post_backward` drive FSDP2 internals of the installed torch."""
 
 import contextlib
 import functools
@@ -35,9 +32,9 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# Consecutive decoder layers per FSDP2 shard group under ZeRO-2: a group all-gathers and reduce-scatters once for
-# all of them. ZeRO-2 keeps every layer gathered from its forward to its backward anyway; under ZeRO-3 FSDP2 holds
-# the running group and the one it prefetches, so units would multiply the gathered window ZeRO-3 exists to bound.
+# Decoder layers per FSDP2 shard group under ZeRO-2; a group all-gathers and reduce-scatters once for all of them.
+# ZeRO-2 keeps every layer gathered from forward to backward anyway; under ZeRO-3 FSDP2 holds the running group and its
+# prefetch, so units would multiply the gathered window ZeRO-3 exists to bound.
 LAYERS_PER_UNIT = 2
 
 
@@ -58,10 +55,8 @@ class IdentityParamSet:
 def mixed_precision_policy(
     compute_dtype: torch.dtype, *, fp32_reduce: bool, cast_forward_inputs: bool
 ) -> MixedPrecisionPolicy:
-    """FSDP2 policy computing in ``compute_dtype`` and reducing grads in fp32 under ``fp32_reduce``
-    (a bf16 sum loses ~10^4x precision), else in ``compute_dtype``. An fp32 run gets an all-fp32
-    policy: ``fully_shard`` requires a non-None one, and it is a functional no-op.
-    """
+    """FSDP2 policy computing in ``compute_dtype``, reducing in fp32 under ``fp32_reduce`` (a bf16 sum loses ~10^4x
+    precision). ``fully_shard`` requires a non-None policy, so an fp32 run gets a no-op all-fp32 one."""
     return MixedPrecisionPolicy(
         param_dtype=compute_dtype,
         reduce_dtype=torch.float32 if fp32_reduce else compute_dtype,
@@ -76,10 +71,9 @@ def _should_cast_forward_inputs(model: nn.Module) -> bool:
 
 
 def _reject_unreachable_decoder_layers(model: nn.Module) -> None:
-    """Raise when a generative decoder exposes no decoder-layer list :func:`decoder_layers` reaches:
-    the whole model would be one shard group, all-gathered for the entire forward. The layer-less
-    shapes this wrap serves (a SentenceTransformer, a classification backbone, a PP stage) do not
-    generate."""
+    """Raise when a generative decoder exposes no decoder-layer list, since the whole model would be one shard group,
+    all-gathered for the entire forward. Layer-less shapes this wrap serves (a SentenceTransformer, a classification
+    backbone, a PP stage) do not generate."""
     inner = base_transformers_model(model)
     if not (isinstance(inner, PreTrainedModel) and inner.can_generate()):
         return
@@ -92,12 +86,8 @@ def _reject_unreachable_decoder_layers(model: nn.Module) -> None:
 
 
 def _warn_fp32_pins_cast_by_policy(model: nn.Module, mp_policy: MixedPrecisionPolicy) -> None:
-    """Warn when the policy will compute fp32-pinned params in low precision.
-
-    They reach the wrap in fp32 only under fp32 master weights, and ``MixedPrecisionPolicy`` casts a
-    whole group with no per-parameter dtype, so they compute at ``param_dtype`` where a single-GPU run
-    keeps fp32.
-    """
+    """Warn when the policy will compute fp32-pinned params in low precision: ``MixedPrecisionPolicy`` casts a whole
+    group with no per-parameter dtype, where a single-GPU run keeps fp32."""
     if mp_policy.param_dtype in (None, torch.float32):
         return
     pinned = fp32_pinned_names(model)
@@ -128,13 +118,9 @@ def _tied_parameters(model: nn.Module) -> "IdentityParamSet":
 
 
 def _uniform_dtype_split(layer: nn.Module, left_out: "IdentityParamSet") -> list[nn.Module]:
-    """Submodules of ``layer`` that take a ``fully_shard`` group of their own, innermost first, so every
-    group's trainable parameters share one dtype (FSDP2 asserts it; an ``fp32_router`` breaks it).
-
-    A subtree of another dtype splits off at the smallest submodule holding all of it; a mixed subtree
-    splits further. The layer keeps the dtype needing the fewest extra groups. ``left_out`` holds the
-    parameters no group of the layer takes. Raises where one module directly owns two dtypes.
-    """
+    """Submodules of ``layer`` needing their own ``fully_shard`` group, innermost first, so every group's trainable
+    params share one dtype (FSDP2 asserts it; an ``fp32_router`` breaks it). The layer keeps the dtype needing fewest
+    extra groups; ``left_out`` holds params no group takes. Raises where one module directly owns two dtypes."""
 
     def trainable(module: nn.Module, *, recurse: bool) -> list[nn.Parameter]:
         return [p for p in module.parameters(recurse=recurse) if p.requires_grad and p not in left_out]
@@ -183,9 +169,9 @@ def _uniform_dtype_split(layer: nn.Module, left_out: "IdentityParamSet") -> list
 
 
 def _unshard_with_layer(layer: nn.Module, split: list[nn.Module]) -> None:
-    """Unshard the ``split`` groups whenever ``layer`` runs forward: a family can read a submodule's
-    parameters without calling it (``F.linear(x, self.gate.weight)``), skipping its own pre-hook. The
-    root post-backward callback still reduces their gradients."""
+    """Unshard the ``split`` groups whenever ``layer`` runs forward, since a family can read a submodule's parameters
+    without calling it (``F.linear(x, self.gate.weight)``), skipping its own pre-hook. The root post-backward callback
+    still reduces their gradients."""
 
     def _pre_forward(_module: nn.Module, _args: tuple) -> None:
         for module in split:
@@ -200,9 +186,8 @@ def _layer_units(
     left_out: list["IdentityParamSet"],
     layers_per_unit: int,
 ) -> list[list[int]]:
-    """Indices of consecutive decoder layers, up to ``layers_per_unit`` per FSDP2 unit. A layer whose trainable
-    dtype outside its ``splits`` groups and its ``left_out`` parameters differs from its unit's opens the next
-    unit: FSDP2 asserts one trainable dtype per group."""
+    """Indices of consecutive decoder layers, up to ``layers_per_unit`` per unit. A layer whose trainable dtype
+    (outside ``splits`` and ``left_out``) differs from its unit's opens the next, since FSDP2 asserts one per group."""
     units: list[list[int]] = []
     unit_dtypes: set[torch.dtype] = set()
     for index, layer in enumerate(layers):
@@ -220,21 +205,16 @@ def _layer_units(
 
 
 def layers_per_shard_group(reshard_after_forward: bool) -> int:
-    """Decoder layers per FSDP2 shard group: :data:`LAYERS_PER_UNIT` under ZeRO-2, one under ZeRO-3."""
     return 1 if reshard_after_forward else LAYERS_PER_UNIT
 
 
 def _install_unit_hooks(unit: list[nn.Module]) -> None:
-    """Replace torch's forward hooks on one ``fully_shard`` group of consecutive layers with hooks under which the
-    layers train as they would in groups of their own, per-layer gradient checkpointing included.
-
-    torch starts a multi-module group at whichever module runs first, which in a reentrant recompute is the
-    group's last layer: its post-backward would reduce and reshard the group before the layers below it ran their
-    backward. Here the first layer's pre-forward and the last layer's post-forward bracket the forward, and the
-    first layer's recompute runs a one-layer group's recompute hooks, which register the group's pre- and
-    post-backward hooks that a reentrant forward under ``no_grad`` could not. Each later layer casts its inputs as
-    its own group would and, in a recompute, re-gathers what a reshard after forward freed.
-    """
+    """Replace torch's forward hooks on a multi-layer ``fully_shard`` group so its layers train as in groups of their
+    own, per-layer GC included. torch starts a group at whichever module runs first, in a reentrant recompute its last
+    layer, whose post-backward would reduce and reshard the group before the layers below ran backward. Here the first
+    layer's pre-forward and the last's post-forward bracket the forward, and the first layer's recompute registers the
+    backward hooks a reentrant forward under ``no_grad`` could not. Each later layer casts its inputs as its own group
+    would and, in a recompute, re-gathers what a reshard after forward freed."""
     state = unit[0]._get_fsdp_state()
     group = state._fsdp_param_group
     if group is None:
@@ -253,9 +233,8 @@ def _install_unit_hooks(unit: list[nn.Module]) -> None:
     def first_pre_forward(module: nn.Module, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
         args, kwargs = state._pre_forward(module, args, kwargs)
         if is_bw() and group._training_state == TrainingState.PRE_BACKWARD:
-            # The group's pre-backward ran in a later layer's backward and its post-backward is still to come:
-            # a reentrant checkpoint around this layer alone, whose forward registered nothing. A non-reentrant
-            # recompute builds a graph that never runs backward, so the hook is inert there.
+            # PRE_BACKWARD here means a reentrant checkpoint around this layer alone, whose forward registered nothing.
+            # A non-reentrant recompute builds a graph that never runs backward, so the hook is inert there.
             args, kwargs = group._register_post_backward_hook(args, kwargs)
         return args, kwargs
 
@@ -293,9 +272,8 @@ def apply_fsdp2_per_layer(
     *,
     layers_per_unit: int | None = None,
 ) -> int:
-    """Apply FSDP2 per unit of consecutive decoder layers, then to the backbone and the model root; returns the group
-    count (for logging). A layer mixing trainable dtypes first gets nested groups. ``layers_per_unit`` overrides
-    :func:`layers_per_shard_group`'s count."""
+    """Apply FSDP2 per unit of consecutive decoder layers, then to the backbone and the root; returns the group count.
+    A layer mixing trainable dtypes first gets nested groups."""
     _warn_fp32_pins_cast_by_policy(model, mp_policy)
     underlying_model = backbone_with_layers(model) or model
 
@@ -375,7 +353,6 @@ def _apply_fsdp2(
     reshard_after_forward: bool = False,
     fp32_master_weights: bool = False,
 ) -> None:
-    """Wrap ``model`` over ``dp_mesh`` and log it; ``topology`` names the mesh in the caller's terms."""
     mp_policy = mixed_precision_policy(
         compute_dtype,
         fp32_reduce=fp32_reduce or fp32_master_weights,
@@ -407,8 +384,8 @@ def _apply_fsdp2(
 
 
 def _require_single_device_params(model: nn.Module) -> None:
-    """Raise unless every param is on one device. A raise, not a fallback: the check is rank-local and
-    the mesh construction after it collective, so one rank skipping would hang the others."""
+    """Raise unless every param is on one device. The check is rank-local and the mesh construction after it
+    collective, so one rank skipping instead would hang the others."""
     devices = {p.device for p in model.parameters()}
     if len(devices) > 1:
         raise RuntimeError(
@@ -419,8 +396,7 @@ def _require_single_device_params(model: nn.Module) -> None:
 
 
 def _broadcast_from_first_coordinate(tensor: torch.Tensor, mesh: DeviceMesh, dims: list[int]) -> None:
-    """COLLECTIVE over ``mesh``'s groups along ``dims``, in that order: ``tensor`` takes, in place, the copy of each
-    group's first rank, so after every dim of the mesh it holds the copy at the mesh's first coordinate."""
+    """COLLECTIVE over ``mesh``'s groups along ``dims``, in order: ``tensor`` takes each group's first copy."""
     wire = tensor if tensor.is_contiguous() else tensor.contiguous()
     for dim in dims:
         group = mesh.get_group(dim)
@@ -430,14 +406,9 @@ def _broadcast_from_first_coordinate(tensor: torch.Tensor, mesh: DeviceMesh, dim
 
 
 def _start_replicas_identical(model: nn.Module, dp_mesh: DeviceMesh, replicated: IdentityParamSet) -> int:
-    """COLLECTIVE over ``dp_mesh``: every parameter more than one DP rank holds a copy of takes the first copy;
-    returns how many parameters this rank broadcast.
-
-    FSDP2, unlike DDP, broadcasts no module state, and those copies only average their gradients, so a tensor the
-    ranks drew from their own RNG streams (a LoRA adapter, a new head or embedding row) would keep each rank's draw
-    for the whole run. A shard takes the copy at index 0 of each mesh dim it is replicated over (``dp_replicate``
-    under HSDP); a parameter in ``replicated``, an FSDP-ignored whole copy on every rank, takes DP rank 0's.
-    """
+    """COLLECTIVE over ``dp_mesh``: every parameter more than one DP rank holds a copy of takes the first copy; returns
+    how many this rank broadcast. FSDP2, unlike DDP, broadcasts no module state and those copies only average
+    gradients, so a tensor drawn per rank (a LoRA adapter, a new head row) stays different all run."""
     broadcast = 0
     with torch.no_grad():
         for param in model.parameters():
@@ -469,13 +440,10 @@ def apply_fsdp2_for_dp(
     dp_replicate_size: int = 1,
     ignored_params_replicated: bool = False,
 ) -> bool:
-    """Apply FSDP2 per unit of decoder layers for data-parallel grad sync in place; returns whether it ran.
-
-    ``ignored_params`` (EP-module params, frozen params of a dtype no trainable one shares) stay out;
-    ``ignored_params_replicated`` declares each a whole copy on every rank of the DP group (no expert distributed).
-    ``dp_replicate_size > 1`` shards within an NVLink domain and replicates across domains (HSDP). Every copy the
-    wrap leaves on more than one rank, an HSDP shard or a replicated ignored parameter, starts from the first one.
-    """
+    """Wrap ``model`` per unit of decoder layers for data-parallel grad sync in place; returns whether it ran.
+    ``ignored_params`` (EP modules, frozen params of a dtype no trainable one shares) stay out;
+    ``ignored_params_replicated`` declares each a whole copy on every DP rank. ``dp_replicate_size > 1`` shards within
+    a domain, replicates across (HSDP)."""
     if dp_size <= 1:
         if is_global_main_process():
             logger.info("  Single GPU — skipping FSDP2")
@@ -516,12 +484,8 @@ def apply_fsdp2_for_tp(
     fp32_master_weights: bool = False,
     reshard_after_forward: bool = False,
 ) -> tuple[bool, DeviceMesh | None]:
-    """Apply FSDP2 over the DP dimension of a TP run; returns ``(fsdp_wrapped, device_mesh)``.
-
-    ``dp_size`` is the caller's ``data_parallel_size``, never ``world // tp_size``, which agrees only
-    while every other DP-dividing axis is rejected beside TP. ``ignored_params`` are an EP+TP run's EP
-    modules, which sync their own gradients.
-    """
+    """Wrap the DP dimension of a TP run; returns ``(fsdp_wrapped, device_mesh)``. ``dp_size`` is the caller's
+    ``data_parallel_size``, never ``world // tp_size``. ``ignored_params`` are EP modules, which sync themselves."""
     if dp_size <= 1:
         logger.info("  DP=1 under TP: no FSDP2 wrap (DTensor and EP sync carry the gradients)")
         return False, None
@@ -558,27 +522,20 @@ def apply_fsdp2_for_tp(
 
 
 def fsdp2_modules(model: nn.Module) -> list[FSDPModule]:
-    """Every ``fully_shard``-wrapped module under ``model``, in ``modules()`` order (a list, so the
-    per-window toggle can cache it instead of re-walking the tree every backward)."""
+    """Every ``fully_shard``-wrapped module under ``model``, as a list so the per-window toggle can cache it."""
     return [module for module in model.modules() if isinstance(module, FSDPModule)]
 
 
 def reshard_fsdp2_modules(model: nn.Module) -> None:
-    """Re-register every FSDP2 module's sharded DTensor params before a state-dict API call.
-
-    An eval forward leaves the transient UNSHARDED params registered (``reshard_after_forward=False``
-    skips the post-forward reshard; the root skips it even at True). ``get_optimizer_state_dict`` maps
-    params by identity while the optimizer holds the sharded DTensors (``KeyError: 0``), and
-    ``set_model_state_dict`` would write into buffers the next unshard discards. Per-rank; a no-op when
-    already sharded.
-    """
+    """Re-register every FSDP2 module's sharded DTensor params before a state-dict API call (per-rank). An eval forward
+    leaves the transient unsharded params registered: ``get_optimizer_state_dict`` maps params by identity
+    (``KeyError: 0``) and ``set_model_state_dict`` would write into buffers the next unshard discards."""
     for module in fsdp2_modules(model):
         module.reshard()
 
 
 def fsdp2_param_groups(model: nn.Module) -> list[FSDPParamGroup]:
-    """The parameter group of every ``fully_shard``-wrapped module under ``model`` that manages parameters, each
-    once (a multi-layer unit's layers share one), in ``modules()`` order."""
+    """Each ``fully_shard`` module's parameter group, once each (a multi-layer unit's layers share one)."""
     groups = (module._get_fsdp_state()._fsdp_param_group for module in fsdp2_modules(model))
     return list({id(group): group for group in groups if group is not None}.values())
 
@@ -594,22 +551,15 @@ def _holds_unsharded_grad(group: FSDPParamGroup) -> bool:
 
 
 def complete_fsdp2_post_backward(groups: list[FSDPParamGroup]) -> int:
-    """COLLECTIVE where a group reduces: run FSDP2's post-backward on every group a finished backward left
-    gathered or holding an unsharded gradient, then make the current stream wait on the reductions it issued;
-    returns how many groups reduce-scattered. Which groups reduce follows from rank-local gradient state, so
-    every rank must run each layer the same number of times per backward, as FSDP2 itself needs every rank to
-    run the same modules.
-
-    A one-module ``fully_shard`` group that reentrant checkpointing recomputes K>1 times in one backward
-    (checkpoint around its ``__call__``) gets FSDP2's post-backward hook in only one recompute. The others find
-    its state PRE_BACKWARD, re-gather it and accumulate into the unsharded gradient, and the root's final callback
-    skips the group as already POST_BACKWARD: K-1 contributions never reach the sharded gradient, and the gathered
-    parameters outlive the optimizer step. A multi-layer unit's state sits in the root's state list once per
-    module, so the callback's later visit finds the group idle and runs its post-backward itself, leaving this
-    nothing to reduce there. ``post_backward`` is idempotent where the backward ran it and honours
-    the group's window flags (no reduce after ``set_requires_gradient_sync(False)``, no reshard after
-    ``set_reshard_after_backward(False)``), so this is a no-op wherever every recompute was hooked.
-    """
+    """COLLECTIVE where a group reduces: run FSDP2's post-backward on every group a finished backward left gathered or
+    holding an unsharded gradient, then make the current stream wait on the reductions; returns how many
+    reduce-scattered. Which groups reduce follows rank-local gradient state, so every rank must run each layer equally
+    often per backward. A one-module group that reentrant checkpointing recomputes K>1 times in one backward gets
+    FSDP2's post-backward hook in only one recompute. The others find it PRE_BACKWARD, re-gather it and accumulate into
+    the unsharded gradient, and the root's final callback skips it as POST_BACKWARD: K-1 contributions never reach the
+    sharded gradient, and the gathered params outlive the optimizer step. A multi-layer unit's group is finished by the
+    callback's later visit. Since ``post_backward`` is idempotent and honours the window flags, this is a no-op
+    wherever every recompute was hooked."""
     pending = [group for group in groups if group.is_unsharded or _holds_unsharded_grad(group)]
     busy = [
         f"{group!r}: {group._training_state.name}" for group in pending if group._training_state != TrainingState.IDLE
@@ -638,11 +588,9 @@ def complete_fsdp2_post_backward(groups: list[FSDPParamGroup]) -> int:
 
 
 def reject_unfinished_fsdp2_backward(groups: list[FSDPParamGroup]) -> None:
-    """Raise if a group's post-backward is still undone after :func:`complete_fsdp2_post_backward`: a gradient
-    held unsharded while the group's reduce is armed is missing from the sharded gradient the clip and the
-    optimizer read, and a group left gathered while its reshard is armed feeds the next forward parameters
-    the optimizer step never reaches. Rank-local, as a check on torch's internals: a leftover only some ranks
-    hold raises there while their peers wait in the next collective."""
+    """Raise if a group's post-backward is undone after :func:`complete_fsdp2_post_backward`: an unreduced gradient is
+    missing from what the clip and optimizer read, and a group left gathered feeds the next forward params the step
+    never reached. Rank-local, so a leftover on some ranks raises there while peers wait in the next collective."""
     unreduced = [repr(group) for group in groups if group.reduce_grads and _holds_unsharded_grad(group)]
     gathered = [repr(group) for group in groups if group.reshard_after_backward and group.is_unsharded]
     if not unreduced and not gathered:
@@ -658,15 +606,11 @@ def reject_unfinished_fsdp2_backward(groups: list[FSDPParamGroup]) -> None:
 
 
 def install_fsdp2_safe_disable_adapter(peft_model: nn.Module, fsdp_root: nn.Module) -> None:
-    """Make ``peft_model.disable_adapter()`` restore ``requires_grad`` on the FSDP2 sharded params.
-
-    peft clears the flag on the adapter params registered at entry and restores it on those registered
-    at exit. A reference pass that is the first forward after a reshard enters on the sharded params and
-    exits on the unsharded ones that forward left registered, so the sharded adapters would stay frozen.
-    When the params in the trainable slots changed, every FSDP2 module under ``fsdp_root`` is resharded
-    before peft's exit; a pass that enters and exits on the same params reshards nothing. The slots are
-    read once: FSDP2 swaps what a slot holds, never the slot. Per-rank, idempotent, a no-op without FSDP2.
-    """
+    """Make ``peft_model.disable_adapter()`` restore ``requires_grad`` on the FSDP2 sharded params. peft clears the
+    flag on the params registered at entry and restores it on those registered at exit; a reference pass that is the
+    first forward after a reshard enters on sharded and exits on unsharded params, leaving the sharded adapters frozen.
+    So when the trainable slots' params changed, every FSDP2 module is resharded before peft's exit. The slots are read
+    once, since FSDP2 swaps what a slot holds, never the slot. Per-rank and idempotent."""
     if getattr(peft_model, "_fsdp2_safe_disable_adapter", False):
         return
     disable_adapter = peft_model.disable_adapter

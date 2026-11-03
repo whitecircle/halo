@@ -1,11 +1,5 @@
-"""Model-side evidence that each parallel axis a run asked for took effect.
-
-A trainer's ``has_ep_group`` / ``is_tp_mode`` / ``is_cp_mode`` return the ``ParallelismConfig`` it was
-handed, so a check on them passes on a run whose loader silently skipped the axis. These probes read
-what the loader and the trainer's wrap left on the model instead: the EP layers and the expert
-weights they hold, the TP-sharded parameters, the Ulysses attention layers, and the expert-TP groups the
-ranks report.
-"""
+"""Model-side evidence that each parallel axis took effect; ``has_ep_group`` and friends only echo the config a run was
+handed."""
 
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -21,8 +15,8 @@ from tests.common.rank_log import log
 
 
 class ExpertTPMembership(NamedTuple):
-    """One rank's view of its expert-TP group: the group's global ranks (``None`` without a group), the
-    ``expert_tp_rank`` it holds there and the data-parallel rank whose batch it reads."""
+    """One rank's view of its expert-TP group: global ranks (None without a group), ``expert_tp_rank``, and the DP rank
+    whose batch it reads."""
 
     members: tuple[int, ...] | None
     expert_tp_rank: int
@@ -30,7 +24,6 @@ class ExpertTPMembership(NamedTuple):
 
 
 def tp_sharded_param_names(model) -> list[str]:
-    """Parameters held as DTensors on a mesh with a ``tp`` dim."""
     return [
         name
         for name, param in model.named_parameters()
@@ -39,13 +32,12 @@ def tp_sharded_param_names(model) -> list[str]:
 
 
 def ulysses_attention_layers(model) -> list[UlyssesAttention]:
-    """The attention layers CP swapped for their Ulysses wrappers."""
     return [module for module in model.modules() if isinstance(module, UlyssesAttention)]
 
 
 def _bank_split_ep_way(layer) -> bool:
-    """The layer owns an ``ep_size``-th of the expert bank, and its expert weights hold exactly that
-    many experts. EP-sharded experts are FSDP-ignored plain tensors, so dim 0 is the local count."""
+    """The layer owns an ``ep_size``-th of the bank; EP-sharded experts are FSDP-ignored plain tensors, so dim 0 is the
+    local count."""
     weights = layer.expert_named_params()
     return (
         layer.experts_per_rank * layer.ep_size == layer.num_experts
@@ -57,17 +49,8 @@ def _bank_split_ep_way(layer) -> bool:
 
 
 def parallel_shape_checks(model, parallelism_config) -> dict[str, bool]:
-    """One named check per parallel axis ``parallelism_config`` enables, each read off ``model``.
-
-    * EP layers (``ep_layers_wrapped``) wherever the run needs them and the checkpoint is a MoE: EP
-      distribution, or grouped-GEMM expert compute at ``ep_size=1``;
-    * ``expert_bank_split_ep_way`` under ``ep_size > 1``, on every EP layer;
-    * ``expert_ffn_sharded_etp_way`` under ETP, on every EP layer;
-    * ``tp_sharded_params`` under TP;
-    * ``cp_attention_wrapped`` under CP, every Ulysses layer spanning ``cp_size`` ranks.
-
-    Call it after the trainer is built, so the FSDP2 wrap has run. No collective.
-    """
+    """One named check per parallel axis ``parallelism_config`` enables, each read off ``model``. Call after the FSDP2
+    wrap; no collective."""
     pc = parallelism_config
     checks: dict[str, bool] = {}
     layers = ep_layers(model)
@@ -97,14 +80,9 @@ def parallel_shape_checks(model, parallelism_config) -> dict[str, bool]:
 
 
 def expert_tp_group_problems(views: Sequence[ExpertTPMembership], expert_tp_size: int) -> list[str]:
-    """What is wrong with the expert-TP groups the world's ranks report, ``views[r]`` being global rank ``r``'s.
-
-    Empty when every rank sits in a group of exactly ``expert_tp_size`` ranks, itself included, that each of its
-    members reports alike, whose members hold the expert-TP ranks ``0 .. expert_tp_size - 1`` once each and read
-    one DP rank's batch, since the partners sum their shards' outputs token by token. Which ranks pair up
-    (contiguous or strided) is the layout's own choice; a group spanning DP replicas, a rank outside its own group,
-    members that disagree on the group, a shard index held twice or partners reading different batches is named.
-    """
+    """What is wrong with the expert-TP groups ``views[r]`` reports; empty when every rank is in one exact-size group.
+    Members must agree, hold each shard index once and read one DP rank's batch, since partners sum their shards'
+    outputs token by token."""
     problems = []
     for rank, view in enumerate(views):
         if view.members is None:
@@ -135,8 +113,8 @@ def expert_tp_group_problems(views: Sequence[ExpertTPMembership], expert_tp_size
 
 
 def expert_tp_group_views(layer, dp_rank: int) -> list[ExpertTPMembership]:
-    """COLLECTIVE (the world): every rank's :class:`ExpertTPMembership` read off its EP ``layer`` and the ``dp_rank``
-    its config assigns it, in global-rank order. One object gather, which a rank without a group joins as well."""
+    """COLLECTIVE (the world): every rank's :class:`ExpertTPMembership` in global-rank order; a rank with no group
+    joins the gather too."""
     group = layer.expert_tp_group
     mine = ExpertTPMembership(
         None if group is None else tuple(dist.get_process_group_ranks(group)), layer.expert_tp_rank, dp_rank

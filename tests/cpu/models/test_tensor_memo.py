@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``TensorMemo``: one derivation for every reader of the same tensor contents, and never one tensor's derivation for
-another's.
-
-Every attention layer of a forward reads the same ``position_ids``, and a reentrant checkpoint's recompute reads
-detached copies of it, which share its storage and version counter. A later micro-batch's row is a new tensor that
-the allocator can place at the freed address of the last one, with the same shape and version: a memo keyed on the
-address alone would hand it the earlier row's document boundaries.
-
-    python tests/cpu/models/test_tensor_memo.py
-"""
+"""``TensorMemo``: one derivation per tensor contents. A later row can land at the last one's freed address with the
+same shape and version, so a memo keyed on the address alone would hand it the earlier row's document boundaries."""
 
 import pytest
 import torch
@@ -16,8 +8,7 @@ import torch
 from halo.models.attention.tensor_memo import TensorMemo
 from halo.models.segment_markers import packed_row_varlen_kwargs
 
-# Trials of a freed row followed by another row of the same shape: the CPU allocator returns the freed block to
-# the next one in nearly every trial, so a memo that kept no reference would answer most of them stale.
+# The CPU allocator reuses a freed row's block in nearly every trial, so a memo keeping no reference would go stale.
 TRIALS = 50
 
 

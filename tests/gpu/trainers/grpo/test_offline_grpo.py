@@ -1,27 +1,8 @@
 #!/usr/bin/env python
-"""
-Offline GRPO Trainer smoke test with standard FSDP (no EP/CP/TP).
+"""OfflineGRPOTrainer under standard FSDP on Qwen3-0.6B; ``compute_loss`` matches an independent objective, so a wrong
+finite loss fails.
 
-Runs OfflineGRPOTrainer in standard FSDP mode on Qwen3-0.6B with:
-- Gradient checkpointing
-- Liger kernels (fused RMSNorm + cross-entropy)
-- BF16 mixed precision
-- Synthetic offline GRPO data (4 completions per prompt with graded rewards)
-- 30% multi-turn prompts
-
-Test Phases:
-1. Synthetic dataset creation (prompt/completions/rewards)
-2. Offline GRPO training for 10 steps
-3. Validation: every configured step ran, the final and every per-step loss is finite, and
-   ``compute_loss`` on one group's batch matches the objective recomputed independently from
-   full-vocabulary logits, so a wrong-but-finite loss fails
-
-``--hsdp`` trains under HSDP over two simulated NVLink domains of ``world // 2`` ranks and reads the 2-D mesh and
-its replicas in step off the model.
-
-Run:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_offline_grpo.py
-    torchrun --nproc_per_node=4 tests/gpu/trainers/grpo/test_offline_grpo.py --hsdp
+``--hsdp`` trains over two simulated NVLink domains and reads the 2-D mesh and its replicas in step off the model.
 """
 
 import argparse
@@ -41,8 +22,6 @@ from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 from tests.common.training_checks import training_run_checks
 
-# Configuration
-
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 10
 BATCH_SIZE = 1
@@ -54,18 +33,18 @@ NUM_TRAIN_SAMPLES = 64
 NUM_EVAL_SAMPLES = 16
 SEED = 42
 MULTI_TURN_RATIO = 0.3
-# The objective the oracle below recomputes, set explicitly so the two cannot drift apart.
+# Set explicitly so the oracle and the run cannot drift apart.
 LOSS_TYPE = "bnpo"
 PG_FORMULATION = "prob_weighted"
 MIN_LOG_PROB = -3.0
-# A group's own rank-normalized advantages nearly cancel, leaving an objective close to the bf16
-# log-softmax residual. These keep it well above that and still send one row through the floor.
+# A group's rank-normalized advantages nearly cancel, near the bf16 log-softmax residual. These stay above it and send
+# one row through the floor.
 ORACLE_ADVANTAGES = (1.5, 1.0, 0.5, -0.5)
 
 
 def objective_oracle_checks(trainer) -> dict[str, bool]:
-    """``compute_loss`` on the first group's rows against the bnpo / prob_weighted objective with the
-    negative-advantage floor, recomputed from full-vocabulary logits. Collective (FSDP2 forward)."""
+    """COLLECTIVE (FSDP2 forward). The bnpo / prob_weighted objective with the floor, recomputed from full-vocabulary
+    logits."""
     rows = [trainer.train_dataset[index] for index in range(len(ORACLE_ADVANTAGES))]
     batch = trainer._prepare_inputs(trainer.data_collator(rows))
     batch["advantage"] = torch.tensor(
@@ -100,11 +79,7 @@ def objective_oracle_checks(trainer) -> dict[str, bool]:
     }
 
 
-# Main Test
-
-
 def run(ctx) -> dict:
-    """Run Offline GRPO test."""
     log(f"\n{'=' * 70}")
     log("  Offline GRPO Training Test (Standard FSDP, no EP/CP/TP)")
     log(f"  World size: {ctx.world_size}, Model: {MODEL_NAME}")
@@ -115,14 +90,12 @@ def run(ctx) -> dict:
     log(f"  Max completion length: {MAX_COMPLETION_LENGTH}")
     log(f"{'=' * 70}")
 
-    # ── Load tokenizer ──────────────────────────────────────────────
     log("\n[1/5] Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     log(f"  Tokenizer loaded: vocab_size={tokenizer.vocab_size}")
 
-    # ── Create datasets ─────────────────────────────────────────────
     log("\n[2/5] Creating synthetic offline GRPO datasets...")
     train_dataset = create_offline_grpo_dataset(
         tokenizer, NUM_TRAIN_SAMPLES, seed=SEED, num_completions=NUM_COMPLETIONS, multi_turn_ratio=MULTI_TURN_RATIO
@@ -136,7 +109,6 @@ def run(ctx) -> dict:
     )
     log(f"  Train: {len(train_dataset)} samples, Eval: {len(eval_dataset)} samples")
 
-    # Log a sample
     if ctx.rank == 0:
         sample = train_dataset[0]
         log(f"  Sample prompt (truncated): {sample['prompt'][:150]}...")
@@ -144,14 +116,12 @@ def run(ctx) -> dict:
         log(f"  Rewards: {sample['rewards']}")
         log(f"  Completion 0 (truncated): {sample['completions'][0][:100]}...")
 
-    # Count multi-turn samples
     multi_turn_count = sum(1 for s in train_dataset if s["prompt"].count("user") > 1)
     log(
         f"  Multi-turn samples: {multi_turn_count}/{len(train_dataset)} "
         f"({100 * multi_turn_count / len(train_dataset):.0f}%)"
     )
 
-    # ── Load model ──────────────────────────────────────────────────
     log("\n[3/5] Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
@@ -163,7 +133,6 @@ def run(ctx) -> dict:
     log(f"  Model loaded: {param_count / 1e6:.1f}M parameters")
     log(f"  Memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # ── Configure trainer ───────────────────────────────────────────
     log("\n[4/5] Configuring Offline GRPO trainer...")
     config = OfflineGRPOConfig(
         output_dir=ctx.output_dir,
@@ -203,11 +172,9 @@ def run(ctx) -> dict:
     log(f"  Advantage method: {config.advantage_method}")
     log(f"  PG formulation: {config.policy_gradient_formulation}")
 
-    # ── Train ───────────────────────────────────────────────────────
     log("\n[5/5] Training...")
     train_result = trainer.train()
 
-    # ── Collect metrics ─────────────────────────────────────────────
     log("\n  --- Training Results ---")
     log_history = trainer.state.log_history
     reward_metrics = [entry["rewards/mean"] for entry in log_history if "rewards/mean" in entry]
@@ -218,7 +185,6 @@ def run(ctx) -> dict:
     if advantage_metrics:
         log(f"  Mean advantages: {[f'{a:.4f}' for a in advantage_metrics]}")
 
-    # ── Assertions ──────────────────────────────────────────────────
     log("\n  --- Assertions ---")
     checks = training_run_checks(train_result, trainer, MAX_STEPS)
     checks |= dp_layout_checks(

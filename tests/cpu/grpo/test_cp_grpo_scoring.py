@@ -64,9 +64,7 @@ def _scored_shards(model, hidden, ids, mask, labels, cp_size):
         wrapper = unpatched_cp_wrapper(model, cp_size=cp_size, cp_rank=rank)
         start = rank * SEQ // cp_size
         end = (rank + 1) * SEQ // cp_size
-        # CPU has no Ulysses attention kernel. The actual wrapper split is pinned separately in
-        # test_cp_grpo_hidden.py; inject the full-backbone hidden shard here to isolate the real
-        # boundary shift, head transform, ignore-index handling and chunked scorer.
+        # CPU has no Ulysses attention kernel, so inject the hidden shard; test_cp_grpo_hidden.py pins the real split.
         wrapper.forward_hidden_states = lambda **kwargs: hidden[:, start:end]
         local_logps, local_labels = scorer._cp_chunked_logps_impl(wrapper, ids, mask, labels)
         logps.append(local_logps)

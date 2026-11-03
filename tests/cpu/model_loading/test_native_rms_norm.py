@@ -1,22 +1,5 @@
-"""Torch's fused RMSNorm computes each family's eager norm under that family's casting mode.
-
-Gemma mode (Gemma 4, GptOss): the fused kernel normalizes and multiplies the weight in fp32 and casts
-once, which is those families' own order. The cases cover a scaled norm, a weightless one
-(``with_scale=False``, which LigerRMSNorm cannot express) and an fp32 weight under bf16 activations,
-which the fused kernel cannot take in one call.
-
-Llama mode (Qwen3 MoE, GLM-4 MoE Lite): the normalized activations are cast back before the weight
-multiply, which then runs in the activation dtype (``weight * x.to(input_dtype)``). A native norm left in
-the gemma mode would skip that rounding, which the bf16 case detects.
-
-Outputs agree to bf16 rounding in both modes: the fused reduction sums in another order than the eager
-``pow(2).mean``.
-
-The applier's instance patch binds forwards on a built module — this norm's, LigerRMSNorm's, fla's gated
-norm's and the fused GLU MLP's — and a module so patched must survive ``torch.save`` and ``torch.load``.
-The fused-loss head's binding cannot be pickled by reference, so loading a model patched with it must
-raise rather than come back running the unfused head.
-"""
+"""Torch's fused RMSNorm computes each family's eager norm under that family's casting mode, agreeing to bf16 rounding.
+A patched module must survive ``torch.save``/``torch.load``; a fused-loss head must refuse to load."""
 
 import functools
 import importlib
@@ -100,8 +83,7 @@ def _compare(eager, native, act_dtype):
     [(torch.bfloat16, torch.bfloat16), (torch.float32, torch.float32), (torch.bfloat16, torch.float32)],
 )
 def test_llama_mode_matches_the_llama_family_norms(norm_cls, act_dtype, weight_dtype):
-    """Including the llama norms' dtype promotion: an fp32 weight times the bf16-cast activations
-    returns fp32, and the native norm must return the same dtype."""
+    """An fp32 weight times bf16-cast activations returns fp32, and the native norm must too."""
     torch.manual_seed(0)
     eager = norm_cls(96, eps=1e-6).to(weight_dtype)
     native = _native_rms_norm_class(norm_cls, casting_mode="llama")(96, eps=1e-6).to(weight_dtype)
@@ -116,8 +98,7 @@ def test_gemma_mode_matches_gptoss_norm():
 
 
 def test_the_casting_mode_is_observable_in_bf16():
-    """The two modes differ by one bf16 rounding before the weight multiply; with a weight far from 1 that
-    rounding shows, so a llama-family norm given the gemma mode would not match its eager module."""
+    """The modes differ by one bf16 rounding before the multiply, visible with a weight far from 1."""
     torch.manual_seed(0)
     eager = Qwen3MoeRMSNorm(96, eps=1e-6).to(torch.bfloat16)
     llama = _native_rms_norm_class(Qwen3MoeRMSNorm, casting_mode="llama")(96, eps=1e-6).to(torch.bfloat16)
@@ -137,12 +118,7 @@ def test_the_casting_mode_is_observable_in_bf16():
     "spec", [s for s in LIGER_FAMILY_SPECS if s.rms_norm_kernel == "native"], ids=lambda s: s.model_types[0]
 )
 def test_the_applier_installs_each_familys_casting_mode(spec):
-    """The norm class the family's applier installs follows the family's eager order in bf16 more closely
-    than the same kernel under the other casting mode, so a spec with the wrong mode fails here.
-
-    The applier's class swap runs on a stand-in for the modeling module, which leaves transformers'
-    classes untouched for the rest of the session.
-    """
+    """Runs on a stand-in for the modeling module, leaving transformers' classes untouched."""
     module = importlib.import_module(spec.modeling_module)
     staged = SimpleNamespace(__name__=module.__name__, **{name: getattr(module, name) for name in spec.rms_norm})
     apply_fused_modules(staged, spec, {"rms_norm": True})
@@ -173,7 +149,6 @@ def _spec(model_type: str):
 
 
 def _plain_state(module: torch.nn.Module) -> dict:
-    """The instance attributes a patched forward reads (eps, casting mode, offset, gate, ...)."""
     return {name: value for name, value in vars(module).items() if name != "forward" and not name.startswith("_")}
 
 
@@ -200,17 +175,8 @@ def _plain_state(module: torch.nn.Module) -> dict:
     ids=("native_norm", "liger_norm", "gated_norm", "fused_glu_mlp"),
 )
 def test_an_instance_patched_module_survives_torch_save_and_load(model_type, flags, build, forward, hidden):
-    """The instance patch (an applier given ``model=``) binds the toolkit's forward on a built module. A
-    bound method would pickle as a lookup of the function's own name on the module: ``torch.load`` then
-    fails (a name the module does not carry) or silently binds the class's own forward (a function named
-    ``forward``). The loaded module must run the toolkit's forward, bound to itself, over the attributes
-    the patch set.
-
-    The Liger and fla kernels are Triton, so their modules are checked for the binding and those
-    attributes; the native norm and the GLU MLP also recompute their output. The modules are built from
-    transformers' own classes and patched per instance only, which leaves the classes untouched for the
-    rest of the session.
-    """
+    """A bound method pickles as a name lookup, so ``torch.load`` fails or silently binds the class's forward. Liger
+    and fla kernels are Triton, so those are checked for the binding."""
     torch.manual_seed(0)
     module = build()
     apply_fused_modules_to_model(module, _spec(model_type), flags)
@@ -235,8 +201,7 @@ def test_an_instance_patched_module_survives_torch_save_and_load(model_type, fla
     ids=lambda s: s.model_types[0],
 )
 def test_an_instance_patched_liger_norm_runs_the_specs_variant_at_its_own_epsilon(spec):
-    """The instance patch must hand LigerRMSNorm's forward what the class swap does: the spec's offset and
-    casting mode, which select the kernel's variant, and the module's own epsilon."""
+    """The spec's offset and casting mode select the kernel's variant."""
     module = importlib.import_module(spec.modeling_module)
     for name in spec.rms_norm:
         norm = getattr(module, name)(16, 3e-6)
@@ -251,9 +216,8 @@ def test_an_instance_patched_liger_norm_runs_the_specs_variant_at_its_own_epsilo
 
 
 def test_an_instance_patched_fused_loss_head_refuses_torch_load():
-    """The fused-loss head keeps a bound method: its forward is a per-family closure no pickle can
-    reference, and the balancing resolver detects the head by that function's module. Loading a model so
-    patched must raise, not come back running the family's unfused head."""
+    """Its forward is a per-family closure no pickle can reference, and it must not come back running the unfused
+    head."""
     model = LagunaForCausalLM(LagunaConfig(**TINY_LAGUNA_CONFIG))
     apply_fused_modules_to_model(model, _spec("laguna"), {"fused_linear_cross_entropy": True})
     buffer = io.BytesIO()

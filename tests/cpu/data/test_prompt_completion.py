@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Prompt+completion tokenization under the two length budgets, on fixtures recorded from SMPO's joint tokenizer
-and offline GRPO's per-completion one, both of which cut completions plainly at ``max_completion_length``:
-boundary merges, both budgets' cuts, a completion of exactly the cap, terminator-ending completions, both
-truncation modes, nominal and post-processor BOS, unset caps."""
+"""Prompt+completion tokenization under the two length budgets, on fixtures recorded from SMPO's joint tokenizer and
+offline GRPO's per-completion one, both of which cut completions plainly at ``max_completion_length``."""
 
 import copy
 

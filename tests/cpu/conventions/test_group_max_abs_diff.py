@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.distributed.group_max_abs_diff`` reads replica identity the way its GPU callers need.
-
-The HSDP, multi-node EP and TP replicated-gradient suites gate "the replicas stayed bit-identical" on
-this probe and run only on the GPU tiers. Two real gloo ranks pin it: identical tensors read 0.0, a
-difference on one rank reads that difference on every rank, and a NaN on one rank reads NaN, which a
-``== 0.0`` verdict fails. An empty shard reads 0.0. ``max_abs_diff_across`` over several tensors reads the
-largest difference, and NaN for a NaN behind a larger difference or for no tensors at all.
-
-Run: python tests/cpu/conventions/test_group_max_abs_diff.py
-"""
+"""``tests.common.distributed.group_max_abs_diff`` reads replica identity the way its GPU callers need, on two real
+gloo ranks: a difference on one rank reads on every rank, and a NaN reads NaN, which a ``== 0.0`` verdict fails."""
 
 import math
 

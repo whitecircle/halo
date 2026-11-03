@@ -1,21 +1,5 @@
 #!/usr/bin/env python
-"""
-Test: DistributedSelfDistillationTrainer (offline SDPG approximation) with Qwen3-VL-2B (single-GPU smoke).
-
-Validates the full self-distillation path end-to-end:
-1. SelfDistillVLMDataCollator emits the student batch + teacher_* branch (privileged hint).
-2. The trainer runs the student forward + privileged-teacher forward and computes
-   L = L_sft + beta(k) * L_OPD on the shared response tokens.
-3. ParallelismConfig() by default; HALO_TEST_EP / HALO_TEST_TP select EP / TP.
-
-Assertions: training completes, all logged losses finite, and the OPD term is actually
-exercised (an opd_loss metric is recorded), so the privileged-teacher forward + full-vocab
-reverse-KL ran — not just the SFT arm.
-
-Run:
-    torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/other/test_self_distillation_vlm.py
-"""
+"""DistributedSelfDistillationTrainer on Qwen3-VL-2B: the OPD term ran, not just the SFT arm. Single-GPU smoke."""
 
 import torch
 from datasets import Dataset, Sequence
@@ -39,7 +23,6 @@ NUM_TRAIN_STEPS = 4
 
 
 def _parallelism_from_env() -> ParallelismConfig:
-    """Standard by default; HALO_TEST_TP / HALO_TEST_EP select TP / EP (for parallelism sweeps)."""
     ep = env_int("HALO_TEST_EP", 1)
     tp = env_int("HALO_TEST_TP", 1)
     if ep > 1:
@@ -50,11 +33,8 @@ def _parallelism_from_env() -> ParallelismConfig:
 
 
 def create_vlm_self_distill_dataset(n: int) -> Dataset:
-    """Synthetic raw VLM conversations with a privileged ``answer`` field (read-a-digit task).
-
-    Message content is uniformly list-of-parts (Arrow needs a consistent struct) and the
-    ``images`` column is cast to the datasets Image feature so PIL images round-trip.
-    """
+    """Content is uniformly list-of-parts, since Arrow needs a consistent struct; ``images`` is cast so PIL images
+    round-trip."""
     rows = []
     for i in range(n):
         d = i % 10
@@ -144,7 +124,6 @@ def run(ctx) -> dict:
     losses = step_losses(trainer)
     checks["enough_steps_logged"] = len(losses) >= 2
 
-    # The OPD term must have actually run (teacher forward + reverse-KL), not just SFT.
     checks["opd_loss_recorded"] = any("opd_loss" in e for e in trainer.state.log_history)
 
     log(f"  {len(losses)} steps logged, checks: {checks}")

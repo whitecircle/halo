@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """CP's divisibility padding must fail loud without a pad token instead of inventing id 0.
-
-``DistributedSFTTrainer.compute_loss`` pads the batch up to a multiple of ``cp_size`` before the
-Ulysses split. A pad id falling back to ``0`` whenever the tokenizer has none pads every sequence
-with whatever real vocabulary token happens to sit at index 0 — indistinguishable, in the logs and
-in the loss, from a correctly padded run.
-
-Run: python tests/cpu/trainers/test_sft_cp_pad_token.py
+Id 0 is a real vocabulary token, so such a run looks correctly padded in the logs and in the loss.
 """
 
 from types import SimpleNamespace
@@ -31,8 +25,6 @@ def _inputs(seq_len):
 
 
 class _CPHost(SimpleNamespace):
-    """Fake ``self`` carrying only what the CP branch of ``compute_loss`` reads."""
-
     _pad_to_cp_multiple = DistributedSFTTrainer._pad_to_cp_multiple
 
 
@@ -74,8 +66,6 @@ def test_a_processor_without_a_pad_token_raises_too():
 
 
 def test_a_real_pad_token_still_pads_the_batch():
-    """Anti-vacuity: with a pad id the padding contract is unchanged — pad id on input_ids, ignore
-    index on labels, zeros on the attention mask, all widened to a multiple of cp_size."""
     captured = _run(SimpleNamespace(pad_token_id=7), seq_len=3)
     assert captured["input_ids"].tolist() == [[1, 2, 3, 7]]
     assert captured["labels"].tolist() == [[1, 2, 3, LABEL_IGNORE_INDEX]]
@@ -83,16 +73,12 @@ def test_a_real_pad_token_still_pads_the_batch():
 
 
 def test_pad_token_id_zero_is_a_valid_pad_token():
-    """An ``or 0`` fallback would collapse 'no pad token' and 'pad token is id 0' into one branch; id 0
-    is a real tokenizer setting (Llama-family pad) and must go through, not trip the raise."""
+    """Id 0 is a real tokenizer setting (Llama-family pad); an ``or 0`` fallback would confuse it with no pad token."""
     captured = _run(SimpleNamespace(pad_token_id=0), seq_len=3)
     assert captured["input_ids"].tolist() == [[1, 2, 3, 0]]
 
 
 def test_a_divisible_batch_never_consults_the_tokenizer():
-    """The raise belongs to the padding branch only: a run whose sequences already divide evenly
-    must not be refused for a tokenizer setting it never uses."""
-
     class _Exploding:
         @property
         def pad_token_id(self):

@@ -32,10 +32,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ISMaskConfig:
-    """Mask/veto stages layered on the truncated IS ratio, all off by default: the geometric-mean band
-    (``geo_band_min``/``geo_band_max``, set together) masks a trajectory whose ``exp(mean log-ratio)`` over its
-    corrected tokens leaves it, the veto (``veto_min``) one with any corrected token's ratio below it, and OPSM
-    (``opsm_delta``, :func:`apply_opsm`, once advantages exist) a negative-advantage one past that many nats."""
+    """Mask/veto stages on the truncated IS ratio, all off by default: the geometric-mean band (set both ends) masks a
+    trajectory whose ``exp(mean log-ratio)`` over corrected tokens leaves it, the veto one with any corrected token's
+    ratio below ``veto_min``, and OPSM (``opsm_delta``) a negative-advantage one past that many nats."""
 
     geo_band_min: float | None = None
     geo_band_max: float | None = None
@@ -53,19 +52,17 @@ class ISMaskConfig:
 
     @property
     def any_mask_active(self) -> bool:
-        """Whether a stage :func:`apply_is_masks` applies (the geometric band or the veto) is set."""
+        """A stage :func:`apply_is_masks` applies (the geometric band or the veto) is set."""
         return self.geo_band_min is not None or self.veto_min is not None
 
     @property
     def any_stage_active(self) -> bool:
-        """Whether any stage is set, OPSM included."""
         return self.any_mask_active or self.opsm_delta is not None
 
     @property
     def sums_sequence_logratio(self) -> bool:
-        """Whether a stage reads the per-token log-ratio summed over a trajectory (the geometric band's
-        and OPSM's per-trajectory mean); the veto reads single tokens. The sampler-logprob preflight
-        holds such a run to engine log-probs not renormalized over the sampler's cut."""
+        """A stage reads the log-ratio summed over a trajectory (the band and OPSM); the veto reads single tokens. The
+        sampler-logprob preflight holds such a run to engine log-probs not renormalized over the sampler's cut."""
         return self.geo_band_min is not None or self.opsm_delta is not None
 
 
@@ -142,7 +139,6 @@ class ISCorrectionArguments(ValidatedConfig):
         )
 
     def build_is_mask_config(self) -> ISMaskConfig:
-        """The IS mask stages the ``isr_*`` knobs set, validated by :class:`ISMaskConfig` itself."""
         return ISMaskConfig(
             geo_band_min=self.isr_geo_band_min,
             geo_band_max=self.isr_geo_band_max,
@@ -203,10 +199,9 @@ class ReasoningCostArguments(ValidatedConfig):
     )
 
     def _validate_fields(self) -> None:
-        """A NaN passes every ordered comparison, a negative price would pay for the length it prices, and a
-        cap set while the price is off, or the failed-group switch while both terms are off, parses and changes
-        nothing. The levels a price must map, and the objective a waiver reads, are checked at trainer
-        construction, beside the environment that draws and prices them."""
+        """A NaN passes every ordered comparison, a negative price would pay for the length it prices, and a cap with
+        the price off, or the failed-group switch with both terms off, changes nothing. Price levels and the objective
+        a waiver reads are checked at trainer construction."""
         super()._validate_fields()
         owner = type(self).__name__
         if self.reasoning_price is None and self.reasoning_price_cap != ReasoningCostArguments.reasoning_price_cap:
@@ -364,8 +359,7 @@ class AsyncRolloutConfig(
             "= off."
         },
     )
-    # Default flipped vs AdvantageShapingArguments: on a sparse verifiable env reward the all-equal
-    # groups dominate the batch.
+    # On by default here: on a sparse verifiable env reward the all-equal groups dominate the batch.
     drop_degenerate_groups: bool = field(
         default=True,
         metadata={
@@ -453,8 +447,7 @@ class AsyncRolloutConfig(
     def _validate_fields(self) -> None:
         super()._validate_fields()
         owner = type(self).__name__
-        # A 0 divides by zero (the sync period at `global_step % sync_weights_every_n_steps`, the empty actor
-        # list), reads as unset (`max_concurrent_rollouts or default`) or fails inside the DataLoader.
+        # A 0 divides by zero (the sync period, the empty actor list), reads as unset or fails inside the DataLoader.
         require_int(
             owner,
             ge=1,
@@ -480,11 +473,9 @@ class AsyncRolloutConfig(
                 f"{owner}: prefetch_depth={self.prefetch_depth} sets how many rounds prefetch holds, but {why}, "
                 "or remove prefetch_depth."
             )
-        # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
-        # server is then retried until the NCCL watchdog kills the job.
+        # A negative budget reaches backoff as no limit: a wedged server is retried until the NCCL watchdog fires.
         require_int(owner, ge=0, why=" (0 = one attempt, no retry)", max_retries=self.max_retries)
-        # Compared against wall-clock, where a non-positive deadline cancels every episode on entry and halts the
-        # run as an empty batch.
+        # Wall-clock: a non-positive deadline cancels every episode on entry, halting the run as an empty batch.
         require_finite(
             owner,
             gt=0,
@@ -518,8 +509,7 @@ class AsyncRolloutConfig(
                 "budget are per episode; the level travels as the request's top-level field and the budget is "
                 "added to the nested form per request."
             )
-        # SGLang drops the request field without a word. A level's own thinking budget reaches the same field yet
-        # keeps steering through the chat template; rollout_max_thinking_tokens is a cap and nothing else.
+        # SGLang drops the field silently. A level's thinking budget still steers through the template; this only caps.
         if self.rollout_backend == SGLANG_BACKEND and self.rollout_max_thinking_tokens is not None:
             raise ValueError(
                 "rollout_max_thinking_tokens is not supported with rollout_backend='sglang': the "
@@ -531,22 +521,21 @@ class AsyncRolloutConfig(
         return self.early_stop_on_skipped_updates
 
     def get_server_urls(self) -> list[str]:
-        """The rollout-server URLs generation spreads over."""
         if self.rollout_server_configs:
             return [c["url"] for c in self.rollout_server_configs]
         return [self.rollout_server_url]
 
     def prefetch_active(self) -> bool:
-        """Whether the run prefetches: ``enable_prefetch`` where set, else two or more rollout servers. Every push
-        pauses all servers together, so one server overlaps as several do; unset keeps a lone one on-policy."""
+        """``enable_prefetch`` where set, else two or more rollout servers. Every push pauses all servers together, so
+        one server overlaps as several do; unset keeps a lone one on-policy."""
         if self.enable_prefetch is None:
             return len(self.get_server_urls()) > 1
         return self.enable_prefetch
 
     @classmethod
     def rollout_field_sources(cls) -> dict[str, str]:
-        """Each ``RolloutConfig`` field -> the field :meth:`get_rollout_config` copies into it: its
-        ``rollout_<name>`` spelling where declared, else the same name. Fields with neither are derived."""
+        """Each ``RolloutConfig`` field -> its ``rollout_<name>`` spelling where declared, else the same name; fields
+        with neither are derived."""
         declared = {f.name for f in fields(cls)}
         return {
             target.name: source
@@ -562,16 +551,14 @@ class AsyncRolloutConfig(
         *,
         in_process_group: bool = True,
     ) -> RolloutConfig:
-        """The ``RolloutConfig`` this config describes. The caller owning the tokenizer resolves ``stop_token_ids``
-        (from ``rollout_stop_tokens``) and ``reasoning_end_token_id`` (from ``rollout_reasoning_end_token``); an
-        eval joining no process group passes ``in_process_group=False``, skipping the NCCL-watchdog bound."""
+        """The caller owning the tokenizer resolves ``stop_token_ids`` and ``reasoning_end_token_id``; an eval joining
+        no process group passes ``in_process_group=False``, skipping the NCCL-watchdog bound."""
         if in_process_group:
             self._validate_timeouts_against_nccl_watchdog()
         mirrored = {target: getattr(self, source) for target, source in self.rollout_field_sources().items()}
         mirrored["chat_template_kwargs"] = dict(self.rollout_chat_template_kwargs)
         return RolloutConfig(
             **mirrored,
-            # Derived from other state rather than mirrored from a same-named knob.
             capture_token_ids=self.train_on_sampled_tokens,
             capture_routed_experts=self.routing_replay == "rollout",
             stop_token_ids=stop_token_ids,
@@ -579,11 +566,8 @@ class AsyncRolloutConfig(
         )
 
     def _validate_timeouts_against_nccl_watchdog(self):
-        """Refuse an ``episode_timeout`` above the NCCL watchdog ``init_process_group`` installs, and warn near it.
-
-        A straggler rank holds its peers at the per-step collective for its slowest episode or retry budget, so
-        past the watchdog their collective aborts before the straggler is cancelled.
-        """
+        """Refuse an ``episode_timeout`` above the NCCL watchdog and warn near it: a straggler holds its peers at the
+        per-step collective, so past the watchdog their collective aborts before the straggler is cancelled."""
         nccl_minutes = nccl_timeout() // timedelta(minutes=1)
         watchdog = nccl_minutes * 60
         if self.episode_timeout > watchdog:
@@ -595,7 +579,6 @@ class AsyncRolloutConfig(
                 f"episode_timeout (keep ≥15 min margin so the cancelled rank can unwind and rejoin), or "
                 f"lower episode_timeout."
             )
-        # Every rank builds a rollout config; a warning about the config itself is said once.
         if self.episode_timeout >= WATCHDOG_WARN_FRACTION * watchdog and is_global_main_process():
             logger.warning(
                 f"episode_timeout ({self.episode_timeout:.0f}s) is within "
@@ -620,8 +603,7 @@ class AsyncRolloutConfig(
 
 @dataclass
 class EnvironmentConfig(ValidatedConfig):
-    """Environment selection, reward terms and turn budget, parsed from YAML and resolved through
-    halo/environments/registry.py, which lists the available ``environment_type`` values."""
+    """Environment selection, reward terms and turn budget, resolved through halo/environments/registry.py."""
 
     environment_type: str = field(
         default="react_math",
@@ -656,8 +638,7 @@ class EnvironmentConfig(ValidatedConfig):
     )
 
     def __post_init__(self):
-        # Spelled as the registry keys it, so every consumer comparing the name (the run name, the coding eval's
-        # env check) reads the type the run resolves.
+        # Spelled as the registry keys it, so every consumer comparing the name reads the type the run resolves.
         if not isinstance(self.environment_type, str):
             raise ValueError(f"environment_type must be a registry name, got {self.environment_type!r}")
         self.environment_type = self.environment_type.lower()
@@ -666,12 +647,10 @@ class EnvironmentConfig(ValidatedConfig):
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
-        # ``EnvironmentBase`` re-checks both, but that construction happens inside a Ray actor, after
-        # the cluster and the vLLM servers are up. Check at parse time instead.
+        # ``EnvironmentBase`` re-checks both, but only inside a Ray actor after the cluster and vLLM servers are up.
         require_int(type(self).__name__, ge=1, **present(max_turns=self.max_turns))
         self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails here
-        # Merged last in to_env_config, a key it writes from a top-level field would override that field
-        # past the validation above.
+        # Merged last in to_env_config, a key it writes from a top-level field would override it past the check above.
         shadowing = sorted(set(self.environment_kwargs) & set(self._core_env_config()))
         if shadowing:
             raise ValueError(
@@ -681,18 +660,14 @@ class EnvironmentConfig(ValidatedConfig):
 
     @property
     def reward_terms(self) -> tuple[RewardTerm, ...]:
-        """The typed reward terms of ``rewards``, validated."""
         return parse_reward_terms(self.rewards, ENVIRONMENT_REWARD_SOURCES)
 
     def _core_env_config(self) -> dict[str, Any]:
-        """The environment-config keys the top-level fields write, ``None`` where a field is unset."""
         return {"reward_terms": [dict(term) for term in self.rewards], "max_turns": self.max_turns}
 
     def to_env_config(self) -> dict[str, Any]:
-        """Merge the reward terms and turn budget with ``environment_kwargs`` into the dict passed to
-        ``build_environment(environment_type, config)``."""
-        # Only an explicitly configured turn cap is forwarded; injecting the dataclass default would
-        # override the per-class defaults.
+        """The dict passed to ``build_environment(environment_type, config)``."""
+        # Only an explicit turn cap is forwarded; the dataclass default would override the per-class defaults.
         config = {key: value for key, value in self._core_env_config().items() if value is not None}
         config.update(self.environment_kwargs)
         return config
@@ -700,8 +675,7 @@ class EnvironmentConfig(ValidatedConfig):
 
 @dataclass
 class EnvironmentalGRPOScriptArguments(PromptDatasetArguments, CommonScriptArguments):
-    """Dataset-specific args for Environmental GRPO. Async infra is in AsyncRolloutConfig,
-    env selection in EnvironmentConfig (both parsed separately)."""
+    """Dataset args; async infra is in AsyncRolloutConfig, env selection in EnvironmentConfig (parsed separately)."""
 
     PROJECT_NAME: ClassVar[str] = "environmental-grpo"
 

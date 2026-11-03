@@ -1,20 +1,5 @@
 #!/usr/bin/env python
-"""Extra collator masking + routing tests (companion to test_collators.py).
-
-Uses the same hand-built token-id idiom: exact label-value asserts via
-get_unmasked_positions / direct index comparison. Covers three correctness-critical
-surfaces not pinned elsewhere:
-
-  1. DataCollatorWithPacking DROPS the dense attention_mask on packed data (a dense
-     all-ones mask reintroduces silent cross-document attention under Flash Attention),
-     but keeps it for non-packed data.
-  2. The completion mask binds each assistant span to the RIGHT EOS across an intervening
-     TOOL_RESULT turn — both assistant spans unmasked exactly, the tool-result tokens
-     masked.
-  3. A response template that cannot match yields an all-(-100) batch (the loss-0 trap).
-
-Run: pytest tests/cpu/data/test_collator_masking_extra.py
-"""
+"""Extra collator masking and routing tests, using the hand-built token-id idiom of test_collators.py."""
 
 import logging
 from unittest.mock import MagicMock
@@ -30,7 +15,6 @@ from halo.data.collators.packing import (
 )
 from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
 
-# Token vocabulary (mirrors test_collators.py)
 PAD = 0
 EOS = 1
 RESP_1, RESP_2 = 10, 11
@@ -73,8 +57,7 @@ def get_unmasked_positions(labels):
 
 
 def test_packing_drops_attention_mask_when_packed():
-    """Packed rows must NOT carry a dense attention_mask — a present all-ones mask makes
-    Flash Attention treat the whole pack as ONE sequence (cross-document attention leak)."""
+    """A present all-ones mask makes Flash Attention treat the whole pack as one sequence."""
     tok = make_tokenizer()
     collator = DataCollatorWithPacking(tokenizer=tok)
 
@@ -98,7 +81,6 @@ def test_packing_drops_attention_mask_when_packed():
 
 
 def test_packing_keeps_attention_mask_when_not_packed():
-    """Without seq_lengths the row is a single document — the dense attention_mask stays."""
     tok = make_tokenizer()
     collator = DataCollatorWithPacking(tokenizer=tok)
 
@@ -110,19 +92,8 @@ def test_packing_keeps_attention_mask_when_not_packed():
 
 
 def test_completion_mask_binds_correct_eos_across_tool_result():
-    """Two assistant turns separated by a tool-result turn.
-
-    layout (indices):
-      0 USER_A
-      1 RESP_1   2 RESP_2     <- assistant turn 1 response template
-      3 ASST_A   4 EOS        <- turn-1 content + its EOS
-      5 TOOL_R1  6 TOOL_R2    <- tool-result turn (must stay masked)
-      7 RESP_1   8 RESP_2     <- assistant turn 2 response template
-      9 ASST_B  10 EOS        <- turn-2 content + its EOS
-
-    Each assistant span must bind to ITS OWN turn's EOS (4 and 10), so both spans are
-    unmasked exactly and the tool-result tokens (5,6) stay masked. A wrong EOS bind would
-    unmask the tool-result span (turn 1 borrowing turn 2's EOS) or drop a turn."""
+    """Two assistant turns separated by a tool-result turn: 0 USER_A, 1-2 template, 3 ASST_A, 4 EOS, 5-6 tool
+    result, 7-8 template, 9 ASST_B, 10 EOS. A wrong EOS bind would unmask the tool-result span or drop a turn."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -152,13 +123,12 @@ def test_completion_mask_binds_correct_eos_across_tool_result():
     )
     assert {7, 8, 9, 10} <= unmasked, f"turn-2 span not fully unmasked: {sorted(unmasked)}"
     assert 0 not in unmasked, f"user token leaked into the loss: {sorted(unmasked)}"
-    # Exhaustive: nothing outside the two spans is unmasked.
     assert unmasked == {1, 2, 3, 4, 7, 8, 9, 10}, f"unexpected unmasked set: {sorted(unmasked)}"
 
 
 def test_completion_marker_must_occur_in_rendered_template():
-    """A marker the chat template never emits masks EVERY label — the run trains zero tokens at
-    loss ~0. The factory probes the RENDERED text at construction and refuses the pairing."""
+    """A marker the template never emits masks every label and trains zero tokens at loss ~0; the factory probes the
+    rendered text at construction."""
     tok = make_tokenizer()
     tok.chat_template = "tmpl"
     tok.apply_chat_template = lambda conversation, tokenize=False: "<|im_start|>assistant\na"
@@ -171,9 +141,7 @@ def test_completion_marker_must_occur_in_rendered_template():
 
 
 def test_completion_marker_probe_accepts_matching_template():
-    """A marker the template does emit must survive the probe AND reach the collator: the factory
-    threads ``assistant_message_template`` into every completions-only collator, and a marker
-    dropped on the way masks every label exactly as a wrong one would."""
+    """The marker must also reach the collator: one dropped on the way masks every label as a wrong one would."""
     marker = "<|im_start|>assistant"
     tok = make_tokenizer()
     tok.chat_template = "tmpl"
@@ -188,9 +156,8 @@ def test_completion_marker_probe_accepts_matching_template():
 
 
 def test_completion_marker_probe_accepts_thinking_only_marker():
-    """gpt-oss harmony emits ``<|channel|>final<|message|>`` only when the assistant message
-    carries ``thinking`` — a content-only probe alone rejected the documented harmony + SFT
-    pairing at collator construction. The probe must accept a marker any renderable variant emits."""
+    """gpt-oss harmony emits ``<|channel|>final<|message|>`` only when the message carries ``thinking``, so the
+    probe accepts a marker any renderable variant emits."""
     marker = "<|channel|>final<|message|>"
     tok = make_tokenizer()
     tok.chat_template = "tmpl"
@@ -216,11 +183,8 @@ def test_completion_marker_probe_accepts_thinking_only_marker():
 
 
 def test_completion_marker_probe_skips_unrenderable_template(caplog):
-    """A template needing inputs the synthetic probe lacks cannot be verified — never a false raise.
-
-    The unverified pairing still has to be built and still has to be announced: silence here reads
-    exactly like a passing probe, and the defect it exists to catch surfaces only as a run at loss ~0.
-    """
+    """A template needing inputs the probe lacks cannot be verified: never a false raise, and the unverified pairing
+    is still built and announced."""
     marker = "anything"
     tok = make_tokenizer()
     tok.chat_template = "tmpl"
@@ -243,11 +207,8 @@ def test_completion_marker_probe_skips_unrenderable_template(caplog):
 
 @pytest.mark.parametrize("collator_cls", [DataCollatorForCompletionOnlyLMWithPacking, DataCollatorForCompletionOnlyLM])
 def test_unmatchable_template_warns_on_the_packed_and_padded_paths(collator_cls):
-    """Every completion collator must REPORT the loss-0 trap, not just silently mask the row.
-
-    An all-(-100) row returned with no diagnostic on the packed and padding-free paths turns a
-    wrong assistant_message_template into a NaN/zero loss with nothing pointing at the cause.
-    """
+    """An all-(-100) row with no diagnostic turns a wrong assistant_message_template into a NaN or zero loss with
+    nothing pointing at the cause."""
     tok = make_tokenizer(response_template_ids=[RESP_1, RESP_2])
     collator = collator_cls(response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok)
     ids = [USER_A, ASST_A, ASST_B, EOS]
@@ -260,7 +221,6 @@ def test_unmatchable_template_warns_on_the_packed_and_padded_paths(collator_cls)
 
 
 def test_unmatchable_template_warns_on_the_padding_free_path():
-    """Same fail-loud contract for the flattening (padding-free) collator."""
     tok = make_tokenizer(response_template_ids=[RESP_1, RESP_2])
     collator = DataCollatorWithFlatteningAndCompletionMask(
         response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok

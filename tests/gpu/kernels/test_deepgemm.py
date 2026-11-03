@@ -1,23 +1,8 @@
 #!/usr/bin/env python
-"""GPU test for the native DeepGEMM fp8 / fp4 grouped MoE path (halo/kernels/lowp/deepgemm.py).
+"""The opt-in native DeepGEMM fp8 / fp4 path: correctness, since it is net-slower than bf16 at training shapes.
 
-This is the opt-in native low-precision capability: it runs on Blackwell's fp8/fp4 tensor cores and
-converges, but is net-slower than bf16 at every training shape (so it is never auto-selected — see
-:func:`~halo.kernels.lowp.deepgemm.use_deepgemm`). The test validates *correctness*, not speed. ``deep_gemm``
-is an opt-in install, so the fp8/fp4 kernel checks only run where it is present — but "not present" and
-"present and broken" are separated first (``test_availability_gate_is_honest``), because
-``deepgemm_available`` swallows every import error and would otherwise let a broken install delete both
-kernel checks from the suite while the node still exits 0.
-
-- the fp8 and fp4 forwards match a bf16 reference within — and crucially *not below* — the inherent block
-  error (a relerr near 0 would mean the kernel silently fell back to bf16; the band lower-bound catches
-  that), for even and uneven (incl. empty-expert) routing. fp4 also exercises the K-not-÷256 zero-pad
-  (K=2880 → 3072) that lets gpt-oss-width experts run on the fp4 tensor cores,
-- the backward is bf16-exact (Wgrad-in-HP) and finite,
-- the per-step weight cache keeps training finite across optimizer steps,
-- ``use_deepgemm`` is OFF by default and only opts in under ``HALO_DEEPGEMM_NATIVE=1`` at a qualifying shape.
-
-Run: python tests/gpu/kernels/test_deepgemm.py
+``deepgemm_available`` swallows every import error, so a broken ``deep_gemm`` must be told apart from an absent one, or
+both kernel checks vanish while the node exits 0. fp4 also exercises the K-not-÷256 zero-pad (K=2880 → 3072).
 """
 
 import importlib
@@ -33,8 +18,7 @@ from tests.common.tolerances import TOL
 
 DEV = "cuda"
 
-# Per-format relerr band vs bf16. Lower bound > 0 so a silent bf16 fallback (relerr ≈ 0) FAILS the test —
-# i.e. we assert the kernel really ran in low precision on the tensor cores.
+# Lower bound > 0, so a silent bf16 fallback (relerr ≈ 0) fails.
 _BANDS = {"mxfp8": (0.005, 0.10), "nvfp4": (0.03, 0.30)}
 
 
@@ -105,16 +89,16 @@ def test_weight_cache_across_steps():
 
 
 def test_gate():
-    # OFF by default (not opted in), at every shape — native is never auto-selected.
+    # Off by default at every shape: native is never auto-selected.
     assert not use_deepgemm(256, 2880), "default must not route to DeepGEMM"
     assert not use_deepgemm(8192, 8192), "default must not route to DeepGEMM even at a wide shape"
-    # Opt-in: enabled only for qualifying (wide / large-M) shapes; still off below the floor.
+    # Opt-in: only for qualifying (wide / large-M) shapes.
     prev = os.environ.get("HALO_DEEPGEMM_NATIVE")
     os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
     try:
         assert not use_deepgemm(256, 2880), "opted-in but below the shape floor → still off"
-        # The gate also requires deep_gemm to be importable. On an image without it (the default —
-        # deep_gemm is an opt-in install), use_deepgemm stays off even at a qualifying shape.
+        # The gate also requires deep_gemm importable, an opt-in install, so it stays off without it even at a
+        # qualifying shape.
         if deepgemm_available():
             assert use_deepgemm(2048, 8192), "opted-in at a qualifying wide/large-M shape → on"
         else:
@@ -128,14 +112,8 @@ def test_gate():
 
 
 def test_availability_gate_is_honest():
-    """``deepgemm_available()`` must agree with what ``import deep_gemm`` actually does, and the only
-    acceptable reason for it to be False is that the package is genuinely NOT INSTALLED.
-
-    It swallows every ``Exception``, so an installed-but-broken ``deep_gemm`` (a missing symbol, a
-    broken transitive dependency, a CUDA ABI mismatch) reads exactly like the opt-in package being
-    absent. Without this check that regression deletes both kernel tests below from the suite while
-    the node still exits 0 — the failure mode is a silently shrinking test suite, not a red test.
-    """
+    """The only acceptable reason for False is the package being absent: a missing symbol or CUDA ABI mismatch reads
+    the same, and would silently delete both kernel tests from the suite."""
     try:
         importlib.import_module("deep_gemm")
         error = None
@@ -148,8 +126,8 @@ def test_availability_gate_is_honest():
     )
 
     if error is not None:
-        # deep_gemm is an opt-in install (see agent-docs/optimization/low-precision-moe-kernels.md), so its
-        # ABSENCE is a supported state. Anything else is a broken install, and must be loud.
+        # Absence is a supported state (agent-docs/optimization/low-precision-moe-kernels.md); anything else must be
+        # loud.
         absent = isinstance(error, ModuleNotFoundError) and error.name == "deep_gemm"
         assert absent, (
             f"deep_gemm is installed but does not import: {type(error).__name__}: {error}. "
@@ -171,8 +149,7 @@ if __name__ == "__main__":
     print("test_availability_gate_is_honest")
     installed = test_availability_gate_is_honest()
     if not installed:
-        # deep_gemm ships in neither image, so this is the normal path. Report it as a SKIP, not a
-        # PASS: the gate above is verified, but the fp8/fp4 kernel tests below never ran.
+        # The normal path, since neither image ships deep_gemm. A SKIP, since the fp8/fp4 kernel tests below never ran.
         print("SKIP: deep_gemm absent (opt-in); the gate is verified, the fp8/fp4 kernel tests are not")
         sys.exit(0)
     print("test_deepgemm_forward_backward")

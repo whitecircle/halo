@@ -1,8 +1,6 @@
 """ctypes binding of the libnccl calls rank 0 of a vLLM weight-transfer group makes, vendored from vLLM v0.18.0
-(``vllm.distributed.device_communicators.pynccl_wrapper``), Apache-2.0. Wire contract: the trainer publishes
-``ncclUniqueId`` pickled from this module path, and the vLLM image unpickles it through a shim at the same path that
-re-exports vLLM's own class (``Dockerfile.vllm``). The path, the class name and its ``_fields_`` are pinned by
-``tests/cpu/weight_sync/test_wire_pins.py``."""
+(``vllm.distributed.device_communicators.pynccl_wrapper``), Apache-2.0. ``ncclUniqueId`` is pickled from this module
+path and unpickled through a shim at that path in the vLLM image, so the path, class and ``_fields_`` are wire."""
 
 import ctypes
 import functools
@@ -41,7 +39,6 @@ _NCCL_DATA_TYPES = {
     torch.float8_e4m3fn: 10,
 }
 
-# (name, restype, argtypes) of every libnccl function bound.
 _FUNCTIONS = (
     ("ncclGetErrorString", ctypes.c_char_p, [ncclResult_t]),
     ("ncclGetVersion", ncclResult_t, [ctypes.POINTER(ctypes.c_int)]),
@@ -62,7 +59,6 @@ _FUNCTIONS = (
 
 
 def nccl_data_type(dtype: torch.dtype) -> int:
-    """The ``ncclDataType_t`` that carries ``dtype``."""
     try:
         return _NCCL_DATA_TYPES[dtype]
     except KeyError:
@@ -71,7 +67,6 @@ def nccl_data_type(dtype: torch.dtype) -> int:
 
 @functools.cache
 def _bind_functions(so_file: str) -> dict[str, Callable]:
-    """The typed functions of the libnccl at ``so_file``, loaded once per path."""
     try:
         library = ctypes.CDLL(so_file)
     except Exception:
@@ -90,7 +85,7 @@ def _bind_functions(so_file: str) -> dict[str, Callable]:
 
 
 class NCCLLibrary:
-    """libnccl at ``VLLM_NCCL_SO_PATH``, else ``libnccl.so.2``; every call raises on a failed ``ncclResult_t``."""
+    """Every call raises on a failed ``ncclResult_t``."""
 
     def __init__(self):
         so_file = env_str("VLLM_NCCL_SO_PATH")

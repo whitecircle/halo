@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 
 def _check_fused_experts_mapped(base: LazyLoadPlan) -> None:
-    """Fail loud when a fused checkpoint's expert weights all missed the model's namespace (a fused layout fuses
-    nothing, so its plans are final): a silently empty expert plan would train fresh experts on real attention."""
+    """Fail loud when a fused checkpoint's expert weights all missed the model's namespace; a silently empty expert
+    plan would train fresh experts on real attention."""
     if base.expert_layout != ExpertKeyLayout.FUSED or any(p.action is WeightAction.EXPERT_SHARD for p in base.plans):
         return
     sample = next((key for key in base.weight_map if FUSED_EXPERT_KEY_PATTERN.search(key)), None)
@@ -61,12 +61,8 @@ def load_ep_model_lazy(
     preserve_checkpoint_precision: bool = False,
     **model_kwargs,
 ) -> nn.Module:
-    """COLLECTIVE: a MoE streamed from the safetensors checkpoint at ``model_name_or_path``, each rank reading
-    only its own expert slice (fused-3D hubs) or fusing only its own experts (per-expert hubs), then EP-patched.
-
-    Configured fp32 masters keep their stored values on their first read or fusion;
-    ``preserve_checkpoint_precision`` (a resume) also requires every one restored.
-    """
+    """COLLECTIVE: stream a MoE from safetensors, each rank reading only its expert slice or fusing only its experts,
+    then EP-patch. ``preserve_checkpoint_precision`` (a resume) requires every fp32 master restored."""
     model_class = model_class or AutoModelForCausalLM
     rank = get_global_rank()
     logger.info(f"[Rank {rank}] EP lazy loader: {model_name_or_path}")
@@ -113,8 +109,8 @@ def load_ep_model_lazy(
     )
 
     logger.info(f"[Rank {rank}] Applying EP patching...")
-    # Derived, never asserted: a checkpoint whose expert keys match no pattern is planned REPLICATE, and
-    # claiming "already sharded" there would give every rank global experts 0..E_local-1.
+    # Derived: a checkpoint whose expert keys match no pattern is planned REPLICATE, and asserting sharded
+    # there would give every rank global experts 0..E_local-1.
     model = apply_ep_layers(base.model, ep_config, weights_already_sharded=weights_already_sharded)
     finalize_loaded_model(model, weights_dir=model_name_or_path)
     logger.info(f"[Rank {rank}] EP lazy loading complete")
@@ -130,12 +126,9 @@ def _load_ep_model_huggingface(
     *,
     preserve_checkpoint_precision: bool,
 ) -> nn.Module:
-    """COLLECTIVE: the whole model through ``from_pretrained``, a node's ranks at a time, EP-patched before it
-    moves to the device.
-
-    Every conversion-mapping result (a fused ``gate_up_proj``, a stacked per-expert bank) is an anonymous CPU
-    tensor rather than a page-cache mmap view, so a converted family stages its whole expert set per rank.
-    """
+    """COLLECTIVE: the whole model through ``from_pretrained``, a node's ranks at a time, EP-patched before it moves to
+    the device. Conversion results are anonymous CPU tensors, not mmap views, so a converted family stages its whole
+    expert set per rank."""
     kwargs = dict(from_pretrained_kwargs)
     config = kwargs["config"]
     num_experts = require_expert_count(config)
@@ -170,11 +163,9 @@ def load_ep_model(
     *,
     preserve_checkpoint_precision: bool,
 ) -> nn.Module:
-    """COLLECTIVE: a MoE with its experts distributed by EP, streamed lazily where ``pc.ep_lazy_loading`` allows
-    and the checkpoint is a lazily readable safetensors one, else through ``from_pretrained``.
-
-    ``preserve_checkpoint_precision`` marks a full-finetune resume and makes fp32-master coverage strict.
-    """
+    """COLLECTIVE: a MoE distributed by EP, streamed lazily where allowed and readable, else through
+    ``from_pretrained``. ``preserve_checkpoint_precision`` marks a full-finetune resume and makes fp32-master coverage
+    strict."""
     # First: ep_config() builds the EP groups on every rank, which no per-rank filesystem probe may precede.
     ep_config = pc.ep_config()
     main = is_global_main_process()

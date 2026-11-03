@@ -1,8 +1,5 @@
-"""SFT's token accuracy under CP's fused head loss, which returns each rank's chunk accuracy in place of logits: the
-world value must pool every rank's correct targets over every rank's supervised targets, so each chunk weighs in by
-its own target count, not by the whole row's.
-
-Run: python tests/cpu/trainers/test_sft_cp_token_accuracy.py
+"""SFT's token accuracy under CP's fused head loss, which returns each rank's chunk accuracy in place of logits.
+The world value pools correct over supervised targets across ranks, so each chunk weighs by its own target count.
 """
 
 import pytest
@@ -15,8 +12,7 @@ from halo.trainers.world_metrics import WorldMetrics
 from tests.common.world_metrics import fake_world
 
 CP_SIZE = 2
-# Rank 0's chunk (positions 0-3) supervises only its boundary target, the label at position 4; rank 1's supervises the
-# labels at positions 5-7.
+# Rank 0's chunk (positions 0-3) supervises only the label at position 4; rank 1's supervises positions 5-7.
 LABELS = torch.tensor([[LABEL_IGNORE_INDEX] * 4 + [5, 6, 7, 8]])
 # Rank 0 predicts its one target, rank 1 none of its three: one correct target of four.
 CHUNK_ACCURACY = (1.0, 0.0)

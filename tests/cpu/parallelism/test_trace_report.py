@@ -1,13 +1,5 @@
-"""CPU tests for scripts/profiling/trace_report.py: trace-set discovery and report guards.
-
-Discovery must group the exporter's ``<label>-rankNN.trace.json[.gz]`` artifacts by label and
-rank and ignore everything else in the directory; the collective-report guards (non-dense rank
-sets, mixed suffixes, bad filenames) must reject *before* touching TraceLens, so they are
-testable without the profiling dependency group installed. The report happy paths need real
-GPU traces + TraceLens and are exercised by the GPU-side smoke, not here.
-
-Run: python tests/cpu/parallelism/test_trace_report.py
-"""
+"""scripts/profiling/trace_report.py discovery and guards, which reject before touching TraceLens; report happy
+paths need GPU traces."""
 
 import gzip
 import sys
@@ -28,7 +20,7 @@ _CPU_OP_EVENT = b'{"ph": "X", "cat": "cpu_op", "name": "aten::mm", "dur": 2.0}'
 
 
 def _write_trace(path: Path, *events: bytes, pad: int = 0) -> Path:
-    """Write a minimal Chrome trace, gzipped when the name says so, padded to force chunked reads."""
+    """Gzipped when the name says so, padded to force chunked reads."""
     body = b'{"traceEvents": [' + b",".join((*events, b'{"ph": "M", "name": "%b"}' % (b"x" * pad))) + b"]}"
     path.write_bytes(gzip.compress(body) if path.name.endswith(".gz") else body)
     return path
@@ -45,7 +37,7 @@ def test_discovery_groups_by_label_and_rank(tmp_path):
         "trace-cycle1-rank00.trace.json.gz",
         "trace-cycle1-rank01.trace.json.gz",
         "gen-rank00.trace.json",
-        # Sibling profiler artifacts and noise must be ignored.
+        # Sibling profiler artifacts and noise are ignored.
         "trace-cycle1-rank00.top_ops.txt",
         "trace-cycle1-rank00.stacks_cuda.txt",
         "mem-trace-rank00.pickle",
@@ -73,7 +65,7 @@ def test_rank_report_rejects_non_trace_filename(tmp_path):
 
 
 def test_rank_report_rejects_cuda_only_capture(tmp_path):
-    """cpu_activity=False traces cannot be reported on — say so, not a pandas KeyError from TraceLens."""
+    """Says so instead of a pandas KeyError from TraceLens."""
     trace = _write_trace(tmp_path / "t-rank00.trace.json.gz", _KERNEL_EVENT)
     with pytest.raises(ValueError, match="no cpu_op events"):
         write_rank_report(trace)
@@ -81,14 +73,14 @@ def test_rank_report_rejects_cuda_only_capture(tmp_path):
 
 @pytest.mark.parametrize("name", ["t-rank00.trace.json", "t-rank00.trace.json.gz"])
 def test_has_cpu_ops_detects_marker_across_read_boundaries(tmp_path, monkeypatch, name):
-    """The scan is chunked, so the marker must still be found when it straddles two reads."""
+    """The scan is chunked, so the marker may straddle two reads."""
     monkeypatch.setattr(trace_report, "_SCAN_CHUNK", 8)
     assert has_cpu_ops(_write_trace(tmp_path / name, _CPU_OP_EVENT, _KERNEL_EVENT, pad=64))
     assert not has_cpu_ops(_write_trace(tmp_path / f"other-{name}", _KERNEL_EVENT, pad=64))
 
 
 def test_collective_report_skips_sparse_rank_set(tmp_path):
-    """A ranks="0,8" capture has no dense 0..N-1 rank set — must skip, not mis-map ranks."""
+    """A ranks="0,8" capture has no dense 0..N-1 rank set, so it would mis-map ranks."""
     _touch(tmp_path, "t-rank00.trace.json.gz", "t-rank08.trace.json.gz")
     ranks = discover_trace_sets(tmp_path)["t"]
     assert write_collective_report("t", ranks) is None
@@ -101,7 +93,7 @@ def test_collective_report_skips_mixed_suffixes(tmp_path):
 
 
 def _run_main(tmp_path, monkeypatch, failing: set[str], *, keep_going: bool = False) -> list[str]:
-    """Run the CLI over ``tmp_path`` with the TraceLens call stubbed; returns the reported labels."""
+    """The TraceLens call is stubbed; returns the reported labels."""
     reported: list[str] = []
 
     def fake_rank_report(path: Path) -> Path:
@@ -119,21 +111,15 @@ def _run_main(tmp_path, monkeypatch, failing: set[str], *, keep_going: bool = Fa
 
 
 def test_one_unreportable_label_does_not_cancel_the_others(tmp_path, monkeypatch):
-    """A CUDA-only (or truncated) capture is per-label: it must not take every other label's report
-    with it — the directory holds a whole run's cycles, and re-capturing is a GPU job.
-
-    ``--keep_going`` is what accepts the partial result; the sibling labels are reported either way
-    (see the exit-code test below), so the flag changes the verdict, never the work done.
-    """
+    """The directory holds a whole run's cycles, and re-capturing is a GPU job. ``--keep_going`` changes the
+    verdict, never the work done."""
     _touch(tmp_path, "cuda-only-rank00.trace.json", "good-rank00.trace.json", "later-rank00.trace.json")
 
     assert _run_main(tmp_path, monkeypatch, failing={"cuda-only"}, keep_going=True) == ["good", "later"]
 
 
 def test_a_partial_run_exits_nonzero_by_default(tmp_path, monkeypatch):
-    """Exiting 0 on a partial run reports missing workbooks as generated ones: the caller analyses
-    whichever labels happened to survive without knowing any are gone. The surviving labels are
-    still reported — the failure is the verdict, not a cancellation."""
+    """Exiting 0 would report missing workbooks as generated ones."""
     _touch(tmp_path, "cuda-only-rank00.trace.json", "good-rank00.trace.json", "later-rank00.trace.json")
 
     with pytest.raises(SystemExit, match="1 of 3 trace set"):
@@ -141,7 +127,6 @@ def test_a_partial_run_exits_nonzero_by_default(tmp_path, monkeypatch):
 
 
 def test_every_label_failing_exits_nonzero(tmp_path, monkeypatch):
-    """Nothing was produced — the CLI must not report success."""
     _touch(tmp_path, "a-rank00.trace.json", "b-rank00.trace.json")
 
     with pytest.raises(SystemExit, match="2 of 2 trace set"):

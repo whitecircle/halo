@@ -1,16 +1,9 @@
 #!/usr/bin/env python
-"""The chunked log-prob head (``halo.kernels.head_logprobs``) on one GPU, at a real model's head shape.
+"""The chunked log-prob head (``halo.kernels.head_logprobs``) on one GPU at a real model's head shape: scoring,
+forward+backward, peak memory.
 
-Times a scoring forward (no grad) and a forward+backward of ``chunked_head_logprobs`` with bf16 hidden states
-and head weight, as GRPO calls it, and records each row count's peak allocated memory. The first
-forward+backward and scoring pass are timed on their own: on a tree whose tiles run compiled they include the
-compile, so run with fresh ``TORCHINDUCTOR_CACHE_DIR`` and ``TRITON_CACHE_DIR`` to read a cold rank's cost.
-
-Only ``chunked_head_logprobs`` is called, so the same file times another tree's kernel put on ``PYTHONPATH``.
-``--inductor_nondeterministic`` recompiles the tiles without inductor's ``deterministic`` mode, to price it.
-
-Usage (inside the Halo image, one GPU):
-    torchrun --nproc_per_node=1 tests/gpu/profiling/benchmark_head_logprobs.py --head qwen3-8b --out qwen3.json
+First passes include the compile, so run with fresh ``TORCHINDUCTOR_CACHE_DIR`` and ``TRITON_CACHE_DIR`` to read a cold
+rank's cost. Only ``chunked_head_logprobs`` is called, so this times another tree's kernel on ``PYTHONPATH``.
 """
 
 import argparse
@@ -29,7 +22,7 @@ HEADS = {
     "gpt-oss-20b": (2880, 201088, None),
     "gemma4-26b-a4b": (2816, 262144, 30.0),
 }
-# Logit spread of a trained head: most mass on a few tokens.
+# A trained head's spread: most mass on a few tokens.
 LOGIT_STD = 6.0
 
 

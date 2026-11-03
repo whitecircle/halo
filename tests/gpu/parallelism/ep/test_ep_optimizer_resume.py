@@ -73,11 +73,10 @@ from tests.common.tiny_models import build_tied_qwen3_checkpoint
 from tests.common.tolerances import TOL
 from tests.common.training_checks import snapshot_trainable, step_losses
 
-# Modes whose tiny model is MoE — the only ones with expert weights to gather on save.
+# The only modes with expert weights to gather on save.
 MOE_MODES = ("ep", "ep1", "ep_cp")
-# The parameter groups each mode's model holds, every one of which keeps an fp32 master under
-# --fp32-masters (router, expert and non-expert flags together). An ep1 row takes it only with
-# --unsharded-ep1-experts: FSDP-managed ep1 experts and fp32_non_ep_params refuse each other.
+# Each mode's groups keep fp32 masters under --fp32-masters. An ep1 row takes it only with --unsharded-ep1-experts:
+# FSDP-managed ep1 experts and fp32_non_ep_params refuse each other.
 FP32_MASTER_GROUPS = {
     "ep": {"expert", "router", "non_expert"},
     "ep1": {"expert", "router", "non_expert"},
@@ -93,9 +92,8 @@ SAVE_AT_STEP = 3
 BATCH_SIZE = 2
 LEARNING_RATE = 1e-4
 MAX_SEQ_LENGTH = 256
-# Resumed steps 4-6 vs the continuous run: identical batches, restored weights and moments, and the
-# same rounding noise, so every row measured bit-exact (|delta| 0.0); a warm restart shifts the
-# trajectory by the full Adam-moment reset, and a replayed rounding stream by ~1e-3.
+# Identical batches, restored state and rounding noise, so every row measured bit-exact (|delta| 0.0); a warm restart
+# shifts the trajectory by the full Adam-moment reset, and a replayed rounding stream by ~1e-3.
 LOSS_TOL = TOL.replayed_resume_loss_abs
 
 
@@ -145,7 +143,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
         max_steps=max_steps,
         per_device_train_batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
-        lr_scheduler_type="constant",  # step-count-invariant: phases with different max_steps stay comparable
+        lr_scheduler_type="constant",  # Step-count-invariant: phases with different max_steps stay comparable.
         bf16=True,
         logging_steps=1,
         save_strategy="steps" if save_at else "no",
@@ -160,8 +158,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
 
 
 def _make_trainer(model_path, pc, tokenizer, train_dataset, config, *, preserve_checkpoint_precision=False):
-    # CP rejects sdpa (Ulysses needs a Flash kernel), so let CP auto-detect (FA4 on Blackwell) and
-    # keep the cheaper sdpa path for the other modes, which do not constrain the kernel.
+    # CP rejects sdpa (Ulysses needs a Flash kernel), so CP auto-detects; the other modes keep the cheaper sdpa path.
     model, _ = load_distributed_model(
         model_name_or_path=model_path,
         parallelism_config=pc,
@@ -181,7 +178,6 @@ def _make_trainer(model_path, pc, tokenizer, train_dataset, config, *, preserve_
 
 
 def _snapshot_values(snapshot: dict) -> list[tuple[str, object]]:
-    """Every state value in a snapshot, flattened across params — for whole-snapshot scans."""
     return [(f"{fqn}.{key}", value) for fqn, entry in snapshot["state"].items() for key, value in entry.items()]
 
 
@@ -203,14 +199,14 @@ class _ResumeCapture(TrainerCallback):
 
 
 def _trainable_weights(model) -> dict[str, torch.Tensor]:
-    """Every trainable parameter, whole and at its live dtype. Collective under FSDP2."""
+    """COLLECTIVE under FSDP2. Every trainable parameter, whole and at its live dtype."""
     reshard_fsdp2_modules(model)
     return snapshot_trainable(model)
 
 
 def _configured_master_checks(model, mode: str) -> dict[str, bool]:
-    """Live parameter identities separate routers, experts and the remaining parameters; each group
-    :data:`FP32_MASTER_GROUPS` names for ``mode`` must hold fp32 masters carrying more than bf16 precision."""
+    """Each group :data:`FP32_MASTER_GROUPS` names for ``mode`` holds fp32 masters carrying more than bf16
+    precision."""
     groups = fp32_master_groups(model)
     expected = FP32_MASTER_GROUPS[mode]
     checks = {
@@ -219,7 +215,7 @@ def _configured_master_checks(model, mode: str) -> dict[str, bool]:
     for group in expected:
         parameters = groups[group].values()
         checks[f"{group}_configured_master_dtype"] = all(parameter.dtype == torch.float32 for parameter in parameters)
-        # A BF16-exact source would pass a loader that discards its stored FP32 mantissa.
+        # A bf16-exact source would pass a loader that discards its stored fp32 mantissa.
         checks[f"{group}_masters_exceed_bf16_precision"] = any(
             not torch.equal(local, local.to(torch.bfloat16).float())
             for parameter in parameters
@@ -229,7 +225,6 @@ def _configured_master_checks(model, mode: str) -> dict[str, bool]:
 
 
 def _unequal(expected: dict[str, torch.Tensor], actual: dict[str, torch.Tensor]) -> list[str]:
-    """Keys whose tensors differ in value or dtype, or are missing from ``actual``."""
     return sorted(
         key
         for key, value in expected.items()
@@ -264,18 +259,9 @@ def _verify_checkpoint_files(ckpt_dir: str, world_size: int, pc: ParallelismConf
 
 
 def _verify_checkpoint_weights(ckpt_dir: str, source_dir: str, mode: str) -> tuple[bool, str]:
-    """Rank 0: the saved weights are the whole model, at full shapes, carrying the TRAINED values.
-
-    The source checkpoint every phase loads from is the reference layout, so a key it declares that
-    the save did not write back — or wrote at a sharded shape — is a dropped/half-gathered tensor.
-    That is the failure this shape invites: at ``ep_size=1`` the experts are FSDP2 DTensors, so the
-    save must ``full_tensor()`` them rather than write a rank's slice (or nothing at all), and a
-    reload would then silently re-init them.
-
-    Extra keys are reported, not failed: the discriminating half is that every declared key came
-    back whole, and the one extra-key spelling that IS corruption (a doubled ``experts.experts.``
-    prefix from a mis-prefixed gather) is failed explicitly.
-    """
+    """Rank 0: the whole model at full shapes with trained values. At ``ep_size=1`` a save writing a rank's slice of
+    the DTensor experts makes a reload silently re-init them. A doubled ``experts.experts.`` prefix is corruption and
+    fails."""
     saved = load_full_state_dict(ckpt_dir)
     source = load_full_state_dict(source_dir)
     if saved is None or source is None:
@@ -295,10 +281,8 @@ def _verify_checkpoint_weights(ckpt_dir: str, source_dir: str, mode: str) -> tup
     if non_finite:
         problems.append(f"{len(non_finite)} key(s) hold non-finite values, e.g. {non_finite[:3]}")
 
-    # Anti-vacuity: the save must hold the TRAINED weights. Identical-to-source everywhere means the
-    # writer emitted the initial values (or the reload source, not the live model). Per-key rather
-    # than all-keys: with top-2-of-8 routing over 3 steps an individual expert can legitimately be
-    # untouched, so the premise is that at least one expert tensor moved.
+    # Anti-vacuity: identical-to-source everywhere means the writer emitted initial values. Any-key: with top-2-of-8
+    # routing over 3 steps an individual expert can legitimately be untouched.
     changed = [k for k in set(source) & set(saved) if not torch.equal(saved[k].float(), source[k].float())]
     if not changed:
         problems.append("every saved tensor equals the untrained source — the save wrote initial weights")
@@ -320,7 +304,7 @@ def run(ctx):
     metrics: dict[str, float] = {}
     device = ctx.device
 
-    # Shared workspace: rank 0's output dir (single-node shared FS).
+    # Rank 0's output dir (single-node shared FS).
     dirs = [ctx.output_dir]
     dist.broadcast_object_list(dirs, src=0)
     shared_dir = dirs[0]
@@ -348,7 +332,6 @@ def run(ctx):
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = create_sft_dataset(64, tokenizer, seed=SEED)
 
-    # ── Phase 1: continuous 6-step reference ─────────────────────────────────
     log(f"\n--- Phase 1 ({mode}): continuous {TOTAL_STEPS}-step reference ---")
     trainer = _make_trainer(tiny_dir, pc, tokenizer, train_dataset, _sft_config(train_out, TOTAL_STEPS, None))
     ctx.on_teardown(trainer.cleanup_ep)
@@ -361,7 +344,6 @@ def run(ctx):
     cleanup_memory()
     ctx.barrier()
 
-    # ── Phase 2: train to the save point, snapshot the state the shards hold ─
     log(f"\n--- Phase 2 ({mode}): train {SAVE_AT_STEP} steps + checkpoint ---")
     trainer = _make_trainer(tiny_dir, pc, tokenizer, train_dataset, _sft_config(train_out, SAVE_AT_STEP, SAVE_AT_STEP))
     ctx.on_teardown(trainer.cleanup_ep)
@@ -396,7 +378,6 @@ def run(ctx):
     cleanup_memory()
     ctx.barrier()
 
-    # ── Phase 3: resume → optimizer state restored EXACTLY, losses track the reference ─
     log(f"\n--- Phase 3 ({mode}): resume from checkpoint-{SAVE_AT_STEP} ---")
     trainer = _make_trainer(
         ckpt_dir,
@@ -447,7 +428,6 @@ def run(ctx):
     cleanup_memory()
     ctx.barrier()
 
-    # ── Phase 4 (ep only): topology mismatch → loud warm restart, run proceeds ─
     if mode == "ep":
         log("\n--- Phase 4 (ep): resume the ep_size=2 checkpoint at ep_size=1 (mismatch) ---")
         with logged_messages(optimizer_store_mod.logger) as store_log:
@@ -467,11 +447,9 @@ def run(ctx):
         capture = trainer_ref["capture"]
         checks["mismatch_capture_fired"] = capture is not None
         if capture is not None:
-            # Warm restart: no TRAINED moments may carry over — every state entry there is must still
-            # be at its freshly-initialized value. Not "state is empty": ``optimizer.state`` is a
-            # defaultdict, so a bare read inserts an empty entry. ``step`` is held to the saved step
-            # rather than to zero, since an entry torch's zero-LR init step materialized counts that
-            # step; a wrongly loaded shard shows non-zero moments AND the saved step.
+            # Warm restart: every state entry must be at its fresh value. ``optimizer.state`` is a defaultdict, so
+            # emptiness won't do. ``step`` is held to the saved step, since torch's zero-LR init step counts; a wrongly
+            # loaded shard shows non-zero moments and the saved step.
             carried = _snapshot_values(capture["snapshot"])
             carried_moments = sorted(
                 key for key, value in carried if torch.is_tensor(value) and bool(value.abs().sum() > 0)

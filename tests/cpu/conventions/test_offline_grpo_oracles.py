@@ -1,11 +1,7 @@
 #!/usr/bin/env python
-"""The offline-GRPO GPU suites' shared oracles grade the real trainer, on CPU.
-
-The suites compare the trainer's run-start reference sweep and its pure-KL loss with independent
-full-logits scores (:mod:`tests.common.offline_grpo`). Here the same helpers run against a real
-single-process trainer: they must agree with it, reject a wrong objective, leave the policy as they
-found it, and read a resumed export's move at the export's dtype.
-"""
+"""The offline-GRPO GPU suites' shared oracles (:mod:`tests.common.offline_grpo`) grade the real trainer, on CPU:
+they agree with it, reject a wrong objective, leave the policy as found, and read a resumed export's move at the
+export's dtype."""
 
 from types import SimpleNamespace
 

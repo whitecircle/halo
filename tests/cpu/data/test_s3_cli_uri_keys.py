@@ -1,11 +1,7 @@
 #!/usr/bin/env python
-"""``s3.py`` takes a full ``s3://bucket/key`` URI wherever it takes a key, as every other S3-reading CLI does.
-
-A URI read as a bare key would run against ``s3://<--bucket>/s3://bucket/key``: a download or delete that finds
-nothing and reports so. The URI names its own bucket, so ``--subfolder`` and a different ``--bucket`` beside it
-are refused rather than silently dropped. The client is stubbed at its own methods (no boto3 session), patched by
-dotted path like the sibling CLI tests.
-"""
+"""``s3.py`` takes a full ``s3://bucket/key`` URI wherever it takes a key; read as a bare key it would run against
+``s3://<--bucket>/s3://bucket/key``. ``--subfolder`` or a different ``--bucket`` beside one is refused. The
+client is stubbed at its own methods, patched by dotted path."""
 
 import sys
 from unittest.mock import patch

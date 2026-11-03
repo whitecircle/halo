@@ -1,18 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the shared eval runner: trajectory recording (``serialize_trajectory`` +
-``write_trajectories_jsonl``), the episode driver's failure handling and retries (``run_episode``), and the
-scores (``collect_results`` + ``summarize`` + ``report``).
-
-- A recorded trajectory keeps the conversation and the grading verdict but never the answer key (the
-  hidden tests in ``info["_test_cases"]``, the graded ``info["context"]["answer"]`` payload).
-- A generation the episode's own request lost (a context overflow, a timeout past every retry) is
-  graded on what the episode earned; one the driver lost is a generation error: no verdict, out of
-  every score, counted and recorded apart.
-- A sample counts solved on the environment's own verdict where it reports one.
-
-Run:
-    python tests/cpu/environments/test_eval_runner.py
-"""
+"""The shared eval runner: trajectory recording, the episode driver's failure handling and retries, and the scores.
+A recording keeps the verdict but never the answer key; a generation the driver lost is a generation error, out
+of every score, while one the episode's own request lost is graded on what it earned."""
 
 import itertools
 import json
@@ -61,8 +50,7 @@ def test_trajectory_path_slugifies_per_run():
 
 
 def _leaky_traj() -> Trajectory:
-    """A finished trajectory whose info carries both the verdict AND the answer key, to prove the
-    serializer keeps the former and drops the latter."""
+    """A finished trajectory whose info carries both the verdict and the answer key."""
     return Trajectory(
         messages=[
             Message.system("You are an expert competitive programmer."),
@@ -165,9 +153,6 @@ async def test_an_episode_that_raises_records_its_exception_type(monkeypatch):
     assert row["samples"][0]["error"] == "TimeoutError"
 
 
-# run_episode failure handling
-
-
 def _tooled_env(**kw) -> NativeToolUseEnvironment:
     registry = NativeToolRegistry()
     registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: "ok"))
@@ -194,8 +179,8 @@ async def _run_scripted_episode(env, script, monkeypatch):
 
 
 async def test_generation_failure_is_truncation_not_completion(monkeypatch):
-    """An episode that dies on a generation error must NOT take the plain-text terminal path: that
-    marks it ``completed`` and pays completion-graded envs the full objective for an HTTP error."""
+    """The plain-text terminal path would mark it ``completed`` and pay completion-graded envs the full objective
+    for an HTTP error."""
     env = _tooled_env()
     traj = await _run_scripted_episode(env, [RuntimeError("http boom")], monkeypatch)
     assert traj.done and traj.truncated
@@ -205,8 +190,7 @@ async def test_generation_failure_is_truncation_not_completion(monkeypatch):
 
 
 async def test_generation_failure_keeps_earned_tool_reward(monkeypatch):
-    """A mid-episode death preserves what the episode already earned (per-call tool rewards), it just
-    doesn't add the completion payout."""
+    """A mid-episode death keeps the per-call tool rewards and adds no completion payout."""
     env = _tooled_env()
     traj = await _run_scripted_episode(env, [_tool_call_response(), RuntimeError("http boom")], monkeypatch)
     assert traj.done and traj.truncated and traj.info["completed"] is False
@@ -215,9 +199,8 @@ async def test_generation_failure_keeps_earned_tool_reward(monkeypatch):
 
 
 async def test_generation_failure_is_not_priced_as_a_turn_overflow(monkeypatch):
-    """A lost generation is the driver's fault: the episode is truncated with the error stamped under
-    ``EPISODE_ERROR_KEY`` (the Ray actor's spelling for its errored rows), and pays no
-    ``turn_overflow_penalty`` — the price of a policy that burned its turn budget."""
+    """A lost generation is the driver's fault: stamped under ``EPISODE_ERROR_KEY``, with no
+    ``turn_overflow_penalty``."""
     env = _tooled_env(turn_overflow_penalty=0.3)
     traj = await _run_scripted_episode(env, [_tool_call_response(), RuntimeError("http boom")], monkeypatch)
     assert traj.done and traj.truncated
@@ -234,8 +217,6 @@ async def test_a_real_turn_cap_overflow_still_pays(monkeypatch):
 
 
 async def test_completed_episode_still_pays_success(monkeypatch):
-    """The happy path is untouched: a real final text answer completes and earns the objective term's
-    full weight."""
     env = _tooled_env()
     final = chat_reply(answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None)
     traj = await _run_scripted_episode(env, [final], monkeypatch)
@@ -245,13 +226,8 @@ async def test_completed_episode_still_pays_success(monkeypatch):
 
 
 async def test_length_cutoff_is_recovered_offline_exactly_as_online(monkeypatch):
-    """The eval must stamp the engine's ``finish_reason`` into the step context the way the training
-    rollout does (``EnvironmentActor.run_episode``).
-
-    Without it a turn the engine cut off at its token cap arrives as an ordinary text answer: the env
-    finalizes the mid-sentence fragment and grades it as the deliberate one, so an offline eval scores
-    what online would have nudged and retried — diverging the identical online/offline verdict the
-    grading module is built to promise."""
+    """Without the engine's ``finish_reason`` in the step context, a cut turn arrives as a text answer and the env
+    grades the fragment, diverging from online."""
     env = _tooled_env()
     cut_off = chat_reply(
         answer="a thought that ran out of",
@@ -312,13 +288,8 @@ async def test_the_eval_keeps_a_cut_call_on_its_turn_and_in_the_record_without_r
 
 
 async def test_eval_records_the_reasoning_channel_without_writing_it_to_the_jsonl(monkeypatch):
-    """The eval stamps reasoning onto the assistant turn exactly as the training rollout does — and
-    the persisted trajectory still ships no chain-of-thought.
-
-    ``serialize_trajectory`` renders messages through the plain ``to_dict``, the same reasoning-free
-    form the generation request uses; flipping it to ``include_thinking`` would put every episode's
-    CoT into the ``--save_trajectories`` file, and the file is what gets shared.
-    """
+    """``serialize_trajectory`` renders through the plain ``to_dict``; ``include_thinking`` would put every
+    episode's CoT into the file that gets shared."""
     env = _tooled_env()
     final = chat_reply(
         answer="done",
@@ -334,9 +305,8 @@ async def test_eval_records_the_reasoning_channel_without_writing_it_to_the_json
 
 
 async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
-    """The schema is read after ``reset``: an MCP environment only registers its tools when the first
-    reset connects to the server, so a read before it would send ``tools=None`` and score a toolless
-    episode as the model's failure."""
+    """An MCP environment registers its tools at the first reset, so an earlier read sends ``tools=None`` and scores
+    a toolless episode as the model's failure."""
     env = _tooled_env()
     seen: dict[str, Any] = {}
     real_reset, real_schema = env.reset, env.get_tools_schema
@@ -362,10 +332,8 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
 
 
 async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypatch):
-    """Under ``reasoning_effort: random`` a rerun, or the next checkpoint's eval, must score each problem at
-    the level it got before; the draw follows the problem text, as the trainer's eval does. ``random.choice``
-    walks the levels in turn here, so a per-episode draw lands on every level across the reruns and cannot
-    match the stable one by chance."""
+    """A rerun or the next checkpoint's eval scores each problem at the level it got before. ``random.choice`` walks
+    the levels in turn here, so a per-episode draw cannot match by chance."""
     env = _tooled_env()
     env.reasoning_effort = RANDOM_REASONING_EFFORT
     turn = itertools.count()
@@ -393,8 +361,7 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
 
 
 def test_a_conversation_with_no_user_turn_has_no_level_to_draw():
-    """The draw is keyed by the task, and a conversation with no user turn has none: drawn as an empty task,
-    every such problem would share one level without a word."""
+    """The draw is keyed by the task; drawn as an empty task, every such problem would share one level."""
     with pytest.raises(ValueError, match="no 'user' message"):
         stable_reasoning_effort([{"role": "system", "content": "frame"}])
 
@@ -441,8 +408,7 @@ async def test_a_call_cut_at_the_cap_is_recorded_as_the_policy_wrote_it(monkeypa
 
 
 async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):
-    """An exception escaping the episode loop must still release the trajectory (try/finally), else
-    every failed episode leaks its trajectory + sandbox session for the run's lifetime."""
+    """Otherwise every failed episode leaks its trajectory and sandbox session for the run's lifetime."""
     env = _tooled_env()
 
     async def _boom(client, **request):
@@ -457,17 +423,9 @@ async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):
     assert env._trajectories == {}
 
 
-# collect_results — the generation contract every sample is drawn under
-
-
 async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
-    """Every sampling knob on the RolloutConfig must reach the request.
-
-    ``top_p`` is the one this pins hardest: omitted at this call, every eval samples at the SERVER's
-    default nucleus while training samples at ``rollout_top_p`` — the eval then measures a policy the
-    trainer never optimized, with nothing in the output to say so. The rest ride along because the
-    contract is passed as one object.
-    """
+    """``top_p`` hardest: omitted, the eval samples at the server's default nucleus while training uses
+    ``rollout_top_p``, measuring a policy the trainer never optimized."""
     seen: list[dict] = []
 
     async def _capture(client, **request):
@@ -492,9 +450,8 @@ async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
 
 
 async def test_a_conversation_prompt_hands_the_environment_its_last_user_turn(monkeypatch):
-    """Training hands an environment a conversation's last user turn as the task; an eval handing it
-    the whole list opens the episode on the dataset's framing turns and grades a different task than
-    the policy trained on."""
+    """The whole list would open the episode on the dataset's framing turns and grade a different task than
+    training."""
     convo = [
         {"role": "system", "content": "dataset framing"},
         {"role": "user", "content": "an earlier turn"},
@@ -529,9 +486,7 @@ async def test_a_conversation_without_a_user_turn_is_refused_before_any_episode(
 
 
 async def test_a_content_part_user_turn_hands_the_environment_its_text(monkeypatch):
-    """A last user turn whose ``content`` is an OpenAI content-part list is the task as its text parts
-    concatenated, as a chat template renders them. Handed the part list, the environment's reset reads
-    each part as a message and raises ``KeyError: 'role'``."""
+    """Handed the part list, the environment's reset reads each part as a message and raises ``KeyError: 'role'``."""
     convo = [
         {"role": "system", "content": "dataset framing"},
         {"role": "user", "content": [{"type": "text", "text": "the "}, {"type": "text", "text": "task"}]},
@@ -550,8 +505,7 @@ async def test_a_content_part_user_turn_hands_the_environment_its_text(monkeypat
 
 
 async def test_a_content_part_the_environment_cannot_carry_is_refused_before_any_episode(monkeypatch):
-    """An environment's conversation is text, so an image part would be dropped and the task graded
-    without it; the row is refused, naming the part, before anything is generated."""
+    """An environment's conversation is text, so an image part would be dropped and the task graded without it."""
 
     async def _never(client, **request):
         raise AssertionError("no episode may run for a task the environment cannot carry")
@@ -568,8 +522,8 @@ async def test_a_content_part_the_environment_cannot_carry_is_refused_before_any
 
 
 async def test_a_recorded_native_episode_carries_its_tool_calls_once(monkeypatch):
-    """The messages carry every call and result; a second log of them in ``info`` would be pickled through
-    Ray and the TP broadcast and written to the JSONL for nothing."""
+    """A second log in ``info`` would be pickled through Ray and the TP broadcast and written to the JSONL for
+    nothing."""
     done = chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
     monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([_tool_call_response(), done]))
     (row,) = await collect_results(
@@ -582,8 +536,7 @@ async def test_a_recorded_native_episode_carries_its_tool_calls_once(monkeypatch
 
 
 async def test_collect_results_omits_the_model_for_a_single_model_endpoint(monkeypatch):
-    """``model_name`` unset must send NOT_GIVEN, not ``None``: a single-model server 404s a null
-    model instead of answering with what it serves."""
+    """A single-model server 404s a null model, so unset sends NOT_GIVEN."""
     seen: list[dict] = []
 
     async def _capture(client, **request):
@@ -598,13 +551,8 @@ async def test_collect_results_omits_the_model_for_a_single_model_endpoint(monke
 
 
 async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
-    """The eval and training drivers share one dispatcher, so a sync env's ContextVar store must
-    survive from turn to turn here too.
-
-    Per-call ``asyncio.to_thread`` copies a FRESH context each time, which would re-seed the simulated
-    file tools every turn: a file written on turn 1 would be gone on turn 2, and an offline eval would
-    miss a capability the online rollout (one context per episode) has.
-    """
+    """Per-call ``asyncio.to_thread`` copies a fresh context, so a file written on turn 1 would be gone on turn 2,
+    which online (one context per episode) keeps."""
     registry = build_simulated_file_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=3)
 
@@ -641,8 +589,8 @@ def test_summarize_empty_results_fails_loud():
 
 
 def test_summarize_counts_the_samples_that_carry_no_signal():
-    """An invalid grade, or an episode whose run raised, scores 0 and stays in the means; the report
-    counts them apart, so a sandbox outage does not read as a weak model."""
+    """An invalid grade or a raised episode scores 0 and stays in the means; counted apart, a sandbox outage does
+    not read as a weak model."""
     rows = [
         {"samples": [{"reward": 1.0, "success": True}, {"reward": 0.0, "success": False, "error": "outage"}]},
         {"samples": [{"reward": 0.0, "success": False}, {"reward": 0.0, "success": False, "error": "raised"}]},
@@ -683,8 +631,8 @@ async def _episode_under_retries(env, script, monkeypatch, rollout=_RETRYING):
 
 
 async def test_an_engine_serialization_fault_is_retried_like_a_training_rollout(monkeypatch):
-    """A 400 the engine returns for a NaN log-prob it could not serialise is its own fault: the training
-    rollout retries it, so the eval does too, instead of ending the episode on it."""
+    """A 400 for a NaN log-prob the engine could not serialise is its own fault: training retries it, so the eval
+    does too."""
     fault = _bad_request("Out of range float values are not JSON compliant: nan")
     traj, calls = await _episode_under_retries(_tooled_env(), [fault, _final()], monkeypatch)
 
@@ -720,9 +668,8 @@ _TIMEOUT = APITimeoutError(request=httpx.Request("POST", "http://x/v1/chat/compl
     ids=["context-overflow", "timeout"],
 )
 async def test_a_failure_the_episode_itself_caused_is_graded_not_dropped(monkeypatch, failure):
-    """A conversation that outgrew the served context, or a turn that outran the timeout on every client
-    retry, follows the episode's own length: dropping those samples would score only the episodes short
-    enough to finish. They are graded on what they earned, as misses."""
+    """Context overflow or timeouts follow the episode's own length; dropping them would score only episodes short
+    enough to finish."""
     monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([_tool_call_response(), failure]))
 
     (row,) = await collect_results(
@@ -746,9 +693,8 @@ async def test_a_failure_the_episode_itself_caused_is_graded_not_dropped(monkeyp
     ids=["unknown-model", "rejected-key", "forbidden", "malformed-request"],
 )
 async def test_a_client_error_the_episode_did_not_cause_is_a_generation_error(monkeypatch, failure):
-    """A terminal client error other than a context overflow says nothing about the episode: an unknown
-    model or route, a rejected key, a request the driver built wrong. Graded as a miss it would score
-    the endpoint's misconfiguration as the policy's failure."""
+    """An unknown model or route, a rejected key, a request built wrong says nothing about the episode; graded as a
+    miss it scores misconfiguration as the policy's failure."""
     monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([_tool_call_response(), failure]))
 
     (row,) = await collect_results(

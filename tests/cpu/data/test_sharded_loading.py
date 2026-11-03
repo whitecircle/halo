@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for sharded dataset loading.
-
-These tests verify the distributed shard loading functionality
-similar to Megatron-LM's approach.
-
-Usage:
-    python tests/cpu/data/test_sharded_loading.py
-"""
-
 import os
 import shutil
 import tempfile
@@ -33,7 +23,6 @@ from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 
 def create_test_sharded_dataset(num_examples: int, num_shards: int, temp_dir: str) -> str:
-    """Helper to create a test sharded dataset."""
     dataset = Dataset.from_dict(
         {
             "input_ids": [[i, i + 1, i + 2] for i in range(num_examples)],
@@ -51,7 +40,6 @@ def create_test_sharded_dataset(num_examples: int, num_shards: int, temp_dir: st
 
 
 def test_shard_assignment_multi_rank():
-    """Test shard assignment for multiple ranks."""
     print("Testing shard assignment (multi rank)...")
 
     temp_dir = tempfile.mkdtemp()
@@ -80,7 +68,6 @@ def test_shard_assignment_multi_rank():
 
 
 def test_shard_assignment_remainder():
-    """Test shard assignment with remainder shards."""
     print("Testing shard assignment (remainder)...")
 
     temp_dir = tempfile.mkdtemp()
@@ -110,7 +97,6 @@ def test_shard_assignment_remainder():
 
 
 def test_load_split():
-    """Test loading a dataset split."""
     print("Testing load_split...")
 
     temp_dir = tempfile.mkdtemp()
@@ -137,7 +123,6 @@ def test_load_split():
 
 
 def test_load_split_distributed():
-    """Test loading split for distributed training simulation."""
     print("Testing load_split (distributed)...")
 
     temp_dir = tempfile.mkdtemp()
@@ -175,7 +160,6 @@ def test_load_split_distributed():
 
 
 def test_total_examples():
-    """Test getting total example count."""
     print("Testing total_examples...")
 
     temp_dir = tempfile.mkdtemp()
@@ -199,7 +183,6 @@ def test_total_examples():
 
 
 def test_is_sharded_dataset():
-    """Test ShardedDatasetLoader.is_sharded_dataset static method."""
     print("Testing is_sharded_dataset...")
 
     temp_dir = tempfile.mkdtemp()
@@ -218,14 +201,8 @@ def test_is_sharded_dataset():
 
 
 def test_is_sharded_dataset_s3_probe_failure_returns_false(tmp_path):
-    """Any S3 probe failure (403 AccessDenied, throttling — not just missing credentials) must
-    return False when no local mirror exists, NOT raise: the caller reconciles the probe across
-    ranks with an all_reduce, and a raise on one rank skips that collective and hangs the peers
-    until the NCCL watchdog. (With a mirror the probe answers True offline —
-    test_s3_control_json_cache.py.)
-
-    Catching only credential errors lets any other ClientError propagate.
-    """
+    """With no local mirror any S3 probe failure returns False: the caller reconciles across ranks with an
+    all_reduce, and a raise on one rank hangs the peers until the NCCL watchdog."""
     print("Testing is_sharded_dataset S3 probe failure...")
 
     for error in (
@@ -243,7 +220,6 @@ def test_is_sharded_dataset_s3_probe_failure_returns_false(tmp_path):
 
 
 def test_load_single_shard():
-    """Test loading a dataset with only 1 shard (num_shards=1)."""
     print("Testing load single shard...")
 
     temp_dir = tempfile.mkdtemp()
@@ -271,7 +247,6 @@ def test_load_single_shard():
 
 
 def test_empty_shard_assignment_for_high_rank():
-    """A rank beyond num_shards gets an empty shard assignment."""
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)
@@ -282,13 +257,8 @@ def test_empty_shard_assignment_for_high_rank():
 
 
 def test_undersharded_train_split_fails_fast():
-    """num_shards < world_size on the TRAIN split must fail loudly, not silently
-    truncate every rank to zero examples.
-
-    The length-equalizer downstream all_reduce(MIN)s rank lengths, so one
-    zero-length rank zeroes the whole batch; load_split raises with an
-    actionable re-preprocess hint instead.
-    """
+    """The length equalizer all_reduce(MIN)s rank lengths, so one zero-length rank would zero the batch; load_split
+    raises with a re-preprocess hint."""
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)
@@ -311,9 +281,7 @@ def _one_shard_index_payload() -> dict:
 
 
 def test_shard_index_version_mismatch_raises():
-    """The index stamp is COMPARED, not merely carried: read with this build's field meanings, a
-    diverged build's index hands ranks the wrong shards. The ``metadata.json`` twin refuses the same
-    way; without the comparison the shard half accepts anything JSON-shaped."""
+    """Read with this build's field meanings, a diverged build's index hands ranks the wrong shards."""
     payload = _one_shard_index_payload() | {"version": "0.9"}
     with pytest.raises(IncompatiblePreprocessedDataset, match="0.9"):
         ShardIndex.from_dict(payload)
@@ -328,11 +296,8 @@ def test_shard_index_unknown_field_raises():
 
 
 def test_zero_shard_train_index_raises(tmp_path):
-    """An index claiming ZERO shards for train must raise, not hand every rank an empty Dataset.
-
-    The undersharded guard reads ``0 < num_shards < world_size``, so zero would slip past it and every
-    rank would train on an empty split behind a per-rank warning.
-    """
+    """The undersharded guard reads ``0 < num_shards < world_size``, so zero would slip past it and every rank would
+    train on an empty split."""
     (tmp_path / "train").mkdir()
     write_stamped_sidecar(
         str(tmp_path / "train" / SHARD_INDEX_FILE),
@@ -344,12 +309,8 @@ def test_zero_shard_train_index_raises(tmp_path):
 
 
 def test_load_datasets_list_entry_missing_test_split_fails_loud():
-    """A dataset LIST entry gets the same split guard as a single path.
-
-    The list branch discards the sharded flag and the loader skips a missing split, so without the
-    guard a train-only sharded entry surfaces as a bare ``KeyError('test')`` inside the per-entry
-    filtering. The raise must name the offending entry and the remedy.
-    """
+    """The list branch discards the sharded flag and the loader skips a missing split, so the raise names the entry
+    and the remedy instead of a bare ``KeyError('test')``."""
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # writes only the train split
@@ -361,12 +322,8 @@ def test_load_datasets_list_entry_missing_test_split_fails_loud():
 
 
 def test_load_preprocessed_dataset_empty_test_split_raises():
-    """A GLOBALLY empty test split (zero examples in the shard index) must fail loud at load.
-
-    Without the guard the empty split would flow through and either KeyError downstream or hang
-    distributed eval. Mirrors load_datasets' empty-test guard. (Per-rank-only
-    emptiness — fewer non-empty shards than DP ranks — is the trainer-side equalize-raise case.)
-    """
+    """The empty split would KeyError downstream or hang distributed eval. Per-rank-only emptiness is the
+    trainer-side equalize-raise case."""
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # non-empty train
@@ -382,14 +339,8 @@ def test_load_preprocessed_dataset_empty_test_split_raises():
 
 
 def test_load_preprocessed_dataset_empty_train_split_raises(monkeypatch):
-    """The train split gets the same emptiness verdict as the test split.
-
-    A pre-processed artifact whose filters dropped every training row is not a degraded run, it is
-    no run at all — and unguarded it reaches the trainer as a zero-step schedule (sharded loads die
-    later in the length equalizer, with a message that names neither the split nor the cause).
-    The empty split is handed over in memory: the pinned ``datasets`` writes no shard for a zero-row
-    split, so ``save_to_disk`` cannot even produce the artifact this guard is for.
-    """
+    """Unguarded it reaches the trainer as a zero-step schedule. The empty split is handed over in memory, since the
+    pinned ``datasets`` writes no shard for a zero-row split."""
     columns = ["input_ids", "attention_mask", "example_id"]
     ds = DatasetDict(
         {
@@ -405,9 +356,7 @@ def test_load_preprocessed_dataset_empty_train_split_raises(monkeypatch):
 
 
 def test_load_preprocessed_dataset_missing_test_split_fails_loud():
-    """A preprocessed dataset with NO test split at all must raise the clear re-prepare error at the
-    loader seam (mirroring load_datasets' guard), not surface later as a bare KeyError('test') at the
-    consumer's unconditional ds["test"]."""
+    """Raises the re-prepare error at the loader seam, not a bare KeyError('test') at the consumer."""
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # writes only the train split
@@ -418,7 +367,6 @@ def test_load_preprocessed_dataset_missing_test_split_fails_loud():
 
 
 def test_load_preprocessed_dataset_nonempty_test_split_loads():
-    """Positive control for the empty-test guard: a non-empty test split loads normally."""
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)
@@ -440,11 +388,7 @@ def test_load_preprocessed_dataset_nonempty_test_split_loads():
 
 
 def test_undersharded_test_split_warns_not_fails():
-    """A small TEST split with fewer shards than ranks is tolerated (warn-only).
-
-    Ranks beyond num_shards get an empty test dataset rather than a hard error,
-    since a tiny eval split is a legitimate case.
-    """
+    """Ranks beyond num_shards get an empty test dataset, since a tiny eval split is legitimate."""
     temp_dir = tempfile.mkdtemp()
     try:
         dataset = Dataset.from_dict(
@@ -469,9 +413,7 @@ def test_undersharded_test_split_warns_not_fails():
 
 
 def test_load_datasets_sharded_missing_test_split_fails_loud():
-    """A raw sharded dataset carrying only a train split is the one load path that can return a
-    partial DatasetDict — load_datasets must raise the clear re-shard ValueError, not an opaque
-    KeyError downstream."""
+    """A raw sharded dataset with only train is the one load path that can return a partial DatasetDict."""
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # writes only the train split
@@ -482,12 +424,8 @@ def test_load_datasets_sharded_missing_test_split_fails_loud():
 
 
 def test_warm_shard_cache_serves_without_aws_credentials(tmp_path):
-    """A relaunch with a complete shard cache and no AWS credentials must serve that cache.
-
-    The staleness probe is best-effort end to end, so BUILDING its S3 client — which resolves
-    credentials and a region — has to sit inside the guard too; outside it, the offline relaunch
-    the cache exists for dies before the first probe.
-    """
+    """Building the staleness probe's S3 client resolves credentials and a region, so it sits inside the best-effort
+    guard."""
     source = tmp_path / "shard_source"
     Dataset.from_dict({"input_ids": [[1, 2, 3]] * 4}).save_to_disk(str(source))
     shard = ShardInfo(id=0, path="train/shard_00000", num_examples=4)

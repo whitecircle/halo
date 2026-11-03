@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""The environmental trainer's KL reference forward reads the one reference rule.
-
-A run holding a frozen ``ref_model`` forwards it with the policy's adapters untouched; a PEFT run with
-none forwards the policy itself with its adapters disabled, and only for that forward (the offline
-trainer's side of the same rule is pinned in ``test_offline_grpo_kl_reference.py``).
-
-    python tests/cpu/grpo/test_reference_policy.py
-"""
+"""The environmental trainer's KL reference forward: a frozen ``ref_model`` runs with the policy's adapters untouched;
+a PEFT run with none forwards the policy itself with its adapters disabled, for that forward only."""
 
 import contextlib
 import types

@@ -1,9 +1,5 @@
-"""Atomic-free token permute/unpermute and per-expert bias gather for grouped-GEMM MoE expert compute.
-
-Both directions reduce over a token's ``top_k`` expert rows through :func:`build_inv_map`'s ``inv_map``
-instead of the bf16 CAS-loop ``index_add_`` that serializes under high ``top_k``, accumulating in fp32
-with no pad copy or ``[recv_N, top_k, H]`` transient; the routing-weight multiply folds into the unpermute.
-"""
+"""Atomic-free token permute/unpermute and per-expert bias gather for grouped-GEMM MoE expert compute. Both directions
+reduce through ``inv_map`` in fp32 instead of the bf16 CAS-loop ``index_add_`` that serializes under high ``top_k``."""
 
 from __future__ import annotations
 
@@ -45,8 +41,7 @@ def _gather_reduce_kernel(
     tl.store(out_ptr + row * hidden + cols, acc, mask=col_mask)
 
 
-# ``weight_grad`` is a runtime branch rather than a constexpr, so the one binary the EP warm-up compiles
-# serves both cases.
+# ``weight_grad`` is a runtime branch, so the one binary the EP warm-up compiles serves both cases.
 @triton.jit(do_not_specialize=["grad_out_stride", "weight_grad"])
 def _weighted_unpermute_bwd_kernel(
     grad_out_ptr,
@@ -78,11 +73,8 @@ def _weighted_unpermute_bwd_kernel(
 
 
 def build_inv_map(sorted_token_idx: torch.Tensor, recv_N: int, width: int) -> torch.Tensor:
-    """The atomic-free permute/unpermute map.
-
-    ``inv_map[r, j]`` = the j-th sorted position whose recv token is ``r``, padded to ``width`` cols
-    with sentinel ``N_sorted``. Sync-free (stable argsort + cumulative counts, no host round-trip).
-    """
+    """``inv_map[r, j]`` = the j-th sorted position whose recv token is ``r``, padded to ``width`` cols with sentinel
+    ``N_sorted``. Sync-free (stable argsort + cumulative counts, no host round-trip)."""
     device = sorted_token_idx.device
     n_sorted = sorted_token_idx.shape[0]
     inv_map = torch.full((recv_N, width), n_sorted, dtype=torch.long, device=device)
@@ -121,8 +113,7 @@ def _gather_reduce(src: torch.Tensor, inv_map: torch.Tensor, weight: torch.Tenso
 
 
 def padded_gather_reduce(src: torch.Tensor, inv_map: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
-    """:func:`gather_reduce_rows` as the padded reference: weight the rows, pad with a zero row, gather
-    ``[N, top_k, H]`` and sum. The CPU path, and the eager baseline the kernel replaces."""
+    """The CPU path, and the eager baseline the kernel replaces."""
     if weight is not None:
         src = src * weight.unsqueeze(-1).to(src.dtype)
     pad = src.new_zeros(1, src.shape[1])
@@ -130,18 +121,14 @@ def padded_gather_reduce(src: torch.Tensor, inv_map: torch.Tensor, weight: torch
 
 
 def gather_reduce_rows(src: torch.Tensor, inv_map: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
-    """Sum each output row's ``top_k`` source rows (optionally weighted) through ``inv_map``.
-
-    Triton on CUDA, the padded-gather reference elsewhere.
-    """
+    """Sum each output row's ``top_k`` source rows (optionally weighted) through ``inv_map``."""
     if src.is_cuda:
         return _gather_reduce(src, inv_map, weight)
     return padded_gather_reduce(src, inv_map, weight)
 
 
 class MoEGatherPermute(torch.autograd.Function):
-    """``sorted = tokens[sorted_token_idx]`` (index_select gather) with an atomic-free gather-reduce
-    backward over ``inv_map``."""
+    """``sorted = tokens[sorted_token_idx]`` with an atomic-free gather-reduce backward over ``inv_map``."""
 
     @staticmethod
     def forward(ctx, tokens: torch.Tensor, sorted_token_idx: torch.Tensor, inv_map: torch.Tensor):
@@ -155,13 +142,9 @@ class MoEGatherPermute(torch.autograd.Function):
 
 
 class MoEWeightedUnpermute(torch.autograd.Function):
-    """``out[r] = sum_k w[j] * expert_out[j]`` for ``j = inv_map[r, k]``: the routing-weight multiply and
-    the atomic-free unpermute in one pass.
-
-    Numerically the eager ``expert_out * w`` then padded gather-sum, without the intermediate bf16
-    rounding of each weighted row (the product and the sum accumulate in fp32). ``expert_out`` is saved
-    only when ``weights`` needs a gradient, the one gradient that reads it.
-    """
+    """``out[r] = sum_k w[j] * expert_out[j]`` for ``j = inv_map[r, k]``. Numerically the eager ``expert_out * w`` then
+    padded gather-sum, without the intermediate bf16 rounding of each weighted row. ``expert_out`` is saved only when
+    ``weights`` needs a gradient, the one gradient that reads it."""
 
     @staticmethod
     def forward(ctx, expert_out, weights, sorted_token_idx, inv_map):
@@ -184,8 +167,7 @@ class MoEWeightedUnpermute(torch.autograd.Function):
             return grad_expert, grad_weights.to(weights.dtype), None, None
         # Autograd casts the incoming gradient to the forward output's dtype, which is expert_out's.
         n_sorted, hidden = sorted_token_idx.shape[0], grad_out.shape[-1]
-        # Read in place at its row stride: under EP the gradient arrives as a row-strided view of the
-        # padded transport buffer.
+        # Under EP the gradient arrives as a row-strided view of the padded transport buffer, read in place.
         if grad_out.stride(-1) != 1:
             grad_out = grad_out.contiguous()
         grad_expert = torch.empty((n_sorted, hidden), device=grad_out.device, dtype=grad_out.dtype)
@@ -193,7 +175,7 @@ class MoEWeightedUnpermute(torch.autograd.Function):
         if n_sorted:
             _weighted_unpermute_bwd_kernel[(n_sorted,)](
                 grad_out,
-                # Unread without the weight gradient; grad_expert carries expert_out's dtype, so the binary is the same.
+                # Unread without the weight gradient; grad_expert has expert_out's dtype, so the binary is the same.
                 expert_out if ctx.weight_grad else grad_expert,
                 weights,
                 sorted_token_idx,
@@ -208,12 +190,9 @@ class MoEWeightedUnpermute(torch.autograd.Function):
 
 
 class MoEExpertBiasGather(torch.autograd.Function):
-    """Per-expert bias broadcast ``bias[eids]`` to expert-sorted tokens, with an atomic-free backward.
-
-    The default index_add_ backward is a bf16 atomic scatter that serialises, since all of an expert's
-    tokens hit the same bias row. ``grad_bias`` is instead a per-expert grad sum via one GEMM
-    ``onehot(eids)ᵀ @ grad_out``, accumulated in fp32 (on the tensor cores for a bf16 bias), no atomics,
-    order-independent."""
+    """``bias[eids]`` to expert-sorted tokens. The default index_add_ backward is a bf16 atomic scatter that
+    serializes, as all of an expert's tokens hit one bias row; here ``grad_bias`` is the one GEMM
+    ``onehot(eids)ᵀ @ grad_out``, accumulated in fp32 (on the tensor cores for a bf16 bias)."""
 
     @staticmethod
     def forward(ctx, bias: torch.Tensor, eids: torch.Tensor):
@@ -230,13 +209,8 @@ class MoEExpertBiasGather(torch.autograd.Function):
 
 
 def warm_permute_kernels(num_tokens: int, hidden: int, top_k: int, device: torch.device, dtype: torch.dtype) -> None:
-    """Run the fused permute's backward and the weighted unpermute forward and backward once, over
-    ``num_tokens`` tokens each routed to ``top_k`` rows (the unpermute forward is the same kernel in both
-    grad modes), and both kernels of the gathers' index_select (:func:`_warm_index_select`). Call with grad enabled.
-
-    The operands are zeros, drawn from no generator, so a call inside a recompute region leaves the RNG
-    where the recompute expects it; the kernels compile on shape and dtype alone.
-    """
+    """Call with grad enabled. The operands are zeros, drawn from no generator, so a call inside a recompute region
+    leaves the RNG where the recompute expects it; the kernels compile on shape and dtype alone."""
     sorted_token_idx = torch.arange(num_tokens, device=device).repeat_interleave(top_k)
     inv_map = build_inv_map(sorted_token_idx, num_tokens, top_k)
     n_sorted = sorted_token_idx.numel()
@@ -250,11 +224,9 @@ def warm_permute_kernels(num_tokens: int, hidden: int, top_k: int, device: torch
 
 
 def _warm_index_select(width: int, device: torch.device, dtype: torch.dtype) -> None:
-    """Run index_select over rows of ``width`` with an index of one row and of more than :data:`_SMALL_INDEX_ROWS`, at
-    ``dtype`` and at fp32: :class:`MoEGatherPermute` gathers tokens at the run dtype and :class:`MoEExpertBiasGather`
-    expert biases at theirs, fp32 masters under ``fp32_experts``. Which of the two kernels a gather takes follows the
-    routing, and CUDA loads a kernel on its first launch, which mid-step blocks the host while every peer waits in the
-    next combine."""
+    """At ``dtype`` and fp32, as expert biases are fp32 masters under ``fp32_experts``. Which of the two kernels a
+    gather takes follows the routing, and CUDA loads a kernel on its first launch, which mid-step blocks the host while
+    every peer waits in the next combine."""
     for value_dtype in dict.fromkeys((dtype, torch.float32)):
         rows = torch.zeros((1, width), device=device, dtype=value_dtype)
         for count in (1, _SMALL_INDEX_ROWS + 1):

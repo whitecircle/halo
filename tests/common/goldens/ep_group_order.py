@@ -1,12 +1,6 @@
-"""EP group-order golden: the ``new_group`` calls each grid shape's ``EPConfig`` makes, in order and with
-their keyword arguments, and which of those calls built each group a rank keeps.
-
-``new_group`` is a collective over the default group, so every rank must make the same calls in the
-same order; the record raises where a rank does not, since a real job hangs there. Two calls over the
-same members build two communicators, so a group is identified by its call, not by its members. Which
-group each rank holds, and its rank coordinates, are the rank-layout golden's. Stored as a digest per
-shape plus the full record of each shape in :data:`LITERAL_SHAPES`.
-"""
+"""EP group-order golden: the ``new_group`` calls each shape's ``EPConfig`` makes, in order, and which call built each
+group a rank keeps. ``new_group`` is collective over the default group, so the record raises where ranks disagree, as a
+real job hangs there. A group is identified by its call: same members, two communicators."""
 
 from __future__ import annotations
 
@@ -19,14 +13,13 @@ from tests.common.goldens import regen_main
 from tests.common.goldens.shape_grid import GridGolden, LayoutShape
 from tests.common.parallelism import StubGroup, stubbed_process_groups
 
-# The process groups EPConfig hands out.
 GROUP_FIELDS = ("process_group", "dispatch_ep_group", "expert_tp_group", "expert_replica_group", "dp_scope_group")
-# The knob off its default, so a timeout fixed in code or read once at import is written as its value;
-# only one read from nccl_timeout() as the group is built is written as that call.
+# Off its default, so a timeout fixed in code or read at import is written as its value; only a build-time read is
+# written as the call.
 RECORD_ENV = {"DIST_NCCL_TIMEOUT_MINUTES": "7"}
 
-# Node-local and cross-node EP at expert TP 1, 2 and 4 on one pipeline stage, EP or expert TP alone on
-# two, and EP groups of one rank, whose creation is skipped.
+# Node-local and cross-node EP at expert TP 1, 2 and 4, EP or expert TP alone on two stages, and one-rank EP groups,
+# whose creation is skipped.
 LITERAL_SHAPES = (
     LayoutShape(8, 8, 8),
     LayoutShape(16, 8, 8, ep_size=8),
@@ -46,8 +39,8 @@ LITERAL_SHAPES = (
 
 
 def _argument(name: str, value) -> str:
-    """A ``new_group`` keyword argument as the golden writes it: the NCCL watchdog timeout as
-    ``nccl_timeout()`` when it is what that call returns under :data:`RECORD_ENV`."""
+    """A ``new_group`` keyword as the golden writes it: the watchdog timeout as ``nccl_timeout()`` when that call
+    returns it."""
     if name == "timeout" and value == nccl_timeout():
         return "nccl_timeout()"
     return repr(value)
@@ -58,7 +51,6 @@ def _call(group: StubGroup) -> list:
 
 
 def _call_index(calls: list[StubGroup], group: StubGroup | None) -> int | None:
-    """The index of the call in ``calls`` that built ``group``; ``None`` for no group."""
     if group is None:
         return None
     for index, built in enumerate(calls):
@@ -68,8 +60,8 @@ def _call_index(calls: list[StubGroup], group: StubGroup | None) -> int | None:
 
 
 def group_order_record(shape: LayoutShape) -> dict:
-    """The ``new_group`` calls every rank of ``shape`` makes building its ``EPConfig``, the call each
-    rank's groups come from, and each rank's ``ep_group_idx`` and ``expert_replica_ranks``."""
+    """The ``new_group`` calls every rank makes building its ``EPConfig``, the call each group comes from, and
+    ``ep_group_idx`` and ``expert_replica_ranks``."""
     orders = []
     built_by = {field: [] for field in GROUP_FIELDS}
     ep_group_idx, expert_replica_ranks = [], []

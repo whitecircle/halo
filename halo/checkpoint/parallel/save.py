@@ -1,9 +1,6 @@
-"""The saver ladder: :func:`save_checkpoint` writes the tokenizer, then runs the saver the ladder picks.
-
-Every rung is rank-uniform, so all ranks pick the same saver, and ``None`` falls through to
-``Trainer.save_model``. PP precedes the full-model rungs because a stage is a partial model, and EP
-precedes CP so an EP+CP save gathers its experts. The FSDP2, CP, TP and unsharded rungs share one streamed body.
-"""
+"""The saver ladder: :func:`save_checkpoint` writes the tokenizer, then runs the saver the ladder picks. Rungs are
+rank-uniform and ``None`` falls through to ``Trainer.save_model``. PP precedes the full-model rungs because a stage is
+a partial model, and EP precedes CP so an EP+CP save gathers its experts."""
 
 from __future__ import annotations
 
@@ -49,11 +46,8 @@ def save_checkpoint(ctx: CheckpointContext, output_dir: str) -> bool:
 
 
 def save_tokenizer(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: write the run's tokenizer into ``output_dir`` on the save rank; a failure raises on every rank.
-
-    Written before the weights: a save stopped once its index names the weight files is already a
-    checkpoint that loads, and it must carry the tokenizer it loads with.
-    """
+    """COLLECTIVE: write the tokenizer on the save rank, before the weights, since a save stopped once its index names
+    the weight files already loads and must carry its tokenizer. A failure raises on every rank."""
     guard = DeferredRankFailure(f"tokenizer save to {output_dir}")
     if ctx.is_save_rank and ctx.tokenizer is not None:
         guard.run(partial(ctx.tokenizer.save_pretrained, output_dir))
@@ -61,8 +55,7 @@ def save_tokenizer(ctx: CheckpointContext, output_dir: str) -> None:
 
 
 def select_checkpoint_saver(ctx: CheckpointContext) -> CheckpointSaver | None:
-    """The first rung that owns the save — PEFT adapters, PP, expert-LoRA adapters, EP sharded or
-    gathered, CP, TP, FSDP2, an unsharded model holding an external table — or ``None``."""
+    """The first rung that owns the save, or ``None``."""
     config = ctx.parallelism_config
     # A merged-base save takes the mode's saver even with adapters, and under accelerate FSDP v1 the
     # adapters are flat-param shards whose layout the base Trainer's save owns.
@@ -97,8 +90,7 @@ def _streamed_save(
     chunks: Iterable[dict[str, torch.Tensor]],
     saved: str,
 ) -> None:
-    """COLLECTIVE: the FSDP2/CP/TP body — stream ``chunks`` through the gathered writer, fenced so the writer's
-    failure (an ENOSPC) raises on every rank."""
+    """COLLECTIVE: stream ``chunks`` through the gathered writer, fenced so a failure (an ENOSPC) raises everywhere."""
     with barrier_on_exit(f"Writing the checkpoint to {output_dir}"):
         stream_gathered_checkpoint(
             model,
@@ -119,20 +111,14 @@ def save_fsdp2_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
 
 
 def save_unsharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: a model every rank holds whole (one process, DDP) that holds an external table, through the
-    gathered writer, which writes the tables beside the weights."""
+    """COLLECTIVE: a model each rank holds whole (one process, DDP) with an external table, via the gathered writer."""
     chunks = chunked_saveable_tensors(ctx.model, retain=ctx.is_save_rank)
     _streamed_save(ctx, output_dir, ctx.model, chunks, f"Saved {type(ctx.model).__name__} to {output_dir}")
 
 
 def save_cp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: CP without EP, its items the CP wrapper's ``state_dict()``, whose keys it remaps.
-
-    That dict carries the persistent buffers under the remapped keys and holds references only, so the
-    streamed gather still resolves them chunk by chunk; the sinks come off the unwrapped model. Each tensor
-    is written under its first key only, the key set the FSDP2 and TP savers' ``named_parameters`` walk
-    writes: safetensors refuses two keys over one storage (a tied ``lm_head.weight``).
-    """
+    """COLLECTIVE: CP without EP, its items the wrapper's ``state_dict()``, whose keys it remaps. Each tensor goes
+    under its first key only, since safetensors refuses two keys over one storage (a tied ``lm_head.weight``)."""
     cp_wrapper = ctx.cp_wrapper
     inner = unwrap_toolkit_wrappers(cp_wrapper)
     # Under keep_vars a tied parameter is one object under both keys.
@@ -146,12 +132,9 @@ def save_cp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
 def _tp_chunks(
     model: nn.Module, model_to_save: nn.Module, *, retain: bool, keep_live_dtype: bool
 ) -> Iterator[dict[str, torch.Tensor]]:
-    """COLLECTIVE: a TP save's gathered chunks — the DTensor walk, then the hand-sliced params whole.
-
-    The plain TP-sharded params (GptOss sinks) are not DTensors, so ``full_tensor()`` never
-    reconstructs them; they leave the walk, which would flush this rank's ``[heads/tp]`` slice before
-    the gathered tensor arrives under the same key, and get a collective pass and a chunk of their own.
-    """
+    """COLLECTIVE: the DTensor walk, then the hand-sliced params whole. Plain TP-sharded params (GptOss sinks) leave
+    the walk, which would flush this rank's ``[heads/tp]`` slice before the gathered tensor arrives under the same
+    key."""
     hand_sliced = hand_sliced_suffixes(model)
     items = ((name, tensor) for name, tensor in saveable_items(model_to_save) if not name.endswith(hand_sliced))
     yield from chunked_saveable_tensors(model_to_save, retain=retain, items=items)
@@ -161,8 +144,7 @@ def _tp_chunks(
 
 
 def save_tp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: TP / TP+DP, every TP rank reconstructing the full tensors and the FS-aware save rank
-    writing them, not ``tp_rank == 0``, which several TP groups per node would race on."""
+    """COLLECTIVE: TP / TP+DP. The FS-aware save rank writes, as ``tp_rank == 0`` would race a node's TP groups."""
     fs_aware_makedirs(output_dir)
     if ctx.is_save_rank:
         logger.info(f"Saving TP model to {output_dir}...")

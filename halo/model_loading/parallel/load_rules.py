@@ -1,8 +1,5 @@
-"""The refusals a load runs before it reads a weight: the run against its launcher and dtype, the model's
-``config.json`` against the parallelism shape, the quantized, from-scratch and low-precision options, then the module
-tree CP and selective TP need, read off a meta-device shell.
-
-``ParallelismConfig`` is model-blind, so these faults otherwise surface minutes and several collectives into a job."""
+"""The refusals a load runs before it reads a weight, since ``ParallelismConfig`` is model-blind and these faults
+otherwise surface minutes and several collectives into a job."""
 
 from __future__ import annotations
 
@@ -46,13 +43,9 @@ def _divisors_up_to(value: int, ceiling: int) -> list[int]:
 
 
 def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> None:
-    """Refuse a per-rank token budget the first MoE dispatch would refuse.
-
-    The dispatcher sizes its arena from the all-reduced MAX tokens/rank of the EP group, and every rank
-    of a group declares the same per-device shape, so that MAX is ``ep_rows_per_device × max_length``
-    here. ``max_length: null`` resolves against ``config.json``: it is the largest budget a run can
-    declare, so treating it as undeclared would switch the gate off exactly where it binds.
-    """
+    """Refuse a per-rank token budget the first MoE dispatch would refuse, sized off
+    ``ep_rows_per_device × max_length``. ``max_length: null`` resolves against ``config.json``, the largest budget a
+    run can declare, so it cannot switch the gate off."""
     if pc.ep_size <= 1 or pc.ep_rows_per_device <= 0:
         return
     text = text_config(model_config)
@@ -62,11 +55,10 @@ def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> 
         return
     max_length = pc.ep_declared_max_length or context_window_from_config(model_config)
     if not max_length:
-        # max_length: null on a config that states no window — nothing to judge against.
+        # max_length: null on a config that states no window leaves nothing to judge against.
         return
-    # CP shrinks a rank's token count (it holds one sequence chunk). EP is orthogonal to DP and TP
-    # replicates the batch, so dividing by neither keeps this an upper bound. Under PP the rows are one
-    # microbatch's (parallelism_config_from_args).
+    # CP is the one axis that shrinks a rank's token count; dividing by no other keeps this an upper bound. The rows
+    # are one forward's, so one microbatch's under PP.
     budget = pc.ep_rows_per_device * max_length
     tokens_per_rank = budget // pc.cp_size
     capacity = ep_dispatch_capacity(tokens_per_rank)
@@ -99,9 +91,8 @@ def reject_unsupported_run(pc: ParallelismConfig, dtype: torch.dtype) -> None:
     """Refuse EP/CP/TP/PP under ``accelerate launch`` (the trainer's own axis set, reached first so the
     message can name the launcher), and fp32 training under Expert Parallelism."""
     reject_accelerate_launch(pc)
-    # DeepEP's dispatch buffer is sized for 2-byte tokens; fp32 activations trip a raw C++ assert in
-    # `get_dispatch_buffer_size` at the first dispatch, naming neither fp32 nor the config. Keyed on
-    # ep_size, not has_ep_group: pure ETP folds into has_ep_group but never reaches the transport.
+    # DeepEP's dispatch buffer is sized for 2-byte tokens, so fp32 trips a raw C++ assert naming neither fp32 nor the
+    # config. Keyed on ep_size, as pure ETP folds into has_ep_group but never reaches the transport.
     if dtype == torch.float32 and pc.ep_size > 1:
         raise ValueError(
             f"fp32 training is not supported under Expert Parallelism "
@@ -116,10 +107,7 @@ def reject_unsupported_run(pc: ParallelismConfig, dtype: torch.dtype) -> None:
 def reject_unsupported_model(
     pc: ParallelismConfig, model_config, *, sinks_policy: SinksPolicy, wraps_experts: bool
 ) -> None:
-    """Refuse what this model's ``config.json`` cannot take under ``pc``, before the process groups.
-
-    ``wraps_experts`` is whether the load swaps in the EP layers (``needs_ep_layers`` on a MoE).
-    """
+    """Refuse what this model's ``config.json`` cannot take under ``pc``, before the process groups."""
     if pc.ep_size > 1:
         num_experts = resolve_expert_count(model_config)
         if num_experts and num_experts % pc.ep_size != 0:
@@ -141,9 +129,8 @@ def reject_unsupported_model(
                 f"be ragged. Use an expert_tensor_parallel_size dividing {width}."
             )
     if pc.fp32_non_ep_params and pc.experts_fsdp_managed and has_routed_experts(model_config):
-        # Config-time and rank-symmetric on purpose: under PP a hybrid stack can give one stage
-        # no MoE layer, so the equivalent check on the trainer's per-rank module walk would
-        # raise on MoE stages while dense stages walked into the wrap and hung the job.
+        # At config time and rank-symmetric, as under PP a stage may hold no MoE layer: a per-rank walk would raise on
+        # MoE stages while dense stages hang in the wrap.
         remedy = (
             "drop fp32_non_ep_params (fsdp_shard_ep1_experts=false is refused under PP/TP/CP)"
             if pc.pp_size > 1 or pc.tp_size > 1 or pc.cp_size > 1
@@ -156,13 +143,12 @@ def reject_unsupported_model(
             f"'uniform original parameter dtype' at the first forward. Remedy: {remedy}."
         )
     # Dense TP goes through HF's tp_plan="auto", which validates no head count of its own, so
-    # without this it fails on the first forward's reshape — after the full load.
+    # without this it fails on the first forward's reshape, after the full load.
     validate_tp_head_divisibility(text_config(model_config), pc.tp_size)
     _reject_undispatchable_token_budget(pc, model_config)
 
-    # Under accelerate MULTI_GPU the wrapped experts would silently hijack accelerate's DDP management,
-    # and under accelerate FSDP they are unvalidated against the plugin's wrapping; EP/CP/TP launches
-    # under accelerate were already refused by reject_unsupported_run.
+    # Under accelerate MULTI_GPU the wrapped experts would silently hijack accelerate's DDP management, and under
+    # accelerate FSDP they are unvalidated against the plugin's wrapping.
     if wraps_experts and is_accelerate_launch() and not (pc.has_ep_group or pc.is_cp_mode or pc.is_tp_mode):
         raise ValueError(
             "Grouped GEMM for MoE experts (use_grouped_gemm=True, the default on "
@@ -184,8 +170,7 @@ def reject_unsupported_model(
             "the Ulysses attention kernels never receive the sink column, so live sinks would give a wrong "
             "softmax normalization in every layer."
         )
-    # Declared on the family spec (``supports_fp32_non_ep_params``); otherwise DeepEP's raw C++ assert fires at
-    # the first dispatch.
+    # Declared on the family spec (``supports_fp32_non_ep_params``); else DeepEP's C++ assert fires at first dispatch.
     spec = find_moe_family_spec_for_config(model_config)
     if pc.fp32_non_ep_params and pc.ep_size > 1 and spec is not None and not spec.supports_fp32_non_ep_params:
         family = "/".join(spec.model_types)
@@ -242,10 +227,8 @@ def reject_unsupported_load(
 
 
 def reject_random_init_tables(model_config, *, init_from_scratch: bool) -> None:
-    """Refuse a random-weight build (``init_from_scratch``) of a model whose config builds an external table (the
-    family patches stamp :data:`~halo.models.external_tables.EXTERNAL_TABLES_STAMP` on it): the table is frozen and
-    only a checkpoint supplies it, while the build keeps the checkpoint's ``_name_or_path``, so its attach would pair
-    the pretrained table with random weights."""
+    """Refuse a random-weight build of a model whose config builds an external table: the table is frozen and comes
+    only from a checkpoint, so its attach would pair a pretrained table with random weights."""
     if init_from_scratch and getattr(model_config, EXTERNAL_TABLES_STAMP, False):
         raise ValueError(
             f"init_from_scratch builds {getattr(model_config, 'model_type', 'this model')} with random weights, but "
@@ -264,12 +247,8 @@ def reject_unsupported_structure(
     *,
     trust_remote_code: bool,
 ) -> None:
-    """Refuse a module tree CP or selective TP cannot run, on a meta-device shell before any weight read: the
-    Ulysses refusals (sequence-axis layers, attention class, flash label, head counts) and the TP head split and
-    zero-shard check, the predicates the CP wrap and the TP sharding run again on the loaded model.
-
-    Config-only, so every rank reaches the same verdict.
-    """
+    """Refuse a module tree CP or selective TP cannot run, on a meta shell before any weight read. Config-only, so
+    every rank reaches the same verdict."""
     attention_only_tp = uses_attention_only_tp(pc, model_config)
     if not (pc.is_cp_mode or attention_only_tp):
         return

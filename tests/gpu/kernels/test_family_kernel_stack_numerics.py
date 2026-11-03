@@ -80,23 +80,22 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 SEED = 0
 BATCH, SEQ = 2, 96
 
-# fp32: fused kernels accumulate in another order than eager, and FLCE/Liger CE chunk the loss.
+# Fused kernels accumulate in another order than eager, and FLCE/Liger CE chunk the loss.
 FP32_LOSS_RTOL = 1e-4
 FP32_GRAD_COS_MIN = 0.9999
 FP32_GRAD_NORM_RTOL = 2e-2
-# The stock model's own round-off spread, the median over this many one-ulp nudges; a bound widens to this
-# multiple of it, never past the floor and ceiling below. On the steep-decay GDN layer the stack's deviation
-# measured 0.87x the spread, 1.2e-3 in 1 - cos; on GLM-5 Next two nudges in eight flip the indexer top-k.
+# The stock model's own round-off spread, the median over this many one-ulp nudges; a bound widens to this multiple of
+# it, within the floor and ceiling below. On the steep-decay GDN layer the stack's deviation measured 0.87x the spread,
+# 1.2e-3 in 1 - cos; on GLM-5 Next two nudges in eight flip the indexer top-k.
 ROUNDOFF_PROBES = 8
 ROUNDOFF_SPREAD_MULTIPLE = 4.0
 ROUNDOFF_GRAD_COS_FLOOR = 0.99
 ROUNDOFF_GRAD_NORM_RTOL_CEILING = 5e-2
-# bf16: the stack's error against the fp32 stock model, relative to the stock model's own bf16 error.
-# Across seeds the stack's median gradient error stays within these ratios: a single seed is noisy, a
-# wrong precision or a dropped fp32 accumulation is not.
+# The stack's error against the fp32 stock model, relative to the stock model's own bf16 error, median across seeds: a
+# single seed is noisy, a wrong precision or a dropped fp32 accumulation is not.
 BF16_LOSS_ERROR_RATIO_MAX = 3.0
 BF16_MEDIAN_GRAD_ERROR_RATIO_MAX = 2.0
-BF16_ERROR_FLOOR = 5e-3  # below this both errors are rounding noise and the ratio divides by it
+BF16_ERROR_FLOOR = 5e-3  # Below this both errors are rounding noise and the ratio divides by it.
 
 
 def _norm_rel(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -112,13 +111,8 @@ def _loss_and_grads(model, input_ids) -> tuple[float, dict[str, torch.Tensor]]:
 
 
 def _hf_named_grads(model_type: str, model_cls: type, config, grads: dict[str, torch.Tensor]):
-    """EP-layer gradients under the stock model's parameter names.
-
-    The family's own merge maps the wrapper's tensors to the checkpoint layout, and the model class's
-    ``from_pretrained`` then converts that layout to the live one, exactly as a real save and load would
-    (the class itself, so a remote-code family needs no modeling file beside the saved config).
-    Returns the gradients plus the keys the load reported missing and unexpected.
-    """
+    """EP-layer gradients under the stock model's names, through the family's merge and the class's
+    ``from_pretrained``, as a real save and load would, plus the keys the load reported missing and unexpected."""
     merged = post_process_merged_weights(dict(grads), model_type, verbose=False)
     with tempfile.TemporaryDirectory() as directory:
         config.save_pretrained(directory)
@@ -135,16 +129,13 @@ def _stock_model(model_cls: type, config, state: dict, dtype: torch.dtype):
 
 
 def _stack_model(model_cls: type, config, state: dict, dtype: torch.dtype):
-    """The model as the production loader assembles it: the applier's class swaps (already applied),
-    the reference weights, the EP layer."""
     model = _stock_model(model_cls, config, state, dtype)
     apply_ep_layers(model, single_process_ep_config(require_expert_count(config), use_grouped_gemm=True))
     return model
 
 
 def _fixed_nb_launches() -> dict[str, bool]:
-    """Per kernel :data:`~halo.kernels.fla_launch.FIXED_NB_KERNELS` names, whether its autotuner launches it at a
-    fixed ``NB``; one that is no longer autotuned reads ``False``."""
+    """Whether each :data:`~halo.kernels.fla_launch.FIXED_NB_KERNELS` autotuner launches at a fixed ``NB``."""
     launches = {}
     for module, kernel_names in FIXED_NB_KERNELS.items():
         for kernel_name in kernel_names:
@@ -154,7 +145,6 @@ def _fixed_nb_launches() -> dict[str, bool]:
 
 
 def _round_off_probe(model_cls: type, config, state: dict, probe: int):
-    """The fp32 stock model with every parameter moved to an adjacent fp32 value, up or down per element."""
     model = _stock_model(model_cls, config, state, torch.float32)
     generator = torch.Generator().manual_seed(probe)
     with torch.no_grad():
@@ -165,8 +155,7 @@ def _round_off_probe(model_cls: type, config, state: dict, probe: int):
 
 
 def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads: dict) -> dict:
-    """Per parameter, the median move of the stock gradient under :data:`ROUNDOFF_PROBES` one-ulp nudges:
-    ``1 - cos`` and the relative change of its norm. Same kernels and autotuned tiles as the reference."""
+    """Per parameter, the median ``1 - cos`` and relative norm change under :data:`ROUNDOFF_PROBES` one-ulp nudges."""
     moves = {name: [] for name in ref_grads}
     for probe in range(ROUNDOFF_PROBES):
         _, grads = _loss_and_grads(_round_off_probe(model_cls, config, state, probe), input_ids)
@@ -183,8 +172,8 @@ def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads
 
 
 def run_family(ctx, model_type: str, seed: int = SEED) -> dict:
-    """The stock fp32 reference and its round-off spread, and the stock bf16 reference, first; then the
-    applier, then the stack in fp32 and bf16, every fla kernel on its first launchable autotune config."""
+    """The references run before the applier, then the stack in fp32 and bf16, each fla kernel on its first launchable
+    autotune config."""
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     family = TINY_MOE_FAMILIES[model_type]
@@ -245,7 +234,6 @@ def run_family(ctx, model_type: str, seed: int = SEED) -> dict:
 
 
 def _fp32_bounds(spread: dict) -> tuple[float, float]:
-    """A parameter's fp32 ``(cos_min, norm_rtol)``: the fixed bounds, widened to its round-off spread."""
     widened_cos = max(ROUNDOFF_GRAD_COS_FLOOR, 1 - ROUNDOFF_SPREAD_MULTIPLE * spread["one_minus_cos"])
     widened_norm = min(ROUNDOFF_GRAD_NORM_RTOL_CEILING, ROUNDOFF_SPREAD_MULTIPLE * spread["norm_rel"])
     return min(FP32_GRAD_COS_MIN, widened_cos), max(FP32_GRAD_NORM_RTOL, widened_norm)

@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""The collective recorder the loader trace golden runs on: it catches a collective under any name a
-module holds it by, refuses one it has no model of, and models what a rank receives from its peers.
-
-Run: python tests/cpu/runtime/test_collective_recorder.py
-"""
+"""The collective recorder the loader trace golden runs on: it catches any held name, refuses what it has no model
+of, and models peer data."""
 
 import pytest
 import torch
@@ -18,7 +15,7 @@ from tests.common.collective_recorder import recording_rank
 
 
 def test_a_dtensor_scatter_is_recorded_through_its_own_binding():
-    """DTensor's collective helpers import ``scatter`` from ``distributed_c10d`` by name."""
+    """DTensor's helpers import ``scatter`` from ``distributed_c10d`` by name."""
     with recording_rank(0, 2, 2) as trace:
         distribute_tensor(torch.ones(4, 4), init_device_mesh("cpu", (2,)), [Shard(0)])
     assert trace.events == ["init_device_mesh cpu (2,) None", "scatter group_src=0 float32[2, 4] [0, 1]"]

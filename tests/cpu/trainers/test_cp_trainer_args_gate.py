@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Test that CP setup runs the trainer-args gate and adopts the loaded wrapper's CP config.
-
-``reject_cp_trainer_args`` rejects the settings whose loss/metric path re-derives a result
-from ``(logits, labels)`` outside the CP wrapper — label smoothing, ``loss_type='dft'``, and eval
-metric hooks — each of which silently pairs this rank's sequence chunk with full-length labels.
-The check is only worth anything if the CP setup path actually calls it. The trainer must reuse the
-wrapper's config rather than build a second one: that would create a second set of CP process groups.
-
-Run: python tests/cpu/trainers/test_cp_trainer_args_gate.py
-"""
+"""CP setup refuses settings that pair a rank's sequence chunk with full-length labels and adopts the wrapper's config.
+A second config would create a second set of CP process groups."""
 
 import types
 
@@ -25,7 +17,7 @@ _LOADED_CP_CONFIG = object()
 
 
 class _Wrapper:
-    """Stands in for the loaded UlyssesModel, the top-level model the patched ``find_ulysses_model`` finds."""
+    """Stands in for the loaded UlyssesModel."""
 
     cp_config = _LOADED_CP_CONFIG
 
@@ -76,13 +68,7 @@ def test_dft_loss_type_is_rejected():
 
 @pytest.mark.parametrize("eval_strategy", ["steps", "no"])
 def test_metric_hooks_are_rejected_whatever_the_eval_strategy(eval_strategy):
-    """``eval_strategy='no'`` is not a promise the hooks go unused.
-
-    ``evaluate()`` / ``predict()`` run the metric path on demand, whatever the strategy the trainer
-    was built with, and there the hooks pair this rank's sequence-chunk logits with the full-length
-    labels. A refusal gated on the strategy accepts exactly that trainer and misaligns at the first
-    manual ``evaluate()`` — a silently wrong metric, mid-run.
-    """
+    """``evaluate()`` and ``predict()`` run the metric path whatever the strategy, misaligning logits and labels."""
     with_compute = _fake_self(eval_strategy=eval_strategy)
     with_compute.compute_metrics = lambda _preds: {}
     with pytest.raises(CPConfigError, match="compute_metrics"):
@@ -93,7 +79,7 @@ def test_metric_hooks_are_rejected_whatever_the_eval_strategy(eval_strategy):
     with pytest.raises(CPConfigError, match="preprocess_logits_for_metrics"):
         _configure_cp(with_preprocess)
 
-    # Anti-vacuity: the hooks are what is refused, not evaluation. Loss-only eval still configures.
+    # Only the hooks are refused: loss-only eval still configures.
     _configure_cp(_fake_self(eval_strategy=eval_strategy))
 
 

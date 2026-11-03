@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""``keep_all_dataset_columns`` turns HF's column pruning off for a trainer that reads columns its
-model's forward never names (env GRPO's rollout context, offline GRPO's collator, the SBERT collator).
-
-    python tests/cpu/trainers/test_keep_all_dataset_columns.py
-"""
+"""``keep_all_dataset_columns`` turns HF's column pruning off for a trainer reading columns its forward never names."""
 
 import types
 from unittest import mock

@@ -1,7 +1,6 @@
-"""The local backend's compile/run core under a bubblewrap namespace jail: fresh user/mount/PID/IPC/UTS namespaces,
-no network unless ``allow_network``, a read-only system and only the working directory writable, the jail's root a
-subordinate uid of this process's user, so a program owns no host file and ``RLIMIT_NPROC`` binds it. The container
-must let the jail create namespaces and mount its own proc; construction probes once and names the fix."""
+"""The local backend under a bubblewrap namespace jail: fresh user/mount/PID/IPC/UTS namespaces, no network unless
+``allow_network``, only the working directory writable, and the jail's root a subordinate uid of this process's user,
+so a program owns no host file and ``RLIMIT_NPROC`` binds it."""
 
 import contextlib
 import ctypes
@@ -29,32 +28,28 @@ _LIBC = ctypes.CDLL(None, use_errno=True)
 _JAIL_TEARDOWN_SECONDS = 5.0
 _JAIL_TEARDOWN_POLL_SECONDS = 0.002
 
-# Where the jail mounts its working directory: a fixed path, so a traceback, which names its source by
-# absolute path, shows this one rather than the host's.
+# Fixed, so a traceback, which names its source by absolute path, shows this path rather than the host's.
 _JAIL_WORKDIR = "/sandbox"
 
-# Each lists a user's subordinate id ranges, ``<user>:<start>:<count>``, which newuidmap/newgidmap map.
+# ``<user>:<start>:<count>`` subordinate id ranges, which newuidmap/newgidmap map.
 _SUBORDINATE_ID_FILES = ("/etc/subuid", "/etc/subgid")
 
-# What bwrap reports when the kernel refuses the jail a fresh /proc, and when its root cannot reach a
-# path it binds.
+# bwrap's messages: the kernel refused the jail a fresh /proc; the jail's root cannot reach a path it binds.
 _PROC_MOUNT_REFUSED = "Can't mount proc"
 _BIND_SOURCE_UNREACHABLE = "Can't find source path"
 
-# The kernel grants a user namespace a fresh proc only beside one already fully visible, and a
-# container's /proc is not (Docker masks parts of it, the NVIDIA runtime more). A clean one mounted
-# elsewhere is, and leaves the masks on /proc in place; the jail binds neither.
+# The kernel grants a user namespace a fresh proc only beside one already fully visible, and a container's /proc is
+# not (Docker masks parts of it, the NVIDIA runtime more). A clean one elsewhere is, and leaves those masks in place.
 _CLEAN_PROC_MOUNT = "mkdir -p /run/fullproc && mount -t proc proc /run/fullproc"
 
 
 def _is_child_subreaper() -> bool:
-    """Whether ``PR_SET_CHILD_SUBREAPER`` is set on this process."""
     flag = ctypes.c_int()
     return _LIBC.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(flag), 0, 0, 0) == 0 and bool(flag.value)
 
 
 def _set_child_subreaper(flag: int) -> None:
-    """Set or clear ``PR_SET_CHILD_SUBREAPER``: while set, this process adopts its orphaned descendants."""
+    """While set, this process adopts its orphaned descendants."""
     if _LIBC.prctl(
         _PR_SET_CHILD_SUBREAPER, ctypes.c_ulong(flag), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0)
     ):
@@ -76,8 +71,7 @@ def _subordinate_id(path: str) -> int | None:
 
 
 def _reap_group(pgid: int) -> bool:
-    """Reap this process's exited children in process group ``pgid`` without blocking; whether none is
-    left there."""
+    """Reap exited children in group ``pgid`` without blocking; whether none is left there."""
     try:
         while os.waitid(os.P_PGID, pgid, os.WEXITED | os.WNOHANG) is not None:
             pass
@@ -87,15 +81,13 @@ def _reap_group(pgid: int) -> bool:
 
 
 class _JailReaper:
-    """This process's part in reaping the init (the jail's PID 1) ``bwrap`` exits without reaping on every run.
+    """Reaps the init (the jail's PID 1) that ``bwrap`` exits without reaping on every run.
 
-    It holds ``PR_SET_CHILD_SUBREAPER`` while any jailed run is in flight, so the orphaned init is reparented
-    here. The flag belongs to a process and no fork or unpickled sandbox carries it, so it is taken where a run
-    starts; released between runs, it leaves the orphans of whatever else the process started (a trainer rank's
-    Ray daemons) to the container's init. A flag held already is left set. The init stays in the run's process
-    group, whose id no new process can take while a member is unreaped, so a wait on the group reaps it and no
-    other child; it exits only once every task left in the jail has, so the wait is bounded and a later run
-    finishes a group that outlived it.
+    Holds ``PR_SET_CHILD_SUBREAPER`` while any jailed run is in flight, so the orphaned init is reparented here. The
+    flag belongs to a process and no fork or unpickled sandbox carries it, so it is taken where a run starts; released
+    between runs, it leaves other orphans (a trainer rank's Ray daemons) to the container's init. The init stays in the
+    run's process group, whose id no new process can take while a member is unreaped, so a wait on the group reaps it
+    and no other child. It exits only once every task in the jail has, so a later run finishes one that outlives it.
     """
 
     def __init__(self) -> None:
@@ -110,7 +102,6 @@ class _JailReaper:
 
     @contextlib.contextmanager
     def held(self):
-        """Keep this process a child subreaper for the duration."""
         with self._lock:
             if self._runs == 0:
                 self._held_before = _is_child_subreaper()
@@ -126,8 +117,7 @@ class _JailReaper:
                     _set_child_subreaper(0)
 
     def reap(self, leader: int) -> None:
-        """Reap the group of the run led by ``leader``, waiting for it at most :data:`_JAIL_TEARDOWN_SECONDS`,
-        then what earlier runs left."""
+        """Reap ``leader``'s group, waiting at most :data:`_JAIL_TEARDOWN_SECONDS`, then what earlier runs left."""
         deadline = time.monotonic() + _JAIL_TEARDOWN_SECONDS
         while not _reap_group(leader):
             if time.monotonic() >= deadline:
@@ -148,16 +138,8 @@ _jail_reaper = _JailReaper()
 
 
 class BubblewrapSandbox(LocalSubprocessSandbox):
-    """Local backend hardened with bubblewrap namespace isolation (network + filesystem). The jail's root runs as
-    :attr:`program_owner`, this process's user's first subordinate uid and gid; each run's jail init is reaped
-    through :class:`_JailReaper`.
-
-    Args:
-        allow_network: keep network reachable inside the jail (default False).
-        bwrap_path: path to the ``bwrap`` binary (default: resolved from ``PATH``).
-        extra_ro_binds: additional host paths to expose read-only.
-        Remaining args (memory/compile limits) are inherited from the local backend.
-    """
+    """Local backend with bubblewrap namespace isolation (network + filesystem). The jail's root runs as
+    :attr:`program_owner`, this process's user's first subordinate uid and gid."""
 
     # A session builds once, on an empty stdin, and the jailed program can neither remove its working
     # directory (a mount point) to force a rebuild nor write outside it for one to include.
@@ -209,7 +191,7 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
 
     @property
     def isolated(self) -> bool:
-        """Confined only while the jail has its own network namespace (``allow_network`` shares the host's)."""
+        """Confined only while the jail has its own network namespace."""
         return not self.allow_network
 
     def _verify_can_sandbox(self) -> None:
@@ -260,10 +242,9 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         env: dict[str, str],
         started: tuple[int, int] | None = None,
     ) -> tuple[str, str, int | None, bool]:
-        """The local run inside the subreaper window :meth:`_reap_adopted` needs, with ``bwrap``'s status
-        read back: its init cannot die of its program's signal, so ``bwrap`` exits ``128 + n`` for a
-        program killed by signal ``n``, which is returned as ``subprocess`` reports it, ``-n``. A program
-        that exits with such a code itself reads as that signal."""
+        """Runs inside the subreaper window :meth:`_reap_adopted` needs. The init cannot die of its program's signal,
+        so ``bwrap`` exits ``128 + n`` for a program killed by signal ``n``, returned as ``subprocess`` reports it,
+        ``-n``. A program that exits with such a code itself reads as that signal."""
         with _jail_reaper.held():
             stdout, stderr, returncode, timed_out = super()._run_in_new_session(
                 argv, stdin=stdin, timeout=timeout, cwd=cwd, env=env, started=started
@@ -274,18 +255,15 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
 
     @staticmethod
     def _child_env(workdir: str) -> dict[str, str]:
-        """The local environment, its working-directory paths at the jail's mount."""
         return LocalSubprocessSandbox._child_env(_JAIL_WORKDIR)
 
     def _reap_adopted(self, leader: int) -> None:
-        """Reap the jail's init, which ``bwrap`` leaves behind on every run (:class:`_JailReaper`)."""
         _jail_reaper.reap(leader)
 
     def _wrap_command(self, argv: list[str], workdir: str) -> list[str]:
-        """Prepend the bubblewrap launcher that jails ``argv`` with only ``workdir`` writable."""
-        # Not --new-session, which takes the jail's init out of the run's process group, where the group kill
-        # reaches it and _reap_adopted finds it: the program gets its own session inside the jail instead, so
-        # a signal it sends its group (`kill(0, ...)`) reaches neither bwrap nor the init, as on `local`.
+        # Not --new-session, which takes the init out of the run's process group, where the group kill reaches it and
+        # _reap_adopted finds it. The program gets its own session inside the jail instead, so a `kill(0, ...)` it
+        # sends reaches neither bwrap nor the init, as on `local`.
         uid, gid = self.program_owner
         wrapper: list[str] = [
             self._unshare_path,

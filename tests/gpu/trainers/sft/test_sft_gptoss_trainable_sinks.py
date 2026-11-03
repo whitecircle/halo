@@ -1,20 +1,8 @@
 #!/usr/bin/env python
-"""Trainable GptOss attention sinks (``train_sinks``) train end-to-end under FA4.
+"""Trainable GptOss sinks (``train_sinks``) train end to end under FA4, through the wrap and into the optimizer.
 
-The kernel-level exactness of the FA4 rescale is pinned by ``tests/gpu/kernels/test_fa4_trainable_sink_rescale.py``;
-this test pins the trainer path: the loader stamps ``SinksPolicy.TRAINABLE``, the sinks stay trainable
-through the parallelism wrap, EVERY layer's sinks receive a non-zero gradient at the optimizer step,
-the optimizer moves them, and the loss and grad norms stay finite. Modes: plain FSDP2 (``--mode fsdp``,
-sinks DP-sharded as DTensors), TP=2 (``--mode tp``, sinks hand-sliced plain tensors gathered through
-the TP seam), EP=2 (``--mode ep``, sinks FSDP-managed next to EP-ignored experts). Packing is on so the
-varlen kernel runs; the dense kernel path is covered by the kernel test.
-
-The gradient is probed directly rather than inferred from movement: the sinks are bf16 parameters
-under stochastic rounding, and a few steps at a small learning rate move only a fraction of them
-(the update is far below one bf16 ULP), so "every layer moved" would be flaky by construction.
-
-Fails if: the policy is not stamped, the sinks are frozen or dropped from the optimizer by any wrap,
-the FA4 rescale stops delivering a sink gradient in any layer, or training diverges.
+The gradient is probed directly: bf16 sinks under stochastic rounding at a small LR move only a fraction, far below one
+ULP, so "every layer moved" would be flaky.
 """
 
 import argparse
@@ -68,7 +56,7 @@ class SinkGradProbe(TrainerCallback):
 
 
 def _full_sinks(model) -> dict[str, torch.Tensor]:
-    """Every layer's full sink vector on this rank — DTensor shards materialized, TP hand-slices gathered."""
+    """Every layer's full sink vector on this rank: DTensor shards materialized, TP hand-slices gathered."""
     full = {}
     tp_gathered = dict(iter_hand_sliced_full(model))
     for name, param in model.named_parameters():
@@ -144,8 +132,7 @@ def run(ctx) -> dict:
     checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
     losses = step_losses(trainer)
 
-    # Every rank holds a slice of every layer's sinks (DTensor shard or TP head range): sum the
-    # per-layer gradient mass over the world before judging, in one fixed name order.
+    # Every rank holds a slice of every layer's sinks: sum the gradient mass over the world, in one fixed name order.
     names = sorted(before)
     mass = torch.tensor([probe.grad_mass.get(name, 0.0) for name in names], device=ctx.device)
     dist.all_reduce(mass)

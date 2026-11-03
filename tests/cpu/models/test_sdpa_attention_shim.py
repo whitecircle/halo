@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the dispatchless-eager-attention shim on remote modeling modules.
-
-``modeling_bailing_moe_v3`` (Ling 3.0) copies HF's ``eager_attention_forward`` helper but not the
-``ALL_ATTENTION_FUNCTIONS`` dispatch, so ``attn_implementation: sdpa`` changes only the mask format
-while every layer still materializes the ``[B, H, S, S]`` score plane — ~190 GiB on a packed 80k
-row. The shim wraps the module GLOBAL with an SDPA route gated on the attention module's own config.
-These tests drive the real ``get_class_in_module`` funnel with a module reproducing the published
-file's shape, and pin the wrapper's numerics against the file's own eager on every path it takes
-(masked, causal, GQA, unequal qk/v head dims).
-
-    python tests/cpu/models/test_sdpa_attention_shim.py
-"""
+"""``modeling_bailing_moe_v3`` (Ling 3.0) copies HF's ``eager_attention_forward`` without its dispatch, so
+``attn_implementation: sdpa`` still materializes the ``[B, H, S, S]`` score plane, ~190 GiB on a packed 80k row."""
 
 import pathlib
 import sys
@@ -27,8 +17,7 @@ from halo.model_loading.remote_code import (
 
 apply_remote_code_compat_shims()
 
-# The published file's shape: the HF eager helper (repeat_kv + fp32 softmax) with NO dispatch —
-# forwards resolve `eager_attention_forward` as a module global at every call.
+# The published file's shape: the HF eager helper with no dispatch, so forwards resolve it as a module global per call.
 DISPATCHLESS_SOURCE = '''
 import torch
 import torch.nn as nn
@@ -63,7 +52,7 @@ class LingLikeAttention:
         return eager_attention_forward(module, query, key, value, attention_mask, scaling=scaling)
 '''
 
-# A file that carries a real dispatch selects backends itself and must be left alone.
+# A file with a real dispatch selects backends itself.
 DISPATCHING_SOURCE = """
 ALL_ATTENTION_FUNCTIONS = {}
 
@@ -130,10 +119,8 @@ def test_dispatchless_module_is_wrapped_through_the_funnel(tmp_path, monkeypatch
 
 
 def test_sdpa_route_matches_eager_on_every_geometry(tmp_path, monkeypatch):
-    """Masked, causal-unmasked, GQA, and unequal qk/v head dims — each against the file's own eager.
-
-    fp32 throughout: the CPU SDPA math backend and the eager formula must agree to float tolerance,
-    so any drift is a real semantics change (wrong mask slice, wrong GQA pairing, wrong scale)."""
+    """fp32 throughout: the CPU SDPA math backend and the eager formula agree to float tolerance, so any drift is a
+    real semantics change."""
     cls = _load(tmp_path, monkeypatch, DISPATCHLESS_SOURCE, "LingLikeAttention")
     module = sys.modules[cls.__module__]
     original = module.eager_attention_forward.__wrapped__
@@ -163,7 +150,7 @@ def test_non_sdpa_config_falls_through_to_the_original(tmp_path, monkeypatch):
 
 
 def test_output_attentions_keeps_the_eager_path(tmp_path, monkeypatch):
-    """SDPA cannot return attention weights, so the request must silently keep eager, not drop them."""
+    """SDPA cannot return attention weights."""
     cls = _load(tmp_path, monkeypatch, DISPATCHLESS_SOURCE, "LingLikeAttention")
     module = sys.modules[cls.__module__]
     q, k, v = _qkv()
@@ -180,9 +167,7 @@ def test_module_with_a_real_dispatch_is_untouched(tmp_path, monkeypatch):
 
 
 def test_legacy_tied_weights_list_becomes_a_dict(tmp_path, monkeypatch):
-    """save_pretrained on 5.12+ calls ``.keys()`` on ``_tied_weights_keys`` — the funnel must
-    convert the v4 list form (every Bailing/Ling class) to the safe empty dict, and leave a
-    class that already carries the dict form alone."""
+    """Every Bailing/Ling class carries the v4 list form."""
     cls = _load(tmp_path, monkeypatch, TIED_LIST_SOURCE, "LegacyTiedModel")
     assert cls._tied_weights_keys == {}
     module = sys.modules[cls.__module__]

@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""``DeepEPDispatcher.__del__`` must reach its shutdown check even after the module is torn down.
-
-The finalizer skips ``destroy()`` during interpreter shutdown, because the CUDA context may already
-be corrupted. That check has to run without touching a module global: torchrun teardown can null this
-module's globals before the finalizer fires, and a bare ``sys.is_finalizing()`` then raises —
-printing an "Exception ignored in: <function DeepEPDispatcher.__del__>" traceback at the end of every
-EP run. So ``sys.is_finalizing`` is bound as a DEFAULT ARGUMENT, captured at definition time, and
-lives in the function object rather than in module state.
-
-That binding is also why this file patches ``__del__.__defaults__`` instead of ``sys.is_finalizing``:
-the latter cannot reach the finalizer, which is the property under test. Nothing here
-constructs a real dispatcher — it needs CUDA and DeepEP — and nothing needs to: the finalizer only
-calls back into ``self``.
-
-Run: ``python tests/cpu/parallelism/test_dispatcher_finalizer_shutdown.py`` (or ``pytest -m cpu``).
-"""
+"""``DeepEPDispatcher.__del__`` reaches its shutdown check after module teardown, with ``sys.is_finalizing`` bound
+as a default argument, hence this patches ``__del__.__defaults__``."""
 
 from __future__ import annotations
 
@@ -27,7 +13,7 @@ from halo.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
 
 
 class _Dispatcher:
-    """Everything ``__del__`` touches on ``self`` — which is only ``destroy``."""
+    """``__del__`` touches only ``destroy`` on ``self``."""
 
     def __init__(self):
         self.destroy_calls: list[bool] = []
@@ -37,7 +23,7 @@ class _Dispatcher:
 
 
 def test_the_shutdown_probe_is_bound_at_definition_time():
-    """The whole point: no module-global lookup happens inside the finalizer."""
+    """No module-global lookup happens inside the finalizer."""
     assert list(inspect.signature(DeepEPDispatcher.__del__).parameters) == ["self", "_is_finalizing"]
     assert DeepEPDispatcher.__del__.__defaults__ == (sys.is_finalizing,)
 
@@ -52,9 +38,8 @@ def test_destroy_is_skipped_during_interpreter_shutdown(monkeypatch):
 
 
 def test_destroy_drops_the_claim_without_freeing_while_the_interpreter_runs(monkeypatch):
-    """Anti-vacuity for the skip, and the second half of the finalizer's contract: freeing runs a
-    collective on DeepEP's device-side barrier, and the GC fires at a moment no other rank agrees
-    on — so a live-interpreter finalizer must drop the claim only."""
+    """Freeing runs a collective on DeepEP's barrier, and GC fires at a moment no other rank agrees on, so a live
+    finalizer only drops the claim."""
     monkeypatch.setattr(DeepEPDispatcher.__del__, "__defaults__", (lambda: False,))
     stub = _Dispatcher()
 
@@ -64,8 +49,7 @@ def test_destroy_drops_the_claim_without_freeing_while_the_interpreter_runs(monk
 
 
 def test_patching_sys_is_finalizing_does_not_reach_the_finalizer(monkeypatch):
-    """Documents the consequence of the definition-time binding: the finalizer is deaf to a later
-    rebind of ``sys.is_finalizing``, so a test that patched it would silently assert nothing."""
+    """A test patching ``sys.is_finalizing`` would silently assert nothing."""
     monkeypatch.setattr(sys, "is_finalizing", lambda: True)
     stub = _Dispatcher()
 

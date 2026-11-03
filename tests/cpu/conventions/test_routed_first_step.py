@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""``tests.common.routed_first_step`` sees the routed-path faults the SMPO layouts GPU rows rely on it for.
-
-A CPU twin of that suite's tiny Qwen3-MoE: its EP layers at ep1 (one gloo rank) and under pure expert TP 2 (two),
-each step recorded by :func:`capturing_routed_forwards` and :func:`gather_routed_grads` after the trainer's EP sweep,
-against the stock model pinned on the recorded picks. The clean path passes every routed check with its compared
-errors a clear factor under :data:`TOL`'s bounds, and each fault fails its own checks a clear factor past them: a halved
-combine the outputs and the gradients, a dropped expert-TP reduce the outputs. The pin reproduces the stock block of
-every router in :data:`PINNED_GATE_WEIGHTS` on its own picks bit for bit and reports a pick off the top-k; the checks
-refuse an incomplete pin, a step with nothing recorded, an uncompared routing parameter, an expert gradient zero on one
-side only and a token naming one expert twice.
-
-Run: python tests/cpu/conventions/test_routed_first_step.py
-"""
+"""``tests.common.routed_first_step`` sees the routed-path faults the SMPO layouts GPU rows rely on it for. A CPU
+twin of that suite's tiny Qwen3-MoE at ep1 and pure expert TP 2, against the stock model pinned on the recorded
+picks: the clean path passes and each fault fails by a clear factor."""
 
 import copy
 import datetime
@@ -64,7 +54,6 @@ FAULT_VISIBLE = {
     "routed_grads_match_reference",
     "routed_picks_are_reference_near_ties",
 }
-# Each twin's world size and the variants it runs.
 TWINS = {
     "ep1": (1, ("clean", "halved", "uncovered", "zeroed", "duplicated", "unrecorded")),
     "etp2": (2, ("clean", "halved", "dropped")),
@@ -304,7 +293,6 @@ def _block(router_cls: type) -> tuple[nn.Module, type, torch.Tensor]:
 
 
 def _router_call(container: nn.Module, layer_cls: type, hidden: torch.Tensor):
-    """The stock router's ``(logits, weights, picks)`` on ``hidden``."""
     return layer_cls._find_gate_or_router(container.mlp)(hidden.reshape(-1, hidden.shape[-1]))
 
 

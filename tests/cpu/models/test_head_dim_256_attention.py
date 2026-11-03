@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the attention a head_dim-256 or softcapped model resolves to, packed and padded, per GPU.
-
-The failures these gates close are late or silent. FA4's dedicated head_dim-256 kernel asserts in its first
-backward on a softcap (Gemma 2) and on a window (Gemma 3), so FA4 on such a model never trains, and multi-head
-latent attention (GLM-4.7-Flash) stays off it on FA2 as a precaution. transformers' SDPA drops
-``attn_logit_softcapping`` without a word, so a Gemma 2 run on it trains a different model at a plausible loss.
-The padded scripts take the loader's own pick on Blackwell, head_dim-256 checkpoints included.
-
-Run: ``python tests/cpu/models/test_head_dim_256_attention.py`` (or ``pytest -m cpu``).
-"""
+"""The attention a head_dim-256 or softcapped model resolves to per GPU. FA4's dedicated kernel asserts in its first
+backward on a softcap or window; transformers' SDPA silently drops the softcap and trains a different model."""
 
 from __future__ import annotations
 
@@ -66,8 +58,6 @@ def _resolve(config, request, *, dtype=torch.bfloat16) -> str:
 
 
 def _resolved(family: str, arch: str, collator: str) -> str:
-    """What the policy load resolves: a packed SFT row with :func:`default_training_rows_attn_implementation`'s
-    request, a padded script's with :func:`default_padded_attn_implementation`'s."""
     config = _config(family)
     unset = types.SimpleNamespace(attn_implementation=None)
     with _on(arch):
@@ -85,13 +75,11 @@ def _resolved(family: str, arch: str, collator: str) -> str:
         return _resolve(config, request)
 
 
-# (family, arch) -> (packed, padded). On Blackwell both shapes take the loader's pick: Gemma 2/3 and GLM-4.7-Flash (MLA)
-# leave FA4 for FA2 by head width, Gemma 1 and GPT-J (hd256, no softcap, no window) and the hd128 families keep it,
-# PaliGemma's prefix-LM mask reaches no flash kernel, and Gemma 4's 512-wide heads fit none; the head_dim-256
-# GatedDeltaNet families take FA2 on packed rows only. A softcapped policy's padded batch requests FA2 on Blackwell,
-# which trains its softcap, and SDPA on Hopper, which the softcap turns into FA3; a remote-code checkpoint's requests
-# SDPA, as every padded script does on Hopper, where GPT-J's class (no SDPA path) turns it into eager. A remote-code
-# config's packed row keeps the loader's pick, which its build may refuse.
+# (family, arch) -> (packed, padded). On Blackwell, Gemma 2/3 and GLM-4.7-Flash (MLA) leave FA4 for FA2 by head width,
+# PaliGemma's prefix-LM mask and Gemma 4's 512-wide heads reach no flash kernel, and head_dim-256 GatedDeltaNet
+# families take FA2 on packed rows only. On Hopper a padded script requests SDPA, which a softcap turns into FA3 and
+# GPT-J's class (no SDPA path) into eager. A remote-code config requests SDPA when padded; packed, it keeps the
+# loader's pick, which its build may refuse.
 _EXPECTED = {
     ("gemma2", "blackwell"): (FA2, FA2),
     ("gemma2", "hopper"): (FA3, FA3),
@@ -139,8 +127,7 @@ _REQUESTS = [None, SDPA, FA2, FA3, FA4, "flex_attention", "eager"]
 @pytest.mark.parametrize("request_", _REQUESTS, ids=lambda r: str(r))
 @pytest.mark.parametrize("family", ["gemma2", "vaultgemma"])
 def test_a_softcapped_model_never_resolves_to_sdpa(family, request_, arch, dtype):
-    """Whatever is requested, pinned or defaulted, on any GPU and in fp32 too: SDPA would train without the
-    softcap, and nothing downstream says so."""
+    """SDPA would train without the softcap, and nothing downstream says so."""
     with _on(arch):
         resolved = _resolve(_config(family), request_, dtype=dtype)
     assert resolved != SDPA
@@ -149,8 +136,7 @@ def test_a_softcapped_model_never_resolves_to_sdpa(family, request_, arch, dtype
 
 
 def test_a_softcapped_sdpa_request_falls_back_to_flash_then_flex():
-    """The order is FA3 on Hopper, FA2, flex, eager: both flash kernels carry the softcap at head_dim 256, the arch's
-    own FA3 first; flex's compile path is unusable under EP, so it comes last before eager."""
+    """FA3 on Hopper, then FA2, flex, eager. Flex comes late because its compile path is unusable under EP."""
     config = _config("gemma2")
     with _on("hopper"):
         assert _resolve(config, SDPA) == FA3
@@ -163,8 +149,7 @@ def test_a_softcapped_sdpa_request_falls_back_to_flash_then_flex():
 
 
 def test_a_softcapped_fallback_past_the_flash_head_cap_skips_flash_attention_2():
-    """FA2 caps at head_dim 256, so a softcapped model with wider heads falls back to flex, which carries the
-    softcap, and never to an FA2 that would raise at the model build."""
+    """FA2 caps at head_dim 256 and would raise at the model build; flex carries the softcap."""
     config = _config("gemma2", head_dim=512)
     with _on("hopper"):
         assert attention_mod.validate_attn_implementation(config, SDPA, SinksPolicy.NEUTRALIZED) == "flex_attention"
@@ -172,7 +157,7 @@ def test_a_softcapped_fallback_past_the_flash_head_cap_skips_flash_attention_2()
 
 
 def test_an_fp32_softcapped_flash_request_is_redirected_to_flex_by_name():
-    """The fp32 redirect names flex for a softcapped model; naming SDPA would log a backend the run never takes."""
+    """Naming SDPA would log a backend the run never takes."""
     with _on("hopper"), patch.object(attention_mod.logger, "warning") as warn:
         assert _resolve(_config("gemma2"), FA3, dtype=torch.float32) == "flex_attention"
     fp32_warnings = [call.args[0] for call in warn.call_args_list if "dtype=float32" in call.args[0]]
@@ -180,21 +165,19 @@ def test_an_fp32_softcapped_flash_request_is_redirected_to_flex_by_name():
 
 
 def test_the_sdpa_refusal_is_keyed_on_the_softcap_not_the_family():
-    """Anti-vacuity: the same Gemma 2 config with the softcap off keeps a pinned SDPA."""
     with _on("hopper"):
         assert _resolve(_config("gemma2", attn_logit_softcapping=None), SDPA) == SDPA
 
 
 @pytest.mark.parametrize("family", ["gemma2", "gemma3_text"])
 def test_fa4_survives_at_head_dim_128(family):
-    """Anti-vacuity: the demotion is keyed on FA4's dedicated head width. Gemma 2 and Gemma 3 at 27B have
-    128-wide heads, whose general kernel takes the softcap and the window."""
+    """Gemma 2 and Gemma 3 at 27B have 128-wide heads, whose general kernel takes the softcap and the window."""
     with _on("blackwell"):
         assert _resolve(_config(family, head_dim=128), None) == FA4
 
 
 def test_the_fa4_demotion_names_the_kernel_limit():
-    """The warning is the only record of why a Gemma run lost FA4; it must name the feature."""
+    """The warning is the only record of why a Gemma run lost FA4."""
     with _on("blackwell"), patch.object(attention_mod.logger, "warning") as warn:
         assert _resolve(_config("gemma2"), FA4) == FA2
     assert any("attention logit softcapping" in call.args[0] for call in warn.call_args_list)
@@ -203,22 +186,19 @@ def test_the_fa4_demotion_names_the_kernel_limit():
 @pytest.mark.parametrize("request_", [None, FA4], ids=["unset", "pinned_fa4"])
 @pytest.mark.parametrize("family", ["gemma2", "vaultgemma", "gemma3_text"])
 def test_a_deterministic_run_lands_a_softcapped_or_windowed_head_dim_256_model_on_fa2(family, request_, monkeypatch):
-    """The dedicated-kernel refusal runs ahead of the deterministic-backward fallback, so a ``full_determinism`` run
-    of Gemma 2, VaultGemma or Gemma 3 at head_dim 256 lands on FA2, which takes the softcap and the window, not on
-    the SDPA that fallback names."""
+    """The dedicated-kernel refusal runs ahead of the deterministic-backward fallback, which names SDPA."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
     config = _config(family)
-    # premise: the deterministic-backward fallback's own condition holds
+    # Premise: the deterministic-backward fallback's own condition holds.
     assert attention_mod.flash_attention_deterministic() and attention_mod.uses_fa4_dedicated_head_dim(config)
     with _on("blackwell"):
         assert _resolve(config, request_) == FA2
 
 
 def test_a_window_declared_on_the_config_alone_refuses_the_dedicated_kernel():
-    """A head_dim-256 model declaring its window on the config alone (Mistral-style, no ``layer_types``) slides on
-    every layer, so FA4's dedicated kernel refuses it and the resolver lands on FA2."""
+    """A window on the config alone (Mistral-style) slides on every layer, so FA4's dedicated kernel refuses it."""
     config = _config("mistral", head_dim=256, sliding_window=32)
-    assert getattr(config, "layer_types", None) is None  # premise
+    assert getattr(config, "layer_types", None) is None
     with _on("blackwell"):
         assert _resolve(config, None) == FA2
         assert _resolve(_config("mistral", head_dim=256, sliding_window=None), None) == FA4
@@ -236,7 +216,6 @@ class _MlaConfig(PretrainedConfig):
 
 
 def test_an_mla_query_key_width_reaches_the_dedicated_kernel_gate():
-    """FA4 sees the 256-wide query/key an MLA model builds from its two slices, not its declared head_dim."""
     config = _MlaConfig()
     config.attn_logit_softcapping = 30.0
     assert attention_mod.fa4_dedicated_kernel_refusal(config) == "it takes no attention logit softcapping"
@@ -244,8 +223,7 @@ def test_an_mla_query_key_width_reaches_the_dedicated_kernel_gate():
     assert attention_mod.fa4_dedicated_kernel_refusal(config) is None
 
 
-# Multi-head latent attention at a 256-wide query/key head in two families' spellings: GLM-4.7-Flash's release
-# widths (192 + 64 query/key, 256 value, the config's defaults) and DeepSeek-V3's classes at the same widths.
+# MLA at a 256-wide query/key head: GLM-4.7-Flash's release widths (its defaults), DeepSeek-V3's classes at the same.
 _LATENT_256 = {
     "glm4_moe_lite": {},
     "deepseek_v3": {"qk_nope_head_dim": 192, "qk_rope_head_dim": 64, "v_head_dim": 256},
@@ -256,11 +234,10 @@ _LATENT_256 = {
 @pytest.mark.parametrize("request_", [None, FA4], ids=["unset", "pinned_fa4"])
 @pytest.mark.parametrize("family", sorted(_LATENT_256))
 def test_multi_head_latent_attention_at_head_dim_256_trains_on_fa2(family, request_, deterministic, monkeypatch):
-    """A 256-wide latent attention stays on FA2 as a precaution whatever the family, pinned or not, in a
-    deterministic run too (not on the SDPA its fallback names), and CP's kernel refuses FA4 on the same verdict."""
+    """FA2 as a precaution, pinned or not, deterministic or not; CP's kernel refuses FA4 on the same verdict."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
     config = _config(family, **_LATENT_256[family])
-    assert attention_mod.uses_fa4_dedicated_head_dim(config)  # premise
+    assert attention_mod.uses_fa4_dedicated_head_dim(config)
     with _on("blackwell"), patch.object(attention_mod.logger, "warning") as warn:
         assert _resolve(config, request_) == FA2
     assert any("multi-head latent attention" in call.args[0] for call in warn.call_args_list)
@@ -272,17 +249,15 @@ def test_multi_head_latent_attention_at_head_dim_256_trains_on_fa2(family, reque
 
 @pytest.mark.parametrize("family", sorted(_LATENT_256))
 def test_multi_head_latent_attention_keeps_fa4_at_other_widths(family):
-    """Anti-vacuity: the latent-attention refusal is the dedicated kernel's; at a 128-wide query/key head (64 + 64,
-    Mistral4's) FA4's general kernel trains it."""
+    """At a 128-wide query/key head (64 + 64, Mistral4's) FA4's general kernel trains it."""
     config = _config(family, **{"qk_nope_head_dim": 64, "qk_rope_head_dim": 64, "v_head_dim": 128})
     with _on("blackwell"):
         assert _resolve(config, None) == FA4
 
 
 def test_a_head_dim_256_model_without_a_latent_keeps_fa4():
-    """Anti-vacuity: the refusal reads the latent, not the width; Qwen3.5's 256-wide heads keep FA4."""
     config = _config("qwen3_5_text")
-    assert attention_mod.uses_fa4_dedicated_head_dim(config) and not has_latent_attention(config)  # premise
+    assert attention_mod.uses_fa4_dedicated_head_dim(config) and not has_latent_attention(config)
     with _on("blackwell"):
         assert _resolve(config, None) == FA4
     assert attention_mod.supports_fa4_backward(config)

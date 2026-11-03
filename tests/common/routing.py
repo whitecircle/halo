@@ -11,12 +11,8 @@ from halo.models.moe.family_specs import MoEFamilySpec
 
 
 class BareEPLayer(EPGroupLimitedMoELayerBase):
-    """Minimal concrete EP layer for exercising the selection helpers without DeepEP/GPU: bypasses
-    ``__init__`` (no dispatcher) and sets exactly the attributes the helpers read.
-
-    Rooted at the class that OWNS the group-limited routing, so the helpers exercised are the ones the
-    families inherit rather than a copy the base happens to also carry.
-    """
+    """Minimal EP layer for the selection helpers: no dispatcher, rooted at the class owning group-limited routing, so
+    helpers are what families inherit."""
 
     FAMILY = MoEFamilySpec(model_types=())
 

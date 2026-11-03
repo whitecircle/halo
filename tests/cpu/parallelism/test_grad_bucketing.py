@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Bucketed gradient reduction equals per-tensor reduction (numerical equivalence).
-
-``reduce_grads_bucketed`` coalesces many gradients sharing one (op, group, divisor) into a single
-collective per dtype, replacing a chain of latency-bound all-reduces used by the post-backward
-deferred cross-node DP sweep and the TP-replicated grad sync. This test proves it produces
-BIT-IDENTICAL results to calling ``reduce_grad`` on each tensor, across a real 2-rank gloo group and
-for every reduction kind the callers use (SUM+divisor, AVG, fp32-reduce), including mixed dtypes and
-non-contiguous grads. A bug in the flatten/scatter offset math or the dtype bucketing would diverge.
-
-    python tests/cpu/parallelism/test_grad_bucketing.py
-"""
+"""Bucketed gradient reduction is bit-identical to per-tensor reduction on a real 2-rank gloo group, for every
+reduction kind callers use."""
 
 import pytest
 import torch
@@ -23,13 +14,13 @@ WORLD_SIZE = 2
 
 
 def _make_grads(rank: int) -> list[torch.Tensor]:
-    """Distinct per-rank grads of assorted shapes/dtypes, incl. a non-contiguous one."""
+    """Incl. a non-contiguous one."""
     g = torch.manual_seed(1000 + rank)
     tensors = [
         torch.randn(4, 5, generator=g, dtype=torch.float32),
         torch.randn(7, generator=g, dtype=torch.float32),
         torch.randn(3, 3, generator=g, dtype=torch.bfloat16),
-        torch.randn(2, 6, generator=g, dtype=torch.bfloat16).t(),  # non-contiguous
+        torch.randn(2, 6, generator=g, dtype=torch.bfloat16).t(),
         torch.randn(1, generator=g, dtype=torch.float32),
     ]
     return tensors
@@ -37,14 +28,13 @@ def _make_grads(rank: int) -> list[torch.Tensor]:
 
 def _worker(rank: int, tmp: str) -> None:
     failures = []
-    # cap=huge → single chunk per dtype; cap=32 bytes → forces the multi-chunk path (boundaries
-    # must still align across ranks and the scatter offsets must stay correct).
+    # cap=32 bytes forces the multi-chunk path, whose boundaries must align across ranks.
     for cap in (grad_reduce.BUCKET_MAX_BYTES, 32):
         grad_reduce.BUCKET_MAX_BYTES = cap
         for op, divisor, fp32 in [
             (dist.ReduceOp.SUM, WORLD_SIZE, False),
             (dist.ReduceOp.AVG, None, False),
-            (dist.ReduceOp.SUM, WORLD_SIZE, True),  # fp32 reduce path (affects the bf16 tensors)
+            (dist.ReduceOp.SUM, WORLD_SIZE, True),  # fp32 reduce path (affects the bf16 tensors).
         ]:
             reference = _make_grads(rank)
             for t in reference:
@@ -57,7 +47,7 @@ def _worker(rank: int, tmp: str) -> None:
                 if not torch.equal(r, b):
                     failures.append(f"cap={cap} op={op} fp32={fp32} tensor[{i}] max|Δ|={(r - b).abs().max()}")
 
-    # Empty input is a no-op (must not hang — no collective issued).
+    # Must not hang: no collective issued.
     reduce_grads_bucketed([], op=dist.ReduceOp.AVG, group=None)
 
     result = "PASS" if not failures else "FAIL: " + "; ".join(failures)

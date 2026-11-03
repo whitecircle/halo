@@ -1,26 +1,9 @@
 #!/usr/bin/env python
-"""A tree row on the real kernels matches every example run alone.
+"""A tree row on the real kernels matches every example run alone, against the fp32 stock forward.
 
-The CPU tier proves the plans and the seams against reference kernels; this pins what only the CUDA
-kernels can break. The gather form calls the flash varlen kernel with more keys than queries per
-sequence and relies on its bottom-right causal and window alignment, in forward and backward — a
-shape neither upstream nor the stock packed path exercises. The split form reads the fused-sink
-log-sum-exp and backpropagates through it. A GatedDeltaNet layer runs its delta-rule kernel with one
-initial state per varlen sequence and a gradient through both states, and its convolution over a
-gathered row. Each model is finalized as a loaded one is (``finalize_loaded_model``), so the delta-rule kernel
-autotunes under the FLA Blackwell restriction a training run gets.
-
-One tiny bf16 model per kernel shape — GPT-OSS (live sinks, a window shorter than the branches),
-Qwen3 MoE (no sink, no window), Qwen3.5 MoE at its release head shapes (FA4's head_dim-256 kernel, gather only,
-and FA2; GatedDeltaNet layers) — runs a three-level tree row in every form its backends allow. Checked against the fp32
-stock forward of each example on its own: hidden states and mixer gradients; the same row without
-its plan as a negative control; root tokens of the split form bit-identical to the plain packed
-forward after the first layer (the stock call is untouched for them); the recurrence warm-up running
-every state variant a training row compiles; and the key gather's fp32 gradient accumulation against
-the bf16 scatter at a fan-out where the latter visibly drifts. Every admitted backend's kernel is also
-compared directly with the plain-torch kernel the CPU tier uses in its place, on sequences with more
-keys than queries under a window. The models route every token to all of their experts: top-k routing flips on bf16 noise,
-which would measure the router, not the mixers.
+The gather form calls the flash varlen kernel with more keys than queries, relying on its bottom-right causal and
+window alignment, a shape neither upstream nor the stock packed path exercises. Models route every token to all their
+experts: top-k routing flips on bf16 noise, which would measure the router.
 """
 
 import copy
@@ -54,10 +37,9 @@ from tests.common.trees import concat_columns, example_rows, randomize_sinks, re
 
 WINDOW = 16
 VOCAB = 1024
-HIDDEN_REL_TOL = 4e-2  # bf16 through four layers against fp32
+HIDDEN_REL_TOL = 4e-2  # bf16 through four layers against fp32.
 GRAD_COSINE_FLOOR = 0.999
-LEAK_REL_FLOOR = 0.3  # a row without its plan must be far from the reference, or the checks compare nothing
-# Config overrides per family: four layers, every expert active.
+LEAK_REL_FLOOR = 0.3  # A row without its plan must be far from the reference, or the checks compare nothing.
 _ALL_EXPERTS = {"num_hidden_layers": 4, "num_experts_per_tok": 2}
 FAMILIES = {
     "gpt_oss": {**_ALL_EXPERTS, "num_local_experts": 2, "sliding_window": WINDOW},
@@ -74,23 +56,20 @@ FAMILIES = {
         "linear_value_head_dim": 128,
     },
 }
-# The forms checked per backend. FA2 returns no log-sum-exp gradient and drops GPT-OSS's live sinks;
-# FA4's head_dim-256 kernel (Qwen3.5) takes no log-sum-exp gradient either.
+# FA2 returns no log-sum-exp gradient and drops GPT-OSS's live sinks; FA4's head_dim-256 kernel (Qwen3.5) has no such
+# gradient either.
 BACKENDS = {
     "gpt_oss": {"flash_attention_4": ("split", "gather")},
     "qwen3_moe": {"flash_attention_4": ("split", "gather"), "flash_attention_2": ("gather",)},
     "qwen3_5_moe_text": {"flash_attention_4": ("gather",), "flash_attention_2": ("gather",)},
 }
 _MIXERS = ("self_attn", "linear_attn")
-# (takes a state, returns one, normalizes query and key itself) of the recurrence calls along a
-# chain: its root, its middle, its leaf. A tree row is normalized once, ahead of the depths.
+# (takes a state, returns one, normalizes query and key itself) along a chain: root, middle, leaf. A tree row
+# normalizes once.
 RECURRENCE_STATE_VARIANTS = {(False, True, False), (True, True, False), (True, False, False)}
 
 
 def _tree_row(generator: torch.Generator) -> dict[str, torch.Tensor]:
-    """Trees of several shapes in one row: trunks shorter and longer than the window, a second level,
-    branches from 2 to 70 tokens, and a plain document."""
-
     def tokens(n: int) -> list[int]:
         return torch.randint(0, VOCAB, (n,), generator=generator).tolist()
 
@@ -131,8 +110,6 @@ def _mixer_gradients(model) -> torch.Tensor:
 
 
 def _alone(model, row, examples) -> tuple[torch.Tensor, torch.Tensor]:
-    """Hidden states of every example run on its own by the stock forward, laid back on the row, and
-    the mixer gradients of the summed loss over their trained tokens."""
     model.zero_grad(set_to_none=True)
     hidden = torch.zeros(len(row["input_ids"]), model.config.hidden_size, device="cuda")
     for rows in examples:
@@ -143,9 +120,7 @@ def _alone(model, row, examples) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _record_recurrence_states(family: TreeFamily) -> set[tuple[bool, bool, bool]]:
-    """Note, for every call of the family's recurrence from here on, whether it took a state, whether
-    it returned one and whether it normalized. Installed before tree attention, so it sees what the
-    kernel is asked."""
+    """Installed before tree attention, so it sees what the kernel is asked."""
     seen: set[tuple[bool, bool, bool]] = set()
     stock = getattr(family.module, family.stateful.recurrence)
 
@@ -159,9 +134,8 @@ def _record_recurrence_states(family: TreeFamily) -> set[tuple[bool, bool, bool]
 
 
 def _kernel_contract_errors(backend: str) -> tuple[float, float]:
-    """The backend's varlen kernel against :func:`~tests.common.trees.reference_varlen`, output and
-    key gradient: sequences with more keys than queries, the keys ahead of the queries shorter and
-    longer than the window."""
+    """Against :func:`~tests.common.trees.reference_varlen` on more keys than queries, ahead keys shorter and longer
+    than the window."""
     generator = torch.Generator(device="cuda").manual_seed(7)
     heads, kv_heads, head_dim = 4, 2, 64
     query_lengths, ahead = (40, 7, 130, 25), (9, WINDOW + 20, 3, 0)
@@ -264,8 +238,7 @@ def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
     if "split" not in BACKENDS[name].get("flash_attention_4", ()):
         return checks
 
-    # A root has no ancestors, so the split form leaves its tokens to the stock packed call: the
-    # first full layer's attention gives them what it gives the same roots packed on their own.
+    # A root has no ancestors, so the split form leaves it to the stock packed call.
     model.config._attn_implementation = "flash_attention_4"
     model.eval()
     with torch.no_grad():

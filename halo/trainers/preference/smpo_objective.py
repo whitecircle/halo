@@ -30,11 +30,8 @@ class SMPOStepConstants:
 
 
 def cp_global_mean(sums: torch.Tensor, counts: torch.Tensor, cp_config) -> torch.Tensor:
-    """``sums / counts`` over whole sequences: under CP both are summed over the group first.
-
-    The ``sums`` reduce is autograd-aware (its backward sums the gradient over the group); an in-place
-    ``dist.all_reduce`` reaches autograd only through the deprecated c10d fallback, as the identity.
-    """
+    """The CP reduce is autograd-aware (its backward sums the gradient over the group); an in-place ``dist.all_reduce``
+    reaches autograd only through the deprecated c10d fallback, as the identity."""
     if cp_config is not None and cp_config.cp_size > 1:
         sums = cp_sum_rows(sums, cp_config)
         counts = cp_sum_rows(counts, cp_config)
@@ -42,11 +39,8 @@ def cp_global_mean(sums: torch.Tensor, counts: torch.Tensor, cp_config) -> torch
 
 
 def masked_logit_mean(logits: torch.Tensor, loss_mask: torch.Tensor, cp_config=None) -> torch.Tensor:
-    """``logits[loss_mask].mean()`` without the masked copy, fp32-accumulated; an empty mask yields 0.
-
-    Under CP the sum and token count are summed over the group, so every rank reports the sequence-global
-    mean. A logged metric, computed without grad.
-    """
+    """``logits[loss_mask].mean()`` without the masked copy, fp32-accumulated; an empty mask yields 0. Sequence-global
+    under CP. A logged metric, computed without grad."""
     with torch.no_grad():
         stats = torch.stack(
             [(logits.sum(dim=-1, dtype=torch.float32) * loss_mask).sum(), loss_mask.sum(dtype=torch.float32)]
@@ -58,13 +52,9 @@ def masked_logit_mean(logits: torch.Tensor, loss_mask: torch.Tensor, cp_config=N
 
 
 def cp_quantile(values: torch.Tensor, q: float, cp_config) -> torch.Tensor | None:
-    """Quantile of ``values`` over the whole sequence, not this CP rank's slice; ``None`` when no rank holds one.
-
-    A local quantile would give each rank its own clip bound, so the CP sum would drift with ``cp_size``.
-    Detached: the bound is a clamp limit, not a term of the objective; left differentiable, every clamped
-    token would route its gradient into the one element that is the quantile. It also keeps the
-    all-gather, which has no autograd kernel, off the graph.
-    """
+    """Quantile over the whole sequence, since a local one would give each rank its own clip bound and the CP sum would
+    drift with ``cp_size``; ``None`` when no rank holds a value. Detached: left differentiable, every clamped token
+    would route its gradient into the one quantile element, and the all-gather has no autograd kernel."""
     values = values.detach().float()
     group = cp_config.process_group if cp_config else None
     if group is None or dist.get_world_size(group) == 1:
@@ -115,12 +105,8 @@ class SMPOObjective:
     def clip_log_probs(
         self, per_token_logps: torch.Tensor, loss_mask: torch.Tensor, is_chosen: torch.Tensor, cp_config=None
     ) -> torch.Tensor:
-        """Percentile-clip the rejected low tail and the chosen high tail, then floor the rejected side.
-
-        ``is_chosen`` selects the chosen side in any batch shape (a ``[rows, 1]`` column, or the padding-free
-        row's per-token mask). The lower percentile runs before ``min_log_prob``, so the floor can only raise
-        the tail further; masked positions are never touched and the input is left unmodified.
-        """
+        """Percentile-clip the rejected low tail and chosen high tail, then floor the rejected side. The lower
+        percentile runs before ``min_log_prob``, so the floor can only raise the tail further."""
         if self.lower_clip_percentile is None and self.upper_clip_percentile is None and self.min_log_prob is None:
             return per_token_logps
         clipped = per_token_logps
@@ -157,11 +143,8 @@ def metric_sums(
     chosen_sft_sum: torch.Tensor,
     rejected_sft_sum: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
-    """One batch's detached metric sum contributions, the definition both loss paths build from.
-
-    ``pair_valid`` is a per-pair 0/1 mask, so the PP eval's filler pairs contribute nothing. Nothing is
-    re-reduced: under CP the log-probs, logit means and SFT losses arrive as CP-global means.
-    """
+    """One batch's detached metric sums, the definition both loss paths build from. ``pair_valid`` leaves the PP eval's
+    filler pairs out. Nothing is re-reduced, as CP inputs arrive as CP-global means."""
     return {
         key: value.detach()
         for key, value in (
@@ -184,11 +167,8 @@ def metric_sums(
 def metrics_from_sums(
     sums: dict[str, torch.Tensor], constants: SMPOStepConstants, *, report_margin: bool
 ) -> dict[str, torch.Tensor]:
-    """Fold metric sums into the batch's unprefixed means over ``constants``' divisors.
-
-    The key set is fixed here, never by what accumulated: a missing key reads as zero, so a pipeline stage
-    that ran no microbatch reports the same names as one that did.
-    """
+    """Fold metric sums into the batch's means. The key set is fixed here: a missing key reads as zero, so a pipeline
+    stage that ran no microbatch reports the same names as one that did."""
     # On the device the step's own constants live on: a stage that accumulated nothing would otherwise
     # divide a CPU zero by a device token count.
     device = next(

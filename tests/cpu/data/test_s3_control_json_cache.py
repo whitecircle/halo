@@ -1,16 +1,7 @@
 #!/usr/bin/env python
-"""Mirrored S3 control-file reads — sharded/preprocessed datasets must survive an S3 outage warm.
-
-The dataset BYTES are offline-servable (completion-marker caches); the small control files training
-reads first — ``shard_index.json``, ``metadata.json`` — must be too. Live-only, a warm-cache relaunch
-of a sharded run during an SSO outage dies on the index fetch, and a preprocessed dataset degrades to
-"raw" and dies on its stripped source columns, both against the documented offline
-contract. ``read_control_json_with_cache`` closes that: live wins and refreshes a local mirror; the
-mirror serves when S3 is unreachable; a live 404 is authoritative — the mirror is dropped so a
-re-pushed non-sharded/raw dataset cannot keep its old classification offline.
-
-    python tests/cpu/data/test_s3_control_json_cache.py
-"""
+"""``read_control_json_with_cache`` keeps sharded and preprocessed datasets warm through an S3 outage: live wins and
+refreshes a local mirror, the mirror serves when S3 is unreachable, and a live 404 drops it so a re-pushed raw
+dataset cannot keep its old classification offline."""
 
 import json
 from unittest.mock import patch
@@ -54,8 +45,7 @@ def test_outage_without_a_mirror_reraises(cache_root):
 
 
 def test_live_wins_over_a_stale_mirror(cache_root):
-    """When S3 answers, the payload is re-fetched and the mirror refreshed — the mirror must never
-    shadow a live re-push (same staleness contract as the fingerprint probes)."""
+    """The mirror must never shadow a live re-push."""
     with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", return_value={"v": 1}):
         read_control_json_with_cache("b", "d/x.json")
     with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", return_value={"v": 2}):
@@ -65,8 +55,7 @@ def test_live_wins_over_a_stale_mirror(cache_root):
 
 
 def test_authoritative_absence_drops_the_mirror_and_raises(cache_root):
-    """A live 404 says the control file is GONE (dataset re-pushed without it); serving the old
-    mirror on the next outage would classify a now-raw dataset as preprocessed/sharded."""
+    """Serving the old mirror on the next outage would classify a now-raw dataset as preprocessed or sharded."""
     with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", return_value=PAYLOAD):
         read_control_json_with_cache("b", "d/metadata.json")
     with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=FileNotFoundError("404")):
@@ -80,8 +69,8 @@ def test_authoritative_absence_drops_the_mirror_and_raises(cache_root):
 
 @pytest.mark.parametrize("failing_step", ["makedirs", "replace"])
 def test_unwritable_mirror_does_not_fail_the_live_read(cache_root, monkeypatch, failing_step):
-    """A full/read-only cache volume must cost the mirror, not the training run's control read —
-    whether it refuses the mirror directory or the publish into it."""
+    """A full or read-only cache volume costs the mirror, not the run's control read, whether it refuses the
+    directory or the publish."""
     monkeypatch.setattr(f"halo.data.sources.s3_dataset_store.os.{failing_step}", _raise_enospc)
     with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", return_value=PAYLOAD):
         assert read_control_json_with_cache("b", "d/x.json") == PAYLOAD
@@ -89,9 +78,6 @@ def test_unwritable_mirror_does_not_fail_the_live_read(cache_root, monkeypatch, 
 
 def _raise_enospc(*args, **kwargs):
     raise OSError(28, "No space left on device")
-
-
-# The consumers: the sharded probe and the preprocessed-metadata probe.
 
 
 def test_sharded_probe_true_from_mirror_when_offline(cache_root):
@@ -140,7 +126,7 @@ def test_preprocessed_probe_survives_an_outage_from_the_mirror(cache_root):
 
 
 def test_preprocessed_probe_false_and_quiet_on_live_absence(cache_root):
-    """An absent metadata.json is the NORMAL raw-dataset case — no mirror, no warning-tone failure."""
+    """An absent metadata.json is the normal raw-dataset case."""
     with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=FileNotFoundError("404")):
         assert is_preprocessed_dataset("s3://b/raw") is False
     assert not list((cache_root / "control").glob("*.json"))

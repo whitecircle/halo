@@ -32,14 +32,12 @@ logger = logging.getLogger(__name__)
 
 
 def has_injected_lora(backbone: nn.Module) -> bool:
-    """True if ``inject_adapter_in_model`` added tuner layers to ``backbone`` (in place, so not a PeftModel).
-    Structural: a remote-code backbone's own ``lora_``-named parameters (jina's LoRA parametrizations) are
-    base weights, not injected adapters."""
+    """Structural: a remote-code backbone's own ``lora_``-named parameters (jina's LoRA parametrizations) are base
+    weights."""
     return any(isinstance(module, BaseTunerLayer) for module in backbone.modules())
 
 
 def require_injected_lora_config(model: nn.Module) -> LoraConfig:
-    """The ``LoraConfig`` ``inject_adapter_in_model`` stamped on the module of ``model`` it injected into."""
     for module in model.modules():
         configs = getattr(module, "peft_config", None)
         if isinstance(configs, dict) and isinstance(configs.get("default"), LoraConfig):
@@ -51,10 +49,8 @@ def require_injected_lora_config(model: nn.Module) -> LoraConfig:
 
 
 def folded_backbone_chunks(backbone: nn.Module, *, retain: bool) -> Iterator[dict[str, torch.Tensor]]:
-    """COLLECTIVE: :func:`chunked_saveable_tensors` over the backbone with its injected LoRA folded in out of
-    place, under the base model's names: the tensors the tuner layers own are dropped by identity (a backbone's
-    own ``lora_``-named parameters stay). Each target folds inside its chunk's gather, in the chunk order every
-    rank shares (a DTensor collective under FSDP2)."""
+    """COLLECTIVE. Injected LoRA folded in out of place, under the base model's names, each target inside its chunk's
+    gather in the chunk order every rank shares (a DTensor collective under FSDP2)."""
     adapters = tuner_adapter_param_ids(backbone)
     # The parameters themselves, not their data: the fold finds its targets by identity.
     params = ((name, param) for name, param in backbone.named_parameters() if id(param) not in adapters)
@@ -68,15 +64,14 @@ def folded_backbone_chunks(backbone: nn.Module, *, retain: bool) -> Iterator[dic
 
 
 def trainable_tensors(model: nn.Module) -> dict[str, torch.Tensor]:
-    """The tensors an injected-LoRA run trains, which its fold cannot give back: every parameter with
-    ``requires_grad``, the same set the optimizer steps. Structural, so rank-uniform in name and order."""
+    """Every parameter with ``requires_grad``, which a fold cannot give back. Structural, so rank-uniform in name and
+    order."""
     return {name: param.data for name, param in model.named_parameters() if param.requires_grad}
 
 
 def _resume_adapter_mismatch(saved: dict[str, torch.Tensor], live: dict[str, torch.Tensor], path: str) -> str | None:
-    """Why the resume adapter at ``path`` cannot restore ``live`` exactly, or None: names and full shapes must match
-    one for one (:func:`~halo.checkpoint.adapters.adapter_layout_mismatch`), since a tensor left out would resume from
-    initialization and ``copy_`` would broadcast a saved rank-1 adapter into a wider one."""
+    """Names and full shapes must match one for one: a tensor left out would resume from initialization and ``copy_``
+    would broadcast a saved rank-1 adapter into a wider one."""
     mismatch = adapter_layout_mismatch(saved, {name: tuple(tensor.shape) for name, tensor in live.items()})
     return mismatch and (
         f"the resume adapter at {path} does not match this run's trainable tensors (was the run relaunched with "
@@ -85,12 +80,8 @@ def _resume_adapter_mismatch(saved: dict[str, torch.Tensor], live: dict[str, tor
 
 
 def restore_injected_lora(model: nn.Module, backbone: nn.Module, checkpoint: str) -> None:
-    """COLLECTIVE. Copy ``checkpoint``'s resume adapter into ``model``'s live trainable tensors, bit-exact.
-
-    Refuses, rank-uniformly, a backbone built from the checkpoint itself (its fold already holds the
-    delta), a missing adapter file, another LoRA scaling, and tensors that differ in name or shape.
-    FSDP2 DTensors restore from mesh rank 0's copy through ``distribute_tensor``, in sorted key order.
-    """
+    """COLLECTIVE. Bit-exact. Refuses, rank-uniformly, a backbone built from the checkpoint itself (its fold already
+    holds the delta), a missing file, another LoRA scaling, and tensors differing in name or shape."""
     if built_from_checkpoint_across_ranks(backbone, checkpoint):
         raise ValueError(resume_adapter_on_own_weights_reason(checkpoint))
     saved, path = read_adapter_across_ranks(

@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CLI-override casting/dispatch tests for HaloArgumentParser (halo/configs/parser.py).
-
-Pins the Optional cast — Optional-typed numeric fields are cast, not left as raw strings —
-plus bool override parsing (truthy/falsey accepted, garbage rejected) and the ``--key=value``
-form the parser requires of example launch commands.
-
-Run: python tests/cpu/config/test_yaml_cli_overrides.py
-"""
+"""CLI-override casting and dispatch in ``HaloArgumentParser``: Optional numeric fields are cast, bools parse
+strictly, and launch commands use ``--key=value``."""
 
 import re
 import tempfile
@@ -61,13 +55,9 @@ def test_bool_override_rejects_garbage():
 
 
 def test_example_launch_commands_use_the_equals_form():
-    """``load_values`` only accepts ``--key=value``; the space form raises immediately.
-
-    Example headers are copy-pasted verbatim, so a ``--expert_parallel_size 2`` written there is a
-    launch command that cannot run. Scans the tree rather than a list.
-    """
+    """``load_values`` only accepts ``--key=value``, and example headers are copy-pasted verbatim. Scans the tree."""
     launch_line = re.compile(r"scripts/training/\S+\.py.*")
-    # A torchrun/accelerate flag consumed by the LAUNCHER, before the script path — not an override.
+    # A torchrun/accelerate flag consumed by the launcher before the script path is no override.
     space_form = re.compile(
         r"--(?!nproc_per_node|master_port|rdzv|config_file|num_processes|main_process_port)[a-z_]+\s+[^-\s]"
     )

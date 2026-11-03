@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""Parse-time validation of the SDPG argument block (``SDPGArguments``) on both OPD arms.
-
-The hint template is a ``str.format`` string whose placeholders each arm's formatter fills from a
-fixed set: the on-policy trainer the gold answer alone, the self-distillation collator a reference
-solution too. A placeholder outside that set would raise ``KeyError`` at the first teacher prompt,
-after the model load, and an unbounded numeric knob would NaN or invert the OPD term; both are
-refused at parse time. A null template is refused naming the field — except beside RLVR's closed
-``use_sdpg`` gate, where the script's gate refusal names it as a value set beside the gate.
-
-Run: pytest tests/cpu/config/test_sdpg_args.py
-"""
+"""Parse-time validation of ``SDPGArguments`` on both OPD arms. A placeholder outside an arm's fixed set raises
+``KeyError`` at the first teacher prompt, after the model load, and an unbounded numeric knob NaNs or inverts the
+OPD term."""
 
 import math
 import re
@@ -64,8 +56,8 @@ def test_the_pinned_default_template_is_valid_on_every_arm(arm):
 
 
 def test_each_formatter_fills_every_placeholder_its_arm_admits():
-    """The declared sets are the contract the parse-time check enforces; a name added to one that its
-    formatter does not supply would pass the check and raise ``KeyError`` mid-run."""
+    """A name added to a declared set that its formatter does not supply would pass the check and raise ``KeyError``
+    mid-run."""
     online = _placeholders(SDPGArguments.HINT_PLACEHOLDERS)
     assert _online_teacher_hint(online, "42") == online.replace("{answer}", "42")
 
@@ -128,8 +120,7 @@ def test_a_malformed_template_is_refused(arm, template):
     ids=["SDPGArguments", "SelfDistillScriptArguments", "OnlineGRPOScriptArguments-use_sdpg"],
 )
 def test_a_null_template_is_refused_naming_the_field(build):
-    """A YAML ``sdpg_hint_template: null`` parses to None, which ``string.Formatter`` meets with a bare
-    ``TypeError`` naming no field."""
+    """A YAML null parses to None, which ``string.Formatter`` meets with a bare ``TypeError`` naming no field."""
     with pytest.raises(ValueError, match=r"^sdpg_hint_template must be a str.format template string, got None$"):
         build(sdpg_hint_template=None)
 
@@ -149,8 +140,8 @@ def _run_rlvr_main(tmp_path, yaml_tail: str):
 
 
 def test_a_null_template_beside_the_closed_rlvr_gate_is_refused_by_the_gate(tmp_path):
-    """With ``use_sdpg`` off the template is inert, so the refusal that speaks is the one naming it as set
-    beside the closed gate — not a parse error asking for a template the run would never read."""
+    """With ``use_sdpg`` off the template is inert, so the refusal that speaks names it as set beside the closed
+    gate."""
     with pytest.raises(ValueError, match=r"use_sdpg off does not support .*\['sdpg_hint_template'\]"):
         _run_rlvr_main(tmp_path, "sdpg_hint_template: null\n")
 
@@ -200,8 +191,7 @@ def test_the_boundary_values_still_parse(arm):
     [("{answer}", "sdpg_answer_field"), ("{solution}", "privileged_solution_field")],
 )
 def test_self_distillation_needs_a_column_for_each_slot_its_hint_names(template, unset):
-    """With no column to fill a named slot no row could render the hint; a slot the template does not
-    name needs none — a solution-only template takes no answer column."""
+    """A slot the template does not name needs no column: a solution-only template takes no answer column."""
     with pytest.raises(ValueError, match=rf"column is unset \(\['{unset}'\]\)"):
         SelfDistillScriptArguments(sdpg_hint_template=template, **{unset: None})
     assert SelfDistillScriptArguments(sdpg_hint_template=template, sdpg_beta_base=0.0, **{unset: None})

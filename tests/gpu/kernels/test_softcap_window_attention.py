@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""Gemma 2 and Gemma 3 train each row shape on the backend its script resolves, as accurately as eager.
+"""Gemma 2 and Gemma 3 train each row shape on the backend its script resolves, as accurately as eager. Blackwell only.
 
-Blackwell only. One family per launch (``--family``), a tiny random-init model at a release attention geometry
-(8:4 heads, 2 layers): Gemma 2 with an attention softcap at head_dim 256 (2B/9B) and 128 (27B), and Gemma 3 at
-head_dim 256 with sliding layers whose window the rows exceed. Each row shape resolves through its script's seam: one
-unpacked row through SFT's default at one row per batch, a row of three packed documents through SFT's default for
-packed rows, a right-padded batch of two through the padded scripts' default. FA4's head_dim-256 backward asserts on
-a softcap and on a window, and a softcap stays off its varlen kernels, so only Gemma 2 27B's unpacked row may stay on
-FA4; every other row expects FA2. The bf16 model then trains each row on its backend against the same weights in fp32 on
-eager.
-
-Per row, the logits and the median gradient must stay within 1.5x of bf16 eager's error, all finite. Premise checks
-keep the gates honest: at head_dim 256 FA4's backward refuses the model, at 128 the varlen entry point's softcap
-refusal the family patches install stops the packed and the padded rows' forward (both routes are still needed), and
-on Gemma 2 SDPA's logits error is at least 10x eager's (the softcap it drops matters at this geometry). Fails if a row
-resolves to FA4 where FA4 cannot train it, to SDPA under a softcap, or if its backend trains it wrong.
-
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_softcap_window_attention.py --family gemma2_hd128
+FA4's head_dim-256 backward asserts on a softcap and a window, and a softcap stays off its varlen kernels, so only
+Gemma 2 27B's unpacked row may stay on FA4. On Gemma 2 SDPA's logits error must be at least 10x eager's, showing the
+softcap it drops matters at this geometry.
 """
 
 import argparse
@@ -43,13 +30,13 @@ DOCUMENT_LENGTHS = (400, 300, 324)
 PADDED_LENGTHS = (SEQ, SEQ - 200)
 WINDOW = 256
 SOFTCAP = 2.0
-# Scales q and k so the random-init scores reach well past SOFTCAP, where the softcap changes the softmax.
+# Reaches well past SOFTCAP, where the softcap changes the softmax.
 SCORE_SCALE = 8.0
-# Two bf16 kernels accumulate in different orders; the resolved one may trail bf16 eager by this factor.
+# Two bf16 kernels accumulate in different orders.
 EAGER_ERROR_RATIO = 1.5
 # SDPA without the softcap is a different function, not a rounding difference.
 SOFTCAP_DROP_RATIO = 10.0
-# What FA4's varlen entry point raises on a softcapped call once the family patches installed its refusal.
+# What FA4's varlen entry point raises once the family patches installed its refusal.
 VARLEN_SOFTCAP_REFUSAL = "reached FlashAttention-4's varlen kernels"
 FA2, FA4, SDPA = "flash_attention_2", "flash_attention_4", "sdpa"
 
@@ -92,7 +79,7 @@ def _rows(vocab_size: int, device) -> dict[str, dict]:
 
 
 def _request(row_name: str, config) -> str | None:
-    """The request the script that builds ``row_name`` rows makes when the YAML pins none."""
+    """The request the script building ``row_name`` rows makes when the YAML pins none."""
     unset = types.SimpleNamespace(attn_implementation=None)
     if row_name == "padded":
         return default_padded_attn_implementation(unset, sinks_reset=True, checkpoint_config=config)
@@ -107,7 +94,6 @@ def _request(row_name: str, config) -> str | None:
 
 
 def _forward_backward(model, row: dict, attn_implementation: str):
-    """Logits over the real tokens and every parameter's gradient of a next-token loss over them."""
     model.config._attn_implementation = attn_implementation
     model.zero_grad(set_to_none=True)
     logits = model(**row, use_cache=False).logits.float()
@@ -131,8 +117,8 @@ def _errors(model, row, attn_implementation, reference) -> dict[str, float]:
 
 
 def _fa4_refuses(model, row) -> bool:
-    """Whether FA4 raises on this row's forward or backward, its kernel's assert or the varlen entry point's softcap
-    refusal the family patches install: the limit a route off FA4 exists for."""
+    """Whether FA4 raises on this row, its kernel's assert or the patches' softcap refusal: the limit a route off FA4
+    exists for."""
     model.config._attn_implementation = apply_family_patches(model.config, FA4)
     model.zero_grad(set_to_none=True)
     try:

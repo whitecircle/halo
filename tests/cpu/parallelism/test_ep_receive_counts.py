@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""At ``ep_size > 1`` the expert compute sizes its index reads off the dispatch's host-side receive counts, bit
-for bit what the device-sized ``nonzero`` / ``torch.where`` give.
-
-DeepEP's synced dispatch already reports, on the host, how many (token, expert) slots each local expert
-received: V2 on its handle (``num_recv_tokens_per_expert_list``), V1 as its fourth dispatch output. The
-backends hand them on, the dispatcher passes them through, and the expert compute reads nothing back from the
-device to size its indices: the grouped sort (on CPU, the torch construction of ``halo/kernels/moe_route_sort.py``)
-compacts with a ``nonzero_static`` of their sum, the per-expert loop selects each expert's slots with a
-``nonzero_static`` of its own count. On CUDA the grouped sort is a counting sort sized by their sum, held bit for bit
-to this construction by ``tests/cpu/kernels/test_moe_route_sort.py``. Asserted here:
-
-- the sort's six outputs equal the ``nonzero`` sort's bit for bit: padded receives, an idle expert, rows
-  whose every slot is local, and a receive with no local slot;
-- every tiny family's expert compute at ``ep_size > 1``, grouped and per-expert loop, each alone and under
-  expert TP, gives bit-identical outputs and gradients (tokens, routing weights, every expert parameter);
-- a count that disagrees with the received ids raises (a device-side assert, synchronous on CPU), and a
-  missing or mis-sized count raises before any index is read;
-- each backend hands on the counts from where its DeepEP version reports them.
-
-``tests/gpu/parallelism/ep/test_ep_receive_counts.py`` checks the counts against real DeepEP dispatch on
-both backends.
-
-Run: ``python tests/cpu/parallelism/test_ep_receive_counts.py`` (or ``pytest -m cpu``).
-"""
+"""At ``ep_size > 1`` the expert compute sizes its index reads off the dispatch's host-side receive counts, bit for
+bit what the device-sized ``nonzero`` gives."""
 
 from __future__ import annotations
 
@@ -49,8 +27,7 @@ from tests.common.parallelism import single_process_ep_config
 from tests.common.route_sort_reference import receive_counts
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
-# Routing width of the family sweep's synthetic receive; the expert compute takes any width (Gemma 4's router
-# sits outside its EP layer, which then carries no top_k of its own).
+# Gemma 4's router sits outside its EP layer, which then carries no top_k of its own.
 FAMILY_TOP_K = 4
 FAMILY_CASES = tuple((family, expert_tp_size) for family in TINY_MOE_FAMILIES for expert_tp_size in (1, 2))
 FAMILY_CASE_IDS = [f"{family}_etp{expert_tp_size}" for family, expert_tp_size in FAMILY_CASES]
@@ -101,7 +78,7 @@ def test_a_receive_with_no_local_slot_sorts_to_nothing():
 
 
 def test_ep_size_one_needs_no_counts():
-    """At ep_size 1 nothing was dispatched and every id is local: no counts, no compaction."""
+    """Nothing was dispatched and every id is local."""
     experts = torch.randint(0, 4, (16, 2))
     tokens = torch.randn(16, 8, dtype=torch.float64)
     weights = torch.rand(16, 2, dtype=torch.float64)
@@ -126,7 +103,7 @@ def test_a_count_that_disagrees_with_the_received_ids_raises(shift):
 
 @pytest.mark.parametrize("recv_counts", (None, (1, 2)), ids=("missing", "wrong_length"))
 def test_missing_or_mis_sized_counts_raise_at_ep_size_above_one(recv_counts):
-    """The mis-sized counts still sum to the three local slots, so only the length check refuses them."""
+    """The mis-sized counts sum to the three local slots, so only the length check refuses them."""
     layer = GroupedSortLayer(ep_size=2, experts_per_rank=4)
     experts = torch.tensor([[0, -1], [1, 2]])
     with pytest.raises(RuntimeError, match="needs the dispatch's per-local-expert receive counts"):
@@ -136,10 +113,8 @@ def test_missing_or_mis_sized_counts_raise_at_ep_size_above_one(recv_counts):
 
 
 def _ep_layer(family: str, *, grouped: bool, expert_tp_size: int = 1) -> EPMoELayerBase:
-    """``family``'s first EP layer on one rank owning every expert (CPU runs the grouped path on the
-    ``grouped_mm`` fallback), then marked ``ep_size=2`` so its expert compute reads counts like a dispatching
-    rank's. Under expert TP the layer holds ETP rank 0's shard; the compute itself never reaches the ETP group,
-    which a stand-in therefore fills."""
+    """CPU runs the grouped path on the ``grouped_mm`` fallback; marked ``ep_size=2`` so the compute reads counts. A
+    stand-in fills the ETP group it never reaches."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES[family])
     config = single_process_ep_config(
@@ -160,10 +135,8 @@ def _ep_layer(family: str, *, grouped: bool, expert_tp_size: int = 1) -> EPMoELa
 
 
 def _family_inputs(layer: EPMoELayerBase):
-    """A padded receive for ``layer`` (rank 0 of two), its tokens, routing weights, upstream grad and counts."""
     dtype = next(p.dtype for _, p in layer.expert_named_params())
-    # A receive of every global expert hands each local one every token, and equal counts cannot show a count
-    # read off the wrong expert.
+    # Equal counts cannot show a count read off the wrong expert.
     top_k = min(FAMILY_TOP_K, 2 * layer.experts_per_rank - 1)
     experts = received_expert_ids(48, top_k, layer.experts_per_rank, 2, seed=11)
     g = torch.Generator().manual_seed(5)
@@ -174,7 +147,6 @@ def _family_inputs(layer: EPMoELayerBase):
 
 
 def _expert_step(layer: EPMoELayerBase, compute, tokens, weights, grad_out):
-    """One ``compute(tokens, weights)`` and its backward: output and every gradient it reaches."""
     layer.zero_grad(set_to_none=True)
     x = tokens.clone().requires_grad_(True)
     w = weights.clone().requires_grad_(True)
@@ -195,8 +167,6 @@ def _assert_steps_identical(family: str, got, want) -> None:
 
 @pytest.mark.parametrize(("family", "expert_tp_size"), FAMILY_CASES, ids=FAMILY_CASE_IDS)
 def test_every_family_computes_bit_identically_from_the_counts(family, expert_tp_size, monkeypatch):
-    """The grouped sort compacts off the counts, on every family's grouped path, its expert-TP shard included,
-    and matches the ``nonzero`` sort bit for bit through the whole expert compute."""
     layer = _ep_layer(family, grouped=True, expert_tp_size=expert_tp_size)
     tokens, experts, weights, grad_out, counts = _family_inputs(layer)
 
@@ -225,8 +195,6 @@ def test_every_family_computes_bit_identically_from_the_counts(family, expert_tp
 
 @pytest.mark.parametrize(("family", "expert_tp_size"), FAMILY_CASES, ids=FAMILY_CASE_IDS)
 def test_every_family_loop_computes_bit_identically_from_the_counts(family, expert_tp_size, monkeypatch):
-    """The per-expert loop sizes each expert's slot read off its count, one ``nonzero_static`` per local expert,
-    and matches the ``torch.where`` loop bit for bit."""
     layer = _ep_layer(family, grouped=False, expert_tp_size=expert_tp_size)
     tokens, experts, weights, grad_out, counts = _family_inputs(layer)
     assert 0 not in counts, f"{family}: an idle expert would leave its parameter gradient unchecked"
@@ -263,8 +231,8 @@ def _loop_layer_and_receive():
 
 @pytest.mark.parametrize("change", ("one_too_many", "one_too_few", "same_total_reversed"))
 def test_a_loop_count_that_disagrees_with_the_received_ids_raises(change):
-    """A per-expert count that is wrong but keeps the total still drops one expert's slots and pads another's
-    with -1, which indexes the last row."""
+    """A wrong count keeping the total drops one expert's slots and pads another's with -1, which indexes the last
+    row."""
     layer, tokens, experts, weights, counts = _loop_layer_and_receive()
     counts = list(counts)
     if change == "same_total_reversed":

@@ -1,8 +1,5 @@
-"""Real EP layers whose expert widths sit past torch's grouped-GEMM tile switch, and dispatched receives whose rows per
-expert fall on either side of it: the cases of the checks that the EP warm-up launches every grouped-GEMM kernel the expert compute can (kernel
-classes on CPU, ``tests/cpu/parallelism/test_ep_activation_warmup.py``; lazy loads on GPU,
-``tests/gpu/parallelism/ep/test_ep_sort_sync_free.py``).
-"""
+"""Real EP layers with expert widths past torch's grouped-GEMM tile switch and receives on either side of it, for the
+warm-up checks."""
 
 from __future__ import annotations
 
@@ -26,10 +23,10 @@ from tests.common.ep_stubs import stubbed_rank_ep_layer
 from tests.common.kernel_launches import GROUPED_MM_SMALL_TILE_DIM
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG, TINY_QWEN35_MOE_CONFIG
 
-# Expert widths past the small tile's, so every projection outside expert TP can take either tile.
+# Past the small tile's, so every projection outside expert TP can take either tile.
 GEMM_WIDTH = 256
-# (EP layer, HF block, its config, the config's fields) of the expert layouts the grouped GEMM is handed: GptOss's
-# de-interleaved pair with biases, Qwen3's separate halves, Qwen3.5's fused pair.
+# (EP layer, HF block, its config, its fields): GptOss's de-interleaved pair with biases, Qwen3's separate halves,
+# Qwen3.5's fused pair.
 GEMM_FAMILIES = {
     "gpt_oss": (
         EPGptOssMoELayer,
@@ -59,12 +56,11 @@ GEMM_VARIANTS = {
     "expert_lora": {"expert_lora": ExpertLoraSpec(r=8, alpha=16.0, dropout=0.1)},
     "mxfp8": {},
 }
-# Local slots per local expert of the swept receives: one to past the tile switch.
+# Local slots per local expert: one to past the tile switch.
 SWEPT_ROWS_PER_EXPERT = (1, 64, GROUPED_MM_SMALL_TILE_DIM, GROUPED_MM_SMALL_TILE_DIM + 1, 192)
 
 
 def gemm_layer(family: str, layout: str, variant: str, device: torch.device | str = "cpu") -> EPMoELayerBase:
-    """Rank 0's bf16 EP layer of ``family`` in ``layout`` and ``variant`` on ``device``, storing the grouped layout."""
     layer_cls, block_cls, config_cls, fields = GEMM_FAMILIES[family]
     torch.manual_seed(0)
     block = block_cls(config_cls(**fields))
@@ -80,9 +76,8 @@ def gemm_layer(family: str, layout: str, variant: str, device: torch.device | st
 
 
 def routed_receive(layer: EPMoELayerBase, rows_per_expert: int):
-    """``(tokens, local expert ids, gate weights, receive counts)`` as ``layer``'s expert compute receives them, with
-    ``rows_per_expert`` local slots per local expert: each token routed to ``top_k`` distinct local experts, round
-    robin; at ``ep_size > 1`` the tokens a view of a receive buffer at DeepEP's padded wire width."""
+    """``(tokens, local expert ids, gate weights, receive counts)`` as expert compute receives them, each token routed
+    to ``top_k`` distinct local experts."""
     device = next(layer.parameters()).device
     local, top_k, hidden = layer.experts_per_rank, layer.top_k, layer.hidden_dim
     rows = -(-rows_per_expert * local // top_k)

@@ -1,9 +1,5 @@
-"""sentence-transformers adapters for embedding training.
-
-:class:`PreloadedTransformer` wraps an already-loaded backbone in ST's ``Transformer`` interface (ST's own
-reloads from a path, discarding the EP/TP patches); :func:`patch_sentence_transformer_gradient_checkpointing`
-gives ST's ``gradient_checkpointing_*`` the keywords transformers' trainer passes.
-"""
+"""sentence-transformers adapters. ST's ``Transformer`` reloads from a path, discarding the EP/TP patches, and its
+``gradient_checkpointing_*`` lack the keywords transformers' trainer passes."""
 
 import inspect
 
@@ -44,7 +40,6 @@ class PreloadedTransformer(InputModule):
         }
 
     def forward(self, features: dict[str, torch.Tensor], **kwargs) -> dict[str, torch.Tensor]:
-        """Run the backbone and add ``token_embeddings`` to *features*."""
         trans_features = {k: v for k, v in features.items() if k in self.model_forward_params}
         outputs = self.auto_model(**trans_features, **kwargs, return_dict=True)
 
@@ -64,8 +59,8 @@ class PreloadedTransformer(InputModule):
         max_length: int | None = None,
         **kwargs,
     ) -> dict[str, torch.Tensor]:
-        """Tokenize texts as sentence-transformers' ``Transformer.preprocess`` does: ``prompt`` prepended to each
-        text (a pair's first), the collator's per-batch ``max_length`` over ``max_seq_length``, other hints ignored."""
+        """As ST's ``Transformer.preprocess``: ``prompt`` prepended to each text (a pair's first), the collator's
+        per-batch ``max_length`` over ``max_seq_length``, other hints ignored."""
         if prompt:
             inputs = [(prompt + text[0], *text[1:]) if isinstance(text, tuple) else prompt + text for text in inputs]
         output: dict = {}
@@ -105,7 +100,7 @@ class PreloadedTransformer(InputModule):
         return self.auto_model.config.get_text_config().hidden_size
 
     def save(self, output_path: str, **kwargs) -> None:
-        """Save backbone and tokenizer. For EP/TP, the trainer handles saving."""
+        """For EP/TP, the trainer handles saving."""
         self.auto_model.save_pretrained(output_path)
         finalize_exported_config(self.auto_model.config, output_path, source=config_schema_source(self.auto_model))
         self.tokenizer.save_pretrained(output_path)
@@ -146,7 +141,7 @@ def _gradient_checkpointing_disable(self) -> None:
 
 
 def patch_sentence_transformer_gradient_checkpointing() -> None:
-    """Route ST's ``gradient_checkpointing_enable`` / ``_disable``, which lack transformers' ``every_n_layers``
-    and ``offload``, to the pipeline's transformers model; idempotent."""
+    """ST's ``gradient_checkpointing_enable`` / ``_disable`` lack transformers' ``every_n_layers`` and ``offload``, so
+    route them to the pipeline's transformers model. Idempotent."""
     BaseModel.gradient_checkpointing_enable = _gradient_checkpointing_enable
     BaseModel.gradient_checkpointing_disable = _gradient_checkpointing_disable

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The default embedding path's backbone loads at the checkpoint source the ranks agreed on, then warms.
-
-sentence-transformers loads that backbone itself, outside ``load_distributed_model``, so
-``build_sentence_transformer`` runs ``resolve_model_source`` on its own and must hand the agreed
-commit on — not the configured revision, which each node's Hub cache would resolve for itself. The
-pipeline reads its pooling and dense modules from the repo's subfolders, so the fetch takes the whole
-repo rather than the top-level files a model load reads. For the same reason it runs the loader's
-attention warm-up itself.
-
-    python tests/cpu/models/test_embedding_backbone_source.py
-"""
+"""The embedding backbone loads outside ``load_distributed_model``, so it must use the commit the ranks agreed on.
+The fetch takes the whole repo, since the pipeline reads its pooling and dense modules from subfolders."""
 
 from types import SimpleNamespace
 
@@ -72,8 +63,7 @@ def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_pa
 
 @pytest.mark.parametrize("attn_implementation", ["sdpa", None], ids=["pinned", "unset"])
 def test_the_embedding_backbone_is_warmed_after_its_run_policies(monkeypatch, tmp_path, attn_implementation):
-    """The parallel loader warms its model last; this path must too, or a pinned FA4 or a Gemma 4 flex-sliding
-    backbone compiles at one rank's first forward while its peers wait in the next collective."""
+    """Unwarmed, a pinned FA4 or Gemma 4 flex-sliding backbone compiles at one rank's first forward as peers wait."""
     checkpoint = tmp_path / "base"
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(checkpoint)
     word_level_tokenizer().save_pretrained(checkpoint)

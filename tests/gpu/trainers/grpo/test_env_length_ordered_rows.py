@@ -72,25 +72,22 @@ ROW_TOKENS = [512 + 1024 * i for i in range(ROWS)]
 DENSE_VOCAB = 32_000
 # TRL's buffer shuffle seeds: the shuffled run's, and the floor run's other micro-batch order of the same round.
 SHUFFLE_SEED, FLOOR_SEED = 7, 8
-# The dealt gradients may differ from the shuffled run's this many times as far as the floor run's do.
 FLOOR_GRAD_FACTOR = 2.0
-# Another order's bf16 accumulation moves these gradients by about 2e-2; a floor past this ceiling is no longer
-# rounding, and would license any dealt gradient under it.
+# Another order's bf16 accumulation moves these gradients by about 2e-2; a floor past this is no longer rounding and
+# would license any dealt gradient under it.
 FLOOR_GRAD_CEILING = 5e-2
-# Batch order pairs each row with the peer's row of the mirrored length rank. Measured on 2x B300: 0.983 s against
-# the dealt 0.861 s (1.14x), short of the 1.5x the token counts alone give, the rest being per-row cost both orders
-# pay alike. The bar keeps half that gain; two batch-order passes must time closer than it.
+# Batch order pairs each row with the peer's row of the mirrored length rank. Measured on 2x B300: 0.983 s against the
+# dealt 0.861 s (1.14x), short of the token counts' 1.5x because both orders pay per-row cost. The bar keeps half that
+# gain.
 _MIN_SPEEDUP = 1.07
 _TIMED_REPEATS = 3
-# The MoE arm: the tiny Qwen3-MoE (hidden 256, the DeepEP wire width) on rows of 64 .. 424 tokens, inside its 512
-# positions, over a word-level vocabulary.
+# Tiny Qwen3-MoE (hidden 256, the DeepEP wire width) on rows of 64 .. 424 tokens, inside its 512 positions.
 MOE_FAMILY = "qwen3_moe"
 MOE_ROW_TOKENS = [64 + 24 * i for i in range(ROWS)]
 MOE_WORDS = 500
 MOE_SEED = 0
-# Real (token, layer) selections a dealt R2 capture may route apart from the batch order's, or twice the floor
-# run's flips in a random row order where that is larger. A floor past its ceiling is more than near-ties, and a
-# row whose routing lands in another row's slot moves most of its selections.
+# Real (token, layer) selections a dealt R2 capture may route apart from batch order, or twice the floor's flips where
+# that is larger. A row whose routing lands in another row's slot moves most of its selections.
 R2_FLIP_MAX = 1e-3
 R2_FLOOR_FACTOR = 2.0
 R2_FLOOR_CEILING = 1e-2
@@ -104,7 +101,6 @@ if ARGS.timed and ARGS.moe:
 
 
 def _rank_round(ctx, row_tokens: list[int], vocab: int) -> dict:
-    """This rank's round: the shared lengths, rank 1's in reverse, the world's loss-token count as the normalizer."""
     lengths = row_tokens if ctx.rank % 2 == 0 else row_tokens[::-1]
     halves = [n // 2 for n in lengths]
     completions = [n - h for n, h in zip(lengths, halves, strict=True)]
@@ -130,16 +126,14 @@ def _ranks_pair_length_ranks(ctx, mask: torch.Tensor, order: torch.Tensor) -> No
 
 
 def _selection_flips(captured: torch.Tensor, expected: torch.Tensor) -> tuple[bool, float]:
-    """Whether two ``[rows, seq, layers, top_k]`` routing masks mark the same positions real (``>= 0``), and the
-    share of the real (token, layer) selections whose expert sets differ."""
     real = captured[..., 0] >= 0
     differ = (captured.sort(-1).values != expected.sort(-1).values).any(-1) & real
     return torch.equal(real, expected[..., 0] >= 0), differ.sum().item() / max(real.sum().item(), 1)
 
 
 def _engine_masks(mask: torch.Tensor, injector: RoutingReplayInjector, seed: int) -> torch.Tensor:
-    """An engine's routing for every real token of a round, laid out as ``assemble_rollout_masks`` places a fully
-    covered one: distinct random experts per (token, layer), ``-1`` on padding."""
+    """An engine's routing as ``assemble_rollout_masks`` places a fully covered one: distinct random experts, ``-1`` on
+    padding."""
     rows, seq = mask.shape
     generator = torch.Generator().manual_seed(seed)
     scores = torch.rand(rows, seq, injector.num_ep_layers, injector.num_experts, generator=generator)
@@ -187,8 +181,7 @@ def run_dense(ctx) -> dict:
     record_check(checks, "ranks_pair_length_ranks", lambda: _ranks_pair_length_ranks(ctx, mask, order))
 
     def train(deal: bool, seed: int = SHUFFLE_SEED):
-        """One round from zeroed gradients: (summed loss, row id -> loss-forward log-probs in forward order, this
-        rank's gradients). The deal ignores ``seed``."""
+        """One round from zeroed gradients. The deal ignores ``seed``."""
         model.zero_grad(set_to_none=True)
         total, row_logps = train_round(
             loss_host(model, chunks=CHUNKS, accelerator=accelerator), batch, deal=deal, seed=seed
@@ -211,7 +204,7 @@ def run_dense(ctx) -> dict:
         assert list(logps_f) != list(logps_s), "the floor run forwarded the rows in the shuffled run's order"
         assert list(logps_d) != list(logps_s), "the dealt run forwarded the rows in the shuffled run's order"
         floor, dealt = relative_l2(grads_f, grads_s), relative_l2(grads_d, grads_s)
-        # Per tensor, recorded: an error confined to a small tensor barely moves the whole-model ratio.
+        # Per tensor: an error confined to a small tensor barely moves the whole-model ratio.
         worst_floor, _ = worst_relative_l2(grads_f, grads_s)
         worst_dealt, worst_name = worst_relative_l2(grads_d, grads_s)
         metrics.update(grad_rel_diff_floor=floor, grad_rel_diff=dealt)
@@ -232,8 +225,8 @@ def run_dense(ctx) -> dict:
 
 
 def _load_moe_policy(ctx):
-    """COLLECTIVE. The tiny MoE through the production loader at ``ep_size = world``, its dense parameters FSDP2
-    wrapped and its EP layers left out, as the EP mode wraps them; returns ``(model, vocabulary size)``."""
+    """COLLECTIVE. The tiny MoE through the production loader at ``ep_size = world``, wrapped as the EP mode wraps
+    it."""
     tokenizer = word_level_tokenizer([f"w{i}" for i in range(MOE_WORDS)])
     family = TINY_MOE_FAMILIES[MOE_FAMILY]
     checkpoint = shared_tiny_family_checkpoint(ctx, family, "length_deal_qwen3_moe", tokenizer, MOE_SEED)

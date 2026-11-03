@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Offline GRPO refuses a prompt that tokenizes to nothing, at dataset map time, on every rank.
-
-Its completions would otherwise train against a context the data never held. The refusal lives in
-the tokenize map rather than the collator: the map runs inside ``coordinated_map``, whose failure
-join raises on every rank, where a collator raise on the one rank that drew the row would leave its
-peers in the next collective.
-
-    python tests/cpu/grpo/test_offline_grpo_empty_prompt.py
-"""
+"""An empty tokenized prompt is refused at map time, or its completions train on a context the data never held.
+``coordinated_map``'s failure join raises on every rank; a collator raise would leave peers in the next collective."""
 
 import datetime
 import os
@@ -20,7 +13,7 @@ from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
-# Far below a real barrier wait: a rank left hanging fails the test instead of stalling the suite.
+# Far below a real barrier wait, so a hung rank fails the test instead of stalling the suite.
 PG_TIMEOUT_SEC = 15
 EOS_ID = 900
 EMPTY_ROW = 1

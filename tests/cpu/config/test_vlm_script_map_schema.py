@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""The raw-VLM prepare step the SFT and teacher-distillation scripts share keeps mixed-modality rows as the row
-processor emits them.
-
-An image row and a text-only row infer different Arrow types for the mapped ``history`` content, so
-a ``num_proc > 1`` map whose shards split the modalities either fails to align them or coerces every
-image part into the text-part struct (``{"type": "image", "text": None}``) — unless the map pins
-``vlm_map_features``. ``prepare_raw_vlm_split`` maps raw VLM rows with no extra kept column and is driven
-here end to end through ``prepare_vlm_dataset``.
-
-Run: pytest tests/cpu/config/test_vlm_script_map_schema.py
-"""
+"""The raw-VLM prepare step keeps mixed-modality rows as the row processor emits them. Image and text rows infer
+different Arrow types for ``history``, so a ``num_proc > 1`` map either fails to align them or coerces image
+parts into the text-part struct unless it pins ``vlm_map_features``."""
 
 from types import SimpleNamespace
 from unittest import mock

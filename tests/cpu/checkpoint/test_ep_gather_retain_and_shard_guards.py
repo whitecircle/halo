@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the EP whole-layer gather's retain gate and for the sharded-save expert-LoRA guard.
-
-- ``gather_layer_state_dict(..., retain=False)``: every rank must enter the SAME collectives (the
-  expert gather, and ``full_tensor()`` on each replicated DTensor) while only the save rank keeps the
-  result. Without the gate every rank materializes a full host copy of the layer, taking per-node CPU
-  peak to ``local_ranks`` x one gathered layer.
-- ``retain`` reaches INSIDE the expert gather: the expert all-gathers stay on every rank, but the
-  layout assembly that follows them — the per-expert split, the transpose + ``contiguous``, the host
-  copy — must not run off the writer. That assembly is the tens of GB per layer at 397B, paid on 511
-  of 512 ranks per checkpoint.
-- The gather exports PERSISTENT buffers only: the sharded save writes persistent buffers alone, so a
-  non-persistent buffer here breaks the "merged-from-sharded == gathered" invariant the merge
-  transforms are built around.
-- ``save_sharded_ep=True`` + native expert LoRA: the shard key set comes from ``expert_named_params()``,
-  which includes ``<attr>_lora_A/_lora_B``, so those are written as ``.shard_N`` keys that
-  ``merge_ep_shards.py``'s base-root pattern never matches — they pass through dead while the merged
-  experts are the frozen base. Must be rejected up front.
-
-Run: pytest tests/cpu/checkpoint/test_ep_gather_retain_and_shard_guards.py
-"""
+"""The EP whole-layer gather's retain gate and the sharded-save expert-LoRA guard. Every rank enters the same
+collectives while only the save rank assembles; off the writer that assembly is tens of GB per layer at 397B."""
 
 from types import SimpleNamespace
 
@@ -35,8 +17,7 @@ from tests.common.ep_stubs import StubEPLayerBase
 
 
 class _StubEPLayer(StubEPLayerBase):
-    """Minimal EP layer: one gathered expert tensor, one replicated router param, one persistent and
-    one non-persistent buffer. Records every gather call so the collective count can be asserted."""
+    """Records every gather call so the collective count can be asserted."""
 
     def __init__(self, *, expert_lora: bool = False):
         super().__init__()
@@ -72,7 +53,7 @@ def test_retain_true_returns_the_whole_layer():
 
 
 def test_retain_false_runs_the_gather_but_keeps_nothing():
-    """Non-save ranks must still enter the expert gather (a collective) yet assemble nothing."""
+    """Non-save ranks still enter the collective yet assemble nothing."""
     layer = _StubEPLayer()
     gathered = layer.gather_layer_state_dict("model.layers.0.mlp", retain=False)
     assert gathered == {}
@@ -82,8 +63,7 @@ def test_retain_false_runs_the_gather_but_keeps_nothing():
 
 
 def test_gather_exports_persistent_buffers_only():
-    """The sharded save writes persistent buffers only; exporting a rotary cache here would break the
-    merged-from-sharded == gathered invariant."""
+    """Exporting a rotary cache here would break merged-from-sharded == gathered."""
     layer = _StubEPLayer()
     gathered = layer.gather_layer_state_dict("model.layers.0.mlp", retain=True)
     assert "model.layers.0.mlp.expert_bias" in gathered
@@ -96,8 +76,6 @@ EP_GROUP = "fake-dispatch-ep-group"
 
 
 class _FusedGatherLayer(StubEPLayerBase):
-    """Fused-GLU expert shards over a ``EP_SIZE``-rank dispatch group, gathered by the REAL gather."""
-
     def __init__(self):
         super().__init__()
         self.expert_tp_size = 1
@@ -108,8 +86,6 @@ class _FusedGatherLayer(StubEPLayerBase):
 
 
 class _PerExpertGatherLayer(_FusedGatherLayer):
-    """Same shards, split into the per-expert hub layout (GLM-4 / LFM-2 shape)."""
-
     FAMILY = MoEFamilySpec(
         model_types=(),
         expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, ("gate_proj", "up_proj", "down_proj")),
@@ -118,7 +94,7 @@ class _PerExpertGatherLayer(_FusedGatherLayer):
 
 @pytest.fixture
 def ep_group(monkeypatch):
-    """Emulate the ``EP_SIZE``-rank expert-axis all-gather, counting every entry."""
+    """Emulates the ``EP_SIZE``-rank expert-axis all-gather."""
     calls: list[tuple[int, ...]] = []
 
     def fake_all_gather_into_tensor(output, tensor, group=None):
@@ -133,7 +109,6 @@ def ep_group(monkeypatch):
 
 
 def test_family_gather_assembles_only_on_the_retaining_rank(ep_group):
-    """The writer gets the full expert tensors; every other rank gets nothing to hold."""
     layer = _FusedGatherLayer()
     retained = layer.gather_expert_state_dict(device="cpu", retain=True)
     assert {key: tuple(t.shape) for key, t in retained.items()} == {
@@ -144,7 +119,7 @@ def test_family_gather_assembles_only_on_the_retaining_rank(ep_group):
 
 
 def test_non_retaining_rank_enters_every_expert_collective(ep_group):
-    """The all-gathers are group-wide: a rank that skipped one would hang the peers still in it."""
+    """A rank that skipped one would hang the peers still in it."""
     layer = _FusedGatherLayer()
     layer.gather_expert_state_dict(device="cpu", retain=True)
     retaining = list(ep_group)
@@ -154,8 +129,7 @@ def test_non_retaining_rank_enters_every_expert_collective(ep_group):
 
 
 def test_per_expert_split_never_runs_off_the_writer(ep_group, monkeypatch):
-    """The per-expert split is the allocation — one fresh contiguous tensor per expert per projection.
-    Skipping it is the whole point of the gate, so it must not run when nothing is retained."""
+    """The per-expert split is the allocation: one fresh contiguous tensor per expert per projection."""
     splits = []
     real_layout = expert_gather.to_hub_expert_tensors
 
@@ -175,7 +149,6 @@ def test_per_expert_split_never_runs_off_the_writer(ep_group, monkeypatch):
 
 
 def _model_with(layer) -> nn.Module:
-    """A gpt_oss root holding ``layer`` on a single EP group spanning 8 ranks."""
     layer.ep_config = SimpleNamespace(expert_tp_size=1, ep_group_size=8, num_ep_groups=1)
     root = nn.Module()
     root.config = SimpleNamespace(model_type="gpt_oss", auto_map=None)
@@ -184,8 +157,7 @@ def _model_with(layer) -> nn.Module:
 
 
 def test_sharded_save_rejects_native_expert_lora(monkeypatch):
-    """The adapter shards are written under keys merge_ep_shards.py never reads, so the merged experts
-    would be the frozen base — reject before training instead of after."""
+    """``merge_ep_shards.py`` never reads the adapter shard keys, so the merged experts would be the frozen base."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=True)
     with pytest.raises(ValueError, match="expert LoRA"):
@@ -199,8 +171,7 @@ def test_sharded_save_allowed_without_expert_lora(monkeypatch):
 
 
 def test_sharded_save_rejects_multiple_ep_groups(monkeypatch):
-    """Several EP groups = DP replicas, each holding the SAME experts, so the shards merge with
-    every expert duplicated. Only a single group spanning the world is mergeable."""
+    """EP groups are DP replicas holding the same experts, so the shards merge duplicated."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
     model = _model_with(layer)
@@ -212,15 +183,8 @@ def test_sharded_save_rejects_multiple_ep_groups(monkeypatch):
 
 @pytest.mark.parametrize("field", ("ep_group_size", "expert_tp_size"))
 def test_topology_guards_do_not_pass_on_a_config_that_never_declared_the_field(monkeypatch, field):
-    """Neither topology guard may fall back to the value that makes it pass.
-
-    ``getattr(ep_cfg, "ep_group_size", world_size)`` / ``getattr(ep_cfg, "expert_tp_size", 1)``
-    substitute exactly the value the very next comparison accepts, so anything that is not a
-    finalized ``EPConfig`` clears both checks VACUOUSLY — the sharded save would then run on a
-    topology nothing validated and merge duplicated or expert-TP-split experts. ``EPConfig`` sets
-    both fields unconditionally, so this is unreachable through the production path today; the
-    point is that the guards must not be able to reach a pass verdict without reading the topology.
-    """
+    """``getattr(ep_cfg, "ep_group_size", world_size)`` substitutes the value the comparison accepts, clearing both
+    checks vacuously."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
     model = _model_with(layer)

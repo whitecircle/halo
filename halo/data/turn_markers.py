@@ -18,8 +18,7 @@ def reject_missing_response_marker(
     train_on_completions_only: bool,
     subject: str,
 ) -> None:
-    """Refuse completion-only masking with no assistant marker, where the pair is first accepted rather than
-    at the first batch, after the model load and the dataset map; ``subject`` names the caller."""
+    """Refused here, not at the first batch after the model load and dataset map; ``subject`` names the caller."""
     if train_on_completions_only and response_prompt_template is None:
         raise ValueError(
             f"{subject}: train_on_completions_only=True requires assistant_message_template (the "
@@ -51,10 +50,8 @@ def tokenize_response_template(
 def verify_marker_renders_in_chat_template(
     tokenizer: PreTrainedTokenizerBase, assistant_message_template: str
 ) -> None:
-    """Raise when ``assistant_message_template`` occurs in no rendered probe, which would mask every label.
-
-    Probes with and without ``thinking`` (gpt-oss harmony emits the marker only for a thinking message).
-    """
+    """An absent marker would mask every label. Probes with and without ``thinking`` (gpt-oss harmony emits the marker
+    only for a thinking message)."""
     probe_conversations = (
         [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
         [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a", "thinking": "t"}],
@@ -71,11 +68,8 @@ def verify_marker_renders(
     probe_conversations: Sequence[list[dict[str, Any]]],
     assistant_message_template: str,
 ) -> list[str]:
-    """Raise when ``assistant_message_template`` occurs in none of ``probe_conversations`` as ``render`` renders
-    them, which would mask every label; returns the rendered probes, empty (with a warning) where none rendered.
-
-    Probes the rendered text, since templates assemble the marker from pieces.
-    """
+    """Raise when the marker occurs in no rendered probe, which would mask every label; returns the rendered probes,
+    empty (with a warning) where none rendered. Probes text, as templates assemble the marker from pieces."""
     rendered_texts = []
     probe_failures = []
     for conversation in probe_conversations:
@@ -84,7 +78,6 @@ def verify_marker_renders(
         except Exception as exc:  # template requires inputs this synthetic variant lacks; skip it
             probe_failures.append(f"{type(exc).__name__}: {exc}")
             continue
-        # isinstance: only actual text can be probed; anything else is skipped.
         if isinstance(rendered, str):
             rendered_texts.append(rendered)
     if not rendered_texts and is_global_main_process():
@@ -115,8 +108,7 @@ def reject_unusable_response_marker(
     train_on_completions_only: bool,
     subject: str,
 ) -> None:
-    """A text completion-only collator's construction-time marker refusals: no marker at all, then, where
-    the tokenizer carries a chat template, a marker the template never renders."""
+    """No marker at all, then, where the tokenizer has a chat template, a marker the template never renders."""
     reject_missing_response_marker(response_prompt_template, train_on_completions_only, subject)
     if train_on_completions_only and getattr(tokenizer, "chat_template", None):
         verify_marker_renders_in_chat_template(tokenizer, response_prompt_template)
@@ -126,10 +118,8 @@ def resolve_eos_token_ids(
     tokenizer: PreTrainedTokenizerBase,
     model_config: Any = None,
 ) -> frozenset[int]:
-    """Every token id that ends an assistant turn: the tokenizer's eos and the model config's ``eos_token_id``
-    (or its ``text_config``'s), where GLM-4 lists the role markers that delimit its turns. A distinct pad is
-    no terminator, else a turn missing its own would train the model to predict the trailing pad.
-    """
+    """The tokenizer's eos and the model config's ``eos_token_id`` (or ``text_config``'s), where GLM-4 lists its role
+    markers. A distinct pad is no terminator, else a turn missing its own would train on the trailing pad."""
     ids: set[int] = set()
 
     def _collect(value: Any) -> None:
@@ -149,8 +139,7 @@ def resolve_eos_token_ids(
 
 
 def ends_with_terminator(input_ids, tokenizer, eos_token_ids) -> bool:
-    """Whether ``input_ids`` already ends a turn, ignoring the trailing whitespace templates close it with
-    (``<terminator>\\n``), so no second terminator is appended; walks back to the first content token."""
+    """Ignores trailing whitespace templates close a turn with (``<terminator>\\n``), so no second one is added."""
     for token_id in reversed(input_ids):
         if token_id in eos_token_ids:
             return True
@@ -160,8 +149,7 @@ def ends_with_terminator(input_ids, tokenizer, eos_token_ids) -> bool:
 
 
 def lacks_terminator(input_ids, tokenizer, eos_token_ids) -> bool:
-    """Whether ``input_ids`` need ``tokenizer.eos_token_id`` appended to close the turn: any of
-    ``eos_token_ids`` (the tokenizer's eos when empty) already counts, since GLM-4 and Gemma close turns with
+    """Any of ``eos_token_ids`` (the tokenizer's eos when empty) already counts, since GLM-4 and Gemma close turns with
     a role marker the config lists; False when the tokenizer has no eos."""
     eos_id = tokenizer.eos_token_id
     return eos_id is not None and not ends_with_terminator(input_ids, tokenizer, eos_token_ids or {eos_id})

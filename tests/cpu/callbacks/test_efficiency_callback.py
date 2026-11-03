@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-"""Tests for EfficiencyCallback. Run: python tests/cpu/callbacks/test_efficiency_callback.py"""
 
 import logging
 from dataclasses import replace
@@ -17,16 +16,11 @@ from halo.kernels.lowp.spec import LowpSpec
 from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from tests.common.parallelism import make_parallelism_config
 
-# Single-process topology: a test that exercises no parallel axis still owes the callback a real
-# config, because every divisor it applies is read off one.
+# Every divisor the callback applies is read off a real config, so axis-free tests still pass one.
 _NO_PARALLELISM = make_parallelism_config(world_size=1, gpus_per_node=1)
-
-# Mock helpers
 
 
 class MockParam:
-    """A lightweight mock for torch.nn.Parameter."""
-
     def __init__(self, numel_val, dtype=torch.bfloat16, requires_grad=True):
         self._numel = numel_val
         self.dtype = dtype
@@ -38,8 +32,6 @@ class MockParam:
 
 
 class MockModel:
-    """A mock model with configurable named_parameters and config."""
-
     def __init__(self, named_params=None, config=None, dtype=None):
         self._named_params = named_params or []
         self.config = config
@@ -54,11 +46,7 @@ class MockModel:
 
 
 class MockConfig:
-    """Mock model config with arbitrary attributes.
-
-    ``get_text_config`` mirrors ``PretrainedConfig``: every real config exposes it, returning the
-    language tower's config (itself, for a text-only model).
-    """
+    """``get_text_config`` mirrors ``PretrainedConfig``: the language tower's config, itself for a text-only model."""
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -69,8 +57,6 @@ class MockConfig:
 
 
 class MockTrainingArgs:
-    """Mock TrainingArguments with common fields."""
-
     def __init__(self, **kwargs):
         self.bf16 = kwargs.get("bf16", False)
         self.fp16 = kwargs.get("fp16", False)
@@ -83,15 +69,12 @@ class MockTrainingArgs:
 
 
 class MockTrainerState:
-    """Mock TrainerState."""
-
     def __init__(self, global_step=0, max_steps=100, num_input_tokens_seen=None):
         self.global_step = global_step
         self.max_steps = max_steps
         self.num_input_tokens_seen = num_input_tokens_seen
 
 
-# A dense model whose per-token FLOPs are 6 GFLOP, with no attention term or full-model baseline.
 _DENSE_FLOPS = RankFlopsModel(
     model_flops_per_token=6.0e9,
     active_model_flops_per_token=6.0e9,
@@ -115,7 +98,6 @@ def _rank_flops(model, parallelism=_NO_PARALLELISM, seq_len=128) -> RankFlopsMod
 
 
 def _precision(model, args) -> str:
-    """The peak key the callback settles on once the Trainer has initialized it with ``model``."""
     cb = EfficiencyCallback(make_parallelism_config(world_size=1, gpus_per_node=1))
     cb.on_init_end(args, MockTrainerState(), None, model=model)
     return cb.precision
@@ -124,15 +106,12 @@ def _precision(model, args) -> str:
 def _peaked(
     flops: RankFlopsModel | None = _DENSE_FLOPS, peak: float | None = 1.0e15, parallelism=_NO_PARALLELISM
 ) -> EfficiencyCallback:
-    """A callback on ``parallelism`` measuring every step against ``peak``, with ``flops`` as its FLOPs model."""
     cb = EfficiencyCallback(parallelism, n_warmup_steps=0)
     cb.flops_model, cb.gpu_peak_flops = flops, peak
     return cb
 
 
 class _HostClock:
-    """The callback's clock without a GPU, advanced by hand."""
-
     def __init__(self):
         self.now = 0.0
 
@@ -148,16 +127,12 @@ def clock(monkeypatch) -> _HostClock:
 
 
 def _measured_step(clock: _HostClock, cb, *, tokens=1000, step_time=0.5, step=1) -> None:
-    """Optimizer step ``step`` through the hooks, then its log, where the callback records it: ``tokens`` cluster
-    tokens (``None``: uncounted) in ``step_time`` seconds of ``clock``, which runs on from the previous step."""
+    """One optimizer step through the hooks, then the log where the callback records it. ``tokens=None``: uncounted."""
     cb.training_args = cb.training_args or MockTrainingArgs()
     cb.on_step_begin(cb.training_args, MockTrainerState(global_step=step - 1), None)
     clock.now += step_time
     cb.on_step_end(cb.training_args, MockTrainerState(global_step=step, num_input_tokens_seen=tokens), None)
     cb.on_log(cb.training_args, MockTrainerState(global_step=step), None, logs={})
-
-
-# Tests
 
 
 def test_classify_gpu_name():
@@ -200,13 +175,8 @@ def test_the_first_parameter_picks_the_precision_without_a_model_dtype():
 
 
 def test_the_fp32_peak_key_is_tf32_aware():
-    """An fp32-param model maps to the precision its matmuls actually run at.
-
-    On Ampere+ fp32 matmuls execute on TF32 Tensor Cores when
-    float32_matmul_precision='high' (the toolkit/NGC default) — keying MFU off the
-    true-fp32 peak then yields MFU > 100% (the achieved TF32 FLOPs exceed the fp32
-    peak). 'highest' is true fp32; 'medium' uses bf16.
-    """
+    """On Ampere+ fp32 matmuls run on TF32 Tensor Cores at ``float32_matmul_precision='high'``, so keying MFU off the
+    true-fp32 peak yields MFU > 100%. 'highest' is true fp32; 'medium' uses bf16."""
     prev = torch.get_float32_matmul_precision()
     try:
         torch.set_float32_matmul_precision("high")
@@ -226,12 +196,8 @@ def test_the_fp32_peak_key_is_tf32_aware():
     [("fp8", "fp8"), ("fp4", "fp4"), ("mxfp4", "fp4"), ("bf16", "bf16")],
 )
 def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_precision, expected):
-    """MFU divides by the peak the GEMMs are actually issued at.
-
-    ``lowp_precision`` keeps the masters in bf16 while the matmuls run in fp8/fp4, so a key derived
-    from the parameter dtype charges an fp8 run against the bf16 peak and every reported utilization
-    reads ~2x high (4x for fp4). nvfp4 and mxfp4 share the 4-bit MMA, hence one peak.
-    """
+    """A key from the parameter dtype charges an fp8 run against the bf16 peak, so utilization reads ~2x high (4x for
+    fp4). nvfp4 and mxfp4 share the 4-bit MMA, hence one peak."""
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "B300")
     callback = efficiency.EfficiencyCallback(
         make_parallelism_config(world_size=1, gpus_per_node=1, lowp=LowpSpec(precision=lowp_precision))
@@ -243,8 +209,7 @@ def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_pre
 
 
 def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, caplog):
-    """A detected SKU whose table entry lacks the run's precision zeroes MFU, S-MFU and TFLOP/s for
-    the whole run; the INFO line naming the GPU must not be the only trace of it."""
+    """A missing table entry zeroes MFU, S-MFU and TFLOP/s for the whole run, so INFO can't be the only trace."""
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "A100")
     callback = efficiency.EfficiencyCallback(
         make_parallelism_config(world_size=1, gpus_per_node=1, lowp=LowpSpec(precision="fp8"))
@@ -262,39 +227,33 @@ def test_get_gpu_peak_flops():
 
 
 def test_is_expert_param():
-    # EP fused expert params -- True
+    # EP fused experts
     assert _is_expert_param("model.layers.0.mlp.gate_up_proj") is True
     assert _is_expert_param("model.layers.0.mlp.down_proj") is True
 
-    # GptOss grouped-GEMM de-interleaved experts (use_grouped_gemm, on by default) -- True.
-    # The fused gate_up_proj is split into gate_proj_gmm/up_proj_gmm; missing these
-    # undercounts GptOss experts by the gate+up share (~2/3), inflating S-MFU ~3x.
+    # GptOss grouped-GEMM splits gate_up_proj; missing these undercounts its experts by ~2/3, inflating S-MFU ~3x.
     assert _is_expert_param("model.layers.0.mlp.gate_proj_gmm") is True
     assert _is_expert_param("model.layers.0.mlp.up_proj_gmm") is True
     assert _is_expert_param("model.layers.0.mlp.gate_proj_gmm_bias") is True
     assert _is_expert_param("model.layers.0.mlp.up_proj_gmm_bias") is True
 
-    # Separate-projection experts + biases (Qwen3, Bailing, GptOss expert-TP shards) -- True
+    # Separate-projection experts and biases (Qwen3, Bailing, GptOss expert-TP shards)
     assert _is_expert_param("model.layers.0.mlp.gate_proj") is True
     assert _is_expert_param("model.layers.0.mlp.up_proj") is True
     assert _is_expert_param("model.layers.0.mlp.gate_up_proj_bias") is True
     assert _is_expert_param("model.layers.0.mlp.down_proj_bias") is True
 
-    # Shared expert -- False
     assert _is_expert_param("model.layers.0.mlp.shared_expert.down_proj") is False
 
-    # Router / gate -- False
     assert _is_expert_param("model.layers.0.mlp.gate.weight") is False
     assert _is_expert_param("model.layers.0.mlp.router.weight") is False
 
-    # HF MoE unpatched -- True
+    # HF MoE unpatched
     assert _is_expert_param("model.layers.0.mlp.experts.0.w1.weight") is True
 
-    # EP individual experts -- True
-    # Pre-5.14 Zaya nesting ("local_experts") is unreadable by the current stack — not expert params.
+    # Pre-5.14 Zaya nesting is unreadable by the current stack.
     assert _is_expert_param("model.layers.0.mlp.local_experts.w1") is False
 
-    # Attention -- False
     assert _is_expert_param("model.layers.0.self_attn.q_proj.weight") is False
 
 
@@ -315,32 +274,29 @@ def test_detect_moe_config_num_experts():
 
 
 def test_detect_moe_config_no_moe():
-    config = MockConfig(hidden_size=4096)  # no MoE attrs
+    config = MockConfig(hidden_size=4096)
     model = MockModel(config=config)
     ne, tk = (resolve_expert_count(model.config), resolve_router_topk(model.config))
     assert ne == 0 and tk == 0, f"Expected (0, 0), got ({ne}, {tk})"
 
 
 def test_detect_moe_config_no_config():
-    model = MockModel()  # no config attribute at all
+    model = MockModel()
     model.config = None
     ne, tk = (resolve_expert_count(model.config), resolve_router_topk(model.config))
     assert ne == 0 and tk == 0, f"Expected (0, 0), got ({ne}, {tk})"
 
 
 def test_estimate_linear_flops():
-    # 1B trainable params -> 6e9 flops per token
     num_params = 1_000_000_000
-    # A single parameter whose numel is overridden stands for the 1B params; no config, no attention term.
+    # One parameter with an overridden numel stands for the 1B; no config, no attention term.
     model = MockModel(named_params=[("weight", MockParam(num_params, dtype=torch.bfloat16, requires_grad=True))])
     flops = _rank_flops(model).model_flops_per_token
     assert flops == 6 * num_params, f"Expected {6 * num_params}, got {flops}"
 
 
 def test_a_fully_frozen_rank_is_charged_forward_and_input_gradient():
-    """A rank with no trainable parameter (a frozen stage, a frozen base) still runs the forward and
-    the input gradient its upstream needs, never a weight gradient: 4N in the dense and the active
-    estimate alike, which agree on a model without routed experts."""
+    """A frozen stage or base runs the forward and the input gradient its upstream needs, but no weight gradient."""
     model = torch.nn.Linear(10, 10, bias=False).requires_grad_(False)
     model.config = None
     flops = _rank_flops(model)
@@ -376,12 +332,7 @@ def test_the_measured_step_times_are_every_step_after_warmup_unrounded(clock):
     assert cb.time.avg_step_time_seconds == 0.31
 
 
-# Core accounting: FLOPS/token, MFU, S-MFU, throughput.
-# These pin the *values* of the numbers the callback reports to wandb.
-
-
 def test_estimate_model_flops_includes_attention():
-    """6N param term PLUS the 12*L*S*H attention term when a config is present."""
     n_params = 1_000_000
     p = MockParam(n_params, requires_grad=True)
     config = MockConfig(num_hidden_layers=4, hidden_size=128)
@@ -394,7 +345,6 @@ def test_estimate_model_flops_includes_attention():
 
 
 def test_mfu_value(clock):
-    """MFU% = (tokens * flops_per_token / step_time) / peak * 100, exactly."""
     cb = _peaked()
     _measured_step(clock, cb, tokens=1000, step_time=0.5)
     # step_flops = 1000 * 6e9 = 6e12; /0.5s = 1.2e13 flops/s; /1e15 *100 = 1.2%
@@ -405,7 +355,7 @@ def test_mfu_value(clock):
 
 def test_mfu_distributed_efficiency(clock):
     """params_ratio > 1.05 turns MFU into a distributed-efficiency speedup figure."""
-    cb = _peaked(replace(_DENSE_FLOPS, full_params=4.0e9, params_ratio=4.0))  # local is 1/4 of the full model
+    cb = _peaked(replace(_DENSE_FLOPS, full_params=4.0e9, params_ratio=4.0))
     _measured_step(clock, cb, tokens=1000, step_time=0.5)
     # step_mfu = 1.2% → distributed_efficiency = 4.0 * 1.2 / 100 = 0.048
     assert cb.mfu.step_distributed_efficiency == pytest.approx(0.05, abs=1e-2)
@@ -413,14 +363,12 @@ def test_mfu_distributed_efficiency(clock):
 
 @pytest.mark.parametrize(("flops", "peak"), [(None, 1.0e15), (_DENSE_FLOPS, None)])
 def test_mfu_zeroed_when_unconfigured(clock, flops, peak):
-    """No peak flops / no model flops → all MFU fields zeroed (not stale)."""
     cb = _peaked(flops, peak)
     _measured_step(clock, cb)
     assert cb.mfu == MFUMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
 def test_smfu_sparse_value(clock):
-    """S-MFU uses the active (sparse) flops/token, which is lower than dense MFU."""
     cb = _peaked(replace(_DENSE_FLOPS, active_model_flops_per_token=1.5e9, sparsity_factor=0.25))
     _measured_step(clock, cb, tokens=1000, step_time=0.5)
     # step_active_flops = 1000 * 1.5e9 = 1.5e12; /0.5 = 3e12; /1e15*100 = 0.3%
@@ -428,9 +376,8 @@ def test_smfu_sparse_value(clock):
     assert cb.smfu.step_smfu_tflops_per_sec == pytest.approx(3.0, abs=1e-6)
 
 
-# Each axis as (config fields, world size, GPUs per node, data-parallel replicas, ranks splitting one sequence),
-# the replicas and the split counted by hand: a batch is shared by the ranks of one TP, expert-TP or CP group and
-# of one pipeline chain, while every EP rank draws its own.
+# Each axis as (config fields, world size, GPUs per node, data-parallel replicas, ranks splitting one sequence).
+# A batch is shared by the ranks of one TP, expert-TP or CP group and one pipeline chain; each EP rank draws its own.
 _AXES = {
     "dp": ({}, 4, 4, 4, 1),
     "ep": ({"ep_size": 4}, 4, 4, 4, 1),
@@ -457,9 +404,8 @@ def test_the_throughput_rows_cover_every_supported_axis_set():
 
 @pytest.mark.parametrize("axis", sorted(_AXES))
 def test_token_throughput_counts_each_shared_batch_once(monkeypatch, clock, axis):
-    """Every rank counts the batch its replica shares into HF's world-summed counter. The cluster figure is each
-    replica's batch once, tokens/s/GPU is that over the world size, and MFU charges the rank every token it
-    runs through its parameter slice: the whole batch under TP, expert-TP and PP, its 1/cp share under CP."""
+    """The cluster figure is each replica's batch once and tokens/s/GPU is that over the world size. MFU charges a rank
+    every token it runs through its parameter slice: the whole batch under TP, expert-TP and PP, its 1/cp under CP."""
     _, world, _, replicas, sequence_split = _AXES[axis]
     batch_tokens, step_time = 8000, 2.0
     cb = _peaked(parallelism=_axis_config(axis))
@@ -478,25 +424,20 @@ def test_token_throughput_counts_each_shared_batch_once(monkeypatch, clock, axis
 
 @pytest.mark.parametrize("report_mfu_diagnostics", [False, True])
 def test_on_log_gates_diagnostics(report_mfu_diagnostics):
-    """MFU diagnostics stay OUT of the headline log unless report_mfu_diagnostics=True."""
     cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=0, report_mfu_diagnostics=report_mfu_diagnostics)
     cb.tps = ThroughputMetrics(step_tokens_per_second=1234.0)
     cb.mfu = MFUMetrics(step_mfu_percent=42.0)
 
     logs: dict = {}
     cb.on_log(MockTrainingArgs(), MockTrainerState(global_step=5), None, logs=logs)
-    assert logs["step_tokens_per_second"] == 1234.0  # headline always present
+    assert logs["step_tokens_per_second"] == 1234.0
     assert logs.get("step_mfu_percent") == (42.0 if report_mfu_diagnostics else None)
 
 
 def test_initialize_metrics_survives_unmeasurable_model():
-    """A model the estimator cannot measure disables MFU instead of killing the run.
-
-    The estimate fails loud (no parameters AND no hidden_size / num_hidden_layers in the config); the
-    callback is observability, so it must degrade.
-    """
+    """The estimator fails loud, but the callback is observability, so it disables MFU instead of killing the run."""
     shell = MockModel(named_params=[], config=MockConfig(model_type="mystery"))
-    with pytest.raises(ValueError):  # the estimator itself stays fail-loud
+    with pytest.raises(ValueError):
         _rank_flops(shell)
 
     cb = EfficiencyCallback(_NO_PARALLELISM)
@@ -506,7 +447,6 @@ def test_initialize_metrics_survives_unmeasurable_model():
 
 
 def test_initialize_metrics_measures_normal_model():
-    """The degrade path must not swallow the normal case: a countable model still gets FLOPS/token."""
     model = MockModel(
         named_params=[("model.layers.0.self_attn.q_proj.weight", MockParam(1_000_000))],
         config=MockConfig(hidden_size=128, num_hidden_layers=2),
@@ -520,8 +460,7 @@ def test_initialize_metrics_measures_normal_model():
 
 @pytest.mark.parametrize("max_length", [None, 0, -1])
 def test_a_one_sided_budget_keeps_its_declared_length(max_length):
-    """A prompt budget with no completion cap still sizes the MFU sequence length, and a non-positive
-    ``max_length`` is no bound; either way wrong, the estimate would run at another length."""
+    """A prompt budget with no completion cap still sizes the MFU length; a non-positive ``max_length`` is no bound."""
     model = MockModel(
         named_params=[("model.layers.0.self_attn.q_proj.weight", MockParam(1_000_000))],
         config=MockConfig(hidden_size=128, num_hidden_layers=2),
@@ -532,8 +471,7 @@ def test_a_one_sided_budget_keeps_its_declared_length(max_length):
     assert cb.flops_model.model_flops_per_token == 6 * 1_000_000 + 12 * 2 * 300 * 128
 
 
-# The logs dict's key order, which wandb/tb series and the bench lines read: the step clock, throughput,
-# memory, then MFU and S-MFU when diagnostics are on.
+# The logs dict's key order, which wandb/tb series and the bench lines read.
 _LOGGED_KEYS = (
     "step_time_seconds",
     "avg_step_time_seconds",
@@ -561,7 +499,7 @@ _LOGGED_KEYS = (
 
 
 def test_logged_metric_keys_keep_their_order(monkeypatch):
-    """Driven through the hooks only, on a MoE model so S-MFU is emitted too."""
+    """On a MoE model, so S-MFU is emitted too."""
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "B300")
     model = MockModel(
         named_params=[
@@ -582,7 +520,6 @@ def test_logged_metric_keys_keep_their_order(monkeypatch):
 
 
 def test_on_log_skips_during_warmup():
-    """Within the warmup window on_log emits nothing."""
     cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=3)
     cb.tps = ThroughputMetrics(step_tokens_per_second=999.0)
 
@@ -592,9 +529,8 @@ def test_on_log_skips_during_warmup():
 
 
 def test_the_wired_length_bound_spans_the_training_config_and_the_script_args(clock):
-    """GRPO's config declares neither max_length nor max_prompt_length and the scripts carry the
-    prompt budget on their own args, so the bound the wired callback measures against reads both:
-    an uncounted step falls back to ``batch x accumulation x 150 x fill`` tokens."""
+    """GRPO's config declares neither max_length nor max_prompt_length and the scripts carry the prompt budget on their
+    own args, so the wired bound reads both. An uncounted step falls back to ``batch x accumulation x 150 x fill``."""
     script_args = SimpleNamespace(
         moe_balancing="none",
         enable_efficiency_metrics=True,

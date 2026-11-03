@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """The SFT trainers score through the model's own forward, never TRL's ``chunked_nll`` patch.
-
-TRL 1.14 defaults an unset ``loss_type`` to ``chunked_nll`` whenever ``use_liger_kernel`` is off, and
-that type swaps the model's forward for one that projects ``lm_head`` itself: no head transform, no
-router aux loss, no logits for a subclass that reads them. The trainer turns it into ``nll`` before
-the distributed setup, whether the config arrives by keyword or positionally.
-
-    python tests/cpu/trainers/test_sft_loss_type.py
-"""
+TRL 1.14 defaults to it with ``use_liger_kernel`` off, and it projects ``lm_head`` itself, skipping head transforms."""
 
 import types
 
@@ -50,7 +43,6 @@ def _model():
 
 
 def test_trls_default_for_a_liger_off_run_is_chunked_nll():
-    """Premise: what the trainer guards against is TRL's own default."""
     assert SFTConfig(output_dir="unused", use_liger_kernel=False, bf16=False, use_cpu=True).loss_type == "chunked_nll"
 
 

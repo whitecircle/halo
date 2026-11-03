@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""RLVR (Reinforcement Learning with Verifiable Rewards) online GRPO training.
-
-Online GRPO against a vLLM server, scored by the ``rewards`` terms of the config: the strict
-``\\boxed{}`` accuracy grader, the regex format grader, a generative judge, a served reward model.
-
-Supported Parallelism Modes: EP, TP, ETP (CP is not supported by ``DistributedOnlineGRPOTrainer``; the
-rollout server takes its own GPUs, so size the launch to the remaining ones).
-
-Usage:
-    torchrun --nproc_per_node=<GPUs left after the server> scripts/training/grpo/online.py \\
-        examples/grpo/online/rlvr-online-grpo-template.yaml
-"""
+"""RLVR online GRPO against a vLLM server, scored by the config's ``rewards`` terms. Modes: EP, TP, ETP (no CP); the
+rollout server takes its own GPUs, so size the launch to the remaining ones."""
 
 from trl import GRPOConfig
 
@@ -54,8 +44,8 @@ from halo.trainers.grpo.rollout.engine_preflight import verify_context_window, v
 
 
 def build_rlvr_row_fn(args: OnlineGRPOScriptArguments, tokenizer):
-    """Row transform for the RLVR map: the rendered generation prompt, the conversation it was rendered
-    from and the ground-truth answer. Accepts conversational (list of messages) and string prompts."""
+    """Row transform: the rendered generation prompt, its conversation and the ground-truth answer. Accepts
+    message-list and string prompts."""
 
     def process_for_rlvr(row):
         prompt_data = as_conversation(row[args.prompt_field])
@@ -70,8 +60,7 @@ def build_rlvr_row_fn(args: OnlineGRPOScriptArguments, tokenizer):
         )
 
         template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
-        # Reasoning-effort steer ("random" → a level sampled per prompt). Single-turn, so per-prompt is
-        # the per-episode analogue of the env-GRPO rollout (halo/environments/reasoning_effort.py).
+        # "random" samples a level per prompt, the single-turn analogue of the env-GRPO per-episode steer.
         effort = resolve_reasoning_effort(args.reasoning_effort)
         if effort is not None:
             template_kwargs["reasoning_effort"] = effort
@@ -99,9 +88,8 @@ def main():
         OnlineGRPOScriptArguments, GRPOConfig, ModelArguments, ParallelismArguments
     )
 
-    # The weight sync forwards trainer parameter names verbatim, and the text-only CausalLM sibling
-    # spells its decoder model.layers.* where the multimodal checkpoint the server loads spells
-    # model.language_model.layers.*, so every dense tensor would miss its slot on the first sync.
+    # The weight sync forwards names verbatim, and the text-only sibling's model.layers.* would miss the multimodal
+    # server's model.language_model.layers.* on the first sync.
     reject_unsupported_args("RLVR Online GRPO", text_only_model=args.text_only_model)
     # Each block's tunables reach the trainer only through its gate, so a value set beside a closed
     # gate is inert (its defaults are truthy, hence the default-comparing form).
@@ -110,9 +98,7 @@ def main():
     if not args.use_sdpg:
         reject_non_default_args("RLVR Online GRPO with use_sdpg off", args, *args.SDPG_TUNABLES)
 
-    # --use_sdpg swaps in the SDPG trainer (GRPO loss plus privileged-teacher reverse-KL OPD on
-    # positive-advantage rollouts). It reuses the same rollout and verifier machinery, so only the
-    # class and the OPD kwargs differ.
+    # --use_sdpg swaps in the SDPG trainer over the same rollout and verifier machinery; class and OPD kwargs differ.
     trainer_cls = DistributedSDPGTrainer if args.use_sdpg else DistributedOnlineGRPOTrainer
     context = init_training_script(
         args,
@@ -142,9 +128,8 @@ def main():
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
-    # Pre-sharded datasets are split per DP rank at load; the trainer gets dataset_presharded so it
-    # does not re-shard (no-op for the usual raw prompt/answer dataset). The prompt column is the
-    # loader's render column: it must exist, and rows with an empty prompt are dropped.
+    # The trainer gets dataset_presharded so it does not re-shard. The prompt column is the loader's render column: it
+    # must exist, and empty-prompt rows drop.
     ds, dataset_presharded = load_script_datasets(
         args,
         parallelism_config,
@@ -218,8 +203,8 @@ def main():
         sequence_ratio_active=DistributedOnlineGRPOTrainer.sums_sequence_logratio(grpo_config),
         backend=VLLM_BACKEND,
     )
-    # The KL reference TRL would otherwise build itself; None where the run holds none. Loaded after the
-    # server preflights, so a misconfigured server fails before a second model load.
+    # The KL reference TRL would otherwise build; None where the run holds none. After the server preflights, so a
+    # misconfigured server fails before a second model load.
     ref_model = load_reference_model_for_on_policy_grpo(
         args,
         model_config,

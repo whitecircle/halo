@@ -1,9 +1,6 @@
-"""EP bitwise harness: every EP family's forward, backward, gradients and construction, compared bit for bit
-between two commits (``make verify-ep BASE=<sha>``): each tree records its cases with its own code, and the
-records are compared tensor by tensor and order list by order list into ``evidence/ep_bitwise-<head sha>.json``.
-The CPU tier runs one process on the per-expert loop; the GPU tier runs grouped GEMM in bf16 under
-``full_determinism``, on one rank and as ``ep2`` and ``ep2+etp2``, each with the shared-expert overlap off and on.
-"""
+"""EP bitwise harness: every EP family's forward, backward, gradients and construction, compared bit for bit between
+two commits. ``make verify-ep BASE=<sha>``. CPU runs the per-expert loop; GPU runs grouped GEMM in bf16 under
+``full_determinism`` on 1 rank, ep2 and ep2+etp2."""
 
 from __future__ import annotations
 
@@ -60,8 +57,7 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 FAMILIES = tuple(TINY_MOE_FAMILIES)
 SEED = 1234
-# Reseeded after the build, so the adapters and the dropout masks do not hang on how much randomness the
-# model build and the EP patch consumed.
+# Reseeded after the build, so adapters and dropout masks do not hang on how much randomness the build consumed.
 ADAPTER_SEED = 1
 FORWARD_SEED = 2
 BATCH = 2
@@ -70,9 +66,7 @@ ADAPTER_STD = 0.02
 BIAS_SCALE = 0.05
 WEIGHT_DECAY = 0.1
 LORA_RANK = 8
-# The variants that run a forward and backward, by the EPConfig fields each sets on top of the defaults:
-# fp32 router masters on FSDP-ignored experts, native expert LoRA with dropout, an armed routing-replay
-# mask, and bias-update balancing with seeded biases.
+# The variants that run a forward and backward, by the EPConfig fields each sets on top of the defaults.
 FORWARD_VARIANTS = {
     "defaults": {},
     "fp32_masters": {"experts_fsdp_managed": False, "fp32_router": True},
@@ -80,19 +74,16 @@ FORWARD_VARIANTS = {
     "routing_replay": {},
     "bias_update": {},
 }
-# fp32 expert masters on the grouped path only: the per-expert loop's fp32-expert matmul relies on CUDA
-# autocast, which does nothing on CPU.
+# Grouped path only: the per-expert loop's fp32-expert matmul relies on CUDA autocast, which does nothing on CPU.
 GROUPED_VARIANT_FIELDS = {"fp32_masters": {"fp32_experts": True}}
 SHARED_OVERLAP_ENV = "HALO_EP_SHARED_OVERLAP"
-# ParallelismConfig fields of the multi-rank GPU modes, which run the defaults variant.
 GPU_EP_MODES = {"ep2": {"ep_size": 2}, "ep2_etp2": {"ep_size": 2, "expert_tp_size": 2}}
 
 
 @dataclass(frozen=True)
 class ConstructionLayout:
-    """A construction-only variant: the job whose every rank it builds on stubbed process groups, as
-    ``EPConfig`` fields over ``world_size`` ranks of one node, and whether PEFT then trains a saved copy of
-    the router (``modules_to_save``) that the EP layers re-hook."""
+    """A construction-only variant: built on stubbed process groups per rank, as ``EPConfig`` fields, optionally with a
+    PEFT-saved router."""
 
     world_size: int
     fields: dict
@@ -100,18 +91,17 @@ class ConstructionLayout:
 
 
 CONSTRUCTION_VARIANTS = {
-    # One EP group with peers: the in-backward router hooks (the trainer's sweep divides the experts).
+    # One EP group with peers: the in-backward router hooks.
     "in_backward_grad_sync": ConstructionLayout(2, {"ep_size": 2}),
     # Two EP groups: the trainer's post-backward sweep syncs, so no hook may register.
     "deferred_grad_sync": ConstructionLayout(4, {"ep_size": 2}),
-    # The same group with PEFT training a saved copy of the router, which each EP layer re-hooks.
+    # PEFT training a saved copy of the router, which each EP layer re-hooks.
     "modules_to_save": ConstructionLayout(2, {"ep_size": 2}, saved_router=True),
     # Pure expert TP: the shard of every expert each rank stores.
     "etp_construction": ConstructionLayout(2, {"ep_size": 1, "expert_tp_size": 2}),
 }
 VARIANTS = (*FORWARD_VARIANTS, *CONSTRUCTION_VARIANTS)
-# The cases (``<launch>/<family>/<variant>``) that raise on today's code because the variant does not apply to
-# the family: routing replay, on either single-process launch, for the families that cannot re-derive gate
+# Cases that raise today since the variant does not apply: routing replay for families that cannot re-derive gate
 # weights at a forced selection.
 KNOWN_RAISING = frozenset(
     f"{launch}/{family}/routing_replay"
@@ -123,8 +113,7 @@ KNOWN_RAISING = frozenset(
 
 @dataclass(frozen=True)
 class Launch:
-    """One producer run in a tree: its output label, mode, rank count (``None``: one plain process) and
-    environment."""
+    """One producer run in a tree: output label, mode, rank count (``None``: one plain process) and environment."""
 
     label: str
     mode: str
@@ -146,8 +135,8 @@ LAUNCH_BY_LABEL = {launch.label: launch for tier in LAUNCHES.values() for launch
 
 
 def launch_variants(launch: Launch, variants) -> list[str]:
-    """The variants ``launch`` records out of ``variants``: all of them on the CPU launch, those that forward
-    on the grouped one, and the defaults alone in a multi-rank mode, which takes no variant."""
+    """The variants ``launch`` records: all on CPU, those that forward on grouped, the defaults alone in a multi-rank
+    mode."""
     if launch.mode == "cpu":
         return list(variants)
     if launch.mode == "grouped":
@@ -156,8 +145,7 @@ def launch_variants(launch: Launch, variants) -> list[str]:
 
 
 def control_case(launch: Launch, families, variants) -> tuple[str, str] | None:
-    """The ``(family, variant)`` the negative control of ``launch`` reruns: its first case outside
-    :data:`KNOWN_RAISING`, or ``None`` when it runs none."""
+    """The ``(family, variant)`` the negative control reruns: the first case outside :data:`KNOWN_RAISING`, or None."""
     return next(
         (
             (family, variant)
@@ -175,8 +163,7 @@ def _model(family: str, dtype: torch.dtype, device: torch.device | str = "cpu") 
 
 
 def _wrap(model: torch.nn.Module, ep_config: EPConfig, *, perturb: bool) -> None:
-    """The EP patch, the expert adapters drawn where the config carries native expert LoRA, and under
-    ``perturb`` the negative control: every expert bank rotated by one expert."""
+    """The EP patch and expert adapters; ``perturb`` is the negative control, every expert bank rotated by one."""
     apply_ep_layers(model, ep_config)
     if ep_config.expert_lora is not None:
         torch.manual_seed(ADAPTER_SEED)
@@ -186,8 +173,8 @@ def _wrap(model: torch.nn.Module, ep_config: EPConfig, *, perturb: bool) -> None
 
 
 def _hook_effect(hook, param: torch.Tensor) -> str:
-    """What a gradient hook does to a gradient of ones: each all-reduce it issues (op, dtype, group ranks) and
-    the scale it leaves, so two hooks match when they act alike however they are built."""
+    """What a hook does to a gradient of ones: each all-reduce (op, dtype, group ranks) and the scale, so hooks match
+    when they act alike."""
     probe = torch.zeros((), dtype=param.dtype, requires_grad=True)
     probe.grad = torch.ones((), dtype=param.dtype)
     reduces = []
@@ -223,7 +210,7 @@ def _orders(model: torch.nn.Module) -> Orders:
 
 
 def _replay_mask(injector, seq: int, device) -> torch.Tensor:
-    """``[rows, seq, EP layers, top_k]`` distinct experts per token, drawn from a fixed seed."""
+    """``[rows, seq, EP layers, top_k]`` distinct experts per token, from a fixed seed."""
     generator = torch.Generator().manual_seed(SEED)
     scores = torch.rand(BATCH, seq, injector.num_ep_layers, injector.num_experts, generator=generator)
     return scores.argsort(dim=-1)[..., : injector.top_k].to(device)
@@ -238,8 +225,8 @@ def _enable_bias_update(model: torch.nn.Module) -> None:
 
 
 def _forward_backward(model: torch.nn.Module, variant: str, seq: int, device, batch_index: int) -> Tensors:
-    """One forward and backward on batch ``batch_index`` of the fixed seed, armed with the replay mask for the
-    ``routing_replay`` variant and capturing the dispatched routing wherever the family supports replay."""
+    """One forward and backward on batch ``batch_index``, armed with the replay mask for ``routing_replay``, capturing
+    routing where supported."""
     model.train()
     layers = named_ep_layers(model)
     replays = variant == "routing_replay"
@@ -256,7 +243,7 @@ def _forward_backward(model: torch.nn.Module, variant: str, seq: int, device, ba
     with injector.capture(BATCH, seq) if injector is not None else contextlib.nullcontext([]) as routing:
         outputs = model(input_ids=ids, labels=labels)
     outputs.loss.backward()
-    # The trainer's post-backward expert divide, a no-op in one process.
+    # A no-op in one process.
     sweep_ep_grads(model)
     if replays:
         injector.disarm()
@@ -273,8 +260,8 @@ def _forward_backward(model: torch.nn.Module, variant: str, seq: int, device, ba
 
 
 def _forward_case(family: str, variant: str, *, tier: str, perturb: bool, device):
-    """One variant that forwards: the per-expert loop in fp32 on CPU, grouped GEMM in bf16 on GPU, and bf16 for
-    ``fp32_masters`` on either, so its fp32 upcasts change a dtype."""
+    """One variant that forwards: per-expert fp32 on CPU, grouped bf16 on GPU, and bf16 for ``fp32_masters`` so its
+    upcasts change a dtype."""
     grouped = tier == "gpu"
     dtype = torch.bfloat16 if grouped or variant == "fp32_masters" else torch.float32
     fields = FORWARD_VARIANTS[variant] | (GROUPED_VARIANT_FIELDS.get(variant, {}) if grouped else {})
@@ -286,8 +273,7 @@ def _forward_case(family: str, variant: str, *, tier: str, perturb: bool, device
 
 
 def _save_router(model: torch.nn.Module) -> torch.nn.Module:
-    """``model`` under token-mixer LoRA with each EP layer's router in ``modules_to_save``, its routers
-    re-hooked as the trainer re-hooks them."""
+    """``model`` under token-mixer LoRA with each router in ``modules_to_save``, re-hooked as the trainer does."""
     routers = [f"{path}.{layer._ROUTER_ATTR}" for path, layer in named_ep_layers(model) if layer._ROUTER_ATTR]
     targets = mixer_linear_leaves(model)
     torch.manual_seed(ADAPTER_SEED)
@@ -298,7 +284,7 @@ def _save_router(model: torch.nn.Module) -> torch.nn.Module:
 
 
 def _construction_case(family: str, variant: str, *, perturb: bool):
-    """Every rank of ``variant``'s layout built in turn: each rank's parameters and orders, under its rank."""
+    """Every rank of ``variant``'s layout built in turn: each rank's parameters and orders."""
     layout = CONSTRUCTION_VARIANTS[variant]
     tensors, orders = {}, {}
     for rank in range(layout.world_size):
@@ -336,8 +322,7 @@ def _gpu_ep_case(family: str, mode: str, *, perturb: bool, device):
 
 
 def produce(output: Path, launch: Launch, families, variants, *, perturb: bool = False) -> None:
-    """Record ``launch``'s cases over ``families`` and :func:`launch_variants` under
-    ``output/<launch label>/<family>/<variant>``."""
+    """Record ``launch``'s cases under ``output/<launch label>/<family>/<variant>``."""
     with quiet_logs():
         if launch.mode == "cpu":
             for family in families:
@@ -366,14 +351,12 @@ def produce(output: Path, launch: Launch, families, variants, *, perturb: bool =
 
 
 def unexpected_raises(raised: dict[str, dict]) -> list[str]:
-    """The cases among the raised records that :data:`KNOWN_RAISING` does not name."""
     return sorted({case_of(record) for record in raised} - KNOWN_RAISING)
 
 
 def assess(base: Path, head: Path, control: Path, accept=()) -> tuple[str, dict]:
-    """The verdict on three recorded outputs and its findings: it fails on a delta outside the cases ``accept``
-    names, on a head raise outside :data:`KNOWN_RAISING`, and on a control record that matches its base one
-    or raised."""
+    """The verdict and findings: fails on a delta outside ``accept``, a head raise outside :data:`KNOWN_RAISING`, or a
+    control that matches or raised."""
     deltas, accepted = split_accepted(compare_records(base, head), accept)
     raised = raised_records(head)
     unexpected = unexpected_raises(raised)

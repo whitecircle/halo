@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """SMPO percentile clipping.
-
-The percentile clip bound is a FLOOR, so it must not carry gradient — left differentiable, every
-clamped token routes its gradient back through the quantile into the single element that IS the
-quantile, handing that one token ``clamped_count`` times the gradient (the opposite of the outlier
-suppression the clip exists for), and disagreeing with the CP path where the all-gather detaches the
-bound anyway.
-"""
+The bound carries no gradient, or the quantile element would take ``clamped_count`` times the gradient."""
 
 from types import SimpleNamespace
 
@@ -21,7 +15,6 @@ CP_WORLD_SIZE = 2
 
 
 def _clipper(lower=None, upper=None, min_log_prob=None) -> SMPOObjective:
-    """The objective carrying only the clip knobs under test."""
     return SMPOObjective(
         beta=1.0,
         loss_type="sigmoid",
@@ -33,26 +26,17 @@ def _clipper(lower=None, upper=None, min_log_prob=None) -> SMPOObjective:
 
 
 def _rejected_logps(rows=1, seq=600, seed=0):
-    """Log-probs of a well-SFT'd policy: mostly near 0 with a thin low tail (Exponential(3)).
-
-    Drawn by inverse-CDF from a seeded uniform so the fixture is deterministic without relying on
-    the global RNG.
-    """
+    """Log-probs of a well-SFT'd policy: mostly near 0 with a thin low tail (Exponential(3))."""
     generator = torch.Generator().manual_seed(seed)
     uniform = torch.rand(rows, seq, generator=generator).clamp(min=1e-9)
     return uniform.log() / 3.0
 
 
 def test_percentile_clip_bound_carries_no_gradient():
-    """No token may receive more than unit gradient through the clip.
-
-    A correct floor gives each token d(sum)/d(logp) of exactly 1 (unclamped) or 0 (clamped). A
-    differentiable bound instead concentrates every clamped token's gradient onto the quantile
-    element, so its gradient equals the number of clamped tokens.
-    """
+    """A correct floor gives each token a gradient of exactly 1 (unclamped) or 0 (clamped)."""
     logps = _rejected_logps().requires_grad_(True)
     loss_mask = torch.ones_like(logps, dtype=torch.bool)
-    is_chosen = torch.zeros(logps.size(0), dtype=torch.bool).unsqueeze(1)  # every row rejected
+    is_chosen = torch.zeros(logps.size(0), dtype=torch.bool).unsqueeze(1)
 
     clipper = _clipper(lower=0.02)
     clipped = clipper.clip_log_probs(logps, loss_mask, is_chosen, cp_config=None)
@@ -66,7 +50,6 @@ def test_percentile_clip_bound_carries_no_gradient():
 
 
 def test_padding_free_percentile_clip_bound_carries_no_gradient():
-    """The padding-free row shares the contract and the same method — only the selector differs."""
     flat = _rejected_logps(rows=1, seq=800).reshape(-1).requires_grad_(True)
     loss_mask = torch.ones_like(flat, dtype=torch.bool)
     is_chosen = torch.zeros_like(flat, dtype=torch.bool)
@@ -79,7 +62,6 @@ def test_padding_free_percentile_clip_bound_carries_no_gradient():
 
 
 def test_clip_still_clamps_the_low_tail():
-    """Detaching the bound must not disable the clip itself."""
     logps = _rejected_logps()
     loss_mask = torch.ones_like(logps, dtype=torch.bool)
     is_chosen = torch.zeros(logps.size(0), dtype=torch.bool).unsqueeze(1)
@@ -145,12 +127,7 @@ def _boolean_mask_clip(clipper, per_token_logps, loss_mask, is_chosen):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_the_clip_reproduces_both_selector_spellings(dtype):
-    """The one clip must equal BOTH independent spellings, on the same data, in the same dtype.
-
-    The two differ only in selector (row split vs boolean mask) and write (``where`` vs ``clamp``);
-    a change to the rule — an order swap, a masked position touched, a dtype cast moved — breaks
-    one of these two comparisons.
-    """
+    """A change to the rule (an order swap, a masked position touched, a dtype cast moved) breaks one comparison."""
     num_chosen, seq = 3, 400
     logps = _rejected_logps(rows=2 * num_chosen, seq=seq, seed=7).to(dtype)
     loss_mask = torch.ones_like(logps, dtype=torch.bool)
@@ -202,12 +179,7 @@ def _cp_clip_worker(rank: int, out_path: str) -> None:
 
 
 def test_cp_sliced_clip_matches_the_whole_sequence_clip(tmp_path):
-    """The collective branch of ``cp_quantile`` is what keeps the clip independent of ``cp_size``.
-
-    Each rank clips only its own sequence chunk; the bound is the quantile of the GATHERED tokens, so
-    the result must be the whole-sequence clip restricted to that chunk. A local quantile (or a bound
-    taken before the gather) gives each rank a different floor and fails here.
-    """
+    """``cp_quantile``'s gather keeps the clip independent of ``cp_size``; a local quantile would differ per rank."""
     out = str(tmp_path / "result.txt")
     run_gloo_ranks(_cp_clip_worker, CP_WORLD_SIZE, out)
     with open(out) as fh:

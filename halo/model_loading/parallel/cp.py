@@ -29,12 +29,9 @@ def load_cp_model(
     preserve_checkpoint_precision: bool,
     wraps_experts: bool,
 ) -> nn.Module:
-    """COLLECTIVE: load a model for Ulysses CP with no expert distribution.
-
-    ``wraps_experts`` gives a MoE its grouped-GEMM EP layers before the CP wrap, on the inner HF
-    model as under EP+CP; without them a MoE under pure CP pays the Liger swiglu/geglu force-off without
-    the speedup it buys.
-    """
+    """COLLECTIVE: load a model for Ulysses CP with no expert distribution. ``wraps_experts`` gives a MoE its
+    grouped-GEMM EP layers before the CP wrap; without them pure CP pays the Liger swiglu/geglu force-off without the
+    speedup it buys."""
     cp_config = pc.cp_config()
     ep_config = pc.ep_config() if wraps_experts else None
     rank = get_global_rank()
@@ -42,7 +39,7 @@ def load_cp_model(
 
     kwargs = dict(from_pretrained_kwargs)
     revalidate_attn_kwarg(kwargs, kwargs["config"])
-    # Finalized before the CP wrap, on the inner HF model — the wrapper carries no tie_weights.
+    # Finalized before the CP wrap, as the wrapper carries no tie_weights.
     model = load_whole_model(
         model_class,
         source,
@@ -68,12 +65,9 @@ def load_ep_cp_model(
     *,
     preserve_checkpoint_precision: bool,
 ) -> nn.Module:
-    """COLLECTIVE: load a MoE with its experts distributed by EP and its sequences split by Ulysses CP.
-
-    Router gradients averaged over ``world_size`` stay correct under CP: each rank's local gradient is
-    ``cp_size ×`` the batch gradient (mean over local tokens), so ``all_reduce(SUM) / world_size``
-    recovers the batch mean.
-    """
+    """COLLECTIVE: load a MoE with experts distributed by EP and sequences split by CP. Router gradients averaged over
+    ``world_size`` stay correct: each rank's gradient is ``cp_size ×`` the batch gradient, so
+    ``all_reduce(SUM) / world_size`` recovers the batch mean."""
     ep_config = pc.ep_config()
     cp_config = pc.cp_config()
     rank = get_global_rank()

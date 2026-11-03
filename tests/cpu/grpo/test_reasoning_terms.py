@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the trainer-side reasoning terms: the per-level, capped reasoning price (on every token or
-past a soft budget) and the under-use floor.
-
-The price is ``-min(cap, price_per_1k * reasoning_tokens / 1000)`` at the level's own price, so one
-trace costs most where little reasoning was asked and the cap keeps a long trace from outweighing the
-task reward. The floor is the only term that pays for MORE reasoning: it prices an episode's shortfall
-against three quarters of the per-turn thinking budget it ran under. Both read the episode's reasoning
-summed over its turns — a short repair turn is not under-use. Past a budget (``reasoning_price_past_budget``)
-the price charges only what each turn reasoned past a soft per-turn budget, and nothing within it. A training
-group no baseline episode of which earned the objective is charged neither term (``reasoning_terms_in_failed_groups``
-restores the charge): there the length terms would be most of what tells the attempts apart.
-
-Run: python tests/cpu/grpo/test_reasoning_terms.py  (or pytest)
-"""
+"""Trainer-side reasoning terms: the per-level capped price ``-min(cap, price_per_1k * reasoning_tokens / 1000)``, on
+every token or past a soft budget, and the under-use floor, both reading reasoning summed over an episode's turns."""
 
 import types
 from collections import defaultdict
@@ -58,7 +46,7 @@ def test_price_is_linear_in_reasoning_tokens_per_thousand_summed_over_turns():
 
 
 def test_price_is_capped_exactly_at_the_cap():
-    # 10000 tokens at 0.01 per 1k reach the cap; ten times that trace pays no more.
+    # 10000 tokens at 0.01 per 1k reach the cap.
     assert reasoning_price_term([10000], 0.01, CAP) == pytest.approx(-CAP)
     assert reasoning_price_term([100000], 0.01, CAP) == pytest.approx(-CAP)
     assert reasoning_price_term([9999], 0.01, CAP) > -CAP
@@ -76,14 +64,13 @@ def test_floor_prices_the_episode_shortfall_and_nothing_above_the_target():
 def test_floor_sums_the_episode_so_a_short_repair_turn_is_not_under_use():
     # One deep turn then two terse repairs: a per-turn mean would price the repairs as under-use.
     assert reasoning_floor_term([9000, 100, 100], 8192, 0.05) == 0.0
-    # An extra thinking-free tool turn cannot lower the score either.
     assert reasoning_floor_term([4096], 8192, 0.05) == reasoning_floor_term([4096, 0, 0], 8192, 0.05)
 
 
 def test_floor_charges_silent_turns_in_full_and_a_lost_episode_nothing():
-    # Turns that carry no reasoning at all are the maximal under-use...
+    # Turns with no reasoning at all are the maximal under-use.
     assert reasoning_floor_term([0, 0, 0], 8192, 0.05) == pytest.approx(-0.05)
-    # ...an episode with no assistant turn is one the driver lost, not a policy choice.
+    # An episode with no assistant turn is one the driver lost, never a policy choice.
     assert reasoning_floor_term([], 8192, 0.05) == 0.0
     # Off switches: no cap, or no weight.
     assert reasoning_floor_term([10], 0, 0.05) == 0.0
@@ -97,8 +84,6 @@ def test_the_floor_target_rounds_a_cap_the_share_does_not_divide():
 
 
 class _CharTokenizer:
-    """One token per character: deterministic reasoning lengths without a real tokenizer."""
-
     def __call__(self, text, add_special_tokens=False):
         return {"input_ids": [0] * len(text)}
 
@@ -115,8 +100,7 @@ def _reward_host(num_generations=1, **config) -> DistributedAsyncEnvironmentalGR
 
 
 def _rollout(level, tokens, budget=None, soft=False, objective=1.0):
-    """An episode of zero environment reward whose turns carry ``tokens`` reasoning tokens each, its settled
-    objective component ``objective``."""
+    """Zero environment reward; each turn carries ``tokens`` reasoning tokens; settled objective ``objective``."""
     trajectory = types.SimpleNamespace(
         reasoning_effort=level,
         reasoning_budget=budget,
@@ -186,15 +170,13 @@ def _episode(thinkings, budget=1000, level="low", objective=1.0):
 
 
 def _built_rewards(trainer, episodes) -> torch.Tensor:
-    """The trainer's own training-round reward build, each episode's reasoning counted by its tokenizer."""
     counts = [reasoning_token_counts(trainer._tokenizer, e.trajectory) for e in episodes]
     return trainer._build_rollout_rewards(episodes, counts, torch.device("cpu"), "train")
 
 
 def test_a_training_group_that_earned_no_objective_is_charged_neither_term():
-    """Where every attempt failed, the length terms are most of what tells the attempts apart, so the advantage
-    would teach reasoning less wherever the task is out of reach. A group with a success is charged in full, its
-    failure included."""
+    """Where every attempt failed, the length terms are most of what tells attempts apart, so the advantage would teach
+    reasoning less wherever the task is out of reach."""
     rollouts = [
         _rollout("low", [4096], budget=8192),  # solved
         _rollout("low", [4096], budget=8192, objective=0.0),  # failed beside a solve: charged
@@ -210,8 +192,7 @@ def test_a_training_group_that_earned_no_objective_is_charged_neither_term():
 
 
 def test_a_vetoed_solve_and_an_episode_outside_the_baseline_earn_their_group_nothing():
-    """The group is read off the settled objective component, which a veto zeroes even where the environment's
-    solve verdict stands, and off the episodes that train."""
+    """The group reads the settled objective component, which a veto zeroes even where the solve verdict stands."""
     vetoed = _episode(["x" * 500], objective=0.0)
     vetoed.metrics[SOLVE_RATE_KEY] = 1.0
     invalid = _episode(["x" * 500])
@@ -225,8 +206,7 @@ def test_a_vetoed_solve_and_an_episode_outside_the_baseline_earn_their_group_not
 
 
 def test_eval_episodes_and_the_knob_charge_failed_groups():
-    """An eval reward trains nothing, so it reports what the reasoning costs; the knob restores the charge in
-    training."""
+    """An eval reward trains nothing, so it reports what the reasoning costs."""
     rollouts = [_rollout("low", [4096], objective=0.0) for _ in range(2)]
     for mode, config in (("eval", {}), ("train", {"reasoning_terms_in_failed_groups": True})):
         rewards, metrics = _apply(rollouts, mode=mode, num_generations=2, reasoning_price=PRICE, **config)
@@ -235,10 +215,8 @@ def test_eval_episodes_and_the_knob_charge_failed_groups():
 
 
 def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
-    """The real path: the trainer's own reward build and its per-turn token counter. Every assistant
-    turn is one entry, a thinking-free one as 0 — a counter that skipped them would hand the floor an
-    empty list, which it reads as a lost episode, so dropping the reasoning entirely would be free
-    while brief reasoning paid nearly the whole weight."""
+    """Every assistant turn is one entry, a thinking-free one as 0. A counter that skipped them would hand the floor an
+    empty list, which it reads as a lost episode, so dropping the reasoning entirely would be free."""
     trainer = _reward_host(reasoning_price=PRICE, reasoning_floor=0.05)
     episodes = [
         _episode([None, "", None]),  # three silent turns: the whole floor, nothing to price
@@ -291,8 +269,7 @@ def test_config_refuses_values_that_would_invert_or_poison_the_terms():
 
 
 def test_a_price_cap_with_the_price_off_is_refused_as_inert():
-    """The cap is read only beside a price: set alone it parses and changes nothing. Its default value
-    passes with the price off, and any value is free while the price is on."""
+    """The cap is read only beside a price, so set alone it parses and changes nothing."""
     with pytest.raises(ValueError, match="reasoning_price_cap set with reasoning_price unset"):
         AsyncRolloutConfig(reasoning_price_cap=0.2)
     assert AsyncRolloutConfig(reasoning_price_cap=0.1).reasoning_price is None
@@ -328,8 +305,7 @@ def _check_terms(host) -> None:
 
 
 def test_construction_refuses_a_price_table_that_misses_or_invents_a_level():
-    """The config parses any non-empty map; the trainer, beside the environment that draws the levels,
-    refuses one that is not exactly low, medium and high."""
+    """The config parses any non-empty map; the trainer, beside the environment that draws the levels, refuses it."""
     with pytest.raises(ValueError, match=r"missing \['high'\]"):
         _check_terms(_constructing({}, reasoning_price={"low": 0.01, "medium": 0.005}))
     with pytest.raises(ValueError, match=r"unknown \['extreme'\]"):
@@ -340,8 +316,7 @@ def test_construction_refuses_a_price_table_that_misses_or_invents_a_level():
 
 
 def test_construction_refuses_waiving_the_terms_under_a_reward_that_prices_no_success_above_zero():
-    """No episode of a judge-only reward, nor of one whose environment term weighs nothing, earns the objective,
-    so every group would read as failed."""
+    """No episode of a judge-only or zero-weight environment reward earns the objective; all groups read as failed."""
     for objective_term in (None, EnvironmentTerm(weight=0.0), EnvironmentTerm(weight=-1.0)):
         with pytest.raises(ValueError, match="prices no success above zero"):
             _check_terms(_constructing({}, objective_term=objective_term, reasoning_price=PRICE))
@@ -360,17 +335,16 @@ def test_construction_refuses_a_price_with_no_level_to_price_at():
 
 
 def test_construction_refuses_an_answer_room_bound_on_a_level_with_no_reasoning_cap():
-    """The answer room is what a turn generates past its reasoning cap: a drawable level without one would leave
-    the bound bounding nothing, so the trainer refuses the run before any episode instead of every episode
-    raising in its actor."""
+    """The answer room is what a turn generates past its reasoning cap, so a drawable level without one bounds nothing.
+    Refused up front, or every episode raises in its actor."""
     with pytest.raises(ValueError, match="rollout_max_answer_tokens"):
         _check_terms(_constructing({"low": 8192, "medium": 12288}, rollout_max_answer_tokens=8192))
     _check_terms(_constructing({"low": 8192, "medium": 12288, "high": 16384}, rollout_max_answer_tokens=8192))
 
 
 def test_a_budget_on_a_level_the_environment_never_draws_budgets_no_episode():
-    """The floor's gate reads the levels the effort setting can draw: a fixed setting draws one, an unset one
-    none, so a budget elsewhere would leave the floor never pricing an episode."""
+    """The floor's gate reads the levels the effort setting can draw (a fixed setting one, an unset one none), so a
+    budget elsewhere would leave the floor never pricing an episode."""
     for effort in ("low", None):
         with pytest.raises(ValueError, match="no episode of this run carries one"):
             _check_terms(_constructing({"high": 16384}, effort=effort, reasoning_floor=0.05))
@@ -390,7 +364,7 @@ def test_construction_refuses_a_floor_no_episode_can_ever_be_priced_by():
     _check_terms(_constructing({}, reasoning_floor=0.05, rollout_max_thinking_tokens=8000))
     # The floor reads the stated budget, so a soft one no engine cap backs still carries it.
     _check_terms(_constructing({"high": 16384}, soft=("high",), reasoning_floor=0.05))
-    _check_terms(_constructing({}))  # off: nothing to check
+    _check_terms(_constructing({}))
 
 
 def test_past_a_budget_the_price_counts_only_what_each_turn_spent_past_it():
@@ -402,8 +376,8 @@ def test_past_a_budget_the_price_counts_only_what_each_turn_spent_past_it():
 
 
 def test_the_trainer_prices_past_a_budget_only_where_it_was_soft():
-    """An enforced budget cannot be overrun, so past a budget only a soft one is read; the floor still reads both,
-    and the two never meet on one episode: a turn past its budget leaves the episode above the floor's reference."""
+    """An enforced budget cannot be overrun, so only a soft one is read here. The floor reads both, and a turn past its
+    budget leaves the episode above the floor's reference, so the two never meet."""
     rollouts = [
         _rollout("low", [10192, 2000], budget=8192, soft=True),  # 2000 past the budget
         _rollout("low", [10192], budget=8192, soft=False),  # enforced: not priced past it
@@ -425,8 +399,7 @@ def test_pricing_past_a_budget_needs_a_price():
 
 
 def test_construction_refuses_pricing_past_a_budget_unless_every_drawable_budget_is_soft():
-    """An enforced or unset budget cannot be overrun, so its turns would go unpriced: every level the environment
-    draws must be soft, a fixed level only itself."""
+    """An enforced or unset budget cannot be overrun, so its turns go unpriced; a fixed effort checks one level."""
     budgets = {"low": 8192, "medium": 12288, "high": 16384}
     config = {"reasoning_price": PRICE, "reasoning_price_past_budget": True}
     for soft in ((), ("high",)):
@@ -452,8 +425,7 @@ class _CountingTokenizer(_CharTokenizer):
 
 
 class _Round:
-    """The real round entry over two collected episodes, recording what each consumer was handed.
-    ``leader`` stands in for the TP/ETP group leader's rollouts, which the broadcast hands every rank."""
+    """Records what each consumer was handed. ``leader`` stands in for the TP/ETP group leader's broadcast rollouts."""
 
     _collect_and_score_rollouts = DistributedAsyncEnvironmentalGRPOTrainer._collect_and_score_rollouts
     _extract_prompts_and_contexts = DistributedAsyncEnvironmentalGRPOTrainer._extract_prompts_and_contexts
@@ -483,8 +455,7 @@ class _Round:
 
 
 def test_a_rounds_reasoning_is_counted_once_for_both_consumers():
-    """The reasoning terms and the rollout metrics read one count: tokenizing every trace twice per step
-    costs a second pass over the longest text the step holds."""
+    """Tokenizing every trace twice per step costs a second pass over the longest text the step holds."""
     host = _Round()
     host._collect_and_score_rollouts([{"prompt": "task"}, {"prompt": "task"}])
     assert host.handed["rewards"] == [[2, 0, 4], [3]]
@@ -493,8 +464,7 @@ def test_a_rounds_reasoning_is_counted_once_for_both_consumers():
 
 
 def test_the_counts_are_the_tp_leaders_episodes():
-    """Under TP/ETP every rank trains the group leader's rollouts, so both consumers count the leader's
-    reasoning, not the episodes this rank collected."""
+    """Under TP/ETP every rank trains the group leader's rollouts."""
     host = _Round(leader=[_episode(["xxxxx"]), _episode(["xxxxxx", None])])
     host._collect_and_score_rollouts([{"prompt": "task"}, {"prompt": "task"}])
     assert host.handed["rewards"] == host.handed["metrics"] == [[5], [6, 0]]

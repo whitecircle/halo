@@ -1,6 +1,3 @@
-"""Selects the SFT data collator a run's context-parallel, padding-free, packing and completion-only
-options call for."""
-
 import logging
 
 from halo.data.collators.collator_rules import reject_unsupported_collator_options, supports_one_document_varlen_set
@@ -40,15 +37,12 @@ def select_data_collator(
     per_device_eval_batch_size: int = 0,
     emit_varlen_one_document: bool = False,
 ):
-    """The data collator matching the training configuration, ``None`` for TRL's own; raises on an option
-    combination no collator can serve. ``model_config`` supplies the eos set that ends assistant turns,
-    which templates delimiting turns with role markers (GLM-4) need.
+    """The collator matching the config, ``None`` for TRL's own; raises on a combination no collator can serve.
+    ``model_config`` supplies the eos set that ends assistant turns (GLM-4's role-marker templates).
 
-    ``emit_varlen_one_document`` hands a one-document batch its varlen set where the model takes it
-    (:func:`~halo.data.collators.collator_rules.supports_one_document_varlen_set`), outside PP
-    (``keeps_packed_rows``), whose stages build their own; the CP routes never take it, Ulysses handing the kernel
-    its own ``cu_seqlens``. TRL's collator then comes from here, with the set. Only for a caller whose batches reach
-    this model alone: the set moves every flash model a batch reaches onto the varlen kernel."""
+    ``emit_varlen_one_document`` hands a one-document batch its varlen set where the model takes it, outside PP (whose
+    stages build their own) and the CP routes (Ulysses hands the kernel its own ``cu_seqlens``). Only for a caller
+    whose batches reach this model alone: the set moves every flash model a batch reaches onto the varlen kernel."""
     reject_unsupported_collator_options(
         tokenizer,
         padding_free=padding_free,

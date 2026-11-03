@@ -1,9 +1,5 @@
-"""Unsplit references, stage builders and check blocks for the PP stage-equivalence tests.
-
-A pipeline run (runner-level dense stages, or the real trainer over EP / ep1-GMM / ETP stages) is
-scored against an unsplit model over the same global batch. Every helper is topology-parametric; the
-consuming test owns its ParallelismConfig and the topology-specific assertions.
-"""
+"""Unsplit references, stage builders and check blocks for the PP stage-equivalence tests; the test owns its
+topology."""
 
 import math
 from dataclasses import dataclass
@@ -46,37 +42,26 @@ from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 
 SEQ_LEN = 64
-# The token-id ceiling of build_ragged_batch's rows: a model under test needs at least this vocabulary.
 RAGGED_BATCH_VOCAB_SIZE = TINY_GPTOSS_CONFIG["vocab_size"]
 LOSS_REL_TOL = 2e-2
-# Per-expert grads gate against the bf16 ep1-wrapper twin (identical routing decisions + grouped-mm
-# kernels — measured ≤0.007 in the pp2×ep1 test), so the gate can be tight. The fp32 raw-HF
-# reference cannot serve here: its hidden states differ from the bf16 run relatively, flipping
-# near-tied router top-k picks (~1 token/expert), which shifts whole-expert grad mass by ~0.1-0.3
-# with no parallelism bug at all. It still anchors the absolute checks (loss, router norm/cosine,
-# clip norm) under flip-tolerant bands.
+# Per-expert grads gate against the bf16 ep1 twin (same routing and grouped-mm kernels, measured <=0.007 in pp2 x ep1).
+# The fp32 raw-HF reference cannot serve: bf16 noise flips near-tied top-k picks and shifts whole-expert grad mass by
+# ~0.1-0.3 with no parallelism bug. It still anchors the loss, router norm and clip norm under flip-tolerant bands.
 EXPERT_GRAD_REL_TOL = 2e-2
 ROUTER_NORM_RATIO_BAND = (0.7, 1.4)
 ROUTER_COSINE_MIN = 0.9
-# Router grads vs the bf16 twin. The ×16-scaled (decisive) router saturates its softmax, so router
-# grads are tiny and bf16-noise-dominated: the fp32 cosine is data-dependent (0.98 on the 4-row
-# batch, 0.84 on one layer of the 8-row batch with no parallelism bug), while the twin — identical
-# kernels and routing — separates precision noise from a real sync bug. rel_err < 5e-2 implies
-# cosine > 0.9987, far tighter than any usable fp32 band.
+# Router grads vs the bf16 twin. The x16-scaled router saturates its softmax, so its grads are tiny and bf16-noisy: the
+# fp32 cosine is data-dependent (0.98 on 4 rows, 0.84 on one layer of 8 rows, no bug). rel_err < 5e-2 implies cosine >
+# 0.9987.
 ROUTER_TWIN_REL_TOL = 5e-2
 CLIP_NORM_REL_TOL = 5e-2  # vs fp32: the flipped tokens' grads genuinely differ between the two runs
 
 
 @dataclass
 class UnsplitReference:
-    """One unsplit model's full-batch backward, packaged for the equivalence checks.
-
-    ``slice_losses[r]`` is DP replica ``r``'s expected loss ``S_r / (G / dp)``: the ragged label
-    prefixes make the per-replica token counts unequal on purpose, and the PP trainer normalizes
-    every replica by the DP-global count ``G/dp``. The expert fields are populated only when the model
-    carries EP layers: expert parameters have no sharding-independent name (ETP and grouped-GEMM
-    split the fused ``gate_up_proj``), so they compare through :func:`gather_expert_grads` instead.
-    """
+    """One unsplit model's full-batch backward, packaged for the equivalence checks. ``slice_losses[r]`` is ``S_r / (G
+    / dp)``: ragged prefixes make replica token counts unequal, and the trainer normalizes by ``G/dp``. Expert
+    parameters have no sharding-independent name, so they compare through :func:`gather_expert_grads`."""
 
     grads: dict[str, torch.Tensor]
     param_names: set[str]
@@ -91,13 +76,9 @@ class UnsplitReference:
 def build_dense_model(
     tokenizer=None, *, vocab_size: int | None = None, attn_implementation: str | None = None
 ) -> Qwen3ForCausalLM:
-    """Tiny dense Qwen3, identical on every rank (fixed seed).
-
-    pad/eos ids must live inside the model's vocab: TRL copies the tokenizer's ids into the model
-    config, and the saved config would otherwise fail ``from_pretrained``'s padding_idx assert. With
-    no ``tokenizer`` the tiny config's own 1024-token vocab and ids 0/1 are used; a suite that
-    tokenizes with a real tokenizer passes it together with that checkpoint's ``vocab_size``.
-    """
+    """Tiny dense Qwen3, identical on every rank; a real ``tokenizer`` is passed with its checkpoint's ``vocab_size``.
+    Pad/eos ids must be in vocab: TRL copies them into the config, and the saved config would fail
+    ``from_pretrained``'s padding_idx assert."""
     torch.manual_seed(1234)
     config = TINY_QWEN3_CONFIG if vocab_size is None else {**TINY_QWEN3_CONFIG, "vocab_size": vocab_size}
     return Qwen3ForCausalLM(
@@ -111,20 +92,14 @@ def build_dense_model(
 
 
 def build_gptoss_model(dtype: torch.dtype = torch.bfloat16, **config_overrides) -> GptOssForCausalLM:
-    """Tiny GptOss, identical on every rank (fixed seed)."""
     torch.manual_seed(1234)
     config = GptOssConfig(**{**TINY_GPTOSS_CONFIG, **config_overrides}, pad_token_id=0, eos_token_id=1)
     return GptOssForCausalLM(config).to(dtype)
 
 
 def build_moe_model(dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
-    """Tiny GptOss with decisive routing, identical on every rank.
-
-    At init the router logits are near-tied, so the bf16 run and the reference flip top-k selections
-    for a few tokens — a data-dependent divergence that shifts whole-expert grad mass and has nothing to
-    do with the parallelism under test. Scaling the router weights ×16 (exact in any float dtype) widens
-    the logit gaps far past bf16 noise; the math compared (dispatch/combine/sync) is unchanged.
-    """
+    """Tiny GptOss, identical on every rank, with the router weights scaled x16. Near-tied logits at init flip top-k
+    picks between the bf16 run and the reference. The exact scale widens gaps past bf16 noise."""
     model = build_gptoss_model(dtype)
     with torch.no_grad():
         for layer in model.model.layers:
@@ -133,22 +108,21 @@ def build_moe_model(dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
 
 
 def build_patched_moe_model(config: ParallelismConfig, dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
-    """The MoE model carrying the config's EP layers + prepared (non-collective) EP buffers."""
     model = build_moe_model(dtype)
     apply_ep_layers(model, config.ep_config())
     return model
 
 
 def build_unmasked_batch(vocab_size: int, rows: int, seq_len: int = 32, device=None):
-    """Fixed random rows labelled with themselves: no ignored target, so every DP replica holds the
-    same token count and the per-replica normalization averages to the exact full-batch loss."""
+    """Rows labelled with themselves: no ignored target, so per-replica normalization averages to the exact full-batch
+    loss."""
     g = torch.Generator(device="cpu").manual_seed(99)
     input_ids = torch.randint(0, vocab_size, (rows, seq_len), generator=g).to(device)
     return input_ids, input_ids.clone()
 
 
 def build_ragged_batch(global_batch: int, seq_len: int = SEQ_LEN, seed: int = 7) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fixed random rows with ragged ignore prefixes: replicas hold unequal loss-token counts."""
+    """Rows with ragged ignore prefixes, so replicas hold unequal loss-token counts."""
     g = torch.Generator().manual_seed(seed)
     rows = torch.randint(4, RAGGED_BATCH_VOCAB_SIZE, (global_batch, seq_len), generator=g)
     labels = rows.clone()
@@ -158,8 +132,8 @@ def build_ragged_batch(global_batch: int, seq_len: int = SEQ_LEN, seed: int = 7)
 
 
 def causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor, reduction: str = "mean") -> torch.Tensor:
-    """The shifted next-token CE over the non-ignored targets, in fp32: token-count-normalized as the pipeline
-    runner computes it, or summed (``reduction="sum"``) for a caller that applies its own normalizer."""
+    """The shifted next-token CE in fp32: token-count-normalized as the runner computes it, or summed for a caller's
+    own normalizer."""
     shift_logits = logits[:, :-1, :]
     summed = F.cross_entropy(
         shift_logits.reshape(-1, shift_logits.size(-1)).float(),
@@ -171,8 +145,8 @@ def causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor, reduction: str = 
 
 
 def full_batch_eval_loss(model, eval_dataset: Dataset, batch_size: int, device=None) -> float:
-    """HF's ``eval_loss`` of ``model`` over ``eval_dataset`` in full batches of ``batch_size``: the mean of
-    the per-batch token-mean CEs (the reference a reloaded pipeline export must reproduce)."""
+    """HF's ``eval_loss`` in full batches: the mean of per-batch token-mean CEs, which a reloaded pipeline export must
+    reproduce."""
     batch_losses = []
     for start in range(0, len(eval_dataset), batch_size):
         batch = {
@@ -195,7 +169,6 @@ def token_ce_sums(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 
 
 def baseline_grads(model, input_ids: torch.Tensor, labels: torch.Tensor):
-    """Unsplit ``model`` over the full global batch: the reference loss, logits and per-name gradients."""
     logits = model(input_ids=input_ids).logits
     loss = causal_lm_loss(logits, labels)
     loss.backward()
@@ -204,8 +177,8 @@ def baseline_grads(model, input_ids: torch.Tensor, labels: torch.Tensor):
 
 
 def gather_stage_grads(stage, *, to_cpu: bool = False) -> dict[str, torch.Tensor]:
-    """COLLECTIVE (a DTensor gradient gathers over its mesh, in parameter order). Every stage gradient as a
-    full fp32 tensor keyed by its unsplit-model name; a parameter without one is left out."""
+    """COLLECTIVE (DTensor gathers, in parameter order). Every stage gradient as full fp32, keyed by its unsplit-model
+    name."""
     grads = {}
     for name, param in stage.named_parameters():
         if param.grad is not None:
@@ -215,23 +188,17 @@ def gather_stage_grads(stage, *, to_cpu: bool = False) -> dict[str, torch.Tensor
 
 
 def max_abs_grad_errors(grads: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]):
-    """Each gradient's :func:`max_abs_rel_err` against the reference of its name, and the worst one's name.
-
-    A non-finite error reads as inf, since a NaN would compare false against every bound; names the reference
-    lacks are left out.
-    """
+    """Each gradient's :func:`max_abs_rel_err` and the worst name; non-finite reads as inf, since a NaN compares false
+    against every bound."""
     errors = {name: max_abs_rel_err(grad, reference[name]) for name, grad in grads.items() if name in reference}
     errors = {name: err if math.isfinite(err) else math.inf for name, err in errors.items()}
     return errors, max(errors, key=errors.get, default=None)
 
 
 def count_checkpoint_calls(stage) -> list[int]:
-    """Wrap each stage layer's installed checkpoint function with a counter; returns ``[count]``.
-
-    Call after GC is enabled. The counter is the anti-vacuity gate for every GC leg: HF only
-    checkpoints a layer that is training with grad enabled, so a silently-skipped gate would otherwise
-    turn a GC run into a plain re-test of the non-GC path.
-    """
+    """Wrap each stage layer's checkpoint function with a counter; returns ``[count]``. Call after GC is enabled. The
+    anti-vacuity gate for GC legs: HF only checkpoints a training layer with grad on, so a skipped gate re-tests the
+    non-GC path."""
     calls = [0]
     for layer in stage.model.layers:
         inner = layer._gradient_checkpointing_func
@@ -245,8 +212,7 @@ def count_checkpoint_calls(stage) -> list[int]:
 
 
 def build_stage_groups(config: ParallelismConfig):
-    """COLLECTIVE (group creation). The stage's DP mesh (the ``dp`` half of a ``(pp, dp)`` mesh) and this
-    rank's pipeline chain group."""
+    """COLLECTIVE (group creation). The stage's DP mesh and this rank's pipeline chain group."""
     mesh = init_device_mesh("cuda", (config.pp_size, config.stage_world_size), mesh_dim_names=("pp", "dp"))
     return mesh["dp"], build_pipeline_group(config)
 
@@ -262,11 +228,8 @@ def build_runner_stage(
     gc: bool = False,
     **stage_kwargs,
 ):
-    """This rank's stage of ``model``, FSDP2-sharded per layer over the ``groups`` DP mesh and driven by a
-    ``PipelineRunner`` (``TokenLoss`` unless ``loss``); returns ``(stage, runner, gc_calls)``.
-
-    ``gc`` enables checkpointing before the wrap, as TRL does, behind :func:`count_checkpoint_calls`.
-    """
+    """This rank's stage, FSDP2-sharded per layer over the DP mesh and driven by a ``PipelineRunner``; returns
+    ``(stage, runner, gc_calls)``."""
     dp_mesh, pp_group = groups
     stage = build_pipeline_stage(model, config.pp_rank, config.pp_size, **stage_kwargs)
     gc_calls = [0]
@@ -281,8 +244,7 @@ def build_runner_stage(
 
 
 def snapshot_stage(stage, *, buffers: bool = False) -> tuple[dict[str, torch.Tensor], list[str]]:
-    """A copy of every stage parameter (and buffer, with ``buffers``) keyed by its unsplit-model name, and the
-    names of the tensors left on the meta device."""
+    """A copy of every stage parameter (and buffer) by unsplit-model name, and the names left on the meta device."""
     tensors, stranded = {}, []
     for name, tensor in [*stage.named_parameters(), *(stage.named_buffers() if buffers else ())]:
         if tensor is None:
@@ -295,9 +257,8 @@ def snapshot_stage(stage, *, buffers: bool = False) -> tuple[dict[str, torch.Ten
 
 
 def check_loss_vs_baseline(loss, baseline_loss, config: ParallelismConfig, groups, tol: float) -> tuple[dict, dict]:
-    """COLLECTIVE (world MAX). The last stage's DP-averaged loss (over the ``groups`` DP mesh) vs the unsplit
-    full-batch loss, asserted on every rank: only last-stage ranks hold a loss, and a check made on them alone
-    would vanish on the rank the harness reports from."""
+    """COLLECTIVE (world MAX). The last stage's DP-averaged loss vs the unsplit loss, asserted on every rank. Only
+    last-stage ranks hold a loss, and a check on them alone would vanish on the rank the harness reports from."""
     dp_mesh, _ = groups
     err = torch.zeros(1, device=baseline_loss.device)
     if config.is_last_pp_stage:
@@ -310,9 +271,8 @@ def check_loss_vs_baseline(loss, baseline_loss, config: ParallelismConfig, group
 
 
 def gather_expert_grads(layer: EPMoELayerBase, device="cpu") -> dict[str, torch.Tensor]:
-    """COLLECTIVE (the layer's expert gather). ``layer``'s expert gradients in its family's hub layout, whatever it
-    stores locally, so two runs compare in one layout. Raises on a missing gradient: gathering zeros for an expert
-    the backward never reached would make the comparison vacuous."""
+    """COLLECTIVE (the layer's expert gather). ``layer``'s expert gradients in its family's hub layout. Raises on a
+    missing gradient: gathering zeros for an expert the backward never reached makes the comparison vacuous."""
     grads = {}
     for name, param in layer.expert_named_params():
         if param.grad is None:
@@ -331,16 +291,9 @@ def rel_err(test: torch.Tensor, ref: torch.Tensor) -> float:
 def run_unsplit_reference(
     model, rows: torch.Tensor, labels: torch.Tensor, device, dp_size: int, row_kwargs: list[dict] | None = None
 ) -> UnsplitReference:
-    """Full-global-batch forward+backward on an unsplit model; grads keyed by global param name.
-
-    An EP-wrapped model additionally yields its experts through ``gather_expert_grads`` (no
-    collective at ``ep_group_size == 1``) so a distributed run can be compared shard-for-shard in
-    one canonical layout, and the expert parameter names so the name-keyed comparison can skip them.
-    ``row_kwargs`` runs each row as its own ``[1, L]`` forward with its kwargs (a packed row's positions and
-    segment markers) in place of the batch's all-ones mask, without a KV cache unless a row's kwargs ask for one, as
-    the SFT trainer and a pipeline stage run a training row: transformers reads restarting positions as documents
-    only where no cache is live.
-    """
+    """Full-global-batch forward+backward on an unsplit model; grads keyed by global param name. ``row_kwargs`` runs
+    each row as its own ``[1, L]`` forward, with no KV cache unless a row asks: transformers reads restarting positions
+    as documents only where no cache is live."""
     model.train()
     if row_kwargs is None:
         logits = model(input_ids=rows.to(device), attention_mask=torch.ones_like(rows).to(device)).logits
@@ -374,7 +327,7 @@ def run_unsplit_reference(
 
     ep_modules = named_ep_layers(model)
     expert_grads = {name: gather_expert_grads(m, device=device) for name, m in ep_modules}
-    # Under the GPT-OSS spelling only; another family's router compares by name with the other parameters.
+    # Under the GPT-OSS spelling only; another family's router compares by name.
     router_grads = {
         name: torch.cat(
             [grads[f"{name}.router.{p}"].float().flatten() for p in sorted(n for n, _ in m.router.named_parameters())]
@@ -397,9 +350,8 @@ def fp32_reference(rows: torch.Tensor, labels: torch.Tensor, device, dp_size: in
 
 
 def apply_single_process_ep1(model, rank: int, *, use_grouped_gemm: bool = True):
-    """``model`` with the ep1 EP layers on a single-process EPConfig whose hooks and dispatch stay inert;
-    stage_world_size=1 with stage_base_rank=rank keeps its group creation collective-consistent (every rank
-    creates every single-rank group in the same order)."""
+    """``model`` with ep1 EP layers on a single-process EPConfig; ``stage_base_rank=rank`` keeps group creation
+    collective-consistent."""
     config = EPConfig(
         ep_size=1,
         stage_world_size=1,
@@ -421,27 +373,22 @@ def ep1_reference(
     dtype: torch.dtype = torch.bfloat16,
     use_grouped_gemm: bool = True,
 ) -> UnsplitReference:
-    """Unsplit reference carrying the same ep1 EP layers, single-process.
-
-    At ``dtype=torch.float32`` with ``use_grouped_gemm=False`` this is the exact-arithmetic
-    reference an fp32 distributed run is gated against: the expert compute is the per-expert loop
-    over plain torch ops, so no kernel is asked to run outside the dtype it supports.
-    """
+    """Unsplit reference carrying the same ep1 EP layers, single-process. At fp32 with ``use_grouped_gemm=False`` this
+    is the exact-arithmetic reference: plain torch ops, no kernel outside its dtype."""
     model = apply_single_process_ep1(build_moe_model(dtype), rank, use_grouped_gemm=use_grouped_gemm)
     return run_unsplit_reference(model.to(device), rows, labels, device, dp_size)
 
 
 def bf16_twin_reference(ctx, rows: torch.Tensor, labels: torch.Tensor) -> UnsplitReference:
-    """bf16 ep1-wrapper twin: identical routing, grouped-mm kernels and expert-output rounding → tight
-    per-expert/router gates. Pins the process to the unfused expert-output sum first
-    (:func:`pin_unfused_expert_sum`), which the EP run under test then shares."""
+    """bf16 ep1 twin: identical routing, grouped-mm kernels and expert-output rounding, for tight per-expert and router
+    gates."""
     pin_unfused_expert_sum(ctx)
     return ep1_reference(rows, labels, ctx.device, dp_size=1, rank=ctx.rank)
 
 
 class _UnfusedWeightedUnpermute:
-    """:class:`~halo.kernels.moe_permute.MoEWeightedUnpermute`'s contract with each weighted expert row
-    rounded to the run dtype before an ``index_add`` sums a token's rows."""
+    """``MoEWeightedUnpermute``'s contract with each weighted row rounded to the run dtype before ``index_add`` sums
+    them."""
 
     @staticmethod
     def apply(expert_out, weights, sorted_token_idx, inv_map):
@@ -450,16 +397,9 @@ class _UnfusedWeightedUnpermute:
 
 
 def pin_unfused_expert_sum(ctx) -> None:
-    """Run every EP layer in this process on the unfused expert-output sum, which rounds each weighted
-    expert output to bf16 before adding. With two experts per token those two adds commute, so the ep1
-    twin and an EP run that splits a token's experts across ranks (each partial rounded, then summed by
-    DeepEP's combine) round alike; three or more would not.
-
-    The fused un-permute accumulates a rank's weighted rows in fp32 and rounds once, so the two runs
-    would round differently and near-tied top-k picks flip downstream. The permute's gather-reduce
-    backward needs no pin: it sums gradient rows that are already bf16, which two-way commutes the same.
-    The fused kernels' own numerics are gated by ``test_moe_permute`` and the family kernel-stack numerics.
-    """
+    """Run every EP layer in this process on the unfused expert-output sum, rounding each weighted output to bf16
+    before adding. Two adds commute, so the ep1 twin and an EP run splitting a token's experts across ranks round
+    alike; three would not. The fused un-permute rounds once, so near-tied picks would flip downstream."""
     patcher = mock.patch.object(compute, "MoEWeightedUnpermute", _UnfusedWeightedUnpermute)
     patcher.start()
     ctx.on_teardown(patcher.stop)
@@ -480,7 +420,7 @@ def build_pp_sft_trainer(
     moe_balancing: str = "auto",
     bf16: bool = True,
 ):
-    """The real DistributedSFTTrainer over the PP config (the trainer splits the model itself)."""
+    """The real DistributedSFTTrainer over the PP config; the trainer splits the model itself."""
     args = SFTConfig(
         output_dir=ctx.output_dir,
         max_steps=max_steps,
@@ -513,7 +453,6 @@ def build_pp_sft_trainer(
 
 
 def dp_slice_batch(rows: torch.Tensor, labels: torch.Tensor, dp_rank: int, per_device_batch: int) -> dict:
-    """This DP replica's slice of the global batch (every rank of a chain gets the same slice)."""
     sl = slice(dp_rank * per_device_batch, (dp_rank + 1) * per_device_batch)
     return {
         "input_ids": rows[sl],
@@ -525,18 +464,15 @@ def dp_slice_batch(rows: torch.Tensor, labels: torch.Tensor, dp_rank: int, per_d
 def check_loss_vs_reference(
     loss, reference: UnsplitReference, dp_rank: int, tol: float = LOSS_REL_TOL
 ) -> tuple[dict, dict]:
-    """Per-replica loss vs the reference slice loss."""
     expected = reference.slice_losses[dp_rank]
     loss_err = abs(float(loss) - expected) / abs(expected)
     return {"loss_matches_reference": loss_err < tol}, {"loss_rel_err": loss_err}
 
 
 def score_stage_grads_vs_reference(ctx, stage, reference: UnsplitReference, checks: dict, metrics: dict) -> None:
-    """COLLECTIVE (world all-gather). Score every gradient ``stage`` holds against ``reference`` by its unsplit name:
-    non-expert parameters directly (a DTensor gathers over its mesh, in parameter order on every rank), expert banks
-    in the family's hub layout through the export's gather. Scored by direction and norm ratio, a gradient under
-    ``TOL.grad_negligible_layer_fraction`` of its decoder layer's largest held to that floor as absolute error, and the
-    stages together must compare every gradient the reference holds."""
+    """COLLECTIVE (world all-gather). Score every gradient ``stage`` holds against ``reference`` by its unsplit name.
+    Direction and norm ratio; under ``TOL.grad_negligible_layer_fraction``, absolute error. The stages together must
+    cover the reference."""
     ep_modules = named_ep_layers(stage)
     expert_ids = {id(param) for _, module in ep_modules for _, param in module.expert_named_params()}
     pairs, compared = {}, set()
@@ -594,14 +530,8 @@ def check_router_grads(
     twin_router_grads: dict[str, torch.Tensor] | None = None,
     twin_tol: float = ROUTER_TWIN_REL_TOL,
 ) -> tuple[dict, dict]:
-    """Router grads: bit-identical across the stage's ranks, plus a gate vs the references.
-
-    Without a twin, the fp32 reference carries both scale and direction (norm-ratio band +
-    cosine). With ``twin_router_grads``, direction moves to the tight twin rel-err gate
-    (``router_grads_match_twin``) and the fp32 reference keeps only the absolute norm-ratio band —
-    the fp32 cosine on the saturated router's tiny grads is bf16-noise-dominated and
-    data-dependent (see :data:`ROUTER_TWIN_REL_TOL`); it stays reported as a metric.
-    """
+    """Router grads: bit-identical across the stage's ranks, plus a gate vs the references. With ``twin_router_grads``
+    direction moves to the tight twin gate and fp32 keeps only the norm band (see :data:`ROUTER_TWIN_REL_TOL`)."""
     router_ok, router_identical, twin_ok = True, True, True
     worst_ratio, worst_cos, worst_twin_err = 1.0, 1.0, 0.0
     for local_name, module in ep_modules:
@@ -644,14 +574,8 @@ def check_expert_grads_vs_reference(
     *,
     tol: float = EXPERT_GRAD_REL_TOL,
 ) -> tuple[dict, dict]:
-    """Expert grads: reassemble this rank's shards with the layer's own gather, compare per expert.
-
-    Both sides go through ``gather_expert_grads``, so the comparison follows the layout the family
-    actually holds instead of a hardcoded attribute list — which under ETP names attributes that do
-    not exist and silently compares nothing. The gather is collective over the expert-TP and
-    dispatch groups; ``down_proj_bias`` lives on expert-TP rank 0 only, so a rank's key set can be a
-    strict subset of the reference's and coverage is pinned world-wide rather than per rank.
-    """
+    """Compare per expert via both sides' ``gather_expert_grads``; a hardcoded attribute list compares nothing under
+    ETP. ``down_proj_bias`` lives on expert-TP rank 0 only, so coverage is pinned world-wide rather than per rank."""
     num_experts = TINY_GPTOSS_CONFIG["num_local_experts"]
     expert_ok, compared_tensors, experts_covered = True, 0, 0
     errs, failures, compared_keys = [], [], set()
@@ -703,14 +627,8 @@ def check_expert_grads_vs_reference(
 def compare_stage_grads_vs_reference(
     ctx, stage, reference: UnsplitReference, tol: float, *, exclude_experts: bool = False
 ) -> tuple[dict, dict]:
-    """Every stage param's grad vs the reference via global names (+ world-wide name-union cover).
-
-    DTensor grads are gathered with ``full_tensor()`` (collective over their mesh); the union of
-    stage param names across the world must cover the reference exactly — nothing dropped by the
-    split, nothing double-owned under a wrong name. ``exclude_experts`` drops the EP layers' expert
-    weights from both sides, for a run that shards the experts along an axis the reference does not
-    (neither name nor shape then matches); :func:`check_expert_grads_vs_reference` covers them instead.
-    """
+    """Every stage param's grad vs the reference by global name; the world-wide name union must cover it exactly.
+    ``exclude_experts`` drops expert weights for a run sharding them along an axis the reference does not."""
     skip_ids = (
         {id(p) for m in stage.modules() if isinstance(m, EPMoELayerBase) for _, p in m.expert_named_params()}
         if exclude_experts
@@ -732,7 +650,7 @@ def compare_stage_grads_vs_reference(
             grads_ok = False
             continue
         err = rel_err(full, ref)
-        # A NaN compares false against every bound, so a non-finite error counts as infinite.
+        # A NaN compares false against every bound.
         err = err if math.isfinite(err) else math.inf
         if err > worst_err:
             worst_err, worst_name = err, global_name
@@ -755,7 +673,7 @@ def compare_stage_grads_vs_reference(
 
 
 def check_clip_norm(ctx, clip_norm, reference: UnsplitReference, tol: float = CLIP_NORM_REL_TOL) -> tuple[dict, dict]:
-    """Clip norm: one identical value on every rank, matching the reference total norm."""
+    """One identical value on every rank, matching the reference total norm."""
     norm_t = clip_norm.detach().float().reshape(1).to(ctx.device)
     spread = world_spread(float(norm_t), device=ctx.device)
     ref_total_norm = reference.total_norm
@@ -767,8 +685,8 @@ def check_clip_norm(ctx, clip_norm, reference: UnsplitReference, tol: float = CL
 
 
 def check_gc_engaged(stage, calls: list[int], n_microbatches: int) -> tuple[dict, dict]:
-    """Every stage layer checkpointed on every microbatch forward (torch's one-time shape-inference
-    pass may add one more sweep)."""
+    """Every stage layer checkpointed on every microbatch forward; torch's shape-inference pass may add one more
+    sweep."""
     n_layers = len(stage.model.layers)
     lo = n_layers * n_microbatches
     return (
@@ -780,15 +698,10 @@ def check_gc_engaged(stage, calls: list[int], n_microbatches: int) -> tuple[dict
 def check_expert_load_counts(
     stage, ep_modules: list, calls: list[int], tokens_per_forward: int, n_microbatches: int
 ) -> tuple[dict, dict]:
-    """Expert-load accounting: exactly one count per (token, top-k slot) of every training forward.
-
-    An unrecognised checkpoint recompute re-runs the router and doubles every layer's counter —
-    invisible in the loss, corrupting the ``moe/*`` metrics and the bias_update balancing itself. The
-    pipeline's no-grad shape-inference forward must not count either (the rule that keeps a KL-reference
-    forward out of the balancing signal), so the expected total is calibrated on the grad-driven
-    microbatches, while ``calls`` proves how many forwards ran at all. Requires
-    :meth:`enable_bias_balancing` on the layers before the step.
-    """
+    """Exactly one expert-load count per (token, top-k slot) of every training forward. Needs
+    :meth:`enable_bias_balancing` first. A checkpoint recompute that re-runs the router doubles the counters, invisible
+    in the loss but corrupting ``moe/*`` and bias_update. The pipeline's no-grad shape-inference forward must not count
+    either."""
     total_forwards = calls[0] // len(stage.model.layers)
     expected = tokens_per_forward * TINY_GPTOSS_CONFIG["num_experts_per_tok"] * n_microbatches
     counts = {name: float(module.expert_load_counter.sum()) for name, module in ep_modules}
@@ -806,7 +719,7 @@ def check_expert_load_counts(
 
 
 def second_step_dispatch_works(trainer, batch: dict, first_loss) -> bool:
-    """A second step proves the kept layers' DeepEP dispatch still works after the stage split."""
+    """A second step proves the kept layers' DeepEP dispatch still works after the split."""
     for p in trainer.model.parameters():
         p.grad = None
     trainer.state.global_step = 1  # the deferred sweep's double-run guard keys on the step

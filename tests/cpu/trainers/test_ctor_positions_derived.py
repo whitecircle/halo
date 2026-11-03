@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""The trainer ctor position tables are DERIVED from the installed TRL signatures.
-
-A hand-maintained ``{"data_collator": 2}`` silently reads a neighbouring argument the release after
-TRL inserts a parameter; ``ctor_positions`` must follow the signature instead, and fail loud when
-the parameter disappears from it.
-
-The per-trainer slots below are pinned as LITERALS read off TRL 1.14.2's signatures — recomputing
-``params.index(...)`` here would assert the derivation against itself. A TRL bump that moves one of
-these parameters fails this test, which is the point: the gates that read them (SFT's CP collator
-rejection, DPO/KTO's EP/TP reference rejection, the mixin's positional model/config) would otherwise
-gate on the wrong argument.
-
-Run: ``python tests/cpu/trainers/test_ctor_positions_derived.py`` (or ``pytest -m cpu``).
-"""
+"""Trainer ctor position tables derive from the installed TRL signatures and fail loud when a parameter disappears.
+Slots are literals off TRL 1.14.2; recomputing ``params.index(...)`` would test the derivation against itself."""
 
 import pytest
 
@@ -58,7 +46,7 @@ def test_ctor_config_reads_the_slot_of_the_forwarded_base():
 
 
 def test_ctor_config_falls_through_an_explicit_none_keyword():
-    """Load-bearing at ``require_vllm_server_mode``: ``args=None`` must not mask a positional config."""
+    """``require_vllm_server_mode`` relies on it: ``args=None`` must not mask a positional config."""
     config = object()
     assert get_ctor_config((None, None, config), {"args": None}, GRPO_CTOR_POSITIONS) is config
     assert get_ctor_config((), {"args": config}, GRPO_CTOR_POSITIONS) is config
@@ -66,8 +54,7 @@ def test_ctor_config_falls_through_an_explicit_none_keyword():
 
 
 def test_positionals_without_a_slot_table_raise():
-    """Keywords resolve without a table; positionals cannot, and skipping them would silently drop the
-    setup that reads the model and the config."""
+    """Positionals can't resolve without a table, and skipping them would silently drop the model and config setup."""
     model, config = object(), object()
     assert get_ctor_model_and_config((), {"model": model, "args": config}, None) == (model, config)
     with pytest.raises(ValueError, match="without a ctor_positions table"):
@@ -75,7 +62,6 @@ def test_positionals_without_a_slot_table_raise():
 
 
 def test_gate_extracts_the_passed_collator():
-    """The value the CP gate reads must be the collator the caller passed — either way in."""
     collator = object()
     ctor_args: list = [None] * (SFT_CTOR_POSITIONS["data_collator"] + 1)
     ctor_args[SFT_CTOR_POSITIONS["data_collator"]] = collator
@@ -84,7 +70,6 @@ def test_gate_extracts_the_passed_collator():
 
 
 def test_gate_extracts_the_passed_reference_model():
-    """The DPO/KTO EP/TP reference gate reads ``ref_model`` out of the same positional slot."""
     ref = object()
     assert get_ctor_arg((None, ref), {}, "ref_model", DPO_CTOR_POSITIONS) is ref
     assert get_ctor_arg((None, ref), {}, "ref_model", KTO_CTOR_POSITIONS) is ref
@@ -92,8 +77,6 @@ def test_gate_extracts_the_passed_reference_model():
 
 
 def test_derivation_follows_a_shifted_signature():
-    """Simulate the TRL insertion that breaks a hand table: the derived slot must move with it."""
-
     class _Base:
         def __init__(self, model, args=None, data_collator=None):
             pass
@@ -113,8 +96,6 @@ def test_derivation_follows_a_shifted_signature():
 
 
 def test_a_varargs_signature_declares_no_slot():
-    """A ``(*args, **kwargs)`` constructor names no parameter, so its slots are refused, not guessed."""
-
     class _Real:
         def __init__(self, model, ref_model=None, args=None):
             pass
@@ -128,8 +109,6 @@ def test_a_varargs_signature_declares_no_slot():
 
 
 def test_missing_parameter_fails_loud():
-    """A name the installed signature does not declare must raise, not gate on a guessed slot."""
-
     class _NoCollator:
         def __init__(self, model, args=None):
             pass

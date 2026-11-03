@@ -1,9 +1,5 @@
-"""On-policy SDPG trainer (Self-Distilled Policy Gradient, arXiv:2606.04036): ``L = L_GRPO + beta(k) * L_OPD``.
-
-The same policy, run under ``torch.no_grad`` on a hint revealing the gold ``answer``, is the privileged
-teacher; the student is distilled toward its full-vocab distribution by reverse KL ``D_KL(p ‖ SG[q])``,
-gated to positive-advantage rollouts. Text-only (the hint is tokenizer-built).
-"""
+"""On-policy SDPG (arXiv:2606.04036): ``L = L_GRPO + beta(k) * L_OPD``. The same policy, no-grad on a hint revealing
+the gold ``answer``, is the teacher of a reverse KL gated to positive-advantage rollouts. Text-only."""
 
 import logging
 
@@ -27,8 +23,7 @@ def positive_advantage_gate(
     advantages: torch.Tensor,
     enabled: bool,
 ) -> torch.Tensor:
-    """The OPD token gate: the trained completion tokens of ``loss_mask`` ``[B, C]``, restricted when ``enabled``
-    to rows whose ``advantages`` (``[B]`` or ``[B, 1]``) are strictly positive. A zero advantage is a tied or
+    """``loss_mask``, restricted when ``enabled`` to rows of strictly positive advantage. A zero advantage is a tied or
     unscorable group, where the verifier expressed no preference to pull the student toward."""
     if not enabled:
         return loss_mask
@@ -37,8 +32,6 @@ def positive_advantage_gate(
 
 
 class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnlineGRPOTrainer):
-    """On-policy SDPG: online GRPO + privileged-teacher reverse-KL OPD on positive-advantage rollouts."""
-
     _tag_names = ["trl", "grpo", "sdpg"]
 
     PP_REFUSAL = (
@@ -60,7 +53,6 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         self._adopt_sdpg_arguments(kwargs)
         self.sdpg_answer_field = sdpg_answer_field
         self.opd_positive_advantage_only = opd_positive_advantage_only
-        # Warned once for the whole run: a single answer-less row means the column is unusable.
         self._warned_missing_answer: set = set()
 
         super().__init__(*args, **kwargs)
@@ -94,7 +86,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         return output
 
     def _build_teacher_prompts(self, prompt_ids, prompt_mask, answers):
-        """Left-padded ``[prompt + hint]`` token ids per rollout row (hint reveals the gold answer)."""
+        """Left-padded ``[prompt + hint]`` token ids per rollout row."""
         tok = resolve_tokenizer(self.processing_class)
         rows = []
         for i in range(prompt_ids.size(0)):
@@ -161,27 +153,20 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         gate = positive_advantage_gate(
             effective_loss_mask(inputs).to(opd_per_token.dtype), inputs["advantages"], self.opd_positive_advantage_only
         )
-        # Rows padding an eval split's final round repeat its first rows: the OPD mean reads the
-        # split's own (in train, the whole batch, unsliced).
+        # Rows padding an eval split's final round repeat its first rows, so the OPD mean reads the split's own.
         real_rows = self.eval_split_rows(gate.size(0))
         opd = global_token_mean(split_rows_head(opd_per_token, real_rows), split_rows_head(gate, real_rows))
 
         beta = self._opd_beta()
         self.store_batch_metrics(self._opd_metrics(opd, beta), "train" if model.training else "eval", real_rows)
-        # TRL normalizes inside _compute_loss, so an undivided per-microbatch OPD mean inflates beta
-        # by grad_accum.
+        # TRL normalizes inside _compute_loss, so an undivided per-microbatch OPD mean inflates beta by grad_accum.
         if model.training:
             opd = opd / self.current_gradient_accumulation_steps
         return loss + beta * opd
 
     def _completion_logits(self, model, prefix_ids, prefix_mask, completion_ids, completion_mask):
-        """Full-vocab logits predicting each completion token of ``[prefix + completion]`` → ``[B, C, V]``.
-
-        Where the forward takes ``logits_to_keep`` (TRL's ``model_kwarg_keys``, as its own GRPO forward
-        reads them) the head stops at the last ``C + 1`` positions, so the prompt's ``[B, P, V]`` rows are
-        never built. The prefixes differ in length; aligning on the sequence end pairs these rows with the
-        loss forward's.
-        """
+        """``[B, C, V]``. Where the forward takes ``logits_to_keep`` the prompt's rows are never built. The prefixes
+        differ in length; aligning on the sequence end pairs these rows with the loss forward's."""
         keep = completion_ids.size(1) + 1
         input_ids = torch.cat([prefix_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prefix_mask, completion_mask], dim=1)

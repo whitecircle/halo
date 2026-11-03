@@ -1,26 +1,7 @@
 #!/usr/bin/env python
-"""The flex-sliding attention on every masked causal layer of a sliding-window model: Step-3.7's full layers
-take FlexAttention under their packed (document-causal) or padded mask beside its sliding layers, and Gemma 4's
-head_dim-512 global layers past the matmul budget take mem-efficient attention per packed document.
-
-* A tiny Step-3.7 (full and sliding layers, per-layer head counts) on packed rows longer than its window,
-  and on a right-padded batch, reproduces the SDPA model's loss and every gradient, with every layer on
-  FlexAttention; on a single unpadded document its full layers, which then get no mask, keep SDPA.
-* At Step-3.7's real attention shapes (head_dim 128, 12 and 8 query heads per KV head, window 512, bf16),
-  the compiled kernel's output and input gradients against a per-document fp64 reference are no worse than
-  mem-efficient SDPA's on the dense mask, full and sliding calls alike.
-* A packed document's output is bitwise independent of every other document in its row.
-* After the load-time warm-up, no packed length, batch, grad mode or ``no_grad`` pass compiles, nor a call
-  carrying a tensor-parallel rank's share of a module's heads, which keeps SDPA instead.
-* A tiny Gemma 4 with 512-wide global layers, past the matmul budget, reproduces the SDPA model's loss and every
-  gradient on packed rows with its global layers on the per-document kernel, compiling nothing after the
-  warm-up; a padded row's global layers keep SDPA.
-* At Gemma 4's global shapes (head_dim 512, 8 query heads per KV head, ``scaling`` 1.0 over RMS-normed heads,
-  bf16) on two packed rows, the per-document kernel's output and input gradients against a per-document fp64
-  reference are no worse than mem-efficient SDPA's on the dense mask, and a document's output is bitwise
-  independent of the others.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_flex_masked_layers.py
+"""The flex-sliding attention on every masked causal layer: Step-3.7's full layers on FlexAttention, and Gemma 4's
+head_dim-512 global layers past the matmul budget on the per-document kernel. Outputs stay within SDPA's error against
+fp64, documents stay bitwise isolated, and nothing compiles after the warm-up.
 """
 
 from unittest.mock import patch
@@ -54,8 +35,7 @@ def _step3p7(attn: str) -> Step3p7ForConditionalGeneration:
 
 
 def _counting(function, calls: list):
-    """``function``, appending to ``calls`` on each call: proof the path under test ran, where a silent
-    fallback to SDPA would reproduce the SDPA model exactly."""
+    """Proof the path under test ran: a silent fallback to SDPA would reproduce the SDPA model exactly."""
     return lambda *args, **kwargs: calls.append(1) or function(*args, **kwargs)
 
 
@@ -89,8 +69,7 @@ def _document_mask(lengths: list[int], window: int | None) -> torch.Tensor:
 
 
 def test_step3p7_matches_sdpa(batch: dict, flex_calls: int):
-    """Uncompiled (fp32-exact) FlexAttention in place of the compiled kernel: the model must reproduce the SDPA
-    model's loss and every gradient to fp32 round-off, with ``flex_calls`` layers on FlexAttention."""
+    """Uncompiled (fp32-exact) FlexAttention must match to fp32 round-off, with ``flex_calls`` layers on it."""
     name = register_flex_sliding_attention()
     torch.manual_seed(0)
     reference = _step3p7("sdpa").float()
@@ -112,10 +91,8 @@ def _errors(out, grads, expected, expected_grads):
 
 
 def test_real_shapes_match_fp64_no_worse_than_sdpa():
-    """Step-3.7's attention shapes on a packed 4,096-token row, compiled kernel, bf16: against fp64 per-document
-    attention, the output and the query, key and value gradients stay within 1.5x the error of mem-efficient
-    SDPA over the same dense mask. Head counts are cut to one KV head per call (the ratios kept) so the fp64
-    reference fits; the kernel's numerics do not depend on the count."""
+    """Within 1.5x mem-efficient SDPA's error against fp64 per-document attention. Head counts are cut to one KV head
+    per call so the reference fits; the kernel's numerics do not depend on the count."""
     lengths = [1500, 900, 1200, 496]
     seq = sum(lengths)
     for group, window in ((12, 512), (8, None)):
@@ -159,8 +136,7 @@ def test_real_shapes_match_fp64_no_worse_than_sdpa():
 
 
 def test_documents_are_isolated_bitwise():
-    """Perturbing one packed document's queries, keys and values leaves every other document's output bitwise
-    unchanged, on a full call and a sliding call (the premise: the perturbed document's own output moves)."""
+    """On a full and a sliding call (the premise: the perturbed document's own output moves)."""
     lengths = [700, 300, 500]
     seq, first = sum(lengths), lengths[0]
     for window in (None, 256):
@@ -189,9 +165,8 @@ def test_documents_are_isolated_bitwise():
 
 
 def test_one_warmup_serves_a_step3p7_run():
-    """The warm-up compiles a training and a forward-only graph per call the model's layers make (a full and a
-    sliding one here); after it, forwards and backwards over other packed lengths and a padded batch, and
-    forward-only passes, compile nothing."""
+    """The warm-up compiles a training and a forward-only graph per call the model's layers make; after it nothing
+    compiles."""
     name = register_flex_sliding_attention()
     torch.manual_seed(0)
     model = _step3p7(name).to(torch.bfloat16)
@@ -200,7 +175,7 @@ def test_one_warmup_serves_a_step3p7_run():
     counters.clear()
     warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
     calls = sdpa_flex_sliding.flex_attention_calls(model)
-    assert len(calls) == 2, calls  # premise: one full and one sliding signature
+    assert len(calls) == 2, calls  # Premise: one full and one sliding signature.
     flex = []
     with (
         patch.object(torch._dynamo.config, "error_on_recompile", True),
@@ -216,10 +191,8 @@ def test_one_warmup_serves_a_step3p7_run():
 
 
 def test_a_tensor_parallel_share_of_the_heads_compiles_nothing():
-    """Under tensor parallelism a rank's call carries its share of the module's heads (tp=2 here: half the
-    query and half the KV heads), which the warm-up, reading the module, does not compile. After the warm-up
-    such a call, forward and backward, must compile nothing (Dynamo raises on any compile here) and match SDPA
-    over the same mask, while the module's own call runs FlexAttention (the premise)."""
+    """A TP rank's call carries its share of the heads, which the warm-up does not compile. Such a call must compile
+    nothing (Dynamo raises on any compile here) and match SDPA, while the module's own call runs FlexAttention."""
     name = register_flex_sliding_attention()
     torch.manual_seed(0)
     model = _step3p7(name).to(torch.bfloat16)
@@ -273,9 +246,8 @@ def _gemma4(attn: str) -> Gemma4ForCausalLM:
 
 
 def test_gemma4_packed_globals_match_sdpa(batch: dict, varlen_calls: int):
-    """Past the matmul budget (patched to 0) the 512-wide global layers of a packed row must run the per-document
-    kernel, ``varlen_calls`` times, and the model must reproduce the SDPA model's loss and every gradient (fp32;
-    both on the mem-efficient kernel, the process pinned as the Gemma 4 loader pins it)."""
+    """Past the matmul budget (patched to 0) the global layers run the per-document kernel, ``varlen_calls`` times, and
+    match SDPA, both on the mem-efficient kernel as the Gemma 4 loader pins it."""
     patch_sdpa_for_wide_heads()
     name = register_flex_sliding_attention()
     torch.manual_seed(0)
@@ -299,8 +271,7 @@ def test_gemma4_packed_globals_match_sdpa(batch: dict, varlen_calls: int):
 
 
 def test_a_warmed_gemma4_past_the_budget_runs_without_compiling():
-    """The per-document kernel compiles nothing: after the warm-up, packed forwards and backwards over several
-    lengths and a forward-only pass, with the global layers on it, leave the warm-up's graphs the only ones."""
+    """After the warm-up, packed forwards and backwards and a forward-only pass leave its graphs the only ones."""
     patch_sdpa_for_wide_heads()
     name = register_flex_sliding_attention()
     torch.manual_seed(0)
@@ -335,8 +306,7 @@ def _rms_normed(*shape, generator) -> torch.Tensor:
 
 
 def _per_document_reference(q, k, v, rows: list[list[int]], scale: float) -> torch.Tensor:
-    """fp64 causal attention run on each document alone (KV repeated per group), ``[B, S, H, D]``. On the math
-    kernel, the only one taking fp64, which the Gemma 4 checks' process-wide SDPA pin turns off."""
+    """On the math kernel, the only one taking fp64, which the Gemma 4 checks' process-wide SDPA pin turns off."""
     group = q.shape[1] // k.shape[1]
     out = []
     with sdpa_kernel([SDPBackend.MATH]):
@@ -363,10 +333,8 @@ def _packed_rows_mask(rows: list[list[int]]) -> torch.Tensor:
 
 
 def test_gemma4_global_shapes_match_fp64_no_worse_than_sdpa():
-    """Two packed 4,096-token rows (different splits, so the boundaries cross the batch), Gemma 4's global shapes,
-    bf16, past the budget: against fp64 per-document attention the per-document kernel's output and query, key
-    and value gradients stay within 1.5x the error of mem-efficient SDPA over the same dense mask. One KV head
-    with its 8 query heads (Gemma 4's ratio) keeps the reference small."""
+    """Within 1.5x mem-efficient SDPA's error against fp64. Different splits, so the boundaries cross the batch. One KV
+    head with its 8 query heads (Gemma 4's ratio) keeps the reference small."""
     rows = [[1500, 900, 1200, 496], [4000, 96]]
     group, seq, dim, scale = 8, 4096, 512, 1.0
     generator = torch.Generator(device="cuda").manual_seed(0)
@@ -409,8 +377,7 @@ def test_gemma4_global_shapes_match_fp64_no_worse_than_sdpa():
 
 
 def test_gemma4_global_documents_are_isolated_bitwise():
-    """Perturbing one packed document leaves every other document's per-document output bitwise unchanged,
-    including the second row's (the premise: the perturbed document's own output moves)."""
+    """Including the second row's (the premise: the perturbed document's own output moves)."""
     rows = [[700, 300, 500], [1000, 500]]
     seq, first, group = 1500, 700, 8
     generator = torch.Generator(device="cuda").manual_seed(1)
@@ -445,7 +412,7 @@ def run(ctx) -> dict:
         "step3p7_single_document_full_layers_keep_sdpa",
         lambda: test_step3p7_matches_sdpa(_packed([300]), flex_calls=LAYERS // 2),
     )
-    # Each of the two rows runs alone, so every layer calls FlexAttention once per row.
+    # Each row runs alone, so every layer calls FlexAttention once per row.
     record_check(
         checks,
         "step3p7_padded_matches_sdpa",

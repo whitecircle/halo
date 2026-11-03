@@ -1,9 +1,5 @@
-"""The two reads a resume shares: a file the whole world must agree on (:func:`consensus_read`) and a
-checkpoint's shards opened on every rank (:func:`joined_streaming_reader`).
-
-Both join their verdict before any rank branches on it; the absent-everywhere policy stays with the
-caller, because only it knows whether nothing-to-restore is legitimate.
-"""
+"""The two reads a resume shares: a file the world must agree on, and a checkpoint's shards opened on every rank. Both
+join their verdict before any rank branches on it; the absent-everywhere policy stays with the caller."""
 
 from __future__ import annotations
 
@@ -36,14 +32,10 @@ def consensus_read(
     checkpoint: str,
     remedy: str = "",
 ) -> tuple[Any, str | None]:
-    """COLLECTIVE, twice. Agree a resume input is on every rank, then agree every rank read it.
-
-    Returns ``(value, path)``, or ``(None, None)`` when the file is absent on EVERY rank, the one outcome
-    the caller decides for itself. Present on a subset, or unreadable anywhere, raises on every rank;
-    ``remedy`` appends the caller's way out. Of alternative ``paths`` (an adapter's safetensors or bin)
-    the first present on every rank wins: a first-local pick lets two nodes read the same tensors in a
-    different key order, and a per-key mesh collective then deadlocks.
-    """
+    """COLLECTIVE, twice. Agree a resume input is on every rank, then that every rank read it. Returns
+    ``(value, path)``, or ``(None, None)`` when absent on EVERY rank; a subset or an unreadable copy raises everywhere.
+    Of alternative ``paths`` the first present on every rank wins, since a first-local pick can give two nodes
+    different key orders and deadlock a per-key mesh collective."""
     candidates = (paths,) if isinstance(paths, str) else tuple(paths)
     presence = [rank_consensus(os.path.isfile(path)) for path in candidates]
     local_path = next((path for path, present in zip(candidates, presence, strict=True) if present.all_ok), None)
@@ -69,9 +61,8 @@ def consensus_read(
 
 @contextmanager
 def joined_streaming_reader(checkpoint: str, keys: Iterable[str] | None, *, what: str) -> Iterator[Any]:
-    """COLLECTIVE. Open the checkpoint's shards for ``keys`` (``None``: every key), agree every rank opened
-    them, close on exit. Opening is what validates a torn shard, so the verdict is joined before the
-    caller's own collectives; the reader then serves one tensor at a time."""
+    """COLLECTIVE. Open the shards for ``keys`` (``None``: every key) and agree every rank opened them; opening is what
+    validates a torn shard, so the verdict is joined before the caller's own collectives."""
     reader: StreamingCheckpointReader | None = None
     read_error: Exception | None = None
     try:
@@ -89,7 +80,6 @@ def joined_streaming_reader(checkpoint: str, keys: Iterable[str] | None, *, what
 
 
 def reject_ep_sharded_resume(checkpoint: str) -> None:
-    """COLLECTIVE (rank 0's probe). Refuse a resume from a per-rank EP-sharded save, whose intact files hold
-    partial tensors."""
+    """COLLECTIVE (rank 0's probe). Refuse a per-rank EP-sharded save, whose intact files hold partial tensors."""
     if rank0_verdict(partial(is_ep_sharded_checkpoint, checkpoint), f"Probing {checkpoint} for per-rank EP shards"):
         raise ValueError(ep_sharded_checkpoint_reason(checkpoint))

@@ -1,5 +1,4 @@
-"""Offline GRPO batch collation: a tokenized prompt/completion group padded to the batch layout
-``OfflineGRPOTrainer.compute_loss`` expects."""
+"""Offline GRPO batch collation to the layout ``OfflineGRPOTrainer.compute_loss`` expects."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -18,7 +17,6 @@ REF_PER_TOKEN_LOGPS_COLUMN = "ref_per_token_logps"
 
 
 def _group_tensors(features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-    """The per-row group metadata the GRPO loss reads, carried into the batch unchanged by both layouts."""
     return {
         column: torch.tensor([row[column] for row in features]) for column in ("group_id", "group_size", "advantage")
     }
@@ -45,7 +43,7 @@ def _has_reference_rows(features: list[dict[str, Any]]) -> bool:
 
 @dataclass
 class OfflineGRPODataCollatorWithPadding:
-    """Pads tokenized prompt/completion inputs to the batch's max length (prompts left-padded)."""
+    """Pads to the batch's max length, prompts left-padded."""
 
     pad_token_id: int = 0
 

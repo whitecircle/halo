@@ -1,6 +1,5 @@
-"""OpenAI chat-completions wire format for the rollout engines (vLLM and SGLang): a turn's request fields and the
-turn a reply reports, the captures included, which the two engines request and return in different places.
-Transport belongs to the rollout drivers."""
+"""OpenAI chat-completions wire format for the rollout engines: a turn's request fields and the turn a reply reports,
+which vLLM and SGLang request and return in different places."""
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -20,24 +19,20 @@ from halo.log import warn_once
 
 logger = logging.getLogger(__name__)
 
-# Backends already warned (once per process) that a per-effort thinking budget reaches no engine field, that
-# their completions carry no ``usage.completion_tokens``, and that a cut call's text could not be decoded.
 _thinking_budget_unenforced_warned: set[str] = set()
 _completion_tokens_missing_warned: set[str] = set()
 _cut_call_decode_failed_warned: set[str] = set()
 
 
 def _logprob_entries(choice: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """A choice's per-token ``logprobs.content`` entries, or None when the server returned none; ``[]`` is a
-    zero-token completion whose capture succeeded."""
+    """``None`` when the server returned none; ``[]`` is a zero-token completion whose capture succeeded."""
     content = (choice.get("logprobs") or {}).get("content")
     return content if isinstance(content, list) else None
 
 
 def _extract_token_ids(choice: dict[str, Any]) -> list[int] | None:
-    """Recover the sampled generation token ids from a choice's per-token logprobs. With
-    ``--return-tokens-as-token-ids`` each entry's ``token`` is ``"token_id:<N>"``; parse the ints.
-    Returns None if logprobs are absent or malformed, so the caller falls back to re-tokenization."""
+    """With ``--return-tokens-as-token-ids`` each entry's ``token`` is ``"token_id:<N>"``. ``None`` if absent or
+    malformed, so the caller falls back to re-tokenization."""
     content = _logprob_entries(choice)
     if content is None:
         return None
@@ -54,8 +49,7 @@ def _extract_token_ids(choice: dict[str, Any]) -> list[int] | None:
 
 
 def _extract_token_logprobs(choice: dict[str, Any]) -> list[float] | None:
-    """Recover the sampled tokens' behavior-policy log-probs (the IS correction's input) from a choice's
-    ``logprobs.content``. Returns None if logprobs are absent or any entry lacks a numeric ``logprob``."""
+    """Behavior-policy log-probs, the IS correction's input. ``None`` if absent or any entry lacks a number."""
     content = _logprob_entries(choice)
     if content is None:
         return None
@@ -69,8 +63,8 @@ def _extract_token_logprobs(choice: dict[str, Any]) -> list[float] | None:
 
 
 def _sglang_meta_triples(choice: dict[str, Any]) -> list[list[Any]] | None:
-    """A choice's ``meta_info.output_token_logprobs`` (``[logprob, token_id, token_text]`` per sampled token), or
-    None when absent or malformed: SGLang's OpenAI ``logprobs`` drops the id, the ``return_meta_info`` echo keeps it."""
+    """``[logprob, token_id, token_text]`` per token, or ``None``: SGLang's OpenAI ``logprobs`` drops the id, the
+    ``return_meta_info`` echo keeps it."""
     triples = (choice.get("meta_info") or {}).get("output_token_logprobs")
     if not isinstance(triples, list):
         return None
@@ -105,21 +99,18 @@ def _capture_sglang(
     return ids, logprobs, choice.get("prompt_token_ids")
 
 
-# Per-backend response readers: the engines return the same three facts in different places.
 _TOKEN_CAPTURE = {VLLM_BACKEND: _capture_vllm, SGLANG_BACKEND: _capture_sglang}
 
 
 def capture_generation_tokens(
     choice: dict[str, Any], data: dict[str, Any], backend: str
 ) -> tuple[list[int] | None, list[float] | None, list[int] | None]:
-    """The turn's sampled ids, their logprobs and the engine's prompt ids, read in ``backend``'s shape."""
     return _TOKEN_CAPTURE[backend](choice, data)
 
 
 def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> TurnGeneration:
-    """One turn as a chat-completions response (a raw JSON body, or an SDK reply's ``model_dump()``) reports it:
-    text, tool calls, reasoning, the sampled-token count and why it stopped, plus the captures ``config``
-    requested (sampled ids, their logprobs, the engine's prompt ids, the MoE routing)."""
+    """One turn as a chat-completions response reports it (a raw JSON body, or an SDK reply's ``model_dump()``), plus
+    the captures ``config`` requested."""
     choice = data["choices"][0]
     usage = data.get("usage") or {}
     msg = choice["message"]
@@ -142,9 +133,7 @@ def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> Tu
         )
     routing_mask = None
     if config.capture_routed_experts:
-        # The raw base64 MoE routing. vLLM attaches it per choice. SGLang leaves it in the ``meta_info`` it echoes
-        # per choice when the request asks for that (every request capturing sampled ids does), and publishes it
-        # response-level under ``sglext`` otherwise.
+        # vLLM attaches it per choice; SGLang in the echoed ``meta_info`` when asked, else under ``sglext``.
         routing_mask = (
             choice.get("routed_experts")
             or (choice.get("meta_info") or {}).get("routed_experts")
@@ -173,9 +162,8 @@ async def with_cut_call_as_written(
     detokenize: Callable[[list[int]], Awaitable[str]],
     log_prefix: str,
 ) -> TurnGeneration:
-    """``gen`` with the call its token cap cut as the policy wrote it: the ids past the reasoning close, decoded by
-    the driver's ``detokenize``, replace the arguments vLLM's parser salvaged. The salvage stands where no
-    single-token close splits the ids or the decode fails."""
+    """``gen`` with the cut call as the policy wrote it: the decoded ids past the reasoning close replace the arguments
+    vLLM's parser salvaged. The salvage stands where no single-token close splits the ids or the decode fails."""
     ids, end = gen.token_ids, config.reasoning_end_token_id
     cut_in_call = gen.finish_reason == FINISH_REASON_LENGTH and gen.tool_calls and ids
     if not cut_in_call or config.backend != VLLM_BACKEND or end is None or end not in ids:
@@ -216,8 +204,7 @@ def _thinking_cap_fields(config: RolloutConfig) -> dict[str, Any]:
     if config.backend == VLLM_BACKEND:
         # vLLM forces the reasoning-end marker; needs a server-side reasoning parser.
         return {"thinking_token_budget": config.max_thinking_tokens}
-    # A cap reaching here came from the env's profile — a level's budget or a soft level's ceiling (a
-    # global one is rejected at config time); the budget still reaches the reward side.
+    # From the env's profile (a global cap is rejected at config time); the budget still reaches the reward side.
     warn_once(
         logger,
         _thinking_budget_unenforced_warned,
@@ -237,21 +224,19 @@ def _thinking_cap_fields(config: RolloutConfig) -> dict[str, Any]:
 def _template_fields(
     config: RolloutConfig, reasoning_effort: str | None, reasoning_budget: int | None, budget_soft: bool
 ) -> dict[str, Any]:
-    """The level top-level, where both engines derive their thinking toggles from it, and the run's template
-    variables nested, joined by the level's budget under :data:`REASONING_BUDGET_TEMPLATE_VAR`."""
+    """The level goes top-level, where both engines derive their thinking toggles from it; the template variables go
+    nested, joined by the level's budget."""
     fields: dict[str, Any] = {}
     template_kwargs = dict(config.chat_template_kwargs or {})
     if reasoning_budget is not None:
-        # Episode-constant: the trainer renders every turn with the one value the trajectory carries, never the
-        # narrower cap an output budget leaves a late turn.
+        # Episode-constant: the trainer renders every turn with this value, never a late turn's narrower cap.
         template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
         if budget_soft:
             template_kwargs[REASONING_BUDGET_SOFT_TEMPLATE_VAR] = True
     if reasoning_effort is not None:
         fields["reasoning_effort"] = reasoning_effort
         if config.backend != VLLM_BACKEND:
-            # SGLang pops a nested copy into the top-level field before rendering, so a disagreement
-            # would resolve to the nested value; the exact copy keeps one value either way.
+            # SGLang pops a nested copy into the top-level field, so a disagreement would resolve to the nested value.
             template_kwargs["reasoning_effort"] = reasoning_effort
     if template_kwargs:
         fields["chat_template_kwargs"] = template_kwargs
@@ -264,9 +249,8 @@ def generation_control_fields(
     reasoning_budget: int | None = None,
     budget_soft: bool = False,
 ) -> dict[str, Any]:
-    """The request fields carrying a turn's generation contract: the sampler filters, the reasoning cap the engine
-    enforces this turn, the level, and the template variables with the budget the template states; one owner
-    for the training payload and the eval's SDK call alike."""
+    """Sampler filters, the engine's reasoning cap, the level and the template variables; one owner for the training
+    payload and the eval's SDK call alike."""
     return {
         **_sampler_fields(config),
         **_thinking_cap_fields(config),
@@ -275,8 +259,7 @@ def generation_control_fields(
 
 
 def capture_request_fields(config: RolloutConfig) -> dict[str, Any]:
-    """The request fields asking the engine for the captures ``config`` requests, in its own spelling: SGLang
-    ignores unknown keys rather than rejecting them, so vLLM's would be a no-op there."""
+    """In the engine's own spelling: SGLang ignores unknown keys, so vLLM's would be a no-op there."""
     fields: dict[str, Any] = {}
     is_vllm = config.backend == VLLM_BACKEND
     if config.capture_token_ids:
@@ -287,13 +270,11 @@ def capture_request_fields(config: RolloutConfig) -> dict[str, Any]:
             # The server's own render is authoritative; a client-side re-render can differ.
             fields["return_token_ids"] = True
         else:
-            # SGLang's OpenAI `logprobs` drops the token id; the meta_info it echoes still
-            # carries it, and the prompt ids come back on the choice (non-streaming only).
+            # SGLang's OpenAI `logprobs` drops the id; its meta_info keeps it, and prompt ids come back on the choice.
             fields["return_meta_info"] = True
             fields["return_prompt_token_ids"] = True
     if config.capture_routed_experts and not is_vllm:
-        # SGLang additionally needs a per-request opt-in. start_len stays 0 so rows cover the full
-        # sequence, which is the convention assemble_rollout_masks replays prompt spans from.
+        # A per-request opt-in. start_len stays 0 so rows cover the full sequence, as assemble_rollout_masks expects.
         fields["return_routed_experts"] = True
     return fields
 
@@ -306,9 +287,8 @@ def build_payload(
     reasoning_budget: int | None = None,
     budget_soft: bool = False,
 ) -> dict[str, Any]:
-    """Build the OpenAI chat-completions request payload. ``reasoning_effort`` is the per-episode
-    resolved level; ``config.max_thinking_tokens`` carries the turn's engine cap and ``reasoning_budget``
-    the level's budget the template states, soft or not (see :func:`generation_control_fields`)."""
+    """``config.max_thinking_tokens`` carries the turn's engine cap and ``reasoning_budget`` the level's budget the
+    template states (:func:`generation_control_fields`)."""
     payload: dict[str, Any] = {
         "messages": messages,
         "temperature": config.temperature,
@@ -325,8 +305,7 @@ def build_payload(
 
 
 def reject_unenforceable_thinking_budget(model_types: Iterable[str], unenforceable: Mapping[str, str]) -> None:
-    """Refuse a thinking budget the rollout engine accepts but can never enforce for these ``model_types``;
-    ``unenforceable`` is its client's ``UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES``."""
+    """Refuse a thinking budget the rollout engine accepts but can never enforce for these ``model_types``."""
     unmatched = sorted(set(model_types) & unenforceable.keys())
     if unmatched:
         facts = "; ".join(unenforceable[model_type] for model_type in unmatched)

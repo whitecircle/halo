@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""A checkpoint writer slower than the collective watchdog must not abort its peers.
-
-Every rank writes its optimizer shard and its sharded-EP shard at once, a gathered save's writer flushes
-its last part and index alone, and each pipeline stage's writer closes its own parts; on slow shared
-storage the slowest of those writes can outlast ``DIST_NCCL_TIMEOUT_MINUTES``. The verdict that follows
-each write is joined over the c10d store (``DIST_STORE_TIMEOUT_HOURS``), so the peers wait the writer out
-instead of aborting in a collective. Two ranks (four for the pipeline), real gloo, the collective timeout
-cut to 3 s right before the save against a 6 s write.
-
-    python tests/cpu/checkpoint/test_slow_writer_store_join.py
-"""
+"""A checkpoint writer slower than the collective watchdog must not abort its peers: each verdict joins over the c10d
+store. Real gloo, the collective timeout cut to 3 s right before the save against a 6 s write."""
 
 from __future__ import annotations
 
@@ -48,15 +39,14 @@ from tests.common.parallelism import make_parallelism_config
 WORLD_SIZE = 2
 PP_WORLD_SIZE = 4
 SLOW_RANK = 1
-# The collective bound the save runs under, and a write twice as long: a peer waiting in a collective fails.
+# A peer waiting in a collective fails.
 SAVE_PG_TIMEOUT = datetime.timedelta(seconds=3)
 SLOW_WRITE_S = 6.0
 SEED = 20261025
 
 
 def _arm_save_timeout() -> None:
-    """Line the ranks up under the launch's generous bound, then cut it for the save: the setup's skew must not
-    read as a collective timing out."""
+    """The setup's skew must not read as a collective timing out."""
     dist.barrier()
     c10d._set_pg_timeout(SAVE_PG_TIMEOUT)
 
@@ -70,7 +60,7 @@ def _slowed(write):
 
 
 class _StubEPLayer(StubEPLayerBase):
-    """One rank's experts of a two-way EP group spanning the world, the layout a sharded EP save takes."""
+    """The layout a sharded EP save takes."""
 
     def __init__(self):
         super().__init__()
@@ -148,14 +138,14 @@ def _saver_worker(rank: int, root: str, saver: str) -> None:
     try:
         SAVERS[saver](rank, checkpoint)
         outcome = "saved"
-    except Exception as exc:  # the verdict file must be written whatever the rank raised
+    except Exception as exc:  # The verdict file must be written whatever the rank raised.
         outcome = f"{type(exc).__name__}: {exc}"
     with open(os.path.join(root, f"outcome_{rank}.json"), "w") as fh:
         json.dump(outcome, fh)
 
 
 def _pp_stage_worker(rank: int, root: str) -> None:
-    """pp2 x dp2: stage 1's writer closes its last part slowly while every other rank waits on it."""
+    """pp2 x dp2: stage 1's writer closes its last part slowly."""
     torch.manual_seed(SEED)
     model = Qwen3ForCausalLM(
         Qwen3Config(
@@ -178,7 +168,7 @@ def _pp_stage_worker(rank: int, root: str) -> None:
         _arm_save_timeout()
         save_pp_checkpoint(save_context(stage, config), root)
         outcome = "saved"
-    except Exception as exc:  # the verdict file must be written whatever the rank raised
+    except Exception as exc:
         outcome = f"{type(exc).__name__}: {exc}"
     with open(os.path.join(root, f"outcome_{rank}.json"), "w") as fh:
         json.dump(outcome, fh)

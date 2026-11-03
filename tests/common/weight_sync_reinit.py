@@ -1,11 +1,6 @@
-"""Repeated trainer connect → sync → close cycles against one live rollout server, rebinding one group
-port each cycle: the body of the weight-transfer re-init suite, on either engine.
-
-A cycle that leaves either end's NCCL communicator alive strands its device memory while ``/health``
-keeps answering 200, until a later init fails outright; the device-memory checks catch that, and the
-served-policy checks prove each re-init still lands its sync. Whole-checkpoint cycles then catch a
-trainer-side staging buffer left in a pool only the closed client allocated from.
-"""
+"""Repeated connect, sync and close cycles on one group port against one live server, the re-init suite's body on
+either engine. A leaked NCCL communicator strands device memory while ``/health`` stays 200; whole-checkpoint cycles
+catch a staging buffer left in a pool only the closed client allocated from."""
 
 import subprocess
 from collections.abc import Iterable
@@ -20,30 +15,23 @@ from tests.common.on_policy_e2e import probe_top_logprobs, record_served_baselin
 from tests.common.rank_log import log
 from tests.common.weight_sync import push, weight_transfer_port
 
-# The checkpoint the vLLM tier's dense endpoint serves, which the re-init and pool-reconnect suites push.
+# The checkpoint the vLLM tier's dense endpoint serves.
 VLLM_REINIT_MODEL = env_str("HALO_TEST_VLLM_REINIT_MODEL", QWEN3_0_6B)
-# The final RMSNorm scales every logit, so a cycle's push shifts the whole top-k without reordering
-# it into a degenerate distribution the next cycle could no longer move.
+# The final RMSNorm scales every logit, so a push shifts the top-k without reordering it into a distribution the next
+# cycle cannot move.
 PERTURBED_PARAM = "model.norm.weight"
 PERTURBATION = 1.02
-# An unreleased communicator strands ~633 MiB per cycle on each end of a vLLM pair (measured on 0.26.0),
-# so a dozen leaking cycles overshoot this budget several times over.
+# An unreleased communicator strands ~633 MiB per cycle on each end of a vLLM pair (measured on 0.26.0).
 MAX_MEMORY_GROWTH_MIB = 1024
-# Connect/sync/close cycles that push every parameter (over 1 GiB for the default checkpoint), so each
-# client fills full-size staging buffers: one a closed client strands costs about a chunk per cycle,
-# and the growth after the first such cycle overshoots the budget.
+# Cycles pushing every parameter (over 1 GiB by default), so each client fills full-size staging buffers. A stranded
+# one costs about a chunk per cycle and overshoots the budget.
 WHOLE_CHECKPOINT_CYCLES = 4
 CONNECTION_TIMEOUT_S = 120.0
 
 
 def _server_gpu_used_mib(server_gpu: str | None) -> int:
-    """Used device memory on the server's GPU(s), read out of process.
-
-    The server holds a GPU outside ``CUDA_VISIBLE_DEVICES`` (it must — a rank cannot broadcast to
-    itself), so torch cannot see it here; ``nvidia-smi`` enumerates every GPU regardless.
-    ``server_gpu`` is the server's GPU as ``nvidia-smi`` indexes it; ``None`` means every GPU this
-    process does not own.
-    """
+    """Used device memory on the server's GPU(s) via ``nvidia-smi``, since the server sits outside
+    ``CUDA_VISIBLE_DEVICES``; ``None`` means every GPU not ours."""
     query = ["nvidia-smi", "--query-gpu=index,uuid,memory.used", "--format=csv,noheader,nounits"]
     if server_gpu:
         query += ["-i", server_gpu]
@@ -58,7 +46,7 @@ def _server_gpu_used_mib(server_gpu: str | None) -> int:
 
 
 def _trainer_gpu_used_mib(device: torch.device) -> int:
-    """Used device memory on this rank's GPU, driver-level — NCCL's allocations sit outside torch's."""
+    """Used device memory on this rank's GPU, driver-level, since NCCL's allocations sit outside torch's."""
     free, total = torch.cuda.mem_get_info(device)
     return (total - free) // 2**20
 
@@ -70,7 +58,7 @@ def _sync(
     device: torch.device,
     group_port: int,
 ) -> None:
-    """One whole trainer lifetime against the server: connect, one quiesced update, disconnect."""
+    """One whole trainer lifetime: connect, one quiesced update, disconnect."""
     client = client_class(base_url=server_url, group_port=group_port, connection_timeout=CONNECTION_TIMEOUT_S)
     client.init_communicator(device=device)
     try:
@@ -82,17 +70,12 @@ def _sync(
 def serve_the_checkpoint(
     client_class: type[WeightSyncClientBase], server_url: str, model, device: torch.device, group_port: int
 ) -> None:
-    """Push the loaded checkpoint whole, so a suite's baseline is the policy its restore returns to.
-
-    The server outlives the rows of a tier, and an on-policy row before this one leaves its trained
-    weights served; a restore that re-pushes only the perturbed tensor could not reach a baseline taken
-    over those.
-    """
+    """Push the loaded checkpoint whole: the server outlives a tier's rows and may still serve an earlier row's trained
+    weights."""
     _sync(client_class, server_url, ((name, t.detach()) for name, t in model.named_parameters()), device, group_port)
 
 
 def _probe_or_none(server_url: str, model_name: str) -> dict[str, float] | None:
-    """The served policy's fingerprint, or ``None`` if the server can no longer produce one."""
     try:
         return probe_top_logprobs(server_url, model_name)
     except Exception as e:  # noqa: BLE001 — the verdict is "unusable", whatever the engine failed with
@@ -110,25 +93,23 @@ def run_reinit_cycles(
     cycles: int,
     group_port_knob: str,
 ) -> dict:
-    """``cycles`` connect/sync/disconnect cycles of ``client_class`` against the server at ``server_url``
-    serving ``model_name``, then a restoring cycle: the ``gpu_test_main`` result of the suite. The port is
-    drawn once (``group_port_knob`` pins it) and rebound by every cycle."""
+    """``cycles`` connect/sync/disconnect cycles, then a restoring cycle; the ``gpu_test_main`` result. The port is
+    drawn once and rebound by every cycle."""
     log(f"{client_class.BACKEND_NAME} weight-transfer re-init: {cycles} cycles against {server_url}")
     checks: dict[str, bool] = {}
     model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16).to(ctx.device)
     param = dict(model.named_parameters())[PERTURBED_PARAM]
     original = param.detach().clone()
 
-    # Itself part of the invariant: close_communicator must release the port on both ends or the next
-    # cycle cannot form its group.
+    # Part of the invariant: close_communicator must release the port on both ends or the next cycle cannot form its
+    # group.
     group_port = weight_transfer_port(group_port_knob)
     serve_the_checkpoint(client_class, server_url, model, ctx.device, group_port)
     baseline = record_served_baseline(server_url, model_name, checks)
     probes = [baseline]
     errors: list[str] = []
-    # Both baselines are taken after the first cycle: the first sync loads the NCCL library, sizes
-    # the staging buffers and warms both engines' allocators, and only what a SECOND and later cycle
-    # adds on top of that is a leak.
+    # After the first cycle: the first sync loads NCCL, sizes staging buffers and warms allocators, so only later
+    # growth is a leak.
     server_before = trainer_before = 0
     for cycle in range(1, cycles + 1):
         with torch.no_grad():
@@ -146,10 +127,8 @@ def run_reinit_cycles(
     server_growth = _server_gpu_used_mib(server_gpu) - server_before
     trainer_growth = _trainer_gpu_used_mib(ctx.device) - trainer_before
 
-    # Only the trainer is measured across these: vLLM 0.26.0's packed consumer receives on fresh
-    # streams per update, so its reserved memory grows with whole-model pushes until PyTorch's stream
-    # pool wraps, whatever the trainer does. They leave the served model as the light cycles did, and
-    # the restore below proves they landed exactly.
+    # Trainer only: vLLM 0.26.0's packed consumer receives on fresh streams per update, so its reserved memory grows
+    # until PyTorch's stream pool wraps, whatever the trainer does.
     whole_completed = whole_before = 0
     while not errors and whole_completed < WHOLE_CHECKPOINT_CYCLES:
         named_params = ((name, tensor.detach()) for name, tensor in model.named_parameters())
@@ -164,8 +143,7 @@ def run_reinit_cycles(
             whole_before = _trainer_gpu_used_mib(ctx.device)
     whole_growth = _trainer_gpu_used_mib(ctx.device) - whole_before
 
-    # The restore is a cycle of its own, and its exact-equality verdict is what proves the engine
-    # reloaded the pushed tensor rather than drifting under repeated reloads.
+    # Exact equality here proves the engine reloaded the pushed tensor rather than drifting under repeated reloads.
     restored: dict[str, float] | None = None
     if not errors:
         try:

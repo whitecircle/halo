@@ -1,6 +1,4 @@
-"""Shared-vs-per-node filesystem scope: the ``DIST_*_SHARED_FILESYSTEM`` flags and their rank
-consensus, the save/load ranks they pick, main-rank-first ordering for read-side work, and the probes of
-the declared output and input sharing."""
+"""Shared-vs-per-node filesystem scope: the ``DIST_*_SHARED_FILESYSTEM`` flags, consensus, probes, main-rank-first."""
 
 import datetime
 import logging
@@ -44,7 +42,7 @@ _OUTPUT_SHARED_FILESYSTEM_VAR = "DIST_OUTPUT_SHARED_FILESYSTEM"
 # Far below the store default: a hub-metadata wait this long means the ranks disagree on the phase.
 _HUB_METADATA_TIMEOUT = datetime.timedelta(minutes=30)
 
-# Sentinel the shared-filesystem probes write; dot-prefixed and inert if one leaks.
+# Dot-prefixed and inert if one leaks.
 FS_PROBE_PREFIX = ".halo_fs_probe_"
 
 _FS_PROBE_INTERVAL_S = 0.25
@@ -67,10 +65,10 @@ class FilesystemSide:
     unshared_loss: str
     # What a per-node declaration over shared storage races.
     shared_race: str
-    # How each node keeps its own copy, and how every node shares one; ``{name}`` is the flagged location.
+    # Each node's own copy, and every node sharing one; ``{name}`` is the flagged location.
     per_node_remedy: str
     shared_remedy: str
-    # What else the side's one declaration binds, closing each of its refusals.
+    # What else the side's declaration binds, closing each of its refusals.
     coverage: str = ""
 
 
@@ -105,29 +103,26 @@ def _shared_filesystem_flag(var: str, default: bool) -> bool:
 
 
 def is_shared_filesystem() -> bool:
-    """The ``DIST_SHARED_FILESYSTEM`` umbrella (default shared): the rank-agreed value once
-    :func:`resolve_shared_filesystem_consensus` has run, else this rank's env. Never a collective."""
+    """The ``DIST_SHARED_FILESYSTEM`` umbrella: rank-agreed after :func:`resolve_shared_filesystem_consensus`, else
+    this rank's env. Never a collective."""
     return _shared_filesystem_flag(_SHARED_FILESYSTEM_VAR, True)
 
 
 def is_input_shared_filesystem() -> bool:
-    """Whether the read side (downloads, dataset map/pack, HF caches) is shared:
-    ``DIST_INPUT_SHARED_FILESYSTEM``, else the umbrella."""
+    """Read side (downloads, dataset map/pack, HF caches): ``DIST_INPUT_SHARED_FILESYSTEM``, else the umbrella."""
     return _shared_filesystem_flag(_INPUT_SHARED_FILESYSTEM_VAR, is_shared_filesystem())
 
 
 def is_output_shared_filesystem() -> bool:
-    """Whether the write side (checkpoints, run.log, dumps) is shared: ``DIST_OUTPUT_SHARED_FILESYSTEM``,
-    else the umbrella."""
+    """Write side (checkpoints, run.log, dumps): ``DIST_OUTPUT_SHARED_FILESYSTEM``, else the umbrella."""
     return _shared_filesystem_flag(_OUTPUT_SHARED_FILESYSTEM_VAR, is_shared_filesystem())
 
 
 def resolve_shared_filesystem_consensus() -> None:
-    """COLLECTIVE: agree the three flags across ranks, rank 0's values winning with a warning, and memoize
-    them once, at the end, so no reader sees a half-resolved state. The flags pick the coordination
-    scope, so ranks that disagree would wait in different scopes."""
+    """COLLECTIVE: agree the three flags, rank 0's values winning with a warning. They pick the coordination scope, so
+    ranks that disagree would wait in different scopes. Memoized at the end, so no reader sees half a state."""
     global _shared_filesystem_consensus
-    # Read from the environment, bypassing the memo: this rank's flags are the consensus input.
+    # Bypass the memo: this rank's env is the consensus input.
     umbrella = env_flag(_SHARED_FILESYSTEM_VAR, default=True)
     local = {
         _SHARED_FILESYSTEM_VAR: umbrella,
@@ -146,8 +141,7 @@ def resolve_shared_filesystem_consensus() -> None:
             {var: agreed[var] for var in disagreed},
         )
     _shared_filesystem_consensus = agreed
-    # Getting it wrong is silent: an umbrella left shared on per-node local disks makes every node
-    # recompute the dataset — correct output, N× the CPU and disk, no error.
+    # A wrong umbrella is silent: left shared on per-node disks, every node recomputes the dataset at N× CPU and disk.
     if is_global_main_process():
         logger.info(
             "Shared-filesystem scope: %s (set DIST_SHARED_FILESYSTEM=0 for per-node local storage).",
@@ -156,20 +150,16 @@ def resolve_shared_filesystem_consensus() -> None:
 
 
 def is_fs_save_rank() -> bool:
-    """Whether this rank writes shared files: global rank 0 on a shared output filesystem, else each
-    node's local rank 0."""
     return is_global_main_process() if is_output_shared_filesystem() else is_local_main_process()
 
 
 def is_fs_load_rank() -> bool:
-    """Whether this rank does shared read-side work (downloads, cache fills): global rank 0 on a shared
-    input filesystem, else each node's local rank 0."""
+    """Whether this rank does shared read-side work (downloads, cache fills)."""
     return is_global_main_process() if is_input_shared_filesystem() else is_local_main_process()
 
 
 def fs_aware_makedirs(path: str, writer_rank: Callable[[], bool] = is_fs_save_rank) -> None:
-    """COLLECTIVE: create ``path`` on ``writer_rank`` (:func:`is_fs_load_rank` for a read-side cache dir) behind
-    :func:`barrier_on_exit`, so a ``makedirs`` failure raises on every rank."""
+    """COLLECTIVE: create ``path`` on ``writer_rank``; a ``makedirs`` failure raises on every rank."""
     with barrier_on_exit(f"Creating {path}"):
         if writer_rank():
             os.makedirs(path, exist_ok=True)
@@ -177,12 +167,9 @@ def fs_aware_makedirs(path: str, writer_rank: Callable[[], bool] = is_fs_save_ra
 
 @contextmanager
 def fs_aware_main_first(tag: str, timeout: datetime.timedelta | None = None):
-    """Run the body on the main rank first, then on every other rank, which reuses what it cached.
-
-    The scope follows the input filesystem: global rank 0 leads the world, or each node's local rank 0
-    its node. Waiters block on a store key, so the body must issue no collective (``fs_aware_makedirs``
-    barriers). ``tag`` names the call site under the :class:`StorePhase` invariant.
-    """
+    """Run the body on global rank 0 (shared input FS) or each node's local rank 0 first, then on the others. Waiters
+    block on a store key, so the body must issue no collective (``fs_aware_makedirs`` barriers). ``tag`` names the call
+    site under the :class:`StorePhase` invariant."""
     if not has_process_group():
         yield
         return
@@ -209,15 +196,9 @@ def fs_aware_main_first(tag: str, timeout: datetime.timedelta | None = None):
 
 
 def hub_metadata_main_first(tag: str, fetch: Callable[..., Any]) -> Any:
-    """Run a small hub metadata read (``AutoConfig``, ``AutoTokenizer``, ...) main-rank-first and return
-    its result, under a short bound so a tag entered from a rank-dependent branch fails by name.
-
-    ``fetch(local_files_only=...)`` is told to read the cache alone off the load rank
-    (:func:`is_fs_load_rank`), so the followers read what their scope's main rank fetched and each scope
-    makes one Hub query. It can be the run's first coordinated phase, so it takes the shared-filesystem
-    consensus when none has been taken yet. Before ``init_distributed`` no rank waits for another, so every
-    rank fetches.
-    """
+    """Main-rank-first hub metadata read (``AutoConfig``, ...) under a short bound, so a tag entered from a
+    rank-dependent branch fails by name. ``fetch(local_files_only=...)`` reads only the cache off the load rank, one
+    Hub query per scope; before ``init_distributed`` every rank fetches. Takes the consensus if none ran yet."""
     if _shared_filesystem_consensus is None:
         resolve_shared_filesystem_consensus()
     with fs_aware_main_first(f"hub_meta/{tag}", timeout=_HUB_METADATA_TIMEOUT):
@@ -227,11 +208,8 @@ def hub_metadata_main_first(tag: str, fetch: Callable[..., Any]) -> Any:
 def filesystem_contradiction(
     side: FilesystemSide, name: str, declared_shared: bool, seen: list[bool], *, path: str | None = None
 ) -> str | None:
-    """Why ``side``'s declared sharing contradicts what the ranks saw under the location ``name`` names (at
-    ``path``, when given), or None when it holds.
-
-    ``seen[rank]`` is whether that rank saw the sentinel global rank 0 wrote there.
-    """
+    """Why ``side``'s declared sharing contradicts ``seen`` (per rank, whether it saw rank 0's sentinel under
+    ``name``), or None when it holds."""
     if not seen:
         return None
     location = f"{name} ({path})" if path else name
@@ -274,8 +252,7 @@ def _visible_within(paths: list[str], seconds: float) -> list[bool]:
 
 
 def _write_sentinels(directories: list[str]) -> tuple[str, list[str | None]]:
-    """Global rank 0's half of the probe: the sentinel name, and per directory why no sentinel could be
-    written there (None where one was)."""
+    """Rank 0's half of the probe: the sentinel token and each directory's write failure, None where it succeeded."""
     token = f"{time.time_ns():x}"
     failures: list[str | None] = []
     for directory in directories:
@@ -291,15 +268,14 @@ def _write_sentinels(directories: list[str]) -> tuple[str, list[str | None]]:
 
 
 def _sentinel_visibility(directories: list[str], declared_shared: bool) -> tuple[list[str | None], list[list[bool]]]:
-    """COLLECTIVE: global rank 0 writes a sentinel under each of ``directories`` and every rank looks for it;
-    returns rank 0's write failures and ``seen[directory][rank]`` (all False where it wrote none). The
-    sentinels are removed after."""
-    # Broadcast after the writes: every peer polls the names rank 0 wrote, and only once they exist.
+    """COLLECTIVE: rank 0 writes a sentinel under each directory and every rank looks for it; returns rank 0's write
+    failures and ``seen[directory][rank]`` (all False where it wrote none)."""
+    # Broadcast after the writes, so peers poll only names that exist.
     token, failures = broadcast_from_rank0(_write_sentinels(directories) if is_global_main_process() else None)
     sentinels = [os.path.join(directory, FS_PROBE_PREFIX + token) for directory in directories]
     written = [sentinel for sentinel, failure in zip(sentinels, failures, strict=True) if failure is None]
-    # Only a rank that EXPECTS to see a sentinel polls for it, ruling out a cached negative lookup;
-    # under a per-node declaration seeing the file at all is already proof, and not seeing it agrees.
+    # Only a shared declaration polls, ruling out a cached negative lookup; per-node, seeing the file at all is proof
+    # and not seeing it agrees.
     budget = fs_probe_timeout().total_seconds() if declared_shared else 0.0
     gathered: list[list[bool]] = [[] for _ in range(get_global_world_size())]
     dist.all_gather_object(gathered, _visible_within(written, budget))
@@ -321,10 +297,9 @@ def _is_multi_node_run() -> bool:
 
 
 def verify_output_filesystem_sharing(output_dir: str) -> None:
-    """COLLECTIVE: probe whether ``output_dir`` really is shared across nodes and raise on a declaration
-    that contradicts it, once per directory per process. Both wrong declarations are otherwise
-    silent: shared on per-node disks leaves the other nodes no resumable checkpoint, per-node on a
-    shared mount races every node's writer on the same paths."""
+    """COLLECTIVE: raise when ``output_dir``'s real sharing contradicts the declaration, once per directory per
+    process. Otherwise silent: shared on per-node disks leaves other nodes no resumable checkpoint, per-node on a
+    shared mount races every node's writer."""
     if not _is_multi_node_run() or not output_dir:
         return
     probed = os.path.abspath(output_dir)
@@ -347,10 +322,8 @@ def verify_output_filesystem_sharing(output_dir: str) -> None:
 
 
 def verify_input_filesystem_sharing(caches: Mapping[str, str]) -> None:
-    """COLLECTIVE: probe whether each read-side cache directory (``caches`` maps the variable naming it to its
-    path) really is shared across nodes as ``DIST_INPUT_SHARED_FILESYSTEM`` declares, and raise on a
-    contradiction; a no-op within one node. A cache global rank 0 cannot write is filled by nobody, so its
-    declaration is moot and it is skipped."""
+    """COLLECTIVE: raise when a read-side cache directory (``caches`` maps variable to path) contradicts
+    ``DIST_INPUT_SHARED_FILESYSTEM``. A cache rank 0 cannot write is filled by nobody and is skipped."""
     if not _is_multi_node_run():
         return
     declared_shared = is_input_shared_filesystem()
@@ -374,9 +347,8 @@ def verify_input_filesystem_sharing(caches: Mapping[str, str]) -> None:
 
 
 def agree_input_probe_across_ranks(probe: Callable[[], bool], subject, probe_name: str) -> bool:
-    """COLLECTIVE: :func:`agree_probe_across_ranks` for a probe of the run's input, run only on each input
-    scope's load rank (:func:`is_fs_load_rank`) while the rest abstain with ``False``. A probe that raises
-    is joined over the store first, so its cause raises on every rank."""
+    """COLLECTIVE: :func:`agree_probe_across_ranks` for a probe run only on each input scope's load rank, the rest
+    abstaining with ``False``. A raising probe is joined over the store first, so its cause raises on every rank."""
     probing = is_fs_load_rank()
     local, failure = False, None
     if probing:

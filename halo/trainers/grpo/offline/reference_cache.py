@@ -1,9 +1,6 @@
-"""Bounded, filesystem-aware storage of offline GRPO's ragged frozen-reference scores.
-
-Every file of a launch lives under ``output_dir/_reference_cache/<launch>/``, mapped by every rank, and
-nothing is unlinked while mapped (on NFS a removed file stays readable only on the unlinking host). A launch
-holds an exclusive lock on ``<launch>.lock`` until it exits; a new cache removes launches whose lock it takes.
-"""
+"""Filesystem-aware storage of offline GRPO's ragged frozen-reference scores. Nothing is unlinked while mapped (on NFS
+a removed file stays readable only on the unlinking host). A launch holds ``<launch>.lock`` until exit; a new cache
+removes launches whose lock it takes."""
 
 from __future__ import annotations
 
@@ -37,7 +34,6 @@ logger = logging.getLogger(__name__)
 # Values per transfer buffer, merge copy, validation slice and digest update: bounds the device
 # buffers and host copies whatever the table's size (1 MiB of float32 scores, 2 MiB of int64 lengths).
 REFERENCE_BUFFER_VALUES = 1 << 18
-# The two flat files of a cache, in the order every writer appends and every reader maps them.
 _PAYLOAD_KINDS = (("lengths", torch.int64), ("values", torch.float32))
 # NFS's stand-in for a removed file some process still has open; removing it breaks that process.
 _NFS_REMNANT_PREFIX = ".nfs"
@@ -61,14 +57,12 @@ class MappedReferenceScores:
 
 @functools.cache
 def _launch_id() -> str:
-    """This launch's scratch directory name. COLLECTIVE on the first call, which every rank makes from
-    its first reference cache, in lockstep."""
+    """COLLECTIVE on the first call, which every rank makes from its first reference cache, in lockstep."""
     return broadcast_from_rank0(uuid.uuid4().hex if get_global_rank() == 0 else None)
 
 
 def _remove_scratch(path: str) -> None:
-    """Remove a scratch tree, keeping the ``.nfs*`` remnants of files a live process still maps and the
-    directories that hold them."""
+    """Keeps the ``.nfs*`` remnants of files a live process still maps and the directories that hold them."""
     for entry in os.scandir(path):
         if entry.is_dir(follow_symlinks=False):
             _remove_scratch(entry.path)
@@ -84,13 +78,11 @@ def _remove_scratch(path: str) -> None:
 
 
 def _lock_path(root: str, launch: str) -> str:
-    """The lock file beside a launch's directory, held exclusively by that launch's writer while it runs."""
     return os.path.join(root, f"{launch}.lock")
 
 
 def _try_lock(path: str) -> int | None:
-    """An exclusive, non-blocking lock on ``path`` (created if absent), or None where it is held or the
-    mount takes no locks."""
+    """Returns None where the lock is held or the mount takes no locks."""
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -115,8 +107,8 @@ def _hold_launch_lock(root: str, launch: str) -> None:
 
 
 def _remove_finished_launches(root: str, launch: str) -> None:
-    """Remove the other launches' scratch whose lock nothing holds. A held lock, or one the mount cannot
-    take, keeps it: a live launch's mapped files stay, and an unprovable verdict never deletes."""
+    """A held lock, or one the mount cannot take, keeps a launch's scratch: a live launch's mapped files stay, and an
+    unprovable verdict never deletes."""
     for entry in os.scandir(root):
         if entry.name == launch or not entry.is_dir(follow_symlinks=False):
             continue
@@ -137,8 +129,7 @@ def _remove_finished_launches(root: str, launch: str) -> None:
 
 
 def _create_launch_cache_directory(output_dir: str | os.PathLike) -> str:
-    """COLLECTIVE. A fresh directory in this launch's scratch; its writers first remove every other
-    launch's whose writer no longer runs (:func:`_remove_finished_launches`)."""
+    """COLLECTIVE. Its writers first remove every other launch whose writer no longer runs."""
     root = os.path.join(os.fspath(output_dir), REFERENCE_CACHE_DIR_NAME)
     launch = _launch_id()
     directory = os.path.join(root, launch, broadcast_from_rank0(uuid.uuid4().hex if get_global_rank() == 0 else None))
@@ -157,14 +148,9 @@ def _create_launch_cache_directory(output_dir: str | os.PathLike) -> str:
 
 
 def link_checkpoint_into_scratch(output_dir: str | os.PathLike, source: str) -> str:
-    """COLLECTIVE. Link (or copy) a checkpoint file into this launch's scratch and return the linked path.
-
-    A resume maps the scratch name, so the mapping never holds the checkpoint's own entry, which
-    rotation removes: on NFS a mapped entry's removal leaves an ``.nfs*`` file that keeps the
-    checkpoint directory alive and freshly modified, and the newest-mtime rotation then keeps it over a
-    complete checkpoint. A source absent from a writer's filesystem stays absent from its scratch, for
-    the caller's presence verdict.
-    """
+    """COLLECTIVE. A resume maps the scratch name because on NFS removing a mapped entry leaves an ``.nfs*`` file that
+    keeps the checkpoint directory freshly modified, and newest-mtime rotation then keeps it over a complete
+    checkpoint."""
     linked = os.path.join(_create_launch_cache_directory(output_dir), os.path.basename(source))
     guard = DeferredRankFailure(f"Staging {source} into the reference scratch")
     if is_fs_save_rank() and os.path.isfile(source):
@@ -174,7 +160,7 @@ def link_checkpoint_into_scratch(output_dir: str | os.PathLike, source: str) -> 
 
 
 def reference_cache_writers() -> tuple[int, ...]:
-    """COLLECTIVE. The global ranks that write the output filesystem, by the checkpoint writer predicate."""
+    """COLLECTIVE. By the checkpoint writer predicate."""
     owner = torch.tensor([int(is_fs_save_rank())], dtype=torch.int64, device=collective_device())
     gathered = all_gather_cat(owner, 0, None, get_global_world_size())
     return tuple(rank for rank, flag in enumerate(gathered.tolist()) if flag)
@@ -300,8 +286,8 @@ class ReferenceScoreCache:
                 self._transfer_group = None
 
     def discard(self) -> None:
-        """Remove this cache after a failure, without requiring a healthy process group. A transfer group
-        is left to process teardown: the failure may have stranded a transfer on it."""
+        """No healthy process group required. A transfer group is left to process teardown, as the failure may have
+        stranded a transfer on it."""
         if is_fs_save_rank() and os.path.isdir(self.directory):
             _remove_scratch(self.directory)
 
@@ -313,12 +299,8 @@ class ReferenceScoreCache:
         return os.path.join(self.directory, f"{shard}.{kind}")
 
     def _transfer_group_for(self, representatives: dict[int, int]) -> dist.ProcessGroup | None:
-        """COLLECTIVE once. The sweep's own point-to-point group over its sources and writers, or None
-        when every source writes its own scores.
-
-        NCCL keeps a buffer per connected peer for its communicator's lifetime, so sends over the world
-        group would leave each writer O(DP) of them through training; :meth:`finish` destroys this one.
-        """
+        """COLLECTIVE once. NCCL keeps a buffer per connected peer for a communicator's lifetime, so sends over the
+        world group would leave each writer O(DP) of them through training."""
         if self._transfer_group is None and any(
             writer != source for writer in self.writers for source in representatives.values()
         ):

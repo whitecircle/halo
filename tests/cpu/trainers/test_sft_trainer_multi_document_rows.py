@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""A packing or padding-free collator handed straight to ``DistributedSFTTrainer`` meets every rule the collator
-factory runs on its rows (``reject_multi_document_rows``), read on the model the trainer built, and SMPO's
-padding-free row meets the same rules.
-
-    python tests/cpu/trainers/test_sft_trainer_multi_document_rows.py
+"""A packing or padding-free collator handed straight to ``DistributedSFTTrainer`` meets the collator factory's row
+rules (``reject_multi_document_rows``), read on the model the trainer built. SMPO's padding-free row meets them too.
 """
 
 import types
@@ -108,14 +105,14 @@ def test_a_handed_collator_meets_the_factory_rules(case, monkeypatch):
 
 
 def test_a_handed_collator_on_a_flash_backend_constructs(monkeypatch):
-    """Anti-vacuity: the same packed rows on a backend that keeps them apart reach the trainer setup."""
+    """The same packed rows on a backend that keeps them apart reach the trainer setup."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _KERNELS_PRESENT)
     model = _model(TINY_MOE_FAMILIES["bailing_moe"], "flash_attention_2")
     _construct_sft(model, model, _packing())
 
 
 def test_the_rules_read_the_model_built_from_a_model_id(monkeypatch):
-    """A model id handed to the constructor carries no config; the rules read the model the base built from it."""
+    """A model id carries no config; the rules read the model the base built from it."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _KERNELS_PRESENT)
     built = _model(TINY_MOE_FAMILIES["bailing_moe"], "sdpa")
     with pytest.raises(ValueError, match="packing=True on attn_implementation='sdpa'"):
@@ -123,8 +120,8 @@ def test_the_rules_read_the_model_built_from_a_model_id(monkeypatch):
 
 
 def test_smpo_padding_free_meets_the_fa4_varlen_rule(tmp_path, monkeypatch):
-    """SMPO's flattened row reaches FA4's varlen kernels like the SFT collator's, so a softcapped model there is
-    refused at the policy load."""
+    """SMPO's flattened row reaches FA4's varlen kernels like the SFT collator's, so a softcapped model is refused at
+    the policy load."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _KERNELS_PRESENT)
     with pytest.raises(ValueError, match="attention logit softcapping"):
         SMPOTrainer(

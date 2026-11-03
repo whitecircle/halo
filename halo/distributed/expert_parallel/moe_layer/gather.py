@@ -1,9 +1,5 @@
-"""The collective half of an EP export: this rank's expert tensors gathered across the expert-TP and dispatch-EP
-groups, then written in the family's :class:`~halo.models.moe.expert_layout.ExpertLayout` under its hub keys.
-
-Every gather is collective over those groups: each rank calls it, and ``retain=False`` joins every collective
-without assembling the result, which only the writing rank needs.
-"""
+"""The collective half of an EP export: expert tensors gathered across the expert-TP and dispatch-EP groups. Each rank
+calls every gather; ``retain=False`` joins every collective without assembling the result."""
 
 from __future__ import annotations
 
@@ -44,9 +40,8 @@ class EPGatherMixin:
     }
 
     def gather_expert_tensors(self, local: Mapping[str, torch.Tensor], *, retain: bool = True) -> dict:
-        """COLLECTIVE over the expert-TP and dispatch-EP groups. ``local`` (this rank's expert tensors by runtime
-        attribute, matmul convention) with every expert and every expert-TP shard, in ``local``'s order; ``{}``
-        without ``retain``."""
+        """COLLECTIVE over the expert-TP and dispatch-EP groups. ``local`` (this rank's tensors by runtime attribute,
+        matmul convention) with every expert and expert-TP shard, in ``local``'s order; ``{}`` without ``retain``."""
         gathered = {}
         for attr, tensor in local.items():
             if attr in self.EXPERT_TP_SHARD_DIMS:
@@ -62,11 +57,8 @@ class EPGatherMixin:
         self, *, device: torch.device | str = "cpu", merge_lora: bool = False, retain: bool = True
     ) -> dict:
         """COLLECTIVE (see :meth:`gather_expert_tensors`). This layer's experts in the family's hub layout on
-        ``device``, keyed relative to the layer before the export renames.
-
-        ``merge_lora`` folds each adapted weight's grouped-LoRA delta ``scaling·(A@B)`` into it, on the full plain
-        tensor, so the RL weight sync ships the trained experts rather than the frozen base.
-        """
+        ``device``. ``merge_lora`` folds each grouped-LoRA delta into its weight, so the RL weight sync ships the
+        trained experts rather than the frozen base."""
         # Gated on built adapters, not the flag: the weight sync asks for the fold unconditionally.
         if merge_lora and self.has_expert_lora and self.expert_tp_size > 1:
             raise NotImplementedError(
@@ -88,19 +80,15 @@ class EPGatherMixin:
         return to_hub_expert_tensors(self.FAMILY.expert_layout, gathered, device=device) if retain else {}
 
     def is_expert_param(self, name: str) -> bool:
-        """Whether ``name``, relative to this layer, is one of its expert tensors: its first segment names one of
-        :meth:`expert_named_params`, native expert adapters included. Save and weight sync split by it."""
+        """Whether ``name``, relative to this layer, is one of its expert tensors, native adapters included. Save and
+        weight sync split by it."""
         return name.split(".")[0] in {attr for attr, _param in self.expert_named_params()}
 
     def gather_layer_state_dict(self, layer_name: str, *, merge_lora: bool = False, retain: bool = True) -> dict:
-        """COLLECTIVE (see :meth:`gather_expert_tensors`, plus each FSDP2-sharded replicated tensor). The whole layer
-        for a checkpoint under ``layer_name``, in the hub spelling: the gathered experts, then every persistent
-        replicated param and buffer (router, shared experts, balancing slots).
-
-        No LoRA layer sits inside an EP layer (the trainer refuses one), so the replicated tensors are written as
-        they are. Persistent buffers only: a non-persistent one (a rotary cache) is absent from the sharded save, and
-        writing it here would break merged-from-sharded == gathered.
-        """
+        """COLLECTIVE (see :meth:`gather_expert_tensors`, plus each FSDP2-sharded replicated tensor): the whole layer
+        for a checkpoint in the hub spelling, gathered experts then persistent replicated params and buffers. No LoRA
+        layer sits inside an EP layer, so replicated tensors are written as they are. Persistent only, since a
+        non-persistent buffer is absent from the sharded save and would break merged-from-sharded == gathered."""
         experts = self.gather_expert_state_dict(merge_lora=merge_lora, retain=retain)
         gathered = {f"{layer_name}.{self.FAMILY.to_hub_key(key)}": tensor for key, tensor in experts.items()}
         del experts

@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""On a flash run an SFT batch that is one document hands attention its varlen set, as packed rows do.
-
-Without ``cu_seq_lens_q/k`` and ``max_length_q/k`` in the forward kwargs, transformers' flash path tests every
-attention layer's ``position_ids`` for a packed row (``_is_packed_sequence``, a device sync, again in each
-checkpoint recompute) before running the dense kernel on an unpacked batch-1 row. The SFT collators hand that row
-the set ``[0, S]``, ``S`` that transformers derives from its positions, so the kernel runs varlen over one segment
-and no layer tests the row. The set follows the resolved backend and the model: FA2/FA3/FA4, not where another
-mixer reads the set (GatedDeltaNet) or FA4's varlen kernels refuse the attention (Gemma 2's softcap), never under CP
-or PP, and only for a caller that opts in (the SFT script, whose batches reach one model). Several rows, a padded
-row and a multi-document packed row keep their own path. The set is all a route adds to its batch, TRL's own
-collator included, so the logits, the loss and every gradient stay bit-identical on the CPU reference kernels
-across the tiny roster of packing families (:mod:`tests.common.one_document_flash_varlen`, one fresh interpreter
-each), and a set with a wrong boundary trains another loss.
-
-    python tests/cpu/data/test_one_document_flash_varlen.py
-"""
+"""On a flash run a one-document SFT batch hands attention its varlen set, sparing every layer a packed-row test
+(``_is_packed_sequence``, a device sync), again in each recompute. Logits, loss and gradients stay bit-identical
+across the roster (:mod:`tests.common.one_document_flash_varlen`)."""
 
 import contextlib
 from types import SimpleNamespace
@@ -55,7 +42,6 @@ from tests.common.repo import probe_findings
 from tests.common.sft_collator import build_sft_collator
 
 RESPONSE_TEMPLATE = [30]
-# One unpacked row whose completion opens on the response template and closes on EOS.
 COMPLETION_ROW = {"input_ids": [5, 6, RESPONSE_TEMPLATE[0], 8, 9, 10, EOS_ID]}
 # Two rows of different lengths: the batch pads, and transformers unpads it by its mask.
 TWO_ROWS = ({"input_ids": [5, 6, 7, 8]}, {"input_ids": [9, 10]})
@@ -127,7 +113,7 @@ def test_a_flash_run_hands_a_one_document_batch_its_varlen_set(attn_implementati
     )
     assert all(key in batch for key in VARLEN_KEYS), sorted(batch)
     _assert_transformers_derivation(batch)
-    # Anti-vacuity: transformers would test exactly this row in every layer and run its dense kernel.
+    # Transformers would test exactly this row in every layer and run its dense kernel.
     positions = batch.get("position_ids", torch.arange(batch["input_ids"].shape[1]).unsqueeze(0))
     assert not flash_utils._is_packed_sequence(positions, batch_size=1)
 
@@ -151,8 +137,8 @@ def test_the_set_is_the_only_change_to_the_batch(completion_only, packing):
 @pytest.mark.parametrize("pad_to_multiple_of", [None, 8])
 @pytest.mark.parametrize("rows", [(TWO_ROWS[0],), TWO_ROWS], ids=("one_row", "two_rows"))
 def test_the_full_sequence_route_is_trls_collator(rows, pad_to_multiple_of, labelled):
-    """Where an SFT run used to leave its collator to TRL, the factory's collator is TRL's, built with the arguments
-    TRL builds its own with, plus the set on an unpadded one-row batch only."""
+    """The factory's collator is TRL's, built with the arguments TRL builds its own with, plus the set on an
+    unpadded one-row batch."""
     rows = [{**row, "labels": [-100, *row["input_ids"][1:]]} if labelled else dict(row) for row in rows]
     collator = _collator(_config("flash_attention_2"), pad_to_multiple_of=pad_to_multiple_of)
     assert type(collator) is DataCollatorForLanguageModelingWithVarlen
@@ -193,21 +179,20 @@ def test_a_multi_row_batch_gets_no_set():
     ids=("trl", "completion_only", "wrapped"),
 )
 def test_equal_length_rows_get_no_set(completion_only, packing):
-    """Two unpadded rows of one length (rows cut at ``max_length``, ``wrapped`` packing above batch 1) carry an
-    all-ones mask: one ``[0, S]`` set would have flash attend the first row alone and never write the second."""
+    """An all-ones mask on two rows: one ``[0, S]`` set would have flash attend the first row alone and never write
+    the second."""
     rows = [_row(completion_only), _row(completion_only)]
     collator = _collator(_config("flash_attention_2"), completion_only=completion_only, packing=packing)
     with pytest.warns(UserWarning, match="seq_lengths") if packing else contextlib.nullcontext():
         batch = collator(rows)
-    # Anti-vacuity: no padding tells these rows apart from one document; only their count does.
+    # No padding tells these rows apart from one document; only their count does.
     assert batch["input_ids"].shape[0] == 2 and batch["attention_mask"].all()
     assert not any(key in batch for key in VARLEN_KEYS), sorted(batch)
 
 
 @pytest.mark.parametrize("name", MULTI_DOCUMENT_BATCHES)
 def test_a_multi_document_packed_batch_keeps_the_set_of_its_documents(name):
-    """The opt-in adds nothing to a packed row of several documents: it carries the set of its documents, which
-    transformers derives from its restarting positions, never the one-document ``[0, S]``."""
+    """It carries the set of its documents, never the one-document ``[0, S]``."""
     completion_only, rows = MULTI_DOCUMENT_BATCHES[name]
     batch = _collator(_config("flash_attention_2"), completion_only=completion_only, packing=True)(
         [dict(row) for row in rows]

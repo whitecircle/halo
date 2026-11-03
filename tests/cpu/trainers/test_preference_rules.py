@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""The SMPO, DPO and KTO construction refusals: each fires on its own condition, named by its mechanism, and the
-supported run passes them all.
-
-Run: python tests/cpu/trainers/test_preference_rules.py
-"""
+"""The SMPO, DPO and KTO construction refusals fire on their own conditions, and the supported run passes them all."""
 
 from types import SimpleNamespace
 
@@ -51,7 +47,7 @@ def test_the_supported_run_passes_every_refusal():
 
 
 def test_the_pp_options_are_inert_off_pipeline_parallelism():
-    """Every SMPO PP refusal sits behind ``is_pp_mode``: a non-PP run keeps padding_free and the clip bounds."""
+    """Every SMPO PP refusal sits behind ``is_pp_mode``, so a non-PP run keeps padding_free and the clip bounds."""
     off = SimpleNamespace(is_pp_mode=False, cp_size=1)
     reject_smpo_pp_options(_smpo_args(padding_free=True, lower_clip_percentile=0.1), off, object(), is_vlm=True)
 

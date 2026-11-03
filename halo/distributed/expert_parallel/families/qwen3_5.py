@@ -10,12 +10,7 @@ from halo.models.moe.family_specs import QWEN3_5
 
 
 class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
-    """EP layer for Qwen3.5 MoE (Qwen3_5MoeSparseMoeBlock) using DeepEP.
-
-    Fused gate_up_proj/down_proj routed experts (GLM4 layout, base fused-GLU helpers).
-    ``Qwen3_5MoeTopKRouter`` returns ``(router_logits, router_scores, router_indices)``. The shared
-    expert (``Qwen3_5MoeMLP``) and its sigmoid gate (``Linear(hidden, 1)``) are not distributed.
-    """
+    """EP layer for ``Qwen3_5MoeSparseMoeBlock``. The shared expert and its sigmoid gate are not distributed."""
 
     HF_MODULE_NAMES = ("Qwen3_5MoeSparseMoeBlock",)
     FAMILY = QWEN3_5
@@ -39,8 +34,7 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
         return (f"shared_expert_gate={'yes' if self.shared_expert_gate else 'no'}",)
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """``Qwen3_5MoeTopKRouter`` weights at ``indices``: the shared softmax gating. This router
-        carries no ``norm_topk_prob`` and renormalizes unconditionally."""
+        """The shared softmax gating; this router has no ``norm_topk_prob`` and renormalizes unconditionally."""
         return self._softmax_gate_weights_at(router_logits, indices, normalize=True)
 
     def _route_hidden_states(self, flat: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
@@ -60,15 +54,13 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
         return topk_indices, topk_weights
 
     def _biased_route(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(topk_indices, topk_weights)`` under a balancing bias: top-k on the bias-adjusted probabilities,
-        gated by the unbiased renormalized softmax at those indices, ``Qwen3_5MoeTopKRouter``'s arithmetic, so a
-        zero bias selects and gates identically up to the router's bf16 cast (this path stays fp32).
-        ``_deepseek_biased_route`` applies the routing replay itself."""
+        """Top-k on the bias-adjusted probabilities, gated by the unbiased renormalized softmax
+        (``Qwen3_5MoeTopKRouter``'s arithmetic), so a zero bias selects and gates identically up to the router's bf16
+        cast. ``_deepseek_biased_route`` applies the routing replay."""
         topk_weights, topk_indices = self._deepseek_biased_route(router_logits)
         return topk_indices, topk_weights
 
     def _shared_expert_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """The shared expert, sigmoid-gated where the block carries the gate."""
         shared_output = self.shared_expert(hidden_states)
         if self.shared_expert_gate is not None:
             shared_output = shared_output * torch.sigmoid(self.shared_expert_gate(hidden_states))

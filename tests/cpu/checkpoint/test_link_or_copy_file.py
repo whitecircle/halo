@@ -1,12 +1,5 @@
-"""``link_or_copy_file``: a hard link where the filesystem takes one, else a copy that reads like the link.
-
-The shard merges, ``reset_sinks``, the unchanged-file republish of a save and offline GRPO's reference scratch
-carry files through it. A copy keeps the source's mode and mtime, as the link does, and an existing destination
-is replaced, never written through: it may be a link to another checkpoint's file. A destination that is the
-source's own entry, reached by another path, is refused before anything is removed.
-
-    python tests/cpu/checkpoint/test_link_or_copy_file.py
-"""
+"""``link_or_copy_file``: a hard link where possible, else a copy that reads like the link.
+An existing destination is replaced, never written through, since it may link to another checkpoint's file."""
 
 import os
 import stat
@@ -58,8 +51,7 @@ def test_a_refused_link_copies_with_the_source_mode_and_mtime(tmp_path, monkeypa
 
 @pytest.mark.parametrize("links", [True, False], ids=["link", "copy"])
 def test_an_existing_destination_is_replaced_not_written_through(tmp_path, monkeypatch, links):
-    """A merge re-run into its output directory finds the earlier file there, possibly a link to another
-    checkpoint's: the new file takes the entry over and leaves the other checkpoint's bytes alone."""
+    """A merge re-run finds the earlier file there, possibly a link to another checkpoint's."""
     other = tmp_path / "other_checkpoint.pt"
     other.write_bytes(OTHER_CHECKPOINT_BYTES)
     destination = tmp_path / "merged.pt"
@@ -76,8 +68,7 @@ def test_an_existing_destination_is_replaced_not_written_through(tmp_path, monke
 
 @pytest.mark.parametrize("reached_by", ["same_path", "second_mount"])
 def test_the_sources_own_entry_is_refused_and_survives(tmp_path, monkeypatch, reached_by):
-    """Replacing a destination that names the source's own entry would delete the only copy, so the call refuses
-    before it removes anything; a second mount of the directory is the path ``realpath`` does not see through."""
+    """It would delete the only copy; a second mount is the path ``realpath`` does not see through."""
     save = tmp_path / "save"
     save.mkdir()
     source = _source(save)

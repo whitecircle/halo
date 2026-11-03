@@ -21,12 +21,8 @@ from halo.trainers.preference.smpo_objective import SMPOObjective, SMPOStepConst
 
 @dataclass
 class SMPOPipelineLoss:
-    """SMPO's pipeline-loss contract over ``[c0, r0, c1, r1, ...]`` rows, so no microbatch splits a pair.
-
-    A microbatch cannot derive SMPO's divisors (the pair count, each side's token count) or read the live
-    margin, so :meth:`refresh_constants` records them from each step's whole batch (in eval, its real pairs)
-    and the metrics accumulate as sums: summed over microbatches, loss and metrics equal the non-PP step's.
-    """
+    """A microbatch cannot derive SMPO's divisors or read the live margin, so :meth:`refresh_constants` records them
+    from each step's whole batch and metrics accumulate as sums, equal to the non-PP step's over the microbatches."""
 
     objective: SMPOObjective
     pad_token_id: int
@@ -68,8 +64,7 @@ class SMPOPipelineLoss:
         )
 
     def refresh_constants(self, inputs: dict[str, torch.Tensor]) -> None:
-        """Record the step's pair count, per-side token counts (each at least 1, so a step of padding alone
-        scores 0) and the live margin."""
+        """Each token count is at least 1, so a step of padding alone scores 0."""
         counts = loss_token_counts_per_row(inputs["labels"])
         self.constants = SMPOStepConstants(
             pair_count=max(inputs["input_ids"].size(0) // 2, 1),
@@ -121,8 +116,8 @@ class SMPOPipelineLoss:
         return (margin_losses * pair_valid).sum() / constants.pair_count + sft_term
 
     def predictions(self, logits: torch.Tensor, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """The per-pair ``[pairs, 2]`` (chosen, rejected) rewards the trainer's eval reports, reduced on the last
-        stage instead of sending the ``[rows, S, vocab]`` plane down the chain."""
+        """Per-pair ``[pairs, 2]`` rewards, reduced on the last stage instead of sending the ``[rows, S, vocab]`` plane
+        down the chain."""
         token_logps, loss_mask = token_logprobs(logits, inputs["labels"])
         chosen_logps, rejected_logps = self._pair_mean_logps(token_logps.masked_fill(~loss_mask, 0), loss_mask)
         _, chosen_rewards, rejected_rewards = self.objective.margin_loss(

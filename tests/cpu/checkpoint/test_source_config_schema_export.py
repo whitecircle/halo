@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""A source-schema-exporting family's ``config.json`` must be the SOURCE repo's schema, not transformers'.
-
-``exports_source_config_schema`` (Step-3.7 Flash) marks a family whose serving engines have no
-config class of their own and read it only through the source repo's ``auto_map`` modules. Those
-modules spell the config in the vendor's own keys, which transformers 5.20 ABSORBS at load
-(``Step3p7TextConfig.attribute_map`` plus the ``kwargs.pop`` derivations in ``__post_init__``) and
-never re-emits — so a transformers-written config is a schema no pinned engine parses, and nothing
-on the save side can invert it. Every toolkit config write therefore carries the source's own
-``config.json`` and modules forward with this run's changes applied.
-
-Three properties carry that, and each fails when the export breaks: the written config keeps the
-source's spellings and none of the native-only ones, it reloads in the training image's transformers
-to exactly the config that was trained, and a value this run changed (a ``patch_vocab.py``
-``vocab_size``) reaches it. The roster is derived from the class hierarchy, so a family cannot start
-declaring the flag without its own fixture landing here.
-
-Run: ``python tests/cpu/checkpoint/test_source_config_schema_export.py`` (or ``pytest -m cpu``).
-"""
+"""A source-schema family's ``config.json`` is the source repo's schema, since transformers absorbs the vendor keys
+at load and engines read only those."""
 
 from __future__ import annotations
 
@@ -37,12 +21,8 @@ from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.rosters import ep_layer_class_by_model_type
 
-# The tiny stand-in for ``stepfun-ai/Step-3.7-Flash``'s own ``config.json``: the release's key
-# spellings at the roster's geometry. Every MoE/attention field is the vendor's, not transformers' —
-# ``moe_num_experts``/``moe_top_k``/``num_attention_groups`` are ``attribute_map`` aliases, and
-# ``moe_layers_enum``/``attention_other_setting`` are derived away into ``mlp_layer_types`` /
-# ``num_sliding_attention_heads`` + ``per_layer_config``. ``test_the_source_config_parses_to_the_roster_geometry`` below
-# pins it against ``TINY_STEP3P7_CONFIG``, so it cannot drift into a different model.
+# The release's key spellings at the roster's geometry; ``test_the_source_config_parses_to_the_roster_geometry`` pins
+# it against ``TINY_STEP3P7_CONFIG``.
 TINY_STEP3P7_SOURCE_CONFIG = {
     "architectures": ["Step3p7ForConditionalGeneration"],
     "auto_map": {
@@ -89,13 +69,11 @@ TINY_STEP3P7_SOURCE_CONFIG = {
     },
 }
 
-# Key spellings that decide whether the artifact is servable: the source's, which the pinned engines
-# read, against the native-only ones transformers writes and they have no class for.
+# The source's, which the pinned engines read, against the native-only ones they have no class for.
 _SOURCE_SPELLINGS = ("moe_num_experts", "moe_top_k", "moe_layers_enum", "attention_other_setting")
 _NATIVE_ONLY_SPELLINGS = ("n_routed_experts", "num_experts_per_tok", "mlp_layer_types", "per_layer_config")
 
-# Stand-ins for the release's remote-code modules. The export copies them; it never imports them, and
-# the modeling entry names a sibling to pin the transitive copy the ``auto_map`` never mentions.
+# The export copies them and never imports them; the modeling entry names a sibling to pin the transitive copy.
 _SOURCE_MODULES = {
     "configuration_step3p7.py": "class Step3p7Config: pass\n",
     "processing_step3.py": "class Step3VLProcessor: pass\n",
@@ -119,7 +97,7 @@ def _write_source(directory, payload: dict, modules: dict[str, str]) -> str:
 
 
 def _model_from(source: str):
-    """The tiny model as a training run holds it: loaded config, source recorded by the loader."""
+    """Loaded config, source recorded by the loader."""
     torch.manual_seed(0)
     model = Step3p7ForConditionalGeneration(AutoConfig.from_pretrained(source)).to(torch.bfloat16)
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, source)
@@ -151,8 +129,7 @@ def test_every_declaring_family_has_a_source_schema_fixture():
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_the_source_config_parses_to_the_roster_geometry(cls):
-    """The stand-in source must be the roster model in the vendor's spellings — otherwise every
-    assertion below is about a different config than the rest of the suite trains."""
+    """Otherwise every assertion below is about a different config than the suite trains."""
     source_config, _modules = FIXTURES[cls]
     parsed = Step3p7Config.from_dict(json.loads(json.dumps(source_config))).to_dict()
     native = Step3p7Config(
@@ -183,16 +160,15 @@ def test_the_export_carries_the_source_schema_and_its_modules(cls, tmp_path):
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_the_export_reloads_to_the_config_that_was_trained(cls, tmp_path):
-    """The carry must cost nothing on the training side: this transformers accepts the source's
-    spellings (that is how it loads the release), so the export reloads to the live config exactly."""
+    """This transformers accepts the source's spellings, so the export reloads exactly."""
     _payload, export, model = _exported(tmp_path, cls)
     assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_a_patched_vocab_size_reaches_the_carried_config(cls, tmp_path):
-    """``patch_vocab.py``'s one config-visible effect. Carried verbatim, it would serve the source's
-    vocabulary against a resized embedding — the checkpoint-wide off-by-N no reader can detect."""
+    """Carried verbatim, it would serve the source's vocabulary against a resized embedding, an off-by-N no reader
+    can detect."""
     patched = TINY_STEP3P7_CONFIG["vocab_size"] + 128
 
     def resize(model):
@@ -206,9 +182,7 @@ def test_a_patched_vocab_size_reaches_the_carried_config(cls, tmp_path):
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_the_standalone_writer_carries_the_schema_too(cls, tmp_path):
-    """``save_full_checkpoint`` is the other config writer — the one ``patch_vocab.py`` and the
-    after-training tools use. An export servable only when it came from a parallel save is half a
-    path: the vocab patch is exactly where a Step-3.7 run starts."""
+    """The vocab patch is where a Step-3.7 run starts, through ``save_full_checkpoint``."""
     source_config, modules = FIXTURES[cls]
     source = _write_source(tmp_path / "source", source_config, modules)
     export = str(tmp_path / "export")
@@ -227,9 +201,7 @@ def test_the_standalone_writer_carries_the_schema_too(cls, tmp_path):
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_a_change_the_source_schema_swallows_is_refused(cls, tmp_path):
-    """The carry is only sound while the rewritten config re-parses to the live values. A field the
-    source spells through a legacy key the walk cannot update parses back to the SOURCE's value, and
-    the served model would then run a geometry the trainer never had — so the export refuses."""
+    """A field spelled through a legacy key parses back to the source's value, a geometry the trainer never had."""
 
     def widen_sliding_heads(model):
         model.config.text_config.num_sliding_attention_heads = TINY_STEP3P7_CONFIG["num_attention_heads"]
@@ -240,8 +212,7 @@ def test_a_change_the_source_schema_swallows_is_refused(cls, tmp_path):
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_a_source_without_remote_code_leaves_the_native_schema(cls, tmp_path, caplog):
-    """A source that was never servable has no schema to hand on; the export says so and writes
-    transformers' own rather than inventing one."""
+    """A source that was never servable has no schema to hand on."""
     source_config = {k: v for k, v in FIXTURES[cls][0].items() if k != "auto_map"}
     source = _write_source(tmp_path / "source", source_config, {})
     export = str(tmp_path / "export")
@@ -257,8 +228,7 @@ def test_a_source_without_remote_code_leaves_the_native_schema(cls, tmp_path, ca
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_only_an_unreadable_source_degrades_to_the_native_schema(cls, tmp_path, monkeypatch, caplog):
-    """A source the export cannot read keeps the native schema with a warning; any other failure in
-    the read is a bug and must surface rather than ship an unservable config with a log line."""
+    """Any other read failure is a bug and must surface rather than ship an unservable config."""
     source = _write_source(tmp_path / "source", *FIXTURES[cls])
     model = _model_from(source)
     export = str(tmp_path / "export")

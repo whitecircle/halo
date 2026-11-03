@@ -70,7 +70,7 @@ def _fa4_checks(launch, label: str) -> dict[str, bool]:
 
 
 def _launch(config: Path, overrides: list[str], launch: int):
-    """Launch number ``launch``; a method generating through an engine binds a weight-transfer port of its own."""
+    """A method generating through an engine binds a weight-transfer port of its own."""
     server_fields = CASES[ARGS.method].server_fields
     if server_fields is not None:
         overrides = [*overrides, f"--{server_fields[1]}={weight_transfer_port('HALO_TEST_VLLM_GROUP_PORT', launch)}"]

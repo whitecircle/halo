@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: a SWE grader that itself crashes must drop its episode from the GRPO group baseline.
-
-``SweEnvironment._grade_episode`` scores a raising ``test_function`` as a failure. That verdict is
-about the grader, not the completion, so the episode also has to carry ``EPISODE_INVALID_KEY`` — the
-flag the trainer reads to exclude a row from the group mean every sibling's advantage is measured
-against. A real pass/fail verdict must NOT carry it.
-
-    python tests/cpu/environments/test_swe_grader_crash_invalid.py
-"""
+"""A SWE grader that crashes drops its episode from the GRPO group baseline: the verdict is about the grader, so the
+episode carries ``EPISODE_INVALID_KEY``. A real pass or fail does not."""
 
 import pytest
 
@@ -49,8 +42,7 @@ def test_crashing_test_function_marks_the_episode_invalid():
 
 
 def test_real_verdicts_stay_in_the_baseline():
-    # The counterpart that keeps the flag honest: an episode the grader actually judged is signal,
-    # whichever way it went, and must stay in the baseline.
+    # An episode the grader judged is signal, whichever way it went, and stays in the baseline.
     passed = _finished_episode(lambda trajectory: True)
     failed = _finished_episode(lambda trajectory: False)
     assert passed.episode_invalid is False

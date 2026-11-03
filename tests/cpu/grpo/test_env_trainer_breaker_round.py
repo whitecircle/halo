@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The IS trust-region breaker's verdict holds for the WHOLE generation round.
-
-A round spans ``steps_per_generation * num_iterations`` micro-batches — ``num_iterations`` optimizer
-steps at the default ``steps_per_generation`` — and ``_build_training_tensors`` zeroes the advantages
-of every one of them. The optimizer skip must therefore fire on every one of those steps too: a skip
-that consumed the flag on first use would leave the later steps running Adam on momentum alone, exactly the
-weight movement the skip exists to prevent. ``_update_breaker_tripped`` owns the flag: it sets this
-round's verdict and, on the next round, replaces it.
-
-    python tests/cpu/grpo/test_env_trainer_breaker_round.py
-"""
+"""The IS trust-region breaker's verdict holds for the whole generation round. A skip that consumed the flag on first
+use would leave the round's later steps running Adam on momentum alone, the movement the skip exists to prevent."""
 
 import types
 from collections import defaultdict
@@ -26,7 +17,6 @@ class _TrainerStandIn(types.SimpleNamespace):
 
 
 def _skip_hook(host):
-    """The breaker's pre-optimizer-step hook over ``host``, as the trainer registers it."""
     callback = _BreakerOptimizerSkipCallback(host)
     return lambda: callback.on_pre_optimizer_step(None, None, None)
 
@@ -64,8 +54,6 @@ def test_the_skip_fires_on_every_optimizer_step_while_the_round_is_tripped():
 
 
 def test_the_next_round_verdict_replaces_a_tripped_one():
-    """The flag comes down only where it went up: a healthy round after a tripped one re-enables the
-    optimizer step, and a tripped round after a healthy one arms it."""
     tripped, host = _breaker_host(0.5, tripped=True)
     assert tripped(*_batch([True, False, False, False]), 4, "train") is False
     assert host._breaker_tripped_this_step is False
@@ -74,8 +62,7 @@ def test_the_next_round_verdict_replaces_a_tripped_one():
 
 
 def test_an_eval_round_leaves_the_training_verdict_standing():
-    """Evaluation can run between two optimizer steps of one generation round; its batch build must
-    not clear the verdict those steps still act on."""
+    """Evaluation can run between two optimizer steps of one generation round."""
     tripped, host = _breaker_host(0.5, tripped=True)
     assert tripped(*_batch([False, False, False, False]), 4, "eval") is False
     assert host._breaker_tripped_this_step is True

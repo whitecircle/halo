@@ -1,16 +1,5 @@
 """TRL's ``_prepare_dataset`` runs once per filesystem scope, outside any collective, and is reused.
-
-TRL's DPO / KTO / reward preparation tokenizes under ``PartialState().main_process_first()`` — the
-peers held in an NCCL barrier for the whole tokenization — and its maps key a fingerprint of a closure
-over the trainer, which a real trainer (holding process groups) cannot hash, so every rank writes its
-own full tokenized copy on every run. Proven against TRL's real ``DPOTrainer._prepare_dataset`` on a
-2-rank gloo group: the load rank prepares while its peer outlasts a process-group timeout on the store,
-the peer loads the published rows, a relaunch over loader-stamped rows prepares nothing while one over
-unstamped rows prepares again (nothing can prove them unchanged), and no map cache lands beside the
-source. A structural guard holds every toolkit trainer over a TRL ``_prepare_dataset`` to the seam.
-
-    python tests/cpu/trainers/test_trl_dataset_prep_coordination.py
-"""
+TRL holds the peers in an NCCL barrier while it tokenizes, and every rank writes its own tokenized copy per run."""
 
 import datetime
 import inspect
@@ -130,7 +119,6 @@ def test_trl_preparation_runs_once_off_the_watchdog_and_is_reused(tmp_path):
 
 
 def _trl_prepare_owner(cls) -> type | None:
-    """The first TRL class in ``cls``'s MRO that defines ``_prepare_dataset``, if any."""
     return next(
         (base for base in cls.__mro__ if "_prepare_dataset" in base.__dict__ and base.__module__.startswith("trl.")),
         None,
@@ -147,11 +135,8 @@ def _main_first_scopes(prepare) -> set[str]:
 
 @pytest.mark.parametrize("trainer_cls", [DistributedDPOTrainer, DistributedKTOTrainer, DistributedRewardTrainer])
 def test_every_trainer_over_a_trl_preparation_routes_through_the_seam(trainer_cls):
-    """The trainers whose scripts let TRL prepare their datasets (DPO, KTO, BT reward) route that preparation
-    through the seam, ahead of TRL's main-first one: one left out would hold its peers in the NCCL barrier
-    again and write one tokenized copy per rank per run. The SFT-derived trainers skip TRL's preparation
-    (their scripts call ``disable_trl_dataset_prep``), so they never reach it. A main-first scope the seam
-    does not neutralize would pair its barrier with nothing."""
+    """One left out would hold its peers in the NCCL barrier and write one tokenized copy per rank per run.
+    The SFT-derived trainers skip TRL's preparation (their scripts call ``disable_trl_dataset_prep``)."""
     owner = _trl_prepare_owner(trainer_cls)
     assert owner is not None, f"{trainer_cls.__name__}: TRL no longer prepares its dataset — revisit the seam"
     scopes = _main_first_scopes(owner._prepare_dataset)

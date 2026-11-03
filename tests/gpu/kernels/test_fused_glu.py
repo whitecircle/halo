@@ -1,14 +1,8 @@
 #!/usr/bin/env python
 """Fused MoE GLU kernels match their eager references, forward and backward.
 
-Exercises every combine of the one row-strided kernel pair: the standard SwiGLU and tanh-GeGLU used by
-Mistral 4 and Gemma 4, and the clamped family — GptOss, DeepSeek-V4 / GLM-5 Next's clamp-then-SiLU,
-Step-3.7's SiLU-then-clamp — whose bound and ``alpha`` are runtime arguments and whose clamp placement
-and ``up + 1`` are ``tl.constexpr``. Token counts vary because grouped expert routing produces dynamic
-shapes; the variants are run in one process because that is where a constexpr keyed to the wrong
-combine, or a compilation reused across two of them, would show.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fused_glu.py
+The variants run in one process because that is where a constexpr keyed to the wrong combine, or a compilation reused
+across two of them, shows.
 """
 
 from collections.abc import Callable
@@ -72,9 +66,8 @@ PACKED_CLAMPED_WIDTHS = (1536, 5)
 
 
 def test_fused_gate_up_layouts_match_eager(combine, eager_fn, dtype, tol, width):
-    """The expert path hands the kernel the two halves of one ``[N, 2M]`` projection. The packed form and
-    the strided halves (no ``.contiguous()`` copy) must both read the right columns and write the right
-    gradient columns: an off-by-``M`` stride swaps gate and up, which only a non-symmetric activation shows."""
+    """The packed form and the strided halves (no ``.contiguous()`` copy) must read and write the right columns: an
+    off-by-``M`` stride swaps gate and up, which only a non-symmetric activation shows."""
     generator = torch.Generator(device="cuda").manual_seed(width)
     for n in (1, 333, 4099):
         base = torch.randn(n, 2 * width, generator=generator, device="cuda", dtype=dtype) * 3
@@ -92,9 +85,8 @@ def test_fused_gate_up_layouts_match_eager(combine, eager_fn, dtype, tol, width)
 
 
 def test_packed_clamped_glu_is_bit_identical_to_the_separate_halves(combine, dtype, width):
-    """The packed clamped form runs the same kernel over ``[gate | up]`` read in place, so forward and
-    gradient must equal the separate-halves call bit for bit; a stride off by ``M`` swaps gate and up,
-    which the asymmetric clamps show."""
+    """The packed clamped form runs the same kernel over ``[gate | up]`` read in place, so forward and gradient match
+    bit for bit; a stride off by ``M`` swaps gate and up, which the asymmetric clamps show."""
     generator = torch.Generator(device="cuda").manual_seed(width)
     for n in (1, 333, 4099):
         base = torch.randn(n, 2 * width, generator=generator, device="cuda", dtype=dtype) * 3
@@ -110,7 +102,6 @@ def test_packed_clamped_glu_is_bit_identical_to_the_separate_halves(combine, dty
 
 
 def test_packed_glu_keeps_leading_dims():
-    """A ``[B, S, 2M]`` input (the dense MLP path) returns ``[B, S, M]`` and a ``[B, S, 2M]`` gradient."""
     gate_up = torch.randn(2, 5, 2 * 64, device="cuda", requires_grad=True)
     out = GluCombine.gelu_tanh().packed(gate_up)
     out.sum().backward()
@@ -119,19 +110,16 @@ def test_packed_glu_keeps_leading_dims():
 
 
 class _Variant(NamedTuple):
-    """One clamped variant: its combine at a bound, its eager reference, the numeric args it takes before
-    the bound, and the tolerances its output scale earns."""
-
     name: str
     fused: Callable[..., torch.Tensor]
     eager: Callable[..., torch.Tensor]
     extra: tuple[float, ...]
-    rel_tol: float  # fp32, on random inputs
-    bound_atol: float  # absolute, on the hand-built bound grid
+    rel_tol: float  # fp32, on random inputs.
+    bound_atol: float  # Absolute, on the hand-built bound grid.
 
 
-# GptOss's `up + 1` and its alpha put its values ~8x the other two's, so it carries its own tolerances
-# and its own dtype/size sweep (which is also where the int64 program offset is exercised).
+# GptOss's `up + 1` and its alpha put its values ~8x the other two's, so it carries its own tolerances and dtype/size
+# sweep.
 GPTOSS = _Variant(
     "gptoss",
     lambda gate, up, alpha, limit: GluCombine.gptoss(alpha, limit)(gate, up),
@@ -164,7 +152,7 @@ CLAMPED_DTYPE_TOLS = ((torch.float32, 1e-5), (torch.bfloat16, 2e-2))
 
 def _check_clamped(variant, n, dtype, limit, tol):
     generator = torch.Generator(device="cuda").manual_seed(n)
-    # ×3 so the ±limit clamps are exercised on both gate and up
+    # x3 so the limit clamps fire on both gate and up.
     base_gate = torch.randn(n, DIM, generator=generator, device="cuda", dtype=dtype) * 3
     base_up = torch.randn(n, DIM, generator=generator, device="cuda", dtype=dtype) * 3
     fused_gate, fused_up = base_gate.clone().requires_grad_(True), base_up.clone().requires_grad_(True)
@@ -181,7 +169,7 @@ def _check_clamped(variant, n, dtype, limit, tol):
 
 
 def test_gptoss_fp32_matches_eager():
-    for n in (1, 333, 4096, 65536):  # varying token counts: shape-agnostic launch
+    for n in (1, 333, 4096, 65536):  # Varying token counts: shape-agnostic launch.
         _check_clamped(GPTOSS, n, torch.float32, LIMIT, 1e-3)
 
 
@@ -196,8 +184,7 @@ def test_clamped_glu_matches_eager(variant, dtype, tol):
 
 
 def test_clamped_glu_honours_every_bound_in_one_process(variant):
-    """Two families (or Step-3.7's two per-layer limits) share the kernel: after warming at one bound
-    over several token counts, a different bound must be computed at that bound, not the first."""
+    """Two families share the kernel: after warming at one bound, a different bound must be computed at that bound."""
     for n in (5, 7, 3, 4, 9, 10):
         _check_clamped(variant, n, torch.float32, 10.0, variant.rel_tol)
     _check_clamped(variant, 6, torch.float32, 0.5, variant.rel_tol)
@@ -205,15 +192,14 @@ def test_clamped_glu_honours_every_bound_in_one_process(variant):
 
 
 def test_clamped_glu_subgradient_at_the_bound(variant):
-    """Inputs sitting exactly on the clamp bound: torch's clamp passes the gradient through at the
-    bound itself, so the kernel's pass-through interval must be closed on both ends (a masked-out
-    gradient is O(1) off; the tolerances only absorb the sigmoid ulp)."""
+    """torch's clamp passes the gradient through at the bound, so the kernel's pass-through interval must be closed on
+    both ends (a masked-out gradient is O(1) off; the tolerances only absorb the sigmoid ulp)."""
     limit = 2.0
     values = torch.tensor([-limit, limit, 0.0, limit + 1e-3, -limit - 1e-3], device="cuda")
     gate = values.repeat(8, 1)
     up = values.flip(0).repeat(8, 1)
     if variant is SILU_THEN_CLAMP:
-        # silu(x) == limit exactly: solve by bisection so the activated gate sits on its own bound.
+        # silu(x) == limit exactly, by bisection, so the activated gate sits on its own bound.
         lo, hi = torch.tensor(0.0, device="cuda"), torch.tensor(10.0, device="cuda")
         for _ in range(60):
             mid = (lo + hi) / 2
@@ -229,12 +215,9 @@ def test_clamped_glu_subgradient_at_the_bound(variant):
 
 
 def test_up_plus_one_is_all_that_separates_the_two_pre_activation_variants():
-    """GptOss and the clamp-then-SiLU variant reach one kernel pair and differ only in the
-    ``UP_PLUS_ONE`` constexpr, so at ``alpha=1`` their outputs must differ by exactly the activated
-    gate. Measured through the kernels, in one process: a constexpr keyed to the wrong combine — or a
-    compilation reused across the two — is invisible to every per-variant check above. The tolerance
-    absorbs the fp32 cancellation of two ~8x larger products (7e-6 in eager fp64-vs-fp32); either
-    constexpr flipped is off by the activated gate itself, up to `limit`."""
+    """The two variants differ only in the ``UP_PLUS_ONE`` constexpr, so at ``alpha=1`` their outputs differ by exactly
+    the activated gate. The tolerance absorbs the fp32 cancellation of two ~8x larger products (7e-6 in eager
+    fp64-vs-fp32); either constexpr flipped is off by the activated gate itself."""
     generator = torch.Generator(device="cuda").manual_seed(0)
     gate = torch.randn(257, DIM, generator=generator, device="cuda") * 3
     up = torch.randn(257, DIM, generator=generator, device="cuda") * 3
@@ -243,9 +226,8 @@ def test_up_plus_one_is_all_that_separates_the_two_pre_activation_variants():
 
 
 def test_the_switch_runs_every_combine_eagerly_on_cuda():
-    """``HALO_FUSED_GLU=0`` is the documented escape from a GLU kernel that fails on a GPU: with it, no
-    combine (separate halves or packed) may reach a Triton kernel, and each must return exactly its
-    eager reference. A combine kind missing here fails the coverage check."""
+    """``HALO_FUSED_GLU=0`` is the documented escape: no combine may reach a Triton kernel, and each returns its eager
+    reference."""
     gate, up = (torch.randn(8, 64, device="cuda", dtype=torch.bfloat16) for _ in range(2))
     gate_up = torch.cat([gate, up], dim=-1)
     eager_forms = {
@@ -281,9 +263,8 @@ def _compiled_binaries(kernel) -> int:
 
 
 def test_one_compile_serves_every_row_count():
-    """The EP dispatch's row count changes every step, and its class (1, a multiple of 16, neither) must
-    not select a new binary: one warm call compiles the forward and backward kernels every later row
-    count runs."""
+    """The EP dispatch's row count changes every step, and its class (1, a multiple of 16, neither) must not select a
+    new binary."""
     width = 704
     kernels = (fused_glu._glu_fwd_kernel, fused_glu._glu_bwd_kernel)
 
@@ -292,8 +273,7 @@ def test_one_compile_serves_every_row_count():
         up = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         GluCombine.silu()(gate, up).sum().backward()
 
-    # Earlier checks in this process compiled these kernels at other row counts; start from an empty
-    # cache so a row count that selects its own binary shows up as a new entry.
+    # Start from an empty cache so a row count selecting its own binary shows as a new entry.
     for kernel in kernels:
         kernel.device_caches.clear()
     run(16)
@@ -304,14 +284,9 @@ def test_one_compile_serves_every_row_count():
 
 
 def test_large_numel_int64_offset():
-    """gate.numel() past 2**31 must stay correct (int64 row offsets).
-
-    On the grouped expert path at long context / high ep (e.g. ep8 past the DeepEP token ceiling,
-    where skewed routing piles >745k tokens onto a rank), ``[N, 2880]`` crosses 2**31 elements. The
-    kernels address a row as ``row * stride`` in int64; in int32 that product wraps negative there and
-    the kernel illegal-accesses. Not run on GPUs too small to hold the >2**31-element tensors (the bug
-    only manifests where the activation fits)."""
-    n = 746_000  # 746000 * 2880 = 2,148,480,000 > 2**31 = 2,147,483,648
+    """Rows address as ``row * stride`` in int64; in int32 that wraps negative past 2**31 elements (ep8 past the DeepEP
+    token ceiling, where skewed routing piles >745k tokens onto a rank) and the kernel illegal-accesses."""
+    n = 746_000  # 746000 * 2880 = 2,148,480,000 > 2**31 = 2,147,483,648.
     assert n * DIM > 2**31
     _check_clamped(GPTOSS, n, torch.bfloat16, LIMIT, 5e-2)
 

@@ -1,5 +1,4 @@
-"""The conversation an episode carries: its messages, the trajectory holding them, the step results an
-environment returns, and the view of them the engine is shown."""
+"""An episode's conversation: messages, the trajectory holding them, step results, and the engine's view."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -7,19 +6,16 @@ from typing import Any, NamedTuple
 
 from halo.environments.episode_keys import EPISODE_INVALID_KEY
 
-# What follows a tool observation cut at its length cap, counting what it dropped.
 TRUNCATION_MARKER = "\n…[truncated {dropped} chars]"
 
-# Message keys a chat template may read assistant CoT from: harmony (gpt-oss) reads ``thinking``,
-# other reasoning families ``reasoning_content``. Templates ignore a spelling they do not know, so
-# emitting both renders the CoT once everywhere; emitting only the wrong one renders an empty block.
+# Harmony (gpt-oss) reads ``thinking``, other reasoning families ``reasoning_content``. Templates ignore a spelling
+# they do not know, so emitting both renders the CoT once everywhere.
 REASONING_KEYS = ("thinking", "reasoning_content")
 
 
 def _content_text(content: Any) -> Any:
-    """A user turn's ``content`` as the text an environment carries: a string as is, a list of content
-    parts as its ``text`` parts concatenated, the way a chat template renders them. Any other part raises
-    ``ValueError``: an environment's conversation is text, so an image part would be dropped unseen."""
+    """Text parts concatenated, the way a chat template renders them. Any other part raises: an environment's
+    conversation is text, so an image part would be dropped unseen."""
     if not isinstance(content, list):
         return content
     other = [
@@ -37,8 +33,7 @@ def _content_text(content: Any) -> Any:
 
 
 def task_prompt(prompt: str | list[dict[str, Any]]) -> Any:
-    """The task an environment is handed for a dataset prompt, the same from the trainer and the eval: a string as
-    is, or a conversation's last user turn (the rest is framing) as text; a conversation without one raises."""
+    """A string as is, or a conversation's last user turn (the rest is framing) as text; none raises."""
     if not isinstance(prompt, list):
         return prompt
     for message in reversed(prompt):
@@ -51,8 +46,6 @@ def task_prompt(prompt: str | list[dict[str, Any]]) -> Any:
 
 
 def truncate_text(text: str, max_chars: int) -> str:
-    """``text`` cut to ``max_chars`` with the cut marked (:data:`TRUNCATION_MARKER`), so a reader knows
-    it read a prefix."""
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + TRUNCATION_MARKER.format(dropped=len(text) - max_chars)
@@ -60,8 +53,6 @@ def truncate_text(text: str, max_chars: int) -> str:
 
 @dataclass(slots=True)
 class Message:
-    """A single conversation message."""
-
     role: str  # "user", "assistant", "system", "tool"
     content: str
     name: str | None = None
@@ -75,7 +66,6 @@ class Message:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
-    # The reasoning cap the turn ran under and the reasoning tokens it sampled: what ``reasoning_capped`` compares.
     thinking_cap: int | None = None
     reasoning_tokens: int | None = None
     # The turn flags behind ``untrainable``: cut by the engine, every call refused or unknown, ended on nothing.
@@ -88,8 +78,8 @@ class Message:
     empty: bool = False
 
     def to_dict(self, include_thinking: bool = False) -> dict[str, Any]:
-        """Convert to dict for tokenizer/API. ``include_thinking`` is opt-in: the training render, and the
-        engine request when the env carries reasoning; the default keeps assistant CoT out of it."""
+        """``include_thinking`` is opt-in: the training render and a carrying env's engine request; the default keeps
+        assistant CoT out."""
         d = {"role": self.role, "content": self.content}
         if self.name:
             d["name"] = self.name
@@ -104,14 +94,12 @@ class Message:
 
     @property
     def untrainable(self) -> bool:
-        """An assistant turn no tokenization path may reward (engine-cut, every call rejected, or empty): it stays
-        in the render, its ids training only under a negative advantage."""
+        """No tokenization path may reward this turn: it stays in the render, trained only on a negative advantage."""
         return self.truncated or self.calls_rejected or self.empty
 
     @property
     def reasoning_capped(self) -> bool:
-        """The turn's counted reasoning reached the cap it ran under, so the engine closed it and what the turn
-        wrote after it was written past the cap."""
+        """The engine closed the reasoning at the cap, so what the turn wrote after was written past it."""
         cap, sampled = self.thinking_cap, self.reasoning_tokens
         return cap is not None and sampled is not None and sampled >= cap
 
@@ -132,8 +120,7 @@ class Message:
 
     @classmethod
     def assistant(cls, content: str, **fields) -> "Message":
-        """An assistant turn. ``fields`` are this class's own optional fields (CoT, engine captures,
-        the turn flags); an unknown name raises TypeError rather than being dropped."""
+        """``fields`` are this class's optional fields; an unknown name raises TypeError rather than being dropped."""
         return cls(role="assistant", content=content, **fields)
 
     @classmethod
@@ -146,9 +133,8 @@ class Message:
 
 
 def engine_view(messages: Sequence[Message], carry_reasoning: bool) -> list[Message]:
-    """The conversation as the engine is told it: every message's visible text and, with ``carry_reasoning``,
-    the LAST assistant turn's reasoning, so a request grows by at most one reasoning budget. The rollout
-    observation and the trainer's context re-render both come through here."""
+    """Every message's visible text and, with ``carry_reasoning``, the last assistant turn's reasoning, so a request
+    grows by at most one reasoning budget. The rollout observation and the trainer's re-render both use this."""
     last = max((i for i, m in enumerate(messages) if m.role == "assistant"), default=None)
     return [
         m if m.thinking is None or (carry_reasoning and i == last) else replace(m, thinking=None)
@@ -158,8 +144,6 @@ def engine_view(messages: Sequence[Message], carry_reasoning: bool) -> list[Mess
 
 @dataclass
 class Trajectory:
-    """A complete or partial trajectory through the environment (messages + rewards + state)."""
-
     messages: list[Message] = field(default_factory=list)
     total_reward: float = 0.0
     done: bool = False
@@ -174,8 +158,7 @@ class Trajectory:
     _assistant_count: int = field(default=0, repr=False)
 
     def append_to_last_user(self, text: str) -> None:
-        """Append ``text`` to the most recent user message: how an env states per-episode facts (a task's
-        budgets, a question's choices) inside the prompt the model already reads."""
+        """How an env states per-episode facts inside the prompt the model already reads."""
         for message in reversed(self.messages):
             if message.role == "user":
                 message.content += text
@@ -183,13 +166,12 @@ class Trajectory:
         raise ValueError("the trajectory has no user message to append to")
 
     def add_message(self, message: Message) -> None:
-        """Add a message to the trajectory."""
         self.messages.append(message)
         if message.role == "assistant":
             self._assistant_count += 1
 
     def last_assistant_message(self) -> Message:
-        """The turn just taken: every step appends the model's message before it is handled."""
+        """Every step appends the model's message before it is handled."""
         message = next((m for m in reversed(self.messages) if m.role == "assistant"), None)
         if message is None:
             raise ValueError(
@@ -199,20 +181,19 @@ class Trajectory:
 
     @property
     def num_turns(self) -> int:
-        """Number of assistant turns (cached)."""
         return self._assistant_count
 
     @property
     def episode_invalid(self) -> bool:
-        """True when the environment marked this episode's reward as carrying no learning signal
-        (see ``EPISODE_INVALID_KEY``); the trainer excludes it from the GRPO group baseline."""
+        """The environment marked this reward as carrying no learning signal; the trainer excludes it from the GRPO
+        group baseline."""
         return bool(self.info.get(EPISODE_INVALID_KEY, False))
 
 
 @dataclass(slots=True)
 class EnvStep:
-    """Result of an environment step, Gym-shaped: ``reward`` is this step's delta, ``done``/``truncated``/``info``
-    mirror the trajectory as the step returned it (``info`` by identity, so mutating it mutates the trajectory)."""
+    """Gym-shaped: ``reward`` is this step's delta; ``info`` is the trajectory's by identity, so mutating it mutates
+    the trajectory."""
 
     trajectory: Trajectory
     observation: list[dict[str, Any]]
@@ -223,7 +204,7 @@ class EnvStep:
 
 
 class StepOutcome(NamedTuple):
-    """A protocol step's result: an :class:`EnvStep` before ``_finalize_step``, no observation, reward unrecorded."""
+    """An :class:`EnvStep` before ``_finalize_step``: no observation, reward unrecorded."""
 
     trajectory: Trajectory
     reward: float

@@ -1,24 +1,8 @@
 #!/usr/bin/env python
-"""The load-time attention warm-ups leave nothing for the first training step to compile on models whose head
-count varies by layer.
+"""The load-time attention warm-ups leave the first step nothing to compile on models with per-layer head counts.
 
-Step-3.7 (64 full / 96 sliding heads over 8 KV heads) and Laguna (48 / 72 over 8) give each layer type its own
-query/KV head ratio, which FA4 keys its compiled kernels on; the reduced models below keep those ratios and the
-128-wide heads, so they compile the same kernels as the released checkpoints. Each model is warmed, then trains
-on single-document and packed rows past and within the sliding window:
-
-* FA4 (Blackwell): no new key lands in FA4's forward or backward JIT caches. Gemma 2 at the 27B's geometry
-  (128-wide heads, ratio 2) rides along on its single-document rows: its logit softcap is part of the kernel key,
-  value included, and a softcap stays off FA4's varlen kernels (not validated there), so a varlen call carrying a
-  softcap, the warm-up's included, is refused before it launches and fails the check;
-* ``sdpa_flex_sliding``: Dynamo raises on any recompile, and each row runs FlexAttention on the layers it masks:
-  every layer of a packed row, the full ones under its document mask, and the sliding ones of a single document.
-  Mistral, whose modules keep no window and pass the config's, rides along.
-
-A warm-up keyed on the config's global head count raised on Step-3.7 (the count is per layer) and compiled
-Laguna's sliding kernel at the full layers' ratio, so its first sliding call compiled inside the step.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_attention_warmup_per_layer_heads.py
+FA4 keys its kernels on the query/KV head ratio. A softcap stays off FA4's varlen kernels (not validated there), so a
+varlen call carrying one is refused before launch and fails the check.
 """
 
 import functools
@@ -50,10 +34,9 @@ from tests.common.rank_log import log
 
 WINDOW = 256
 HEAD_DIM = 128
-# Single-document rows past and within the window, then packed rows of both kinds (a packed row drops the window
-# when its total length is within it). The longest document of each row stays above FA4's 128-row tile, and
-# times the head ratio above its query tile (at most 192 rows): below either, FA4 keys a one-block backward or a
-# single-stage forward the 512-token warm-up rows never compile, a length gap apart from the head counts pinned.
+# The longest document stays above FA4's 128-row tile and, times the head ratio, its query tile (at most 192 rows):
+# below either, FA4 keys a one-block backward or single-stage forward the warm-up never compiles. A packed row drops
+# the window when its length is within it.
 ROWS = ([600], [200], [300, 90, 200], [200, 40])
 
 STEP3P7 = {
@@ -92,7 +75,6 @@ PER_LAYER_HEADS = {
     "step3p7": lambda: Step3p7TextModel(Step3p7TextConfig(**STEP3P7)),
     "laguna": lambda: LagunaForCausalLM(LagunaConfig(**LAGUNA)),
 }
-# Each FA4 model and the query/KV head ratios its layers attend at.
 FA4_MODELS = {
     "step3p7": (PER_LAYER_HEADS["step3p7"], {8, 12}),
     "laguna": (PER_LAYER_HEADS["laguna"], {6, 9}),
@@ -118,8 +100,7 @@ def _counted(fn, calls: list):
 
 
 def _fa4_entry(fn, calls: list, *, varlen: bool):
-    """``fn`` recording each call as ``(varlen, softcap)``, and refusing a varlen call with a softcap before it
-    launches, since the softcap stays off FA4's varlen kernels."""
+    """Records ``(varlen, softcap)`` and refuses a varlen call with a softcap before it launches."""
 
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
@@ -133,7 +114,7 @@ def _fa4_entry(fn, calls: list, *, varlen: bool):
 
 
 def _jit_keys(interface) -> dict[str, set]:
-    """The in-memory key set of each FA4 JIT cache (persistent hits populate it too)."""
+    """In-memory key set of each FA4 JIT cache (persistent hits populate it too)."""
     return {
         name: set(getattr(interface, name).compile_cache.cache)
         for name in ("_flash_attn_fwd", "_flash_attn_bwd", "_bwd_preprocess", "_bwd_postprocess_convert")
@@ -145,12 +126,11 @@ def check_fa4_compiles_nothing_after_the_warmup(name: str) -> None:
 
     build, ratios = FA4_MODELS[name]
     model = _model(build, "flash_attention_4")
-    assert {call.heads // call.kv_heads for call in attention_calls(model)} == ratios  # premise
+    assert {call.heads // call.kv_heads for call in attention_calls(model)} == ratios  # Premise.
     softcaps = {call.softcap for call in attention_calls(model) if call.softcap}
     rows = [lengths for lengths in ROWS if len(lengths) == 1] if softcaps else list(ROWS)
     calls: list = []
-    # The warm-up resolves the entry points per call, and transformers binds them on its first flash call;
-    # unbinding makes it bind the recording ones.
+    # transformers binds the entry points on its first flash call; unbinding makes it bind the recording ones.
     with (
         patch.object(cute, "flash_attn_func", _fa4_entry(cute.flash_attn_func, calls, varlen=False)),
         patch.object(cute, "flash_attn_varlen_func", _fa4_entry(cute.flash_attn_varlen_func, calls, varlen=True)),

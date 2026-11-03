@@ -1,26 +1,5 @@
-"""The weight-sync rendezvous store must listen only on the address the engine is told to dial, and
-already be listening there when the engine is told.
-
-The store is unauthenticated, and the engine reads the NCCL bootstrap from it while the group forms
-(vLLM unpickles it). Bound on every interface, any host that reaches the group port in that window
-can plant a bootstrap of its own. The listener therefore binds the advertised address on both
-engines, and the engine is sent that resolved address rather than a name it might resolve
-differently; a wide bind is the explicit ``HALO_WEIGHT_SYNC_BIND_ALL`` opt-in, and an advertised
-address this host cannot bind alone is refused before the engine is asked to join, never silently
-widened.
-
-The listener is bound before the engine's join request goes out. Told first, the engine dials a port
-nobody holds: another socket can take a probed-and-released port in between, and the engine's own
-retried connect can be handed that port as its source (a TCP self-connect), so the trainer's bind
-fails with the engine already waiting on a group that never forms.
-
-The tests drive the real clients and their real rendezvous stores (a group of one, so no engine
-peer is needed) and read the bound address off the kernel's listener table, as ``ss -ltn`` does.
-The engine's join request runs inline, at the moment the client issues it, so what it records is
-what a real engine would find when it dials in.
-
-    python tests/cpu/weight_sync/test_bind_address.py
-"""
+"""The weight-sync rendezvous store must listen only on the address the engine is told to dial, before it is told.
+The store is unauthenticated and vLLM unpickles the NCCL bootstrap from it, so a wide bind lets any host plant one."""
 
 import ipaddress
 import logging
@@ -50,7 +29,6 @@ _TCP_LISTEN = "0A"
 
 
 def _listening_addresses(port: int) -> list[str]:
-    """Every address the kernel holds a TCP listener on at ``port``, IPv4 and IPv6 alike."""
     addresses = []
     for table, family in (("/proc/net/tcp", socket.AF_INET), ("/proc/net/tcp6", socket.AF_INET6)):
         for row in Path(table).read_text().splitlines()[1:]:
@@ -66,8 +44,8 @@ def _listening_addresses(port: int) -> list[str]:
 
 
 def _assert_listens_only_on(port: int, address: str) -> None:
-    """The listener holds ``address`` and no wildcard. One socket binds one address, so a wildcard is the only way
-    it can reach past the one advertised; a parallel test's own socket on another address may share the number."""
+    """One socket binds one address, so a wildcard is the only way to reach past the advertised one.
+    A parallel test's own socket on another address may share the number."""
     listening = _listening_addresses(port)
     assert address in listening and not {"0.0.0.0", "::"} & set(listening), (
         f"the rendezvous store listens on {listening} while the engine was told to dial {address}:{port}"
@@ -75,7 +53,7 @@ def _assert_listens_only_on(port: int, address: str) -> None:
 
 
 class _JoinRequest(NamedTuple):
-    """A group-join request the engine received, and who listened on its port when it arrived."""
+    """``listening``: who held the port when the request arrived."""
 
     address: str
     port: int
@@ -115,8 +93,6 @@ class _Response:
 
 
 class _StoreHoldingCommunicator:
-    """Stand-in for ``PyNcclCommunicator``, holding the unique-id store it formed from."""
-
     def __init__(self, store, device):
         self.store = store
 
@@ -130,8 +106,7 @@ def _group_without_nccl(*args, **kwargs):
 
 
 def _recording_engine(engine_requests: list[_JoinRequest], server_calls: list[str]):
-    """The engine's routes: vLLM's version and world-size reads report the pinned release and no ranks, and every
-    other request is a group-join request, recorded with who listened on its port when it arrived."""
+    """vLLM's version and world-size reads report the pinned release and no ranks; any other request is a join."""
 
     def request(method, path, **kwargs):
         if path == "/version":
@@ -150,19 +125,16 @@ def _recording_engine(engine_requests: list[_JoinRequest], server_calls: list[st
 
 @pytest.fixture
 def engine_requests() -> list[_JoinRequest]:
-    """Each group-join request the client sent the engine, in order."""
     return []
 
 
 @pytest.fixture
 def server_calls() -> list[str]:
-    """Route of every request the client sent the engine while forming the group, in order."""
     return []
 
 
 @pytest.fixture
 def opened_listeners(monkeypatch) -> list[RendezvousListener]:
-    """Every rendezvous listener either client opened, in order."""
     opened: list[RendezvousListener] = []
     real_init = RendezvousListener.__init__
 
@@ -176,11 +148,7 @@ def opened_listeners(monkeypatch) -> list[RendezvousListener]:
 
 @pytest.fixture(params=["vllm", "sglang"])
 def client(request, monkeypatch, engine_requests, server_calls, opened_listeners):
-    """A real client of each engine against a local server address, its HTTP half stubbed.
-
-    The engine reports no ranks, so the group is the trainer alone: the rendezvous store takes the
-    listener and returns without waiting for an engine peer.
-    """
+    """The engine reports no ranks, so the group is the trainer alone and the store returns without an engine peer."""
     monkeypatch.delenv(BIND_ALL_ENV, raising=False)
     if request.param == "vllm":
         monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
@@ -204,8 +172,6 @@ def client(request, monkeypatch, engine_requests, server_calls, opened_listeners
 
 @pytest.mark.parametrize("advertise_nic", [False, True], ids=["loopback", "nic"])
 def test_the_listener_binds_the_advertised_address(client, engine_requests, advertise_nic):
-    """A same-host group advertises loopback and takes no connection from the network; a group
-    advertising the trainer's NIC (a server on another node) listens on that NIC alone."""
     expected = "127.0.0.1"
     if advertise_nic:
         expected = _route_source_ip(NON_LOCAL_ADDRESS)
@@ -221,8 +187,7 @@ def test_the_listener_binds_the_advertised_address(client, engine_requests, adve
 
 
 def test_a_name_is_advertised_as_the_address_the_listener_binds(client, engine_requests):
-    """The engine resolves a name on its own host, where it can map elsewhere; it is sent the address
-    the listener took, so it dials the listener rather than wherever the name points there."""
+    """The engine resolves a name on its own host, where it can map elsewhere, so it gets the address bound here."""
     client.group_host = "localhost"
 
     client.init_communicator(device="cpu")
@@ -233,8 +198,7 @@ def test_a_name_is_advertised_as_the_address_the_listener_binds(client, engine_r
 
 
 def test_the_opt_in_binds_every_interface(client, engine_requests, monkeypatch, caplog):
-    """``HALO_WEIGHT_SYNC_BIND_ALL`` is the one way to a wide bind, for a NAT or port-mapped trainer, and
-    it is announced at WARNING: an operator must see that the unauthenticated store is on the network."""
+    """For a NAT or port-mapped trainer. WARNING tells the operator the unauthenticated store is on the network."""
     monkeypatch.setenv(BIND_ALL_ENV, "1")
 
     with caplog.at_level(logging.WARNING):
@@ -252,8 +216,7 @@ def test_the_opt_in_binds_every_interface(client, engine_requests, monkeypatch, 
 def test_an_unbindable_advertised_address_is_refused_before_the_engine_joins(
     client, engine_requests, opened_listeners, advertised
 ):
-    """A NAT address (not local) or the wildcard (every interface) would need the wide bind, so
-    without the opt-in it raises naming the knob, before any listener or engine request exists."""
+    """A NAT address (not local) or the wildcard would need the wide bind, so it raises naming the knob."""
     client.group_host = advertised
 
     with pytest.raises(RuntimeError, match=BIND_ALL_ENV):
@@ -266,8 +229,7 @@ def test_an_unbindable_advertised_address_is_refused_before_the_engine_joins(
 def test_a_name_resolving_to_loopback_is_refused_for_a_remote_server(
     client, engine_requests, opened_listeners, monkeypatch
 ):
-    """A trainer hostname that ``/etc/hosts`` maps to ``127.0.1.1`` would put the listener on loopback,
-    where an engine on another host can never connect; it raises instead of timing out the group."""
+    """A hostname ``/etc/hosts`` maps to ``127.0.1.1`` would put the listener where a remote engine can't connect."""
     resolve = socket.gethostbyname
     monkeypatch.setattr(socket, "gethostbyname", lambda name: "127.0.1.1" if name == "trainer" else resolve(name))
     client.host = NON_LOCAL_ADDRESS  # the server sits on another host
@@ -284,8 +246,7 @@ def test_a_name_resolving_to_loopback_is_refused_for_a_remote_server(
 def test_an_ipv6_group_address_is_refused_as_unsupported(
     client, engine_requests, opened_listeners, monkeypatch, bind_all
 ):
-    """The listener is IPv4-only, the wide one included, so an IPv6 group address is refused as
-    unsupported in either mode, without pointing at an opt-in that could not serve it."""
+    """The listener is IPv4-only, the wide one included, so the refusal points at no opt-in."""
     if bind_all:
         monkeypatch.setenv(BIND_ALL_ENV, "1")
     client.group_host = "::1"
@@ -299,8 +260,8 @@ def test_an_ipv6_group_address_is_refused_as_unsupported(
 
 
 def test_a_configured_port_is_listening_when_the_engine_is_told_to_dial_it(client, engine_requests):
-    """Told before the listener exists, the engine dials a port nobody holds, where its retried connect
-    can take the port as its own source and fail the trainer's bind with the engine already waiting."""
+    """Told first, the engine dials a port nobody holds, where its retried connect can take the port as its own source
+    and fail the trainer's bind with the engine already waiting."""
     client.group_port = free_port()
 
     client.init_communicator(device="cpu")
@@ -313,8 +274,7 @@ def test_a_configured_port_is_listening_when_the_engine_is_told_to_dial_it(clien
 
 
 def test_an_unset_port_is_the_one_the_kernel_gave_the_live_listener(client, engine_requests, opened_listeners):
-    """``group_port`` 0 binds port 0 and advertises what the kernel assigned, the port the listener
-    already holds; a probed-and-released port could be taken before anything binds it again."""
+    """A probed-and-released port could be taken before anything binds it again."""
     client.init_communicator(device="cpu")
 
     [listener] = opened_listeners
@@ -330,8 +290,6 @@ def test_an_unset_port_is_the_one_the_kernel_gave_the_live_listener(client, engi
 def test_a_failure_before_the_store_takes_the_listener_closes_it(
     client, engine_requests, opened_listeners, monkeypatch
 ):
-    """A listener the store never took is closed, not detached: the port is free again, and the engine
-    was never asked to join."""
     port = client.group_port = free_port()
     held_at_failure: list[list[str]] = []
 
@@ -354,8 +312,8 @@ def test_a_failure_before_the_store_takes_the_listener_closes_it(
 
 
 class _TwoNicHost:
-    """A host whose default route leaves through a management NIC while the cluster subnet, where the server
-    sits, is reached through another; it binds neither address the tests name, so the server is remote."""
+    """Default route through a management NIC, cluster subnet through another. It binds neither address the tests name,
+    so the server is remote."""
 
     MANAGEMENT_NIC = "192.0.2.5"
     CLUSTER_SUBNET = ipaddress.ip_network("198.51.100.0/24")
@@ -395,8 +353,7 @@ class _FakeSocket:
 
 
 def test_a_remote_server_is_told_the_nic_on_the_route_to_it(monkeypatch):
-    """On a multi-homed node the default route can leave through a NIC the server cannot reach; with no host
-    configured the engine is told this host's address on the route to the server itself."""
+    """On a multi-homed node the default route can leave through a NIC the server cannot reach."""
     monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
     host = _TwoNicHost()
     monkeypatch.setattr(rendezvous.socket, "socket", host.socket)
@@ -430,8 +387,6 @@ def test_a_remote_server_with_no_route_is_refused_naming_the_knob(monkeypatch):
 
 
 def test_a_configured_port_already_held_raises_before_the_engine_is_asked_anything(client, server_calls):
-    """The bind comes first, so a port another socket holds fails before any request reaches the engine,
-    and the error names the port rather than a topology knob."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
         holder.bind(("127.0.0.1", 0))
         holder.listen()

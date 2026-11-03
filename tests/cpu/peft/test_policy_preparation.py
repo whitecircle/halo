@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``prepare_policy_model``: the PEFT wrap and dropout switch the policy-holding trainers share, and the
-input-grad hook it leaves to gradient checkpointing.
-
-Under reentrant checkpointing a frozen embedding's output carries no grad path into a checkpointed layer,
-so the LoRA weights inside it would get no gradient. ``gradient_checkpointing_enable`` installs the hook
-that gives the embedding output ``requires_grad`` on a model whose main input is ``input_ids``, which is
-why no trainer installs one of its own.
-
-Run: python tests/cpu/peft/test_policy_preparation.py
-"""
+"""``prepare_policy_model``: the PEFT wrap, the dropout switch, and the input-grad hook left to gradient checkpointing.
+Under reentrant checkpointing without the hook, LoRA weights inside a checkpointed layer get no gradient."""
 
 from types import SimpleNamespace
 
@@ -68,7 +60,6 @@ def test_a_peft_model_is_kept_when_existing_adapters_are_not_merged():
 
 
 def _checkpointed_loss(*, keep_input_grad_hook: bool) -> tuple[nn.Module, torch.Tensor]:
-    """A LoRA policy's training loss under reentrant gradient checkpointing."""
     model, _ = prepare_policy_model(_model(), _lora(), _args(), disable_dropout=True)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
     if not keep_input_grad_hook:
@@ -87,7 +78,6 @@ def test_gradient_checkpointing_enable_installs_the_hook_the_adapters_train_thro
 
 
 def test_without_the_hook_reentrant_checkpointing_leaves_the_loss_no_grad_path():
-    """Anti-vacuity: the hook is what the adapters train through."""
     with pytest.warns(UserWarning, match="requires_grad"):
         _, loss = _checkpointed_loss(keep_input_grad_hook=False)
 

@@ -34,43 +34,32 @@ from halo.models.moe.family_specs import experts_container_attrs, find_moe_famil
 
 logger = logging.getLogger(__name__)
 
-# What low precision covers, derived from the two rosters that decide it: the dense MLP projections
-# the trainer converts (``MLP_PROJECTIONS``, which the QAT forward quantizes and nothing else) and the
-# expert-FFN weight names the family specs declare, fused (3-D) and per-expert un-fused alike. A
-# hand-written pattern would quantize weights the QAT forward left in bf16 (any `fc1`/`fc2` or bare
-# `mlp` match).
+# Derived from the dense MLP projections the trainer converts and the expert-FFN names the family specs declare; a
+# hand-written pattern would quantize weights the QAT forward left in bf16 (any `fc1`/`fc2` or bare `mlp` match).
 _QUANTIZABLE_WEIGHT_NAMES = tuple(
     dict.fromkeys(
         (*MLP_PROJECTIONS, *HF_FUSED_EXPERT_KEYS, *(key for layout in per_expert_layouts() for key in layout))
     )
 )
 DEFAULT_INCLUDE = rf"\b({'|'.join(_QUANTIZABLE_WEIGHT_NAMES)})\b"
-# Second fence: a VLM's vision tower and projector name their projections like the text MLP on some
-# families (Qwen-VL's ViT blocks carry gate_proj/up_proj/down_proj), but the trainer converts the text
-# backbone only (``_text_backbone_prefix``), so quantizing them would not match the QAT forward.
+# Second fence: a VLM's vision tower and projector can name projections like the text MLP (Qwen-VL's ViT blocks), but
+# the trainer converts the text backbone only.
 DEFAULT_EXCLUDE = (
     r"(norm|layernorm|embed|lm_head|\.bias$|rotary|router|gate\.weight$"
     r"|vision_tower|vision_model|visual|multi_modal_projector)"
 )
-# Round-trip dequant relerr --verify accepts: the format's own block-scaled error (mxfp8 ~0.02-0.05,
-# nvfp4 ~0.08-0.15) with headroom. Above it the cause is structural, usually the contraction axis. The
-# QAT forward is exact wherever a value lands in this band.
+# Round-trip dequant relerr --verify accepts: the format's own error (mxfp8 ~0.02-0.05, nvfp4 ~0.08-0.15) with
+# headroom. Above it the cause is structural, usually the contraction axis.
 _VERIFY_RELERR_TOL = {"mxfp8": 0.08, "nvfp4": 0.25, "mxfp4": 0.35}
-# Per-expert un-fused hub layout (``...experts.3.gate_proj.weight``): expert weights other than the
-# 3-D fused tensor, told apart from a dense MLP projection by this segment alone. The container
-# spellings are the family specs' own (``routed_experts`` beside ``experts``).
+# Per-expert un-fused hub layout (``...experts.3.gate_proj.weight``), told from a dense MLP projection by this segment.
 _PER_EXPERT_SEGMENT = re.compile(rf"\b({'|'.join(experts_container_attrs())})\.\d+\.")
-# The dense projections the trainer converts (``MLP_PROJECTIONS``), by name: a per-expert roster
-# spelling outside an expert segment (LFM-2's dense ``feed_forward.w1``) trains in bf16 and stays so.
+# A per-expert spelling outside an expert segment (LFM-2's dense ``feed_forward.w1``) trains in bf16 and stays so.
 _DENSE_PROJECTION = re.compile(rf"\.({'|'.join(MLP_PROJECTIONS)})\.weight$")
 
 
 def _is_expert_weight(name: str, ndim: int) -> bool:
-    """Whether ``name`` is an EP expert FFN weight — fused 3-D, or one expert of an un-fused layout.
-
-    This is the seam ``--lowp_apply_moe_experts`` turns on, so it is the complement of "dense MLP
-    projection" under the same include roster.
-    """
+    """Whether ``name`` is an EP expert FFN weight, fused 3-D or one expert of an un-fused layout; the seam
+    ``--lowp_apply_moe_experts`` turns on."""
     if ndim == 3 and name.endswith(HF_FUSED_EXPERT_KEYS):
         return True
     return _PER_EXPERT_SEGMENT.search(name) is not None
@@ -86,15 +75,9 @@ def _should_quantize(
     apply_dense_mlp: bool = LowpSpec.apply_dense_mlp,
     apply_moe_experts: bool = LowpSpec.apply_moe_experts,
 ) -> bool:
-    """Quantize iff the tensor matches --include, not --exclude, is at least 2-D, is either a standard
-    ``*.weight`` matrix or a fused 3-D expert tensor (``...experts.gate_up_proj`` etc.), and falls
-    inside the training run's low-precision scope. The contraction axis (checked by the caller) must
-    be divisible by the format block size.
-
-    The scope arguments mirror ``lowp_apply_dense_mlp`` / ``lowp_apply_moe_experts`` /
-    ``lowp_keep_first_blocks`` / ``lowp_keep_last_blocks`` and default to their training defaults, so
-    the export reproduces the QAT forward instead of quantizing weights it left in bf16.
-    """
+    """Whether the tensor matches --include and not --exclude, is a ``*.weight`` matrix or a fused 3-D expert, and
+    falls in the run's low-precision scope. The scope arguments default to training's, so the export reproduces the QAT
+    forward."""
     if include.search(name) is None or exclude.search(name) is not None or tensor.dim() < 2:
         return False
     if not (name.endswith(".weight") or (tensor.dim() == 3 and name.endswith(HF_FUSED_EXPERT_KEYS))):
@@ -115,15 +98,9 @@ def _reject_unexportable_experts(
     apply_moe_experts: bool,
     moe_family: bool,
 ) -> None:
-    """Refuse an expert bank the scope would ship in bf16 while claiming QAT parity.
-
-    Two spellings pass ``_should_quantize`` without matching: a 3-D bank under a name no EP layer
-    class declares as fused (Step-3.7's hub ``moe.gate_proj``/``moe.up_proj`` ``[E, M, H]``, whose
-    ``moe.down_proj`` alone matches), and a MoE checkpoint whose experts match the roster nowhere
-    (Inkling's hub ``w13_weight``/``w2_weight``), which copies the whole model through and still
-    writes a ``quantization_config``. Either way the served experts would run in a precision training
-    never used. Headers only, ahead of the output directory.
-    """
+    """Refuse an expert bank the scope would ship in bf16 while claiming QAT parity: a 3-D bank under a name not
+    declared as fused (Step-3.7's ``moe.gate_proj``), or a MoE checkpoint whose experts match the roster nowhere
+    (Inkling's ``w13_weight``). Headers only, ahead of the output directory."""
     if not apply_moe_experts:
         return
     expert_matches = 0
@@ -158,12 +135,8 @@ def _reject_unexportable_experts(
 
 
 def _fused_expert_axis(input_dir: str) -> int | None:
-    """Contraction axis for this checkpoint's fused 3-D expert tensors, or ``None`` if unresolvable.
-
-    Resolved through the family spec (``MoEFamilySpec.fused_contraction_axis``). ``None`` means the
-    ``model_type`` matches no family; the caller then raises if a fused expert shows up rather than
-    guessing an axis, which would corrupt every dequantized expert.
-    """
+    """The contraction axis of this family's fused 3-D experts, or ``None``; the caller then raises if a fused expert
+    shows up, since a guessed axis corrupts every dequantized expert."""
     for model_type in detect_model_types(input_dir):
         if spec := find_moe_family_spec(model_type):
             return spec.fused_contraction_axis
@@ -171,19 +144,9 @@ def _fused_expert_axis(input_dir: str) -> int | None:
 
 
 def _backbone_block_count(input_dir: str, include: re.Pattern, exclude: re.Pattern) -> int:
-    """Depth of the backbone the export quantizes, read off the checkpoint's own key names.
-
-    Counted over the keys that survive ``include``/``exclude`` (every block carries an MLP, and the
-    exclude fence already drops a VLM's vision tower), so the numbering the keep-last window is
-    measured against is exactly the one the quantization decision uses — no config layer-count field,
-    which a composite config nests and a pruned export contradicts. Metadata-only: the shared walk
-    hands out the shard reader, so a key-only pass reads no tensor.
-
-    Raises when the selected keys number their blocks under more than one root: two interleaved
-    stacks (a vision tower the exclude fence did not catch, a draft/MTP head) would share one index
-    space, so the keep-window would hold back whichever stack owns that index. There is no live module
-    to resolve a text-backbone prefix from at export time, so this refuses rather than guessing.
-    """
+    """Depth of the backbone the export quantizes, off the checkpoint's key names, since a composite config nests the
+    layer count and a pruned export contradicts it. Raises when selected keys number blocks under several roots:
+    interleaved stacks share one index space, and there is no live module to resolve a text-backbone prefix from."""
     indices: set[int] = set()
     roots: set[str] = set()
     for _shard, _reader, name in iter_checkpoint_shard_entries(input_dir):
@@ -203,13 +166,9 @@ def _backbone_block_count(input_dir: str, include: re.Pattern, exclude: re.Patte
 
 
 def _stored_global_scale(name: str, weight: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
-    """The ``weight_global_scale`` compressed-tensors stores for an nvfp4 weight, shape ``[1]`` as its
-    ``generate_gparam`` writes it: the reciprocal of the quantizer's power-of-two multiplier, so exact.
-
-    An all-zero weight's multiplier is far below fp32's reciprocal range; its codes and block scales are
-    all zero, so it stores compressed-tensors' own value for that case, 1.0. An ``inf`` would reach
-    vLLM's max over a fused layer's partition scales and zero every partition.
-    """
+    """The ``weight_global_scale`` compressed-tensors stores for nvfp4, shape ``[1]``: the reciprocal of the
+    power-of-two multiplier, so exact. An all-zero weight stores 1.0, since an ``inf`` would reach vLLM's max over a
+    fused layer's partition scales and zero every partition."""
     stored = global_scale.reciprocal().reshape(1).cpu()
     if not torch.isposinf(stored).any():
         return stored
@@ -225,8 +184,7 @@ def _stored_global_scale(name: str, weight: torch.Tensor, global_scale: torch.Te
 def _contraction_axis(
     name: str, tensor: torch.Tensor, fused_expert_axis: int | None, contraction_axis: int, input_dir: str
 ) -> int:
-    """The axis ``tensor`` is block-scaled along: its family's fused-expert axis for a 3-D bank, else
-    ``contraction_axis``; a 3-D bank of a family no spec claims raises rather than guessing."""
+    """The family's fused-expert axis for a 3-D bank, else ``contraction_axis``; a 3-D bank no spec claims raises."""
     if tensor.dim() != 3:
         return contraction_axis
     if fused_expert_axis is None:
@@ -242,8 +200,7 @@ def _contraction_axis(
 
 
 def _block_scaled_tensors(name: str, tensor: torch.Tensor, quantized: BlockScaledTensor) -> dict[str, torch.Tensor]:
-    """The compressed-tensors entries ``name`` is stored as: packed data, block scales, original shape and,
-    for nvfp4, the global scale."""
+    """The compressed-tensors entries for ``name``: packed data, block scales, shape and, for nvfp4, global scale."""
     base = name[: -len(".weight")] if name.endswith(".weight") else name
     entries = {
         f"{base}.weight_packed": quantized.data.cpu().contiguous(),
@@ -287,8 +244,8 @@ class _ExportPlan:
 
 @dataclass
 class _ExportTally:
-    """What the shards written so far hold: the block-scaled weights and their axes, the tensors left as they
-    were, the worst round-trip error and the output index."""
+    """What the shards written so far hold: block-scaled weights and axes, tensors left as they were, the worst
+    round-trip error and the output index."""
 
     quantized: list[str] = field(default_factory=list)
     weight_axes: dict[str, int] = field(default_factory=dict)
@@ -361,10 +318,8 @@ def _write_manifest(
     weight_axes: dict[str, int],
     scope: dict,
 ) -> None:
-    """Copy every non-weight file (config, tokenizer, chat_template.jinja, remote-code .py) + drop a
-    quantization_config.json describing the block-scaled scheme."""
+    """Copy every non-weight file and write a ``quantization_config.json`` describing the block-scaled scheme."""
     copy_checkpoint_aux_files(input_dir, output_dir)
-    # The ``lowp_precision`` spelling that trains this storage format.
     lowp_precision = next(precision for precision, recipe in LOWP_RECIPES.items() if recipe.quant_format == fmt)
     manifest = {
         "quant_method": "block_scaled",
@@ -373,15 +328,12 @@ def _write_manifest(
         "scale_dtype": "uint8_e8m0" if fmt in ("mxfp8", "mxfp4") else "float8_e4m3fn",
         "block_size": block,
         "contraction_axis": axis,
-        # Per-weight contraction axis: 3-D fused experts differ by family, so a loader reads the axis
-        # per weight here and falls back to contraction_axis only for names absent from this map.
+        # 3-D fused experts differ by family, so a loader reads the axis per weight, falling back to contraction_axis.
         "weight_axes": weight_axes,
         "layout": "compressed-tensors block-scaled (weight_packed / weight_scale / weight_shape)",
         # nvfp4 is two-level: the e4m3 block scale is relative to a per-tensor fp32 global scale.
         "global_scale_key_suffix": ".weight_global_scale" if fmt == "nvfp4" else None,
-        # The low-precision scope this export reproduced. Recorded because it is not derivable from
-        # the weights: a re-export, or a comparison against the training run, needs the same four
-        # ``lowp_*`` values.
+        # Not derivable from the weights; a re-export or a comparison against the run needs these ``lowp_*`` values.
         "scope": scope,
         "quantized_weights": names,
         "note": (
@@ -394,12 +346,10 @@ def _write_manifest(
     with open(os.path.join(output_dir, "quantization_config.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    # Stamp the scheme into config.json, the key readers consult; it also flips the toolkit's
-    # native-quantized detection (EP lazy loading routes such checkpoints to from_pretrained, whose
-    # coverage gate refuses the missing *.weight keys). vLLM and SGLang refuse the unknown
-    # "block_scaled" method; plain transformers only warns, skips quantization and random-initializes
-    # every quantized weight. A raw format name ("mxfp4", "nvfp4", "mxfp8") would instead select a
-    # transformers or vLLM method that reads a different on-disk layout.
+    # The stamp flips the toolkit's native-quantized detection (EP lazy loading routes such checkpoints to
+    # from_pretrained, whose coverage gate refuses the missing *.weight keys). vLLM and SGLang refuse the unknown
+    # ``block_scaled`` method; plain transformers only warns and random-initializes every quantized weight. A raw
+    # format name would select a method reading a different on-disk layout.
     config = read_checkpoint_config(output_dir, missing_ok=True)
     if config is not None:
         config["quantization_config"] = manifest
@@ -425,9 +375,8 @@ def quantize_checkpoint(
 
     # Fused 3-D experts contract on the axis their family declares; 2-D weights use contraction_axis.
     fused_expert_axis = _fused_expert_axis(input_dir)
-    # Index-driven enumeration: a co-located adapter_model.safetensors is never quantized into the
-    # rebuilt index, and a per-rank sharded input is rejected before the output directory exists.
-    # Resolved here rather than in the lazy walks below, whose refusal lands after the output exists.
+    # Index-driven: a co-located adapter_model.safetensors is never quantized into the rebuilt index, and a per-rank
+    # input is rejected before the output exists, which the lazy walks below would do only after.
     checkpoint_shard_files(input_dir)
     n_blocks = _backbone_block_count(input_dir, inc, exc) if (keep_first_blocks or keep_last_blocks) else 0
     kept_blocks = frozenset(kept_block_indices(n_blocks, keep_first_blocks, keep_last_blocks))
@@ -444,8 +393,7 @@ def quantize_checkpoint(
     )
     tally = _ExportTally()
     os.makedirs(output_dir, exist_ok=True)
-    # The shared walk opens each shard once, in order, so grouping its entries by shard carries the
-    # input's shard layout into the output: one written file per input file, under the same name.
+    # Grouping the walk's entries by shard carries the input's shard layout into the output, one file per input file.
     for shard, entries in groupby(iter_checkpoint_shard_entries(input_dir), key=itemgetter(0)):
         shard_name = os.path.basename(shard)
         out_tensors = _export_shard(entries, plan, tally, verify=verify)
@@ -462,10 +410,8 @@ def quantize_checkpoint(
             f"usually the wrong --contraction_axis; {output_dir} was stopped before its index and config."
         )
 
-    # Anything but a single model.safetensors needs an index so the renamed weight_packed/scale keys
-    # stay discoverable. Keyed on the emitted filenames: a lone model-00001-of-00001 input would
-    # otherwise get neither. Either way the sweep drops what this run did not write, a stale index
-    # included.
+    # Anything but a single model.safetensors needs an index so the renamed keys stay discoverable; keyed on the
+    # emitted filenames, since a lone model-00001-of-00001 input would otherwise get neither.
     if set(tally.weight_map.values()) != {SAFETENSORS_WEIGHTS_FILE}:
         write_merged_index(output_dir, tally.weight_map, {"total_size": tally.total_size})
     else:

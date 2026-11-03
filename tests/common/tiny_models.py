@@ -1,10 +1,6 @@
-"""Builders a tiny random-init model needs before it can run: a synthetic on-disk checkpoint, a filled
-routing table, one tiny model per EP MoE family, and the configs the multi-document row gates are checked
-against (a release's remote-code config, a hybrid family no detection names).
-
-Kept apart from :mod:`tests.common.models`, the torch-free catalogue of names and configs that the CPU
-tier and the image build scripts import.
-"""
+"""Builders a tiny random-init model needs: a synthetic checkpoint, a filled routing table and one model per EP MoE
+family. Kept apart from :mod:`tests.common.models`, the torch-free catalogue the CPU tier and image build scripts
+import."""
 
 import shutil
 from collections.abc import Callable, Sequence
@@ -149,22 +145,19 @@ from tests.common.models import (
 # Multiple a tiny family checkpoint pads the tokenizer's vocab to, and the shard size it is saved at.
 VOCAB_PAD_MULTIPLE = 128
 TINY_SHARD_SIZE = "4MB"
-# Seed ``randomize_tid2eid`` fills the hash table from unless a test pins its own.
 DSV4_TID2EID_SEED = 1234
-# The :data:`TINY_MOE_FAMILIES` whose transformers class pins parameters (not only buffers) in fp32
-# through ``_keep_in_fp32_modules_strict``.
+# Families whose transformers class pins parameters (not only buffers) in fp32 via ``_keep_in_fp32_modules_strict``.
 PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
-# The files a synthetic checkpoint copies from its release so ``AutoTokenizer`` loads it offline.
+# Copied from a release so ``AutoTokenizer`` loads a synthetic checkpoint offline.
 TOKENIZER_FILE_PREFIXES = ("tokenizer", "special_tokens", "chat_template")
-# A chat template rendering only the turns' contents, for a word-level tokenizer that scores whole conversations.
 CONTENT_ONLY_CHAT_TEMPLATE = "{% for message in messages %}{{ message['content'] }} {% endfor %}"
-# A sliding window shorter than the documents a packed test row carries, so it masks keys inside one.
+# Shorter than the documents a packed test row carries, so it masks keys inside one.
 TINY_SLIDING_WINDOW = 3
 
 
 def padded_vocab_size(tokenizer) -> int:
-    """``tokenizer``'s vocab rounded up to :data:`VOCAB_PAD_MULTIPLE`, as a release pads it so a TP-sharded
-    embedding and head divide it."""
+    """``tokenizer``'s vocab rounded up to :data:`VOCAB_PAD_MULTIPLE`, as a release pads it so TP-sharded embedding and
+    head divide it."""
     return -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE
 
 
@@ -175,8 +168,7 @@ class _WeightLeaf(torch.nn.Module):
 
 
 def module_with_weight_keys(paths: list[str]) -> torch.nn.Module:
-    """A module tree whose state dict is exactly ``paths`` (each ending in ``.weight``): the key space a
-    checkpoint-conversion or master-replay test maps disk keys onto, without a model behind it."""
+    """A module tree whose state dict is exactly ``paths``, each ending in ``.weight``, with no model behind it."""
     root = torch.nn.Module()
     for path in paths:
         parent = root
@@ -192,19 +184,16 @@ def module_with_weight_keys(paths: list[str]) -> torch.nn.Module:
 
 
 def config_only_module(config) -> torch.nn.Module:
-    """A bare module carrying ``config`` and nothing else: what a gate that reads ``model.config`` and walks the
-    module tree sees, without a model behind it."""
+    """A bare module carrying ``config`` and nothing else: what a gate reading ``model.config`` and walking the tree
+    sees."""
     module = torch.nn.Module()
     module.config = config
     return module
 
 
 def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
-    """Fill every DeepSeek-V4 hash layer's ``tid2eid`` with DISTINCT experts per token id.
-
-    Random init leaves the table all-zero, and DeepEP dispatch and the EP layer's init guard both
-    require distinct top-k experts per token.
-    """
+    """Fill every DeepSeek-V4 hash layer's ``tid2eid`` with distinct experts per token id; DeepEP dispatch and the EP
+    init guard require it."""
     gen = torch.Generator().manual_seed(seed)
     num_experts = model.config.n_routed_experts
     for layer in model.model.layers:
@@ -215,7 +204,6 @@ def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
 
 
 def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
-    """Copy ``repo_id``'s tokenizer files into ``out_dir``, downloading only those, not the weights."""
     tokenizer_dir = Path(snapshot_download(repo_id, allow_patterns=[f"{p}*" for p in TOKENIZER_FILE_PREFIXES]))
     out_dir.mkdir(parents=True, exist_ok=True)
     for src in tokenizer_dir.iterdir():
@@ -224,8 +212,8 @@ def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
 
 
 def word_level_tokenizer(words: Sequence[str] = ()) -> PreTrainedTokenizerFast:
-    """An offline whitespace tokenizer over ``<unk>``, ``<eos>`` (also its pad token) and then ``words``, for
-    a synthetic checkpoint that has no release tokenizer to copy."""
+    """An offline whitespace tokenizer over ``<unk>``, ``<eos>`` (also its pad) and ``words``, for a checkpoint with no
+    release tokenizer."""
     vocab = {"<unk>": 0, "<eos>": 1, **{word: index for index, word in enumerate(words, start=2)}}
     backend = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
     backend.pre_tokenizer = Whitespace()
@@ -233,9 +221,8 @@ def word_level_tokenizer(words: Sequence[str] = ()) -> PreTrainedTokenizerFast:
 
 
 def build_wide_head_gemma4_reward_checkpoint(path: str, words: Sequence[str], *, seed: int = 0) -> None:
-    """Save a random-init single-score Gemma 4 text classifier at :data:`TINY_GEMMA4_WIDE_HEAD_CONFIG` (one sliding
-    and one 512-wide global layer) with a :func:`word_level_tokenizer` over ``words``, as the reward scorers load
-    one: the shape whose ``sdpa`` takes the wide-head SDPA pin and, on CUDA, the flex-sliding variant."""
+    """Save a random-init single-score Gemma 4 text classifier with wide global heads, as reward scorers load one. The
+    shape whose ``sdpa`` takes the wide-head SDPA pin and, on CUDA, the flex-sliding variant."""
     tokenizer = word_level_tokenizer(words)
     tokenizer.chat_template = CONTENT_ONLY_CHAT_TEMPLATE
     torch.manual_seed(seed)
@@ -250,27 +237,25 @@ def build_wide_head_gemma4_reward_checkpoint(path: str, words: Sequence[str], *,
 
 
 class UnknownHybridConfig(PretrainedConfig):
-    """A family transformers does not know and no toolkit list names, so a gate must read its linear-attention
-    layers off its declared fields."""
+    """A family transformers does not know and no toolkit list names, so a gate must read linear-attention layers off
+    its fields."""
 
     model_type = "halo_unknown_hybrid"
 
 
 def unknown_hybrid_config() -> PretrainedConfig:
-    """One linear-attention layer before one attention layer, without the GatedDeltaNet head split."""
     return UnknownHybridConfig(layer_types=["linear_attention", "full_attention"])
 
 
 def remote_config(repo: str, **overrides) -> PretrainedConfig:
-    """Release ``repo``'s config, built by the remote code it ships once the shims restore the names that code
-    imports and transformers 5 dropped."""
+    """Release ``repo``'s config, built by its remote code once the shims restore names transformers 5 dropped."""
     apply_remote_code_compat_shims()
     return AutoConfig.from_pretrained(repo, trust_remote_code=True, **overrides)
 
 
 def build_tied_qwen3_checkpoint(target_dir: str, tokenizer, *, moe: bool, seed: int) -> None:
-    """Save a random-init :data:`TINY_TIED_QWEN3_CONFIG` model (Qwen3-MoE with ``moe``) at ``tokenizer``'s
-    padded vocab, with that tokenizer, as a checkpoint the production loaders read. Rank 0 only."""
+    """Save a random-init :data:`TINY_TIED_QWEN3_CONFIG` model at ``tokenizer``'s padded vocab, with that tokenizer.
+    Rank 0 only."""
     torch.manual_seed(seed)
     fields = {**TINY_TIED_QWEN3_CONFIG, "vocab_size": padded_vocab_size(tokenizer)}
     if moe:
@@ -282,12 +267,8 @@ def build_tied_qwen3_checkpoint(target_dir: str, tokenizer, *, moe: bool, seed: 
 
 
 def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
-    """Write a random-init :data:`TINY_MISTRAL4_CONFIG` model to ``out_dir`` and return the path.
-
-    The layout ``save_pretrained`` writes (``model.safetensors`` + ``config.json``), plus the release's
-    tokenizer files, so the lazy loader and ``load_distributed_model`` run end to end without the
-    119B download.
-    """
+    """Write a random-init :data:`TINY_MISTRAL4_CONFIG` model with the release's tokenizer, so loaders run end to end
+    with no 119B download."""
     copy_release_tokenizer(MISTRAL3_119B_MOE, out_dir)
     torch.manual_seed(seed)
     model = Mistral4ForCausalLM(Mistral4Config(**TINY_MISTRAL4_CONFIG)).to(torch.bfloat16)
@@ -297,15 +278,9 @@ def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
 
 @dataclass(frozen=True)
 class TinyFamily:
-    """How to build one family's tiny model at a tokenizer's vocab, and how a server reloads it.
-
-    ``build`` takes the text-config overrides (vocab and special-token ids) and returns the random-init
-    model; ``load_class`` is the stock class ``from_pretrained`` reads its checkpoint back with.
-    ``ulysses_cp`` is False where Ulysses CP refuses the family at load (a sequence-axis mixer or
-    compressor it cannot shard, or an attention no Ulysses wrapper implements). ``attention_targets`` names the
-    attention projections LoRA adapts where the checkpoint index cannot (hub key names that differ
-    from the module tree, or projections not spelled ``*_proj``).
-    """
+    """How to build one family's tiny model at a tokenizer's vocab, and how a server reloads it. ``ulysses_cp`` is
+    False where Ulysses CP refuses the family at load. ``attention_targets`` names LoRA's projections where the
+    checkpoint index cannot."""
 
     build: Callable[[dict], PreTrainedModel]
     load_class: type = AutoModelForCausalLM
@@ -341,8 +316,8 @@ def _tiny_gemma4(overrides: dict) -> PreTrainedModel:
 
 
 def _tiny_zaya(overrides: dict) -> PreTrainedModel:
-    """Random init zeroes Zaya's per-KV-head key scale (``ZayaQKNorm.temp``), which zeroes every key and
-    with it every gradient into the query and key projections; a released checkpoint carries it learned."""
+    """Random init zeroes ``ZayaQKNorm.temp``, which zeroes every key and every gradient into q and k; a release
+    carries it learned."""
     model = ZayaForCausalLM(ZayaConfig(**{**TINY_ZAYA_CONFIG, **overrides}))
     for module in model.modules():
         if isinstance(module, ZayaQKNorm):
@@ -351,8 +326,7 @@ def _tiny_zaya(overrides: dict) -> PreTrainedModel:
 
 
 def _with_live_ple_convs(model: PreTrainedModel) -> PreTrainedModel:
-    """Random init zeroes every PLE layer's depthwise conv, which a released checkpoint carries learned; without
-    it the conv's output, and every gradient into it, is zero."""
+    """Random init zeroes every PLE depthwise conv, and every gradient into it; a release carries it learned."""
     for module in model.modules():
         if isinstance(module, Qwen4ExpTextPLELayer):
             torch.nn.init.normal_(module.conv1d.weight, std=model.config.get_text_config().initializer_range)
@@ -360,8 +334,8 @@ def _with_live_ple_convs(model: PreTrainedModel) -> PreTrainedModel:
 
 
 def _tiny_bailing(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
-    """Bailing is remote code: its config and model classes come from the module the release ``repo``
-    ships, which imports names transformers 5 dropped until the toolkit's shims restore them."""
+    """Bailing is remote code: its classes come from release ``repo``'s module, which needs the toolkit's shims to
+    import."""
 
     def build(overrides: dict) -> PreTrainedModel:
         config = remote_config(repo)
@@ -372,10 +346,8 @@ def _tiny_bailing(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
     return build
 
 
-# One entry per EP MoE family (``halo/distributed/expert_parallel/families``), keyed by the ``model_type``
-# its tiny model carries, which the GPU suites take as ``--family``.
-# ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the keys to the EP registry, so a new
-# family without a tiny model fails there.
+# One entry per EP MoE family, keyed by ``model_type``. ``test_tiny_family_roster.py`` holds the keys to the EP
+# registry.
 TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "bailing_moe": TinyFamily(
         _tiny_bailing(BAILING_MOE_LING_MINI, TINY_BAILING_MOE_CONFIG),
@@ -385,7 +357,7 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "cohere2_moe": TinyFamily(_causal(Cohere2MoeConfig, Cohere2MoeForCausalLM, TINY_COHERE2_MOE_CONFIG)),
     # The CSA/HCA compressor and indexer pool token windows along the sequence.
     "deepseek_v4": TinyFamily(_tiny_deepseek_v4, ulysses_cp=False, attention_targets=("q_a_proj", "o_b_proj")),
-    # Its attention is not one the Ulysses wrapper implements.
+    # Not an attention the Ulysses wrapper implements.
     "gemma4_text": TinyFamily(_tiny_gemma4, text_overrides={"max_position_embeddings": 512}, ulysses_cp=False),
     "glm4_moe_lite": TinyFamily(_causal(Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG)),
     # KDA linear attention: a causal conv and a recurrent scan along the sequence.
@@ -413,7 +385,6 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         _causal(Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, TINY_QWEN35_MOE_CONFIG), ulysses_cp=False
     ),
     "qwen3_moe": TinyFamily(_causal(Qwen3MoeConfig, Qwen3MoeForCausalLM, TINY_QWEN3_MOE_CONFIG)),
-    # Gated DeltaNet layers, as Qwen3.5-MoE's.
     "qwen3_next": TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN3_NEXT_CONFIG), ulysses_cp=False),
     # Gated DeltaNet layers and the PLE conv along the sequence.
     "qwen4_exp_text": TinyFamily(
@@ -422,14 +393,14 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         ),
         ulysses_cp=False,
     ),
-    # Its attention is not one the Ulysses wrapper implements.
+    # Not an attention the Ulysses wrapper implements.
     "step3p7": TinyFamily(
         _composite(Step3p7Config, Step3p7ForConditionalGeneration, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
         ulysses_cp=False,
     ),
-    # The CCA projection convolves and shifts along the sequence; query, key and value all come out of
-    # it, so ``o_proj`` is the attention's one plain linear.
+    # The CCA projection convolves and shifts along the sequence and yields q, k and v, so ``o_proj`` is the one plain
+    # linear.
     "zaya": TinyFamily(
         _tiny_zaya,
         text_overrides={"max_position_embeddings": 512},
@@ -437,11 +408,8 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         attention_targets=("o_proj",),
     ),
 }
-# The multimodal wrappers an EP family's text tower ships under, keyed by the wrapper's ``model_type``
-# (GLM-5 Next and Step-3.7 ship no text-only class, so their roster model above is already the
-# wrapper). A ``text_config`` names its ``model_type`` where the wrapper defaults to another family's
-# tower. ``tests/cpu/checkpoint/test_ep_hub_namespace_export.py`` holds the two rosters to every
-# multimodal ``model_type`` the EP registry claims.
+# The multimodal wrappers a text tower ships under, keyed by the wrapper's ``model_type``; GLM-5 Next and Step-3.7
+# above are already wrappers. ``test_ep_hub_namespace_export.py`` holds both rosters to the EP registry.
 TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
     "cohere2_vision": TinyFamily(
         _composite(
@@ -509,9 +477,7 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         ulysses_cp=False,
     ),
 }
-# The text-config overrides under which a family's tiny model splits into two pipeline stages on a layer_types
-# period with a MoE layer on each: Qwen3.5-MoE and Laguna at two periods, Inkling at two of its two-layer periods,
-# GLM-4 MoE Lite past its dense first layer. A family not listed splits as built.
+# Overrides under which a tiny model splits into two pipeline stages on a layer_types period with a MoE layer on each.
 TINY_PP_SPLIT_OVERRIDES = {
     "glm4_moe_lite": {"num_hidden_layers": 4},
     "inkling_mm_model": TINY_INKLING_PP_OVERRIDES,
@@ -522,30 +488,24 @@ TINY_PP_SPLIT_OVERRIDES = {
 
 
 def _flex_wide_heads(family: TinyFamily) -> TinyFamily:
-    """``family`` with its heads :data:`FLEX_MIN_HEAD_DIM` wide, the narrowest FlexAttention runs."""
     return replace(family, text_overrides={**family.text_overrides, "head_dim": FLEX_MIN_HEAD_DIM})
 
 
-# The roster's tiny Gemma 4 with its sliding heads as wide as FlexAttention runs (its 8 keeps SDPA): a CUDA load
-# builds Gemma 4 on ``sdpa`` as the flex-sliding variant, as it does a released one, so a suite that means its
-# sliding layers to run FlexAttention takes these models.
+# Sliding heads as wide as FlexAttention runs (the roster's 8 keeps SDPA): a CUDA load builds Gemma 4 on ``sdpa`` as
+# flex-sliding.
 TINY_GEMMA4_TEXT_FLEX_FAMILY = _flex_wide_heads(TINY_MOE_FAMILIES["gemma4_text"])
 TINY_GEMMA4_FLEX_FAMILY = _flex_wide_heads(TINY_MOE_VLM_FAMILIES["gemma4"])
-# Dense models with sliding-window layers, keyed by ``model_type``: a window on the config alone (Mistral), NoPE
-# full layers (Cohere2), q/k norm over the whole projection (OLMo 3).
+# A window on the config alone (Mistral), NoPE full layers (Cohere2), q/k norm over the whole projection (OLMo 3).
 TINY_SLIDING_DENSE_FAMILIES: dict[str, TinyFamily] = {
     "cohere2": TinyFamily(_causal(Cohere2Config, Cohere2ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG)),
     "mistral": TinyFamily(_causal(MistralConfig, MistralForCausalLM, TINY_MISTRAL_SLIDING_CONFIG)),
     "olmo3": TinyFamily(_causal(Olmo3Config, Olmo3ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG)),
 }
-# The dense model the family sweeps pair with the MoE roster.
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
-# The dense Qwen3.5 text model (gated DeltaNet and attention layers), which the MoE roster does not carry.
+# Gated DeltaNet and attention layers, which the MoE roster does not carry.
 TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
-# The dense roster, keyed as the dense rows name it (``--family``).
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
-# Ring-mini-linear-2.0: the Bailing EP family's other attention layout (Lightning Attention-2 beside
-# softmax attention), which the roster's Ling 2.0 ``bailing_moe`` model does not carry.
+# Ring-mini-linear-2.0: the Bailing family's other attention layout (Lightning Attention-2 beside softmax).
 TINY_BAILING_RING_FAMILY = TinyFamily(
     _tiny_bailing(BAILING_MOE_RING_MINI, TINY_BAILING_RING_CONFIG),
     trust_remote_code=True,
@@ -556,17 +516,15 @@ TINY_BAILING_RING_FAMILY = TinyFamily(
 TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
     _tiny_bailing(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
 )
-# A MoE family no EP layer class wraps.
 TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(MixtralConfig, MixtralForCausalLM, TINY_MIXTRAL_CONFIG))
-# Dense Qwen3-VL over the tiny Qwen3 text tower: its own text attention class behind a multimodal backbone.
+# Its own text attention class behind a multimodal backbone.
 TINY_QWEN3_VL_FAMILY = TinyFamily(
     _composite(Qwen3VLConfig, Qwen3VLForConditionalGeneration, TINY_QWEN3_VL_TEXT_CONFIG, TINY_QWEN3_VL_VISION_CONFIG),
     load_class=AutoModelForImageTextToText,
 )
 
-# Dense attention variants past the dense roster, at its geometry: plain GQA (Llama, Qwen2), a config-level sliding
-# window (Mistral), Gemma 2's attention and final softcaps over alternating sliding layers, and Gemma 3's sliding/full
-# layer types at the 256-wide head FA4 runs on its dedicated kernel.
+# Past the dense roster, at its geometry: plain GQA (Llama, Qwen2), a config-level window (Mistral), Gemma 2's softcaps
+# over alternating sliding layers, and Gemma 3's layer types at the 256-wide head FA4 runs on its dedicated kernel.
 TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
     "llama": TinyFamily(_causal(LlamaConfig, LlamaForCausalLM, TINY_QWEN3_CONFIG)),
     "mistral": TinyFamily(
@@ -601,8 +559,7 @@ TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:
-    """``family``'s random-init tiny model (fp32, seeded by the caller), at ``tokenizer``'s vocab when one
-    is given and at the tiny config's own otherwise. ``overrides`` sets further text-config fields."""
+    """``family``'s random-init tiny model (fp32, seeded by the caller), at ``tokenizer``'s vocab when given."""
     overrides = {**family.text_overrides, **(overrides or {})}
     if tokenizer is not None:
         overrides |= {
@@ -623,16 +580,9 @@ def build_tiny_family_checkpoint(
     edit: Callable[[PreTrainedModel], None] | None = None,
     overrides: dict | None = None,
 ) -> None:
-    """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab, with that tokenizer, as a checkpoint
-    the production loaders read. Rank 0 only.
-
-    Sharded, so the checkpoint carries the index a family's attention projection names are read from
-    (:func:`tests.common.adapters.attention_target_modules`). Without ``tokenizer`` the tiny config's
-    own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
-    at full fp32 precision, as a release does, rather than rounded through bf16. ``edit`` changes the
-    random-init model before it is saved (a test pinning its routing, say); ``overrides`` sets text-config
-    fields, as :func:`tiny_family_model` takes them.
-    """
+    """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab as a checkpoint the production loaders read. Rank 0
+    only. Sharded, so it carries the index attention names are read from. ``fp32_pins`` stores pinned parameters at
+    full fp32, as a release does."""
     torch.manual_seed(seed)
     model = tiny_family_model(family, tokenizer, overrides=overrides)
     if edit is not None:
@@ -659,8 +609,8 @@ def shared_tiny_family_checkpoint(
     edit: Callable[[PreTrainedModel], None] | None = None,
     overrides: dict | None = None,
 ) -> str:
-    """:func:`build_tiny_family_checkpoint` into the rank-shared scratch dir ``name``, returned: rank 0
-    builds it (removing it at teardown) and every rank waits for it. Collective."""
+    """:func:`build_tiny_family_checkpoint` into the rank-shared scratch dir ``name``; rank 0 builds it and every rank
+    waits. Collective."""
     path = shared_scratch_dir(name)
     if ctx.rank == 0:
         shutil.rmtree(path, ignore_errors=True)

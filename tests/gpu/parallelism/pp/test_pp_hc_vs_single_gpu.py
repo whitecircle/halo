@@ -1,21 +1,9 @@
 #!/usr/bin/env python
-"""Hyper-connection PP equivalence gate: DeepSeek-V4 / GLM-5 stages must reproduce single-GPU grads.
+"""DeepSeek-V4 / GLM-5 PP stages reproduce single-GPU grads, carrying the ``[B, S, hc_mult, D]`` hyper-connection
+stream over real P2P.
 
-These families' stage boundary is the ``hc_mult``-widened ``[B, S, hc_mult, D]`` stream — carried
-over torch pipelining's P2P by the ``GLM5_NEXT_PP``/``DEEPSEEK_V4_PP`` family specs (``hc_head``
-neutralized off non-last stages, the mirrored mid-chain forward bound on non-first stages). This
-runs the real schedule (recv buffers, shape inference, backward P2P for the 4-D activation) against
-an unsplit single-process baseline over the same global batch, so it fails when:
-  * the boundary stream is collapsed/re-widened (lossy) instead of carried whole
-  * ``hc_head`` (or the final norm) runs mid-network, or is dropped from the last stage
-  * the mid-chain forward drifts from the family's real forward (masks, rotary, indexer chain)
-  * the widened activation loses its gradient path through the P2P boundary
-
-DeepSeek-V4 additionally covers the hash-router (tid2eid) layer pinned to stage 0 with live
-``input_ids``; GLM-5 runs the real KDA/DSA interleave with KDA layers on both stages (the CPU suite
-can only run all-DSA — the installed ``causal_conv1d`` package is CUDA-only).
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_hc_vs_single_gpu.py --family deepseek_v4
+GLM-5 runs the real KDA/DSA interleave, which the CPU suite can't, since the installed ``causal_conv1d`` package is
+CUDA-only.
 """
 
 import sys
@@ -42,16 +30,15 @@ GRAD_TOLERANCE = 2e-3
 PP_SIZE = 2
 N_MICROBATCHES = 2
 
-# 8 layers put KDA layers on both stages of the [4, 4] split (default interleave: DSA at 3 and 7),
-# so the mid-chain forward runs the linear-attention path too, not just the DSA one.
+# KDA layers on both stages of the [4, 4] split (DSA at 3 and 7), so the mid-chain forward runs the linear-attention
+# path too.
 _GLM5_TEXT_8L = {
     **TINY_GLM5_CONFIG,
     "num_hidden_layers": 8,
     "mlp_layer_types": ["dense"] + ["sparse"] * 7,
 }
 
-# pp_split pins the boundary: dsv4's default [2, 1] keeps the hash layer (0) on stage 0; glm5's
-# [4, 4] lands on the KDA/DSA period so both stages hold both layer kinds.
+# dsv4's [2, 1] keeps the hash layer (0) on stage 0; glm5's [4, 4] lands on the KDA/DSA period.
 _FAMILIES = {
     "deepseek_v4": {"pp_split": [2, 1]},
     "glm5_next": {"pp_split": [4, 4]},
@@ -59,16 +46,13 @@ _FAMILIES = {
 
 
 def build_model(device):
-    """Identical weights on every rank — the baseline and the split model must start equal."""
+    """Identical on every rank: the baseline and the split model must start equal."""
     torch.manual_seed(1234)
     if FAMILY == "deepseek_v4":
-        # The roster config keeps the hub's metadata-only MTP field at 1: the liveness gate must
-        # accept it (no tail layer is built). Eager is the family's only attention path.
+        # The roster keeps the hub's metadata-only MTP field at 1, which the liveness gate must accept.
         model = DeepseekV4ForCausalLM(DeepseekV4Config(**TINY_DSV4_CONFIG, attn_implementation="eager"))
-        # Random init leaves the hash table all-zero, i.e. top_k copies of expert 0 per token: the
-        # normalized weights are then a constant 1/top_k and the gate weight's gradient is pure
-        # rounding residue, so the comparison would judge noise. Distinct experts per token id
-        # (seeded, identical on every build) give the hash router a real gradient.
+        # Random init leaves the hash table all-zero, so the gate weight's gradient is pure rounding residue. Distinct
+        # experts per token id give the hash router a real gradient.
         gen = torch.Generator().manual_seed(4321)
         num_experts = model.config.n_routed_experts
         for layer in model.model.layers:
@@ -92,8 +76,7 @@ def run(ctx):
     torch.cuda.set_device(device)
     pp_split = _FAMILIES[FAMILY]["pp_split"]
 
-    # Two simulated 2-GPU nodes: each stage is one whole NVLink domain (dp=2 inside it, the
-    # smallest width the stage FSDP wrap supports) and the pipeline crosses the node boundary.
+    # Each stage is one whole NVLink domain (dp=2, the smallest width the stage FSDP wrap supports).
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     assert config.stage_world_size == 2 and config.pp_rank == ctx.rank // 2
 
@@ -112,7 +95,7 @@ def run(ctx):
     lo, hi = stage_module.layer_range
     assert hi - lo == pp_split[config.pp_rank], (pp_split, config.pp_rank, (lo, hi))
 
-    # This DP replica's slice of the global batch; every rank of a chain gets the same slice.
+    # Every rank of a chain gets the same slice.
     dp_rank = config.get_data_parallel_rank()
     local_bs = GLOBAL_BATCH // config.data_parallel_size
     sl = slice(dp_rank * local_bs, (dp_rank + 1) * local_bs)
@@ -120,8 +103,7 @@ def run(ctx):
 
     checks, metrics = ppeq.check_loss_vs_baseline(loss, ref_loss, config, groups, tol=1e-4)
 
-    # Gradient check via the production FQN remap. A routed-out expert legitimately has no gradient
-    # in either run (both-None is skipped); one-sided absence is the failure this must catch.
+    # A routed-out expert has no gradient in either run; one-sided absence is the failure this must catch.
     grads = ppeq.gather_stage_grads(stage_module)
     stage_names = {stage_module.global_parameter_name(n) for n, _ in stage_module.named_parameters()}
     mismatched = sorted(grads.keys() ^ (stage_names & ref_grads.keys()))
@@ -136,7 +118,7 @@ def run(ctx):
     metrics["worst_grad_rel_err"] = worst_err
     metrics["params_compared"] = len(errors)
 
-    # Every stage must contribute comparisons, or the FQN map silently emptied the check.
+    # Or the FQN map silently emptied the check.
     checks["every_stage_compared_params"] = world_min(len(errors), device) > 0
 
     return {"checks": checks, "metrics": metrics}

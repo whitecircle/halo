@@ -1,7 +1,5 @@
-"""Offline re-grading of recorded code-contest trajectories, apart from generation: each trajectory file's problems
-rebuilt from its dataset by index under the run's own selection, the environment rebuilt from its meta line, and
-every admitted ``submit_solution`` re-run through the environment's own ``grade_solution`` with bounded
-concurrency. Behind ``scripts/environments/inference/regrade_trajectories.py``."""
+"""Offline re-grading of recorded code-contest trajectories: problems rebuilt from the dataset by index under the run's
+selection, the environment from the meta line, every admitted ``submit_solution`` through ``grade_solution``."""
 
 import contextlib
 import json
@@ -29,21 +27,16 @@ from halo.log import info_logger
 # INFO: the report lines are the tool's output, printed under the WARNING root it leaves unconfigured.
 logger = info_logger(__name__)
 
-# Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
-# hidden tests, model/language name the row of the report. Only eval_code_contests.py stamps the full
-# set — eval_env.py writes the generic eval meta, without adapter/language.
+# env_type/adapter/dataset/split select the environment and rebuild the hidden tests, model/language name the report
+# row. Only eval_code_contests.py stamps the full set; eval_env.py's generic meta has no adapter/language.
 _REQUIRED_META_KEYS = ("env_type", "adapter", "dataset", "split", "model", "language")
-# The env options the meta line records at its top level, as the env resolved them, and the re-grade
-# reads from there alone; ``env_kwargs`` supplies every other option.
+# Recorded at the meta line's top level as the env resolved them; ``env_kwargs`` supplies every other option.
 _TOP_LEVEL_ENV_KEYS = ("language", "reasoning_effort", "eval_protocol")
 
 
 def validate_meta(path: str, meta: dict[str, Any]) -> None:
-    """Fail before any grading when the trajectory's meta line lacks a key the re-grade needs.
-
-    Unvalidated, a missing selector surfaces as a bare ``KeyError`` and a missing report field as a
-    ``TypeError`` in the summary line — the latter only AFTER the whole file has been graded.
-    """
+    """Fail before any grading when the meta line lacks a needed key: a missing report field would otherwise be a
+    ``TypeError`` only after the whole file was graded."""
     missing = [key for key in _REQUIRED_META_KEYS if meta.get(key) is None]
     if missing:
         raise ValueError(
@@ -54,7 +47,7 @@ def validate_meta(path: str, meta: dict[str, Any]) -> None:
 
 
 def read_trajectories(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Return ``(meta, episodes)`` from a trajectory JSONL (line 1 is the meta record)."""
+    """``(meta, episodes)``; line 1 is the meta record."""
     meta: dict[str, Any] = {}
     episodes: list[dict[str, Any]] = []
     with open(path) as fh:
@@ -71,9 +64,8 @@ def read_trajectories(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 def _load_payloads(
     adapter_name: str, dataset: str, config: str | None, split: str, selection: ContestSelection
 ) -> tuple[dict[str, Any], ...]:
-    """Rebuild a dataset's per-problem grading payloads (tests, checker, time limit) in the same order
-    ``build_examples`` produced, under the same contest selection — so an episode's ``index`` selects
-    its problem. Cached so re-grading a whole model × language matrix loads each dataset once."""
+    """Grading payloads in the order ``build_examples`` produced, under the same selection, so an episode's ``index``
+    selects its problem. Cached so a model × language matrix loads each dataset once."""
     adapter = CODE_DATASET_ADAPTERS[adapter_name]
     if not adapter.scores_raw_rows:
         raise SystemExit(
@@ -91,7 +83,6 @@ def _load_payloads(
 
 
 def build_payloads(meta: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    """Grading payloads for a trajectory's dataset, keyed by example index (see :func:`_load_payloads`)."""
     return _load_payloads(
         meta["adapter"],
         meta["dataset"],
@@ -102,11 +93,9 @@ def build_payloads(meta: dict[str, Any]) -> tuple[dict[str, Any], ...]:
 
 
 def rebuild_environment(meta: dict[str, Any]) -> CodeContestsEnvironment:
-    """The environment the run used, not a default one: ``env_kwargs`` carries the interaction budgets
-    (``max_submissions``, ``reasoning_effort_profiles``) that decide how many submissions count, the
-    top-level :data:`_TOP_LEVEL_ENV_KEYS` the rest. A run that raised ``max_submissions`` re-graded
-    against the class default would report a lower s@k than the online number. A meta line naming no
-    protocol ran the harness."""
+    """The environment the run used: ``env_kwargs`` carries the budgets (``max_submissions``,
+    ``reasoning_effort_profiles``) that decide how many submissions count, so a class default would report a lower s@k
+    than the online number. A meta line naming no protocol ran the harness."""
     env_kwargs = {k: v for k, v in (meta.get("env_kwargs") or {}).items() if k not in _TOP_LEVEL_ENV_KEYS}
     return build_environment(
         meta["env_type"],
@@ -120,25 +109,18 @@ def rebuild_environment(meta: dict[str, Any]) -> CodeContestsEnvironment:
 
 
 def episode_submission_budget(episode: dict[str, Any], env: Any) -> int:
-    """The submission cap this episode actually ran under.
-
-    The env stamps it per episode as the ``submit_solution`` tool budget; an unstamped trajectory falls
-    back to the env's constructor value.
-    """
+    """The env stamps the cap per episode as the ``submit_solution`` tool budget; an unstamped trajectory falls back to
+    the env's constructor value."""
     info = episode.get("info") or {}
     stamped = (info.get(EPISODE_TOOL_BUDGETS_KEY) or {}).get(SUBMIT_TOOL)
     return int(stamped) if isinstance(stamped, int) and stamped > 0 else env.max_submissions
 
 
 def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -> list[tuple[str, str | None]]:
-    """The ``submit_solution`` payloads ``env`` admitted, as ``(code, language)`` in submission order;
-    ``language`` is the call's own choice under a multi-language run, ``None`` where the run fixed it.
-    Arguments are read the way the environment read them (:meth:`NativeToolCall.from_openai_format`,
-    Python literals included). A recorded call the tool refuses to bind (no code, a missing or foreign
-    language, an argument the tool does not declare, unparseable arguments), or one whose code the
-    environment refused as written in another language (:meth:`CodeContestsEnvironment.find_mislabel`)
-    or as identical, comments aside, to one already graded (:func:`normalized_program`), was never graded and
-    spent no budget, so it takes no slot here either."""
+    """The ``submit_solution`` payloads ``env`` admitted, as ``(code, language)`` in order (``None`` where the run
+    fixed the language), read the way the environment read them. A call the tool refuses to bind, code refused as
+    another language (:meth:`CodeContestsEnvironment.find_mislabel`) or code identical comments aside to one already
+    graded (:func:`normalized_program`) was never graded and spent no budget, so it takes no slot here."""
     tool = env.registry.get(SUBMIT_TOOL)
     solutions: list[tuple[str, str | None]] = []
     graded: set[str] = set()
@@ -160,8 +142,7 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
 
 
 def episode_stated_tolerance(episode: dict[str, Any]) -> FloatTolerance | None:
-    """The float tolerance an episode's own statement states (:func:`find_stated_float_tolerance`), read from its user
-    turns as the environment read it from the prompt."""
+    """The float tolerance an episode's own user turns state, as the environment read it from the prompt."""
     return find_stated_float_tolerance(
         "\n".join(
             str(message.get("content") or "")
@@ -172,14 +153,12 @@ def episode_stated_tolerance(episode: dict[str, Any]) -> FloatTolerance | None:
 
 
 def display_language(language: str | list[str]) -> str:
-    """The meta ``language`` for the report line: a list (a model-chosen set) joined with commas."""
     return ",".join(language) if isinstance(language, list) else str(language)
 
 
 def regrade_file(path: str, workers: int) -> dict[str, Any]:
-    """Re-grade one trajectory file and return its corrected metrics. An episode the eval recorded with
-    a ``generation_error`` stopped on the driver's fault, carries no verdict and leaves ``n``, as it
-    leaves the eval's scores; ``generation_errors`` counts it."""
+    """Re-grade one file. An episode recorded with a ``generation_error`` stopped on the driver's fault, carries no
+    verdict and leaves ``n``, as it leaves the eval's scores."""
     meta, recorded = read_trajectories(path)
     validate_meta(path, meta)
     episodes = [episode for episode in recorded if not episode.get(GENERATION_ERROR_KEY)]
@@ -192,19 +171,15 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
             f"dataset yields; it no longer matches the one the run was scored on"
         )
     env = rebuild_environment(meta)
-    # The run's own grading contract off its meta line, minus the two knobs an offline re-grade must
-    # not inherit. ``stop_on_first_failure``: s@1/s@2 need the all-pass verdict, not the pass
-    # *fraction*, so short-circuiting is identical to full grading while sparing the remaining
-    # (expensive) tests of an already-failed solution. ``max_grading_seconds`` exists to stop one
-    # episode pinning a rollout worker; applying it here would score a correct-but-slow solution as
-    # unsolved. An absent block (a run that stamped none) leaves the rebuilt env's own spec standing.
+    # The run's own grading contract minus two knobs. ``stop_on_first_failure``: s@1/s@2 need only the all-pass
+    # verdict, so short-circuiting spares an already-failed solution's tests. ``max_grading_seconds`` only stops an
+    # episode pinning a rollout worker; here it would score a correct-but-slow solution unsolved.
     spec = env.grading_spec.with_meta(
         meta.get("env_grading") or {}, stop_on_first_failure=True, max_grading_seconds=None
     )
 
     def grade(idx: int, code: str | None, language: str | None, stated_tolerance: FloatTolerance | None) -> bool:
-        """True iff ``code`` passes all of problem ``idx``'s tests, graded in the submission's language under the
-        float tolerance its statement states."""
+        """True iff ``code`` passes all of problem ``idx``'s tests, in its language under its stated tolerance."""
         payload = payloads[idx]
         if not code or not payload.get("tests"):
             return False
@@ -219,7 +194,7 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
         )
         return total > 0 and passed == total
 
-    # One grading task per (episode, admitted submission ≤ budget); bounded concurrency keeps wall-clock real.
+    # Bounded concurrency keeps wall-clock real.
     tasks = [
         (ep_i, code, language)
         for ep_i, episode in enumerate(episodes)
@@ -249,13 +224,12 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
 
 
 def regrade_trajectory_files(paths: list[str], workers: int, output_path: str | None) -> None:
-    """Re-grade each trajectory file in ``paths`` in turn (:func:`regrade_file`), printing its corrected metrics and
-    appending them to ``output_path`` as each lands."""
+    """Print each file's corrected metrics and append them to ``output_path`` as each lands."""
     with contextlib.ExitStack() as stack:
         output = stack.enter_context(open(output_path, "a")) if output_path else None
         for path in paths:
             metrics = regrade_file(path, workers)
-            # Reported and persisted as each result lands, so progress is visible and partial runs are not lost.
+            # As each result lands, so progress is visible and partial runs are not lost.
             logger.info(
                 f"{metrics['model']:28s} {metrics['adapter']:13s} {display_language(metrics['language']):6s} "
                 f"{metrics['eval_protocol']:11s} n={metrics['n']} s@1={metrics['s@1']:.0%} s@2={metrics['s@2']:.0%} "

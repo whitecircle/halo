@@ -1,15 +1,6 @@
-"""CPU tests for ``halo/diagnostics/profiling.py``: artifact export, profiler construction, the CUDA
-memory read and the allocation-history region.
-
-``torch.profiler.profile.export_stacks`` writes an empty file and returns successfully when no
-event carries a Python stack (the case on the image's torch), so an exporter that trusts its
-return value leaves 0-byte files behind and still logs "wrote trace + stacks". Both profilers are
-built by ``build_profiler``, so a setting it drops is lost to the session and the callback alike;
-each caller is pinned on what it passes in (the callback in ``tests/cpu/callbacks/test_torch_profiler.py``).
-Torch traces every supported activity when given none, so the activity choice is read off that call.
-
-Run: python tests/cpu/diagnostics/test_profiler_artifacts.py
-"""
+"""``halo/diagnostics/profiling.py``: artifact export, profiler construction, the CUDA memory read and the
+allocation-history region. ``export_stacks`` writes an empty file and returns successfully when no event carries
+a Python stack, and torch traces every activity when given none."""
 
 import logging
 import os
@@ -81,7 +72,6 @@ def _export(tmp_path, caplog, *, stacks_payload):
 
 
 def test_empty_stacks_are_dropped_not_advertised(tmp_path, caplog):
-    """A no-op export_stacks must leave no file and must not be reported as written."""
     files, log = _export(tmp_path, caplog, stacks_payload="")
 
     assert not [name for name in files if ".stacks_" in name], files
@@ -92,7 +82,6 @@ def test_empty_stacks_are_dropped_not_advertised(tmp_path, caplog):
 
 
 def test_non_empty_stacks_are_kept_and_reported(tmp_path, caplog):
-    """The drop must be driven by emptiness alone — real stacks still land and are logged."""
     files, log = _export(tmp_path, caplog, stacks_payload="frame;frame 1\n")
 
     assert "trace-rank00.stacks_cuda.txt" in files
@@ -102,8 +91,7 @@ def test_non_empty_stacks_are_kept_and_reported(tmp_path, caplog):
 
 
 def test_the_session_profiles_only_the_selected_ranks_region(tmp_path):
-    """The one-shot session profiles its region on a selected rank and writes that rank's artifacts;
-    a rank outside ``ranks`` gets ``None`` and writes nothing."""
+    """A rank outside ``ranks`` gets ``None`` and writes nothing."""
     with torch_profiler_session(str(tmp_path / "skipped"), ranks="1", label="region") as prof:
         assert prof is None
     assert not (tmp_path / "skipped").exists()

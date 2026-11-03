@@ -1,11 +1,5 @@
-"""Every hub dataset the Environmental-GRPO benchmark suite loads honors its prepared-cache knob.
-
-``gpu_test_main`` hands each run a fresh, empty ``HF_DATASETS_CACHE`` (``tests/common/distributed.py``
-``setup_cache_dirs``), so on an offline host a dataset reaches ``trainers/grpo/test_environmental_grpo_benchmarks.py``
-only through ``HALO_TEST_BENCHMARK_DATASETS_CACHE`` passed as ``cache_dir``. A ``load_dataset`` call without it
-fails offline with ``OfflineModeIsEnabled`` however well the host prepared its cache. The GPU script is never
-imported on CPU, so this reads it statically.
-"""
+"""Every hub dataset the env-GRPO benchmark suite loads passes ``HALO_TEST_BENCHMARK_DATASETS_CACHE`` as
+``cache_dir``. Each run's ``HF_DATASETS_CACHE`` starts empty, so a load without it fails offline."""
 
 import ast
 
@@ -62,7 +56,6 @@ def test_every_benchmark_load_reads_the_prepared_cache():
 
 
 def test_a_load_without_the_knob_is_caught():
-    """Anti-vacuity: the parent tree's spelling (no cache_dir) is reported."""
     source = (
         f'DATASETS_CACHE = env_str("{KNOB}")\n'
         'a = load_dataset("openai/gsm8k", "main", split="train[:8]", cache_dir=DATASETS_CACHE)\n'

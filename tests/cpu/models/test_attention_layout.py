@@ -1,12 +1,5 @@
-"""The attention layout must cost every family's layers the way its kernels attend.
-
-Two failure modes this guards, both of which over-report MFU silently: costing a sliding-window,
-chunked, sparse, compressed or linear layer as full attention, and costing a packed row as one
-document when the varlen kernels attend within each document. The roster half instantiates the real
-transformers configs, so a family whose ``layer_types`` vocabulary drifts fails here, not in a run.
-
-    python tests/cpu/models/test_attention_layout.py
-"""
+"""Costing a sliding, chunked, sparse, compressed or linear layer as full attention over-reports MFU silently.
+So does costing a packed row as one document, since the varlen kernels attend within each document."""
 
 import pytest
 import torch
@@ -75,7 +68,7 @@ def _per_token(full_layers: int, window_layers: int, seq_len: int, width=WIDTH, 
 
 
 def _full_attention_formula(seq_len: int) -> float:
-    """The PaLM ``12·L·S·H`` full-attention accounting over every layer."""
+    """PaLM's ``12·L·S·H`` full-attention accounting."""
     return 12.0 * DEPTH * seq_len * HIDDEN
 
 
@@ -96,7 +89,6 @@ def test_the_score_width_is_heads_times_head_dims_not_hidden_size():
 
 
 def test_documents_are_costed_individually_not_as_the_packed_row():
-    """A 64k row of many documents costs Σ L_i × per_token(L_i), never 64k × per_token(64k)."""
     layout = attention_layout_from_config(_Config(_alternating()))
     lengths = torch.tensor([1500, 1500, 1000, 8000, 20000, 32000], dtype=torch.long)
     assert int(lengths.sum()) == MAX_LENGTH
@@ -127,7 +119,6 @@ def test_the_layers_own_type_attribute_wins_over_list_position():
 
 
 def test_the_attention_submodules_layer_idx_indexes_layer_types():
-    """Without a type attribute, ``self_attn.layer_idx`` selects the ``layer_types`` entry."""
     config = _Config(_alternating())
     stage = _Model([_Layer(layer_idx=i) for i in (7, 8, 9)], config)
     assert [layer.kind for layer in attention_layout(stage).layers] == ["full", "window", "full"]
@@ -211,8 +202,8 @@ def test_sparse_layers_cost_top_k_keys_plus_a_pooled_indexer():
 
 
 def test_block_indexed_layers_cost_the_budget_plus_the_tail_block():
-    """A block indexer (Qwen3.8-Flash-Next's QSA) keeps ``indexer_budget`` tokens of whole blocks plus the up to
-    ``indexer_compress_ratio - 1`` tokens of the incomplete tail, and scores one pooled key per block."""
+    """Qwen3.8-Flash-Next's QSA keeps ``indexer_budget`` tokens of whole blocks plus the tail's up to
+    ``indexer_compress_ratio - 1`` tokens, and scores one pooled key per block."""
     config = _Config(
         ["indexed_attention"] * DEPTH,
         indexer_budget=2048,
@@ -282,7 +273,7 @@ def test_a_config_without_head_geometry_keeps_the_palm_width():
 
 
 def test_per_layer_head_geometry_is_read_off_the_per_layer_view():
-    """Gemma 4 registers head_dim per layer; each layer is costed at its own width."""
+    """Gemma 4 registers head_dim per layer."""
 
     class _View:
         def __init__(self, dims):
@@ -316,10 +307,7 @@ def test_grouping_sums_widths_per_rule_without_changing_the_total():
     assert "2×full + 1×window(8)" in layout.describe()
 
 
-# --- the roster, through the real transformers configs -----------------------------------------
-
-# (config key, kinds the family's default layer_types must map to). Every family the toolkit trains
-# is here; a family whose config vocabulary drifts outside LAYER_TYPE_KINDS fails the first case.
+# Config key -> kinds its default layer_types must map to, for every family the toolkit trains.
 _ROSTER = {
     "gpt_oss": {"full", "window"},
     "cohere2_moe": {"full", "window"},

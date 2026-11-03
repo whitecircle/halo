@@ -1,13 +1,5 @@
 #!/usr/bin/env python
-"""The helpers the replayed-resume GPU bodies grade with fail where their callers rely on them.
-
-The merged-resume, precompute-resume and embedding-resume bodies compare a resumed run against the
-uninterrupted one through these helpers and run only on the GPU tiers, so a helper that stopped failing
-would pass every row there unnoticed. These pins drive each with stand-in inputs and assert the verdict
-flips on the input that should flip it.
-
-Run: python tests/cpu/conventions/test_resume_replay_checks.py
-"""
+"""The helpers the replayed-resume GPU bodies grade with fail where their callers rely on them."""
 
 import math
 from types import SimpleNamespace

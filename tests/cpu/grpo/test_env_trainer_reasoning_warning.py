@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""A reasoning-consuming knob with no captured reasoning warns once per run.
-
-Reasoning reaches an assistant turn only through the rollout server's reasoning parser. Without one,
-the reasoning floor scores every episode as maximal under-use, the reasoning price charges nothing,
-and ``carry_reasoning`` sends nothing back — all silently. The trainer warns once, at the point the
-reasoning terms are applied, when a step's assistant turns carry no reasoning while any of the three
-is on, naming the ones that are; a step with reasoning, a step with no assistant turn, or a run with
-all three off warns nothing.
-
-    python tests/cpu/grpo/test_env_trainer_reasoning_warning.py
-"""
+"""A reasoning-consuming knob with no captured reasoning warns once per run. Without the rollout server's reasoning
+parser the floor scores maximal under-use, the price charges nothing and ``carry_reasoning`` sends nothing."""
 
 import logging
 from collections import defaultdict
@@ -24,7 +15,6 @@ from halo.trainers.grpo.environmental.reasoning import reasoning_token_counts
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
-# The warning goes through the tokenize mixin's stdlib logger (the repo's warn_once convention).
 LOGGER = "halo.trainers.grpo.environmental.trajectory_tokenize"
 
 
@@ -52,7 +42,7 @@ def _rollouts(thinkings: list[str | None]) -> list[RolloutResult]:
 
 
 def _with_counts(rollouts: list[RolloutResult]) -> tuple:
-    """``_build_rollout_rewards``' arguments: the rollouts, their per-turn reasoning counts, the device, the mode."""
+    """``_build_rollout_rewards``' arguments."""
     counts = [reasoning_token_counts(_StubTokenizer(), r.trajectory) for r in rollouts]
     return rollouts, counts, torch.device("cpu"), "train"
 

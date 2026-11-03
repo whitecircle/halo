@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """``trainer.train(resume_from_checkpoint=True)`` resumes the checkpoint the entry scripts would.
-
-The base ``Trainer.train`` resolves ``True`` with ``get_last_checkpoint`` — the highest-numbered
-``checkpoint-<N>``, complete or not — then reads that directory's ``trainer_state.json``, which a save
-stopped partway never published. The mixin resolves ``True`` through the scripts' detection instead:
-the newest checkpoint whose trainer state is present, the incomplete ones moved out of the namespace.
-
-``_HFTrainBase`` is HF's resume preamble line for line over the real ``get_last_checkpoint`` and
-``TrainerState``, so the base's own failure is what the tests would see without the mixin.
-
-    python tests/cpu/trainers/test_train_resume_resolution.py
-"""
+The base takes the highest ``checkpoint-<N>``, complete or not, and reads a ``trainer_state.json`` it may lack."""
 
 import json
 import os

@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""Rollout-backend selection: registry, config gating, and the engine-specific request payload.
-
-SGLang ignores unknown request fields instead of rejecting them, and its OpenAI layer discards the
-token id while converting logprobs. Both make the failure mode here SILENT — a run that looks
-configured for sampled-token training quietly trains on re-tokenized text. These tests pin the loud
-rejections and the payload gating that stand in the way.
-"""
+"""Rollout-backend selection: registry, config gating and the engine-specific request payload. SGLang ignores unknown
+fields and its OpenAI layer drops the token id, so a misconfigured run would quietly train on re-tokenized text."""
 
 import logging
 import re
@@ -25,8 +20,6 @@ from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backen
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.weight_sync import StockModel, offline_client
 
-# --- Registry — derived from the client hierarchy, not a hand-maintained table ---
-
 
 def test_registry_resolves_every_backend_and_rejects_unknown():
     assert rollout_backends() == ["sglang", "vllm"]
@@ -37,14 +30,8 @@ def test_registry_resolves_every_backend_and_rejects_unknown():
 
 
 def test_a_client_defined_outside_the_package_cannot_capture_a_backend_key():
-    """A foreign subclass must not displace a shipped client.
-
-    ``__subclasses__()`` returns every class that ever subclassed the base, so without the registry's
-    module filter a class defined anywhere — a test double, or this module tree imported a second
-    time under another name — silently takes over its ``BACKEND_KEY``. That is how
-    ``resolve_weight_sync_client("vllm")`` returns a stub during a full-directory run while passing
-    when the file runs alone: the swap is silent, so only the identity assertion catches it.
-    """
+    """``__subclasses__()`` returns every class that ever subclassed the base, so without the registry's module filter
+    a test double silently takes over its ``BACKEND_KEY``."""
 
     class Impostor(VLLMWeightSyncClient):
         BACKEND_KEY = "vllm"
@@ -54,10 +41,8 @@ def test_a_client_defined_outside_the_package_cannot_capture_a_backend_key():
 
 
 def test_sglang_clients_default_to_distinct_group_names_per_server():
-    """c10d registers group names process-globally on the trainer, so two servers' clients sharing
-    one fixed name fail group formation with "group name has already been created". The default is
-    keyed on the server endpoint, not on group_port: port 0 means "auto-pick at group formation",
-    which is one value for every auto-port client. An explicit name wins."""
+    """c10d registers group names process-globally, so the default is keyed on the server endpoint. Group port 0 is one
+    value for every auto-port client."""
     a = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=0)
     b = offline_client(SGLangWeightSyncClient, "http://localhost:30001", group_port=0)
     named = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=51216, group_name="custom")
@@ -66,12 +51,8 @@ def test_sglang_clients_default_to_distinct_group_names_per_server():
     assert named.group_name == "custom"
 
 
-# --- Engine rosters — read off the client classes, so a loader fact cannot drift silently ---
-
-
 def test_each_engine_pins_the_families_its_loader_cannot_take():
-    """Every entry is an engine fact quoted by the construction gate; moving a family out means its
-    loader was shown to take the online update, in an end-to-end run, not that the entry went stale."""
+    """Moving a family out means its loader was shown to take the online update in an end-to-end run."""
     assert set(SGLangWeightSyncClient.UNSERVABLE_MODEL_TYPES) == {
         "mistral4",
         "bailing_hybrid",
@@ -92,7 +73,7 @@ def test_each_engine_pins_the_families_its_loader_cannot_take():
 
 
 def test_every_unservable_spelling_is_a_family_the_toolkit_trains():
-    """Anti-rot: an entry for a spelling no EP class claims refuses nothing, and hides a rename."""
+    """An entry for a spelling no EP class claims refuses nothing, and hides a rename."""
     known = set(ep_layer_class_by_model_type())
     for client in (SGLangWeightSyncClient, VLLMWeightSyncClient):
         unknown = set(client.UNSERVABLE_MODEL_TYPES) - known
@@ -101,17 +82,13 @@ def test_every_unservable_spelling_is_a_family_the_toolkit_trains():
 
 @pytest.mark.parametrize("client", [SGLangWeightSyncClient, VLLMWeightSyncClient])
 def test_every_unservable_entry_refuses_its_family_with_its_loader_fact(client):
-    """Each entry is what the construction gate quotes: a model of that spelling is refused under the
-    client's backend key, and the refusal carries the entry's reason verbatim."""
     for model_type, reason in client.UNSERVABLE_MODEL_TYPES.items():
         with pytest.raises(ValueError, match=re.escape(reason)):
             reject_unsyncable_model(StockModel(model_type), client.BACKEND_KEY)
 
 
 def test_sglang_declares_the_fused_a_proj_halves_as_one_request():
-    """SGLang's MLA loaders fuse ``q_a_proj`` and ``kv_a_proj_with_mqa`` from a cache local to one
-    ``load_weights`` call, so a half that arrives without the other is dropped without error. The
-    pair is pinned by suffix, which is what keeps a chunk boundary from ever separating them."""
+    """SGLang's MLA loaders drop a half that arrives without the other, so a chunk boundary must not separate them."""
     assert SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS == (
         ("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),
     )
@@ -120,8 +97,8 @@ def test_sglang_declares_the_fused_a_proj_halves_as_one_request():
 
 @pytest.mark.parametrize("backend", rollout_backends())
 def test_each_client_declares_whether_the_pause_it_sends_aborts_the_turns_in_flight(backend):
-    """The env-GRPO retry-budget refusal reads ``PAUSE_ABORTS_IN_FLIGHT``, so it must agree with the pause the
-    client sends: SGLang's ``abort`` mode drops the requests in flight, vLLM's ``keep`` freezes them."""
+    """The env-GRPO retry-budget refusal reads ``PAUSE_ABORTS_IN_FLIGHT``. SGLang's ``abort`` mode drops the requests
+    in flight, vLLM's ``keep`` freezes them."""
     client = resolve_weight_sync_client(backend)
     request = client.PAUSE_REQUEST
     mode = {**request.get("json", {}), **request.get("params", {})}["mode"]
@@ -129,13 +106,9 @@ def test_each_client_declares_whether_the_pause_it_sends_aborts_the_turns_in_fli
 
 
 def test_every_registered_backend_is_a_selectable_config_value():
-    """The registry and the config's Literal must not drift apart — a client registered under a key
-    the config rejects is unreachable, and a config value with no client raises only at train time."""
+    """A client under a key the config rejects is unreachable; a config value with no client raises at train time."""
     literal_values = set(AsyncRolloutConfig.__annotations__["rollout_backend"].__args__)
     assert set(rollout_backends()) == literal_values
-
-
-# --- Config gating — each knob SGLang cannot honor must raise, not warn ---
 
 
 def _sglang_config(**overrides) -> AsyncRolloutConfig:
@@ -149,8 +122,7 @@ def test_sglang_supports_train_on_sampled_tokens():
 
 
 def test_sglang_supports_rollout_routing_replay():
-    """SGLang returns routed experts in a raw-int32 wire format the decoder handles, so R3 is not
-    capability-gated on this backend."""
+    """SGLang returns routed experts in a raw-int32 wire format the decoder handles, so R3 is not gated here."""
     config = _sglang_config(routing_replay="rollout", train_on_sampled_tokens=True)
     assert config.get_rollout_config().capture_routed_experts is True
 
@@ -161,8 +133,8 @@ def test_sglang_rejects_thinking_budget():
 
 
 def test_chat_template_kwargs_refuse_the_effort_key():
-    """The level is per episode and travels top-level; a run-wide nested copy would either duplicate
-    it or, on a disagreement, override it on SGLang and lose to it on vLLM."""
+    """The level is per episode and travels top-level. A nested copy would duplicate it or, on a disagreement, override
+    it on SGLang and lose to it on vLLM."""
     with pytest.raises(ValueError, match="reasoning_effort"):
         AsyncRolloutConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
     assert AsyncRolloutConfig(
@@ -171,26 +143,20 @@ def test_chat_template_kwargs_refuse_the_effort_key():
 
 
 def test_sglang_accepts_the_supported_shape():
-    """Anti-vacuity: the rejections above must come from the specific knobs, not from
-    rollout_backend='sglang' being unusable on its own."""
     config = _sglang_config(routing_replay="recompute", rollout_max_thinking_tokens=None)
     assert config.rollout_backend == "sglang"
     assert config.get_rollout_config().backend == "sglang"
 
 
 def test_vllm_still_accepts_everything_sglang_rejects():
-    """The gate must be engine-specific: not a defect on vLLM, which supports the budget field."""
     config = AsyncRolloutConfig(rollout_backend="vllm", rollout_max_thinking_tokens=4096)
     assert config.rollout_backend == "vllm"
 
 
 def test_rollout_backend_defaults_to_vllm():
-    """The default must stay vLLM — every existing config omits the field and relies on it."""
+    """Every existing config omits the field and relies on it."""
     assert AsyncRolloutConfig().rollout_backend == "vllm"
     assert AsyncRolloutConfig().get_rollout_config().backend == "vllm"
-
-
-# --- Payload gating — vLLM-only fields must not be sent to SGLang ---
 
 
 def _build_payload(backend: str, reasoning_effort: str | None = None, **rollout_kwargs) -> dict:
@@ -205,15 +171,8 @@ def _build_payload(backend: str, reasoning_effort: str | None = None, **rollout_
 
 
 def test_the_effort_level_goes_out_top_level_and_nested_only_where_the_template_needs_it():
-    """One value, from one owner, on both engines.
-
-    The top-level field derives the engines' thinking toggles: vLLM's request model sets
-    ``enable_thinking`` from it and SGLang's validator sets ``thinking``/``enable_thinking``; both hand
-    it to the template. vLLM resolves a disagreement with a nested copy to the top-level value, so a
-    copy there would only be ambiguous. SGLang pops a nested copy into the top-level field before
-    rendering, resolving a disagreement to the nested value, so there the same value rides in both
-    places — an exact copy, never a second knob.
-    """
+    """vLLM resolves a disagreement with a nested copy to the top-level value, so a copy there is only ambiguous.
+    SGLang resolves it to the nested value, so there the same value rides in both places."""
     vllm_payload = _build_payload("vllm", reasoning_effort="high")
     assert vllm_payload["reasoning_effort"] == "high"
     assert "chat_template_kwargs" not in vllm_payload
@@ -223,7 +182,7 @@ def test_the_effort_level_goes_out_top_level_and_nested_only_where_the_template_
 
 
 def test_an_unset_effort_sends_no_field_at_all():
-    """Anti-vacuity: with no level the served model's own template default must stand."""
+    """With no level the served model's own template default must stand."""
     assert "reasoning_effort" not in _build_payload("vllm")
 
 
@@ -235,19 +194,14 @@ def test_sglang_payload_omits_vllm_only_fields():
 
 
 def test_vllm_payload_still_carries_them():
-    """Anti-vacuity: the keys above are genuinely emitted for vLLM, so their absence above is the gate."""
     payload = _build_payload("vllm", capture_token_ids=True, max_thinking_tokens=4096)
     assert payload["return_token_ids"] is True
     assert payload["thinking_token_budget"] == 4096
 
 
 def test_dropped_thinking_budget_is_announced_once(caplog):
-    """A per-effort budget that reaches no engine field must say so — once, not per turn.
-
-    ``rollout_max_thinking_tokens`` is rejected outright for SGLang, so a budget arriving at the
-    payload builder came from the environment's ``reasoning_effort_profiles``. The recipe still states
-    it and the template still renders it, so dropping it silently leaves a cap nothing enforces.
-    """
+    """The budget here came from ``reasoning_effort_profiles``, since ``rollout_max_thinking_tokens`` is rejected for
+    SGLang. The template still renders it, so dropping it silently leaves a cap nothing enforces."""
     engine_wire._thinking_budget_unenforced_warned.discard("sglang")
     try:
         with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):
@@ -262,7 +216,6 @@ def test_dropped_thinking_budget_is_announced_once(caplog):
 
 
 def test_vllm_never_warns_about_the_budget_it_enforces(caplog):
-    """Anti-vacuity: the warning is backend-specific, not emitted whenever a budget is set."""
     engine_wire._thinking_budget_unenforced_warned.discard("vllm")
     with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):
         _build_payload("vllm", max_thinking_tokens=4096)
@@ -270,8 +223,7 @@ def test_vllm_never_warns_about_the_budget_it_enforces(caplog):
 
 
 def test_shared_fields_reach_both_engines():
-    """Only the two vLLM-only keys are gated — SGLang supports stop_token_ids and the logprobs pair,
-    so gating those too would silently disable turn termination."""
+    """SGLang supports stop_token_ids and the logprobs pair; gating them would silently disable turn termination."""
     for backend in ("vllm", "sglang"):
         payload = _build_payload(backend, capture_token_ids=True, stop_token_ids=[42])
         assert payload["stop_token_ids"] == [42], backend
@@ -279,8 +231,7 @@ def test_shared_fields_reach_both_engines():
 
 
 def test_routed_experts_opt_in_is_sglang_only():
-    """SGLang wants the per-request `return_routed_experts` opt-in; vLLM attaches the payload to
-    every response once its server flag is set, and an unknown request field there would 400."""
+    """vLLM attaches the payload to every response once its server flag is set; an unknown field there would 400."""
     sglang = _build_payload("sglang", capture_routed_experts=True)
     assert sglang["return_routed_experts"] is True
     assert "routed_experts_start_len" not in sglang  # 0 default = full sequence incl. prompt
@@ -290,8 +241,6 @@ def test_routed_experts_opt_in_is_sglang_only():
     assert "return_routed_experts" not in off
 
 
-# --- Sampler filters — every request states them, off included ---
-
 _FILTERS = ("top_k", "min_p", "repetition_penalty")
 
 
@@ -300,11 +249,8 @@ def _sampler_fields(body: dict) -> dict:
 
 
 def test_the_filter_defaults_are_the_engines_off_values():
-    """Pinned literally. Both engines fill an omitted filter from the model's generation_config.json
-    (vLLM `--generation-config auto`, SGLang `--sampling-defaults model`; Qwen3.6 ships top_k 20), so the
-    defaults go out on every request and must read as off on both: SGLang refuses top_k 0, which leaves
-    -1. The engine-reference gate and the sampler-logprob probe take these defaults as the identity
-    sampler."""
+    """Both engines fill an omitted filter from generation_config.json (vLLM `--generation-config auto`, SGLang
+    `--sampling-defaults model`; Qwen3.6 ships top_k 20), so these go out on every request. SGLang refuses top_k 0."""
     assert _sampler_fields(vars(RolloutConfig())) == {"top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
 
 
@@ -313,9 +259,8 @@ def test_the_filter_defaults_are_the_engines_off_values():
 )
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_rollout_and_eval_requests_carry_the_configured_filters(backend, filters):
-    """A filter left out renormalizes every reported log-prob over what the model's default keeps, while
-    the trainer scores the full distribution. The training payload and the eval runner's extra body (both
-    off ``generation_control_fields``) carry the config's values on either engine."""
+    """A filter left out renormalizes every reported log-prob over what the model's default keeps, while the trainer
+    scores the full distribution."""
     config = RolloutConfig(backend=backend, **filters)
     expected = {name: getattr(config, name) for name in _FILTERS}
     assert (
@@ -325,14 +270,11 @@ def test_rollout_and_eval_requests_carry_the_configured_filters(backend, filters
     assert _sampler_fields(engine_wire.generation_control_fields(config)) == expected
 
 
-# --- Sampled-token capture — the two engines report the same facts in different places ---
-
-
 def test_sglang_capture_reads_ids_from_meta_info_on_the_choice():
-    """Shapes taken from a live SGLang response: meta_info triples are
-    [logprob, token_id, text], and the prompt ids sit on the CHOICE, not the response root."""
+    """Shapes from a live SGLang response: meta_info triples are [logprob, token_id, text], and the prompt ids sit on
+    the choice."""
     choice = {
-        # The OpenAI logprobs field reports text and drops the id — capturing from it would yield None.
+        # The OpenAI logprobs field reports text and drops the id, so capturing from it would yield None.
         "logprobs": {"content": [{"token": "<think>", "logprob": -0.001}, {"token": "\n", "logprob": -1e-7}]},
         "meta_info": {
             "output_token_logprobs": [[-0.001, 151667, "<think>"], [-1e-7, 198, "\n"]],
@@ -348,15 +290,13 @@ def test_sglang_capture_reads_ids_from_meta_info_on_the_choice():
 
 
 def test_sglang_capture_falls_back_when_meta_info_absent():
-    """Without return_meta_info the ids are unrecoverable — return None so the caller re-tokenizes
-    rather than inventing ids from the text form."""
+    """Without return_meta_info the caller re-tokenizes rather than inventing ids from the text form."""
     choice = {"logprobs": {"content": [{"token": "hi", "logprob": -0.5}]}}
     ids, logprobs, _ = capture_generation_tokens(choice, {}, "sglang")
     assert ids is None and logprobs is None
 
 
 def test_vllm_capture_reads_token_id_strings_and_top_level_prompt_ids():
-    """Anti-vacuity: the vLLM shape is genuinely different, so a single reader could not serve both."""
     choice = {"logprobs": {"content": [{"token": "token_id:42", "logprob": -0.25}]}}
     ids, logprobs, prompt_ids = capture_generation_tokens(choice, {"prompt_token_ids": [7, 8]}, "vllm")
     assert ids == [42]
@@ -365,7 +305,6 @@ def test_vllm_capture_reads_token_id_strings_and_top_level_prompt_ids():
 
 
 def test_each_backend_capture_rejects_the_other_shape():
-    """The readers must not silently half-succeed on the wrong engine's payload."""
     sglang_choice = {"meta_info": {"output_token_logprobs": [[-0.1, 5, "a"]]}, "prompt_token_ids": [1]}
     assert capture_generation_tokens(sglang_choice, {}, "vllm")[0] is None
     vllm_choice = {"logprobs": {"content": [{"token": "token_id:42", "logprob": -0.25}]}}
@@ -373,8 +312,8 @@ def test_each_backend_capture_rejects_the_other_shape():
 
 
 def test_sglang_routing_mask_is_read_from_the_choice_meta_info():
-    """With ``return_meta_info`` (every request that captures sampled ids) SGLang leaves the routing
-    payload in the choice's ``meta_info`` and publishes no ``sglext`` entry; without it, response-level."""
+    """With ``return_meta_info`` SGLang leaves the routing payload in the choice's ``meta_info`` and publishes no
+    ``sglext`` entry; without it, response-level."""
     config = RolloutConfig(backend="sglang", capture_routed_experts=True)
 
     def routing_mask(choice_extras: dict, **response_extras) -> str | None:
@@ -389,7 +328,7 @@ def test_sglang_routing_mask_is_read_from_the_choice_meta_info():
 
 
 def test_sglang_payload_requests_the_meta_info_capture():
-    """The ids only come back when BOTH flags are set; dropping either silently loses them."""
+    """The ids only come back when both flags are set; dropping either silently loses them."""
     payload = _build_payload("sglang", capture_token_ids=True)
     assert payload["logprobs"] is True
     assert payload["return_meta_info"] is True
@@ -406,9 +345,7 @@ def test_capture_flags_absent_when_capture_disabled():
 
 
 def test_rollout_config_backend_roster_matches_the_gate_and_the_readers():
-    """``RolloutConfig.backend`` mirrors ``AsyncRolloutConfig.rollout_backend`` (the validated gate), and the
-    selectable backends and the token-capture readers are one set: a backend without a reader would fail on its
-    first captured turn, a reader without a backend is dead."""
+    """A backend without a reader would fail on its first captured turn, and a reader without a backend is dead."""
     gate = set(get_args(get_type_hints(AsyncRolloutConfig)["rollout_backend"]))
     mirror = set(get_args(get_type_hints(RolloutConfig)["backend"]))
     assert gate and gate == mirror

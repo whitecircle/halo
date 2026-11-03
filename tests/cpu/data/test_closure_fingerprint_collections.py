@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""Closure-fingerprint coverage for scalar collections + visibility of skipped cells.
-
-``_closure_fingerprint`` keys the coordinated-map cache on the output-affecting values a map fn
-captures. Skipping container-typed cells silently makes a map fn capturing e.g. a list of response
-token ids reuse a stale cache when only that list changed. The contract:
-
-* lists/tuples/sets of scalars are fingerprinted (sets order-independently),
-* dicts stay deliberately un-fingerprinted (``none_example`` is pinned cache-irrelevant by
-  ``test_cache_key_knobs``), and
-* any cell the fingerprint cannot cover logs a ONE-TIME warning naming the function and cell type,
-  so the omission is visible instead of silent.
-
-Run: pytest tests/cpu/data/test_closure_fingerprint_collections.py
-"""
+"""``_closure_fingerprint`` covers scalar collections (sets order-independently), leaves dicts out (``none_example``
+is cache-irrelevant), and warns once on any cell it cannot cover."""
 
 import logging
 
@@ -22,8 +10,6 @@ from halo.data.pipeline.map_cache_key import _closure_fingerprint, _unfingerprin
 
 
 def _capturing(value):
-    """A closure over ``value`` with identical code for every call site."""
-
     def fn(row):
         return {"out": value}
 
@@ -31,8 +17,7 @@ def _capturing(value):
 
 
 def test_captured_list_changes_fingerprint():
-    """Two closures identical except for a captured list (e.g. response token ids) must fingerprint
-    differently: hashed to the same key, the second run silently reuses the first's cache."""
+    """Hashed to one key, the second run silently reuses the first's cache."""
     fp_a = _closure_fingerprint(_capturing([1, 2, 3]))
     fp_b = _closure_fingerprint(_capturing([1, 2, 4]))
     assert fp_a and fp_b, "list cells must contribute to the fingerprint, not be skipped"
@@ -46,7 +31,6 @@ def test_captured_tuple_and_set_change_fingerprint():
 
 
 def test_set_fingerprint_is_order_independent():
-    """Set iteration order must not fragment the cache: same elements → same fingerprint."""
     fp_a = _closure_fingerprint(_capturing({3, 1, 2}))
     fp_b = _closure_fingerprint(_capturing({2, 3, 1}))
     assert fp_a == fp_b
@@ -57,21 +41,16 @@ def test_identical_collections_same_fingerprint():
 
 
 def test_non_scalar_collection_not_fingerprinted():
-    """A list of non-scalars (e.g. tensors/objects) stays outside the fingerprint — it falls
-    through to the skip-with-warning path rather than producing an address-dependent repr."""
+    """A list of non-scalars falls through to the skip-with-warning path and produces no address-dependent repr."""
     fp_a = _closure_fingerprint(_capturing([object()]))
     fp_b = _closure_fingerprint(_capturing([object()]))
     assert fp_a == fp_b, "an object address leaked into the fingerprint, fragmenting the cache per run"
     assert fp_a == "", f"a non-scalar cell must be skipped outright, not hashed: {fp_a!r}"
-    # …and skipping must stay distinguishable from covering: a fingerprint that went empty for
-    # everything would satisfy the equality above while silently disabling cache invalidation.
+    # A fingerprint empty for everything would satisfy the equality above while disabling cache invalidation.
     assert _closure_fingerprint(_capturing([1, 2, 3])) != ""
 
 
 def test_unfingerprintable_cell_warns_once(caplog):
-    """A cell type the fingerprint cannot cover must emit a one-time warning naming the function
-    and the type — silence hides the gap; unbounded repetition would be noise."""
-
     class _Opaque:
         pass
 

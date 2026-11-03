@@ -1,7 +1,5 @@
-"""Gradient synchronization for the distributed trainers: the FSDP2 grad-accum window and post-backward
-completion, the QLoRA / deferred-EP / TP-replicated post-backward sweeps, and the step-pre-hooks that run the
-sweeps on a step that missed the clip.
-"""
+"""Gradient synchronization: the FSDP2 grad-accum window and post-backward completion, the post-backward sweeps, and
+the step-pre-hooks that run them on a step that missed the clip."""
 
 import logging
 from collections.abc import Callable
@@ -30,14 +28,9 @@ logger = logging.getLogger(__name__)
 def register_grad_sync_step_hook(
     trainer, flag_attr: str, enabled: Callable[[], bool], action: Callable[[], None]
 ) -> None:
-    """Register ``action`` as a once-per-trainer optimizer step-pre-hook, marked by ``flag_attr``.
-
-    Each sweep lives in the patched ``clip_grad_norm_``, which HF reaches at ``max_grad_norm <= 0`` only through
-    its unclipped norm pass; the sweeps are marked once per step, so a backstop acts only on a step that missed
-    that call. Each sits out torch's zero-LR ``_init_optim_state`` step, which a shard restore or save takes on an
-    optimizer holding no state and which carries no gradients. ``enabled`` is a callable so its state reads stay
-    behind the ``optimizer is None`` check.
-    """
+    """Sweeps live in the patched ``clip_grad_norm_``, which HF reaches at ``max_grad_norm <= 0`` only through its
+    unclipped norm pass, so a backstop acts only on a step that missed it. Each sits out torch's zero-LR
+    ``_init_optim_state`` step."""
     if trainer.optimizer is None or getattr(trainer, flag_attr, False) or not enabled():
         return
 
@@ -51,15 +44,13 @@ def register_grad_sync_step_hook(
 
 
 def same_optimizer_step(marker: tuple | None, state) -> bool:
-    """Whether ``marker``, a sweep's ``(TrainerState, global_step)``, names ``state``'s current optimizer step. The
-    state object is compared by identity: ``global_step`` restarts with every ``train()``'s fresh state, and a step
-    taken before one must not mark the run's first step done."""
+    """``marker`` is a sweep's ``(TrainerState, global_step)``. State compares by identity: ``global_step`` restarts
+    with every ``train()``'s fresh state, and a step taken before one must not mark the run's first step done."""
     return marker is not None and marker[0] is state and marker[1] == state.global_step
 
 
 def claim_optimizer_step(trainer, marker_attr: str) -> bool:
-    """Mark ``trainer``'s current optimizer step under ``marker_attr``; False when it already carries that mark,
-    which a sweep that is not idempotent must not run under twice."""
+    """False when the step already carries this mark, which a sweep that is not idempotent must not run under twice."""
     state = trainer.state
     if same_optimizer_step(getattr(trainer, marker_attr, None), state):
         return False
@@ -68,12 +59,9 @@ def claim_optimizer_step(trainer, marker_attr: str) -> bool:
 
 
 class GradientSyncMixin:
-    """The post-backward gradient sync of :class:`DistributedTrainerMixin`."""
-
     def _install_grad_accum_window(self) -> None:
-        """Cache the FSDP2 modules whose post-backward work toggles per grad-accum window: empty, leaving
-        :meth:`_set_window_end` inert, unless ``fsdp_reshard_after_backward=False`` or ``fsdp_defer_grad_sync``
-        is set on a wrap this trainer applied. Called after every wrap, which is what makes an ``FSDPModule``."""
+        """Empty unless ``fsdp_reshard_after_backward=False`` or ``fsdp_defer_grad_sync`` is set on this trainer's
+        wrap. Called after every wrap, which is what makes an ``FSDPModule``."""
         config = self.parallelism_config
         toggled = self._fsdp_wrapped and (not config.fsdp_reshard_after_backward or config.fsdp_defer_grad_sync)
         # The outermost model, not ``_top_level_model()``: every mode wraps at or below it.
@@ -88,10 +76,8 @@ class GradientSyncMixin:
             )
 
     def _set_window_end(self, is_last: bool) -> None:
-        """Arm FSDP2's post-backward reshard and/or gradient reduce for the microstep about to run: off for
-        microbatches 1..n-1 of the grad-accum window, on for the last. A reshard left off on the last one
-        leaves grad-less unsharded params the optimizer never captured; a reduce left off never reaches
-        the sharded grads."""
+        """Off for microbatches 1..n-1, on for the last. A reshard left off on the last leaves grad-less unsharded
+        params the optimizer never captured; a reduce left off never reaches the sharded grads."""
         if not self._window_modules or is_last == self._window_end_armed:
             return
         config = self.parallelism_config
@@ -103,10 +89,8 @@ class GradientSyncMixin:
         self._window_end_armed = is_last
 
     def _finish_fsdp2_backward(self, model: nn.Module) -> None:
-        """COLLECTIVE where a group reduces: complete the FSDP2 post-backward a reentrant checkpoint recompute
-        skipped, then refuse one still undone, after every microstep's backward and so before the clip. The groups
-        are read off the model the step ran, which under an accelerate-managed launch is only wrapped by
-        ``train()``."""
+        """COLLECTIVE where a group reduces. Complete the post-backward a reentrant recompute skipped, then refuse one
+        still undone, before the clip."""
         cached_model, groups = getattr(self, "_fsdp2_groups_of", (None, None))
         if cached_model is not model:
             groups = fsdp2_param_groups(model)
@@ -123,13 +107,13 @@ class GradientSyncMixin:
             )
 
     def _register_grad_sync_step_hooks(self) -> None:
-        """Back each post-backward sweep (TP-replicated, deferred EP, QLoRA, in that order) with an
-        optimizer step-pre-hook for a step that never reaches the clip. Idempotent."""
+        """Back each sweep (TP-replicated, deferred EP, QLoRA, in that order) with a step-pre-hook for a step that
+        never reaches the clip. Idempotent."""
 
         def sync_tp_replicated() -> None:
             if is_clipping_enabled(self.args.max_grad_norm):
                 return  # the installed TP / EP clip already synced
-            # Over model.parameters(), robust to Muon's nested optimizer.
+            # Over model.parameters(), since Muon nests its optimizer.
             self._sync_tp_replicated_grads(self._tp_replicated_params(self.model.parameters()))
 
         def sweep_deferred_experts() -> None:
@@ -156,8 +140,8 @@ class GradientSyncMixin:
         )
 
     def _sync_qlora_grads(self) -> None:
-        """DP-average every trainable grad once per optimizer step, over the membership
-        :func:`agree_grad_presence` agrees across the world."""
+        """DP-average every trainable grad once per optimizer step, over the membership :func:`agree_grad_presence`
+        agrees."""
         if not getattr(self, "_qlora_grad_sync", False):
             return
         if not claim_optimizer_step(self, "_qlora_sweep_last_step"):
@@ -167,16 +151,9 @@ class GradientSyncMixin:
         reduce_grads_bucketed(grads, op=dist.ReduceOp.AVG, fp32=self.parallelism_config.fp32_grad_reduce)
 
     def _sync_deferred_expert_grads(self) -> None:
-        """COLLECTIVE: the post-backward EP grad sync, once per optimizer step (``EPConfig.runs_post_backward_sweep``).
-
-        Deferred because in-backward hooks would race the EP group's DeepEP combine (multi-group EP across
-        nodes), re-fire per microbatch (PP), or re-fire per nested backward of a reentrant recompute, which
-        the expert divide cannot absorb. Each grad ends as the DP average over its rank block, by the legs
-        of :meth:`_classify_deferred_params`; a single EP group without PP runs the expert leg alone, its
-        router and replicated params averaged by their in-backward hook. Collectives issue in a fixed
-        ``named_parameters`` order, each bucket's membership agreed over its own reduce group. Both
-        callers run only with EP layers present, so a missing EP config raises.
-        """
+        """COLLECTIVE, once per optimizer step. Deferred because in-backward hooks would race the EP group's DeepEP
+        combine, re-fire per microbatch (PP), or re-fire per nested backward of a reentrant recompute, which the expert
+        divide cannot absorb."""
         ep_cfg = require_ep_config(self._ep_config)
         if not ep_cfg.runs_post_backward_sweep:
             return
@@ -194,9 +171,9 @@ class GradientSyncMixin:
 
         if not ep_cfg.sweep_reduces_across_replicas:
             # One EP group, its router averaged by the in-backward hook: the combine already summed every rank's
-            # tokens, so the experts take only the divide, with no collective (a rank no token reached holds no
-            # grad). Per-tensor div_, whose CUDA kernel multiplies by the reciprocal, not _foreach_div_'s true
-            # divide: the rounding single-group expert grads train with.
+            # tokens, so the experts take only the divide, with no collective. Per-tensor div_, whose CUDA kernel
+            # multiplies by the reciprocal unlike _foreach_div_'s true divide, is the rounding single-group expert
+            # grads train with.
             for grad in (param.grad for param in expert_params if param.grad is not None):
                 grad.div_(expert_divisor)
             return
@@ -216,8 +193,7 @@ class GradientSyncMixin:
         world_grads = [p.grad for p in agree_grad_presence(world_params, ep_cfg.dp_scope_group)]
         reduce_grads_bucketed(world_grads, op=dist.ReduceOp.AVG, group=ep_cfg.dp_scope_group, fp32=fp32)
         if replica_params and replica_group is None:
-            # A contract check, not a fallback: group=None is the world group, which under PP spans
-            # stages holding different layers.
+            # group=None is the world group, which under PP spans stages holding different layers.
             raise RuntimeError(
                 f"Deferred cross-replica DP sync collected {len(replica_params)} sharded expert "
                 f"gradient(s) but has no expert replica group to average them over. Reducing over "
@@ -228,11 +204,9 @@ class GradientSyncMixin:
         reduce_grads_bucketed(replica_grads, op=dist.ReduceOp.AVG, group=replica_group, fp32=fp32)
 
     def _classify_deferred_params(self, ep_cfg) -> tuple[list[nn.Parameter], list[nn.Parameter], list[nn.Parameter]]:
-        """The trainable parameters by deferred-sweep leg, as ``(expert, world, replica)``: expert FFN shards
-        (combine already summed the dispatch group: ``SUM`` over the replicas, then the DP divide), router /
-        replicated EP / plain non-expert params (``AVG`` over the DP scope), and non-expert FSDP shards
-        sharded within the EP group (``is_deferred_dp``: a replica-group ``AVG``; otherwise reduce-scatter
-        already averaged them and they sit out)."""
+        """``(expert, world, replica)``: expert FFN shards (SUM over replicas, then the DP divide), router / replicated
+        EP / plain non-expert params (AVG over the DP scope), and non-expert FSDP shards within the EP group
+        (``is_deferred_dp``: replica-group AVG)."""
         expert_ids = self._get_sharded_expert_param_ids()
         ep_ids = self._get_ep_param_ids()
         expert_params: list[nn.Parameter] = []
@@ -258,20 +232,15 @@ class GradientSyncMixin:
         return expert_params, world_params, replica_params
 
     def _tp_replicated_params(self, params) -> list[nn.Parameter]:
-        """``params`` minus the EP/ETP expert shards, which are rank-owned rather than TP replicas;
-        selected structurally, never by rank-local grad presence."""
+        """``params`` minus the rank-owned EP/ETP expert shards; selected structurally, never by rank-local grad
+        presence."""
         expert_ids = self._get_sharded_expert_param_ids()
         return [p for p in params if id(p) not in expert_ids]
 
     def _sync_tp_replicated_grads(self, params: list) -> None:
-        """Reduce the grads the TP graph leaves un-reduced, once per optimizer step; no-op without a TP group.
-
-        Plain replicated params (norms, embeddings, ``lm_head``, pure-TP replicated experts) are
-        AVG-reduced, since nothing else reduces their per-rank grads; the per-head attention norms
-        (:meth:`_tp_per_head_norm_param_ids`) are SUM-reduced, since each rank's gradient covers its own
-        heads. Hand-sliced plain shards (:meth:`_tp_sharded_plain_param_ids`) sit out both. Membership is
-        agreed over the TP group: a router tie-break can leave grad=None on one rank only.
-        """
+        """Plain replicated params are AVG-reduced; per-head attention norms are SUM-reduced, since each rank's
+        gradient covers its own heads; hand-sliced plain shards sit out. Membership is agreed over the TP group: a
+        router tie-break can leave grad=None on one rank only."""
         group = tp_group(self._device_mesh)
         if group is None or dist.get_world_size(group=group) <= 1:
             return
@@ -289,17 +258,15 @@ class GradientSyncMixin:
                 and isinstance(p.data, DTensor)
                 and MeshDim.TP in mesh_dim_names(p.data.device_mesh)
             ):
-                # Plan-sharded: the TP forward's collectives (DTensor's, or the local-shard path's) leave
-                # each rank's gradient complete for its shard. A DTensor without a tp dim is FSDP's dp
-                # shard of a TP-replicated param; its reduce-scatter runs per TP column, so without the
-                # AVG below the TP siblings' replicas drift apart.
+                # Plan-sharded: the TP forward's collectives leave each rank's gradient complete for its shard. A
+                # DTensor without a tp dim is FSDP's dp shard of a TP-replicated param, whose reduce-scatter runs per
+                # TP column, so without the AVG below the siblings' replicas drift apart.
                 continue
             candidates.append(p)
         replicated_grads = []
         per_head_norm_grads = []
         for p in agree_grad_presence(candidates, group):
-            # TP siblings hold the same dp shard of the same replica, so reducing local shards is the
-            # exact cross-replica sync.
+            # TP siblings hold the same dp shard of the same replica, so reducing local shards is the exact sync.
             local = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
             (per_head_norm_grads if id(p) in per_head_norm_ids else replicated_grads).append(local)
         fp32 = bool(self.parallelism_config.fp32_grad_reduce)
@@ -318,12 +285,8 @@ class GradientSyncMixin:
         return self._memoized_param_ids("tp_sharded_plain", build)
 
     def _tp_per_head_norm_param_ids(self) -> set[int]:
-        """Ids of the attention norms whose gradient covers only this rank's heads.
-
-        Registered by :func:`apply_tp_to_attention_only` as names, since FSDP2 replaces Parameter
-        objects after TP is applied. Their true gradient is the sum over the TP group: a colwise
-        projection hands on this rank's heads alone, so nothing else reduces them.
-        """
+        """Ids of the attention norms whose gradient covers only this rank's heads; their true gradient is the sum over
+        the TP group. Registered as names, since FSDP2 replaces Parameter objects after TP is applied."""
 
         def build() -> set[int]:
             model = self._top_level_model()

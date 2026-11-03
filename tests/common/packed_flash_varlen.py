@@ -1,11 +1,6 @@
-"""The packed-row varlen sweep: a tiny family's forward fed the packing collator's varlen set against the same
-forward left to derive it from ``position_ids``, both through transformers' own flash dispatch; and a training
-step under gradient checkpointing, whose backward recompute must read the same handed-over set.
-
-The flash kernels are CPU reference stand-ins installed where transformers caches its loaded kernels, and the
-family's production flash patches are applied, so the sweep rebinds process-global state: it runs in a fresh
-interpreter per family (:func:`main`, :func:`report`) and reports through one ``FINDINGS:`` line.
-"""
+"""The packed-row varlen sweep: a family's forward fed the collator's varlen set vs one left to derive it, and a GC
+training step. Kernels are CPU stand-ins and production patches are applied, so it rebinds process-global state: a
+fresh interpreter per family (:func:`main`, :func:`report`), reporting through one ``FINDINGS:`` line."""
 
 import functools
 import os
@@ -33,7 +28,7 @@ from tests.common.tiny_models import (
 )
 
 FINDINGS_MARKER = "FINDINGS:"
-# Report entries that are not failures: a family the change does not reach, and how many layers it reached.
+# Report entries that are not failures.
 SKIP_PREFIX = "skip:"
 REACH_PREFIX = "reach:"
 VARLEN_KEYS = ("cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k")
@@ -42,19 +37,17 @@ EOS_ID = 1
 SEED = 1234
 # The production flash backend on Blackwell; its int-seqlen patch is part of what the sweep holds.
 SWEEP_ATTN_IMPLEMENTATION = "flash_attention_4"
-# The tensor reads that hand a value to the host: on a device each one waits for the device's queued work.
+# On a device each one waits for the device's queued work.
 HOST_READS = frozenset({"__bool__", "__float__", "__index__", "__int__", "cpu", "item", "nonzero", "numpy", "tolist"})
 
 _TORCH_DIR = os.path.dirname(torch.__file__)
 
-# Rows as TRL's pack_dataset emits them, two packed rows of several documents each.
 MULTI_DOCUMENT_ROWS = (
     {"input_ids": [5, 6, 7, 8, 9, 10, 11], "seq_lengths": [3, 4]},
     {"input_ids": [12, 13, 14, 15, 16], "seq_lengths": [2, 2, 1]},
 )
 
-# Every tiny family whose packed rows reach the packing collator, keyed as the GPU suites name them.
-# DeepSeek-V4 refuses packing (compressed-KV windows), so it has no packed row to sweep.
+# Keyed as the GPU suites name them. DeepSeek-V4 refuses packing (compressed-KV windows), so it has no row to sweep.
 PACKING_FAMILIES = {
     name: family
     for name, family in {
@@ -67,19 +60,16 @@ PACKING_FAMILIES = {
     }.items()
     if name != "deepseek_v4"
 }
-# The flash label a family's packed rows train under where it is not the sweep's: a softcap stays off FA4's varlen
-# kernels (Gemma 2), and its dedicated head_dim-256 kernel takes no sliding window (Gemma 3 at that width).
+# Where it is not the sweep's: a softcap stays off FA4's varlen kernels (Gemma 2), and the head_dim-256 kernel takes no
+# window (Gemma 3).
 PACKED_ATTN_IMPLEMENTATIONS = {"dense:gemma2": "flash_attention_2", "dense:gemma3_text": "flash_attention_2"}
-# Gradient checkpointing per recompute-check mode: off, or the checkpoint at that ``use_reentrant``.
+# Off, or the checkpoint at that ``use_reentrant``.
 GC_MODES = {"off": None, "non_reentrant": False, "reentrant": True}
-# Families whose model forward passes its attention layers no extra kwargs, so the set the collator hands it never
-# reaches attention, which derives its own from position_ids once per step (Ling 2.0's remote forward;
-# tests/cpu/models/test_remote_flash_packed_isolation.py pins that).
+# The model forward passes attention no extra kwargs, so the handed set never reaches it (Ling 2.0's remote forward).
 SET_DROPPING_FAMILIES = frozenset({"bailing_moe"})
 
 
 def padding_tokenizer() -> MagicMock:
-    """The tokenizer surface the packing collators read: right padding with ``PAD_ID``."""
     tok = MagicMock()
     tok.pad_token_id = PAD_ID
     tok.eos_token_id = EOS_ID
@@ -99,7 +89,6 @@ def padding_tokenizer() -> MagicMock:
 
 
 def _attend(q, k, v, *, softmax_scale, causal, window_size, softcap):
-    """Reference attention over one ``[S, H, D]`` sequence: GQA by head repeat, a causal and a sliding mask."""
     seq, heads = q.shape[0], q.shape[1]
     k = k.repeat_interleave(heads // k.shape[1], dim=1)
     v = v.repeat_interleave(heads // v.shape[1], dim=1)
@@ -115,8 +104,8 @@ def _attend(q, k, v, *, softmax_scale, causal, window_size, softcap):
 
 
 class ReferenceFlash:
-    """CPU stand-ins for the flash kernels at FA2's signatures, recording each call's varlen arguments, sliding
-    window and softcap."""
+    """CPU stand-ins for the flash kernels at FA2's signatures, recording varlen arguments, sliding window and
+    softcap."""
 
     def __init__(self):
         self.calls: list[tuple] = []
@@ -169,12 +158,8 @@ class ReferenceFlash:
 
 
 class AttentionHostReads(TorchFunctionMode):
-    """While active, records each :data:`HOST_READS` call made inside a flash attention interface call and outside
-    its kernels: the reads every attention layer of a forward makes, each a host sync on a device (a
-    recompute in the backward runs outside the mode, which :func:`count_derivations` still sees).
-
-    :func:`install_reference_flash` marks the kernels, :meth:`attending` the interface.
-    """
+    """Records each :data:`HOST_READS` call inside a flash attention interface and outside its kernels: each is a host
+    sync on a device."""
 
     def __init__(self):
         super().__init__()
@@ -187,8 +172,6 @@ class AttentionHostReads(TorchFunctionMode):
         return func(*args, **(kwargs or {}))
 
     def scoped(self, fn: Callable, depth: int) -> Callable:
-        """``fn`` shifting the recording depth by ``depth`` for the length of each call."""
-
         @functools.wraps(fn)
         def wrapped(*args, **kwargs):
             self._depth += depth
@@ -200,7 +183,6 @@ class AttentionHostReads(TorchFunctionMode):
         return wrapped
 
     def attending(self, attn_implementation: str = SWEEP_ATTN_IMPLEMENTATION) -> None:
-        """Record inside ``attn_implementation``'s attention interface, the call every attention layer makes."""
         interface = ALL_ATTENTION_FUNCTIONS[attn_implementation]
         interface = getattr(interface, "_recorded_original", interface)
         recorded = self.scoped(interface, 1)
@@ -209,7 +191,6 @@ class AttentionHostReads(TorchFunctionMode):
 
 
 def _first_caller_outside_torch() -> str:
-    """The file of the innermost frame on the stack outside torch and this module."""
     frame = sys._getframe(1)
     while frame is not None and (
         frame.f_code.co_filename.startswith(_TORCH_DIR) or frame.f_code.co_filename == __file__
@@ -219,8 +200,6 @@ def _first_caller_outside_torch() -> str:
 
 
 class MaskHostReads(TorchFunctionMode):
-    """While active, counts the :data:`HOST_READS` calls transformers' mask construction (``masking_utils``) makes."""
-
     def __init__(self):
         super().__init__()
         self.count = 0
@@ -232,8 +211,8 @@ class MaskHostReads(TorchFunctionMode):
 
 
 def count_derivations() -> dict[str, int]:
-    """Call counts of the per-layer derivation a handed-over varlen set replaces (and of the padding-mask path,
-    which precedes it), counted from here on."""
+    """Call counts of the per-layer derivation a handed-over varlen set replaces, and of the padding-mask path before
+    it."""
     counts = {"_is_packed_sequence": 0, "_prepare_from_posids": 0, "_upad_input": 0}
     for name in counts:
         original = getattr(flash_utils, name)
@@ -249,8 +228,7 @@ def count_derivations() -> dict[str, int]:
 
 
 def hide_kernels(reads: AttentionHostReads) -> None:
-    """Stop ``reads`` recording inside the flash kernels transformers holds loaded: a kernel's own reads are not the
-    per-layer derivation's, and the reference kernels read every offset back."""
+    """Stop ``reads`` recording inside loaded kernels: the reference kernels read every offset back."""
     for name in ("_flash_fn", "_flash_varlen_fn"):
         kernel = getattr(flash_utils, name)
         kernel = getattr(kernel, "_hidden_original", kernel)
@@ -260,8 +238,7 @@ def hide_kernels(reads: AttentionHostReads) -> None:
 
 
 def install_loaded_flash(reads: AttentionHostReads, attn_implementation: str) -> dict[str, int]:
-    """The device counterpart of :func:`install_reference_flash`: the kernels transformers loads for
-    ``attn_implementation``, recorded around (:func:`hide_kernels`), plus :func:`count_derivations`."""
+    """The device counterpart of :func:`install_reference_flash`: the kernels transformers loads, recorded around."""
     flash_utils.lazy_import_flash_attention(attn_implementation)
     hide_kernels(reads)
     return count_derivations()
@@ -270,8 +247,7 @@ def install_loaded_flash(reads: AttentionHostReads, attn_implementation: str) ->
 def install_reference_flash(
     reads: AttentionHostReads | None = None, *, attn_implementation: str = SWEEP_ATTN_IMPLEMENTATION
 ) -> tuple[ReferenceFlash, dict[str, int]]:
-    """Fresh reference kernels where transformers caches its loaded ``attn_implementation`` kernels, plus
-    :func:`count_derivations`; ``reads`` records around them (:func:`hide_kernels`)."""
+    """Fresh reference kernels where transformers caches its loaded ones, plus :func:`count_derivations`."""
     kernels = ReferenceFlash()
     flash_utils._loaded_implementation = attn_implementation
     flash_utils._flash_fn = kernels.dense
@@ -285,8 +261,8 @@ def install_reference_flash(
 
 
 def assert_transformers_derivation(varlen: Mapping, position_ids: torch.Tensor) -> None:
-    """``varlen`` holds the varlen set exactly where transformers takes its varlen kernel on ``position_ids``, equal
-    to what it derives: the same int32 offsets, and host-int max lengths."""
+    """``varlen`` holds the set exactly where transformers takes its varlen kernel, equal to its derivation: int32
+    offsets, host-int max lengths."""
     packed = bool(flash_utils._is_packed_sequence(position_ids, batch_size=position_ids.shape[0]))
     assert all((key in varlen) is packed for key in VARLEN_KEYS), (sorted(varlen), packed)
     if not packed:
@@ -300,20 +276,19 @@ def assert_transformers_derivation(varlen: Mapping, position_ids: torch.Tensor) 
 
 
 def set_attn_implementation(model_config, attn_implementation: str | None) -> None:
-    """Resolve ``model_config``'s decoder, at both config levels, to ``attn_implementation``."""
     for level in (model_config, model_config.get_text_config()):
         level._attn_implementation = attn_implementation
 
 
 def use_flash(model_config, attn_implementation: str = SWEEP_ATTN_IMPLEMENTATION) -> None:
-    """Resolve ``model_config``'s decoder to ``attn_implementation`` and apply its production family patches."""
+    """Resolve the decoder to ``attn_implementation`` and apply its production family patches."""
     set_attn_implementation(model_config, attn_implementation)
     apply_family_patches(model_config, attn_implementation)
 
 
 def _packed_flash_batch(name: str, config) -> tuple[str, dict]:
-    """Resolve ``config`` to the flash label ``name``'s packed rows train under and apply its production family
-    patches; return that label and the packing collator's multi-document batch."""
+    """Resolve ``config`` to ``name``'s flash label with its production patches; return the label and the collator's
+    multi-document batch."""
     attn_implementation = PACKED_ATTN_IMPLEMENTATIONS.get(name, SWEEP_ATTN_IMPLEMENTATION)
     use_flash(config, attn_implementation)
     collator = select_data_collator(
@@ -323,8 +298,8 @@ def _packed_flash_batch(name: str, config) -> tuple[str, dict]:
 
 
 def family_findings(name: str) -> list[str]:
-    """What breaks when ``name``'s packed batch hands flash its varlen set, then a ``reach:`` entry counting
-    the attention calls that read it; a lone ``skip:`` entry for a family the change does not reach."""
+    """What breaks when ``name``'s packed batch hands flash its varlen set, plus a ``reach:`` entry; a lone ``skip:``
+    if unreached."""
     if name in SET_DROPPING_FAMILIES:
         return [f"{SKIP_PREFIX} its model forward drops the varlen set, so its attention derives its own"]
     torch.manual_seed(SEED)
@@ -356,7 +331,7 @@ def family_findings(name: str) -> list[str]:
         findings.append(f"the kernels saw different arguments: {with_calls} vs {derived_calls}")
     if with_counts["_is_packed_sequence"] or with_counts["_prepare_from_posids"]:
         findings.append(f"a layer still derived the set from position_ids: {with_counts}")
-    # Every layer that derived the set from position_ids now reads the handed-over one: none dropped it.
+    # Every layer that derived the set now reads the handed-over one.
     kwargs_branch = sum(call[0] == "varlen" for call in with_calls) - with_counts["_upad_input"]
     if kwargs_branch != derived_counts["_prepare_from_posids"]:
         findings.append(
@@ -369,8 +344,8 @@ def family_findings(name: str) -> list[str]:
 
 
 def _shift_first_boundary(batch: dict) -> dict:
-    """``batch`` with its varlen set's first document boundary one token later. ``position_ids`` keep the true
-    boundary, so only a pass that reads the handed-over set sees the shift."""
+    """``batch`` with the set's first boundary one token later; ``position_ids`` keep the true one, so only a reader of
+    the handed set sees it."""
     cu_seq_lens = batch["cu_seq_lens_q"].clone()
     cu_seq_lens[1] += 1
     longest = int(cu_seq_lens.diff().max())
@@ -388,10 +363,8 @@ def _same(a: dict[str, torch.Tensor], b: dict[str, torch.Tensor]) -> bool:
 
 
 def recompute_findings(name: str, gc_mode: str) -> list[str]:
-    """What breaks when a training step on ``name``'s packed batch, checkpointed per ``gc_mode``
-    (:data:`GC_MODES`), hands flash its varlen set: the backward recompute must re-run attention on the handed-over
-    set rather than re-derive it from ``position_ids``. A set with a shifted boundary tells the two apart, since
-    the derivation would restore the true boundary in the recompute alone."""
+    """What breaks when a GC training step hands flash its varlen set; a shifted boundary tells a recompute's
+    re-derivation from reading the set."""
     torch.manual_seed(SEED)
     model = tiny_family_model(PACKING_FAMILIES[name]).train()
     attn_implementation, batch = _packed_flash_batch(name, model.config)
@@ -402,8 +375,7 @@ def recompute_findings(name: str, gc_mode: str) -> list[str]:
         enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": reentrant})
 
     def step(inputs):
-        """The loss and every gradient of one step on ``inputs``, and the derivation calls its forward and its
-        backward made."""
+        """The loss, every gradient, and the derivation calls of one step's forward and backward."""
         model.zero_grad(set_to_none=True)
         _kernels, counts = install_reference_flash(attn_implementation=attn_implementation)
         loss = model(**inputs, use_cache=False).loss
@@ -431,7 +403,7 @@ def recompute_findings(name: str, gc_mode: str) -> list[str]:
     findings = []
     if not _same(with_set, derived):
         findings.append("the varlen set changed the loss or a gradient")
-    # Anti-vacuity: without the set, a checkpoint's recompute re-derives it in every layer whose forward did.
+    # Without the set, a recompute re-derives it in every layer whose forward did.
     derivations = derived_forward["_prepare_from_posids"]
     recomputed = derived_backward["_prepare_from_posids"]
     if not derivations or recomputed != (derivations if reentrant is not None else 0):
@@ -452,11 +424,9 @@ def recompute_findings(name: str, gc_mode: str) -> list[str]:
 
 
 def mask_probe_findings(name: str) -> list[str]:
-    """What breaks when ``name``'s packed flash training step builds its masks without transformers' packed-sequence
-    probe, which the family patches skip on a flash label: a host read left in mask construction, or a loss, logit or
-    gradient that differs from the same step with the probe; an SDPA forward of the same rows that no longer runs the
-    probe its packed mask needs. A ``reach:`` entry counts the reads the probe makes; a lone ``skip:`` entry marks a
-    family whose masks never run it."""
+    """What breaks when a packed flash step builds masks without transformers' packed-sequence probe, which the family
+    patches skip. A host read left in mask construction, a differing loss, logit or gradient, or an SDPA forward that
+    no longer runs the probe it needs."""
     torch.manual_seed(SEED)
     model = tiny_family_model(PACKING_FAMILIES[name]).train()
     if not getattr(model, "_supports_flash_attn", False):
@@ -507,7 +477,6 @@ def mask_probe_findings(name: str) -> list[str]:
 
 
 def report(findings: list[str]) -> None:
-    """Print ``findings`` as the one line :func:`tests.common.repo.probe_findings` reads."""
     print(FINDINGS_MARKER + "|".join(findings))
 
 

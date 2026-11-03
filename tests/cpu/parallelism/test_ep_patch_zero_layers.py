@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the zero-patched-layers outcome of ``apply_ep_layers``.
-
-When EP/ETP distribution is requested but NO MoE block matches a registered wrapper, the run would
-otherwise proceed with replicated, un-synced experts while reporting a data-parallel size that
-assumes they are sharded — it must RAISE (this mirrors the TP loader's zero-sharded-modules gate
-and the CP patcher's zero-wrapped-layers gate).
-
-Grouped-GEMM-only wrapping (``ep_group_size == 1``) is an optimization, so an unwrapped family there
-keeps the stock HF expert compute and only warns.
-
-Run: ``python tests/cpu/parallelism/test_ep_patch_zero_layers.py`` (or ``pytest -m cpu``).
-"""
+"""``apply_ep_layers`` with zero patched layers raises under EP/ETP, or experts run replicated and un-synced at a DP
+size assuming they are sharded. Grouped-GEMM-only wrapping is an optimization, so there it only warns."""
 
 from __future__ import annotations
 

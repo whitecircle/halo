@@ -1,4 +1,4 @@
-"""Construction refusals of the SMPO, DPO and KTO trainers, as pure functions of what they read."""
+"""Construction refusals of the SMPO, DPO and KTO trainers."""
 
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -18,7 +18,6 @@ _PP_BATCH_COUPLED_DPO_LOSSES = {
 
 
 def reject_smpo_options(args, parallelism_config: ParallelismConfig | None) -> None:
-    """Refuse ``padding_free`` under context parallelism."""
     if args.padding_free and parallelism_config and parallelism_config.cp_size > 1:
         raise ValueError(
             "padding_free mode is incompatible with Context Parallelism (CP). "
@@ -28,11 +27,8 @@ def reject_smpo_options(args, parallelism_config: ParallelismConfig | None) -> N
 
 
 def reject_smpo_vlm_options(args, parallelism_config: ParallelismConfig | None, *, is_vlm: bool) -> None:
-    """Refuse the options a VLM run cannot honor; a text run, on any checkpoint, keeps them.
-
-    ``padding_free`` flattens the batch into one sequence, dropping the prompt-tensor alignment the vision
-    tower maps patches through; CP scatters a prompt's placeholder span while every rank keeps the pixels.
-    """
+    """``padding_free`` drops the prompt-tensor alignment the vision tower maps patches through; CP scatters a prompt's
+    placeholder span while every rank keeps the pixels. A text run, on any checkpoint, keeps both."""
     if not is_vlm:
         return
     if args.padding_free:
@@ -51,8 +47,7 @@ def reject_smpo_vlm_options(args, parallelism_config: ParallelismConfig | None, 
 def reject_smpo_pp_options(
     args, parallelism_config: ParallelismConfig | None, peft_config: Any | None, *, is_vlm: bool
 ) -> None:
-    """Refuse the SMPO options pipeline parallelism cannot honor, the explicit ctor parameters included
-    (the mixin's kwargs-reading hook cannot see them)."""
+    """Reads the explicit ctor parameters too, which the mixin's kwargs-reading hook cannot see."""
     if parallelism_config is None or not parallelism_config.is_pp_mode:
         return
     if is_vlm:
@@ -80,8 +75,7 @@ def reject_smpo_pp_options(
 
 
 def reject_dpo_pp_objective(args, *, supported: Mapping[str, Callable]) -> None:
-    """Refuse a DPO objective the PP last-stage loss does not reproduce; ``supported`` maps the loss
-    types it re-implements."""
+    """``supported`` maps the loss types the PP last-stage loss re-implements."""
     loss_types = args.loss_type if isinstance(args.loss_type, list) else [args.loss_type]
     for loss_type in loss_types:
         if loss_type in supported:
@@ -117,7 +111,6 @@ def reject_dpo_pp_objective(args, *, supported: Mapping[str, Callable]) -> None:
 
 
 def reject_kto_pp_loss_type(args) -> None:
-    """Refuse every KTO loss but the KL-free one a pipeline microbatch can compute."""
     if args.loss_type != "apo_zero_unpaired":
         raise ValueError(
             f"loss_type '{args.loss_type}' is not supported under pipeline "
@@ -130,6 +123,5 @@ def reject_kto_pp_loss_type(args) -> None:
 
 
 def reject_policy_from_checkpoint_without_resume(kwargs: Mapping[str, Any]) -> None:
-    """Refuse a policy built from a checkpoint the trainer is not told about."""
     if kwargs.get("policy_from_checkpoint", False) and kwargs.get("resume_checkpoint") is None:
         raise ValueError("policy_from_checkpoint=True needs the resume_checkpoint the policy was built from.")

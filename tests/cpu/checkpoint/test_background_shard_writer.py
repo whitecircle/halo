@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""The streaming shard writer's background part writes change when bytes reach disk, never which bytes.
-
-Entered as a context manager, ``StreamingShardWriter`` hands each finished part to
-``HALO_CHECKPOINT_WRITE_THREADS`` background threads and fills the next part meanwhile. Pinned here:
-every file a gathered save writes (dense and every EP-gathered MoE family) is byte-identical to the
-in-line writer's; the parts in flight stay within the thread count, which is what bounds the writer's
-host RAM; ``close()`` returns only once every part it names is on disk, and names the files already
-there (an external table's) beside them; a model's external table is written in line while its parts
-are still in flight, and the finalize waits those out before naming both in the index; a failed
-background write raises its own exception only once no other write is running, and on every rank of a
-gathered save, through the stream's guard or the finalize's; the block's exit waits out every write
-whatever the caller raised, logging a failed one the caller never collected; outside a block (the
-pipeline-stage writer) parts are written in line; a negative thread count raises when any writer is built, a
-pipeline stage's never-entered one included.
-
-    python tests/cpu/checkpoint/test_background_shard_writer.py
-"""
+"""``StreamingShardWriter``'s background part writes change when bytes reach disk, never which bytes.
+Parts in flight stay within the thread count, which bounds host RAM."""
 
 from __future__ import annotations
 
@@ -60,14 +45,13 @@ THREADS_ENV = "HALO_CHECKPOINT_WRITE_THREADS"
 WRITER_THREAD_PREFIX = "halo-shard-writer"
 # Small enough that every tiny model below splits into several parts.
 SHARD_SIZE = "16KB"
-# The tiny Flash-Next model's streamed weights in a handful of parts, so slowing each write keeps the test short.
+# A handful of parts, so slowing each write keeps the test short.
 TABLE_MODEL_SHARD_SIZE = "256KB"
 WORLD_SIZE = 2
 _REAL_SAVE = writing.save_safetensors_file
 
 
 def _record_write_threads(monkeypatch) -> list[str]:
-    """Route every part write through a recorder of the thread it ran on."""
     real_save = writing.save_safetensors_file
     threads: list[str] = []
 
@@ -80,7 +64,7 @@ def _record_write_threads(monkeypatch) -> list[str]:
 
 
 def _save_with_threads(monkeypatch, tmp_path, threads: int, save) -> tuple[dict[str, str], list[str]]:
-    """``save(output_dir)`` under ``threads`` background writers: the files' digests and the threads that wrote."""
+    """Returns the files' digests and the threads that wrote."""
     output = tmp_path / f"threads{threads}"
     output.mkdir()
     with monkeypatch.context() as patch:
@@ -104,14 +88,14 @@ def _assert_identical_across_thread_counts(monkeypatch, tmp_path, save) -> None:
 
 
 def _tensors(count: int):
-    """``count`` distinct seeded 1 MB float32 tensors, made one at a time so the caller alone holds each."""
+    """Made one at a time so the caller alone holds each."""
     generator = torch.Generator().manual_seed(count)
     for i in range(count):
         yield f"w{i}", torch.randn(250_000, generator=generator)
 
 
 def test_the_stream_writes_the_same_bytes_with_any_thread_count(tmp_path, monkeypatch):
-    """Parts of uneven size, an oversized tensor flushed alone, mixed dtypes: same files, same index."""
+    """Parts of uneven size, an oversized tensor flushed alone, mixed dtypes."""
     staged = {
         **{key: tensor.to(torch.bfloat16) if i % 3 else tensor for i, (key, tensor) in enumerate(_tensors(9))},
         "huge": torch.randn(2_000_000),
@@ -146,7 +130,7 @@ def test_a_dense_gathered_save_writes_the_same_bytes_with_any_thread_count(tmp_p
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
 def test_an_ep_gathered_save_writes_the_same_bytes_with_any_thread_count(family, tmp_path, monkeypatch):
-    """Every MoE family's gathered EP save: its own expert layout, hub respell and save-dtype cast per layer."""
+    """Its own expert layout, hub respell and save-dtype cast per layer."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES[family])
     apply_ep_layers(model, single_process_ep_config())
@@ -158,12 +142,8 @@ def test_an_ep_gathered_save_writes_the_same_bytes_with_any_thread_count(family,
 
 
 class _SlowWrites:
-    """A part write that takes ``seconds``, counting the writes running at once and failing the parts named.
-
-    Before that, a write is held until ``together`` writes are running and until ``release`` is set, each
-    for at most ``hold_seconds``: a held write is still running however slowly the caller proceeds. With
-    ``held_parts``, only those parts wait on ``release``.
-    """
+    """A held write is still running however slowly the caller proceeds; with ``held_parts``, only those parts wait
+    on ``release``."""
 
     def __init__(
         self,
@@ -213,7 +193,6 @@ class _SlowWrites:
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_parts_in_flight_never_exceed_the_thread_count(tmp_path, monkeypatch, threads):
-    """The bound on host RAM: the part filling plus one per thread, each released once written."""
     monkeypatch.setenv(THREADS_ENV, str(threads))
     writes = _SlowWrites(monkeypatch, seconds=0.05, together=threads)
     refs, peak_alive = [], 0
@@ -239,9 +218,7 @@ def _writer_errors(caplog) -> list[logging.LogRecord]:
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_a_failed_write_raises_its_own_error_once_no_write_is_running(tmp_path, monkeypatch, threads):
-    """The error surfaces from the next flush or the close, as its own type, with every other write done,
-    so a caller's cleanup never races a thread still writing; every later call and the block's exit
-    raise it again."""
+    """With every other write done, so a caller's cleanup never races a thread still writing."""
     monkeypatch.setenv(THREADS_ENV, str(threads))
     writes = _SlowWrites(monkeypatch, seconds=0.05, fail_parts=(2,))
     writer = StreamingShardWriter(str(tmp_path), "2MB", enabled=True)
@@ -259,7 +236,6 @@ def test_a_failed_write_raises_its_own_error_once_no_write_is_running(tmp_path, 
 
 
 def test_a_write_error_raised_through_the_block_is_not_logged_again(tmp_path, monkeypatch, caplog):
-    """The caller already propagates the write error, so the exit has no uncollected failure to log."""
     monkeypatch.setenv(THREADS_ENV, "1")
     _SlowWrites(monkeypatch, seconds=0.0, fail_parts=(1,))
     with caplog.at_level(logging.ERROR, logger=writing.logger.name), pytest.raises(OSError, match="writing part 1"):
@@ -272,8 +248,7 @@ def test_a_write_error_raised_through_the_block_is_not_logged_again(tmp_path, mo
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_close_returns_only_once_every_part_it_names_is_on_disk(tmp_path, monkeypatch, threads):
-    """``close()`` hands off the last part itself, so its own join is all that keeps the fragment it
-    returns (published by the index exchange) from naming a part still being written."""
+    """Its own join keeps the returned fragment from naming a part still being written."""
     monkeypatch.setenv(THREADS_ENV, str(threads))
     release = threading.Event()
     _SlowWrites(monkeypatch, seconds=0.0, release=release, hold_seconds=0.3)
@@ -289,8 +264,6 @@ def test_close_returns_only_once_every_part_it_names_is_on_disk(tmp_path, monkey
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_close_names_written_files_beside_its_parts(tmp_path, monkeypatch, threads):
-    """A multi-writer save's fragment holds the files already on disk (an external table's) beside every part,
-    the last one joined first, and counts both in its bytes."""
     monkeypatch.setenv(THREADS_ENV, str(threads))
     release = threading.Event()
     _SlowWrites(monkeypatch, seconds=0.0, release=release, hold_seconds=0.3)
@@ -311,7 +284,6 @@ def test_close_names_written_files_beside_its_parts(tmp_path, monkeypatch, threa
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_a_failed_last_part_raises_from_close_itself(tmp_path, monkeypatch, threads):
-    """The part ``close()`` flushes fails with no later ``add`` to report it: ``close()`` raises it."""
     monkeypatch.setenv(THREADS_ENV, str(threads))
     writes = _SlowWrites(monkeypatch, seconds=0.0, fail_parts=(3,), release=threading.Event(), hold_seconds=0.3)
     writer = StreamingShardWriter(str(tmp_path), "2MB", enabled=True)
@@ -325,9 +297,8 @@ def test_a_failed_last_part_raises_from_close_itself(tmp_path, monkeypatch, thre
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_an_external_table_is_indexed_beside_parts_still_in_flight(tmp_path, monkeypatch, threads):
-    """A gathered save of a model holding an external table (Qwen3.8-Flash-Next's host n-gram table) writes the
-    table's files in line while streamed parts are still being written; the finalize waits those out before it
-    renames them, and its index names both. The files equal the in-line writer's, and the save reloads whole."""
+    """Qwen3.8-Flash-Next's host n-gram table is written in line while parts are in flight; the finalize waits
+    before renaming them."""
     source, background, inline = (str(tmp_path / name) for name in ("source", "background", "inline"))
     build_tiny_qwen4_exp_checkpoint(source)
     os.makedirs(background)
@@ -350,13 +321,12 @@ def test_an_external_table_is_indexed_beside_parts_still_in_flight(tmp_path, mon
     release = threading.Event()
     with monkeypatch.context() as patch:
         patch.setenv(THREADS_ENV, str(threads))
-        # The finalize flushes the last part, so the one before it is the last in flight beside the tables: held
-        # until they are written, however long the save takes to reach them.
+        # The part before the last is held until the tables are written, however long the save takes to reach them.
         writes = _SlowWrites(patch, seconds=0.0, release=release, hold_seconds=60.0, held_parts=(streamed_parts - 1,))
 
         def write_tables_mid_stream(table_model, writer):
             with writes.lock:
-                # A submitted part counts once its thread runs it; the hold keeps it running from then on.
+                # A submitted part counts once its thread runs it.
                 writes.lock.wait_for(lambda: writes.running >= 1, timeout=30)
                 in_flight_at_tables.append(writes.running)
             try:
@@ -378,8 +348,7 @@ def test_an_external_table_is_indexed_beside_parts_still_in_flight(tmp_path, mon
 
 
 def test_the_block_exit_waits_out_every_write_and_logs_a_failed_one(tmp_path, monkeypatch, caplog):
-    """A caller failing mid-stream leaves writes in flight: the exit waits them out, lets the caller's
-    own exception through and logs the failed write it never collected, which may be the cause."""
+    """The failed write it never collected may be the cause."""
     monkeypatch.setenv(THREADS_ENV, "2")
     release = threading.Event()
     writes = _SlowWrites(monkeypatch, seconds=0.2, fail_parts=(1,), release=release, hold_seconds=10.0)
@@ -410,7 +379,7 @@ def test_a_write_failure_no_close_reported_raises_at_the_block_exit(tmp_path, mo
 
 
 def test_outside_a_block_and_at_zero_threads_every_part_is_written_in_line(tmp_path, monkeypatch):
-    """A writer never entered (the pipeline-stage saver) runs no thread to outlive its caller."""
+    """A writer never entered runs no thread to outlive its caller."""
     monkeypatch.setenv(THREADS_ENV, "2")
     write_threads = _record_write_threads(monkeypatch)
     writer = StreamingShardWriter(str(tmp_path / "plain"), "2MB", enabled=True)
@@ -444,7 +413,7 @@ def test_the_thread_count_knob(monkeypatch, caplog, raw, threads, warns):
 
 @pytest.mark.parametrize("enabled", [True, False], ids=["save_rank", "peer_rank"])
 def test_a_negative_thread_count_raises_on_every_rank_before_the_block(tmp_path, monkeypatch, enabled):
-    """The save rank and every peer refuse it building the writer, before a gathered save's first collective."""
+    """Refused before a gathered save's first collective."""
     monkeypatch.setenv(THREADS_ENV, "-3")
     entered = False
     with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITE_THREADS=-3"):
@@ -456,15 +425,13 @@ def test_a_negative_thread_count_raises_on_every_rank_before_the_block(tmp_path,
 
 @pytest.mark.parametrize("enabled", [True, False], ids=["stage_writer_rank", "stage_peer_rank"])
 def test_a_negative_thread_count_refuses_the_pipeline_stage_writer(tmp_path, monkeypatch, enabled):
-    """A pipeline stage builds its writer and writes in line, never entering a block; the count is refused there
-    too, as a stage's writer is built on every stage rank ahead of the stage's gathers."""
+    """A pipeline stage never enters a block, and its writer is built on every stage rank ahead of the gathers."""
     monkeypatch.setenv(THREADS_ENV, "-1")
     with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITE_THREADS=-1"):
         StreamingShardWriter(str(tmp_path), SHARD_SIZE, enabled=enabled, filename_prefix=PP_WRAPPER_PART_PREFIX)
 
 
 def _raise_on_writer_thread(fail_part: int, tensors, path, **kwargs):
-    """Rank 0's part write: part ``fail_part`` fails, and only on a background thread."""
     part = int(os.path.basename(path).rsplit("-", 1)[1].split(".")[0])
     if part == fail_part and threading.current_thread().name.startswith(WRITER_THREAD_PREFIX):
         raise OSError(28, f"No space left on device writing part {part}")
@@ -472,7 +439,6 @@ def _raise_on_writer_thread(fail_part: int, tensors, path, **kwargs):
 
 
 def _failing_stream_worker(rank: int, root: str, fail_part: int) -> None:
-    """Rank 0 writes four one-tensor parts of a gathered save; part ``fail_part`` fails in the background."""
     if rank == 0:
         writing.save_safetensors_file = partial(_raise_on_writer_thread, fail_part)
     chunks = [{f"layer{i}.weight": torch.full((64_000,), float(i))} for i in range(4)]
@@ -486,7 +452,7 @@ def _failing_stream_worker(rank: int, root: str, fail_part: int) -> None:
             normalize=dict,
         )
         outcome = "saved"
-    except Exception as exc:  # the verdict file must be written whatever the rank raised
+    except Exception as exc:  # The verdict file must be written whatever the rank raised.
         outcome = f"{type(exc).__name__}: {exc}"
     with open(os.path.join(root, f"outcome_{rank}.json"), "w") as fh:
         json.dump(outcome, fh)
@@ -498,9 +464,7 @@ def _failing_stream_worker(rank: int, root: str, fail_part: int) -> None:
     ids=["mid-stream", "last-part"],
 )
 def test_a_background_write_failure_raises_on_every_rank(tmp_path, fail_part, seam):
-    """A mid-stream part fails the stream's guard (surfaced at a later flush), the last part the
-    finalize's: either way both ranks raise naming the write, rather than the peer finalizing an index
-    or waiting in the next gather."""
+    """Both ranks raise rather than the peer finalizing an index or waiting in the next gather."""
     os.makedirs(tmp_path / "checkpoint")
     run_gloo_ranks(_failing_stream_worker, WORLD_SIZE, str(tmp_path), fail_part, env={THREADS_ENV: "1"})
     outcomes = [json.loads((tmp_path / f"outcome_{rank}.json").read_text()) for rank in range(WORLD_SIZE)]

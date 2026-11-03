@@ -1,6 +1,5 @@
-"""Local cache-publish protocol for downloaded dataset trees, with the fetch injected so the S3 dataset
-cache and a sharded dataset's per-shard cache share its crash and staleness semantics. The fingerprint is
-what an S3 listing produces (key/ETag/size), so a cached tree validates against a live prefix unread."""
+"""Local cache-publish protocol for downloaded dataset trees, with the fetch injected. The fingerprint is what an S3
+listing produces (key/ETag/size), so a cached tree validates against a live prefix unread."""
 
 import hashlib
 import os
@@ -35,8 +34,7 @@ _STALE_PUBLISH_TMP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def s3_cache_key(bucket: str, key: str) -> str:
-    """The cache-directory name of an S3 object, ``md5("<bucket>/<key>")``, for every cache on this volume:
-    another spelling would miss a pre-populated cache and need live AWS."""
+    """``md5("<bucket>/<key>")``, for every cache on this volume: another spelling would miss a pre-populated cache."""
     return hashlib.md5(f"{bucket}/{key}".encode()).hexdigest()
 
 
@@ -49,7 +47,6 @@ def compute_etag_fingerprint(entries: list[tuple[str, str, int]]) -> str | None:
 
 
 def _write_download_marker(marker_path: str, source_uri: str, fingerprint: str | None) -> None:
-    """Write a download-completion marker: the source URI plus (when known) its content fingerprint."""
     lines = [source_uri]
     if fingerprint is not None:
         lines.append(f"{_MARKER_FINGERPRINT_PREFIX}{fingerprint}")
@@ -58,7 +55,7 @@ def _write_download_marker(marker_path: str, source_uri: str, fingerprint: str |
 
 
 def _read_marker_fingerprint(marker_path: str) -> str | None:
-    """Content fingerprint stored in a completion marker; None for fingerprint-less or unreadable ones."""
+    """None for fingerprint-less or unreadable markers."""
     try:
         with open(marker_path) as f:
             for line in f:
@@ -72,8 +69,8 @@ def _read_marker_fingerprint(marker_path: str) -> str | None:
 def _cleanup_stale_publish_tmp_dirs(
     cache_path: str, max_age_seconds: float = _STALE_PUBLISH_TMP_MAX_AGE_SECONDS
 ) -> list[str]:
-    """Remove the ``<cache_path>.tmp-<uuid>`` siblings older than ``max_age_seconds`` (crashed writers'; a
-    live writer's is always fresh), returning the removed paths."""
+    """Remove ``<cache_path>.tmp-<uuid>`` siblings older than ``max_age_seconds``, which crashed writers left; a live
+    writer's is always fresh."""
     pattern = re.compile(re.escape(os.path.basename(cache_path)) + r"\.tmp-[0-9a-f]{32}$")
     cutoff = time.time() - max_age_seconds
     removed: list[str] = []
@@ -97,11 +94,8 @@ def _cleanup_stale_publish_tmp_dirs(
 
 
 def _publish_tree(tmp_path: str, cache_path: str) -> None:
-    """Swap the fetched ``tmp_path`` in as ``cache_path``, keeping another writer's tree if it published first.
-
-    The old tree is renamed aside, not deleted in place, since another node may be loading it; a crash
-    between the renames leaves ``cache_path`` absent, and the aside name is a ``.tmp-<uuid>`` the reaper takes.
-    """
+    """Swap ``tmp_path`` in, keeping another writer's tree if it published first. The old tree is renamed aside, as
+    another node may load it; a crash between renames leaves ``cache_path`` absent and a ``.tmp-<uuid>`` to reap."""
     superseded = f"{cache_path}.tmp-{uuid.uuid4().hex}"
     try:
         os.rename(cache_path, superseded)
@@ -129,11 +123,9 @@ def publish_cached_download(
     use_cache: bool = True,
     stale_message: str | None = None,
 ) -> bool:
-    """Serve ``cache_path`` from cache or (re)download it with ``fetch(tmp_path)`` and publish it atomically;
-    returns cache-hit. Writers serialize on ``lock_path``; ``live_fingerprint`` (``None`` serves the cache
-    unvalidated) invalidates a cache whose source changed and upgrades a fingerprint-less marker in place. A fetch
-    that raises leaves no partial tree behind.
-    """
+    """Serve from cache or (re)download with ``fetch(tmp_path)`` and publish atomically; returns cache-hit. Writers
+    serialize on ``lock_path``; ``live_fingerprint`` (``None`` serves unvalidated) invalidates a cache whose source
+    changed and upgrades a fingerprint-less marker. A raising fetch leaves no partial tree."""
     complete_marker = os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER)
     with filelock.FileLock(lock_path, timeout=_CACHE_LOCK_TIMEOUT_SECONDS):
         # Under the lock same-node writers are excluded; the age threshold covers cross-node ones.
@@ -173,8 +165,7 @@ def serve_cached_tree(
     stale_message: str,
     use_cache: bool = True,
 ) -> bool:
-    """:func:`publish_cached_download` of ``source_uri`` at ``cache_path`` (``<cache dir>/<tree>``, locked
-    by ``<cache dir>/.lock``), validating a complete cache against ``fingerprint()``. Returns cache-hit."""
+    """Locked by ``<cache dir>/.lock``, validating a complete cache against ``fingerprint()``. Returns cache-hit."""
     cache_dir = os.path.dirname(cache_path)
     os.makedirs(cache_dir, exist_ok=True)
     # Probed outside the lock (network I/O), and only for a cache that could be served.

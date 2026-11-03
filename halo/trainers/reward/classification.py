@@ -9,11 +9,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Distributed binary/multi-label classification trainer: EP, TP and PP; CP unsupported (pooling).
-
-Under PP the whole sequence lives on the last stage, so pooling and every loss variant are last-stage functions,
-and evaluation keeps ``compute_metrics``: the pooled ``[B, num_labels]`` logits broadcast down the chain.
-"""
+"""Distributed binary/multi-label classification trainer: EP, TP and PP; CP unsupported (pooling). Under PP evaluation
+keeps ``compute_metrics``: the pooled ``[B, num_labels]`` logits broadcast down the chain."""
 
 import logging
 from collections.abc import Callable
@@ -55,9 +52,8 @@ from halo.trainers.reward.classification_loss import ClassificationLoss, build_c
 
 logger = logging.getLogger(__name__)
 
-# The one metric this trainer may omit from an eval slice (undefined, not zero): a one-class slice
-# makes the AUC meaningless. Ranking checkpoints on it is checked at construction and again wherever
-# the key is dropped.
+# The one metric this trainer may omit from an eval slice, since a one-class slice leaves the AUC undefined. Ranking
+# checkpoints on it is checked at construction and wherever the key is dropped.
 _OMITTABLE_METRIC = "auc_roc"
 
 
@@ -66,10 +62,9 @@ def _ranks_checkpoints_on_omittable_metric(args: Any) -> bool:
 
 
 def reject_unsupported_classification_args(args: Any, *, default_metrics: bool) -> None:
-    """Refuse HF's ``label_smoothing_factor``, whose label_smoother never runs under this trainer's own loss; under
-    the default metrics, a ``metric_for_best_model`` no evaluation reports, which transformers' best-metric lookup
-    would raise on as a ``KeyError`` at the first eval; and a ``max_length`` unresolved by construction, which
-    bounds the raw dataset's over-length filter."""
+    """Refuse ``label_smoothing_factor``, which never runs under this trainer's own loss; under the default metrics, a
+    ``metric_for_best_model`` no evaluation reports, a ``KeyError`` at the first eval; and a ``max_length`` unresolved
+    by construction, which bounds the raw dataset's over-length filter."""
     if args.label_smoothing_factor:
         raise ValueError(
             f"label_smoothing_factor={args.label_smoothing_factor} has no effect on "
@@ -94,8 +89,8 @@ def reject_unsupported_classification_args(args: Any, *, default_metrics: bool) 
 
 
 def _require_class_ids(labels: torch.Tensor) -> torch.Tensor:
-    """A single-label batch's ``[B]`` class ids, or a raise: a ``[B, C]`` float target would train
-    soft-label cross-entropy, silently. Shape metadata only, so no host sync."""
+    """Raise on a ``[B, C]`` float target, which would silently train soft-label cross-entropy. Shape metadata only, so
+    no host sync."""
     if labels.dim() != 1:
         raise ValueError(
             f"Single-label classification expects [B] integer class ids, got labels of shape "
@@ -109,11 +104,8 @@ def _is_within_length(example: dict[str, Any], max_length: int) -> bool:
 
 
 def _filter_over_length(dataset: Dataset, max_length: int, num_proc: int | None, split_name: str) -> Dataset:
-    """Drop rows whose tokenized length exceeds ``max_length``, reporting the drop rate.
-
-    Never raises — long-tailed datasets are legitimate — but a high drop rate is escalated to a
-    warning by the shared reporter, which holds that threshold for every drop-and-continue filter.
-    """
+    """Never raises, as long-tailed datasets are legitimate; the shared reporter escalates a high drop rate to a
+    warning."""
     original = len(dataset)
     dataset = coordinated_filter(
         dataset,
@@ -142,7 +134,6 @@ def _tokenize(batch: dict[str, list[Any]], tokenizer: "PreTrainedTokenizerBase")
 
 
 def _tokenized_split(dataset: Dataset, tokenizer, max_length: int, num_proc: int | None, split_name: str) -> Dataset:
-    """A raw text/label split tokenized by one coordinated map, its over-length rows dropped."""
     dataset = coordinated_map(
         dataset,
         _tokenize,
@@ -155,13 +146,11 @@ def _tokenized_split(dataset: Dataset, tokenizer, max_length: int, num_proc: int
 
 
 class ClassificationTrainer(DistributedTrainerMixin, Trainer):
-    """Binary/multi-label classification with EP/TP/PP over 'text'/'label' rows (tokenized when ``input_ids`` is
-    absent); CP excluded, since the head needs the full pooled representation."""
+    """Over 'text'/'label' rows, tokenized when ``input_ids`` is absent."""
 
     _tag_names = ["trl", "classification"]
 
     PP_REFUSAL = None
-    # compute_loss returns the batch's own mean (per-replica; DP averages gradients).
     LOSS_IS_OWN_MEAN = True
 
     _pp_pool_pad_id: int | None = None
@@ -251,11 +240,8 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return_outputs=False,
         num_items_in_batch=None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """The configured objective on the head's pooled logits, in fp32.
-
-        No ``_warn_once_on_empty_labels``: that check reads ``labels`` as token ids, and class ids collide with
-        the tokenizer's pad/eos ids (Gemma's pad=0 / eos=1 is every binary label).
-        """
+        """No ``_warn_once_on_empty_labels``: it reads ``labels`` as token ids, and class ids collide with the
+        tokenizer's pad/eos ids (Gemma's pad=0 / eos=1 is every binary label)."""
         with peft_bf16_autocast(self._peft_has_been_casted_to_bf16, self.accelerator.device):
             logits = model(
                 input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], return_dict=True
@@ -329,9 +315,8 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
             except ValueError as error:
                 self._omit_auc_roc(str(error))
             else:
-                # An eval slice carrying one class only warns and returns NaN rather than raising, and
-                # a NaN reaching metric_for_best_model / early stopping compares False against every
-                # checkpoint. Undefined is reported by omitting the key, as the raising path does.
+                # An eval slice carrying one class warns and returns NaN, and a NaN reaching metric_for_best_model or
+                # early stopping compares False against every checkpoint, so undefined omits the key.
                 if np.isnan(auc_roc):
                     self._omit_auc_roc("undefined (a class has no samples)")
                 else:
@@ -350,12 +335,8 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return metrics
 
     def _omit_auc_roc(self, reason: str) -> None:
-        """Leave ``auc_roc`` out of this evaluation's metrics, warning why.
-
-        Both undefined paths (sklearn raising, and sklearn warning + returning NaN) land here so the
-        omission is one behavior. It raises instead when the run ranks checkpoints on the key, where
-        transformers' best-metric lookup would otherwise fail with a bare ``KeyError``.
-        """
+        """Both undefined paths land here so the omission is one behavior. Raises when the run ranks checkpoints on the
+        key, where transformers' best-metric lookup would fail with a bare ``KeyError``."""
         if _ranks_checkpoints_on_omittable_metric(self.args):
             raise ValueError(
                 f"auc_roc is undefined for this evaluation ({reason}) and metric_for_best_model ranks "
@@ -366,18 +347,12 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         logger.warning(f"auc_roc skipped for this evaluation: {reason}")
 
     def _loss_on(self, device) -> ClassificationLoss:
-        """The configured loss, its class weights moved onto ``device`` once."""
         self._classification_loss = self._classification_loss.to(device)
         return self._classification_loss
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
-        """Pooled sequence classification as a last-stage pipeline loss.
-
-        The batch transform rewrites the collated ``labels`` into the runner's ``[B, S]`` plane, ``-100``
-        except at the pooled position, which carries the class id. Multi-hot targets cannot ride a long plane;
-        they ship as the ``class_targets`` extra beside an inert ``0`` marker. Every loss variant decomposes
-        into microbatch sums over a batch-level denominator (:meth:`ClassificationLoss.masked_sum`).
-        """
+        """``labels`` becomes the runner's ``[B, S]`` plane, ``-100`` except the class id at the pooled position;
+        multi-hot targets ship as ``class_targets`` beside an inert ``0`` marker."""
         tokenizer = resolve_tokenizer(self.processing_class)
         self._pp_pool_pad_id = require_pooling_pad_id(self.model.config, getattr(tokenizer, "pad_token_id", None))
         return PipelineLossAdapter(
@@ -412,11 +387,8 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return out
 
     def _pp_classification_token_loss(self, logits: torch.Tensor, target: torch.Tensor | dict) -> torch.Tensor:
-        """Summed pooled loss over the microbatch (the runner divides by the batch normalizer).
-
-        Free of host syncs: inert rows are carried through and masked out of the sum, so an all-inert
-        microbatch is a real zero still wired to the graph and the rank stays in the schedule.
-        """
+        """Free of host syncs: inert rows are masked out of the sum, so an all-inert microbatch is a real zero wired to
+        the graph and the rank stays in the schedule."""
         plane = decode_pooling_plane(target["labels"] if isinstance(target, dict) else target)
         pooled = pooled_logits(logits, plane)
         # Inert rows decode to LABEL_IGNORE_INDEX; clamp keeps the CE gather in range before masking.
@@ -424,8 +396,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return self._loss_on(pooled.device).masked_sum(pooled, targets, plane.valid)
 
     def _pp_classification_normalizer(self, inputs: dict) -> torch.Tensor:
-        """Chain-local batch denominator: the loss is a per-replica mean whose gradients DP averages, so no
-        cross-rank reduction is involved."""
+        """Chain-local: the loss is a per-replica mean whose gradients DP averages, so no cross-rank reduction."""
         plane = decode_pooling_plane(inputs["labels"])
         targets = inputs["class_targets"] if self.is_multi_label else plane.values
         return self._loss_on(targets.device).normalizer(targets, plane.valid)

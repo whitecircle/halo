@@ -18,13 +18,9 @@ logger = logging.getLogger(__name__)
 
 
 class MultiGroupSampler(Sampler):
-    """Per-completion indices, flattened group by group and cut contiguously across DP ranks (remainder to
-    the first ranks), then shuffled with a rank-independent seed.
-
-    A group may straddle ranks: the advantages are precomputed at tokenization and the ``1/group_size``
-    loss weight rides each row, so group locality is not what makes the objective correct. Per-rank counts
-    can differ; :class:`GroupedLoaderMixin` equalizes them.
-    """
+    """Cut contiguously across DP ranks, then shuffled with a rank-independent seed. A group may straddle ranks:
+    advantages are precomputed and the ``1/group_size`` weight rides each row. :class:`GroupedLoaderMixin` equalizes
+    per-rank counts."""
 
     def __init__(self, group_ids, rank, world_size, shuffle=True, seed=0):
         self.shuffle = shuffle
@@ -50,7 +46,6 @@ class MultiGroupSampler(Sampler):
             )
 
     def set_epoch(self, epoch: int) -> None:
-        """Re-seed the per-iteration shuffle for a new epoch (DistributedSampler convention)."""
         self._epoch = epoch
 
     def __iter__(self):
@@ -65,11 +60,9 @@ class MultiGroupSampler(Sampler):
 
 
 class GroupedLoaderMixin:
-    """Offline GRPO's train and eval loaders over :class:`MultiGroupSampler`; mixed in ahead of the
-    spine's DP loader mixin, whose loaders these replace."""
+    """Mixed in ahead of the spine's DP loader mixin, whose loaders these replace."""
 
     def _cache_group_ids(self, train_dataset, eval_dataset) -> None:
-        """Read each split's ``group_id`` column once, for the samplers every loader build takes."""
         if self.accelerator.is_main_process:
             logger.info("Extracting group_ids from training dataset...")
         self._cached_train_group_ids = list(train_dataset["group_id"])
@@ -90,7 +83,6 @@ class GroupedLoaderMixin:
             self._cached_eval_group_ids = None
 
     def get_train_dataloader(self) -> DataLoader:
-        """The training loader over the shuffled grouped sampler."""
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
@@ -103,8 +95,6 @@ class GroupedLoaderMixin:
         return self._prepare_dataloader(dataloader, num_processes=1, process_index=0)
 
     def get_eval_dataloader(self, eval_dataset: str | Dataset | None = None) -> DataLoader:
-        """The evaluation loader over the unshuffled grouped sampler, cached per split."""
-
         def build(dataset):
             group_ids = self._cached_eval_group_ids if dataset is self.eval_dataset else None
             if group_ids is None and dataset is not None and "group_id" in dataset.column_names:
@@ -124,10 +114,8 @@ class GroupedLoaderMixin:
         return build(eval_dataset)
 
     def _build_grouped_dataloader(self, dataset, group_ids, *, batch_size: int, shuffle: bool) -> DataLoader:
-        """COLLECTIVE when the world has peers. A DataLoader over this DP rank's :class:`MultiGroupSampler` slice
-        (TP/ETP/CP siblings see the same batch), its batch count equalized to the world minimum, else
-        faster ranks exit and block the next all-reduce. The sampler already shards, so accelerate places
-        devices only."""
+        """COLLECTIVE when the world has peers. Batch count equalized to the world minimum, else faster ranks exit and
+        block the next all-reduce. The sampler already shards, so accelerate places devices only."""
         dp_size, dp_rank = self.dp_shard_geometry()
 
         dataloader_params = {

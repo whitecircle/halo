@@ -1,5 +1,3 @@
-"""Schedule an arbitrary numeric model attribute over training steps."""
-
 from typing import Any
 
 from transformers import TrainerCallback
@@ -30,8 +28,7 @@ class VariableSchedulerCallback(TrainerCallback):
 
     @staticmethod
     def _get_target_object(kwargs: dict) -> Any:
-        """The callback's model with its top-level ``.module`` peeled, so the attribute lands on the module
-        that reads it; a recursive unwrap would rewrite every nested ``.module`` child each step."""
+        """Peel only the top-level ``.module``: a recursive unwrap would rewrite every nested ``.module`` child."""
         target_obj = kwargs.get("model")
         if target_obj is None:
             raise ValueError(

@@ -1,17 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for four ``UlyssesModel`` / ``CPConfig`` seams that fail silently otherwise.
-
-* **The model gets this rank's chunk of the positions.** Each attention layer applies RoPE (and Mistral4's
-  llama-4 scale) to its own chunk, so the positions must be the sequence's, narrowed with the tokens.
-* **The input guard names the actual problem.** An ``inputs_embeds``-only call must not be reported
-  as "got multimodal features" — that branch is keyed on ``pixel_values``, not on ``input_ids``.
-* **``cp_size > 1`` without a process group is refused.** Degrading to "every rank keeps chunk 0"
-  quietly trains on ``1/cp_size`` of every sample behind a warning.
-* **The serializers' key mapping inverts the patch.** ``strip_cp_attention_level`` must drop exactly
-  the level the wrappers insert, or a save writes attention keys ``from_pretrained`` never loads.
-
-Run: ``python tests/cpu/parallelism/test_cp_wrapper_seams.py`` (or ``pytest -m cpu``).
-"""
+"""Four ``UlyssesModel`` / ``CPConfig`` seams that fail silently otherwise."""
 
 from __future__ import annotations
 
@@ -37,12 +25,8 @@ NUM_LAYERS = 3
 
 
 class _RecordingLogitsOnly(torch.nn.Module):
-    """Stands in for the wrapped transformer, which cannot run in the CPU tier.
-
-    CP's patched attention calls ``flash_attn_func`` directly and flash-attn has no CPU kernel. Only
-    the wrapper's own ``forward`` is under test here; the real validation and patching still ran in
-    :func:`_cp_wrapped_model`.
-    """
+    """CP's patched attention calls ``flash_attn_func`` directly, which has no CPU kernel; the real validation and
+    patching still ran."""
 
     def __init__(self, config):
         super().__init__()
@@ -56,7 +40,6 @@ class _RecordingLogitsOnly(torch.nn.Module):
 
 
 def _cp_wrapped_model():
-    """A real ``UlyssesModel`` over a tiny multi-layer Qwen3, patched for real."""
     config = AutoConfig.for_model(
         "qwen3",
         vocab_size=VOCAB,
@@ -71,23 +54,21 @@ def _cp_wrapped_model():
     )
     torch.manual_seed(0)
     model = AutoModelForCausalLM.from_config(config, dtype=torch.float32)
-    # `reject_unsupported_ulysses_model` requires a flash implementation, which transformers refuses to
-    # instantiate on a CPU host. Build the tree eager and declare the label the validator reads:
-    # no attention kernel is ever called.
+    # The validator requires a flash label, which transformers refuses to instantiate on CPU; no attention kernel is
+    # ever called.
     model.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
     return UlyssesModel(model, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1)), config
 
 
 def _split_two_ways(wrapper):
-    """Drive the wrapper as CP rank 1 of 2 without a 2-rank job: the split then really narrows, and away from
-    position 0."""
+    """Without a 2-rank job, the split still really narrows, away from position 0."""
     wrapper.cp_config.cp_size, wrapper.cp_config.cp_rank = 2, 1
     return SEQ_LEN // 2
 
 
 @pytest.mark.parametrize("explicit_positions", [False, True], ids=["arange", "given"])
 def test_the_model_gets_this_ranks_chunk_of_the_positions(tmp_path, explicit_positions):
-    """Rank 1 must see the second half of the sequence's positions, not positions restarting at 0."""
+    """Each attention layer applies RoPE to its own chunk, so positions must be the sequence's, not restarting at 0."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         wrapper, config = _cp_wrapped_model()
@@ -96,7 +77,7 @@ def test_the_model_gets_this_ranks_chunk_of_the_positions(tmp_path, explicit_pos
         chunk = _split_two_ways(wrapper)
 
         ids = torch.ones(BATCH, SEQ_LEN, dtype=torch.long)
-        # Packed-style positions: per-document resets, so only the real tensor reproduces them.
+        # Per-document resets, so only the real tensor reproduces them.
         packed = torch.tensor([[0, 1, 2, 3, 5, 6, 7, 8]], dtype=torch.long).expand(BATCH, SEQ_LEN).contiguous()
         expected = packed.clone() if explicit_positions else torch.arange(SEQ_LEN).expand(BATCH, SEQ_LEN)
 
@@ -123,8 +104,7 @@ def test_strip_cp_attention_level_inverts_the_level_the_wrappers_insert(tmp_path
 
 
 def test_parameters_yield_each_tensor_once_under_its_hub_name(tmp_path):
-    """An optimizer built from ``parameters()`` must step each tensor once, and the names the trainer keys
-    state by must be the hub ones."""
+    """An optimizer built from ``parameters()`` steps each tensor once; the trainer keys state by hub names."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         wrapper, _ = _cp_wrapped_model()
@@ -155,7 +135,7 @@ def test_inputs_embeds_only_and_multimodal_calls_report_different_problems(tmp_p
 
 
 def test_cp_size_above_one_refuses_to_run_without_a_process_group():
-    """No group means no all-to-all, so this process would attend over chunk 0 alone."""
+    """Without a group, this process would attend over chunk 0 alone, training on ``1/cp_size`` of each sample."""
     with (
         patch(f"{_CP_MOD}.has_process_group", return_value=False),
         pytest.raises(RuntimeError, match="initialized torch.distributed"),
@@ -164,7 +144,7 @@ def test_cp_size_above_one_refuses_to_run_without_a_process_group():
 
 
 def test_cp_size_one_still_builds_without_a_process_group():
-    """Anti-vacuity: the single-process path is exactly the one that must survive."""
+    """Anti-vacuity: the single-process path must survive."""
     with patch(f"{_CP_MOD}.has_process_group", return_value=False):
         config = CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1)
     assert config.process_group is None and config.cp_rank == 0

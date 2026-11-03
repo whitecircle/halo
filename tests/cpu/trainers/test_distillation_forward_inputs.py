@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """The distillation forwards must return logits under Liger on the HF trainer's eval step.
-
-transformers' ``Trainer.prediction_step`` injects ``skip_logits=True`` into loss-only eval inputs
-whenever ``use_liger_kernel`` is on; the distillation objectives build their own loss from
-``outputs.logits`` and forward the inputs WITHOUT labels, where Liger's fused linear-cross-entropy
-forward refuses ``skip_logits`` ("labels and shift_labels are None"). Both trainers derive their
-forward inputs from :func:`logits_forward_inputs`, which is pinned here against that contract.
-
-Run: ``pytest -m cpu tests/cpu/trainers/test_distillation_forward_inputs.py``
-"""
+``Trainer.prediction_step`` injects ``skip_logits=True``, which Liger's fused forward refuses without labels."""
 
 from __future__ import annotations
 
@@ -21,8 +13,6 @@ from tests.common.models import TINY_QWEN3_CONFIG
 
 
 class _LigerContractModel(Qwen3ForCausalLM):
-    """A forward with Liger's fused-LCE contract: ``skip_logits`` without labels is an error."""
-
     def forward(self, *args, skip_logits: bool | None = None, **kwargs):
         if skip_logits and kwargs.get("labels") is None:
             raise ValueError("skip_logits is True, but labels and shift_labels are None")

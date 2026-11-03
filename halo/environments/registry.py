@@ -30,8 +30,6 @@ def register_environment(
     factory: Callable[[dict[str, Any]], EnvironmentBase],
     override: bool = False,
 ) -> None:
-    """Register an environment ``factory`` (env_config dict → EnvironmentBase) under ``name``.
-    Raises unless ``override`` when the name is already registered."""
     name = name.lower()
     if name in _environment_registry and not override:
         raise ValueError(f"Environment type '{name}' is already registered. Use override=True to replace it.")
@@ -40,8 +38,7 @@ def register_environment(
 
 
 def build_environment(env_type: str | tuple[type, dict[str, Any]], env_config: dict[str, Any]) -> EnvironmentBase:
-    """Build an environment from a registered type name (case-insensitive) or an explicit ``(cls, kwargs)``
-    pair, whose ``kwargs`` override ``env_config``."""
+    """``kwargs`` of an explicit ``(cls, kwargs)`` pair override ``env_config``."""
     if isinstance(env_type, tuple):
         cls, kwargs = env_type
         return cls(**{**env_config, **kwargs})
@@ -60,18 +57,15 @@ def build_environment(env_type: str | tuple[type, dict[str, Any]], env_config: d
 
 
 def get_registered_environments() -> list[str]:
-    """Return sorted list of registered environment type names."""
     return sorted(_environment_registry.keys())
 
 
 def _build_native_combined(search_backend: str | None = None, **kwargs) -> NativeToolUseEnvironment:
-    """The native protocol over every built-in tool, web search on ``search_backend``."""
     return NativeToolUseEnvironment(tool_registry=build_combined_tools(search_backend=search_backend), **kwargs)
 
 
 def _register_builtins():
-    """Register all built-in environment types; every factory forwards the full env_config, so YAML
-    ``environment_kwargs`` reach the environment."""
+    """Every factory forwards the full env_config, so YAML ``environment_kwargs`` reach the environment."""
     register_environment("react_math", lambda c: build_react_math_environment(**c))
     register_environment("react_search", lambda c: build_react_search_environment(**c))
 
@@ -93,8 +87,7 @@ def _register_builtins():
     register_environment("swe", lambda c: SweEnvironment(**c))
 
     register_environment("qa_search", lambda c: build_qa_search_environment(**c))
-    # code_contests / codeforces are one environment; only the default output_comparison differs.
-    # code_contests takes the class default ("exact"), so only codeforces carries a preset.
+    # One environment; only the default output_comparison differs.
     register_environment("code_contests", lambda c: CodeContestsEnvironment(**c))
     register_environment("codeforces", lambda c: CodeContestsEnvironment(**{"output_comparison": "tokens", **c}))
     register_environment("exam_qa", lambda c: ExamQAEnvironment(**c))

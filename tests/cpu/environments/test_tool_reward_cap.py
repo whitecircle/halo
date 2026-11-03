@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the per-call tool reward and its episode cap, owned by ``EnvironmentBase``.
-
-``tool_success_reward`` / ``tool_error_penalty`` price every executed call through one accounting
-(``_credit_tool_call``) under both protocols, and ``tool_reward_cap`` bounds what an episode earns
-from successful calls in total — default one paid call per turn of the budget. Without the cap five
-paid calls a turn over ten turns pay 2.5 against a 1.0 solve, so call spam out-earns the objective.
-
-Run: python tests/cpu/environments/test_tool_reward_cap.py
-"""
+"""The per-call tool reward and its episode cap, owned by ``EnvironmentBase``: ``_credit_tool_call`` prices every
+call under both protocols, and ``tool_reward_cap`` defaults to one paid call per turn. Without it five paid calls
+a turn over ten turns pay 2.5 against a 1.0 solve."""
 
 import pytest
 

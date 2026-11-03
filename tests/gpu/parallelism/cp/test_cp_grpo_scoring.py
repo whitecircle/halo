@@ -1,11 +1,5 @@
 #!/usr/bin/env python
-"""Offline-GRPO scoring equivalence on Qwen3 for CP1, CP2 and CP4.
-
-Exercises the production scoring and reduction helpers through real Ulysses attention,
-then applies the toolkit's mean gradient sync explicitly.
-
-Run on four GPUs: torchrun --nproc_per_node=4 tests/gpu/parallelism/cp/test_cp_grpo_scoring.py
-"""
+"""Offline-GRPO scoring equivalence on Qwen3 for CP1, CP2 and CP4, through real Ulysses attention."""
 
 from types import SimpleNamespace
 
@@ -125,7 +119,7 @@ def run(ctx) -> dict:
         hi = lo + shifted_labels.size(1)
         supervised = shifted_labels != LABEL_IGNORE_INDEX
         expected_labels = labels[:, lo + 1 : hi + 1]
-        # The final position of a non-final shard predicts the NEXT shard's first label.
+        # The final position of a non-final shard predicts the next shard's first label.
         if cp_config.cp_rank < cp_size - 1:
             expected_labels = labels[:, lo + 1 : lo + chunk + 1]
         labels_match = bool(torch.equal(shifted_labels, expected_labels))
@@ -168,7 +162,6 @@ def run(ctx) -> dict:
             checks["cp4_drop_boundary_negative_control"] = broken
             log(f"CP4 boundary-only loss error={correct_error:.4g}; dropped-boundary loss error={broken_error:.4g}")
 
-        # Write the synchronized gradients back to the model before the optimizer step.
         for name, param in model.named_parameters():
             if name in cp_gradients:
                 param.grad.copy_(cp_gradients[name].to(param.grad.dtype))
@@ -201,9 +194,8 @@ def run(ctx) -> dict:
         del model, scorer
         cleanup_memory()
 
-    # Production-shaped entry: FSDP2 wraps both decoder layers and the model root. The scorer's
-    # redirection must enter that root, unshard lm_head, and keep it live through the local head
-    # sweep; a bare CP model above cannot detect a missing root-forward redirect.
+    # FSDP2 wraps layers and root; a bare CP model can't detect a missing root-forward redirect, which must unshard
+    # lm_head for the head sweep.
     cp_config = CPConfig(2, stage_world_size=ctx.world_size, stage_base_rank=0, nvlink_domain_size=ctx.world_size)
     model = UlyssesModel(_model(ctx.device), cp_config)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})

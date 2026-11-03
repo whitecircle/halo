@@ -1,21 +1,7 @@
 #!/usr/bin/env python
-"""
-Tests for the pluggable code-execution sandbox backends.
-
-Covers:
-- LocalSubprocessSandbox: stdout capture, stdin plumbing, real imports, non-zero exit,
-  wall-clock timeout, address-space limit, unsupported-language rejection, aux-file traversal guard.
-  Multi-language (C/C++) compile-and-run and persistent sessions are covered in test_sandbox_multilang.py.
-- RemoteSandbox: SandboxFusion response parsing (incl. a rejected compile as ``compile_failed`` and a
-  compile time limit as a backend error), endpoint normalization, timeout/transport errors
-  (via an injected fake session — no network).
-- build_sandbox: env-var backend selection and the remote-url requirement.
-- format_sandbox_repl_output / run_code_via_sandbox: REPL-style rendering — a compile error as the
-  compiler's first diagnostics, a crash as its signal and stderr tail ahead of the program's stdout.
-- run_solution_against_tests: pass/fail/timeout grading on the local backend.
-
-Run: python tests/cpu/environments/test_sandbox.py
-"""
+"""The pluggable code-execution sandbox backends: local subprocess, remote SandboxFusion parsing (no network),
+``build_sandbox`` selection, REPL rendering, and grading on the local backend. Multi-language runs and sessions
+live in test_sandbox_multilang.py."""
 
 import os
 import threading
@@ -49,12 +35,8 @@ _NUMPY_MATMUL = "import numpy as np\na = np.arange(64.0).reshape(8, 8)\nprint(in
 _ONE_BLAS_THREAD_MB = 160
 
 
-# LocalSubprocessSandbox
-
-
 def test_local_output_that_is_not_utf8_is_captured_not_raised():
-    """A program emitting bytes outside UTF-8 must come back as a result the grader can judge (a wrong
-    answer), not as an exception that scores the test as an infra error."""
+    """Returned as a result the grader can judge, not an exception scoring the test as an infra error."""
     sb = LocalSubprocessSandbox()
     res = sb.run("import sys\nsys.stdout.buffer.write(b'\\x80\\xffok\\n'); sys.stderr.buffer.write(b'\\x80')")
     assert res.returncode == 0 and res.error is None
@@ -101,7 +83,6 @@ def test_local_times_out_on_infinite_loop():
 
 
 def _proc_state(pid: int) -> str | None:
-    """Process state letter from /proc (None = no such process)."""
     try:
         with open(f"/proc/{pid}/stat") as fh:
             return fh.read().split(") ", 1)[1].split()[0]
@@ -110,8 +91,7 @@ def _proc_state(pid: int) -> str | None:
 
 
 def test_local_timeout_kills_forked_grandchildren():
-    """On timeout the WHOLE process group must die: killing only the direct child leaves forked
-    grandchildren (a fork bomb's population) running unbounded past every per-process limit."""
+    """Killing only the direct child leaves forked grandchildren running past every per-process limit."""
     sb = LocalSubprocessSandbox()
     code = (
         "import os, sys, time\n"
@@ -153,8 +133,8 @@ def test_a_child_that_escapes_the_group_does_not_hold_the_run_open():
 
 
 def test_limit_wrap_caps_process_count_for_run_step():
-    """The run step's ulimit wrapper must carry -u (RLIMIT_NPROC) so a fork bomb's growth is capped
-    until the group kill lands; the trusted compile step must NOT inherit that cap."""
+    """The run step's ulimit wrapper carries -u (RLIMIT_NPROC) so a fork bomb's growth is capped until the group
+    kill lands; the trusted compile step does not inherit that cap."""
     run_wrapped = LocalSubprocessSandbox._limit_wrap(["prog"], 2, 128, nproc=LOCAL_NPROC_LIMIT)
     assert f"ulimit -u {LOCAL_NPROC_LIMIT}" in run_wrapped[2]
     compile_wrapped = LocalSubprocessSandbox._limit_wrap(["cc"], 30, 2048)
@@ -171,9 +151,8 @@ def test_a_sandboxed_program_cannot_dump_core():
 
 
 def test_execution_gate_caps_concurrency():
-    """The gate admits at most ``slots`` executions at once (a judge-style queue), so a wall-clock
-    time limit is not distorted by oversubscription. One slot strictly serializes; three let runs
-    overlap but never beyond the cap. Fails if the gate stops bounding concurrency."""
+    """One slot strictly serializes; three overlap but never past the cap, so a wall-clock limit is not distorted by
+    oversubscription."""
 
     def peak_concurrency(gate: ExecutionGate, workers: int) -> int:
         live = 0
@@ -203,9 +182,7 @@ def test_execution_gate_caps_concurrency():
 
 
 def test_execution_slots_env_override_via_env_int():
-    """HALO_SANDBOX_MAX_CONCURRENCY parses through halo.env.env_int (single home for env parsing):
-    a valid override wins (clamped to >=1), a malformed value warns inside env_int and falls back
-    to the usable-CPU default instead of raising mid-run."""
+    """A valid override wins (clamped to >=1); a malformed value warns inside env_int and falls back."""
     default_slots = hardware.available_cpu_count()
     saved = os.environ.get("HALO_SANDBOX_MAX_CONCURRENCY")
     try:
@@ -235,7 +212,6 @@ def test_execution_slots_default_to_the_cpus_the_process_may_use(monkeypatch, tm
 
 
 def test_local_enforces_memory_limit():
-    """An allocation past the address-space cap must fail the process, not the host."""
     sb = LocalSubprocessSandbox(memory_limit_mb=256)
     # ~1.5 GiB: RLIMIT_AS turns this into a MemoryError in the child.
     res = sb.run("x = bytearray(1500 * 1024 * 1024)\nprint(len(x))")
@@ -282,17 +258,14 @@ def test_local_rejects_unsafe_aux_path():
 
 
 def test_local_ignores_an_inherited_pythonpath(tmp_path, monkeypatch):
-    """The child runs ``-s -E`` in a minimal environment (``_child_env``), so a module reachable
-    only through the parent's PYTHONPATH is NOT importable inside the sandbox."""
+    """The child runs ``-s -E`` in a minimal environment (``_child_env``), so a module reachable only through the
+    parent's PYTHONPATH does not import in the sandbox."""
     (tmp_path / "halo_pythonpath_probe.py").write_text("VALUE = 1\n")
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     sb = LocalSubprocessSandbox()
     res = sb.run("import halo_pythonpath_probe")
     assert not res.ok
     assert "ModuleNotFoundError" in res.stderr or "ImportError" in res.stderr
-
-
-# RemoteSandbox (no network — injected fake session)
 
 
 def test_remote_endpoint_normalization():
@@ -359,9 +332,8 @@ def test_remote_parses_timeout():
 
 
 def test_remote_compile_failure_is_program_verdict_not_infra_error():
-    """A compile the service's compiler rejected (a finished step, non-zero exit) is the submission's
-    fault: ``compile_failed`` with the diagnostics, ``error`` unset — an ``error`` here would invalidate
-    the whole graded episode."""
+    """A finished step with non-zero exit is the submission's fault: ``compile_failed``, ``error`` unset, which
+    would invalidate the graded episode."""
     payload = {
         "status": "Failed",
         "message": "",
@@ -393,8 +365,8 @@ def test_remote_compile_failure_is_program_verdict_not_infra_error():
     ids=("error-status", "exit-127", "no-status-no-exit"),
 )
 def test_remote_incomplete_compile_step_is_backend_error(compile_result):
-    """A compiler step that did not run to completion — or whose compiler is absent (exit 127) — is
-    the service's fault, never a verdict on the source: ``error`` set, ``compile_failed`` unset."""
+    """A step that did not finish, or an absent compiler (exit 127), is the service's fault: ``error`` set,
+    ``compile_failed`` unset."""
     payload = {"status": "Failed", "compile_result": compile_result}
     sb = RemoteSandbox("http://sandbox:8080", session=RecordingSandboxSession(payload))
     res = sb.run("int main(){}", language="cpp")
@@ -417,9 +389,8 @@ def test_remote_success_without_a_run_result_is_a_backend_error():
 
 
 def test_remote_compile_time_limit_is_a_compile_verdict():
-    """A compile that hit the service's compile time limit is the source's verdict (an ``#include``
-    bomb), like the local backend's compile timeout — never ``error``, which would let a program void
-    its own episode, and not a run timeout."""
+    """The source's verdict (an ``#include`` bomb), like the local compile timeout; ``error`` would let a program
+    void its own episode."""
     payload = {
         "status": "Failed",
         "message": "",
@@ -435,8 +406,6 @@ def test_remote_compile_time_limit_is_a_compile_verdict():
 
 
 def test_remote_clean_compile_step_reads_run_result():
-    """A compiled-language success carries a finished, zero-exit ``compile_result``: the verdict must
-    come from ``run_result`` exactly as for an interpreted run."""
     payload = {
         "status": "Success",
         "compile_result": {"status": "Finished", "return_code": 0, "stdout": "", "stderr": ""},
@@ -459,10 +428,8 @@ def test_remote_handles_transport_error():
 
 
 def test_remote_client_timeout_is_an_infra_error_not_the_programs_tle():
-    """The service enforces ``run_timeout`` itself and reports it in ``run_result.status``, so the
-    client deadline fires only when the service does not answer. Booked as ``timed_out`` it would
-    grade as TIME LIMIT EXCEEDED — a wrong program, outside the infra-outage invalidation — and the
-    REPL would render a timeout string instead of raising ``SandboxInfraError``."""
+    """The service enforces ``run_timeout``, so the client deadline fires only when it does not answer. Booked as
+    ``timed_out`` it would grade as TLE, outside the infra-outage invalidation."""
     sess = RecordingSandboxSession(exc=requests.Timeout("slow"))
     sb = RemoteSandbox("http://sandbox:8080", session=sess)
     res = sb.run("print(1)")
@@ -470,9 +437,6 @@ def test_remote_client_timeout_is_an_infra_error_not_the_programs_tle():
     assert res.error is not None and "timed out" in res.error
     with pytest.raises(SandboxInfraError):
         format_sandbox_repl_output(res, timeout=5.0)
-
-
-# build_sandbox
 
 
 def test_resolve_defaults_to_local():
@@ -541,9 +505,6 @@ def test_resolve_explicit_backend_overrides_env():
             os.environ["HALO_SANDBOX_BACKEND"] = saved
 
 
-# Environment-level sandbox config (sandbox_backend / sandbox_url via environment_kwargs)
-
-
 def test_env_sandbox_backend_config():
     for env in (
         CodeContestsEnvironment(sandbox_backend="local"),
@@ -573,9 +534,6 @@ def test_env_sandbox_config_overrides_env():
             os.environ.pop("HALO_SANDBOX_BACKEND", None)
         else:
             os.environ["HALO_SANDBOX_BACKEND"] = saved
-
-
-# REPL formatting
 
 
 def test_format_repl_stdout():
@@ -624,11 +582,7 @@ def test_format_repl_renders_a_compile_failure_from_the_head_of_the_diagnostics(
 
 
 def test_format_repl_raises_on_backend_error_with_partial_output():
-    """A backend/transport error must RAISE, even if a partial response carried stdout.
-
-    Returned as a string, it would score an infrastructure outage as a successful call (paying
-    ``tool_success_reward`` for a run that never happened).
-    """
+    """Returned as a string, an outage scores as a successful call and pays ``tool_success_reward``."""
     res = SandboxResult(stdout="partial", stderr="", returncode=None, error="remote sandbox error: 503")
     try:
         format_sandbox_repl_output(res, 5)
@@ -639,7 +593,6 @@ def test_format_repl_raises_on_backend_error_with_partial_output():
 
 
 def test_format_repl_program_failures_stay_strings():
-    """A program-level failure is a verdict on the code, not an outage: it must NOT raise."""
     assert "timeout" in format_sandbox_repl_output(SandboxResult(timed_out=True), 0.5).lower()
     assert format_sandbox_repl_output(SandboxResult(stderr="ValueError: boom", returncode=1), 5).startswith("Error")
 
@@ -655,9 +608,6 @@ def test_run_code_via_sandbox_gives_the_program_an_empty_stdin():
     blocking until its timeout."""
     reply = run_code_via_sandbox("print(input())", LocalSubprocessSandbox(), timeout=5.0)
     assert reply.startswith("Error:") and "EOFError" in reply and "timeout" not in reply, reply
-
-
-# run_solution_against_tests on the local backend
 
 
 _ECHO_DOUBLE = "n = int(input())\nprint(n * 2)"

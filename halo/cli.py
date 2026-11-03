@@ -1,6 +1,4 @@
-"""The ``halo`` launcher: ``halo launch`` runs a training method under ``scripts/training`` (``python``,
-``torchrun`` with ``--nproc``, or ``accelerate launch`` with ``--accelerate``), and ``halo run`` a tool
-from any other ``scripts/`` subtree, both by name and discovered from the tree."""
+"""``halo launch`` runs a training method, ``halo run`` a tool from any other ``scripts/`` subtree."""
 
 from __future__ import annotations
 
@@ -20,18 +18,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_ROOT = Path("scripts")
 TRAINING_ROOT = _SCRIPTS_ROOT / "training"
 
-# Excluded from ``halo run``: ``training`` belongs to ``halo launch``, and ``diagrams`` holds
-# doc-asset generators that mostly lack a ``__main__`` guard, so indexing it would surface only the
-# one runnable generator.
+# ``training`` belongs to ``halo launch``; ``diagrams`` holds doc generators that mostly lack a ``__main__`` guard.
 _NON_TOOL_DIRS = frozenset({TRAINING_ROOT.name, "diagrams"})
 
 _EXTRA_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
 _LAUNCH_USAGE = "halo launch METHOD CONFIG [launcher flags] [--field=value ...]"
 _RUN_USAGE = "halo run TOOL [launcher flags] [tool flags]"
 
-# torchrun's multi-node / rendezvous flags. ``halo launch`` builds a single-node command line and
-# passes everything after the config to the script, whose parser would reject these as unknown
-# config fields. Multi-node runs launch one torchrun per node directly.
+# ``halo launch`` is single-node and forwards the rest to the script, whose parser rejects these as unknown fields.
 _TORCHRUN_MULTINODE_FLAGS = frozenset(
     {
         "--nnodes",
@@ -54,11 +48,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
 def _tool_roots(repo_root: Path) -> tuple[Path, ...]:
-    """Every top-level ``scripts/`` subtree except the ones in :data:`_NON_TOOL_DIRS`.
-
-    Discovered from the tree, so a new subtree (e.g. ``profiling``) indexes without a code change;
-    directories holding no runnable scripts drop out in :func:`_index`.
-    """
+    """Every top-level ``scripts/`` subtree but :data:`_NON_TOOL_DIRS`; one with no runnable script drops out later."""
     scripts_root = repo_root / _SCRIPTS_ROOT
     if not scripts_root.exists():
         return ()
@@ -74,31 +64,18 @@ def _slug(text: str) -> str:
 
 
 def _lookup_key(name: str) -> str:
-    """Match key for a name typed on the command line.
-
-    The index is hyphenated (``reward/reward-model``) while the script spells the method
-    ``reward_model``; both spellings must resolve to the same entry.
-    """
+    """Match key for a typed name: the index is hyphenated (``reward/reward-model``), scripts ``reward_model``."""
     return _slug(name).lower()
 
 
 def _stem_alias_key(stem: str) -> str:
-    """Aliasing key that folds singular/plural stem variants together.
-
-    A bare-stem alias must identify exactly one script. ``reward`` and ``rewards`` fold to the same
-    key, so neither gets an alias and the qualified name is required.
-    """
+    """Folds singular and plural stems together, so ``reward`` and ``rewards`` both lose their bare-stem alias."""
     return stem.removesuffix("s")
 
 
 def _index(roots: Iterable[Path], repo_root: Path, name_base: Path) -> dict[str, Path]:
-    """Map slugged names to runnable scripts found under ``roots``.
-
-    A script is runnable when it has a ``__main__`` guard. Each is indexed by its path relative to
-    ``name_base`` (e.g. ``preference/smpo`` or ``after-training/merge-ep-shards``), plus a short alias of
-    its file stem when that stem, folded with its singular/plural variant (:func:`_stem_alias_key`), is
-    unambiguous across the index.
-    """
+    """Map slugged names to the scripts with a ``__main__`` guard under ``roots``, by path relative to ``name_base``,
+    plus a file-stem alias where unambiguous."""
     discovered: list[tuple[str, str, Path]] = []
     for root in roots:
         script_root = repo_root / root
@@ -119,16 +96,12 @@ def _index(roots: Iterable[Path], repo_root: Path, name_base: Path) -> dict[str,
 
 
 def training_methods(root: Path | None = None) -> dict[str, Path]:
-    """Index training methods from ``scripts/training`` file paths (``sft``, ``preference/smpo``, ...).
-
-    Path-derived names are registered before stem aliases, so an ambiguous stem cannot overwrite one.
-    """
+    """Index ``scripts/training`` by path; paths register before stem aliases, so an ambiguous stem overwrites none."""
     return _index((TRAINING_ROOT,), root or REPO_ROOT, TRAINING_ROOT)
 
 
 def tool_commands(root: Path | None = None) -> dict[str, Path]:
-    """Index the non-training tools (after-training, inference, before-training, environments,
-    profiling, ...) from every ``scripts/`` subtree :data:`_NON_TOOL_DIRS` does not exclude."""
+    """Index the tools in every ``scripts/`` subtree :data:`_NON_TOOL_DIRS` does not exclude."""
     repo_root = root or REPO_ROOT
     return _index(_tool_roots(repo_root), repo_root, _SCRIPTS_ROOT)
 
@@ -143,15 +116,9 @@ def build_launch_command(
     port: int | None = None,
     numa_binding: AffinityMode | None = None,
 ) -> list[str]:
-    """Build the process argv.
-
-    Picks the launcher: ``accelerate launch`` when ``accelerate_config`` is given (standard
-    FSDP data-parallel), ``torchrun`` when ``nproc > 1`` (EP/CP/TP and any multi-process run),
-    otherwise plain Python. ``nproc`` maps to ``--num_processes`` under accelerate and
-    ``--nproc_per_node`` under torchrun; ``port`` to ``--main_process_port`` / ``--master_port``
-    (concurrent multi-process launches collide on the default rendezvous port without it).
-    ``numa_binding`` is torchrun's ``--numa-binding``, refused for the other two launchers.
-    """
+    """Build the process argv: ``accelerate launch`` with ``accelerate_config``, ``torchrun`` when ``nproc > 1``, else
+    plain Python. Concurrent multi-process launches collide on the default rendezvous port without ``port``.
+    ``numa_binding`` is torchrun's ``--numa-binding``, refused for the other two launchers."""
     if numa_binding is not None and (accelerate_config is not None or nproc <= 1):
         raise typer.BadParameter(
             "--numa-binding is a torchrun option and needs a torchrun launch (--nproc > 1 without "
@@ -184,17 +151,12 @@ def resolve_config(config: Path, root: Path) -> Path:
     resolved = config if config.is_absolute() or config.exists() else root / config
     if not resolved.exists():
         raise typer.BadParameter(f"config not found: {config} (resolved to {resolved})")
-    # Always absolute: _execute chdirs to --root before exec, so a path validated against the
-    # caller's cwd would otherwise re-resolve there and select a different file.
+    # Absolute: _execute chdirs to --root, so a path checked against the caller's cwd would re-resolve to another file.
     return resolved.resolve()
 
 
 def _reject_option_as_positional(value: str | Path | None, name: str, usage: str) -> None:
-    """Refuse a flag that landed in a positional slot.
-
-    Unknown options are pass-through, so one typed before ``name`` is parsed as ``name`` itself and
-    would otherwise surface as a missing file or an unknown method.
-    """
+    """Refuse a flag parsed as positional ``name``: unknown options pass through, surfacing as a missing file."""
     if value is not None and str(value).startswith("-"):
         raise click.UsageError(f"{name} must come before any flag, but got '{value}'. Usage: {usage}")
 
@@ -209,8 +171,6 @@ def _show(index: dict[str, Path], root: Path) -> None:
 
 
 def _lookup(index: dict[str, Path], name: str, kind: str, root: Path) -> Path:
-    """Resolve a typed name against the hyphenated index (see :func:`_lookup_key`)."""
-    # An empty index means a wrong --root (or an install without the scripts tree), not a bad name.
     if not index:
         raise typer.BadParameter(f"no {kind}s found under {root} — is --root a Halo checkout?")
     entries = {_lookup_key(indexed): indexed for indexed in index}
@@ -231,14 +191,9 @@ def _lookup(index: dict[str, Path], name: str, kind: str, root: Path) -> Path:
 
 
 def _execute(argv: list[str], root: Path, *, cwd: Path | None, dry_run: bool) -> None:
-    """Exec ``argv`` with ``root`` first on ``PYTHONPATH``, from ``cwd`` when one is given: ``halo launch``
-    passes the repo root so a config's relative paths resolve there, ``halo run`` passes ``None`` so a
-    tool's path flags keep the caller's cwd.
-
-    A script's own directory is all ``python script.py`` puts on ``sys.path``, so without the prefix its
-    ``halo`` and ``scripts`` imports would come from whichever tree the install or an inherited
-    ``PYTHONPATH`` names; torchrun and accelerate hand the environment to every rank.
-    """
+    """Exec ``argv`` with ``root`` first on ``PYTHONPATH``, since ``python script.py`` puts only the script's directory
+    on ``sys.path``. ``halo launch`` passes the repo root as ``cwd`` so a config's relative paths resolve there;
+    ``halo run`` passes ``None`` so a tool's path flags keep the caller's cwd."""
     if dry_run:
         typer.echo(" ".join(shlex.quote(part) for part in argv))
         return

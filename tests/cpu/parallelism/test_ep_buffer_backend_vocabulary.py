@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""``EPBufferBackend`` is the one vocabulary of DeepEP buffer backends, and the factory builds every name in it.
-
-``ParallelismConfig`` validates ``ep_buffer_backend`` against the Literal, and ``build_ep_backend`` builds
-the transport the dispatcher claims buffers through. A name one accepts and the other refuses fails a run
-only once a model has loaded on every rank, so every name must reach a backend.
-
-    python tests/cpu/parallelism/test_ep_buffer_backend_vocabulary.py
-"""
+"""``EPBufferBackend`` is the one vocabulary of DeepEP backends, since a name one side refuses fails only after a
+model loaded on every rank."""
 
 from typing import get_args
 
@@ -15,7 +9,7 @@ import pytest
 from halo.distributed.expert_parallel.config import EPBufferBackend
 from halo.distributed.expert_parallel.deepep import backends as backends_mod
 
-# What each name selects; "auto" is the elastic default.
+# "auto" is the elastic default.
 _SELECTED = {
     "auto": backends_mod._ElasticBackend,
     "elastic": backends_mod._ElasticBackend,
@@ -24,7 +18,7 @@ _SELECTED = {
 
 
 class _Dispatcher:
-    """The fields a backend reads at construction: a node-local ep2 dispatch group."""
+    """A node-local ep2 dispatch group."""
 
     hidden_dim = 256
     ep_size = 2

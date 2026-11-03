@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
-"""The data pipeline's shared seams, pinned so a second copy cannot reappear beside them.
-
-Each twin below has exactly one implementation, and a duplicate would be silent: a change landing in
-one arm leaves the other rendering, splitting or masking a row differently. The tests are mutation-shaped —
-they break the SHARED implementation and require every consumer to see it, which is exactly what a
-re-inlined copy would survive.
-
-Run: pytest tests/cpu/data/test_pipeline_single_sourcing.py
-"""
+"""The data pipeline's shared seams, pinned so a second copy cannot reappear. The tests break the shared
+implementation and require every consumer to see it, which a re-inlined copy would survive."""
 
 import ast
 import base64
@@ -47,8 +40,8 @@ from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
 @pytest.fixture(autouse=True)
 def _isolated_datasets_cache(tmp_path, monkeypatch):
-    """A fresh coordinated-op cache per test: the map fingerprint cannot see a fake processor, so a
-    stale hit would replay another test's bake instead of running the one under test."""
+    """A fresh coordinated-op cache per test: the map fingerprint cannot see a fake processor, so a stale hit would
+    replay another test's bake."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_datasets"))
 
 
@@ -62,8 +55,7 @@ def _image() -> Image.Image:
 
 
 def _image_data_uri() -> str:
-    """A PNG as a base64 data URI — the image spelling Arrow can carry inside a conversation column
-    (a bare PIL object makes ``Dataset.from_list`` refuse the mixed content struct)."""
+    """A PNG as a base64 data URI, the image spelling Arrow can carry inside a conversation column."""
     buffer = io.BytesIO()
     _image().save(buffer, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
@@ -91,15 +83,9 @@ class _RenderTokenizer:
         return {"input_ids": list(range(2, 2 + len(tokens))), "attention_mask": [1] * len(tokens)}
 
 
-# --- the VLM preference prologue (SMPO ⧸ reward reward-map) ------------------------------------
-
-
 def test_both_vlm_preference_routes_go_through_the_shared_prologue(monkeypatch):
-    """Break the ONE image-extraction call the shared splitter makes; both routes must fail on it.
-
-    A route that kept its own prologue would import ``extract_conversation_images`` from the VLM leaf
-    itself and sail past this patch.
-    """
+    """A route keeping its own prologue would import ``extract_conversation_images`` itself and sail past this
+    patch."""
 
     class _SharedPrologueReached(Exception):
         pass
@@ -145,15 +131,8 @@ def test_the_shared_prologue_refuses_images_inside_a_completion():
         split_vlm_preference_row(row, "VLM probe row")
 
 
-# --- the text chat render (SFT row map ⧸ SDPG text collator) ------------------------------------
-
-
 def test_both_text_renderers_go_through_the_shared_render(monkeypatch):
-    """Break the image backstop inside ``render_conversation``; both text renderers must fail on it.
-
-    A re-implemented render (fold + template kwargs + backstop) in the SDPG collator would let a
-    fold-policy change reach SFT alone, so the collator has to route here.
-    """
+    """A re-implemented render in the SDPG collator would let a fold-policy change reach SFT alone."""
 
     class _SharedRenderReached(Exception):
         pass
@@ -206,24 +185,16 @@ def test_the_shared_render_applies_the_system_fold_to_both_renderers():
 
 
 def test_the_shared_render_keeps_a_template_emitted_bos():
-    """No unconditional BOS strip: ``tokenize_rendered`` owns the specials contract, and stripping
-    here silently deletes BOS for families whose template emits it while their post-processor adds
-    nothing (gemma-4) — nothing downstream puts it back."""
+    """``tokenize_rendered`` owns the specials contract; stripping here deletes BOS for families whose template
+    emits it while their post-processor adds nothing (gemma-4)."""
     tokenizer = _RenderTokenizer()
     text = render_conversation(tokenizer, list(_PROMPT), {}, conversation_field="messages")
     assert text.startswith("<bos>"), text
     assert render_row_conversation({"messages": _PROMPT}, tokenizer, conversation_field="messages").startswith("<bos>")
 
 
-# --- one declaration per schema ------------------------------------------------------------------
-
-
 def test_the_vlm_map_output_is_one_declaration():
-    """Row processor, pinned Arrow schema and collator signature list must name the SAME columns.
-
-    As three hand-kept lists, a column added to the row processor would have to be edited into two
-    more or the map would strip it before collation.
-    """
+    """As hand-kept lists, a column added to the row processor would be stripped by the map before collation."""
     row = {"messages": [{"role": "user", "content": "hi"}]}
     emitted = set(build_vlm_row_processor(conversation_field="messages")(row))
     assert emitted == set(vlm_map_features()), "the row processor and the pinned schema disagree"
@@ -232,13 +203,8 @@ def test_the_vlm_map_output_is_one_declaration():
 
 
 def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
-    """The offline bake refuses processor keys its stored schema cannot hold — the set is read off
-    VLM_OUTPUT_FEATURES, not hand-typed beside it.
-
-    ``pixel_values_shape`` is the proof: the schema stores it, and a hand-typed copy that omits it
-    refuses a processor emitting it as unstorable. Widening the schema must widen the refusal with
-    it, and a re-inlined literal would not move.
-    """
+    """``pixel_values_shape`` is the proof: the schema stores it, and a hand-typed copy omitting it refuses a
+    processor emitting it."""
 
     def _emitting(extra_key):
         class _ExtraKeyProcessor(FakeVLMProcessorBase):
@@ -262,7 +228,7 @@ def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
                 "role": "user",
                 "content": [{"type": "image", "image": _image_data_uri()}, {"type": "text", "text": "hi"}],
             },
-            # Parts-form on BOTH turns: Arrow refuses a content column mixing a list and a string.
+            # Parts-form on both turns: Arrow refuses a content column mixing a list and a string.
             {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
         ]
     }
@@ -278,8 +244,8 @@ def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
 
 
 def test_the_non_completions_vlm_bake_routes_through_the_shared_label_builder(monkeypatch):
-    """The bake's no-completion-masking arm masks token ids out of labels through the shared builder:
-    replacing the builder must change what it bakes; an inline copy would not see it."""
+    """Replacing the builder must change what the bake's no-completion-masking arm writes; an inline copy would not
+    see it."""
 
     def _sentinel_labels(input_ids, *_args, **_kwargs):
         return torch.full_like(input_ids, -7)
@@ -300,9 +266,8 @@ def test_the_non_completions_vlm_bake_routes_through_the_shared_label_builder(mo
 
 
 def test_the_vlm_bake_masks_image_tokens_without_erasing_a_real_eos():
-    """The non-completions bake routes through the shared ``extra_ignore_token_ids`` path, with the
-    row's own mask passed explicitly: its value-based pad fallback would otherwise erase a real EOS
-    on every family whose pad_token_id IS its eos_token_id (Qwen's default)."""
+    """The row's own mask is passed explicitly, since the value-based pad fallback would erase a real EOS wherever
+    pad_token_id is eos_token_id."""
 
     class _EosTokenizer(FakeVLMTokenizer):
         pad_token_id = 1  # pad == eos, the trap
@@ -333,28 +298,20 @@ def test_the_vlm_bake_masks_image_tokens_without_erasing_a_real_eos():
     assert labels[-1] == input_ids[-1] == 1, "the real EOS was erased by a pad-value mask"
 
 
-# --- the row-shape leaf ---------------------------------------------------------------------------
-
-
 def test_rejected_rows_imports_nothing_from_the_coordinated_map_module():
-    """The rejection-row module is a leaf under the coordinated-map module, not a peer of it: the
-    sentinel a row map emits and the predicate that drops it live with the rows, so
-    ``coordinated_map`` can import the predicate without either module reaching back."""
+    """The sentinel a row map emits and the predicate that drops it live with the rows, so ``coordinated_map``
+    imports the predicate without either reaching back."""
     tree = ast.parse(pathlib.Path(rejected_rows.__file__).read_text())
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
     assert "halo.data.pipeline.coordinated_map" not in imported, sorted(imported)
 
 
 def test_the_row_map_factories_expose_no_dead_injection_knobs():
-    """``none_example`` and ``process_vlm_conversation_fn`` would be caller-supplied overrides no
-    production caller sets — one handing back the factory's own default, the other a stub only tests
-    pass. A knob nothing sets cannot be verified by a run, so it must not exist."""
+    """``none_example`` and ``process_vlm_conversation_fn`` would be overrides no production caller sets, which a
+    run cannot verify."""
     assert "none_example" not in inspect.signature(build_chat_row_processor).parameters
     for fn in (build_vlm_row_processor, build_vlm_history):
         assert "process_vlm_conversation_fn" not in inspect.signature(fn).parameters
-
-
-# --- the completion marker is required where the pair is accepted --------------------------------
 
 
 @pytest.mark.parametrize(
@@ -380,9 +337,8 @@ def test_the_row_map_factories_expose_no_dead_injection_knobs():
     ],
 )
 def test_completion_masking_without_a_marker_is_refused_at_construction(build):
-    """Nothing about this refusal needs a batch. From the label builder it fires at the FIRST BATCH,
-    after the model load and the whole dataset map; the pair is knowably unserviceable where it is
-    accepted."""
+    """From the label builder it fires at the first batch, after the model load and the whole dataset map; the pair
+    is knowably unserviceable where it is accepted."""
     with pytest.raises(ValueError, match="requires assistant_message_template"):
         build()
 

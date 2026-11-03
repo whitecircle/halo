@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""A timed-out episode must be an INVALID row, not a valid zero-reward group member.
-
-A timeout can surface as a bare ``TimeoutError``, and ``str(TimeoutError())`` is ``""``. An error
-field built from it reads as no error to ``rollout_valid_mask``, so a timed-out episode would enter
-the GRPO baseline at reward 0 and an all-timed-out step would never trip the empty-step halt.
-
-    python tests/cpu/environments/test_ray_timed_out_episode_masked.py
-"""
+"""A timed-out episode is an invalid row: ``str(TimeoutError())`` is empty, and an error field built from it reads
+as no error to ``rollout_valid_mask``, entering the baseline at reward 0."""
 
 import asyncio
 from types import SimpleNamespace

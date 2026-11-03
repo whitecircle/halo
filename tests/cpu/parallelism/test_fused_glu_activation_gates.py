@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Fused-GLU activation gates must accept the activations real checkpoints carry.
-
-Transformers MoE modules hold ``ACT2FN`` instances (``SiLUActivation``, ``GELUTanh``) — not
-``nn.SiLU``/``nn.GELU`` — so a gate written against the torch classes silently degrades every
-production run to the eager combine while the parity tests (stubbed with ``F.silu``) stay green.
-:func:`resolve_fused_glu_mul` therefore probes BEHAVIOUR, and what this pins is that the probe
-answers correctly for the objects a real block hands it — plus the wiring that turns that verdict
-into the kernel a layer actually runs.
-
-    python tests/cpu/parallelism/test_fused_glu_activation_gates.py
-"""
+"""Fused-GLU gates accept what real checkpoints carry: ``ACT2FN`` instances, not ``nn.SiLU``/``nn.GELU``.
+A gate against torch classes degrades every run to the eager combine while stubbed parity tests stay green."""
 
 from functools import partial
 
@@ -36,7 +27,7 @@ E, K, H, M = 4, 2, 8, 16
 
 
 def test_silu_gate_accepts_real_checkpoint_activations():
-    assert is_silu_activation(ACT2FN["silu"])  # what HF MoE modules actually carry
+    assert is_silu_activation(ACT2FN["silu"])  # What HF MoE modules actually carry.
     assert is_silu_activation(F.silu)
     assert is_silu_activation(nn.SiLU())
     assert not is_silu_activation(ACT2FN["gelu"])
@@ -46,29 +37,22 @@ def test_silu_gate_accepts_real_checkpoint_activations():
 def test_gelu_tanh_gate_accepts_real_checkpoint_activations():
     assert is_gelu_tanh_activation(ACT2FN["gelu_pytorch_tanh"])
     assert is_gelu_tanh_activation(nn.GELU(approximate="tanh"))
-    assert not is_gelu_tanh_activation(nn.GELU())  # exact GELU is not the tanh approximation
+    assert not is_gelu_tanh_activation(nn.GELU())  # Exact GELU is not the tanh approximation.
     assert not is_gelu_tanh_activation(ACT2FN["silu"])
 
 
 def test_resolver_maps_each_activation_to_its_own_kernel():
-    """The two probes feed ONE resolver, so a gate that answers right but is wired to the wrong
-    kernel — tanh-GELU dispatched to the SiLU kernel — would change the activation silently."""
+    """A right answer wired to the wrong kernel would change the activation silently."""
     assert resolve_fused_glu_mul(ACT2FN["silu"]) == GluCombine.silu()
     assert resolve_fused_glu_mul(ACT2FN["gelu_pytorch_tanh"]) == GluCombine.gelu_tanh()
-    assert resolve_fused_glu_mul(ACT2FN["gelu"]) is None  # exact GELU: no kernel implements it
+    assert resolve_fused_glu_mul(ACT2FN["gelu"]) is None  # Exact GELU: no kernel implements it.
     assert resolve_fused_glu_mul(ACT2FN["relu"]) is None
     assert resolve_fused_glu_mul("not-callable") is None
 
 
 def _real_gemma4_experts() -> Gemma4TextExperts:
-    """The genuine ``Gemma4TextExperts`` — the object the layer meets in production.
-
-    A stand-in declares its own ``act_fn`` and its own ``down_proj`` orientation, so it certifies the
-    test's own assumptions rather than the library's: the real module builds ``act_fn`` from
-    ``config.hidden_activation`` (a ``GELUTanh`` *instance*, not ``nn.GELU``) and stores ``down_proj``
-    as ``[E, H, M]``. Its parameters are ``torch.empty`` — initialize them so no uninitialized NaN
-    reaches the fused-GLU latch.
-    """
+    """A stand-in certifies its own assumptions; the real one builds ``act_fn`` from ``config.hidden_activation``
+    and stores ``down_proj`` as ``[E, H, M]``. Parameters start ``torch.empty``."""
     config = Gemma4TextConfig(
         vocab_size=64,
         hidden_size=H,
@@ -87,14 +71,14 @@ def _real_gemma4_experts() -> Gemma4TextExperts:
 
 
 def test_gemma4_layer_enables_fused_geglu_with_production_activation():
-    """End of the wire: the layer must latch the tanh-GeGLU kernel, not merely recognize the gate."""
+    """The layer must latch the kernel, not merely recognize the gate."""
     layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     assert layer._fused_glu_mul == GluCombine.gelu_tanh()
 
 
 def test_gemma4_fused_combine_matches_the_eager_activation():
-    """The latched kernel must compute what ``act_fn(gate) * up`` computes. The CPU path is eager,
-    so this pins the WIRING; ``tests/gpu/kernels/test_fused_glu.py`` pins the Triton kernel."""
+    """The CPU path is eager, so this pins the wiring; ``tests/gpu/kernels/test_fused_glu.py`` pins the Triton
+    kernel."""
     layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
 
     gate, up = torch.randn(7, M), torch.randn(7, M)
@@ -103,9 +87,7 @@ def test_gemma4_fused_combine_matches_the_eager_activation():
 
 
 def test_packed_combine_follows_the_latch(monkeypatch):
-    """The fused ``[gate | up]`` path runs the packed form of whichever ``GluCombine`` is latched, a
-    family's bound clamp included, and any other latch (a bound method, or eager) keeps the chunked seam
-    rather than silently switching activation."""
+    """Any other latch keeps the chunked seam rather than silently switching activation."""
     layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     gate_up = torch.randn(7, 2 * M)
     packed = []
@@ -128,7 +110,6 @@ def test_packed_combine_follows_the_latch(monkeypatch):
 
 
 def test_real_mistral4_module_activation_passes_the_gate():
-    """The exact production object: ``Mistral4Experts.act_fn`` is a ``SiLUActivation`` instance."""
     config = Mistral4Config(
         hidden_size=32,
         intermediate_size=64,
@@ -143,7 +124,6 @@ def test_real_mistral4_module_activation_passes_the_gate():
 
 
 def _families_forking_the_combine() -> list[str]:
-    """The families that run a ``_glu_combine`` other than the base's, declared or inherited."""
     return [
         cls.__name__
         for cls in ep_layer_classes()
@@ -152,15 +132,8 @@ def _families_forking_the_combine() -> list[str]:
 
 
 def test_a_family_owning_its_combine_latches_it_rather_than_forking_the_seam():
-    """``_glu_combine_name()`` must name what the layer ACTUALLY runs.
-
-    A family with a clamped SwiGLU (DeepSeek-V4, GLM-5 Next, Step-3.7) binds its own combine INTO the
-    latch, so one declaration drives both the compute and the reported name. Overriding
-    ``_glu_combine`` alone instead would let the summary report the latch (``eager``) for exactly the
-    families that are not eager, and the packed ``[gate | up]`` path, which runs a latch's packed form
-    without calling ``_glu_combine``, would skip the override. GptOss is the one family outside the
-    seam entirely — its interleaved-bias paths never call ``_glu_combine``.
-    """
+    """Overriding ``_glu_combine`` alone misreports the latch, and the packed path would skip the override. GptOss
+    is outside the seam entirely."""
     forked = _families_forking_the_combine()
     assert not forked, (
         f"{forked} override _glu_combine instead of latching the combine into _fused_glu_mul, so the "
@@ -170,8 +143,6 @@ def test_a_family_owning_its_combine_latches_it_rather_than_forking_the_seam():
 
 
 def test_a_combine_inherited_from_an_intermediate_base_is_a_fork_too(monkeypatch):
-    """The families under a shared base inherit its override without declaring it, and run it the same."""
-
     def clamped(self, gate, up):
         return gate * up
 
@@ -185,9 +156,7 @@ def test_a_combine_inherited_from_an_intermediate_base_is_a_fork_too(monkeypatch
 
 
 def test_base_glu_combine_name_tracks_the_latch(monkeypatch):
-    """Keeps the override test above honest: for a family that DOES use the base seam, the reported
-    name must follow the latch — fused when armed, ``eager`` when not, and ``eager`` under
-    ``HALO_FUSED_GLU=0``, where the armed kernel runs its eager form."""
+    """Fused when armed, ``eager`` when not and under ``HALO_FUSED_GLU=0``."""
     layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
     assert layer._glu_combine_name() == "gelu_tanh"
@@ -207,8 +176,6 @@ def test_base_glu_combine_name_tracks_the_latch(monkeypatch):
 
 
 def test_gptoss_glu_combine_name_follows_the_switch(monkeypatch):
-    """GptOss names its own combine; under ``HALO_FUSED_GLU=0`` its paths run the eager form, and the
-    summary must say so."""
     layer = object.__new__(EPGptOssMoELayer)
     layer._gptoss_glu = GluCombine.gptoss(1.702, 7.0)
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)

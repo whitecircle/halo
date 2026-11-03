@@ -33,9 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_hub_source_args(parser, source="The FP8 release to dequantize", default="deepseek-ai/DeepSeek-V4-Flash")
     parser.add_argument("--output_dir", required=True, help="Destination for the BF16 checkpoint (needs ~580 GB)")
-    # This tool loads through from_pretrained, so it exposes the same flag as every sibling that
-    # executes a checkpoint's own code. Opt-in, since --model_id defaults to a Hub repo and the hub
-    # V4 checkpoints are transformers-native.
+    # Opt-in: --model_id defaults to a Hub repo and the hub V4 checkpoints are transformers-native.
     add_trust_remote_code_arg(parser, default=False)
     add_max_shard_size_arg(parser)
     return parser.parse_args()

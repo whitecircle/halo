@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""The SFT, self-distillation and embedding scripts request FA2 for a softcapped model whose training or evaluation rows
-reach FA4's varlen call, and refuse a pinned FA4 there.
-
-A softcap stays off FA4's varlen kernels (not validated there), and packed, padding-free and padded rows (more than one
-per batch) all reach them, so Gemma 2 27B (head_dim 128, which FA4's general kernel otherwise runs) trains on FA4 only
-one unpadded row per batch. Driven through ``main()`` (the embedding parallel loader's pipeline through its builder)
-on a Blackwell host up to the policy load: the request must be decided on the rows the collator will build (a
-pre-processed corpus as it was baked), before any weight loads, and reach every model the run loads on it.
-
-Run: pytest tests/cpu/config/test_sft_softcap_attn_default.py
-"""
+"""The SFT, self-distillation and embedding scripts request FA2 for a softcapped model whose rows reach FA4's varlen
+call, and refuse a pinned FA4 there. A softcap stays off those kernels (not validated there), and packed,
+padding-free and padded rows all reach them, so Gemma 2 27B trains on FA4 only one unpadded row per batch."""
 
 import ast
 import contextlib
@@ -179,8 +171,8 @@ def test_a_pinned_fa4_on_packed_rows_is_refused_before_the_load(tmp_path):
     ids=["unpacked-bs1", "hd256-the-loader-demotes"],
 )
 def test_a_pinned_fa4_the_load_keeps_off_varlen_rows_reaches_the_load(tmp_path, yaml_body, head_dim):
-    """Anti-vacuity: one unpadded row per batch trains on FA4, and at head_dim 256 the loader moves the pin to FA2
-    itself; neither is refused."""
+    """One unpadded row per batch trains on FA4, and at head_dim 256 the loader moves the pin to FA2 itself; neither
+    is refused."""
     assert [load["attn_default"] for load in _sft_request(tmp_path, yaml_body, _gemma2(head_dim))] == [FA4]
 
 
@@ -206,9 +198,6 @@ def test_a_pinned_fa4_is_resolved_before_the_load_only_where_it_can_be_refused(
         loads = _sft_request(tmp_path, yaml_body, checkpoint_config)
     assert [load["attn_default"] for load in loads] == [FA4]
     assert resolve.call_count == resolves
-
-
-# --- self-distillation ------------------------------------------------------------------------------------------
 
 
 def _self_distill_module():
@@ -284,9 +273,6 @@ def test_the_self_distillation_policy_and_reference_loads_share_one_request():
     assert len(set(requests.values())) == 1, requests
 
 
-# --- embedding (the parallel loader's pipeline) ------------------------------------------------------------------
-
-
 def _embedding_backbone_loads(
     *,
     batch_size: int,
@@ -351,15 +337,12 @@ def test_an_embedding_backbone_loaded_on_fa4_with_padded_rows_is_refused():
     ids=["unpadded-bs1", "hd256-the-loader-demotes"],
 )
 def test_a_pinned_fa4_the_backbone_load_keeps_off_varlen_rows_is_not_refused(batch_size, head_dim, loaded_backend):
-    """Anti-vacuity: one unpadded row per batch trains on FA4's dense kernel, and at head_dim 256 the loader moves the
-    pin to FA2 itself; the rule reads the backend the load resolves, not the request."""
+    """One unpadded row per batch trains on FA4's dense kernel, and at head_dim 256 the loader moves the pin to FA2;
+    the rule reads the backend the load resolves."""
     loads = _embedding_backbone_loads(
         batch_size=batch_size, pinned=FA4, loaded_backend=loaded_backend, head_dim=head_dim
     )
     assert [load.get("attn_default") for load in loads] == [FA4]
-
-
-# --- every script that plans its rows refuses before the load -----------------------------------------------------
 
 
 def _teacher_distill_refusal(tmp_path, yaml_body: str) -> None:
@@ -388,9 +371,6 @@ def test_a_pinned_fa4_on_padded_rows_is_refused_before_the_load_in_every_script(
             _embedding_backbone_loads(batch_size=2, pinned=FA4, loaded_backend=FA2)
         else:
             _teacher_distill_refusal(tmp_path, yaml_body)
-
-
-# --- fp32 -------------------------------------------------------------------------------------------------------
 
 
 def test_an_fp32_run_on_varlen_rows_requests_nothing_in_every_script(tmp_path):

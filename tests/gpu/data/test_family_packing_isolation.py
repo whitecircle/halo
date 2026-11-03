@@ -1,28 +1,9 @@
 #!/usr/bin/env python
-"""Packed rows on the real kernels for the families whose flash path or isolation is a toolkit patch:
-Ling 2.0 and Ring (remote code on transformers v4's flash template, ``patch_v4_flash_attention_template``),
-Zaya (attention ``position_ids`` re-injection plus the document-aware CCA,
-``patch_zaya_packed_document_isolation``) and Qwen3.8-Flash-Next (tiled QSA and the document-aware PLE,
-``patch_qwen4_exp_document_forwards``, over the GatedDeltaNet segment kernels).
+"""Packed rows on the real kernels for families whose flash path or isolation is a toolkit patch.
 
-A tiny random-init checkpoint loads through ``load_distributed_model`` at the requested label (unset =
-the arch's auto-selected flash kernel), so the label resolution, the remote-class funnel and the family
-patches are the production ones. Every row checks that a flash label resolves to flash, that on one
-document it computes the logits the same weights give on SDPA (the patched call's causal flag and
-softmax scale), and that a packed training step back-propagates finite gradients.
-
-The isolation checks run where every mixer isolates (Ring's Lightning Attention-2 crosses documents by
-design). Doc A is perturbed and precedes the measured doc B (causality alone already shields an earlier
-document). Isolated, doc B reads as doc B alone; the control withholds the isolation (one continuous
-position ramp and a dense mask) and must move doc B by far more than the isolated drift, or the zero
-would be vacuous. Packed rows carry the segment markers the packing collator emits for the family. On a dense
-label doc B is scored against doc B alone on an fp32 load (``FP32_ISOLATED_REL_MAX``, or the family's own bar
-where its kernels round below fp32).
-
-    torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family bailing_moe
-    torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family bailing_moe_linear
-    torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family zaya --attn sdpa
-    torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family qwen4_exp_text --attn sdpa
+Doc A is perturbed and precedes the measured doc B, since causality alone shields an earlier document. The control
+withholds the isolation and must move doc B far more, or the zero is vacuous. Ring's Lightning Attention-2 crosses
+documents by design.
 """
 
 import argparse
@@ -48,19 +29,15 @@ from tests.common.tiny_models import (
 SEED = 0
 DOC_A, DOC_B = 48, 40
 INIT_STD = 0.1
-# Drift as a fraction of doc B's largest |logit|. Isolated, only bf16 reduction order differs (the
-# documents' expert batches change with doc A); a leak moves the logits by O(1) of their scale. The
-# flash-vs-SDPA bar is the same bf16 budget: a dropped causal flag or a wrong scale moves them by O(1).
+# Fraction of doc B's largest |logit|. Isolated, only bf16 reduction order differs; a leak, a dropped causal flag or a
+# wrong scale moves the logits by O(1) of their scale.
 ISOLATED_REL_MAX = 2e-2
 LEAK_REL_MIN = 1e-1
-# A dense label runs the packed row (a masked SDPA call) and the lone document (a causal one) on different
-# kernels, whose bf16 rounding alone moves doc B by ~1e-1 of its scale, past the bf16 bar and onto the leak's;
-# at fp32 the two agree to ~1e-6, so that comparison runs on an fp32 load.
+# On a dense label the packed row (masked SDPA) and lone document (causal) take different kernels, whose bf16 rounding
+# moves doc B by ~1e-1, onto the leak's bar; at fp32 they agree to ~1e-6.
 FP32_ISOLATED_REL_MAX = 1e-4
-# Qwen3.8-Flash-Next's packed and lone doc B run different kernel paths (varlen GatedDeltaNet chunks, the tiled QSA),
-# and its GatedDeltaNet Triton kernels take their dots at TF32 even on fp32 inputs (Triton's default), so the two
-# part at 1.06e-4 of scale while changing doc A moves doc B by exactly 0 and the control by ~1.5: the bar sits
-# above that floor and three orders of magnitude under the leak.
+# Packed and lone doc B run different kernels, and GatedDeltaNet Triton kernels take dots at TF32 even on fp32 inputs,
+# so they part at 1.06e-4 of scale while changing doc A moves doc B by exactly 0 and the control by ~1.5.
 QWEN4_EXP_FP32_ISOLATED_REL_MAX = 5e-4
 
 
@@ -85,7 +62,7 @@ FAMILIES = {
 
 
 def _randomize(model) -> None:
-    """Widen the random init of the weight matrices so a leak reads well above bf16 noise."""
+    """Widen the random init so a leak reads well above bf16 noise."""
     for param in model.parameters():
         if param.dim() >= 2:
             torch.nn.init.normal_(param, std=INIT_STD)
@@ -104,7 +81,6 @@ def _load(ckpt: str, attn_implementation: str | None, dtype: torch.dtype = torch
 
 
 def _row_inputs(batch, device, keys) -> dict:
-    """The packed batch's ``keys`` on ``device``: tensors moved, the varlen maxima left as ints."""
     return {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items() if key in keys}
 
 
@@ -127,15 +103,12 @@ def _one_document_logits(model, doc, device) -> torch.Tensor:
 
 
 def _fp32_doc_b_versus_alone(ckpt: str, label: str, batch, doc_b, device) -> tuple[torch.Tensor, torch.Tensor]:
-    """Packed doc B and doc B alone on an fp32 load of the checkpoint, for a dense label: its packed row (a
-    masked call) and lone document (a causal one) take different kernels."""
     model = _load(ckpt, label, dtype=torch.float32)
     return _doc_b_logits(model, batch, device, isolated=True), _one_document_logits(model, doc_b, device)
 
 
 def _packed_step_is_finite(model, batch, device) -> bool:
-    """One packed training step as SFT runs it, without the KV cache: a finite loss and finite gradients (an expert
-    no token routed to has none)."""
+    """A finite loss and finite gradients; an expert no token routed to has none."""
     model.train()
     model.zero_grad(set_to_none=True)
     loss = model(**_row_inputs(batch, device, set(batch)), use_cache=False).loss

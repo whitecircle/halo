@@ -1,10 +1,5 @@
-"""``staged_file`` publishes only a block that finished, and never leaves its stage behind.
-
-A raise mid-write (a kill, a failed verification) must keep the previous file under the final name:
-under ``reset_sinks --in_place`` that file is the only copy of the weights.
-
-    python tests/cpu/checkpoint/test_staged_file.py
-"""
+"""``staged_file`` publishes only a block that finished, since under ``reset_sinks --in_place`` the previous file is
+the only copy."""
 
 import pytest
 

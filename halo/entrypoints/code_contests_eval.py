@@ -1,7 +1,5 @@
-"""The code-contest eval's run: the contest selection, the protocol, effort and environment config resolved
-from the flags over a training contract, the examples an adapter composes from raw contest rows, and the scored
-run with the trajectory meta the offline re-grade rebuilds it from. Behind
-``scripts/environments/inference/eval_code_contests.py``."""
+"""The code-contest eval behind ``scripts/environments/inference/eval_code_contests.py``: selection, protocol, effort
+and environment config resolved from the flags over a training contract, and the scored run."""
 
 import argparse
 import asyncio
@@ -33,20 +31,16 @@ from halo.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
 
-# thinking_tokens is the CoT budget rather than a completion cap; the headroom keeps the solution and
-# the tool call carrying it from competing with the chain of thought for tokens.
+# thinking_tokens is the CoT budget, so this keeps the solution and its tool call from competing with the CoT.
 SOLUTION_HEADROOM_TOKENS = 4096
 # The coding envs this eval's adapters, language prompt and report buckets are written for.
 CODING_ENV_TYPES = ("codeforces", "code_contests")
-# The eval's defaults, applied where neither a flag nor ``--training_config`` sets the knob. No language
-# or turn budget among them: both are the env class's own, and an eval-side copy would silently grade
-# under a different contract than the class ships once the class moves.
+# Defaults where neither a flag nor ``--training_config`` sets the knob. No language or turn budget: those are the env
+# class's own, and a copy here would silently grade under a different contract once the class moves.
 DEFAULT_ENV_TYPE = "codeforces"
 DEFAULT_TEMPERATURE = 0.2
-# Env options with a flag of their own, the flag being their one spelling on this command line.
 FLAG_OWNED_ENV_KWARGS = ("max_turns", "language", "eval_protocol", "reasoning_effort")
-# ``--reasoning_effort``'s spelling of no level (``reasoning_effort=None``): no episode sends a level
-# or a level's thinking budget, the setting a non-thinking model is evaluated under.
+# ``--reasoning_effort``'s spelling of no level: no episode sends a level or its thinking budget (non-thinking models).
 NO_REASONING_EFFORT = "none"
 
 
@@ -59,23 +53,21 @@ def parse_list_flag(flag: str, value: str) -> list[str]:
 
 
 def parse_language_flag(value: str) -> str | list[str]:
-    """``--language`` as the env's ``language``: one name, or the list a comma-separated value names."""
+    """One name, or the list a comma-separated value names."""
     languages = parse_list_flag("language", value)
     return languages if len(languages) > 1 else languages[0]
 
 
 def reject_flag_owned_env_kwargs(env_kwargs: dict) -> None:
-    """A :data:`FLAG_OWNED_ENV_KWARGS` option also passed through ``--env_kwargs`` would silently
-    override its flag, the JSON being laid over the flags."""
+    """Such an option in ``--env_kwargs`` would silently override its flag, the JSON being laid over the flags."""
     for key in FLAG_OWNED_ENV_KWARGS:
         if key in env_kwargs:
             raise SystemExit(f"set the {key} with --{key}, not --env_kwargs, which would override the flag")
 
 
 def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> ContestSelection:
-    """The contest window, platforms and examples-only choice the run scores, validated against the adapter
-    before any row is read: an unparsable day, an empty window, an unknown platform, a bound the dataset
-    cannot apply, or ``--include_examples_only`` on an adapter that marks no problem examples-only exits."""
+    """Validated against the adapter before any row is read: an unparsable day, an empty window, an unknown platform, a
+    bound the dataset cannot apply, or ``--include_examples_only`` on an adapter with no examples-only marker exits."""
     if args.include_examples_only and adapter.examples_only is None:
         raise SystemExit(f"--include_examples_only on --adapter {args.adapter}: it marks no problem examples-only")
     platforms = parse_list_flag("platform", args.platform) if args.platform is not None else ()
@@ -88,10 +80,9 @@ def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> 
 
 
 def resolve_eval_protocol(flag: str | None, trained_env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """The run's protocol (the flag, else the training config's, else the default) and the training
-    config's env options under it. A config written under another protocol gives way to this run's
-    pins, as its effort profiles do; one that names this protocol itself keeps its values, so a
-    contradiction there raises in the env, as one in ``--env_kwargs`` does."""
+    """The run's protocol (flag, training config, default) and the training config's env options under it. A config
+    written under another protocol gives way to this run's pins; one naming this protocol keeps its values, so a
+    contradiction raises in the env."""
     eval_protocol = resolve_setting(flag, trained_env.get("eval_protocol"), DEFAULT_EVAL_PROTOCOL)
     if trained_env.get("eval_protocol") == eval_protocol:
         return eval_protocol, trained_env
@@ -99,21 +90,18 @@ def resolve_eval_protocol(flag: str | None, trained_env: dict[str, Any]) -> tupl
 
 
 def resolve_effort_setting(flag: str | None, trained_env: dict[str, Any]) -> str | None:
-    """The run's effort level: the flag (:data:`NO_REASONING_EFFORT` = no level), else the training
-    config's, else :data:`DEFAULT_REASONING_EFFORT`. As in training, the default fills only a key the
-    config omits: a config setting ``reasoning_effort: null`` trained at no level and is evaluated at none."""
+    """The flag (:data:`NO_REASONING_EFFORT` = no level), else the training config's, else the default, which fills
+    only a key the config omits: ``reasoning_effort: null`` trained at no level and is evaluated at none."""
     if flag is not None:
         return None if flag == NO_REASONING_EFFORT else flag
     return trained_env.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
 
 
 def default_max_tokens(env: CodeContestsEnvironment, flag: str | None) -> int:
-    """``--max_tokens``' default without ``--training_config``: the flag's level's thinking budget as the
-    built ``env`` binds it (a ``reasoning_effort_profiles`` override in ``--env_kwargs`` included) plus
-    :data:`SOLUTION_HEADROOM_TOKENS`. Without a level or a budget for it there is nothing to size it from, so
-    it takes the training rollout's own default; a soft budget, which a turn may reason past, takes the larger
-    of the two. The level is read off the flag alone: under a training config the YAML's ``rollout_max_tokens``
-    is the default, and its level may be ``random``, which has no budget."""
+    """``--max_tokens``' default without ``--training_config``: the flag's level's thinking budget as ``env`` binds it
+    plus :data:`SOLUTION_HEADROOM_TOKENS`. Without a level or budget it takes the training rollout's default; a soft
+    budget, which a turn may reason past, takes the larger of the two. The level is read off the flag alone, since a
+    training config's may be ``random``, which has no budget."""
     level = resolve_effort_setting(flag, {})
     budget = env.thinking_budget_for_effort(level) if level is not None else None
     if budget is None:
@@ -124,10 +112,9 @@ def default_max_tokens(env: CodeContestsEnvironment, flag: str | None) -> int:
 
 
 def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], env_kwargs: dict) -> dict[str, Any]:
-    """The run's environment config, built once: the environment is made from it and the meta line
-    records it, so the two cannot disagree. The training config's options come first (under the
-    resolved protocol), the resolved settings and flags over them: an eval under a contract grades as
-    the run did. An unset language is left out entirely, so the env class's own default applies."""
+    """Built once, so the environment and the meta line cannot disagree. Training options come first, resolved settings
+    and flags over them, so an eval under a contract grades as the run did. An unset language is left out, so the env
+    class's default applies."""
     eval_protocol, trained_env = resolve_eval_protocol(args.eval_protocol, trained_env)
     return {
         **trained_env,
@@ -142,9 +129,8 @@ def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], en
 def run_trajectory_path(
     args: argparse.Namespace, env: CodeContestsEnvironment, selection: ContestSelection
 ) -> str | None:
-    """The run's trajectory file: ``<model>__<adapter>__<split>__<language>``, plus the protocol and the
-    selection only where they depart from the defaults, so a default run keeps its name. The meta line
-    records both either way."""
+    """``<model>__<adapter>__<split>__<language>``, plus the protocol and selection only where they depart from the
+    defaults, so a default run keeps its name."""
     protocol = env.eval_protocol if env.eval_protocol != DEFAULT_EVAL_PROTOCOL else ""
     return resolve_trajectory_path(args, args.adapter, args.split, ",".join(env.languages), protocol, selection.label)
 
@@ -156,8 +142,7 @@ def contest_meta(
     reasoning_effort: str | None,
     env_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
-    """The code-contest keys of the trajectory meta line: what the offline re-grader rebuilds the run's
-    examples (by index, under the same selection) and environment from."""
+    """What the offline re-grader rebuilds the run's examples (by index, same selection) and environment from."""
     return {
         "adapter": adapter_name,
         "selection": selection.to_meta(),
@@ -166,8 +151,7 @@ def contest_meta(
         "eval_protocol": env.eval_protocol,
         "reasoning_effort": reasoning_effort,
         "env_kwargs": env_kwargs,
-        # The run's whole grading contract, so an offline re-grade reproduces the same verdicts
-        # (per-problem checker/time_limit come from the dataset payload). Derived from the
+        # The run's whole grading contract, so an offline re-grade reproduces the same verdicts; derived from the
         # dataclass, so a knob added to GradingSpec cannot be defaulted offline.
         "env_grading": env.grading_spec.to_meta(),
     }
@@ -176,13 +160,8 @@ def contest_meta(
 def build_examples(
     args: argparse.Namespace, adapter: CodeDatasetAdapter, selection: ContestSelection
 ) -> list[dict[str, Any]]:
-    """Compose the raw contest rows ``selection`` admits into eval examples via the chosen adapter,
-    bucketed by its group field and named by its id field. The examples-only problems it leaves out
-    among the rows read are counted in the log.
-
-    Loading goes through the adapter's own ``load`` when it has one (LiveCodeBench and ICPC-Eval
-    cannot be read with a plain ``load_dataset``), otherwise the standard HF split loader.
-    """
+    """Compose the rows ``selection`` admits into eval examples via the adapter, logging examples-only problems left
+    out. The adapter's own ``load`` applies when it has one (LiveCodeBench and ICPC-Eval need it)."""
     rows = (
         adapter.load(args.dataset, args.config, args.split)
         if adapter.load
@@ -222,8 +201,7 @@ def build_examples(
 
 
 def run_code_contests_eval(args: argparse.Namespace) -> None:
-    """Score the problems ``args`` selects with the environment its flags and training contract resolve, report
-    success@k per the adapter's buckets and write the results and trajectories."""
+    """Score the selected problems, report success@k per the adapter's buckets and write results and trajectories."""
     adapter = CODE_DATASET_ADAPTERS[args.adapter]
     try:
         args.split = adapter.resolve_split(args.split, DEFAULT_SPLIT)
@@ -245,9 +223,8 @@ def run_code_contests_eval(args: argparse.Namespace) -> None:
     reasoning_effort = env_config["reasoning_effort"]
     env = build_environment(env_type, env_config)
     try:
-        # Without a training config the flag's effort level sets the generation budget unless --max_tokens
-        # overrides it: too small a budget truncates the chain of thought before any solution and scores
-        # the problem 0.
+        # Without a training config the flag's effort level sets the budget: too small a budget truncates the chain of
+        # thought before any solution and scores the problem 0.
         rollout = rollout_config_from_args(
             args,
             contract,

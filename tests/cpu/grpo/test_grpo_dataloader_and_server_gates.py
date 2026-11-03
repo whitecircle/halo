@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""GRPO train-dataloader column pruning + the vLLM server-mode construction gates.
-
-- the GRPO train dataloader builds its dataset/collator pair through the shared
-  ``DataParallelLoaderMixin._loader_params`` seam (sized by GRPO's ``_train_loader_batch_size``
-  hook), so a train dataset that is NOT a ``datasets.Dataset`` still honours
-  ``remove_unused_columns`` — via the collator, the base ``Trainer`` contract. A diverged copy that
-  only prunes when the dataset exposes ``column_names`` silently trains such a dataset on every
-  column and fails here.
-- ``require_vllm_server_mode`` raises instead of no-opping when no training config reaches the
-  ctor, refuses every non-server shape before TRL's vLLM client is swapped in, and accepts the
-  server shape.
-- TRL's tool-calling loop (``tools``, ``environment_factory``) is refused by keyword or position: it
-  regenerates while any completion on the rank calls a tool, one collective generate per round, so
-  ranks whose completions stop calling tools at different rounds desync. TRL's ``rollout_func`` is
-  refused under TP/ETP, whose siblings would forward their own rollouts instead of their leader's.
-
-    python tests/cpu/grpo/test_grpo_dataloader_and_server_gates.py
-"""
+"""GRPO train-dataloader column pruning and the vLLM server-mode construction gates. TRL's tool-calling loop is
+refused: it runs one collective generate per round while any completion on the rank calls a tool, so ranks desync."""
 
 from __future__ import annotations
 
@@ -47,11 +31,7 @@ def _pruned_collator(batch):
 
 
 def _train_loader(dataset, *, remove_unused_columns: bool):
-    """Run the real GRPO train-dataloader path over ``dataset``; returns (loader, prune_calls).
-
-    Only the HF/accelerate seams are stubbed (column pruning, sampler, accelerate prepare); the
-    dataset/collator decision under test is the production one.
-    """
+    """The real GRPO train-dataloader path; only column pruning, the sampler and accelerate prepare are stubbed."""
     trainer = object.__new__(DistributedOnlineGRPOTrainer)
     trainer.parallelism_config = SimpleNamespace(
         is_tp_mode=True,
@@ -97,11 +77,7 @@ def _train_loader(dataset, *, remove_unused_columns: bool):
 
 
 def test_non_datasets_train_dataset_prunes_through_the_collator():
-    """A plain-list train dataset has no ``column_names``, so pruning must reach the COLLATOR.
-
-    A diverged copy that passes ``self.data_collator`` through untouched silently drops
-    ``remove_unused_columns`` for every non-``datasets.Dataset`` train dataset.
-    """
+    """A plain-list train dataset has no ``column_names``, so pruning must reach the collator."""
     loader, calls = _train_loader(list(_ROWS), remove_unused_columns=True)
 
     assert loader.collate_fn is _pruned_collator, (
@@ -113,8 +89,6 @@ def test_non_datasets_train_dataset_prunes_through_the_collator():
 
 
 def test_datasets_dataset_prunes_the_dataset_not_the_collator():
-    """Anti-vacuity for the branch above: a real ``datasets.Dataset`` keeps the base contract —
-    columns come off the dataset and the collator is passed through untouched."""
     loader, calls = _train_loader(Dataset.from_list(_ROWS), remove_unused_columns=True)
 
     assert loader.collate_fn is _raw_collator, "a datasets.Dataset must not have its collator rewrapped"
@@ -123,15 +97,13 @@ def test_datasets_dataset_prunes_the_dataset_not_the_collator():
 
 
 def test_train_batch_covers_a_whole_generation_round():
-    """The GRPO batch is ``per_device_train_batch_size * steps_per_generation`` — the whole round's
-    prompts are fetched at once, not one micro-batch."""
+    """The GRPO batch is ``per_device_train_batch_size * steps_per_generation``."""
     loader, _ = _train_loader(list(_ROWS), remove_unused_columns=False)
     assert loader.batch_size == 6, f"expected 2 * 3 rows per fetch, got {loader.batch_size}"
 
 
 def test_missing_training_config_raises():
-    """``get_ctor_config`` resolved no config: silently returning would leave in-process HF generation
-    running under FSDP2/EP (slow and rank-divergent) with nothing in the log to say the gate never ran."""
+    """Returning silently would leave in-process HF generation running under FSDP2/EP, slow and rank-divergent."""
     with pytest.raises(ValueError, match="GRPOConfig"):
         require_vllm_server_mode(None)
 
@@ -150,12 +122,10 @@ def test_non_server_configs_are_refused(use_vllm, vllm_mode, match):
 
 
 def test_the_server_config_is_accepted():
-    """Anti-over-rejection: the one shape the gate exists to let through."""
     require_vllm_server_mode(SimpleNamespace(use_vllm=True, vllm_mode="server"))
 
 
 def _calculator(expression: str) -> str:
-    """A tool TRL would hand the policy."""
     return expression
 
 
@@ -188,7 +158,6 @@ def test_the_ctor_refuses_tools_before_trl_builds_anything():
 
 
 def _rollout(prompts, trainer):
-    """A custom rollout TRL would call in place of the toolkit's generation."""
     return {"prompt_ids": [], "completion_ids": [], "logprobs": []}
 
 

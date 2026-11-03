@@ -1,8 +1,5 @@
-"""The divergences of the teacher, self-distillation and SDPG trainers (arXiv:2606.04036): one registry
-(:data:`DIVERGENCES`, dispatched by :func:`call_divergence` on the signature), their chunked per-token
-reduction, the token means and the frozen scorer's vocabulary checks and placement. Every divergence
-evaluates in fp32: bf16 cancellation in ``log p - log q`` can flip a divergence's sign.
-"""
+"""The divergences of the teacher, self-distillation and SDPG trainers (arXiv:2606.04036). Every divergence evaluates
+in fp32: bf16 cancellation in ``log p - log q`` can flip its sign."""
 
 import functools
 import inspect
@@ -21,9 +18,8 @@ _MASKED_LOGIT_FLOOR = torch.finfo(torch.float32).min
 
 
 def logits_forward_inputs(inputs: Mapping[str, Any]) -> dict[str, Any]:
-    """Model inputs for a forward that must return full-vocab logits: without ``labels`` and ``skip_logits``,
-    which turn a fused linear-cross-entropy forward into a loss, and with ``use_cache`` off, since a cache
-    object on a forward reusing these inputs suppresses the packed-document mask."""
+    """Without ``labels`` and ``skip_logits``, which turn a fused linear-cross-entropy forward into a loss, and with
+    ``use_cache`` off, since a cache object on a forward reusing these inputs suppresses the packed-document mask."""
     return {**{k: v for k, v in inputs.items() if k not in ("labels", "skip_logits")}, "use_cache": False}
 
 
@@ -33,8 +29,7 @@ def _token_cross_entropy(logits: torch.Tensor, labels: torch.Tensor) -> torch.Te
 
 
 def shifted_token_cross_entropy(shift_logits: torch.Tensor, shift_labels: torch.Tensor) -> torch.Tensor:
-    """Per-token fp32 hard-label cross-entropy over already-shifted logits and labels ``[B, S]``, ignored
-    positions 0, left un-reduced for each caller's own denominator; chunked (:func:`map_token_chunks`)."""
+    """Over already-shifted ``[B, S]``, ignored positions 0, un-reduced for each caller's own denominator."""
     return map_token_chunks(_token_cross_entropy, shift_logits, shift_labels)
 
 
@@ -88,14 +83,12 @@ def unnormalized_kl_loss(
 
 
 def mse_loss_fn(student_logits: torch.Tensor, teacher_logits: torch.Tensor) -> torch.Tensor:
-    """MSE between the raw logits, per (token, vocab)."""
     return mse_loss(student_logits.float(), teacher_logits.float(), reduction="none")
 
 
 def soft_target_cross_entropy_loss(
     student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float
 ) -> torch.Tensor:
-    """Soft target cross entropy, per (token, vocab) (:func:`temperature_rescaled`)."""
     teacher_probs = softened_log_probs(teacher_logits, temperature).exp()
     return temperature_rescaled(-(teacher_probs * softened_log_probs(student_logits, temperature)), temperature)
 
@@ -103,9 +96,8 @@ def soft_target_cross_entropy_loss(
 def slim_loss(
     student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float, hard_labels: torch.Tensor
 ) -> torch.Tensor:
-    """Forward KL ``[B, S, V]`` weighted per token by the detached ``1 - exp(-q[y] / p[y])`` at ``T = 1``,
-    which grows toward 1 where the teacher is surer of the gold token than the student. This is the weighting
-    SLIM's text describes (Raman et al., 2023), not its Eq. 4, which prints the inverse ratio."""
+    """Forward KL ``[B, S, V]`` weighted per token by the detached ``1 - exp(-q[y] / p[y])`` at ``T = 1``. This is the
+    weighting SLIM's text describes (Raman et al., 2023); its Eq. 4 prints the inverse ratio."""
     student_gold = gold_token_probs(student_logits, hard_labels)
     weight = 1 - torch.exp(-gold_token_probs(teacher_logits, hard_labels) / student_gold.clamp(min=1e-9))
     return weight.unsqueeze(-1) * forward_kl_loss(student_logits, teacher_logits, temperature)
@@ -146,7 +138,6 @@ DIVERGENCES: dict[str, Callable[..., torch.Tensor]] = {
 
 
 def require_divergence(name: str) -> Callable[..., torch.Tensor]:
-    """The :data:`DIVERGENCES` entry ``name``; an unknown name raises."""
     if name not in DIVERGENCES:
         raise ValueError(f"Unsupported distillation divergence {name!r}. Available: {sorted(DIVERGENCES)}")
     return DIVERGENCES[name]
@@ -159,9 +150,8 @@ def _declared_parameters(loss_fn: Callable) -> frozenset[str]:
 
 
 def uses_hard_labels(loss_fn: Callable) -> bool:
-    """Whether a divergence takes the hard labels itself (``slim``), read off the signature
-    :func:`call_divergence` dispatches on: it weighs the gold token on its own, so no
-    :func:`hard_labels_coefficient` goes on top."""
+    """Read off the signature :func:`call_divergence` dispatches on. Such a divergence weighs the gold token on its
+    own, so no :func:`hard_labels_coefficient` goes on top."""
     return "hard_labels" in _declared_parameters(loss_fn)
 
 
@@ -172,8 +162,7 @@ def call_divergence(
     temperature: float,
     hard_labels: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Invoke a divergence over a whole plane, forwarding only the optional args (``temperature``/
-    ``hard_labels``) its own signature declares; one that weighs the gold token raises without
+    """Forward only the optional args its signature declares; one that weighs the gold token raises without
     ``hard_labels``."""
     params = _declared_parameters(loss_fn)
     optional = {}
@@ -193,7 +182,6 @@ def _vocab_summed_divergence(
     temperature: float,
     hard_labels: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``loss_fn`` (:func:`call_divergence`) summed over the vocabulary where it scores per (token, vocab)."""
     loss = call_divergence(loss_fn, student, teacher, temperature, hard_labels)
     return loss.sum(-1) if loss.dim() == student.dim() else loss
 
@@ -205,10 +193,8 @@ def token_divergence(
     temperature: float,
     hard_labels: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``loss_fn`` per token, summed over the vocabulary: ``[N]`` for ``[N, V]`` rows, ``[B, S]`` for
-    ``[B, S, V]`` logits, ``hard_labels`` shaped like the result. Each token chunk runs under a
-    non-reentrant checkpoint (:func:`map_token_chunks`), so backward holds the two logits planes and no
-    fp32 plane of the divergence."""
+    """``loss_fn`` per token, summed over the vocabulary. Each token chunk runs under a non-reentrant checkpoint, so
+    backward holds the two logits planes and no fp32 plane of the divergence."""
 
     def per_token(student: torch.Tensor, teacher: torch.Tensor, *labels: torch.Tensor) -> torch.Tensor:
         return _vocab_summed_divergence(loss_fn, student, teacher, temperature, *labels)
@@ -224,9 +210,8 @@ def token_divergence_and_cross_entropy(
     temperature: float,
     hard_labels: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """:func:`token_divergence` and :func:`shifted_token_cross_entropy` of the same planes, each ``[B, S]``, from one
-    chunked pass: each chunk's backward builds the student gradient of both terms, where a pass per term builds a
-    whole-plane gradient each and holds the first while it builds the second."""
+    """Both terms from one chunked pass: each chunk's backward builds the student gradient of both, where a pass per
+    term builds a whole-plane gradient each and holds the first while it builds the second."""
 
     def per_token(student: torch.Tensor, teacher: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         divergence = _vocab_summed_divergence(loss_fn, student, teacher, temperature, labels)
@@ -244,8 +229,7 @@ def _hard_labels_gate(student: torch.Tensor, teacher: torch.Tensor, labels: torc
 def hard_labels_coefficient(
     student_logits: torch.Tensor, teacher_logits: torch.Tensor, hard_labels: torch.Tensor
 ) -> torch.Tensor:
-    """Detached gold-token gate ``(1 - p[y]) * q[y]`` at ``T = 1``, shaped like ``hard_labels``, one token
-    chunk at a time."""
+    """Detached gold-token gate ``(1 - p[y]) * q[y]`` at ``T = 1``, one token chunk at a time."""
     return map_token_chunks(_hard_labels_gate, student_logits, teacher_logits, hard_labels)
 
 
@@ -254,8 +238,7 @@ def masked_token_mean(
     response_mask: torch.Tensor,
     sample_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """The batch mean of each sample's token mean of a ``[B, S]`` loss over ``response_mask``, each sample
-    scaled by the optional ``sample_weights`` ``[B]``."""
+    """The batch mean of each sample's token mean over ``response_mask``, each sample scaled by ``sample_weights``."""
     token_sum = (per_token_loss * response_mask.to(per_token_loss.dtype)).sum(-1)
     # fp32 count and division regardless of loss dtype: bf16's 8 mantissa bits round a >256-token
     # denominator to a multiple of 8, so the divide must not be pulled back to the loss dtype.
@@ -268,15 +251,14 @@ def masked_token_mean(
 
 
 def global_token_mean(per_token_loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """A per-token loss averaged over every masked token of the batch, one denominator for all as in a
-    causal-LM loss; an all-masked micro-batch gives 0, not a NaN the gradient reduce spreads."""
+    """One denominator for all tokens, as in a causal-LM loss; an all-masked micro-batch gives 0, not a NaN the
+    gradient reduce spreads."""
     total = (per_token_loss * mask.to(per_token_loss.dtype)).sum().float()
     return total / mask.sum(dtype=torch.float32).clamp(min=1.0)
 
 
 def verify_same_token_ids(tokenizer, scorer_tokenizer) -> None:
-    """Raise unless the two tokenizers map every token to the same id, both ways: a divergence pairs logit
-    rows by token id."""
+    """A divergence pairs logit rows by token id."""
     differing = set(tokenizer.get_vocab().items()) ^ set(scorer_tokenizer.get_vocab().items())
     if differing:
         raise ValueError(
@@ -287,10 +269,8 @@ def verify_same_token_ids(tokenizer, scorer_tokenizer) -> None:
 
 
 def resolve_shared_vocab_width(config, scorer_config, tokenizer, scorer_tokenizer) -> int | None:
-    """The logit width a divergence between a model and a frozen scorer runs over, ``None`` for the whole row,
-    after :func:`verify_same_token_ids` (skipped for one tokenizer object). Rows past ``len(tokenizer)`` are
-    embedding padding no token reaches. Reads only configs and tokenizers, so a script can call it before any
-    scorer weight loads."""
+    """``None`` for the whole row; rows past ``len(tokenizer)`` are embedding padding no token reaches. Reads only
+    configs and tokenizers, so a script can call it before any scorer weight loads."""
     if scorer_tokenizer is not tokenizer:
         verify_same_token_ids(tokenizer, scorer_tokenizer)
     model_rows = config.get_text_config().vocab_size
@@ -308,7 +288,6 @@ def resolve_shared_vocab_width(config, scorer_config, tokenizer, scorer_tokenize
 def place_frozen_scorer(
     scorer: torch.nn.Module, model: torch.nn.Module, tokenizer, scorer_tokenizer
 ) -> tuple[int | None, torch.device]:
-    """``(width, device)``: the logit width a divergence against ``scorer`` runs over
-    (:func:`resolve_shared_vocab_width`), and the device of ``model`` the scorer is then placed on, frozen."""
+    """``(width, device)`` of the divergence against ``scorer``, which is placed on ``model``'s device, frozen."""
     width = resolve_shared_vocab_width(model.config, scorer.config, tokenizer, scorer_tokenizer)
     return width, place_and_freeze(scorer, model)

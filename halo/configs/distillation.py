@@ -1,5 +1,4 @@
-"""Distillation arguments: the privileged-teacher (SDPG) term, the self- and teacher-distillation script
-arguments and ``TeacherDistillationConfig``."""
+"""Distillation arguments: the SDPG term, the self- and teacher-distillation script arguments and config."""
 
 from dataclasses import dataclass, field, fields
 from typing import Any, ClassVar, Literal, get_args
@@ -11,7 +10,6 @@ from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArgu
 from halo.configs.sft import ConversationRenderArguments, SFTScriptArguments
 from halo.data.collators.self_distill import format_field_names
 
-# The teacher hint both OPD flows default to, through SDPGArguments.
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
 
 # Keys of the trainer-side divergence registry (``divergences.DIVERGENCES``), which a test pins this to.
@@ -20,17 +18,11 @@ SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
 
 @dataclass
 class SDPGArguments(ValidatedConfig):
-    """Privileged-teacher OPD term (SDPG, arXiv:2606.04036), shared by the offline self-distillation
-    SFT script and the online RLVR GRPO script.
+    """Privileged-teacher OPD term (SDPG, arXiv:2606.04036), shared by offline self-distillation SFT and online RLVR
+    GRPO. The hint field is not declared here: self-distillation reads a configurable column, RLVR's
+    ``process_for_rlvr`` normalizes it to ``answer``. Validated on construction, as direct builds skip the YAML."""
 
-    The hint field the teacher fills is not declared here: self-distillation reads it from a
-    configurable dataset column, while RLVR's ``process_for_rlvr`` has already normalized it to
-    ``answer``. Validated on construction, so the trainers that build this block from their kwargs
-    hold a direct construction to the bounds a YAML run meets.
-    """
-
-    # The placeholders the arm's hint formatter fills: the on-policy trainer has the gold answer alone;
-    # SelfDistillScriptArguments widens the set with its reference-solution column.
+    # Placeholders the arm's hint formatter fills; SelfDistillScriptArguments adds its reference-solution column.
     HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset({"answer"})
 
     sdpg_hint_template: str = field(
@@ -60,29 +52,23 @@ class SDPGArguments(ValidatedConfig):
 
     @staticmethod
     def sdpg_field_names(exclude: frozenset[str] = frozenset()) -> tuple[str, ...]:
-        """The :class:`SDPGArguments` field names but ``exclude``, never a subclass's own fields."""
+        """``SDPGArguments``' own fields but ``exclude``, never a subclass's."""
         return tuple(f.name for f in fields(SDPGArguments) if f.name not in exclude)
 
     @classmethod
     def pop_from(cls, kwargs: dict, *, exclude: frozenset[str] = frozenset()) -> "SDPGArguments":
-        """The block of this block's fields but ``exclude`` popped from trainer ``kwargs``, validated, every other
-        field its default (an excluded field is applied before the trainer, which never reads it).
-
-        A trainer holds the result, so a directly built one runs the OPD schedule the identical YAML run
-        would. A misspelt field stays in ``kwargs``, where the parent's explicit signature rejects it.
-        """
+        """Pop this block's fields but ``exclude`` from trainer ``kwargs``, validated, so a directly built trainer runs
+        the YAML run's OPD schedule. A misspelt field stays in ``kwargs``, where the parent's signature rejects it."""
         return cls(**{name: kwargs.pop(name) for name in cls.sdpg_field_names(exclude) if name in kwargs})
 
     def sdpg_kwargs(self, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
-        """This block's field values by name, but ``exclude``."""
         return {name: getattr(self, name) for name in self.sdpg_field_names(exclude)}
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
         if self.sdpg_loss not in get_args(SelfDistillationLoss):
             raise ValueError(f"sdpg_loss must be one of {get_args(SelfDistillationLoss)}, got {self.sdpg_loss!r}")
-        # Divides both distributions' logits: zero turns them infinite and NaNs the OPD loss without a
-        # raise, a negative one inverts them.
+        # Divides both distributions' logits: zero NaNs the OPD loss without a raise, a negative one inverts them.
         require_finite(type(self).__name__, gt=0, sdpg_temperature=self.sdpg_temperature)
         # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
         require_finite(type(self).__name__, ge=0, sdpg_beta_base=self.sdpg_beta_base)
@@ -97,8 +83,8 @@ class SDPGArguments(ValidatedConfig):
         self._validate_hint_template()
 
     def _validate_hint_template(self) -> None:
-        """Refuse a placeholder the arm's formatter does not fill: ``str.format`` would raise it at the
-        first teacher prompt, after the model load (and on the online arm, the rollout server)."""
+        """Refuse a placeholder the arm's formatter does not fill: ``str.format`` would raise at the first teacher
+        prompt, after the model load (and on the online arm, the rollout server)."""
         if not isinstance(self.sdpg_hint_template, str):
             raise ValueError(
                 f"sdpg_hint_template must be a str.format template string, got {self.sdpg_hint_template!r}"
@@ -118,19 +104,14 @@ class SDPGArguments(ValidatedConfig):
 
 @dataclass
 class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
-    """Args for SDPG-style offline privileged-context self-distillation SFT (text or VLM).
-
-    One model is both student (prompt only) and teacher (plus a gold-answer hint). The teacher's
-    full-vocab distribution supervises the student on shared response tokens via an OPD loss, atop SFT.
-    """
+    """Offline privileged-context self-distillation SFT (SDPG-style, text or VLM): one model is student (prompt only)
+    and teacher (plus a gold-answer hint), whose full-vocab distribution supervises shared response tokens."""
 
     PROJECT_NAME: ClassVar[str] = "self-distillation"
 
-    # SDPG fields the script applies while building the teacher prompts; every other SDPG field is
-    # forwarded to the trainer, which takes the complement.
+    # Applied by the script while building teacher prompts; the rest go to the trainer, which takes the complement.
     DATASET_SIDE_SDPG_FIELDS: ClassVar[frozenset[str]] = frozenset({"sdpg_hint_template"})
-    # The field naming the column that fills each slot privileged_hint renders
-    # (halo/data/collators/self_distill.py); this arm fills the reference solution too.
+    # The field naming the column for each slot privileged_hint renders; this arm fills the reference solution too.
     HINT_SLOT_FIELDS: ClassVar[dict[str, str]] = {
         "answer": "sdpg_answer_field",
         "solution": "privileged_solution_field",
@@ -192,8 +173,7 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
     )
 
     def build_sdpg_kwargs(self) -> dict:
-        """The SDPG trainer kwargs: every :class:`SDPGArguments` field but the dataset-side ones, the
-        complement the trainer pops."""
+        """Every SDPG field but the dataset-side ones, the complement the trainer pops."""
         return self.sdpg_kwargs(exclude=self.DATASET_SIDE_SDPG_FIELDS)
 
     def _validate_fields(self) -> None:
@@ -240,8 +220,7 @@ class TeacherDistillScriptArguments(ConversationRenderArguments, CommonScriptArg
     )
 
     def _validate_fields(self) -> None:
-        """Require ``teacher_model``: an empty value reaches the loader as a blank model id and only
-        fails there."""
+        """An empty ``teacher_model`` would reach the loader as a blank model id and only fail there."""
         super()._validate_fields()
         if not self.teacher_model:
             raise ValueError("teacher_model must be specified for distillation")
@@ -249,8 +228,6 @@ class TeacherDistillScriptArguments(ConversationRenderArguments, CommonScriptArg
 
 @dataclass
 class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
-    """Configuration for distillation training, extending HuggingFace TrainingArguments."""
-
     distill_loss: Literal[
         "kl_divergence", "mse", "soft_cross_entropy", "cosine_similarity", "jensen_shannon", "slim"
     ] = field(

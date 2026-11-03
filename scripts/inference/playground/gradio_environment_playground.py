@@ -1,18 +1,8 @@
 #!/usr/bin/env python
-"""Gradio Environment Playground — Interactive UI for testing GRPO environments.
+"""Gradio Environment Playground: interactive UI for testing GRPO environments.
 
-Runs multi-turn episodes with any registered environment against a live rollout server, through the
-same driver the offline eval uses (:func:`halo.environments.eval_runner.run_episode`), so an episode
-here is generated and graded exactly as one collected by the trainer.
-
-Usage:
-    # 1. Start the rollout server
-    make build-vllm   # or set VLLM_IMAGE to the public image
-    docker compose -f docker-compose.vllm.yml up vllm-server
-
-    # 2. Launch playground
-    python scripts/inference/playground/gradio_environment_playground.py
-    python scripts/inference/playground/gradio_environment_playground.py --port 7861
+Episodes run against a live rollout server through the offline eval's driver
+(:func:`halo.environments.eval_runner.run_episode`), so one is generated and graded exactly as the trainer collects it.
 """
 
 import argparse
@@ -36,13 +26,12 @@ from scripts.inference.inference_arguments import add_gradio_server_args, launch
 
 logger = logging.getLogger(__name__)
 
-# Per non-assistant message, in the transcript panel: a full tool observation (a failing test log, a
-# search dump) is capped at 16k chars by the env itself and would dominate the turn it belongs to.
+# Per non-assistant message: a tool observation is capped at 16k chars by the env and would dominate its turn.
 _MAX_RENDERED_CHARS = 500
 
 
 def build_context(expected_answer: str) -> dict[str, Any]:
-    """Build the episode context, parsing structured answers (code_contests test cases) as JSON."""
+    """Parses structured answers (code_contests test cases) as JSON."""
     context: dict[str, Any] = {}
     if expected_answer:
         try:
@@ -53,11 +42,8 @@ def build_context(expected_answer: str) -> dict[str, Any]:
 
 
 def render_transcript(trajectory: Trajectory | None) -> list[dict[str, str]]:
-    """The episode's messages as Gradio chat turns.
-
-    Gradio renders only ``user``/``assistant``; a tool or system turn is shown as a labelled user
-    turn rather than dropped, since the observation is what the next turn conditions on.
-    """
+    """Gradio renders only ``user``/``assistant``; a tool or system turn is shown as a labelled user turn, since the
+    observation is what the next turn conditions on."""
     rendered: list[dict[str, str]] = []
     for message in trajectory.messages if trajectory else []:
         content = message.content or ""
@@ -120,18 +106,13 @@ def run_playground_episode(
     top_p: float,
     max_turns: int,
 ) -> tuple[list[dict[str, str]], str]:
-    """Run one episode through the shared eval driver and render it for the UI.
-
-    The shared driver rather than a local copy of the loop: it stamps ``finish_reason`` (so a
-    length-cut or empty turn is recovered here as in training rather than graded as a final answer),
-    binds the episode's reasoning-effort level and token budget, and finalizes a truncated episode.
-    """
+    """Through the shared driver: it stamps ``finish_reason`` (so a length-cut or empty turn recovers as in training),
+    binds the reasoning-effort level and token budget, and finalizes a truncated episode."""
     env = build_environment(env_type, {"max_turns": int(max_turns)})
     try:
         context = build_context(expected_answer)
         reject_answerless_examples(env, [{"context": context}], "the Expected Answer box")
-        # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
-        # full one, so the scheme is restored rather than refused.
+        # A hand-edited "localhost:8000/v1" is not a URL the SDK can route, so the scheme is restored.
         url = server_url if server_url.startswith("http") else f"http://{server_url}"
         client = build_openai_client(base_url=url, api_key_override=api_key)
 
@@ -143,8 +124,7 @@ def run_playground_episode(
                 context,
                 client,
                 rollout=RolloutConfig(
-                    # None rather than "": an unset model name is dropped from the body and a
-                    # single-model server answers with what it serves, while an empty string 404s.
+                    # None: an unset model name is dropped and a single-model server answers; an empty string 404s.
                     model_name=model_name or None,
                     temperature=temperature,
                     max_tokens=int(max_tokens),
@@ -160,11 +140,8 @@ def run_playground_episode(
 
 
 def _episode_handler(api_key: str | None):
-    """The Run button's callback: the episode for the sidebar's values, or the error it raised as the summary.
-
-    The API key is bound here rather than held in a component: a Gradio value, hidden or not, is serialized
-    into every browser's page config.
-    """
+    """The Run button's callback. The API key is bound here: a Gradio value, hidden or not, is serialized into every
+    browser's page config."""
 
     def on_run(
         env_type,
@@ -242,7 +219,6 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The playground's CLI: the rollout endpoint it prefills, plus the shared server block."""
     parser = argparse.ArgumentParser(description="Gradio Environment Playground")
     add_openai_endpoint_args(parser)
     add_gradio_server_args(parser, port_default=7860)

@@ -1,6 +1,5 @@
-"""Apply a :class:`~halo.kernels.lowp.spec.LowpSpec` after EP patching, before FSDP2 wrapping: EP expert
-compute and the dense MLP projections go low precision; attention, embeddings, ``lm_head``, norms and the
-kept end blocks stay bf16."""
+"""Apply a :class:`~halo.kernels.lowp.spec.LowpSpec` after EP patching, before FSDP2 wrapping: EP expert compute and
+dense MLP projections go low precision; attention, embeddings, ``lm_head``, norms and the kept end blocks stay bf16."""
 
 from __future__ import annotations
 
@@ -58,9 +57,8 @@ def _warn_if_dense_mlp_unmatched(model: nn.Module, precision: str) -> None:
 def _verify_block_aligned(
     subject: str, contraction: int, precision: str, quant_format: QuantFormat, *, split_by: str | None, opt_out: str
 ) -> None:
-    """Raise unless ``contraction`` splits into ``quant_format`` blocks: the fake-quant blocks both GEMM operands
-    along it, so a misaligned axis would fail the first forward instead. ``split_by`` names the parallel size that
-    shards the axis on this run (None where it is whole), ``opt_out`` the flag that keeps the module bf16."""
+    """Raise unless ``contraction`` splits into ``quant_format`` blocks, as a misaligned axis would fail the first
+    forward. ``split_by`` names the parallel size sharding the axis, ``opt_out`` the flag keeping the module bf16."""
     block = FORMAT_BLOCK_SIZE[quant_format]
     if contraction % block == 0:
         return
@@ -76,9 +74,7 @@ def _verify_block_aligned(
 
 
 def _verify_block_aligned_experts(name: str, layer: EPMoELayerBase, precision: str, quant_format: QuantFormat) -> None:
-    """Check every grouped-GEMM expert weight of ``layer``. Stored ``[E, K, N]``, its contraction is dim 1: the
-    hidden size, or the intermediate, which expert TP shards. LoRA adapters (bf16 under lowp) and biases are
-    exempt."""
+    """Check every grouped-GEMM expert weight; stored ``[E, K, N]``, contraction on dim 1; LoRA and biases exempt."""
     adapters = {adapter for adapter, _ in layer.expert_lora_named_params()}
     for weight_name, weight in layer.expert_named_params():
         if weight_name in adapters or weight.ndim != 3:
@@ -109,9 +105,8 @@ def _verify_block_aligned_dense(name: str, linear: nn.Linear, precision: str, qu
 
 
 def _convert_dense_linear(linear: nn.Linear, name: str, quant_format: QuantFormat, tp_plan: dict, tp_mesh) -> None:
-    """Retype one dense projection in place, keeping its TP forward transforms: TP installs them as an
-    instance-level ``forward`` a class retype cannot reach, so strip it, retype, and re-install the local-shard
-    forward (transformers' own for a style it does not cover)."""
+    """Retype one dense projection in place. TP installs its transforms as an instance ``forward`` a class retype
+    cannot reach, so strip it, retype, and re-install the local-shard forward."""
     if "forward" not in vars(linear):
         LowPrecisionLinear.convert_(linear, quant_format)
         return

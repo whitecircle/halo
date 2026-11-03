@@ -1,25 +1,22 @@
-"""Field bundles the GRPO script-argument and trainer-config dataclasses mix in, each declaring fields several
-classes would otherwise repeat; a subclass re-declares one only to change its default."""
+"""Field bundles the GRPO argument and config dataclasses mix in; a subclass re-declares one to change its default."""
 
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import ClassVar, Literal, get_args
 
 from halo.config_validation import ValidatedConfig, present, require_finite, require_int
 
-# The RLRR shaping modes: the annotation gates YAML/CLI and RLRRConfig validates against it.
 _RLRRMode = Literal["hrr", "prr"]
 
 
 def rlrr_arg_name(config_field: str) -> str:
-    """The YAML/CLI spelling of one :class:`RLRRConfig` field: ``rlrr_<field>``, except λ, whose config field is
-    ``lam`` because ``lambda`` is a keyword."""
+    """``rlrr_<field>``, except λ, whose config field is ``lam`` because ``lambda`` is a keyword."""
     return "rlrr_lambda" if config_field == "lam" else f"rlrr_{config_field}"
 
 
 @dataclass
 class PromptDatasetArguments(ValidatedConfig):
     """Prompt column and length cap of the GRPO-family trainers. No ``system_prompt``: environmental GRPO takes the
-    environment's, so the trainers that template their own system turn declare it themselves."""
+    environment's, so trainers that template their own declare it."""
 
     max_prompt_length: int | None = field(
         default=None,
@@ -41,9 +38,8 @@ class PromptDatasetArguments(ValidatedConfig):
 
 @dataclass
 class RLRRConfig:
-    """Hyperparameters for RLRR relative-reward shaping (defaults from the paper's Appendix A.1): the single
-    declaration :class:`RLRRArguments` derives its ``rlrr_*`` fields from, help included. Messages name the YAML
-    spelling, since the script arguments build one at parse time."""
+    """RLRR shaping hyperparameters (defaults from the paper's Appendix A.1), from which :class:`RLRRArguments` derives
+    its ``rlrr_*`` fields, help included. Messages name the YAML spelling, as the script arguments build one."""
 
     mode: _RLRRMode = field(
         default="hrr",
@@ -107,11 +103,8 @@ _RLRRTunables = make_dataclass(
 
 @dataclass
 class RLRRArguments(_RLRRTunables, ValidatedConfig):
-    """``use_rlrr`` plus the ``rlrr_*`` tunables of :class:`RLRRConfig` under their YAML spellings.
-
-    Every knob is validated at parse time by building the config eagerly, gate on or off (fail-loud:
-    a mistyped ``rlrr_tau`` must not survive a run just because ``use_rlrr`` is false).
-    """
+    """``use_rlrr`` plus the ``rlrr_*`` tunables. Built eagerly at parse time, gate on or off, so a mistyped
+    ``rlrr_tau`` cannot survive a run with ``use_rlrr`` false."""
 
     TUNABLES: ClassVar[tuple[str, ...]] = tuple(f.name for f in fields(_RLRRTunables))
 
@@ -128,15 +121,13 @@ class RLRRArguments(_RLRRTunables, ValidatedConfig):
         return RLRRConfig(**{f.name: getattr(self, rlrr_arg_name(f.name)) for f in fields(RLRRConfig)})
 
     def build_rlrr_config(self) -> RLRRConfig | None:
-        """Return the :class:`RLRRConfig` these args describe, or ``None`` when RLRR is disabled."""
         return self._rlrr_config() if self.use_rlrr else None
 
 
 @dataclass
 class AdvantageShapingArguments(ValidatedConfig):
-    """Reward scaling, the degenerate-group drop and the token-mass balance of the group-relative advantages the
-    online and environmental GRPO trainers share; the environmental config re-declares ``drop_degenerate_groups``
-    on by default for its sparse verifiable rewards."""
+    """Reward scaling, the degenerate-group drop and token-mass balance of the online and environmental GRPO
+    advantages; the environmental config re-declares ``drop_degenerate_groups`` on by default."""
 
     scale_rewards_std_floor: float = field(
         default=0.0,
@@ -165,8 +156,7 @@ class AdvantageShapingArguments(ValidatedConfig):
     )
 
     def _validate_fields(self) -> None:
-        """Refuse a negative or NaN std floor, which fails silently: ``max(std, floor)`` becomes a
-        no-op or a NaN that propagates to every advantage in the batch."""
+        """A negative or NaN std floor fails silently: ``max(std, floor)`` becomes a no-op or a batch-wide NaN."""
         super()._validate_fields()
         require_finite(
             type(self).__name__, ge=0, why=" (0 = off)", scale_rewards_std_floor=self.scale_rewards_std_floor
@@ -175,10 +165,8 @@ class AdvantageShapingArguments(ValidatedConfig):
 
 @dataclass(frozen=True)
 class EarlyStopConfig:
-    """What a GRPO early stop checks on the logged training steps; the single home of its validation.
-
-    Built by :class:`GRPOEarlyStopArguments`; ``on_skipped_updates`` comes from the environmental config,
-    the one whose trainer has a trust-region breaker that can skip an update."""
+    """What a GRPO early stop checks on logged training steps, and its validation. ``on_skipped_updates`` comes from
+    the environmental config, whose trainer has a trust-region breaker that can skip an update."""
 
     entropy_band: tuple[float, ...] | None = None
     logratio_gap: float | None = None
@@ -248,8 +236,7 @@ class GRPOEarlyStopArguments(ValidatedConfig):
         )
 
     def _stops_on_skipped_updates(self) -> bool:
-        """Whether a step whose every update was skipped counts toward the stop; only a config whose trainer
-        has a trust-region breaker overrides it."""
+        """Only a config whose trainer has a trust-region breaker overrides this."""
         return False
 
 

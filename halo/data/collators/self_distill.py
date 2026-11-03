@@ -1,6 +1,5 @@
-"""The SDPG self-distillation collators, text and VLM: the student batch plus a ``teacher_*`` branch whose last
-user turn carries the privileged hint, with the hint's rendering and injection, the response-alignment
-contract and the confidence weighting both share."""
+"""The SDPG self-distillation collators, text and VLM: the student batch plus a ``teacher_*`` branch whose last user
+turn carries the privileged hint."""
 
 import math
 import string
@@ -19,8 +18,7 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 
 
 def format_field_names(template: str) -> set[str]:
-    """The replacement-field names ``str.format`` looks up in ``template``, nested format specs
-    included. A lone brace raises ``ValueError``, as ``str.format`` would."""
+    """Names ``str.format`` looks up, nested specs included; a lone brace raises ``ValueError``, as it would there."""
     names: set[str] = set()
     for _, name, spec, _ in string.Formatter().parse(template):
         if name is not None:
@@ -29,8 +27,8 @@ def format_field_names(template: str) -> set[str]:
 
 
 def privileged_hint(template: str, **slots: Any) -> str | None:
-    """The hint ``template`` renders from one row's ``slots``, or ``None`` when a slot it names is blank (the
-    template states its slots as fact); a named slot the caller does not supply raises ``KeyError``."""
+    """``None`` when a slot the template names is blank (it states its slots as fact); a slot the caller does not
+    supply raises ``KeyError``."""
     named = {name: slots[name] for name in format_field_names(template)}
     if any(value is None or not str(value).strip() for value in named.values()):
         return None
@@ -38,7 +36,6 @@ def privileged_hint(template: str, **slots: Any) -> str | None:
 
 
 def inject_privileged_hint(history: list[dict[str, Any]], hint: str | None) -> list[dict[str, Any]]:
-    """Return a copy of ``history`` with ``hint`` appended to the last user turn (unchanged for ``None``)."""
     new_history = [dict(msg) for msg in history]
     if hint is None:
         return new_history
@@ -64,8 +61,7 @@ def teacher_history(
     answer_field: str | None,
     solution_field: str | None,
 ) -> list[dict[str, Any]]:
-    """``history`` with ``row``'s privileged hint appended to its last user turn: the teacher branch's
-    conversation, for both collators and the VLM over-length filter."""
+    """The teacher branch's conversation, for both collators and the VLM over-length filter."""
     hint = privileged_hint(
         hint_template,
         answer=row.get(answer_field) if answer_field else None,
@@ -75,8 +71,7 @@ def teacher_history(
 
 
 def require_aligned_responses(batch: Mapping[str, torch.Tensor]) -> None:
-    """Raise unless each row's student and teacher branches supervise the same tokens in order, as OPD pairs
-    the k-th supervised position of one with the k-th of the other."""
+    """Raise unless each row's branches supervise the same tokens in order: OPD pairs the k-th supervised position."""
     student, teacher = batch["labels"][:, 1:], batch["teacher_labels"][:, 1:]
     for row in range(student.size(0)):
         student_tokens = student[row][student[row] != LABEL_IGNORE_INDEX]
@@ -106,8 +101,8 @@ def _checked_confidences(split, field: str) -> torch.Tensor:
 
 
 def confidence_normalizer(train, test, field: str, power: float) -> float:
-    """The train split's mean of ``conf ** power``, the one divisor every batch's weights share (a per-batch
-    mean is 1.0 at batch size 1); ``test`` (or ``None``) is range-checked too, being weighted alike."""
+    """The train split's mean of ``conf ** power``, the one divisor every batch shares (a per-batch mean is 1.0 at
+    batch size 1); ``test`` is range-checked too."""
     if test is not None:
         _checked_confidences(test, field)
     normalizer = float(_checked_confidences(train, field).pow(power).mean())
@@ -119,14 +114,12 @@ def confidence_normalizer(train, test, field: str, power: float) -> float:
 def confidence_weights(
     examples: Sequence[Mapping[str, Any]], field: str, power: float, normalizer: float
 ) -> torch.Tensor:
-    """Per-sample ``conf ** power / normalizer`` weights."""
     confidences = torch.tensor([float(example[field]) for example in examples], dtype=torch.float32)
     return confidences**power / normalizer
 
 
 class SelfDistillBranchMixin:
-    """What both self-distillation collators (text and VLM) add to a student batch: the privileged
-    fields, the hinted teacher history and the per-row confidence weights."""
+    """What both collators add to a student batch: privileged fields, hinted teacher history, confidence weights."""
 
     def _init_self_distill_fields(
         self,
@@ -151,17 +144,14 @@ class SelfDistillBranchMixin:
 
     @property
     def builds_teacher_branch(self) -> bool:
-        """Whether batches carry the ``teacher_*`` branch the OPD term reads."""
         return self.hint_template is not None
 
     def cache_signature(self) -> dict[str, Any]:
-        """Every knob this collator renders with, for the cache key of the prep map it rides (the text encoding,
-        the VLM audit): a map fingerprint reads the collator riding ``fn_kwargs`` by its class name alone, so a
-        changed knob would serve stale rows."""
+        """Every knob this collator renders with, for the prep map's cache key: a map fingerprint reads a collator in
+        ``fn_kwargs`` by class name alone, so a changed knob would serve stale rows."""
         return dict(vars(self))
 
     def _teacher_history(self, history: list[dict[str, Any]], example: dict[str, Any]) -> list[dict[str, Any]]:
-        """``history`` with the row's privileged hint appended to its last user turn."""
         return teacher_history(
             history,
             example,
@@ -178,13 +168,8 @@ class SelfDistillBranchMixin:
 
 
 class SelfDistillTextCollator(SelfDistillBranchMixin):
-    """Text collator for SDPG-style self-distillation (arXiv:2606.04036): the student batch and a ``teacher_*``
-    branch carrying the gold-answer hint, whose response tokens match (:func:`require_aligned_responses`);
-    ``hint_template=None`` builds no teacher branch. Optionally emits ``confidence_weights``.
-
-    A row is rendered, tokenized and labelled once (:func:`encode_self_distill_row`, mapped at prep), so
-    collation pads; a raw conversation row is encoded on the spot.
-    """
+    """Text collator (arXiv:2606.04036); ``hint_template=None`` builds no teacher branch. A row is rendered, tokenized
+    and labelled once (:func:`encode_self_distill_row`, at prep), so collation pads; a raw row is encoded live."""
 
     def __init__(
         self,
@@ -224,7 +209,6 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
 
     def encode_row(self, example: dict[str, Any]) -> dict[str, list[int]]:
-        """One raw row's encoding, as the prep map writes it (:func:`encode_self_distill_row`)."""
         return encode_self_distill_row(example, self)
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
@@ -237,7 +221,6 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         return batch
 
     def _pad(self, rows: list[dict[str, list[int]]], prefix: str) -> dict[str, torch.Tensor]:
-        """One branch's encoded rows padded on the tokenizer's side, as ``tokenizer.pad`` pads them."""
         side = self.tokenizer.padding_side
         input_ids = [torch.tensor(row[f"{prefix}input_ids"]) for row in rows]
         return {
@@ -252,13 +235,8 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
 
 
 class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
-    """VLM collator for SDPG-style self-distillation (arXiv:2606.04036): the student batch plus a hinted
-    ``teacher_*`` branch whose labels select the same response tokens (:func:`require_aligned_responses`).
-
-    The text-only hint leaves the image grid unchanged, so the trainer reuses the student's image tensors.
-    Takes the self-distill span policy, like :class:`SelfDistillTextCollator`; ``hint_template=None``
-    builds no teacher branch. Optionally emits ``confidence_weights``.
-    """
+    """VLM collator (arXiv:2606.04036). The text-only hint leaves the image grid unchanged, so the trainer reuses the
+    student's image tensors; ``hint_template=None`` builds no teacher branch."""
 
     _COMPLETION_SPAN_POLICY = None
 
@@ -279,9 +257,8 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
         )
 
     def audit_row(self, example: dict[str, Any]) -> dict[str, Any]:
-        """Refuse a row whose two branches would supervise different tokens; returns no columns. Reads the
-        rendered text as the processor tokenizes it, before the image placeholders (all in the user turn)
-        expand; mapped at prep by ``audit_self_distill_row``, where the raise is world-uniform."""
+        """Refuse a row whose branches would supervise different tokens; returns no columns. Reads the text before
+        image placeholders (all in the user turn) expand; mapped at prep, where the raise is world-uniform."""
         if not self.builds_teacher_branch:
             return {}
         history = example.get("history", [])
@@ -297,8 +274,7 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
         batch = super().__call__(examples)
 
         if self.builds_teacher_branch:
-            # Never truncated either: the hinted teacher is the longer branch, so truncation would cut response
-            # tokens the student keeps and break OPD row alignment.
+            # Never truncated: the hinted teacher is longer, and a cut would take response tokens the student keeps.
             teacher_batch = self._collate(
                 examples,
                 lambda example: self._teacher_history(example.get("history", []), example),
@@ -307,8 +283,7 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
             batch["teacher_input_ids"] = teacher_batch["input_ids"]
             batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
             batch["teacher_labels"] = teacher_batch["labels"]
-            # Per-token tensors (GLM-4.6V mm_token_type_ids, a prefix LM's token_type_ids) must be the teacher's
-            # own — its sequence is longer.
+            # Per-token tensors (GLM-4.6V mm_token_type_ids, a prefix LM's token_type_ids) must be the teacher's own.
             for key in SEQUENCE_ALIGNED_VISION_KEYS:
                 if key in teacher_batch:
                     batch[f"teacher_{key}"] = teacher_batch[key]
@@ -321,8 +296,8 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
 def _encode_branch(
     collator: SelfDistillTextCollator, conversation: list[dict[str, Any]], row: dict[str, Any], branch: str
 ) -> tuple[list[int], list[int]]:
-    """One branch's token ids, refused rather than truncated past ``max_length``, and its labels: everything
-    outside the completions masked with ``train_on_completions_only``."""
+    """Token ids, refused rather than truncated past ``max_length``, and labels masked outside completions with
+    ``train_on_completions_only``."""
     rendered = render_conversation(
         collator.tokenizer,
         conversation,
@@ -333,8 +308,7 @@ def _encode_branch(
         interleaved_thinking=collator.interleaved_thinking,
         tools_field=collator.tools_field,
     )
-    # tokenize_rendered single-sources the rendered specials: a bare add_special_tokens=True double-BOSes
-    # templates that emit BOS themselves.
+    # tokenize_rendered single-sources the specials: add_special_tokens=True double-BOSes templates emitting BOS.
     input_ids = torch.tensor([tokenize_rendered(collator.tokenizer, rendered)["input_ids"]])
     if input_ids.size(1) > collator.max_length:
         raise ValueError(
@@ -356,14 +330,10 @@ def _encode_branch(
 
 
 def encode_self_distill_row(example: dict[str, Any], collator: SelfDistillTextCollator) -> dict[str, list[int]]:
-    """One raw row's ``input_ids`` and ``labels`` per branch (``teacher_*`` for the hinted one): an over-length
-    branch or misaligned responses raise. Mapped at prep, where a raise is world-uniform; at collate time it is
-    rank-local.
-
-    Module level, as ``num_proc`` map workers reject bound methods, and calling every helper by bare name, so the
-    map's cache key folds in their source (:mod:`halo.data.pipeline.map_cache_key`). The collator rides
-    ``fn_kwargs`` for its knobs, which key the map through :meth:`~SelfDistillBranchMixin.cache_signature`.
-    """
+    """``input_ids`` and ``labels`` per branch; an over-length branch or misaligned responses raise. Mapped at prep,
+    where a raise is world-uniform. Module level, as ``num_proc`` map workers reject bound methods, and calling every
+    helper by bare name, so the map's cache key folds in their source. The collator rides ``fn_kwargs`` for its knobs,
+    which key the map through :meth:`~SelfDistillBranchMixin.cache_signature`."""
     history = example[collator.conversation_field]
     branches = [("student", "", history)]
     if collator.builds_teacher_branch:
@@ -386,6 +356,5 @@ def encode_self_distill_row(example: dict[str, Any], collator: SelfDistillTextCo
 
 
 def audit_self_distill_row(example: dict[str, Any], collator) -> dict[str, Any]:
-    """Module-level seam for mapping the VLM collator's ``audit_row`` (:func:`encode_self_distill_row`'s
-    counterpart, which writes no columns) with ``num_proc`` workers."""
+    """Module-level seam for mapping ``audit_row`` with ``num_proc`` workers."""
     return collator.audit_row(example)

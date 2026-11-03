@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""Grading runs a submission's tests through one sandbox session, so a compiled program is built
-once, and a compile failure grades the whole pool once.
-
-Run: python tests/cpu/environments/test_grading_session.py  (or pytest)
-"""
+"""Grading runs a submission's tests through one sandbox session, so a compiled program is built once, and a compile
+failure grades the whole pool once."""
 
 import errno
 import logging
@@ -114,8 +111,7 @@ def test_a_host_fault_shows_its_class_alone_under_outcome(stage, caplog):
 
 @pytest.mark.parametrize("stage", ["run", "reset"])
 def test_a_backend_down_for_every_test_logs_one_line_per_grade(stage, caplog):
-    """A pool of hundreds of tests against a dead backend must not log a traceback per test: the grade
-    logs one line counting its infra errors, the per-test detail stays at debug."""
+    """The grade logs one line counting its infra errors; the per-test detail stays at debug."""
     with caplog.at_level(logging.WARNING, logger="halo.environments.tasks.coding.grading"):
         grade = run_solution_against_tests("code", _TESTS, sandbox=_DeniedSandbox(stage))
     assert grade.infra_errors == len(_TESTS)

@@ -1,26 +1,8 @@
 #!/usr/bin/env python
-"""
-EP+TP replicated-gradient sync correctness.
+"""EP+TP keeps truly-replicated params bit-identical across the TP group while the distributed experts stay different.
 
-Under TP, truly-replicated params (LayerNorms, router; shared expert on families that have one)
-must be kept identical across the TP axis or the replicas drift apart over training → a
-rank-inconsistent model and per-rank-divergent grad clipping. TP-only does this inside
-the TP clip; EP+TP installs the EP clip (``_install_ep_clip``) instead, so that path owns the sync:
-the EP clip (and the max_grad_norm=0 fallback hook) TP-axis-average the replicated grads
-— EXCLUDING the EP-distributed experts (different experts per TP rank; averaging them would corrupt
-them) and harmlessly including the already-world-synced router. A path that skips the average lets
-the replicas drift.
-
-This test runs EP+TP with DP=1 (ep=2, tp=2 on 2 GPUs), where the replicated params are PLAIN
-tensors (no FSDP), so the gap is maximally visible, and asserts after training:
-  1. Every replicated non-expert, non-DTensor param is BIT-IDENTICAL across the TP group.
-  2. The EP-distributed expert weights still DIFFER across the TP group (NOT corrupted by an
-     over-broad all-reduce).
-  3. Training is healthy (loss finite).
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/combined/test_ep_tp_replicated_grad_sync.py
+EP+TP installs the EP clip, so that path owns the TP-axis average, excluding the experts, which averaging would
+corrupt. Drift gives a rank-inconsistent model and per-rank-divergent grad clipping.
 """
 
 import math
@@ -49,9 +31,8 @@ NUM_TRAIN_STEPS = 8
 SEED = 42
 
 
-# DP=1 EP+TP keeps the replicated params as PLAIN tensors (no FSDP), which is where the missing
-# TP-axis sync is maximally visible. EP and TP are coextensive on the same ranks, so DP=1 means
-# world_size == tp_size (== ep_group_size) — exactly 2 GPUs here (ep=tp=2).
+# DP=1 keeps the replicated params plain (no FSDP), where a missing TP-axis sync shows most. EP and TP are coextensive,
+# so world == tp_size.
 @gpu_test_main(exact_world_size=TP_SIZE, prefix="ep_tp_replicated_grad_sync")
 def run(ctx):
     log(f"\n{'#' * 70}\n  EP+TP replicated-grad sync (ep={EP_SIZE}, tp={TP_SIZE}, DP=1)\n{'#' * 70}")
@@ -78,7 +59,7 @@ def run(ctx):
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=1,
-        learning_rate=5e-5,  # a bit higher so any drift would be visible
+        learning_rate=5e-5,  # A bit higher so any drift would show.
         bf16=True,
         gradient_checkpointing=True,
         use_liger_kernel=False,
@@ -89,7 +70,7 @@ def run(ctx):
         max_length=2048,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        max_grad_norm=1.0,  # exercises the EP clip's sync path
+        max_grad_norm=1.0,  # Exercises the EP clip's sync path.
     )
     trainer = DistributedSFTTrainer(
         model=model,
@@ -108,8 +89,7 @@ def run(ctx):
     assert group is not None and dist.get_world_size(group) == TP_SIZE, "TP group not reachable"
     expert_ids = trainer._get_sharded_expert_param_ids()
 
-    # 1) Replicated non-expert plain params must be bit-identical across the TP axis. A NaN diff
-    # counts as drifted (NaN != 0.0).
+    # A NaN diff counts as drifted (NaN != 0.0).
     replicated_diffs = [
         group_max_abs_diff(p.data, group)
         for p in model.parameters()
@@ -122,7 +102,6 @@ def run(ctx):
         f"({len(replicated_diffs)} params, {drifted} not bit-identical)"
     )
 
-    # 2) EP-distributed experts must STILL differ across TP (not averaged/corrupted).
     expert_diffs = [
         group_max_abs_diff(p.data, group)
         for p in model.parameters()

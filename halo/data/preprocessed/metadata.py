@@ -1,5 +1,5 @@
-"""The ``metadata.json`` contract of a preprocessed dataset: the recorded :class:`PreprocessingConfig`, the stamp
-written beside the rows, and the checks of an artifact against the run that trains on it."""
+"""The ``metadata.json`` contract of a preprocessed dataset: the recorded config, the stamp, and the checks of an
+artifact against the run."""
 
 import json
 import logging
@@ -71,15 +71,13 @@ _UNCOMPARED_FIELDS = frozenset(
 )
 
 _PreprocessingMode = Literal["chat", "text"]
-# The strategies TRL's pack_dataset accepts.
 _PackingStrategy = Literal["bfd", "bfd_split", "wrapped"]
 
 
 @dataclass
 class PreprocessingConfig:
-    """How a corpus is baked, recorded in its ``metadata.json``; ``prepare_dataset.py``'s flags are these fields.
-    ``__post_init__`` refuses an unknown mode, a knob the mode does not read and a combination the bake cannot
-    honor."""
+    """How a corpus is baked; ``prepare_dataset.py``'s flags are these fields. ``__post_init__`` refuses an unknown
+    mode, a knob the mode does not read and a combination the bake cannot honor."""
 
     model_name_or_path: str = field(
         metadata={"help": "Model whose tokenizer bakes the rows and whose config.json lists the turn terminators."}
@@ -210,8 +208,6 @@ _RENDER_CHECKED_FIELDS = tuple(
 
 @dataclass
 class PreprocessedDatasetMetadata:
-    """Metadata for a preprocessed dataset."""
-
     version: str = PREPROCESSING_VERSION
     preprocessed: bool = True
 
@@ -237,23 +233,21 @@ class PreprocessedDatasetMetadata:
 
     @classmethod
     def claims_payload(cls, data: Any) -> bool:
-        """Whether a ``metadata.json`` payload is a toolkit stamp at all, by the field every stamp carries: a hub
-        dataset may ship its own file of that name, which this schema must not judge."""
+        """A hub dataset may ship its own file of that name, which this schema must not judge."""
         return isinstance(data, dict) and "preprocessed" in data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PreprocessedDatasetMetadata":
-        """Read a toolkit ``metadata.json`` payload, refusing one this build cannot read rather than re-tokenizing
-        its pre-tokenized rows as raw; retired spellings are not migrated, since a stamp records what was baked."""
+        """Refuses a stamp this build cannot read rather than re-tokenizing pre-tokenized rows as raw; retired
+        spellings are not migrated, since a stamp records what was baked."""
         reject_incompatible_stamp(cls, data, "Preprocessed dataset metadata")
         return cls(**data)
 
 
 def _read_metadata_payload(path: str, *, s3_outage_reads_absent: bool) -> dict[str, Any] | None:
-    """The raw ``metadata.json`` payload at a local, S3 or Hub dataset path, None only on a confirmed absence (offline,
-    the Hub cache stands for the repo); any other failure raises, so an unreachable source never reads as raw.
-    ``s3_outage_reads_absent`` (the probe's) reads an unmirrored S3 outage as absent with a warning, since a
-    warm-cache raw dataset loads without S3."""
+    """The raw payload, None only on a confirmed absence; any other failure raises, so an unreachable source never
+    reads as raw. ``s3_outage_reads_absent`` (the probe's) reads an unmirrored S3 outage as absent with a warning,
+    since a warm-cache raw dataset loads without S3."""
     source_type, bucket, key = parse_dataset_source(path)
     if source_type == "s3":
         # Mirrored: an outage serves the local mirror, so a warm-cache run still reads as preprocessed.
@@ -297,9 +291,8 @@ def _read_metadata_payload(path: str, *, s3_outage_reads_absent: bool) -> dict[s
 
 
 def is_preprocessed_dataset(path: str) -> bool:
-    """Whether ``path`` holds a toolkit ``metadata.json`` with ``preprocessed=True``; an absent or foreign file reads
-    as raw, and an incompatible toolkit stamp as preprocessed, so :func:`load_preprocessed_metadata` refuses it
-    instead of the run re-tokenizing its rows."""
+    """An absent or foreign file reads as raw, and an incompatible toolkit stamp as preprocessed, so
+    :func:`load_preprocessed_metadata` refuses it instead of the run re-tokenizing its rows."""
     payload = _read_metadata_payload(path, s3_outage_reads_absent=True)
     if payload is None:
         return False
@@ -316,7 +309,6 @@ def is_preprocessed_dataset(path: str) -> bool:
 
 
 def load_preprocessed_metadata(path: str) -> PreprocessedDatasetMetadata:
-    """Load metadata from a preprocessed dataset (local, S3 or HF Hub)."""
     payload = _read_metadata_payload(path, s3_outage_reads_absent=False)
     if payload is None:
         raise FileNotFoundError(f"No {METADATA_FILE} at {path}: not a preprocessed dataset.")
@@ -329,8 +321,8 @@ def load_preprocessed_metadata(path: str) -> PreprocessedDatasetMetadata:
 
 
 def _stated_render_knobs(render_args: Any) -> frozenset[str] | None:
-    """The knobs the run's args STATE, holding other than their default, or None (every knob stated) for args that
-    are not a dataclass. A default makes no claim on the artifact, and the two sides' defaults move apart."""
+    """Knobs held off their default, or None (every knob stated) for non-dataclass args. A default makes no claim on
+    the artifact, and the two sides' defaults move apart."""
     if not is_dataclass(render_args) or isinstance(render_args, type):
         return None
     stated: set[str] = set()
@@ -344,8 +336,7 @@ def _stated_render_knobs(render_args: Any) -> frozenset[str] | None:
 def _render_knob_differences(
     metadata: PreprocessedDatasetMetadata, render_args: Any, recorded: dict[str, Any]
 ) -> tuple[dict[str, tuple[Any, Any]], dict[str, tuple[Any, Any]]]:
-    """``(stated, unstated)``: each checked knob whose run value differs from the recorded one, as
-    ``name -> (prepared, run)``, split by whether the run states it (:func:`_stated_render_knobs`)."""
+    """``(stated, unstated)`` differing knobs as ``name -> (prepared, run)``."""
     stated = _stated_render_knobs(render_args)
     mismatched: dict[str, tuple[Any, Any]] = {}
     unstated: dict[str, tuple[Any, Any]] = {}
@@ -366,9 +357,8 @@ def _render_knob_differences(
 
 
 def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any) -> None:
-    """Raise when a render knob the run STATES differs from the value baked into the artifact; knobs the
-    metadata predates, that ``render_args`` does not carry, or that the run leaves at its own default are
-    reported instead, since the prepared value is what trained either way."""
+    """Raise when a knob the run STATES differs from the baked value; knobs the metadata predates, ``render_args``
+    lacks or the run leaves at default are reported instead, since the prepared value is what trained either way."""
     recorded = metadata.config or {}
     if recorded.get("mode") == "text":
         # Raw-text artifacts render no chat template, so no knob was baked.
@@ -410,10 +400,9 @@ def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any
 
 
 def _rows_chat_template(metadata: PreprocessedDatasetMetadata) -> tuple[Any, str] | None:
-    """``(template, origin)`` of the template the artifact's chat rows were rendered with, or None where the stamp
-    does not say: a text artifact renders none, and one without ``rendered_chat_template`` names at most a
-    ``--chat_template`` override. A non-VLM bake applies that whatever the tokenizer ships; such a VLM stamp does
-    not show whether its processor rendered with it."""
+    """``(template, origin)`` of the template the chat rows were rendered with, or None where the stamp does not say: a
+    text artifact renders none, and one without ``rendered_chat_template`` names at most a ``--chat_template``
+    override, which a VLM stamp does not show its processor used."""
     recorded = metadata.config or {}
     if recorded.get("mode") == "text":
         return None
@@ -434,8 +423,8 @@ def _rows_chat_template(metadata: PreprocessedDatasetMetadata) -> tuple[Any, str
 def _verify_exported_chat_template(
     metadata: PreprocessedDatasetMetadata, exported: Any, render_args: Any | None, run_model: str | None
 ) -> None:
-    """Raise when ``exported``, the chat template the run ends with and its checkpoint exports, is not the one the
-    artifact's rows were rendered with: the model would train on one template and be served with the other."""
+    """Raise when the template the run exports is not the one the rows were rendered with: the model would train on one
+    and be served with the other."""
     rows = _rows_chat_template(metadata)
     if rows is None or rows[0] == exported:
         return
@@ -460,11 +449,8 @@ def verify_preprocessed_dataset(
     required_packing: bool | None = None,
     run_processing_class: Any | None = None,
 ) -> None:
-    """Raise on a max_length, baked-label-masking or render-knob mismatch with the run, and on a chat template
-    ``run_processing_class`` (the run's final tokenizer or processor) ends with other than the rows were
-    rendered with; warn on a model mismatch and on ``required_packing`` (the run's ``packing``) against an
-    unpacked artifact. ``render_args`` is the run's script-args object, compared on every render knob it
-    carries."""
+    """Raise on a max_length, baked-label or render-knob mismatch, and on an exported chat template other than the rows
+    were rendered with; warn on a model mismatch and on ``required_packing`` against an unpacked artifact."""
     if metadata.max_length < required_max_length:
         raise ValueError(
             f"Preprocessed dataset max_length ({metadata.max_length}) is less than "

@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""Policies the model-patch layer DERIVES rather than lists, and the one it deliberately does not.
-
-Each of these decides something silent or late when it is wrong — an attention backend a run cannot train on, a
-recompute dtype mismatch, a norm quantized to bf16, a RoPE table left as load garbage — so the pins
-here are on the derivation itself, not on a call reaching some branch:
-
-* FA4's head_dim-256 refusal reads the query/key width, MLA's split included (transformers pads the value
-  head up to it), and holds only where transformers asks for a deterministic backward;
-* the FSDP2 ``cast_forward_inputs`` policy reads a CLASS attribute the Zaya load patch stamps,
-  with no model_type list in the wrap;
-* the PEFT bf16 cast classifies norms by class, not by a substring of the module path;
-* the per-layer-type rotary recompute (one helper, two layouts) rebuilds exactly the buffers that
-  exist and invents none.
-
-    python tests/cpu/models/test_model_patch_derivations.py
-"""
+"""Policies the model-patch layer derives instead of listing: FA4's head_dim-256 refusal, the FSDP2 cast policy, the
+PEFT bf16 cast and the rotary recompute. A wrong one is silent or late."""
 
 from types import SimpleNamespace
 
@@ -37,32 +23,28 @@ def _config(model_type: str):
     return transformers.CONFIG_MAPPING[model_type]()
 
 
-# The families FA4 trains on its dedicated head_dim-256 kernel.
 _FA4_HEAD_DIM_256_MODEL_TYPES = ("qwen3_next", "qwen3_5", "qwen3_5_moe")
-# The head_dim-256 families the resolver keeps off that kernel: GLM-4.7-Flash's latent attention (a precaution),
-# Gemma 3's windows and Gemma 2's softcap.
+# Kept off the dedicated kernel: GLM-4.7-Flash's latent attention (a precaution), Gemma 3's windows, Gemma 2's softcap.
 _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES = ("glm4_moe_lite", "gemma3_text", "gemma2")
 
 
 @pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES + _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES)
 def test_a_deterministic_run_refuses_fa4_at_head_dim_256(model_type, monkeypatch):
     """transformers passes ``FLASH_ATTENTION_DETERMINISTIC`` to the dedicated head_dim-256 backward as
-    ``deterministic``, a mode not validated here, so such a run keeps FA4 off that width."""
+    ``deterministic``, a mode not validated here."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
     assert supports_fa4_backward(_config(model_type)) is False
 
 
 @pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES)
 def test_head_dim_256_keeps_fa4_outside_a_deterministic_run(model_type, monkeypatch):
-    """Outside a deterministic run nothing refuses FA4 at that width."""
     monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
     assert supports_fa4_backward(_config(model_type)) is True
 
 
 @pytest.mark.parametrize("model_type", _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES)
 def test_fa4_does_not_train_a_refused_head_dim_256_attention_in_any_run(model_type, monkeypatch):
-    """The dedicated kernel's refusals hold outside a deterministic run too, so Context Parallelism, whose Ulysses
-    kernel reads this verdict, never runs FA4 on them."""
+    """Context Parallelism's Ulysses kernel reads this verdict, so it never runs FA4 on them."""
     monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
     assert supports_fa4_backward(_config(model_type)) is False
 
@@ -75,8 +57,7 @@ def test_the_deterministic_refusal_stays_off_other_head_widths(model_type, monke
 
 
 def test_transformers_pads_the_value_head_to_the_query_key_width(monkeypatch):
-    """Premise of the query/key-only verdict: transformers' flash path hands the kernel a value as wide as the
-    query (MLA's narrower value padded) and crops the output back."""
+    """Premise of the query/key-only verdict."""
     widths = []
 
     def kernel(query, key, value, *args, **kwargs):
@@ -104,8 +85,7 @@ class _NarrowValueConfig(transformers.PretrainedConfig):
 
 @pytest.mark.parametrize(("deterministic", "supported"), [("1", False), ("0", True)])
 def test_the_deterministic_refusal_reads_the_query_key_width_alone(deterministic, supported, monkeypatch):
-    """A 256-wide q/k over a 128-wide v reaches the dedicated kernel with its value padded to 256, so a
-    deterministic run refuses FA4 there too, and an ordinary one keeps it."""
+    """The value is padded to 256 on its way to the dedicated kernel, so a deterministic run refuses FA4 there too."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
     config = _NarrowValueConfig()
     assert resolve_qk_v_head_dims(config) == (256, 128)
@@ -117,26 +97,20 @@ def test_the_deterministic_refusal_reads_the_query_key_width_alone(deterministic
     [("glm4_moe_lite", 64, (256, 256)), ("mistral4", 128, (128, 128)), ("qwen3_next", 256, (256, 256))],
 )
 def test_the_head_widths_count_the_mla_split(model_type, declared_head_dim, widths):
-    """MLA declares a ``head_dim`` that is only its RoPE slice (GLM-4.7-Flash: 64) and the query/key width as
-    ``qk_nope_head_dim + qk_rope_head_dim``, so reading ``head_dim`` alone would leave a deterministic run on FA4's
-    dedicated head_dim-256 backward."""
+    """MLA declares a ``head_dim`` that is only its RoPE slice (GLM-4.7-Flash: 64). Reading it alone would leave a
+    deterministic run on FA4's dedicated head_dim-256 backward."""
     config = _config(model_type)
     assert config.head_dim == declared_head_dim
     assert resolve_qk_v_head_dims(config) == widths
 
 
 class _ResidualLayer(nn.Module):
-    """Stand-in for a decoder layer whose class declares the fp32 inter-layer residual."""
-
     _fp32_interlayer_residual = True
 
 
 def test_the_fp32_residual_policy_is_read_off_the_declaring_class():
-    """``cast_forward_inputs`` must be decided by the module tree, not by a model_type list.
-
-    Casting the layer-boundary activation to bf16 makes non-reentrant GC recompute hand torch an
-    fp32 tensor where the forward saved a bf16 view, which it rejects mid-backward.
-    """
+    """Casting the layer-boundary activation to bf16 makes non-reentrant GC recompute hand torch an fp32 tensor where
+    the forward saved a bf16 view, which it rejects mid-backward."""
     plain = nn.Sequential(nn.Linear(2, 2))
     assert _should_cast_forward_inputs(plain) is True
 
@@ -145,16 +119,13 @@ def test_the_fp32_residual_policy_is_read_off_the_declaring_class():
 
 
 def test_the_zaya_load_patch_declares_the_fp32_residual_on_its_decoder_layer():
-    """The other half of that derivation: the hub-native Zaya modeling gets the attribute at load.
-
-    Without the stamp the wrap would cast Zaya's residual and GC would fault in recompute.
-    """
+    """Without the stamp the wrap would cast Zaya's residual and GC would fault in recompute."""
     patch_zaya_fp32_interlayer_residual()
     assert modeling_zaya.ZayaDecoderLayer._fp32_interlayer_residual is True
 
 
 class _FooRMSNorm(nn.Module):
-    """A norm by CLASS, at a module path with no "norm" in it."""
+    """A norm by class, at a module path with no "norm" in it."""
 
     def __init__(self):
         super().__init__()
@@ -170,12 +141,8 @@ class _Gate(nn.Module):
 
 
 def test_the_peft_bf16_cast_classifies_norms_by_class_not_by_path():
-    """The fp32 exemption belongs to norm MODULES, and a dotted path is not what makes one.
-
-    Both directions corrupt silently: a family whose norms sit at a path without "norm" trains them
-    in bf16, and an ordinary projection under a "norm"-named parent is upcast to fp32 and runs a
-    dtype-mismatched matmul against bf16 activations.
-    """
+    """Both directions corrupt silently: norms at a path without "norm" train in bf16, and a projection under a
+    "norm"-named parent is upcast to fp32 and runs a dtype-mismatched matmul against bf16 activations."""
     model = nn.Module()
     model.scaler = _FooRMSNorm()
     model.norm_gate = _Gate()
@@ -187,14 +154,13 @@ def test_the_peft_bf16_cast_classifies_norms_by_class_not_by_path():
 
 
 class _PerLayerTypeRotary(nn.Module):
-    """Rotary exposing the ``rope_init_fns`` mapping layout (Gemma 4 / DeepSeek-V4 shape)."""
+    """The ``rope_init_fns`` mapping layout (Gemma 4 / DeepSeek-V4 shape)."""
 
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace()
         self.rope_type = {"full_attention": "default", "sliding_attention": "default"}
-        # Only ONE of the two declared layer types ships a buffer, and it comes back from the load
-        # in bf16 — the corruption this pass exists to repair.
+        # Only one of the two declared layer types ships a buffer, and it comes back from the load in bf16.
         self.register_buffer("full_attention_inv_freq", torch.zeros(4, dtype=torch.bfloat16), persistent=False)
         self.rope_init_fns = {
             "full_attention": self._init_fn,
@@ -207,12 +173,8 @@ class _PerLayerTypeRotary(nn.Module):
 
 
 def test_the_per_layer_type_rotary_recompute_rebuilds_only_the_buffers_that_exist():
-    """The shared helper must recompute each declared layer type's table in fp32 — and no other.
-
-    Inventing a buffer for a layer type this instance does not use would put a table into
-    ``state_dict``-adjacent state that the modeling never reads; leaving a real one at its loaded
-    bf16 collapses adjacent RoPE positions past a few thousand tokens, silently.
-    """
+    """Inventing a buffer would add a table the modeling never reads. A real one left at bf16 silently collapses
+    adjacent RoPE positions past a few thousand tokens."""
     model = nn.Module()
     model.rotary = _PerLayerTypeRotary()
 
@@ -227,7 +189,7 @@ def test_the_per_layer_type_rotary_recompute_rebuilds_only_the_buffers_that_exis
 
 
 class _LayerTypesRotary(nn.Module):
-    """Rotary exposing the ``layer_types`` + ``rope_type``-dict layout (Laguna / DeepSeek-V4 shape)."""
+    """The ``layer_types`` + ``rope_type``-dict layout (Laguna / DeepSeek-V4 shape)."""
 
     def __init__(self):
         super().__init__()
@@ -235,23 +197,18 @@ class _LayerTypesRotary(nn.Module):
             rope_parameters={"full_attention": {"rope_theta": 3.0}, "sliding_attention": None}
         )
         self.layer_types = ["full_attention", "sliding_attention"]
-        # A null rope_parameters entry means the type is not rotated: the family registers neither a
-        # buffer nor a rope_type for it, so only the rotated type ships one (in load-corrupted bf16).
+        # A null rope_parameters entry means the type is not rotated: no buffer and no rope_type.
         self.rope_type = {"full_attention": "default"}
         self.register_buffer("full_attention_inv_freq", torch.zeros(4, dtype=torch.bfloat16), persistent=False)
 
     def compute_default_rope_parameters(self, config, device=None, layer_type=None, **kwargs):
-        # Indexes the entry the way every family's own init fn does — a null one raises here.
+        # Indexes the entry as every family's own init fn does, so a null one raises here.
         return torch.full((4,), config.rope_parameters[layer_type]["rope_theta"], device=device), 2.0
 
 
 def test_the_layer_types_rotary_recompute_skips_a_type_the_family_does_not_rotate():
-    """The second layout obeys the same rule, and it is the layout where breaking it is fatal.
-
-    A layer type whose rope entry is null has no buffer AND no rope_type, so recomputing it both
-    invents state and calls the family's init fn on the null entry — turning a supported config
-    (Laguna with a non-rotated layer type) into a load-time crash instead of a repaired table.
-    """
+    """Recomputing a null-entry layer type would call the family's init fn on it, turning a supported config (Laguna
+    with a non-rotated layer type) into a load-time crash."""
     model = nn.Module()
     model.rotary = _LayerTypesRotary()
 

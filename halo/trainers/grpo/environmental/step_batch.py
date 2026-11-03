@@ -34,7 +34,6 @@ from halo.trainers.token_metrics import effective_loss_mask
 
 logger = logging.getLogger(__name__)
 
-# The batch key the routing-replay masks ride under, row-aligned with the rest of the batch.
 ROUTING_MASKS_KEY = "routing_masks"
 # Consecutive steps with no valid episode anywhere that halt the run: one can be a grader blip, a second
 # means the rollout path is down.
@@ -43,8 +42,7 @@ EMPTY_ROLLOUT_STEP_LIMIT = 2
 
 @dataclasses.dataclass(frozen=True)
 class BatchRows:
-    """This step's rollouts and how they map onto its rows: each trajectory's row count (past
-    ``rollout_results`` by an eval round's padding trajectories), this rank's dummy rows, the per-turn split."""
+    """``turns_per_traj`` runs past ``rollout_results`` by an eval round's padding trajectories."""
 
     rollout_results: list[RolloutResult]
     turns_per_traj: list[int]
@@ -52,19 +50,17 @@ class BatchRows:
     per_turn: bool
 
     def to_rows(self, values: torch.Tensor, dummy_fill: float = 0) -> torch.Tensor:
-        """Per-trajectory ``values`` laid out over this step's rows (see :func:`expand_traj_to_rows`)."""
         return expand_traj_to_rows(values, self.turns_per_traj, self.num_dummy_rows, self.per_turn, dummy_fill)
 
     def traj_row_ids(self, device: torch.device) -> torch.Tensor:
-        """Each row's index into ``rollout_results``; -1 on the padding and dummy rows, which are no rollout's."""
+        """-1 on the padding and dummy rows, which are no rollout's."""
         ids = torch.arange(len(self.rollout_results), device=device)
         return self.to_rows(F.pad(ids, (0, len(self.turns_per_traj) - len(ids)), value=-1), dummy_fill=-1)
 
 
 @dataclasses.dataclass(frozen=True)
 class StepRows:
-    """This step's rows stacked into the padded tensors every forward reads; ``completion_mask`` is
-    attention-valid, ``tool_mask`` the loss mask."""
+    """``completion_mask`` is attention-valid, ``tool_mask`` the loss mask."""
 
     prompt_ids: torch.Tensor
     completion_ids: torch.Tensor
@@ -95,9 +91,8 @@ class StepScores:
 
 
 class BatchBuildFence(DeferredRankFailure):
-    """The rank-uniform fence of the batch construction, reused every round: a failure is recorded, never
-    raised on one rank (which would strand its peers in the next collective), and :meth:`reject` raises it
-    on every rank, naming the first failing rank."""
+    """A failure is recorded, never raised on one rank (which would strand its peers); :meth:`reject` raises it on
+    every rank, naming the first failing rank."""
 
     def __init__(self) -> None:
         super().__init__("Environmental GRPO batch construction", exc_type=ValueError)
@@ -124,18 +119,15 @@ def _row_on_device(row: TurnRow, device: torch.device) -> TurnRow:
 
 
 def rollout_valid_mask(rollout_results: list[RolloutResult], device: torch.device) -> torch.Tensor:
-    """Per-rollout bool mask of :attr:`RolloutResult.counts_toward_baseline`."""
     return torch.tensor([r.counts_toward_baseline for r in rollout_results], device=device, dtype=torch.bool)
 
 
 def batch_reward_std(rewards: torch.Tensor) -> float:
-    """Sample std of a gathered reward batch; 0.0 for a single reward, where ``Tensor.std()`` returns NaN."""
+    """``Tensor.std()`` returns NaN for a single reward."""
     return rewards.std().item() if rewards.numel() > 1 else 0.0
 
 
 class StepBatchMixin:
-    """Builds one step's training batch for the environmental GRPO trainer."""
-
     def _build_training_tensors(
         self,
         rollout_results: list[RolloutResult],
@@ -144,12 +136,8 @@ class StepBatchMixin:
         num_padding: int,
         reasoning_tokens: list[list[int]],
     ) -> dict[str, torch.Tensor]:
-        """One step's training batch from its rollouts, each one's per-turn ``reasoning_tokens`` and the
-        ``num_padding`` inert trajectories that pad an eval split's final round (:meth:`eval_split_rows`).
-
-        The phases run in this order on every rank, and every collective inside them sits behind a config- or
-        mode-derived gate, never a local-data one: a rank-dependent skip or early-out desyncs the world.
-        """
+        """The phases run in this order on every rank, and every collective sits behind a config- or mode-derived gate:
+        a rank-dependent skip or early-out desyncs the world."""
         rows, turns_per_traj = self._rows_for_step(rollout_results, num_padding, device)
         # After tokenizing: an episode the template cannot re-render leaves the baseline the waiver reads.
         rewards = F.pad(self._build_rollout_rewards(rollout_results, reasoning_tokens, device, mode), (0, num_padding))
@@ -220,9 +208,8 @@ class StepBatchMixin:
     def _rows_for_step(
         self, rollout_results: list[RolloutResult], num_padding: int, device: torch.device
     ) -> tuple[list[TurnRow], list[int]]:
-        """This step's training rows on ``device`` and how many each trajectory contributed: one per assistant
-        turn under ``train_on_sampled_tokens``, else one re-rendered row, and one inert row per padding
-        trajectory."""
+        """One row per assistant turn under ``train_on_sampled_tokens``, else one re-rendered row, and one inert row
+        per padding trajectory."""
         padding = [single_trajectory_row(self._masked_trajectory_tensors())] * num_padding
         per_trajectory = self._tokenize_step_rows(rollout_results) + padding
         rows = [_row_on_device(row, device) for turn_rows in per_trajectory for row in turn_rows]
@@ -231,9 +218,8 @@ class StepBatchMixin:
     def _pad_rows_across_ranks(
         self, rows: list[TurnRow], engine_logps: list[torch.Tensor | None] | None, device: torch.device
     ) -> int:
-        """COLLECTIVE under ``train_on_sampled_tokens``. Append masked dummy rows (no engine score each) up to the
-        world's largest row count, rounded up to a multiple of ``steps_per_generation``, and return how many: the
-        per-turn split gives each rank a variable row count, unequal forwards deadlock, and TRL drops a remainder."""
+        """COLLECTIVE under ``train_on_sampled_tokens``. Append masked dummy rows up to the world's largest row count,
+        rounded up to a multiple of ``steps_per_generation``: unequal forwards deadlock, and TRL drops a remainder."""
         num_dummy_rows = 0
         if self.async_config.train_on_sampled_tokens:
             (global_rows,) = rank_max([len(rows)])
@@ -247,8 +233,7 @@ class StepBatchMixin:
         return num_dummy_rows
 
     def _stack_rows(self, rows: list[TurnRow], device: torch.device) -> StepRows:
-        """The step's rows padded into the batch tensors; the sampling log-probs under the IS correction only,
-        a config-derived gate every rank takes alike."""
+        """Sampling log-probs under the IS correction only, a config-derived gate every rank takes alike."""
         prompt_ids = pad([row.prompt_ids for row in rows], padding_value=self.pad_token_id, padding_side="left")
         completion_ids = pad(
             [row.completion_ids for row in rows], padding_value=self.pad_token_id, padding_side="right"
@@ -297,9 +282,8 @@ class StepBatchMixin:
         engine_logps: list[torch.Tensor | None] | None,
         mode: str,
     ) -> StepScores:
-        """The step's no-grad scores: the policy recompute, the IS weights with the engine's forced closes
-        zeroed, and the reference log-probs clamped against the policy's. Both forwards run the rows in the
-        length deal's order, every score handed back in batch order."""
+        """The policy recompute, the IS weights with forced closes zeroed, and the reference log-probs clamped against
+        the policy's. Both forwards run in the deal's order; scores come back in batch order."""
         order = self._no_grad_row_order(step.attention_mask, mode)
         recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
             step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, rollout_routing_masks, mode, order
@@ -338,12 +322,10 @@ class StepBatchMixin:
         mode: str,
         order: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """The no-grad log-prob recompute and the routing mask the gradient forward replays, both in batch
-        order with the rows forwarded in ``order`` (batch order when ``None``). The gate is config-derived, so
-        the forward and its EP dispatch are entered by every rank or by none."""
+        """Both in batch order. The gate is config-derived, so the forward and its EP dispatch are entered by every
+        rank or by none."""
         # Recomputed once and chunked: a full-batch DeepEP dispatch overflows its 32-bit limit.
         recompute_logps = None
-        # Either the recompute forward below captures the mask, or the engine already supplied it.
         routing_masks = rollout_routing_masks
         if self._runs_logprob_recompute:
             ids, mask = prompt_completion_ids, attention_mask
@@ -385,13 +367,10 @@ class StepBatchMixin:
         logits_to_keep: int,
         order: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
-        """Reference-model log-probs for the KL penalty in batch order, the rows forwarded in ``order``
-        (``None`` when ``beta == 0``)."""
         if self.beta == 0.0:
             return None
         if order is not None:
             prompt_completion_ids, attention_mask = prompt_completion_ids[order], attention_mask[order]
-        # Chunked: a whole-batch DeepEP dispatch exceeds its 32-bit limit on long trajectories.
         with self._reference_policy() as model:
             return self._scored_rows(model, prompt_completion_ids, attention_mask, logits_to_keep, order)
 
@@ -412,8 +391,7 @@ class StepBatchMixin:
     def _step_advantages(
         self, rewards: torch.Tensor, rows: BatchRows, num_padding: int, num_generations: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """``(episode_state, traj_advantages, local_advantages)``; the state is 1 valid, 0 invalid, -1 an eval
-        round's padding."""
+        """The state is 1 valid, 0 invalid, -1 an eval round's padding."""
         episode_state = F.pad(
             rollout_valid_mask(rows.rollout_results, rewards.device).to(torch.int8), (0, num_padding), value=-1
         )
@@ -429,9 +407,8 @@ class StepBatchMixin:
     def _verify_step_has_valid_episodes(
         self, rollout_results: list[RolloutResult], gathered_valid: torch.Tensor
     ) -> None:
-        """Warn on a step where no episode in the world survived the rollout, and raise on the
-        :data:`EMPTY_ROLLOUT_STEP_LIMIT`-th in a row: it trains a zero gradient while logging ``loss=0``. Judged
-        on the world-gathered ``gathered_valid``, so every rank decides alike."""
+        """Warn on a step where no episode in the world survived, and raise on the :data:`EMPTY_ROLLOUT_STEP_LIMIT`-th
+        in a row: it trains a zero gradient while logging ``loss=0``."""
         if gathered_valid.any():
             self._empty_rollout_steps = 0
             return
@@ -472,13 +449,12 @@ class StepBatchMixin:
         advantages: torch.Tensor,
         mode: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """``(completion_mask, tool_mask, loss_mask, num_items_in_batch)``: the step's excluded trajectories
-        (train mode) masked out of both loss masks, a ``negative_only`` row kept only under a negative advantage,
-        and the DAPO normalizer, gathered world-wide in every mode."""
+        """Excluded trajectories (train mode) leave both loss masks, a ``negative_only`` row stays only under a
+        negative advantage, and the DAPO normalizer is gathered world-wide in every mode."""
         world = self._world_metrics
         completion_mask, negative_only, device = step.completion_mask, step.negative_only, step.completion_mask.device
         (tool_mask,) = narrow_loss_masks(negative_only & (advantages >= 0), step.tool_mask)
-        # Masking, not deleting: excluded rows still run the forward so every rank's collective sequence matches.
+        # Excluded rows still run the forward, so every rank's collective sequence matches.
         if mode == "train":
             # An env-invalid episode's forced failure-reward advantage is noise, so its tokens go too.
             drop_traj = ~valid_mask
@@ -505,7 +481,6 @@ class StepBatchMixin:
         # After every drop: a kept row is one whose tokens reach the normalizer below.
         kept = negative_only & tool_mask.any(dim=1)
         world.fraction("sampling/untrainable_rows_trained_frac", kept.sum(), negative_only.sum())
-        # DAPO normalizes by the gathered-global loss-token count / num_processes; a local count mis-scales.
         loss_mask = effective_loss_mask({"completion_mask": completion_mask, "tool_mask": tool_mask})
         num_items_in_batch = gathered_num_items(loss_mask, self.accelerator.gather)
         return completion_mask, tool_mask, loss_mask, num_items_in_batch
@@ -518,8 +493,7 @@ class StepBatchMixin:
         ratio: torch.Tensor,
         negative_only: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """COLLECTIVE. Record the step's token mass; under ``balance_token_mass`` both advantage sets come back
-        balanced, the per-row ones the loss reads and the per-trajectory ones the completions record reports."""
+        """COLLECTIVE. Under ``balance_token_mass`` both advantage sets come back balanced."""
         balance = record_token_mass(
             local_advantages,
             loss_mask,
@@ -547,8 +521,7 @@ class StepBatchMixin:
         num_generations: int,
         mode: str,
     ) -> torch.Tensor:
-        """COLLECTIVE. Record the step's metrics, run the trust-region breaker, write the completions record and
-        fold the rank-local counts; returns the per-row advantages the breaker left."""
+        """COLLECTIVE. Returns the per-row advantages the breaker left."""
         rollout_results = rows.rollout_results
         # Padding fills whole groups, so dropping its rows keeps every episode's group aligned.
         episodes = gathered_state >= 0
@@ -576,9 +549,8 @@ class StepBatchMixin:
     def _log_headline_rewards(
         self, gathered_rewards: torch.Tensor, gathered_valid: torch.Tensor, num_generations: int, mode: str
     ) -> None:
-        """``reward``, its global ``reward_std`` and the ``reward/within_group_std`` the advantage reads, over the
-        gathered VALID episodes only: an invalid episode's forced failure reward would read a grader outage as
-        a policy collapse."""
+        """Over the gathered VALID episodes only: an invalid episode's forced failure reward would read a grader outage
+        as a policy collapse."""
         valid_rewards = gathered_rewards[gathered_valid]
         if valid_rewards.numel() == 0:
             return
@@ -598,9 +570,7 @@ class StepBatchMixin:
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
     ) -> None:
-        """Record the step's solve-group split over this rank's groups (an episode outside the baseline or
-        without a verdict does not vote), an eval round's success@k, and the covariance of each loss token's
-        pre-update log-prob with its row's advantage."""
+        """An episode outside the baseline or without a verdict does not vote."""
         world = self._world_metrics
         solved = [solve_verdict(r.metrics) if r.counts_toward_baseline else None for r in rollout_results]
         groups, all_pass, all_fail, any_pass = group_solve_counts(solved, num_generations)

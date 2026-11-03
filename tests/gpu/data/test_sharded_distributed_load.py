@@ -1,25 +1,8 @@
 #!/usr/bin/env python
-"""Distributed sharded-dataset load correctness under REAL torch.distributed.
+"""Sharded-dataset loading under real torch.distributed: probe agreement, exact partition, equal lengths.
 
-The CPU suite checks the shard-partition math single-process and stubs the collectives. This
-test exercises the parts that only a multi-process / multi-node run actually executes — the same
-code path a multi-node training job hits when it loads a pre-sharded dataset (one disjoint slice
-per data-parallel rank):
-
-1. ``is_sharded_dataset_across_ranks`` — all ranks agree the dataset is sharded, AND the
-   ``all_reduce(MAX)`` recovers the agreed "sharded" answer when ONE rank's probe flakes to
-   False (mimics a per-rank S3 credential/throttling error that would otherwise split ranks
-   onto sharded vs full-dataset paths and hang).
-2. ``ShardedDatasetLoader`` exact partition — every example is loaded exactly once across ranks
-   (no gap silently dropping data, no overlap silently double-training it).
-3. ``_equalize_presharded_length`` — ``all_reduce(MIN)`` truncates all ranks to the global
-   minimum so every DP rank runs the same number of steps (else the next grad all-reduce hangs).
-4. ``_equalize_presharded_length`` zero-rank guard — raises (not silently trains empty) when a
-   rank holds zero examples (num_shards < data_parallel_size).
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/data/test_sharded_distributed_load.py
+A per-rank S3 credential or throttling flake must not split ranks onto sharded and full paths, which hangs. Unequal
+lengths hang the next grad all-reduce.
 """
 
 import os
@@ -39,24 +22,21 @@ from tests.common.harness import gpu_test_main
 from tests.common.rank_log import log
 
 N_EXAMPLES = 100
-N_SHARDS = 17  # > world_size at every supported nproc (2/4/8) so the partition stays non-trivial
+N_SHARDS = 17  # Above world_size at every nproc (2/4/8), so the partition stays non-trivial.
 
 
 def _broadcast_path(rank: int, world_size: int, path: str | None) -> str:
-    """Share rank 0's chosen dataset dir with all ranks (single shared filesystem)."""
     gathered = [None] * world_size
     dist.all_gather_object(gathered, path if rank == 0 else None)
     return gathered[0]
 
 
 def test_coordinated_probe(rank: int, world_size: int, path: str) -> bool:
-    """All ranks agree 'sharded'; all_reduce(MAX) recovers it when rank 0's probe flakes."""
     if not is_sharded_dataset_across_ranks(path):
         log(f"FAIL: rank {rank} did not detect a sharded dataset at {path}", rank=rank)
         return False
 
-    # Simulate a per-rank flake: rank 0's local probe returns False. The all_reduce(MAX) must
-    # still yield True on every rank so no rank diverges onto the full-dataset path.
+    # Rank 0's probe flakes to False; all_reduce(MAX) must still yield True, so no rank diverges onto the full path.
     orig = ShardedDatasetLoader.is_sharded_dataset
     try:
         if rank == 0:
@@ -72,7 +52,7 @@ def test_coordinated_probe(rank: int, world_size: int, path: str) -> bool:
 
 
 def test_exact_partition(rank: int, world_size: int, path: str) -> bool:
-    """Union of all ranks' loaded example ids == every id exactly once (no gap, no overlap)."""
+    """Every id exactly once: no gap, no overlap."""
     loader = ShardedDatasetLoader(dataset_path=path, dp_rank=rank, dp_size=world_size)
     ds = loader.load_split("train")
     my_ids = sorted(int(x) for x in ds["example_id"]) if len(ds) else []
@@ -97,8 +77,7 @@ def test_exact_partition(rank: int, world_size: int, path: str) -> bool:
 
 
 def test_equalize_to_global_min(rank: int, world_size: int) -> bool:
-    """_equalize_presharded_length truncates every rank to the global-minimum length."""
-    lengths = [10 + r for r in range(world_size)]  # 10, 11, 12, ...
+    lengths = [10 + r for r in range(world_size)]
     local = Dataset.from_dict({"x": list(range(lengths[rank]))})
     equalized = DataParallelLoaderMixin._equalize_presharded_length(None, local)
     if len(equalized) != min(lengths):
@@ -109,7 +88,6 @@ def test_equalize_to_global_min(rank: int, world_size: int) -> bool:
 
 
 def test_zero_rank_raises(rank: int, world_size: int) -> bool:
-    """A rank holding zero examples must raise (no silent empty training)."""
     n = 0 if rank == world_size - 1 else 5
     ds = Dataset.from_dict({"x": list(range(n))})
     try:
@@ -126,7 +104,7 @@ def run(ctx) -> dict:
     path = os.path.join(base, "ds") if ctx.rank == 0 else None
     path = _broadcast_path(ctx.rank, ctx.world_size, path)
 
-    # Rank 0 writes a synthetic id-tagged sharded dataset; all ranks then load disjoint slices.
+    # Rank 0 writes an id-tagged sharded dataset; all ranks then load disjoint slices.
     if ctx.rank == 0:
         ctx.on_teardown(lambda: shutil.rmtree(base, ignore_errors=True))
         shutil.rmtree(base, ignore_errors=True)

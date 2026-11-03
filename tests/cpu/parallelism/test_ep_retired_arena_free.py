@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the DeepEP arenas a grow retires are freed once a step's backwards are done.
-
-A grow retires the old ``ElasticBuffer`` instead of freeing it, since an in-flight microbatch's backward may still
-name it; each one is ``ep_size × tokens/rank × (2·hidden + 4·top_k)`` of device memory, which a run that grows
-several times would otherwise hold until teardown. The trainer frees the retired buffers at the end of every
-optimizer step's last backward, a skipped step's included, and after every pipeline schedule's step. Freeing is a
-collective over the arena's group: every rank of a group retired the same buffers, as the capacity a grow
-reaches is the group's all-reduced maximum, so all of them free the same ones. DeepEP is a recorder here.
-
-Run: python tests/cpu/parallelism/test_ep_retired_arena_free.py
-"""
+"""The DeepEP arenas a grow retires are freed once a step's backwards are done, not held until teardown. Freeing is a
+collective, and every rank of a group retired the same buffers since capacity is the group's all-reduced max."""
 
 from types import SimpleNamespace
 
@@ -30,7 +21,7 @@ GRAD_ACCUM = 3
 
 
 class _Buffer:
-    """Stands in for DeepEP's ElasticBuffer: numbered in build order, logging each destroy."""
+    """Numbered in build order, logging each destroy."""
 
     built: list = []
     destroyed: list = []
@@ -90,7 +81,7 @@ class _Backward:
 
 
 class _Trainer(DistributedTrainerMixin, _Backward):
-    """``DistributedTrainerMixin.training_step`` with the per-batch accounting it runs around the step stubbed."""
+    """The per-batch accounting around the step is stubbed."""
 
     def __init__(self, *, pipeline: bool):
         self.accelerator = SimpleNamespace(sync_gradients=True)

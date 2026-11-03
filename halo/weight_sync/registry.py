@@ -8,8 +8,7 @@ import_package_modules(_clients)
 
 
 def _client_registry() -> dict[str, type[WeightSyncClientBase]]:
-    """Backend key → client class, from the subclasses in ``clients`` only: a test double or a second copy
-    of the tree capturing a key would otherwise replace the production client silently."""
+    """``clients`` subclasses only, as a test double or second tree capturing a key would replace the real client."""
     registry: dict[str, type[WeightSyncClientBase]] = {}
     for cls in iter_subclasses(WeightSyncClientBase):
         if not cls.__module__.startswith(f"{_clients.__name__}."):
@@ -26,12 +25,10 @@ def _client_registry() -> dict[str, type[WeightSyncClientBase]]:
 
 
 def rollout_backends() -> list[str]:
-    """Every selectable rollout backend."""
     return sorted(_client_registry())
 
 
 def resolve_weight_sync_client(backend: str) -> type[WeightSyncClientBase]:
-    """The weight-sync client class for ``backend``, raising on an unknown one."""
     registry = _client_registry()
     try:
         return registry[backend]

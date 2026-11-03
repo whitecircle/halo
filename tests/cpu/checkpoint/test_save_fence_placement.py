@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""Where the checkpoint fence may start: after the save's collectives, never around them.
-
-``DeferredRankFailure`` turns a rank-local write failure into a uniform raise by recording it and
-closing the region with an ``all_gather_object``. That is only sound for a region a rank can skip
-without skipping a collective. HF's ``_save_checkpoint`` is not such a region: it calls this
-toolkit's own ``save_model`` first — the strategy gathers, the barriers, PP's index exchange — and
-only then makes its writer-local tail writes (rank-0 ``optimizer.pt``, RNG, ``trainer_state.json``).
-Fencing the whole call means a rank whose disk fills in the FIRST half jumps straight to the guard's
-gather while its peers block in an expert gather it never entered: mismatched collectives and a
-watchdog timeout, which is the exact failure the fence exists to prevent.
-
-So the mixin splits it: ``save_model`` records that its collectives are behind it, and
-``_save_checkpoint`` defers only failures that carry that mark. Anything earlier is re-raised here
-and now, rank-locally — the launcher tears the job down instead of the world timing out one rank at
-a time. Both halves are pinned below, plus the mark on both payload branches of the mixin's
-``save_model``, the ``_write_model_payload`` seam a trainer with its own layout overrides, and a
-structural sweep requiring any ``save_model`` override to mark it too.
-
-    python tests/cpu/checkpoint/test_save_fence_placement.py
-"""
+"""The checkpoint fence starts after the save's collectives, since a rank skipping one for the guard's gather times
+the world out. Earlier failures re-raise rank-locally."""
 
 import ast
 from types import SimpleNamespace
@@ -37,11 +19,8 @@ from tests.common.repo import REPO_ROOT
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
-    """The mixin's ``_save_checkpoint`` over HF's: the toolkit's ``save_model`` (world collectives),
-    then the base's writer-local tail — the shape the fence has to split. ``save_model`` is stubbed to
-    the contract the real one holds: it sets the collectives-done mark at its end, and raising before
-    that stands for a failure inside the gather region. The tail's first write, the rank-0
-    ``optimizer.pt``, fails on ``tail_write_fails``."""
+    """``save_model`` is stubbed to the real contract: it sets the collectives-done mark at its end, and a raise
+    before that is a failure inside the gather region."""
 
     def __init__(self, run_dir, *, save_model_fails=False, tail_write_fails=False):
         self.run_dir = run_dir
@@ -70,7 +49,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
 
 
 def _recording_guards(monkeypatch) -> list:
-    """Every guard the save builds, each recording whether its COLLECTIVE rejection was reached."""
+    """Each records whether its COLLECTIVE rejection was reached."""
     created = []
 
     class _Guard(DeferredRankFailure):
@@ -103,8 +82,7 @@ def test_a_failure_inside_the_collective_region_raises_immediately(tmp_path, mon
 
 
 def test_a_failure_in_the_writer_local_tail_is_made_uniform(tmp_path, monkeypatch):
-    """The half the fence is FOR: an ENOSPC in the base's own rank-local writes reaches every rank
-    through the collective rejection instead of raising on the writer alone."""
+    """An ENOSPC in the base's rank-local writes reaches every rank."""
     guards = _recording_guards(monkeypatch)
     trainer = _Trainer(str(tmp_path), tail_write_fails=True)
 
@@ -115,7 +93,7 @@ def test_a_failure_in_the_writer_local_tail_is_made_uniform(tmp_path, monkeypatc
 
 
 class _SaveModelTrainer(DistributedTrainerMixin):
-    """The REAL ``save_model``, with only its trainer-state factories stubbed."""
+    """Only its trainer-state factories are stubbed."""
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -142,8 +120,7 @@ def test_save_model_marks_its_collectives_done_on_the_strategy_exit(tmp_path, mo
 
 
 def test_save_model_marks_its_collectives_done_on_the_adapter_exit(tmp_path, monkeypatch):
-    """The ladder's PEFT rung writes adapters only; unmarked, every adapter run's saves would
-    take the immediate-raise path even for a failure the fence could have made uniform."""
+    """Unmarked, every adapter run's saves take the immediate-raise path."""
     saved = []
     monkeypatch.setattr(save_mod, "find_peft_model", lambda model: object())
     monkeypatch.setattr(save_mod, "save_peft_adapters", lambda ctx, out: saved.append(out))
@@ -156,9 +133,7 @@ def test_save_model_marks_its_collectives_done_on_the_adapter_exit(tmp_path, mon
 
 
 def test_a_payload_override_keeps_the_shared_steps_around_it(tmp_path, monkeypatch):
-    """A trainer with its own model layout overrides ``_write_model_payload`` alone: the ladder is
-    not reached, while the balancing sidecar before the payload and the collectives mark after it
-    stay the mixin's, in that order on every rank."""
+    """The balancing sidecar before the payload and the mark after it stay the mixin's, on every rank."""
     order = []
     monkeypatch.setattr(checkpointing_mod, "save_checkpoint", lambda ctx, out: pytest.fail("ran the mixin's ladder"))
     monkeypatch.setattr(checkpointing_mod, "save_balancing_biases", lambda *args, **kwargs: order.append("sidecar"))
@@ -177,9 +152,7 @@ def test_a_payload_override_keeps_the_shared_steps_around_it(tmp_path, monkeypat
 
 
 def test_every_save_model_marks_its_collectives_done():
-    """Structural, over the whole trainer tree: a ``save_model`` that replaces the mixin's still
-    gathers, and an unmarked one silently downgrades every deferred tail failure of that trainer to a
-    rank-local raise."""
+    """An unmarked override silently downgrades every deferred tail failure to a rank-local raise."""
     trainers = REPO_ROOT / "halo" / "trainers"
     assert trainers.is_dir(), f"premise: {trainers} must exist, else this test scans nothing"
     unmarked = []

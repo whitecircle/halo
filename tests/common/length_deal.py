@@ -1,8 +1,5 @@
-"""Stand-ins for the length-ordered deal's suites: the environmental trainer over its real scoring path and TRL's
-real buffer and loss, built without ``__init__``, and ragged generation rounds.
-
-A round's ``row_id`` follows each row through a permutation; TRL's loss reads none of it.
-"""
+"""Stand-ins for the length-ordered deal's suites: the environmental trainer's scoring path and TRL's real buffer and
+loss, built without ``__init__``."""
 
 import time
 import types
@@ -55,8 +52,8 @@ def world_accelerator() -> types.SimpleNamespace:
 def ragged_round(
     prompt_lens: list[int], completion_lens: list[int], *, vocab: int, seed: int, device="cpu"
 ) -> dict[str, torch.Tensor]:
-    """A generation round of left-padded prompts and right-padded completions of the given real lengths, with
-    centred advantages and an IS ratio, laid out as the trainer's batch build hands it to TRL."""
+    """A round of left-padded prompts and right-padded completions, with centred advantages and an IS ratio, as the
+    batch build hands it to TRL."""
     gen = torch.Generator().manual_seed(seed)
     rows, prompt_width, completion_width = len(prompt_lens), max(prompt_lens), max(completion_lens)
     prompt_mask = (torch.arange(prompt_width) >= prompt_width - torch.tensor(prompt_lens)[:, None]).long()
@@ -108,8 +105,8 @@ def scoring_host(model, ref_model, *, chunks: int, accelerator, beta: float = 0.
 
 
 def loss_host(model, *, chunks: int, accelerator, loss_type: str = "dapo", max_completion_length: int = 64):
-    """:func:`scoring_host` with TRL's buffer and ``loss_type`` loss state, IS correction on; ``luspo`` at the
-    sequence-level IS it requires, ``dr_grpo`` normalizing by ``max_completion_length``."""
+    """:func:`scoring_host` with TRL's buffer and ``loss_type`` state, IS on; ``luspo`` at sequence-level IS,
+    ``dr_grpo`` by ``max_completion_length``."""
     host = scoring_host(model, None, chunks=chunks, accelerator=accelerator)
     host.args.sapo_temperature_pos, host.args.sapo_temperature_neg = 1.0, 1.05
     host._step = 0
@@ -130,8 +127,8 @@ def loss_host(model, *, chunks: int, accelerator, loss_type: str = "dapo", max_c
 
 
 def train_round(host, batch: dict, *, deal: bool, seed: int = 7) -> tuple[float, dict[int, torch.Tensor]]:
-    """One round through TRL's buffer and loss, backward per micro-batch: ``(summed loss, row id -> the loss
-    forward's per-token log-probs)``. The gradients are left on the model."""
+    """One round through TRL's buffer and loss, backward per micro-batch: ``(summed loss, row id -> per-token
+    log-probs)``."""
     host._orders_rows_by_length = deal
     host._step, host._buffered_inputs = 0, None
     host._generate_and_score_completions = lambda _inputs: dict(batch)
@@ -168,8 +165,8 @@ def with_world_normalizer(batch: dict) -> dict:
 
 
 def timed_no_grad_pass(host, batch: dict, order: torch.Tensor | None, repeats: int) -> float:
-    """The best wall time of ``repeats`` no-grad recomputes of ``batch`` with the rows forwarded in ``order``,
-    every rank fenced in and out."""
+    """The best wall time of ``repeats`` no-grad recomputes with rows forwarded in ``order``, every rank fenced in and
+    out."""
     ids, mask, keep = stacked(batch)
     best = float("inf")
     for _ in range(repeats):

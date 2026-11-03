@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for ``reduce_grads_bucketed`` (``halo/distributed/grad_reduce.py``) on a one-rank gloo group.
-
-A one-rank all-reduce is the identity, so the numerics pin the framing around the collective: the
-chunking, the divisor, the fp32 upcast + write-back, and the scatter-back into every gradient in
-place. The lone-chunk case is load-bearing at scale — every fused expert gradient of a 100B+ MoE is
-above the bucket cap and forms a chunk of its own — so it must be reduced in its own storage rather
-than through a flat copy and back.
-
-Run: ``pytest tests/cpu/parallelism/test_grad_reduce_bucketed.py``.
-"""
+"""``reduce_grads_bucketed`` (``halo/distributed/grad_reduce.py``) framing on a one-rank gloo group. Every fused
+expert grad of a 100B+ MoE is its own chunk, reduced in its own storage."""
 
 import pytest
 import torch
@@ -29,14 +21,13 @@ def one_rank_group(tmp_path):
 
 @pytest.fixture
 def tiny_bucket(monkeypatch):
-    """A 1 KiB bucket cap so a handful of small tensors exercise every chunking branch."""
+    """Small tensors exercise every chunking branch."""
     monkeypatch.setattr(grad_reduce, "BUCKET_MAX_BYTES", 1024)
 
 
 def _grads(dtype: torch.dtype) -> list[torch.Tensor]:
     torch.manual_seed(0)
-    # 16 + 16 elements fit one 1 KiB chunk (bf16: 64 B; fp32: 128 B); the 4096-element tensor is a
-    # chunk of its own on either dtype; the trailing pair opens a third chunk.
+    # 16 + 16 elements fit one 1 KiB chunk; the 4096-element tensor is its own; the trailing pair opens a third.
     shapes = [(4, 4), (2, 8), (64, 64), (3, 5), (5, 3)]
     return [torch.randn(*shape, dtype=dtype) for shape in shapes]
 
@@ -90,18 +81,18 @@ def test_multi_tensor_chunk_is_flattened_and_scattered_back(one_rank_group):
     pending = _launch_flat_chunk(grads, op=dist.ReduceOp.SUM, group=None, fp32=False)
     assert pending.scatter and pending.flat.numel() == 32
     assert pending.flat.data_ptr() not in {g.data_ptr() for g in grads}
-    pending.flat.mul_(2)  # stands in for the peers' contributions
+    pending.flat.mul_(2)  # Stands in for the peers' contributions.
     grad_reduce._finish_flat_chunk(pending, divisor=None)
     torch.testing.assert_close(torch.cat([g.reshape(-1) for g in grads]), pending.flat)
 
 
 def test_non_contiguous_lone_grad_still_takes_the_flat_path(one_rank_group):
     base = torch.randn(8, 8, dtype=torch.bfloat16)
-    grad = base.t()  # non-contiguous view: reducing it "in place" through a flat view is impossible
+    grad = base.t()  # A non-contiguous view cannot be reduced in place through a flat view.
     pending = _launch_flat_chunk([grad], op=dist.ReduceOp.SUM, group=None, fp32=False)
     assert pending.scatter and pending.flat.is_contiguous() and pending.flat.data_ptr() != base.data_ptr()
     grad_reduce._finish_flat_chunk(pending, divisor=2)
-    torch.testing.assert_close(base, (base * 1).to(torch.bfloat16))  # base was written through the view
+    torch.testing.assert_close(base, (base * 1).to(torch.bfloat16))  # base was written through the view.
     torch.testing.assert_close(grad, pending.flat.view_as(grad))
 
 

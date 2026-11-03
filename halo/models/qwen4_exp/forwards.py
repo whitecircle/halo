@@ -1,9 +1,5 @@
-"""The upstream Qwen3.8-Flash-Next (``qwen4_exp``) forwards the toolkit replaces at load, and their installers.
-
-Each installer is idempotent and checks the upstream signatures it replaces or re-derives, so a transformers release
-that changed one fails at load instead of running a replacement written for another forward. The forwards apply to
-every build once installed; only the n-gram table's placement follows the config stamp.
-"""
+"""The upstream Qwen3.8-Flash-Next (``qwen4_exp``) forwards the toolkit replaces at load. Each installer checks the
+upstream signatures it replaces, so a transformers release that changed one fails at load."""
 
 from __future__ import annotations
 
@@ -32,20 +28,16 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# The n-gram table's checkpoint keys, which a host-table build leaves to the table attach: the hub's shards and
-# the embedding weight transformers concatenates them into.
+# A host-table build leaves these to the table attach: the hub's shards and the weight transformers fuses them into.
 _NGRAM_TABLE_KEY_PATTERN = r"ngram_embedding\.(?:shard_\d+\.)?weight$"
-# Marks the installed n-gram embedding forward.
 _HOST_TABLE_ATTR = "_halo_host_ngram_table"
-# Marks the installed document forwards.
 _DOCUMENT_FORWARDS_ATTR = "_halo_document_forwards"
 # The per-layer-type mask mapping upstream's model forward builds and reads, keyed by its ``layer_types``.
 _MASK_KINDS = ("indexed_attention", "linear_attention")
 
 
 def apply_qwen4_exp_patches(model_config) -> None:
-    """Apply every Qwen4-Exp patch and stamp ``model_config`` (run-scoped) so its n-gram tables build in host
-    memory."""
+    """Stamps ``model_config`` (run-scoped) so its n-gram tables build in host memory."""
     patch_qwen4_exp_ngram_embedding()
     patch_qwen4_exp_document_forwards()
     set_config_field_run_scoped(model_config, EXTERNAL_TABLES_STAMP, True)
@@ -61,8 +53,7 @@ def _verify_upstream_parameters(function, expected: tuple[str, ...], patch: str)
 
 
 def _host_table_forward(module: nn.Module, input_ids: torch.Tensor, past_key_values) -> torch.Tensor:
-    """Upstream's ``Qwen4ExpTextNGramEmbedding.forward`` over a host table: the same history, cache update and
-    ids, the rows from the table's own lookup."""
+    """Upstream's forward over a host table: the same history, cache update and ids, the rows from its own lookup."""
     input_ids = input_ids.long()
     resumed = past_key_values is not None and past_key_values.has_previous_state(module.layer_idx, state_idx=2)
     if resumed:
@@ -82,12 +73,8 @@ def _host_table_forward(module: nn.Module, input_ids: torch.Tensor, past_key_val
 
 
 def patch_qwen4_exp_ngram_embedding() -> None:
-    """Give ``Qwen4ExpTextNGramEmbedding`` a :class:`HostNGramTable` in place of its ``nn.Embedding`` when its
-    config carries the external-tables stamp, the forward that reads it, and the model classes an unexpected-key
-    pattern for the table keys the attach reads instead and a ``save_pretrained`` that refuses a model holding the
-    table (:func:`~halo.models.external_tables.reject_state_dict_save`). An unstamped build keeps the stock module and
-    forward.
-    """
+    """A :class:`HostNGramTable` in place of the ``nn.Embedding`` under the external-tables stamp, and a
+    ``save_pretrained`` refusing a model holding the table. An unstamped build keeps the stock module and forward."""
     embedding_cls = qwen4_exp_modeling.Qwen4ExpTextNGramEmbedding
     if getattr(embedding_cls.forward, _HOST_TABLE_ATTR, False):
         return
@@ -141,7 +128,6 @@ def patch_qwen4_exp_ngram_embedding() -> None:
 
 
 def document_forwards_installed() -> bool:
-    """Whether :func:`patch_qwen4_exp_document_forwards` replaced the model, decoder-layer and attention forwards."""
     return getattr(qwen4_exp_modeling.Qwen4ExpTextModel.forward, _DOCUMENT_FORWARDS_ATTR, False)
 
 
@@ -157,17 +143,14 @@ def _verify_upstream_mask_kinds(forward) -> None:
 
 
 def _text_position_ids(position_ids: torch.Tensor | None) -> torch.Tensor | None:
-    """The text positions upstream's model forward reads: a ``[batch, sequence]`` tensor itself, the text row of a
-    ``[4 | 1, batch, sequence]`` one, none for the three M-RoPE rows alone or no tensor."""
+    """A ``[batch, sequence]`` tensor itself, the text row of a ``[4 | 1, batch, sequence]`` one, else none."""
     if position_ids is None or position_ids.ndim == 2:
         return position_ids
     return position_ids[0] if position_ids.shape[0] in (1, 4) else None
 
 
 def document_padding_mask(config, rows: torch.Tensor, attention_mask, position_ids, seq_idx) -> torch.Tensor | None:
-    """The 2-D padding mask (or none) every layer of an uncached row reads in place of upstream's mask mapping, once a
-    packed row (``position_ids`` restarting) is checked to carry the ``seq_idx`` marking its documents. ``rows`` is any
-    ``[batch, sequence, ...]`` tensor of the row: its ids, embeddings or hyper-connection stream."""
+    """The 2-D padding mask every layer of an uncached row reads in place of upstream's mask mapping."""
     # Upstream reads position restarts as documents only without a padding mask.
     positions = _text_position_ids(position_ids) if attention_mask is None or seq_idx is not None else None
     reject_unmarked_documents(positions, seq_idx)
@@ -175,16 +158,14 @@ def document_padding_mask(config, rows: torch.Tensor, attention_mask, position_i
 
 
 def _is_document_call(attention_mask, past_key_values) -> bool:
-    """Whether a layer runs under the document model forward: no cache, and the 2-D padding mask (or none) its
-    mapping carries where upstream's own forward hands every layer a 4-D mask."""
+    """No cache, and the 2-D padding mask (or none) where upstream's own forward hands every layer a 4-D mask."""
     return past_key_values is None and (attention_mask is None or attention_mask.ndim == 2)
 
 
 def _document_decoder_forward(
     layer: nn.Module, hidden_states, position_embeddings, attention_mask, conv_mask, ple_input_ids, **kwargs
 ) -> torch.Tensor:
-    """Upstream's ``Qwen4ExpTextDecoderLayer.forward`` for an uncached row, its PLE kept inside the ``seq_idx``
-    documents (:func:`~halo.models.qwen4_exp.documents.document_ple_forward`)."""
+    """Upstream's decoder layer for an uncached row, its PLE kept inside the ``seq_idx`` documents."""
     hidden_states = hidden_states + document_ple_forward(
         layer.ple, hidden_states, ple_input_ids, kwargs.get("seq_idx"), conv_mask
     )
@@ -200,14 +181,9 @@ def _document_decoder_forward(
 
 
 def patch_qwen4_exp_document_forwards() -> None:
-    """Run every uncached ``qwen4_exp`` forward per ``seq_idx`` document with memory linear in the row length.
-
-    The model forward hands its layers the 2-D padding mask in place of upstream's ``[B, 1, T, T]`` masks and
-    refuses a packed row (``position_ids`` restarting) whose documents no ``seq_idx`` marks; its layers then run
-    the tiled QSA (:func:`~halo.models.qwen4_exp.sparse_attention.qsa_attention_forward`) and the document-aware
-    PLE. A call with a cache, a ``use_cache`` request or a caller-built 4-D or per-layer-type mask keeps upstream's
-    forwards.
-    """
+    """Run every uncached forward per ``seq_idx`` document with memory linear in the row length, handing layers the 2-D
+    padding mask in place of upstream's ``[B, 1, T, T]`` masks. A cache, a ``use_cache`` request or a caller-built 4-D
+    or per-layer-type mask keeps upstream's forwards."""
     model_cls = qwen4_exp_modeling.Qwen4ExpTextModel
     layer_cls = qwen4_exp_modeling.Qwen4ExpTextDecoderLayer
     attention_cls = qwen4_exp_modeling.Qwen4ExpTextAttention

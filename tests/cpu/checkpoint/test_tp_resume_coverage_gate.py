@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""The TP resume coverage gate: a checkpoint that matches too little of the live model must raise.
-
-The streamed TP reload writes only the keys the checkpoint and the live model share, so
-nothing else reports a bad checkpoint: a foreign key set applies as a no-op and the run trains on
-base weights while logging a successful resume. The gate is the same numel-weighted verdict the
-FSDP2 path uses; these tests drive it through :func:`load_resume_weights` so the wiring is
-covered, not just the predicate.
-
-Run: ``python tests/cpu/checkpoint/test_tp_resume_coverage_gate.py`` (or ``pytest -m cpu``).
-"""
+"""The TP resume coverage gate: the reload writes only shared keys, so a foreign key set is a no-op that logs a
+successful resume. Driven through :func:`load_resume_weights` so the wiring is covered."""
 
 import os
 
@@ -22,7 +14,7 @@ from tests.common.checkpoint_io import load_context
 
 
 class _Model(nn.Module):
-    """A large and a small parameter, so a majority-coverage checkpoint can miss the small one."""
+    """So a majority-coverage checkpoint can miss the small one."""
 
     def __init__(self):
         super().__init__()
@@ -47,7 +39,7 @@ def test_a_foreign_checkpoint_raises_and_leaves_the_model_untouched(tmp_path):
 
 
 def test_a_checkpoint_covering_a_minority_of_the_parameters_raises(tmp_path):
-    """The verdict weighs elements, not keys: the head alone is 4 of 260 parameters."""
+    """The head alone is 4 of 260 parameters."""
     save_file({"head.weight": torch.full((2, 2), 3.0)}, os.path.join(tmp_path, "model.safetensors"))
     model = _Model()
 
@@ -56,7 +48,7 @@ def test_a_checkpoint_covering_a_minority_of_the_parameters_raises(tmp_path):
 
 
 def test_a_majority_checkpoint_loads_what_it_has_and_keeps_the_rest(tmp_path):
-    """A legitimately partial checkpoint (tied heads, task heads) is a real resume."""
+    """Tied heads and task heads are legitimately partial."""
     save_file({"body.weight": torch.full((16, 16), 3.0)}, os.path.join(tmp_path, "model.safetensors"))
     model = _Model()
     head_before = model.head.weight.detach().clone()

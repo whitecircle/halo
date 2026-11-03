@@ -1,7 +1,5 @@
-"""Rank-layout golden: the process groups, rank coordinates and expert grad-sync regime every grid
-shape builds today from each rank's ``ParallelismConfig`` and the ``EPConfig``/``CPConfig`` it hands
-out, stored as a digest per shape plus the full layout of each shape in :data:`LITERAL_SHAPES`.
-"""
+"""Rank-layout golden: the process groups, rank coordinates and expert grad-sync regime each grid shape builds per
+rank."""
 
 from __future__ import annotations
 
@@ -12,11 +10,11 @@ from tests.common.goldens import regen_main
 from tests.common.goldens.shape_grid import GridGolden, LayoutShape
 from tests.common.parallelism import stubbed_process_groups
 
-# The EPConfig attributes that decide where expert gradients are synced; each is job-wide.
+# They decide where expert gradients are synced; each is job-wide.
 EP_GRAD_SYNC_FLAGS = ("num_ep_groups", "needs_expert_grad_sync", "is_deferred_dp", "sweep_reduces_across_replicas")
 
-# Every axis combination, both EP scopes, the column-block degenerates (one member per domain, one
-# global group), EP+ETP on and across domains, pipelines, a 1-GPU domain and odd widths.
+# Every axis combination, both EP scopes, column-block degenerates, EP+ETP on and across domains, pipelines, a 1-GPU
+# domain, odd widths.
 LITERAL_SHAPES = (
     LayoutShape(1, 1, 1),
     LayoutShape(2, 2, 2, ep_size=2),
@@ -62,8 +60,8 @@ LITERAL_SHAPES = (
 
 
 def _partition(handles: Iterable[tuple[int, ...] | None]) -> dict | None:
-    """The distinct groups the ranks hold and, per rank, the index of the one it holds (``None`` for a
-    rank holding none); ``None`` when no rank holds one."""
+    """The distinct groups the ranks hold and per rank the index of its own (None for none); None when no rank holds
+    one."""
     held = list(handles)
     groups = sorted({group for group in held if group is not None})
     if not groups:

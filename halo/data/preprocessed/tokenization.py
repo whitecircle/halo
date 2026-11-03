@@ -1,5 +1,4 @@
-"""Offline tokenization of a corpus: text (chat or raw) and VLM rows to input_ids, attention_mask and, where a mask
-shapes them, baked labels, dropping the rows a map rejects."""
+"""Offline tokenization of a corpus: text and VLM rows to input_ids, attention_mask and baked labels."""
 
 import functools
 import logging
@@ -33,8 +32,7 @@ from halo.model_loading.tokenizer_setup import resolve_tokenizer
 
 logger = logging.getLogger(__name__)
 
-# Per-row VLM data failures, dropped with a warning; any other exception aborts the map. The image errors are named
-# rather than their ``OSError`` base, so a full disk aborts instead of counting as a bad row.
+# Per-row data failures, dropped with a warning. Image errors are named rather than ``OSError``, so a full disk aborts.
 _VLM_ROW_DATA_ERRORS = (
     ValueError,
     TypeError,
@@ -59,10 +57,8 @@ def _completion_only_labels(
     extra_ignore_token_ids: tuple[int, ...] = (),
     span_policy: dict[str, bool] | None = None,
 ) -> list[int]:
-    """Completion-only labels for one tokenized example by the span rule every runtime collator labels through
-    (:func:`~halo.data.completion_spans.build_span_labels`), so a baked row masks exactly like an untouched one;
-    ``span_policy`` is the collator's that would have masked it, ``extra_ignore_token_ids`` (image tokens) are
-    masked on top."""
+    """By the span rule every runtime collator labels through, so a baked row masks exactly like an untouched one;
+    ``span_policy`` is that collator's, ``extra_ignore_token_ids`` (image tokens) are masked on top."""
     ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
     batch = {"input_ids": ids, "labels": ids.clone()}
     batch = mask_batch_to_completion_spans(
@@ -94,8 +90,7 @@ def _drop_rejected_rows(
     cause: str,
     context: str,
 ) -> Dataset:
-    """Drop the rejection rows a tokenizing map emitted, refusing a split that lost every row: that is a config
-    error, and ``cause`` names the ones that apply to ``stage``."""
+    """Refuses a split that lost every row: a config error, and ``cause`` names the ones that apply to ``stage``."""
     original_len = len(tokenized)
     tokenized = coordinated_filter(
         tokenized,
@@ -117,9 +112,8 @@ def _drop_rejected_rows(
 
 
 def _reject_fully_masked_labels(tokenized: Dataset, split_name: str) -> None:
-    """Refuse a baked split whose probed rows are all ignore-index, which would train zero tokens: a mistyped
-    assistant template masks everything without tripping the ``input_ids`` filters. Head and tail are probed,
-    since an ordered dataset may open with legitimately masked rows."""
+    """A mistyped assistant template masks everything without tripping the ``input_ids`` filters. Head and tail are
+    probed, since an ordered dataset may open with legitimately masked rows."""
     total = len(tokenized)
     if total == 0 or "labels" not in tokenized.column_names:
         return
@@ -137,7 +131,7 @@ def _reject_fully_masked_labels(tokenized: Dataset, split_name: str) -> None:
 
 
 def _row_processor(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) -> Callable:
-    """The text row map ``config.mode`` selects; a packed raw-text artifact leaves the overflow to the strategy."""
+    """A packed raw-text artifact leaves the overflow to the strategy."""
     if config.mode == "text":
         return build_text_row_processor(
             tokenizer=tokenizer,
@@ -166,10 +160,8 @@ def _bake_labels(
     split_name: str,
     eos_token_ids: frozenset[int] | None,
 ) -> Dataset:
-    """Labels for the tokenized rows, baked for good (the artifact's collators only pad): completion-only under
-    the span policy of the collator that would have masked them at runtime, else none, the collator deriving them
-    from ``input_ids`` as on the runtime path. Stored at ``input_ids``' integer width, where inference would widen
-    them to int64."""
+    """Baked for good (the artifact's collators only pad): completion-only under the span policy of the collator that
+    would have masked them, else none. Stored at ``input_ids``' integer width, which inference would widen."""
     if not config.train_on_completions_only:
         return tokenized
     marker = config.assistant_message_template
@@ -208,9 +200,7 @@ def tokenize_dataset(
     *,
     eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
-    """Tokenize a text split (raw-text or chat mode) to input_ids and attention_mask, plus labels under
-    ``train_on_completions_only``; ``eos_token_ids``, the completion mask's terminators, is resolved here when
-    unset."""
+    """Input_ids and attention_mask, plus labels under ``train_on_completions_only``; resolves unset terminators."""
     tokenizer = resolve_tokenizer_backend(tokenizer, config.tokenizer_backend)
     if config.train_on_completions_only and eos_token_ids is None:
         eos_token_ids = resolve_label_eos_token_ids(config, tokenizer)
@@ -241,8 +231,7 @@ def tokenize_dataset(
 
 
 def _vision_columns(result: Any) -> dict[str, Any]:
-    """The processor's vision outputs in their stored form: float16 ``pixel_values`` bytes with their shape, and
-    ``image_grid_thw`` as a list."""
+    """Stored form: float16 ``pixel_values`` bytes with their shape, ``image_grid_thw`` as a list."""
     columns = {}
     if "pixel_values" in result:
         pixel_values = result["pixel_values"]
@@ -268,7 +257,6 @@ def _vlm_labels(
     image_token_ids: tuple[int, ...],
     eos_token_ids: frozenset[int] | None,
 ) -> list[int]:
-    """A VLM row's labels: image tokens always masked, completion-only masking on top when configured."""
     if config.train_on_completions_only:
         return _completion_only_labels(
             input_ids,
@@ -278,8 +266,7 @@ def _vlm_labels(
             extra_ignore_token_ids=image_token_ids,
             eos_token_ids=eos_token_ids,
         )
-    # The runtime collator's builder, handed the row's all-ones mask so its pad-value fallback cannot erase a real
-    # EOS where pad_token_id == eos_token_id.
+    # The runtime builder, given the row's all-ones mask so its pad-value fallback cannot erase a real EOS at pad==eos.
     return build_completion_only_labels(
         torch.tensor(input_ids, dtype=torch.long),
         tokenizer,
@@ -300,9 +287,9 @@ def tokenize_vlm_row(
     image_token_ids: tuple[int, ...],
     eos_token_ids: frozenset[int] | None,
 ) -> dict[str, Any]:
-    """One raw VLM row to its stored columns through the runtime VLM path's own builder and renderer, so it
-    tokenizes exactly as an untouched run renders it. An empty, over-length or bad-data row becomes the all-None
-    row, Arrow-safe because the map pins ``VLM_OUTPUT_FEATURES``."""
+    """Through the runtime VLM path's own builder and renderer, so it tokenizes as an untouched run renders it. An
+    empty, over-length or bad-data row becomes the all-None row, Arrow-safe because the map pins
+    ``VLM_OUTPUT_FEATURES``."""
     try:
         raw_conversation = resolve_json_value(example.get(config.conversation_field))
         if not raw_conversation:
@@ -358,9 +345,7 @@ def tokenize_vlm_dataset(
     *,
     eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
-    """Tokenize a VLM split, vision tokens included: input_ids with expanded placeholders, attention_mask,
-    labels, float16 ``pixel_values`` bytes and ``image_grid_thw``; ``eos_token_ids`` as in
-    :func:`tokenize_dataset`."""
+    """Input_ids with expanded placeholders, attention_mask, labels, fp16 ``pixel_values`` and ``image_grid_thw``."""
     if config.tools_field or config.interleaved_thinking:
         raise NotImplementedError(
             "VLM offline preprocessing does not render tools_field / interleaved_thinking — the "

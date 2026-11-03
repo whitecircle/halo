@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""Row construction under ``max_train_row_tokens`` and the empty-capture case, on both tokenize paths.
-
-* The context-window check runs BEFORE the row cap on the per-turn path, as on the whole-trajectory
-  path: a row the served model could not have produced is a config error, and a cap
-  set below the context must not absorb it as "over cap". On both paths a row of exactly the window
-  trains and one token more is recorded, the first failure of a step kept; a malformed
-  ``routed_experts`` payload is recorded too, never raised on one rank.
-* ``sampling/rows_over_cap_frac`` counts each row once: rows the cap left out over those plus the rows
-  that train. An over-cap trajectory comes back as a zero-weight placeholder, which is neither — a
-  count that took the placeholder as a built row would read eight all-over-cap trajectories as 0.5.
-* A zero-token assistant turn (``token_ids == []``) is a capture that succeeded, distinct from a
-  missing one (``None``): it yields no row, the rest of the trajectory trains per turn, and the
-  re-render fallback (with its server-flag warning) is reserved for a trainable turn with no ids.
-* An untrainable turn (cut, empty, invented calls) becomes a negative-only row of its sampled ids:
-  through the trainer's own narrowing it trains only under a negative advantage, and the engine-forced
-  reasoning close inside it keeps ratio 0. One without ids yields no row, counted in
-  ``sampling/untrainable_turns_rowless_frac``.
-
-    python tests/cpu/grpo/test_env_trainer_row_paths.py
-"""
+"""Row construction under ``max_train_row_tokens`` and the empty-capture case, on both tokenize paths. The context
+check precedes the cap, which must not absorb a config error; ``[]`` is a capture, ``None`` a missing one."""
 
 import types
 from collections import defaultdict
@@ -48,8 +30,7 @@ _REASONING_CLOSE = 77
 
 
 def _flat_render(msgs, add_generation_prompt, _template_kwargs, include_thinking=True):
-    """A minimal prefix-monotone template (``<role> <content chars> <end>``) the span locator anchors
-    by construction, so the whole-trajectory path runs for real without a tokenizer."""
+    """A prefix-monotone template the span locator anchors by construction, so the whole-trajectory path runs."""
     ids = []
     for m in msgs:
         ids.append(_ROLE_TOKENS[m.role])
@@ -95,9 +76,6 @@ def _turn(comp: list[int] | None, prompt_len: int = 2, **fields) -> Message:
     return Message.assistant("a", token_ids=comp, prompt_token_ids=list(range(1, prompt_len + 1)), **fields)
 
 
-# --- the context check precedes the cap on the per-turn path ------------------------------------------
-
-
 def test_a_per_turn_row_over_the_context_is_recorded_even_when_the_cap_is_lower():
     trainer = _trainer(cap=3, context_limit=4)
     rows = trainer._tokenize_trajectory_turns(_result(_turn([1, 2, 3, 4, 5], prompt_len=3)))  # 8 tokens
@@ -111,11 +89,7 @@ def test_a_per_turn_row_under_the_context_but_over_the_cap_is_only_over_cap():
     assert trainer._batch_errors.reason is None and trainer._rows_over_cap == 1
 
 
-# --- the context check's recording sites -----------------------------------------------------------------
-
-
 def _trajectory_tokens(result: RolloutResult) -> int:
-    """The whole-trajectory render's length, prompt plus completion."""
     prompt, completion, _ = _trainer(per_turn=False)._tokenize_trajectory(result)
     return len(prompt) + len(completion)
 
@@ -159,12 +133,8 @@ def test_a_malformed_routed_experts_payload_is_recorded_and_the_turn_trains_unro
     assert [row.turn_routing for row in rows] == [None]
 
 
-# --- sampling/rows_over_cap_frac counts each row once --------------------------------------------------
-
-
 def test_eight_all_over_cap_trajectories_read_one():
-    """Whole-trajectory path: every trajectory returns the zero-weight placeholder AND counts as over
-    cap; the placeholder must not enter the denominator as a built row."""
+    """The zero-weight placeholder must not enter the denominator as a built row."""
     trainer = _trainer(cap=3, per_turn=False)
     results = [_result(Message.assistant("aaaa")) for _ in range(8)]  # every render > 3 tokens
     per_trajectory = trainer._tokenize_step_rows(results)
@@ -173,8 +143,7 @@ def test_eight_all_over_cap_trajectories_read_one():
 
 
 def test_a_mixed_step_reads_rows_left_out_over_rows_left_out_plus_rows_that_train():
-    """Per-turn path, cap 6: A's two turns are both over (one placeholder), B loses one of two, C's
-    single turn fits — 3 rows left out, 2 rows train, so 0.6; a count over built rows would read 0.5."""
+    """Per-turn path, cap 6: 3 rows left out and 2 train, so 0.6; a count over built rows would read 0.5."""
     trainer = _trainer(cap=6)
     results = [
         _result(_turn([7, 8, 9, 10], prompt_len=4), _turn([7, 8, 9, 10], prompt_len=4)),
@@ -193,9 +162,6 @@ def test_no_cap_logs_no_cap_metric():
     assert "sampling/rows_over_cap_frac" not in flushed_metrics(trainer)
 
 
-# --- an empty capture is a capture ----------------------------------------------------------------------
-
-
 def test_a_zero_token_turn_yields_no_row_and_the_other_turns_still_train_per_turn():
     trainer = _trainer()
     trainer._tokenize_trajectory = lambda result: pytest.fail("a captured trajectory must not re-render")
@@ -208,8 +174,7 @@ def _refused_render(*_args):
     raise ValueError("the template rejects this prefix")
 
 
-# Every way a turn leaves the per-turn batch without dropping its episode: a zero-token capture, a row
-# over the cap, and an untrainable turn whose prefix the template rejects (its engine prompt ids absent).
+# Every way a turn leaves the per-turn batch without dropping its episode.
 _EXCLUDED_TURNS = {
     "zero-token": (_turn([]), _turn([], prompt_len=3)),
     "over-cap": (_turn([5, 6, 7, 8], prompt_len=4),),
@@ -240,8 +205,7 @@ def test_a_trainable_turn_with_no_capture_still_falls_the_trajectory_back():
 
 
 def test_an_untrainable_turn_without_capture_does_not_force_the_fallback():
-    """The all-or-nothing check runs over the turns that train: a cut fragment the engine returned no
-    ids for is skipped either way, so it must not cost the trajectory its per-turn rows."""
+    """The all-or-nothing check runs over the turns that train, so a cut fragment with no ids costs no rows."""
     trainer = _trainer()
     trainer._tokenize_trajectory = lambda result: pytest.fail("the trainable turn is captured; no re-render")
     rows = trainer._tokenize_trajectory_turns(_result(_turn(None, truncated=True), _turn([7, 8])))
@@ -249,12 +213,8 @@ def test_an_untrainable_turn_without_capture_does_not_force_the_fallback():
     assert SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
 
 
-# --- untrainable turns: negative-only rows ------------------------------------------------------------
-
-
 def test_untrainable_turns_that_became_no_row_are_counted():
-    """Per-turn: of three untrainable turns, the captured cut and empty turns became tagged rows and the
-    uncaptured cut none, so one in three; the whole-trajectory path trains none of them."""
+    """Per-turn, the captured cut and empty turns became tagged rows and the uncaptured cut none, so one in three."""
     results = [
         _result(_turn([5, 6], truncated=True), _turn([7])),
         _result(_turn(None, truncated=True), _turn([8], empty=True), _turn([9])),
@@ -274,9 +234,8 @@ _FLAG_IDS = ["cut", "empty", "invented_calls"]
 
 
 def _cut_episode_batch(trainer, advantage: float, flag: dict):
-    """One episode — an untrainable turn whose reasoning the engine closed at its budget
-    (``_REASONING_CLOSE`` at sampling log-prob 0), then a finished turn — laid out and narrowed the way
-    ``_build_training_tensors`` does. Returns ``(rows, ratio, tool_mask, num_items)``."""
+    """An untrainable turn whose reasoning the engine closed at its budget, then a finished turn, narrowed the way
+    ``_build_training_tensors`` does."""
     cut = _turn([5, _REASONING_CLOSE, 6], token_logprobs=[-0.5, 0.0, -0.3], **flag)
     finished = _turn([7, 8], prompt_len=3, token_logprobs=[-0.2, -0.1])
     result = _result(cut, finished)

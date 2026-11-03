@@ -1,22 +1,7 @@
 #!/usr/bin/env python
-"""Gemma 4 26B-A4B attention, forward + backward per layer type, on one GPU.
+"""Gemma 4 26B-A4B attention per layer type, forward + backward on one GPU.
 
-Sliding layers: 16 query / 8 KV heads, head_dim 256, window 1,024. Global layers: 16 / 2 heads,
-head_dim 512. Each backend runs in its own process (``--backend``) because a kernel that rejects a
-shape can leave the CUDA context unusable.
-
-- ``sdpa``: mem-efficient SDPA with manual KV repeat and a dense boolean mask, the path the loader
-  pins for Gemma 4 (``patch_sdpa_for_wide_heads``).
-- ``eager``: matmul-softmax-matmul with fp32 softmax (transformers' eager attention).
-- ``halo``: ``sdpa_flex_sliding``'s own attention function (:func:`flex_sliding_attention`) on the dense
-  mask transformers builds: compiled FlexAttention under the tile block masks on a sliding layer, matmul
-  attention (or mem-efficient SDPA past the budget) on a global one. The block masks come from its cache,
-  as every sliding layer after the first in a forward gets them.
-- ``fa2``: FlashAttention 2 (``flash_attn``) with its local window, where installed.
-- ``fa4``: FlashAttention 4 (``flash_attn.cute``) where installed.
-
-Usage (inside the Halo image, one GPU):
-    python tests/gpu/profiling/benchmark_gemma4_attention.py --backend halo --layer sliding --seq 2048 --out r.jsonl
+Each backend runs in its own process, since a kernel rejecting a shape can leave the CUDA context unusable.
 """
 
 import argparse
@@ -70,9 +55,9 @@ def main():
             scores = (q @ kk.transpose(-1, -2)).masked_fill(~allowed, float("-inf"))
             (torch.softmax(scores.float(), -1).to(q.dtype) @ vv).backward(grad)
     elif args.backend == "halo":
-        patch_sdpa_for_wide_heads()  # the Gemma 4 loader's process-wide SDPA pin
+        patch_sdpa_for_wide_heads()  # The Gemma 4 loader's process-wide SDPA pin.
         module = causal_attention(HEADS, kv_heads, head_dim)
-        # The masks the ``sdpa`` rows use: the dense window on a sliding layer, none (causal) on a global one.
+        # The ``sdpa`` rows' masks: the dense window on a sliding layer, none (causal) on a global one.
         pos = torch.arange(seq, device="cuda")
         mask = ((pos[None] <= pos[:, None]) & (pos[:, None] - pos[None] < window))[None, None] if window else None
         grad_t = grad.transpose(1, 2)
@@ -111,7 +96,7 @@ def main():
     record = {"backend": args.backend, "layer": args.layer, "seq": seq, "torch": torch.__version__}
     try:
         record["fwd_bwd_ms"] = triton.testing.do_bench(fwd_bwd, warmup=5, rep=40)
-    except Exception as exc:  # a backend that rejects this shape is a result, not a crash
+    except Exception as exc:  # A backend rejecting this shape is a result, not a crash.
         record["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
     print(json.dumps(record), flush=True)
     with open(args.out, "a") as f:

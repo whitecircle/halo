@@ -1,5 +1,3 @@
-"""Sequence-classification script arguments and ``ClassificationConfig``."""
-
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
@@ -24,8 +22,6 @@ class ClassificationScriptArguments(CommonScriptArguments):
 
 @dataclass
 class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
-    r"""TrainingArguments for [`ClassificationTrainer`]; per-field docs are in each field's ``help`` metadata."""
-
     max_length: int | None = field(
         default=1024,
         metadata={

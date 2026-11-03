@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""A completion without ``usage.completion_tokens`` counts its captured token ids, never a word count.
-
-``len(text.split())`` would fabricate a length for ``episode/generation_tokens``; the captured ids are
-the only honest length, and their absence is 0 plus one warning.
-
-    python tests/cpu/environments/test_ray_generation_token_count.py
-"""
+"""A completion without ``usage.completion_tokens`` counts its captured token ids, never a word count; their absence
+is 0 plus one warning."""
 
 import logging
 from types import SimpleNamespace

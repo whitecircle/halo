@@ -1,27 +1,7 @@
 #!/usr/bin/env python
-"""``prepare_dataset.py`` must run the invocations the docs publish, and fail fast when it cannot.
-
-What this drives through the real ``main()`` in a fresh subprocess (so the accelerate singleton
-starts unset, as in a real CLI run):
-
-* **The documented raw-text pre-training command.** The completion-masking default must resolve per
-  ``--mode``: a flat default-on is rejected by ``PreprocessingConfig`` as inapplicable to
-  ``mode='text'``, which would exit every documented pre-training invocation on a flag its user never
-  passed.
-* **An explicit masking flag in text mode still fails.** The mode-aware default must not turn the
-  applicability check into a no-op — asking for something ``mode='text'`` cannot do stays loud.
-* **Chat mode with no response marker fails BEFORE the input is fetched.** The labels are baked
-  into the artifact here, so masking without a marker is unbuildable, and the config that owns the
-  pair is built from the command line before any download.
-* **A column flag naming no input column fails before tokenization**, naming the flag and the
-  columns the input carries.
-
-Plus the artifact contract, unstubbed: a ``--num_shards N`` publish must be what the training-side
-sharded loader hands ``N`` data-parallel ranks — every row exactly once, none twice; and the bake
-keeps no intermediate map cache behind and stores labels at the width of ``input_ids``.
-
-    python tests/cpu/data/test_prepare_dataset_script.py
-"""
+"""``prepare_dataset.py`` runs the invocations the docs publish and fails fast when it cannot, through the real
+``main()`` in a fresh subprocess so the accelerate singleton starts unset. A ``--num_shards N`` publish must be
+what the sharded loader hands ``N`` DP ranks, every row exactly once."""
 
 import json
 import os
@@ -43,10 +23,8 @@ _SCRIPT = REPO_ROOT / "scripts/before_training/prepare_dataset.py"
 # A real fast tokenizer built in-process, so the unstubbed run needs no download: one id per word.
 _WORDS = ("doc", *(str(i) for i in range(32)))
 
-# Runs in a subprocess: load the real script as a module, stub only the heavy/network steps
-# (tokenizer load + preprocessing) so the offline load path is exercised, then call main().
-# Reaching the stubbed preprocess proves load_input_dataset() ran; the stubbed load reports whether a
-# rejection came before or after the input was fetched.
+# Runs in a subprocess: stub only the tokenizer load and preprocessing. Reaching the stubbed preprocess proves the load
+# ran; the stubbed load reports whether a rejection came before the input was fetched.
 _DRIVER = """
 import sys, traceback, types
 
@@ -95,10 +73,8 @@ except Exception as e:
 
 
 def _run(argv: list[str], prelude: str = "") -> str:
-    """Drive ``main()`` with ``argv`` over a two-row local dataset; returns everything it printed.
-
-    ``prelude`` is extra driver code run against the loaded module before ``main()``.
-    """
+    """Drive ``main()`` with ``argv`` over a two-row local dataset and return what it printed; ``prelude`` runs
+    against the loaded module first."""
     with tempfile.TemporaryDirectory() as directory:
         raw = os.path.join(directory, "raw")
         out = os.path.join(directory, "out")  # not created; the local-save branch is never reached
@@ -116,8 +92,7 @@ def _run(argv: list[str], prelude: str = "") -> str:
         return proc.stdout + proc.stderr
 
 
-# The published pre-training command (agent-docs/training-methods/pretraining.md), minus the S3 paths:
-# no masking flags, because raw text has no turns to mask.
+# The published pre-training command (agent-docs/training-methods/pretraining.md), minus the S3 paths.
 _DOC_TEXT_ARGV = [
     "--model_name_or_path",
     "dummy-model",
@@ -134,8 +109,7 @@ _DOC_TEXT_ARGV = [
     "2",
 ]
 
-# The published SFT pre-processing command (agent-docs/training-methods/sft.md, launch-recipes.md,
-# scripts-reference.md): chat mode, no marker.
+# The published SFT pre-processing command (agent-docs/training-methods/sft.md): chat mode, no marker.
 _DOC_CHAT_ARGV = [
     "--model_name_or_path",
     "dummy-model",
@@ -157,8 +131,7 @@ def test_the_documented_pretraining_invocation_runs():
 
 
 def test_asking_for_completion_masking_in_text_mode_still_fails():
-    """The mode-aware default must not silence the applicability check: raw text renders no chat
-    template, so there are no user turns to mask and the request is a mistake worth naming."""
+    """Raw text renders no chat template, so there are no user turns to mask and the request is a mistake."""
     output = _run([*_DOC_TEXT_ARGV, "--train_on_completions_only", "--assistant_message_template", "<a>"])
 
     assert "REACHED_PREPROCESS" not in output, output
@@ -166,8 +139,7 @@ def test_asking_for_completion_masking_in_text_mode_still_fails():
 
 
 def test_chat_mode_without_a_response_marker_fails_before_the_input_is_fetched():
-    """Masking is on by default in chat mode (matching training), and the labels are baked here —
-    so the marker is required, and the run must be refused while it still costs nothing."""
+    """The labels are baked here, so the marker is required, and the run is refused while that costs nothing."""
     output = _run(_DOC_CHAT_ARGV)
 
     assert "requires assistant_message_template" in output, output
@@ -176,8 +148,7 @@ def test_chat_mode_without_a_response_marker_fails_before_the_input_is_fetched()
 
 
 def test_the_documented_sft_invocation_runs_once_the_marker_is_supplied():
-    """The other side of that refusal: with the marker, the same command runs — the guard is about
-    an unbuildable pair, not about chat mode."""
+    """With the marker, the same command runs: the guard is about an unbuildable pair."""
     output = _run([*_DOC_CHAT_ARGV, "--assistant_message_template", "<|im_start|>assistant\n"])
 
     assert "REACHED_PREPROCESS" in output, output
@@ -197,9 +168,7 @@ def test_the_documented_sft_invocation_runs_once_the_marker_is_supplied():
     ids=["conversation", "text", "tools"],
 )
 def test_a_column_flag_naming_no_input_column_is_refused_before_tokenization(argv, knob, column):
-    """A ``messages`` corpus under the default ``--conversation_field prompt`` (and its text-mode and
-    tools twins) otherwise dies as a bare ``KeyError`` in a map worker, or bakes every row without the
-    column; the refusal names the knob, the column and what the input does carry."""
+    """Otherwise a bare ``KeyError`` in a map worker, or every row baked without the column."""
     output = _run(argv)
 
     assert "REACHED_LOAD" in output, output
@@ -212,9 +181,8 @@ def test_a_column_flag_naming_no_input_column_is_refused_before_tokenization(arg
     ("splits", "refused"), [(("train", "validation"), True), (("train", "test", "validation"), False)]
 )
 def test_the_held_out_split_the_artifact_bakes_is_checked(splits, refused):
-    """A source with no ``test`` split bakes its ``validation`` split as the test split, so a column
-    missing only there would still die in that split's map; a ``validation`` split beside a ``test``
-    one is never baked, so its schema is not checked."""
+    """A source with no ``test`` bakes its ``validation`` as the test split, so a column missing only there is
+    caught; a ``validation`` beside a ``test`` is never baked."""
     conversation = [[{"role": "user", "content": "hi"}]]
     dataset = DatasetDict(
         {name: Dataset.from_dict({"messages" if name == "validation" else "prompt": conversation}) for name in splits}
@@ -229,8 +197,7 @@ def test_the_held_out_split_the_artifact_bakes_is_checked(splits, refused):
 
 
 def test_a_multi_process_launch_is_refused_before_the_input_is_fetched():
-    """Under torchrun every rank would run the publish against the same destination — one S3 key,
-    local directory or Hub repo — so a launch with more than one process is refused up front."""
+    """Every rank would run the publish against the same destination."""
     output = _run(_DOC_TEXT_ARGV, prelude="publishing.PartialState = lambda: types.SimpleNamespace(num_processes=2)")
 
     assert "EXIT:1" in output, output
@@ -239,8 +206,8 @@ def test_a_multi_process_launch_is_refused_before_the_input_is_fetched():
 
 
 def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
-    """An offline-packed artifact for a model whose compressor windows cut by row index trains
-    nothing the collator would accept, so ``--pack_sequences`` is refused off the model config."""
+    """A compressor whose windows cut by row index trains nothing the collator would accept from an offline-packed
+    artifact."""
     prelude = (
         "from transformers.models.deepseek_v4 import DeepseekV4Config\n"
         "from tests.common.models import TINY_DSV4_CONFIG\n"
@@ -255,10 +222,8 @@ def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
 
 
 def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks():
-    """The real script, unstubbed, on a local raw-text corpus with ``--num_shards 4``: the published
-    artifact must load through ``load_preprocessed_dataset`` for each of 4 data-parallel ranks, and
-    the four slices must be a partition of the corpus — a gap silently drops data, an overlap silently
-    double-trains it, and neither shows up as an error at training time."""
+    """The real script, unstubbed, with ``--num_shards 4``: a gap silently drops data and an overlap double-trains
+    it."""
     num_shards, num_docs = 4, 16
     with tempfile.TemporaryDirectory() as directory:
         raw, tokenizer_dir, out = (os.path.join(directory, name) for name in ("raw", "tok", "out"))
@@ -291,9 +256,8 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
 
 
 def test_the_bake_leaves_no_map_cache_behind_and_stores_no_full_sequence_labels():
-    """Each tokenize/filter/pack map writes a full copy of the corpus; the single-process tool must not leave them
-    in HF_DATASETS_CACHE, where nothing reuses or removes them. A packed full-sequence artifact stores no labels and
-    no attention_mask: its collator derives both from ``input_ids``, so stored copies would double the artifact."""
+    """Each map writes a full corpus copy that nothing reuses in HF_DATASETS_CACHE. A packed full-sequence
+    artifact's collator derives labels and mask from ``input_ids``, so stored copies would double it."""
     with tempfile.TemporaryDirectory() as directory:
         raw, tokenizer_dir, out, cache = (os.path.join(directory, name) for name in ("raw", "tok", "out", "cache"))
         word_level_tokenizer(_WORDS).save_pretrained(tokenizer_dir)

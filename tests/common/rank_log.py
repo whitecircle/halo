@@ -1,5 +1,4 @@
-"""Log lines for the torchrun test suites: one rank's verdicts or every rank's, rank-tagged, and the messages a
-logger emits inside a block."""
+"""Log lines for the torchrun test suites, rank-tagged, and the messages a logger emits inside a block."""
 
 import logging
 from collections.abc import Iterator
@@ -21,7 +20,7 @@ def log_all(msg: str):
 
 
 class _MessageLog(logging.Handler):
-    """Every message a logger emits while this handler is attached."""
+    """Every message a logger emits while attached."""
 
     def __init__(self):
         super().__init__(level=logging.INFO)

@@ -1,6 +1,4 @@
-"""Shared pieces of the PP suites that drive a real trainer: construction refusals, training args, rows,
-runner spies, gradient checkpointing as ``train`` enables it, the EP bias-balanced SFT build and the reload and
-resume pins every PP save owes."""
+"""Shared pieces of the PP suites driving a real trainer."""
 
 import math
 import os
@@ -33,8 +31,8 @@ PAD_ID = 0
 
 
 def expect_construction_error(trainer_cls, name: str, checks: dict, match: str, **trainer_kwargs) -> None:
-    """Construct ``trainer_cls`` on every rank expecting a uniform pre-collective ValueError naming ``match``;
-    records the verdict as ``checks[name]``."""
+    """Construct ``trainer_cls`` on every rank expecting a uniform pre-collective ValueError naming ``match``; records
+    ``checks[name]``."""
     try:
         trainer_cls(**trainer_kwargs)
         checks[name] = False
@@ -45,9 +43,8 @@ def expect_construction_error(trainer_cls, name: str, checks: dict, match: str, 
 
 
 def build_pp_args(config_cls, output_dir: str, *, save_every: int | None = None, **fields):
-    """``config_cls`` with what every PP suite shares, ``fields`` overriding: accumulation becomes the
-    pipeline's microbatch count, a constant LR, every step logged, fp32, and a checkpoint every
-    ``save_every`` steps (none by default)."""
+    """``config_cls`` with what PP suites share: accumulation as the microbatch count, constant LR, every step logged,
+    fp32."""
     return config_cls(
         **{
             "output_dir": output_dir,
@@ -66,8 +63,8 @@ def build_pp_args(config_cls, output_dir: str, *, save_every: int | None = None,
 
 
 def build_sft_rows(vocab_size: int, n_rows: int = 16, seed: int = 7, seq_len: int = 64) -> Dataset:
-    """Pre-tokenized SFT rows with ragged ``-100`` prompt prefixes: DP replicas then hold unequal loss-token
-    counts, which is what exercises the ``num_items_in_batch`` -> G/dp normalizer threading."""
+    """Pre-tokenized rows with ragged ``-100`` prefixes, so replicas hold unequal counts and exercise the
+    ``num_items_in_batch`` -> G/dp threading."""
     g = torch.Generator().manual_seed(seed)
     rows = torch.randint(4, vocab_size, (n_rows, seq_len), generator=g)
     labels = rows.clone()
@@ -83,22 +80,20 @@ def build_sft_rows(vocab_size: int, n_rows: int = 16, seed: int = 7, seq_len: in
 
 
 def tiny_vocab_tokenizer():
-    """The Qwen3 tokenizer padding with id 0: its own pad id (151643) is outside the tiny models' vocab and
-    would send the stage-0 embedding gather out of bounds (data rows draw from ``[4, vocab)``)."""
+    """The Qwen3 tokenizer padding with id 0: its own pad id is outside tiny vocabs and sends the stage-0 embedding
+    gather out of bounds."""
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
     tokenizer.pad_token = tokenizer.convert_ids_to_tokens(PAD_ID)
     return tokenizer
 
 
 def build_seq_cls_model(num_labels: int, seed: int = 1234) -> Qwen3ForSequenceClassification:
-    """Tiny Qwen3 sequence classifier, identical on every rank."""
     torch.manual_seed(seed)
     config = Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=num_labels, pad_token_id=PAD_ID, eos_token_id=1)
     return Qwen3ForSequenceClassification(config)
 
 
 def right_pad(ids: list[list[int]], length: int, device=None) -> dict:
-    """``ids`` right-padded with ``PAD_ID`` to ``length``, with the matching attention mask."""
     input_ids = torch.full((len(ids), length), PAD_ID, dtype=torch.long)
     attention_mask = torch.zeros((len(ids), length), dtype=torch.long)
     for i, row in enumerate(ids):
@@ -108,10 +103,8 @@ def right_pad(ids: list[list[int]], length: int, device=None) -> dict:
 
 
 def build_pp_trainer(trainer_cls, *, also_record=None, **trainer_kwargs):
-    """``trainer_cls(**trainer_kwargs)`` with its pipeline runner's ``step`` and ``eval_loss`` spied; returns
-    ``(trainer, steps, evals)``, one entry per train step and per loss-only eval call. Each entry holds the
-    batch (cloned), ``num_items`` (NaN without a normalizer, so a normalizer check fails rather than raises),
-    every extra target and ``also_record(trainer)``."""
+    """``trainer_cls`` with its runner's ``step`` and ``eval_loss`` spied; returns ``(trainer, steps, evals)``.
+    ``num_items`` is NaN without a normalizer, so a normalizer check fails rather than raises."""
     trainer = trainer_cls(**trainer_kwargs)
     runner = trainer._pp_runner
     steps, evals = [], []
@@ -137,9 +130,8 @@ def build_pp_trainer(trainer_cls, *, also_record=None, **trainer_kwargs):
 
 
 def enable_gradient_checkpointing_as_train_does(trainer) -> None:
-    """Enable checkpointing on ``trainer.model`` as ``Trainer.train`` does before its first step, for a suite that
-    drives ``training_step`` without ``train``: ``every_n_layers`` and ``offload`` come out of the checkpoint
-    kwargs. A no-op where the args ask for none, as once an EP trainer installed its own at construction."""
+    """Enable checkpointing as ``Trainer.train`` does, for a suite driving ``training_step`` without ``train``; a no-op
+    where the args ask for none."""
     if not trainer.args.gradient_checkpointing:
         return
     kwargs = dict(trainer.args.gradient_checkpointing_kwargs or {})
@@ -151,8 +143,8 @@ def enable_gradient_checkpointing_as_train_does(trainer) -> None:
 
 
 class CheckpointCallsInTrain(TrainerCallback):
-    """Counts the stage layers' checkpoint calls during ``trainer.train()``, wrapped at ``on_train_begin``, the first
-    hook after ``train`` enabled checkpointing; :attr:`calls` stays 0 where it enabled none."""
+    """Counts stage layers' checkpoint calls during ``train()``, wrapped at ``on_train_begin``, the first hook after
+    checkpointing is enabled."""
 
     def __init__(self, trainer):
         self._trainer = trainer
@@ -178,9 +170,7 @@ def losses_identical_across_ranks(losses: list[float]) -> bool:
 
 
 def build_bias_balanced_sft_trainer(model, args, config, tokenizer, train_dataset) -> DistributedSFTTrainer:
-    """The real SFT trainer over an EP model with ``bias_update`` balancing wired as the scripts do:
-    ``configure_moe_balancing`` creates the layers' biases and load counters, ``build_run_callbacks`` the
-    balancing callback."""
+    """The real SFT trainer over an EP model with ``bias_update`` balancing wired as the scripts do."""
     apply_ep_layers(model, config.ep_config())
     script_args = CommonScriptArguments(moe_balancing="bias_update")
     mode = configure_moe_balancing(script_args, model, config)
@@ -197,27 +187,26 @@ def build_bias_balanced_sft_trainer(model, args, config, tokenizer, train_datase
 
 
 def probe_step(trainer, rows: Dataset, batch_size: int):
-    """One more pipeline step on this replica's ``batch_size``-row slice of ``rows``, with no optimizer update
-    after it: the loss a reload of the final weights must reproduce. Returns ``(batch, loss)``."""
+    """One more pipeline step on this replica's slice with no optimizer update: the loss a reload must reproduce.
+    Returns ``(batch, loss)``."""
     batch = dp_slice_batch(
         torch.tensor(rows["input_ids"]),
         torch.tensor(rows["labels"]),
         trainer.parallelism_config.get_data_parallel_rank(),
         batch_size,
     )
-    trainer.state.global_step += 1  # the EP sweep's double-run guard keys on the step
+    trainer.state.global_step += 1  # The EP sweep's double-run guard keys on the step.
     return batch, trainer.training_step(trainer.model, dict(batch))
 
 
 def reload_reproduces_probe_loss(model, batch: dict, rows: Dataset, dp_size: int, probe_loss, device) -> bool:
-    """Whether the reloaded unsplit ``model`` scores the probe ``batch`` like the pipeline did, under its
-    normalizer: the summed CE over the DP-global count / dp. Loose (5e-2): the run's bf16 kernels differ from
-    the reload's."""
+    """Whether the reloaded ``model`` scores the probe under the pipeline's normalizer. Loose (5e-2): the run's bf16
+    kernels differ from the reload's."""
     with torch.no_grad():
         logits = model(
             input_ids=batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device)
         ).logits
-    # G is the probe step's DP-global count (every replica's slice), not the dataset's.
+    # G is the probe step's DP-global count, not the dataset's.
     global_labels = torch.tensor(rows["labels"][: dp_size * batch["labels"].size(0)])
     global_count = float((global_labels[:, 1:] != -100).sum())
     expected = float(causal_lm_loss(logits, batch["labels"].to(device), reduction="sum") / (global_count / dp_size))
@@ -227,9 +216,8 @@ def reload_reproduces_probe_loss(model, batch: dict, rows: Dataset, dp_size: int
 
 
 def restored_moments_match_shard(stage, optimizer, checkpoint: str, rank: int, fqn_prefixes=("",)) -> tuple[bool, int]:
-    """Whether every tensor moment this rank's optimizer shard in ``checkpoint`` holds for a parameter under
-    ``fqn_prefixes`` equals the live (restored) optimizer's, bitwise; and how many parameters it covers (none
-    fails)."""
+    """Whether every moment in this rank's shard under ``fqn_prefixes`` equals the live optimizer's, bitwise, and how
+    many params it covers (none fails)."""
     shard = torch.load(
         os.path.join(checkpoint, f"optimizer_shard_{rank:05d}.pt"), map_location="cpu", weights_only=False
     )

@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """TRL's fused Liger loss is switched off once FSDP2 has sharded the model, whatever TRL calls it.
-
-The loss matmuls ``lm_head.weight`` outside FSDP2's forward hooks, where that weight is a sharded
-DTensor. TRL caches ``use_liger_kernel`` on the trainer and keeps the loss under a per-trainer
-attribute, which the guard probes by name; a name it does not know (a TRL release that renamed it)
-must raise rather than leave the fused loss running on a shard.
-
-    python tests/cpu/trainers/test_liger_loss_fsdp2_guard.py
-"""
+It matmuls ``lm_head.weight`` outside FSDP2's forward hooks, where that weight is a sharded DTensor."""
 
 from types import SimpleNamespace
 

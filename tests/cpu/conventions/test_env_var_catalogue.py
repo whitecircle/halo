@@ -1,12 +1,5 @@
-"""The environment-variable catalogue and the code agree in both directions.
-
-``agent-docs/reference/configuration-reference.md`` is the only place a user learns a toolkit env var
-exists, so the two drift failures are symmetric and both silent: a knob added to ``halo/`` that no
-row announces is unreachable in practice, and a row for a variable nothing reads is a promise the
-run does not keep. This sweep fails on either.
-
-Run: pytest tests/cpu/conventions/test_env_var_catalogue.py
-"""
+"""The environment-variable catalogue and the code agree in both directions: a knob with no row is unreachable, and
+a row nothing reads promises what the run does not do."""
 
 import ast
 import re
@@ -17,13 +10,11 @@ from tests.common.repo import REPO_ROOT
 
 CATALOGUE = REPO_ROOT / "agent-docs/reference/configuration-reference.md"
 
-# Prefixes the toolkit owns. Launcher (``LOCAL_RANK``/``SLURM_*``), ``ACCELERATE_*`` and HF/OS
-# variables are read raw at their owner by design (CLAUDE.md), so they owe the catalogue nothing —
-# only a variable under one of these prefixes must carry a row.
+# Launcher, ``ACCELERATE_*`` and HF/OS variables are read raw at their owner by design, so they owe the catalogue
+# nothing.
 TOOLKIT_PREFIXES = ("HALO_", "DIST_", "VLLM_", "SGLANG_", "NVLINK_", "EP_")
 
-# Rows the catalogue documents for the user that this toolkit deliberately never reads, each with
-# the reader that consumes it instead. Adding an entry must be a decision, not an omission.
+# Rows the catalogue documents that the toolkit never reads, each with the reader that consumes it.
 THIRD_PARTY_ROWS = {
     "WANDB_RESUME": "read by the wandb SDK; the row exists to pair it with WANDB_RUN_ID",
     "HALO_SCRATCH": "consumed by the Makefile and compose files on the host; derives the in-container HALO_DATA_ROOT",
@@ -38,17 +29,12 @@ THIRD_PARTY_ROWS = {
     ),
 }
 
-# An env var name: SCREAMING_SNAKE with at least two segments, which is what every read spells.
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
 
 
 def _string_constants_in_value_position(tree: ast.AST):
-    """String constants in a position that could make them an env key.
-
-    Deliberately narrower than "every string literal in the file" — a docstring, an f-string's prose
-    and a diagnostic dict's KEY spell the name without reading it, and counting those would let a log
-    line stand in for a reader.
-    """
+    """String constants that could be an env key. A docstring, an f-string's prose or a diagnostic dict's key spells
+    the name without reading it."""
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
             slots = [node.value]
@@ -98,7 +84,6 @@ _CATALOGUED = _catalogued_variables()
 
 
 def test_the_sweep_sees_both_sides():
-    """Guards the two parsers: a rename that empties either side would otherwise pass everything."""
     assert len(_CATALOGUED) > 40, f"the catalogue table parsed to {len(_CATALOGUED)} rows"
     assert sum(name.startswith(TOOLKIT_PREFIXES) for name in _READ) > 40, "the source sweep found almost no env reads"
 
@@ -110,7 +95,6 @@ def test_catalogue_rows_are_unique():
 
 @pytest.mark.parametrize("variable", sorted(set(_CATALOGUED)), ids=lambda name: name)
 def test_every_catalogued_variable_has_a_reader(variable):
-    """A documented variable no module even names is a promise the run does not keep."""
     if variable in THIRD_PARTY_ROWS:
         pytest.skip(f"{variable}: {THIRD_PARTY_ROWS[variable]}")
     assert variable in _READ, (
@@ -123,7 +107,6 @@ def test_every_catalogued_variable_has_a_reader(variable):
     "variable", sorted(name for name in _READ if name.startswith(TOOLKIT_PREFIXES)), ids=lambda name: name
 )
 def test_every_toolkit_variable_the_code_reads_is_catalogued(variable):
-    """A toolkit knob with no row is unreachable: the environment is the only way to set it."""
     assert variable in _CATALOGUED, (
         f"`{variable}` is read at {_READ[variable]} but has no row in the "
         f"'Environment variables' table of {CATALOGUE.name}."
@@ -131,7 +114,6 @@ def test_every_toolkit_variable_the_code_reads_is_catalogued(variable):
 
 
 def test_third_party_rows_are_still_documented():
-    """The exemption covers rows the catalogue keeps, not names it dropped."""
     for variable in THIRD_PARTY_ROWS:
         assert variable in _CATALOGUED, f"{variable} is exempted but no longer has a catalogue row"
         assert variable not in _READ, f"{variable} now has a reader — drop it from THIRD_PARTY_ROWS"

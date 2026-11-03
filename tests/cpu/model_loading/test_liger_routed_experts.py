@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""Liger's fused MoE kernel never runs routed experts: Halo's EP layer or the model's own implementation does.
-
-Upstream liger-kernel's MoE appliers swap a family's routed-experts class for ``LigerExperts``, that
-kernel, under ``swiglu``; ``LigerExperts`` computed the input gradient wrong on Blackwell until the fix
-that shipped in liger-kernel 0.8.3, which ``tests/gpu/kernels/test_liger_routed_experts.py`` has not
-re-measured. Two rules keep it off:
-
-* a delegating spec that serves its family's dense and shared-expert MLPs (Qwen3.5-MoE, Qwen3-Next)
-  withholds ``swiglu`` from upstream, so the shared expert stays fused while the experts stay stock;
-* any other resolution that hands ``swiglu`` to upstream on a MoE whose experts Halo does not wrap
-  (``ep_size: 1`` with ``use_grouped_gemm: false``, or a family with no EP layer class) gets it
-  forced off, an explicit request included.
-
-Both hold at load and in the trainer's re-sanitization of the config HF Trainer re-applies. Under an EP
-layer the swap is inert, and the soft EP gate still decides.
-
-The whole-model checks run in a subprocess: applying a real applier rebinds the family's classes for
-the rest of the process.
-
-    pytest -m cpu tests/cpu/model_loading/test_liger_routed_experts.py
-"""
+"""Liger's fused MoE kernel never runs routed experts; ``LigerExperts`` computed the input gradient wrong on
+Blackwell before liger-kernel 0.8.3, which has not been re-measured."""
 
 from __future__ import annotations
 
@@ -40,9 +21,8 @@ from tests.common.liger_appliers import liger_applier
 from tests.common.models import TINY_QWEN3_MOE_CONFIG, TINY_QWEN35_MOE_CONFIG
 from tests.common.repo import probe_findings
 
-# One tiny config per family, each carrying routed experts and — where the family has one — a shared
-# expert and a dense layer, so the toolkit's fused GLU has somewhere to show up. All-full-attention
-# on the hybrid families: their gated-delta-net layers are not what this checks.
+# Each carries routed experts and, where the family has them, a shared expert and a dense layer, so the fused GLU has
+# somewhere to show up.
 _TINY_FAMILIES = {
     "qwen3_moe": {**TINY_QWEN3_MOE_CONFIG, "num_hidden_layers": 2},
     "mixtral": {
@@ -76,12 +56,10 @@ _TINY_FAMILIES = {
     },
 }
 
-# The families whose toolkit spec serves `swiglu` on the dense and shared-expert MLPs itself.
 _TOOLKIT_GLU_FAMILIES = {"qwen3_5_moe_text", "qwen3_next"}
 
-# Every way Halo leaves a family's routed experts unwrapped, as ParallelismConfig overrides: Qwen3-MoE,
-# Qwen3.5-MoE and Qwen3-Next have an EP layer class, so only `ep_size: 1` with grouped GEMM off leaves them
-# bare; Mixtral has none, so the grouped-GEMM default leaves it bare too.
+# Qwen3-MoE, Qwen3.5-MoE and Qwen3-Next have an EP layer class, so only `ep_size: 1` with grouped GEMM off leaves them
+# bare; Mixtral has none.
 _UNWRAPPED = {
     "qwen3_moe": {"use_grouped_gemm": False},
     "mixtral": {},
@@ -89,8 +67,7 @@ _UNWRAPPED = {
     "qwen3_5_moe_text": {"use_grouped_gemm": False},
 }
 
-# Run with a `PAYLOAD = <json>` line prepended: the family, its config, needs_ep_layers, and whether
-# a toolkit spec serves its shared expert.
+# Run with a `PAYLOAD = <json>` line prepended.
 _MODEL_PROBE = """
 import inspect
 import json
@@ -191,9 +168,8 @@ print("FAILURES:" + "|".join(failures))
 """
 
 
-# What HF Trainer does at `train()`: upstream's applier alone, from the config the trainer mixin leaves,
-# on a model built outside Halo's loaders (nothing patched it at load). Run with a `PAYLOAD = <json>`
-# line prepended: the family and its ParallelismConfig overrides.
+# What HF Trainer does at `train()`: upstream's applier alone, on a model nothing patched at load. Run with a `PAYLOAD
+# = <json>` line prepended.
 _HF_REAPPLICATION_PROBE = """
 import json
 import sys
@@ -236,15 +212,13 @@ print("FAILURES:" + "|".join(failures))
 
 @pytest.fixture(autouse=True)
 def _restore_loss_utils():
-    """An upstream-resolved application installs the scoped CE patch; keep it out of later tests."""
+    """An upstream-resolved application installs the scoped CE patch."""
     original = loss_utils.nn
     yield
     loss_utils.nn = original
 
 
 class _RecordingApplier:
-    """Stands in for an upstream MoE applier; records the kwargs it was called with."""
-
     def __init__(self):
         self.calls = []
 
@@ -253,20 +227,15 @@ class _RecordingApplier:
 
 
 class _SwigluOffApplier(_RecordingApplier):
-    """An upstream applier declaring ``swiglu=False``: it has no SwiGLU patch for the family (GptOss)."""
+    """``swiglu=False``: it has no SwiGLU patch for the family (GptOss)."""
 
     def __call__(self, rope=True, cross_entropy=False, fused_linear_cross_entropy=True, rms_norm=True, swiglu=False):
         super().__call__(rope, cross_entropy, fused_linear_cross_entropy, rms_norm, swiglu)
 
 
 def _stub_upstream(monkeypatch, model_type: str) -> _RecordingApplier:
-    """Record upstream's applier for ``model_type`` instead of letting it patch transformers.
-
-    A toolkit applier that delegates (Qwen3 MoE's, for its norms) holds upstream's function from import
-    time, so its bound ``upstream`` is stubbed too, and the HF classes its own roles rebind are guarded so
-    monkeypatch restores them: otherwise the real upstream applier runs and Liger's patches stay applied
-    for the rest of the session.
-    """
+    """A delegating applier holds upstream's function from import time, so its ``upstream`` is stubbed too and the
+    rebound HF classes are guarded for monkeypatch."""
     applier = _RecordingApplier()
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, model_type, applier)
     toolkit = dispatch._TOOLKIT_LIGER_APPLIERS.get(model_type)
@@ -296,12 +265,10 @@ def _tiny_config(model_type: str):
 
 
 class _InitStopped(Exception):
-    """Carries control out of the trainer's shared init once it has re-sanitized the Liger config."""
+    """Carries control out of the trainer's shared init after the Liger re-sanitization."""
 
 
 class _InitHost:
-    """A bare trainer host for the shared init, stopped just past the Liger re-sanitization."""
-
     def _snapshot_model_config_state(self, model_config):
         pass
 
@@ -311,7 +278,6 @@ class _InitHost:
 
 
 def _trainer_liger_config(model_config, liger_kernel_config, **parallelism) -> dict:
-    """The ``liger_kernel_config`` the trainer mixin leaves for HF Trainer to re-apply at ``train()``."""
     args = types.SimpleNamespace(use_liger_kernel=True, liger_kernel_config=liger_kernel_config, output_dir="unused")
     kwargs = {
         "parallelism_config": ParallelismConfig(**parallelism),
@@ -329,11 +295,6 @@ def _trainer_liger_config(model_config, liger_kernel_config, **parallelism) -> d
     ids=["qwen3_moe-ep1-no-grouped-gemm", "mixtral-ep1-no-grouped-gemm", "mixtral-no-ep-layer-class"],
 )
 def test_an_unwrapped_moe_hands_upstream_no_swiglu(monkeypatch, model_type, needs_ep_layers):
-    """Where Halo does not wrap the experts, upstream's ``swiglu`` would put ``LigerExperts`` there.
-
-    Qwen3-MoE is unwrapped only at ``ep_size: 1`` with grouped GEMM off; Mixtral has no EP layer class,
-    so it is unwrapped under every configuration, the grouped-GEMM default included.
-    """
     applier = _stub_upstream(monkeypatch, model_type)
     config = _moe_config(model_type)
     applied = dispatch.apply_liger_kernel(config, None, needs_ep_layers=needs_ep_layers)
@@ -341,7 +302,7 @@ def test_an_unwrapped_moe_hands_upstream_no_swiglu(monkeypatch, model_type, need
     assert applier.calls[-1]["swiglu"] is False, "upstream's applier still received swiglu on"
     assert config._halo_liger_applied_config["swiglu"] is False, "the effective record must say what ran"
     assert applied["rms_norm"] is True, "only swiglu goes; the other kernels still apply"
-    # A role the toolkit took over (Qwen3 MoE's norm) is withheld from upstream, which must not patch it too.
+    # A role the toolkit took over is withheld from upstream.
     assert applier.calls[-1]["rms_norm"] is not _toolkit_takes_over(model_type, "rms_norm")
 
     # Anti-vacuity: the same family without experts keeps its fused SwiGLU.
@@ -350,10 +311,7 @@ def test_an_unwrapped_moe_hands_upstream_no_swiglu(monkeypatch, model_type, need
 
 
 def test_an_explicit_swiglu_request_cannot_bring_liger_experts_back(monkeypatch, caplog):
-    """Unlike the inert EP swap, this one trains on a wrong gradient, so a request does not override it.
-
-    The pinned re-application config keeps it off too, since TRL re-applies upstream's applier alone.
-    """
+    """Unlike the inert EP swap, this one trains on a wrong gradient, so a request does not override it."""
     applier = _stub_upstream(monkeypatch, "qwen3_moe")
     config = _moe_config("qwen3_moe")
     with caplog.at_level(logging.WARNING, logger="halo.model_loading.liger.dispatch"):
@@ -371,56 +329,38 @@ def test_an_explicit_swiglu_request_cannot_bring_liger_experts_back(monkeypatch,
     ids=[*_UNWRAPPED, "qwen3_5_moe_text-ep-wrapped"],
 )
 def test_the_trainer_re_sanitization_forces_the_swap_off_too(model_type, parallelism):
-    """HF Trainer re-applies Liger from ``liger_kernel_config`` at ``train()`` through upstream's applier
-    alone, so the trainer mixin sanitizes it a second time: a model loaded outside Halo's loaders, whose
-    config asks for ``swiglu``, must not get ``LigerExperts`` there either.
-
-    Qwen3-MoE and Mixtral lose the flag to the routed-experts rule. For Qwen3-Next and Qwen3.5-MoE the
-    toolkit's spec takes ``swiglu`` over from upstream, which HF's re-application never consults, so the
-    trainer pins it off, under the EP layer too, where upstream would still rebind the experts class
-    process-wide.
-    """
+    """For Qwen3-Next and Qwen3.5-MoE HF's re-application never consults the toolkit's spec, so the trainer pins the
+    flag off, under the EP layer too."""
     config = _trainer_liger_config(_tiny_config(model_type), {"swiglu": True, "rms_norm": True}, **parallelism)
     assert config["swiglu"] is False, "HF's re-application would hand upstream swiglu on the routed experts"
-    # The other kernels still apply, except a role the toolkit took over (Qwen3 MoE's norm): HF's
-    # re-application would bind upstream's variant over it.
+    # HF's re-application would bind upstream's variant over a role the toolkit took over.
     assert config["rms_norm"] is not _toolkit_takes_over(model_type, "rms_norm")
 
 
 @pytest.mark.parametrize(("model_type", "role"), [("gpt_oss", "rms_norm"), ("gemma4_text", "geglu")])
 def test_the_trainer_re_sanitization_turns_the_taken_over_roles_off(model_type, role):
-    """Every role a family's spec takes over from upstream goes off for HF's re-application, a request
-    included: upstream's instance patch would bind its variant over the family's (the llama-cast norm over
-    GptOss's Gemma-cast one, its GeGLU over Gemma 4's dense MLP).
-    """
+    """Upstream's instance patch would bind its variant over the family's (the llama-cast norm over GptOss's
+    Gemma-cast one)."""
     assert role in liger_applier(model_type).spec.upstream_off, "premise: the spec took it over"
     assert _trainer_liger_config(CONFIG_MAPPING[model_type](), {role: True})[role] is False
 
 
 @pytest.mark.parametrize(("model_type", "parallelism"), list(_UNWRAPPED.items()), ids=list(_UNWRAPPED))
 def test_hf_reapplication_of_the_trainer_config_installs_no_liger_experts(model_type, parallelism):
-    """The whole ``train()``-time path on a real tiny model: trainer re-sanitization, then
-    ``transformers.integrations.liger.apply_liger_kernel`` on a model no Halo loader patched.
-    """
     payload = json.dumps([model_type, parallelism])
     failures = probe_findings(f"PAYLOAD = {payload!r}\n" + _HF_REAPPLICATION_PROBE, "FAILURES:")
     assert not failures, f"{model_type}:\n" + "\n".join(failures)
 
 
 def test_the_trainer_re_sanitization_keeps_the_soft_ep_gate():
-    """The trainer site folds the same rules the load site does: under the EP layer the swap is inert, so
-    an explicit request stands, and without one the gate turns it off.
-    """
+    """Under the EP layer the swap is inert, so an explicit request stands."""
     config = _tiny_config("qwen3_moe")
     assert _trainer_liger_config(config, {"swiglu": True})["swiglu"] is True
     assert _trainer_liger_config(config, None)["swiglu"] is False
 
 
 def test_an_applier_with_no_swiglu_patch_is_left_alone(monkeypatch, caplog):
-    """A declared ``swiglu=False`` says upstream has no SwiGLU patch there, so there is no swap to stop.
-
-    Forcing it off would warn about ``LigerExperts`` on a family upstream never gives them to.
-    """
+    """Forcing it off would warn about ``LigerExperts`` on a family upstream never gives them to."""
     applier = _SwigluOffApplier()
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "family_with_swiglu_off", applier)
     config = _moe_config("family_with_swiglu_off")
@@ -432,11 +372,7 @@ def test_an_applier_with_no_swiglu_patch_is_left_alone(monkeypatch, caplog):
 
 
 def test_a_toolkit_entry_that_is_not_a_liger_applier_is_refused(monkeypatch):
-    """Which flags a toolkit applier hands upstream, and which roles it takes over, are read off its spec.
-
-    A stand-in has none to read, so both readers refuse it rather than one of them reading it as
-    withholding nothing.
-    """
+    """A stand-in has no spec, so both readers refuse it rather than one reading it as withholding nothing."""
     monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "qwen3_next", _RecordingApplier())
     with pytest.raises(TypeError, match="not a LigerApplier"):
         dispatch.liger_routed_expert_overrides(False, _moe_config("qwen3_next"))
@@ -445,20 +381,19 @@ def test_a_toolkit_entry_that_is_not_a_liger_applier_is_refused(monkeypatch):
 
 
 def test_under_an_ep_layer_the_soft_gate_still_decides(monkeypatch):
-    """The wrapper replaces the experts, so upstream's swap is inert there and an explicit request stands."""
+    """The wrapper replaces the experts, so upstream's swap is inert there."""
     _stub_upstream(monkeypatch, "qwen3_moe")
     assert dispatch.liger_routed_expert_overrides(True, _moe_config("qwen3_moe")) == {}
     assert dispatch.apply_liger_kernel(_moe_config("qwen3_moe"), None, needs_ep_layers=True)["swiglu"] is False
     explicit = dispatch.apply_liger_kernel(_moe_config("qwen3_moe"), {"swiglu": True}, needs_ep_layers=True)
     assert explicit["swiglu"] is True
 
-    # A delegating spec keeps its shared-expert GLU under the wrapper.
     assert dispatch.liger_ep_disables_fused_glu(True, _moe_config("qwen3_5_moe")) is False
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"])
 def test_a_delegating_spec_serving_the_shared_expert_hands_upstream_no_swiglu(model_type):
-    """The toolkit keeps the flag for its own MLPs; forcing it off would strip the shared expert too."""
+    """Forcing it off would strip the toolkit's shared expert too."""
     applier = liger_applier(model_type)
     assert "swiglu" in applier.defaults, "the toolkit no longer offers swiglu for its shared expert"
     assert applier.hands_upstream("swiglu") is False
@@ -469,11 +404,7 @@ def test_a_delegating_spec_serving_the_shared_expert_hands_upstream_no_swiglu(mo
 
 @pytest.mark.parametrize("model_type", sorted(_TINY_FAMILIES))
 def test_a_built_model_has_no_liger_experts(model_type):
-    """The whole path at ``ep_size: 1`` with grouped GEMM off: resolve, apply, build, inspect.
-
-    Upstream-only families come out with ``swiglu`` off and their experts stock; the delegating ones
-    keep ``swiglu`` on for the toolkit's fused shared expert while upstream is handed it off.
-    """
+    """Delegating families keep ``swiglu`` on for the fused shared expert while upstream is handed it off."""
     toolkit_glu = model_type in _TOOLKIT_GLU_FAMILIES
     payload = json.dumps([model_type, _TINY_FAMILIES[model_type], False, toolkit_glu])
     failures = probe_findings(f"PAYLOAD = {payload!r}\n" + _MODEL_PROBE, "FAILURES:")
@@ -481,10 +412,7 @@ def test_a_built_model_has_no_liger_experts(model_type):
 
 
 def test_no_registered_moe_family_installs_liger_experts():
-    """Every family either registry resolves, applied at load with Halo's defaults and no EP layer.
-
-    Swept off the registries rather than a list, so a MoE family upstream adds later is covered.
-    """
+    """Swept off the registries, so a MoE family upstream adds later is covered."""
     failures = probe_findings(_REGISTRY_SWEEP, "FAILURES:")
     assert not failures, "LigerExperts reached a family's modeling module:\n" + "\n".join(failures)
 

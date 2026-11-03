@@ -1,14 +1,11 @@
-"""The S3 folder commands ``scripts/before_training/s3.py`` runs — push, download, list, exists and delete — each
-through the :class:`~halo.data.sources.s3_client.S3Client` built for ``--bucket``, or for the bucket a full
-``s3://`` URI key names, and returning the report the CLI prints."""
+"""The S3 folder commands ``scripts/before_training/s3.py`` runs, each returning the report the CLI prints."""
 
 from halo.data.sources.s3_client import S3Client, default_bucket
 
 
 def build_command_client(args) -> S3Client:
-    """The client a command runs through: for ``--bucket``, or, when the command's key (``s3_key``, or ``prefix``
-    for ``list``) is a full ``s3://bucket/key`` URI, for that bucket, the key then replacing the URI in ``args``. A
-    URI beside ``--subfolder`` or another ``--bucket`` raises, since it names its whole location itself."""
+    """For ``--bucket``, or the bucket of a key given as a full ``s3://`` URI, the key then replacing the URI in
+    ``args``. A URI beside ``--subfolder`` or another ``--bucket`` raises."""
     field = "prefix" if hasattr(args, "prefix") else "s3_key"
     value = getattr(args, field)
     if not value.startswith("s3://"):
@@ -25,7 +22,6 @@ def build_command_client(args) -> S3Client:
 
 
 def push_command(args, client: S3Client) -> str:
-    """Upload ``args.local_path`` to ``args.s3_key``."""
     result = client.push_folder(
         local_path=args.local_path,
         key=args.s3_key,
@@ -37,7 +33,6 @@ def push_command(args, client: S3Client) -> str:
 
 
 def download_command(args, client: S3Client) -> str:
-    """Download ``args.s3_key`` to ``args.local_path``."""
     result = client.download_folder(
         key=args.s3_key,
         local_path=args.local_path,
@@ -49,7 +44,6 @@ def download_command(args, client: S3Client) -> str:
 
 
 def list_command(args, client: S3Client) -> str:
-    """The objects and directories under ``args.prefix``, one per line."""
     objects = client.list_objects(
         prefix=args.prefix,
         subfolder=args.subfolder,
@@ -72,8 +66,7 @@ def list_command(args, client: S3Client) -> str:
 
 
 def delete_command(args, client: S3Client) -> str:
-    """Delete the object at ``args.s3_key``, or with ``args.recursive`` everything under it, confirming first unless
-    ``args.yes``; a refused or failed delete exits non-zero."""
+    """Confirms first unless ``args.yes``; a refused or failed delete exits non-zero."""
     s3_uri = client.s3_uri(args.s3_key, args.subfolder)
 
     # A no-op delete reports success at the API, so resolve what is actually there first.
@@ -103,7 +96,6 @@ def delete_command(args, client: S3Client) -> str:
 
 
 def exists_command(args, client: S3Client) -> str:
-    """Whether anything exists at ``args.s3_key``."""
     s3_uri = client.s3_uri(args.s3_key, args.subfolder)
 
     if client.exists(args.s3_key, args.subfolder):

@@ -28,26 +28,21 @@ SEQUENCE_ALIGNED_VISION_KEYS = frozenset({"mm_token_type_ids", "token_type_ids"}
 
 
 def vlm_row_tools(row: dict[str, Any]) -> list | None:
-    """The row's tool schemas, decoded from the ``tools_json`` column the VLM map writes."""
     tools_json = row.get("tools_json")
     return json.loads(tools_json) if tools_json else None
 
 
 def render_vlm_text(processor, history: list[dict[str, Any]], *, tools: list | None = None) -> str:
-    """Chat-template the placeholder history :func:`extract_conversation_images` produces; every VLM path
-    renders here, so a preprocessed artifact, a runtime batch and a preference pair tokenize alike."""
+    """Every VLM path renders here, so an artifact, a runtime batch and a preference pair tokenize alike."""
     # ``is None``, not truthiness: a row declaring ``tools: []`` renders under ``tools is defined``.
     template_kwargs = {} if tools is None else {"tools": tools}
     return processor.apply_chat_template(history, tokenize=False, add_generation_prompt=False, **template_kwargs)
 
 
 def run_vlm_processor(processor, texts, row_images, **overrides):
-    """Run a VLM processor over rendered text with ``add_special_tokens=False`` (the render carries them).
-
-    ``row_images`` holds one image list per text, the layout transformers' processors batch: Gemma 3/4 read a flat
-    list as one text's images and refuse a batch of several texts, and the processors that flatten take either.
-    A ``StopIteration`` (placeholder vs image count mismatch) re-raises as ``ValueError``, since one leaked
-    from a collator ends the dataloader silently."""
+    """``add_special_tokens=False``, as the render carries them. ``row_images`` holds one image list per text: Gemma
+    3/4 read a flat list as one text's images and refuse a batch. A ``StopIteration`` (placeholder vs image count
+    mismatch) re-raises as ``ValueError``, since one leaked from a collator ends the dataloader silently."""
     kwargs = {"text": texts, "return_tensors": "pt", "add_special_tokens": False, **overrides}
     if any(row_images):
         kwargs["images"] = [list(images) for images in row_images]
@@ -60,8 +55,7 @@ def run_vlm_processor(processor, texts, row_images, **overrides):
 
 
 def reject_over_length_vlm_batch(encoded, max_length: int | None, subject: str) -> None:
-    """Raise when a processed VLM batch carries a sequence over ``max_length`` (``None`` disables), the only
-    point that sees the length once image placeholders expand; ``subject`` names the batch."""
+    """The only point that sees the length once image placeholders expand; ``None`` disables."""
     if max_length is None:
         return
     attention_mask = encoded.get("attention_mask")
@@ -79,7 +73,6 @@ def reject_over_length_vlm_batch(encoded, max_length: int | None, subject: str) 
 
 
 def decode_image(image_data) -> Image.Image:
-    """A PIL image from a data URI, a file path, raw bytes or an image already decoded."""
     if isinstance(image_data, str):
         if image_data.startswith("data:image"):
             image_data = image_data.split(",")[1]
@@ -135,8 +128,7 @@ def extract_conversation_images(
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
 ) -> tuple[list[dict[str, Any]], list[Image.Image]]:
-    """``(history, images)``: the conversation with each image replaced by a bare placeholder, and the images
-    decoded for the processor."""
+    """The conversation with each image replaced by a bare placeholder, and the decoded images."""
     # Without a system role the prompt is folded into the first turn, not emitted as one the template drops.
     conversation = fold_system_into_conversation(
         conversation, system_prompt, model_supports_system_role, demote_existing_system=False

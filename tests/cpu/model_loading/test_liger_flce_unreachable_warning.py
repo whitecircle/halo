@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``warn_if_flce_unreachable`` — the GRPO-family guard against a silently inert Liger FLCE.
-
-GRPO objectives compute their loss outside the model's forward and never pass ``labels``, so an
-applied ``fused_linear_cross_entropy`` (explicit, or a per-model default like Zaya's) never fires:
-numerically neutral, but the logits plane the user enabled it to remove still materializes. The
-warning at trainer construction is the only surfacing of that — these tests fail if it goes silent,
-fires spuriously, or the GRPO trainers stop declaring the flag that routes to it.
-
-    python tests/cpu/model_loading/test_liger_flce_unreachable_warning.py
-"""
+"""``warn_if_flce_unreachable``: GRPO never passes ``labels``, so FLCE never fires while the logits plane it should
+remove still materializes."""
 
 import logging
 from types import SimpleNamespace
@@ -42,17 +34,16 @@ def test_warns_when_flce_applied(caplog):
     "applied", [None, {}, {"fused_linear_cross_entropy": False}, {"cross_entropy": True}], ids=str
 )
 def test_silent_when_flce_not_applied(caplog, applied):
-    # CE alone must NOT warn: it is the toolkit default and equally inert here — warning on every
-    # GRPO run would train users to ignore the one that matters.
+    # CE is the toolkit default and equally inert here; warning on every GRPO run trains users to ignore the one that
+    # matters.
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
         warn_if_flce_unreachable(_config(applied), "DistributedOnlineGRPOTrainer")
     assert not caplog.records
 
 
 def test_grpo_family_declares_the_flag():
-    # The warning only reaches users through _configure_distributed_modes' gate on this flag; a trainer
-    # silently dropping it re-opens the inert-FLCE trap.
-    assert DistributedTrainerMixin.POLICY_GRADIENT_LOSS is False  # SFT-shaped trainers keep FLCE
+    # The warning reaches users only through _configure_distributed_modes' gate on this flag.
+    assert DistributedTrainerMixin.POLICY_GRADIENT_LOSS is False  # SFT-shaped trainers keep FLCE.
     for trainer in (OfflineGRPOTrainer, DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert trainer.POLICY_GRADIENT_LOSS is True, trainer.__name__
 

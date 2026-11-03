@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""The Liger cross-entropy patch must reach ``transformers.loss.loss_utils`` and NOTHING else, and no Liger
-application may rebind ``torch.nn.LayerNorm``.
-
-Rebinding ``torch.nn.functional.cross_entropy`` (what upstream Liger's own appliers do) swaps the
-kernel under every caller in the process. ``liger_cross_entropy`` serves only 2-D hard-label calls,
-so a 3-D or soft-target caller elsewhere — CP's own fp32 loss, a reward head, third-party code —
-would start raising, while the applier's docstring still promises the narrow scope.
-
-Upstream's VLM appliers called before the model exists install ``layer_norm`` by rebinding ``torch.nn.LayerNorm``
-(their ``modeling_<family>.nn`` is ``torch.nn``), so every LayerNorm the process builds afterwards — a teacher, a
-reference — would be Liger's, whose signature takes no ``elementwise_affine``/``device``/``dtype`` and defaults
-``eps`` to 1e-6.
-
-Run: pytest tests/cpu/model_loading/test_liger_patch_scoping.py
-"""
+"""The Liger CE patch reaches ``transformers.loss.loss_utils`` and nothing else, and no application rebinds
+``torch.nn.LayerNorm``. A process-wide rebind breaks any 3-D or soft-target caller, CP's own fp32 loss included."""
 
 import inspect
 import re
@@ -36,7 +23,6 @@ from tests.common.repo import probe_findings
 
 @pytest.fixture
 def patched():
-    """Apply the patch and restore ``loss_utils``' original ``nn`` afterwards."""
     original = loss_utils.nn
     patch_loss_utils_cross_entropy()
     yield
@@ -44,31 +30,23 @@ def patched():
 
 
 def test_process_wide_cross_entropy_is_untouched(patched):
-    """The blast radius: ``F.cross_entropy`` must still be torch's own function."""
     assert F.cross_entropy is _TORCH_CROSS_ENTROPY, (
         "the Liger CE patch rebound torch.nn.functional.cross_entropy process-wide"
     )
     assert torch.nn.functional.cross_entropy is _TORCH_CROSS_ENTROPY
 
-    # A 3-D / soft-target call that liger_cross_entropy cannot serve must keep working elsewhere.
-    F.cross_entropy(torch.randn(2, 5, 7), torch.randint(0, 5, (2, 7)))  # (N, C, d) hard labels
-    F.cross_entropy(torch.randn(4, 7), torch.softmax(torch.randn(4, 7), dim=-1))  # soft targets
+    # Calls liger_cross_entropy cannot serve must keep working elsewhere.
+    F.cross_entropy(torch.randn(2, 5, 7), torch.randint(0, 5, (2, 7)))
+    F.cross_entropy(torch.randn(4, 7), torch.softmax(torch.randn(4, 7), dim=-1))
 
 
 def test_loss_utils_is_actually_routed_through_liger(patched):
-    """The patch is not a no-op: HF's single CE call site resolves to the Liger replacement."""
     assert loss_utils.nn.functional.cross_entropy is liger_cross_entropy
 
 
 def test_hf_loss_really_reaches_the_override():
-    """Drive HF's real loss and prove the substituted function is CALLED.
-
-    Asserting only that ``loss_utils.nn.functional.cross_entropy`` is the replacement is a property of
-    the proxy, not of transformers: if HF stopped reaching cross-entropy through its module-level ``nn``
-    (a rename, or a switch to a direct ``F.cross_entropy`` import) the patch would become a silent no-op
-    with that assertion still green. A sentinel installed the same way the patch installs its override
-    catches that.
-    """
+    """If HF stopped reaching CE through its module-level ``nn``, the patch would silently no-op with a proxy-only
+    assert still green."""
     calls = []
 
     def _sentinel(*args, **kwargs):
@@ -87,12 +65,8 @@ def test_hf_loss_really_reaches_the_override():
 
 
 def test_a_later_writer_cannot_shadow_the_override(patched):
-    """Upstream Liger's appliers reach torch.nn via ``from transformers.loss.loss_utils import nn``.
-
-    After our patch that name IS the proxy, so their ``nn.functional.cross_entropy = ...`` assignment must
-    land on ``torch.nn.functional`` rather than inside the proxy — otherwise it would permanently shadow
-    our override (killing its CPU fallback) in a module-level singleton no re-patch could repair.
-    """
+    """Their ``nn.functional.cross_entropy = ...`` must land on ``torch.nn.functional``, or it permanently shadows
+    our override in a module-level singleton."""
     marker = object()
     try:
         loss_utils.nn.functional.cross_entropy = marker
@@ -105,7 +79,7 @@ def test_a_later_writer_cannot_shadow_the_override(patched):
 
 
 def test_patch_is_idempotent(patched):
-    """Applying twice must not stack proxies (the appliers may both run in one process)."""
+    """The appliers may both run in one process."""
     before = loss_utils.nn
     patch_loss_utils_cross_entropy()
     assert loss_utils.nn is before
@@ -116,11 +90,7 @@ def test_patch_is_idempotent(patched):
     sorted(set(re.findall(r"\bnn\.([A-Za-z_][A-Za-z0-9_.]*)", inspect.getsource(loss_utils)))),
 )
 def test_every_nn_attribute_loss_utils_uses_still_resolves(patched, attribute):
-    """The override is read-through: every ``nn.<attr>`` in ``loss_utils`` must still resolve.
-
-    Enumerated from the installed ``loss_utils`` source rather than a hand-listed set, so a transformers
-    upgrade that reaches for a new ``nn`` attribute fails here instead of at the first loss computation.
-    """
+    """Enumerated from the source, so a transformers upgrade reaching for a new ``nn`` attribute fails here."""
     resolved = loss_utils.nn
     for part in attribute.split("."):
         resolved = getattr(resolved, part)
@@ -132,15 +102,8 @@ def test_every_nn_attribute_loss_utils_uses_still_resolves(patched, attribute):
 
 
 def test_an_upstream_family_leaves_the_process_wide_function_alone():
-    """The scope must hold for a family UPSTREAM Liger covers, not only for the toolkit's own specs.
-
-    Upstream's appliers install CE by rebinding ``torch.nn.functional.cross_entropy``; dispatch
-    withholds that flag and applies the scoped patch instead. A reward head calling ``F.cross_entropy``
-    twice on one logits tensor (the classification trainer's focal loss) would otherwise read
-    gradients Liger wrote into the tensor in place.
-
-    Subprocess: applying a real upstream applier rebinds the family's classes for the process.
-    """
+    """Otherwise a reward head calling ``F.cross_entropy`` twice on one logits tensor reads gradients Liger wrote in
+    place. Subprocess: applying a real upstream applier rebinds the family's classes for the process."""
     script = """
 import torch.nn.functional as F
 from transformers.loss import loss_utils
@@ -164,12 +127,8 @@ print("FAILURES:" + "|".join(failures))
 
 
 def test_no_upstream_family_rebinds_the_process_wide_layer_norm():
-    """Every family whose dispatched applier is upstream's and declares ``layer_norm`` is applied as the loader
-    applies it, and ``torch.nn.LayerNorm`` stays torch's class, with ``layer_norm: false`` recorded as applied.
-
-    Swept off Liger's registry, so a family upstream adds is covered. Anti-vacuity: called raw, before the
-    model exists, at least one of those appliers does rebind it. Subprocess: the appliers rebind module classes.
-    """
+    """Anti-vacuity: called raw, before the model exists, at least one of those appliers does rebind it.
+    Subprocess: the appliers rebind module classes."""
     script = """
 import inspect
 
@@ -222,8 +181,7 @@ print("FAILURES:" + "|".join(failures))
 
 
 def test_an_applier_that_rebinds_the_layer_norm_is_refused(monkeypatch):
-    """The dispatch checks the class after every application, so an applier rebinding ``torch.nn.LayerNorm``
-    under any flag fails the load instead of reaching every later build."""
+    """It fails the load instead of reaching every later build."""
 
     class _SwappedLayerNorm(torch.nn.LayerNorm):
         pass
@@ -231,20 +189,20 @@ def test_an_applier_that_rebinds_the_layer_norm_is_refused(monkeypatch):
     def rebinding_applier(rope: bool = True, model=None):
         torch.nn.LayerNorm = _SwappedLayerNorm
 
-    monkeypatch.setattr(torch.nn, "LayerNorm", torch.nn.LayerNorm)  # restored after the test
+    monkeypatch.setattr(torch.nn, "LayerNorm", torch.nn.LayerNorm)  # Restored after the test.
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "halo_test_layer_norm_swap", rebinding_applier)
     with pytest.raises(RuntimeError, match="rebound torch.nn.LayerNorm to _SwappedLayerNorm"):
         _apply_liger_for_standard_models("halo_test_layer_norm_swap", {})
 
 
 def test_hf_loss_path_numerics_unchanged_on_cpu(patched):
-    """Liger is Triton/CUDA-only; on CPU the replacement must fall back to torch, bit for bit."""
+    """Liger is Triton/CUDA-only."""
     torch.manual_seed(0)
     logits = torch.randn(1, 6, 11)
     labels = torch.randint(0, 11, (1, 6))
     patched_loss = loss_utils.ForCausalLMLoss(logits, labels, vocab_size=11)
 
-    loss_utils.nn = torch.nn  # unpatched reference
+    loss_utils.nn = torch.nn  # Unpatched reference.
     reference = loss_utils.ForCausalLMLoss(logits, labels, vocab_size=11)
     assert torch.equal(patched_loss, reference)
 

@@ -1,5 +1,4 @@
-"""Rule-based answer normalization and matching; :func:`is_correct_answer` is the check every environment
-grades an answer through."""
+"""Rule-based answer normalization and matching; every environment grades through :func:`is_correct_answer`."""
 
 import re
 from typing import Any
@@ -75,13 +74,11 @@ _VARIABLE_OPERAND_RE = re.compile(
 
 
 def extract_last_boxed(text: str) -> str | None:
-    """Content of the last balanced ``\\boxed{...}`` in ``text``, or ``None`` when none closes.
+    """Content of the last balanced ``\\boxed{...}``, or ``None`` when none closes.
 
-    Braces are matched by depth so nested groups survive (a first-``}`` match truncates ``\\boxed{\\frac{1}{2}}``
-    to ``\\frac{1`` and scores a correct answer wrong). A backslash escapes the next character, so ``\\{``/``\\}``
-    never shift the depth, while a doubled backslash still introduces the token (models emit escaped LaTeX). An
-    unterminated ``\\boxed{`` and an empty ``\\boxed{}`` are no candidates. One left-to-right pass: degenerate
-    rollouts repeat ``\\boxed{`` thousands of times, and rescanning per candidate would be quadratic.
+    Braces match by depth so nested groups survive; a backslash escapes the next character, while a doubled backslash
+    still introduces the token (models emit escaped LaTeX). One left-to-right pass: degenerate rollouts repeat
+    ``\\boxed{`` thousands of times, and rescanning per candidate would be quadratic.
     """
     open_braces: list[int | None] = []  # content start per open brace; None for a brace that opens no box
     best_start = -1
@@ -112,8 +109,8 @@ def extract_last_boxed(text: str) -> str | None:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize text for answer comparison: lowercase, strip, extract from ``\\boxed{}`` / a lone
-    ``**bold**`` span, drop leading answer prefixes ("the answer is", …) and trailing period."""
+    """Lowercase, strip, extract from ``\\boxed{}`` or a lone ``**bold**`` span, drop leading answer prefixes and a
+    trailing period."""
     text = str(text).strip()
 
     boxed = extract_last_boxed(text)
@@ -144,7 +141,6 @@ def normalize_text(text: str) -> str:
 
 
 def exact_match(predicted: str, expected: str) -> bool:
-    """Case-insensitive exact match after normalization."""
     return normalize_text(predicted) == normalize_text(expected)
 
 
@@ -162,7 +158,6 @@ def _stated_values(text: str) -> list[float]:
         # The gap runs up to the digits, so a sign right after an operand reads as the operator it is.
         if previous_end is not None and _OPERATOR_GAP_RE.fullmatch(text, previous_end, match.start("value")):
             return []
-        # Grouping commas dropped, a ``%`` value divided by 100.
         value = float(match["sign"] + match["value"].replace(",", ""))
         values.append(value / 100.0 if match["percent"] else value)
         previous_end = match.end()
@@ -175,13 +170,9 @@ def numeric_match(
     rtol: float = 0.01,
     atol: float = 1e-6,
 ) -> bool:
-    """Whether the prediction states one value and it equals the expected number within tolerance.
-
-    Every number in the prediction must match, so a hedge (``7 or 8``), restated working, an operand of arithmetic or
-    an expression (``1/2``, ``10²``, ``\\sqrt{2}``, ``log 2``) and a bound (``x < 3``) grade wrong. ``,`` grouping
-    reads as one number, a ``%`` value is divided by 100, a power after a letter is a unit exponent and a number glued
-    to a letter part of a token. The expected answer is read the same way and must state exactly one value.
-    """
+    """Whether the prediction states one value equal to the expected number within tolerance. Every number in it must
+    match, so a hedge (``7 or 8``), restated working, an operand or expression (``1/2``, ``10²``, ``\\sqrt{2}``,
+    ``log 2``) and a bound (``x < 3``) grade wrong. The expected answer must state exactly one value."""
     expected_values = _stated_values(normalize_text(expected))
     if len(expected_values) != 1:
         return False
@@ -194,9 +185,7 @@ def numeric_match(
 
 
 def is_correct_answer(predicted: Any, expected: Any) -> bool:
-    """Whether ``predicted`` answers ``expected``: an :func:`exact_match`, else a :func:`numeric_match`. All or
-    nothing: a similarity threshold or substring containment rewards a wrong answer that reads like the right one ("7"
-    in "17").
-    """
+    """An :func:`exact_match`, else a :func:`numeric_match`. All or nothing: a similarity threshold or substring
+    containment rewards a wrong answer that reads like the right one ("7" in "17")."""
     predicted_str, expected_str = str(predicted), str(expected)
     return exact_match(predicted_str, expected_str) or numeric_match(predicted_str, expected_str)

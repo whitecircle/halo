@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the chunked fp32 log-prob kernel and its chunk budget.
-
-``selective_logprobs`` backs the pipeline last-stage losses and replaces TRL's bf16 log-softmax on the
-DPO/KTO loss paths, which pass it the shifted ``logits[:, :-1]`` view. Chunking is only legitimate if
-the numbers do not move, so values and grads are held BITWISE to the unchunked fp32 formulation, and
-the chunks must keep fp32 state out of backward — the reason they exist.
-
-    python tests/cpu/kernels/test_logprobs.py
-"""
+"""The chunked fp32 log-prob kernel and its chunk budget: values and grads held bitwise to the unchunked fp32
+formulation."""
 
 import pytest
 import torch
@@ -20,11 +13,11 @@ from tests.common.numerics import autograd_nodes
 VOCAB = 37
 
 
-# The last case's budget exceeds every row: each row is one chunk, still checkpointed.
+# The last budget exceeds every row: each row is one chunk, still checkpointed.
 @pytest.mark.parametrize(("batch", "seq", "budget_rows"), [(2, 16, 4), (4, 33, 7), (2, 9, 1), (2, 16, 64)])
 def test_selective_logprobs_match_the_full_plane(monkeypatch, batch, seq, budget_rows):
-    """A row left out of the checkpoint keeps its fp32 log-softmax alive until backward — a whole fp32
-    plane across the batch — and a slice per chunk zero-fills a whole-row gradient per chunk."""
+    """A row outside the checkpoint keeps its fp32 log-softmax alive until backward, and a per-chunk slice
+    zero-fills a whole-row gradient."""
     monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", budget_rows * VOCAB)
     torch.manual_seed(batch * 100 + seq)
     base = torch.randn(batch, seq, VOCAB, dtype=torch.bfloat16)
@@ -53,8 +46,7 @@ def test_selective_logprobs_match_the_full_plane(monkeypatch, batch, seq, budget
 
 
 def test_a_row_mask_zeroes_the_masked_positions_as_trl_does():
-    """TRL's DPO/KTO paths pass the shifted completion mask as ``row_mask``; masked positions score zero
-    and send back no gradient, the rest are untouched."""
+    """TRL's DPO/KTO paths pass the shifted completion mask as ``row_mask``."""
     torch.manual_seed(0)
     base = torch.randn(3, 9, VOCAB, dtype=torch.bfloat16)
     index = torch.randint(0, VOCAB, (3, 8))
@@ -85,15 +77,9 @@ def test_selective_logprobs_refuses_a_top_k_index():
 
 
 def test_chunk_budget_is_vocab_aware():
-    """The held fp32 plane must stay bounded as the vocabulary grows.
-
-    The chunk budget is what keeps the fp32 upcast off the memory peak, and the plane it slices is
-    ``tokens x V``. Sizing it in token ROWS bounds nothing in particular: at gpt-oss's V=201k a
-    4096-row chunk is 3.3 GB — the size of the entire bf16 plane it is supposed to be a fraction of —
-    while at V=32k the same constant is 0.5 GB. Asserting a flat ceiling in BYTES is what catches a
-    regression back to a row-count budget.
-    """
-    ceiling = logprob_kernels.LOGIT_CHUNK_ELEMENTS * 4  # fp32
+    """At gpt-oss's V=201k a 4096-row chunk is 3.3 GB, the whole bf16 plane; a ceiling in bytes catches a row-count
+    budget."""
+    ceiling = logprob_kernels.LOGIT_CHUNK_ELEMENTS * 4
     for vocab in (32_000, 151_936, 201_088, 262_144):
         rows = logit_chunk_rows(vocab)
         assert rows >= 1, f"vocab {vocab} must still take at least one row per chunk"
@@ -101,12 +87,12 @@ def test_chunk_budget_is_vocab_aware():
             f"vocab {vocab}: chunk holds {rows * vocab * 4 / 1e9:.2f} GB of fp32, over the "
             f"{ceiling / 1e9:.2f} GB budget — the chunk is sized in rows, not elements"
         )
-    # A vocabulary past the whole budget must not round down to a zero-row (infinite-loop) chunk.
+    # It must not round down to a zero-row (infinite-loop) chunk.
     assert logit_chunk_rows(logprob_kernels.LOGIT_CHUNK_ELEMENTS * 2) == 1
 
 
 def _unchunked_token_logprobs(logits, labels):
-    """The pre-chunking formulation: two full fp32 ``[B, S-1, V]`` planes, held at once."""
+    """Two full fp32 ``[B, S-1, V]`` planes, held at once."""
     shift_logits = logits[:, :-1, :].float()
     shift_labels = labels[:, 1:]
     mask = shift_labels != -100
@@ -115,24 +101,18 @@ def _unchunked_token_logprobs(logits, labels):
     return logps, mask
 
 
-# The last case's budget exceeds every row: each row is one chunk.
+# The last budget exceeds every row: each row is one chunk.
 @pytest.mark.parametrize(("batch", "seq", "budget_rows"), [(2, 16, 4), (4, 33, 7), (2, 9, 1), (2, 16, 64)])
 def test_chunked_token_logprobs_match_the_full_plane(monkeypatch, batch, seq, budget_rows):
-    """Per-token log-probs must be BITWISE identical to the unchunked formulation, grads included.
-
-    ``token_logprobs`` feeds every preference/RL PP adapter (DPO, KTO, SMPO, offline GRPO). Building
-    the fp32 upcast and the ``log_softmax`` output as whole ``[B, S-1, V]`` planes costs ~26 GB per
-    microbatch at ``V=201088, S=8192``, on the one stage that also carries the head — which is why it
-    chunks, like the CE path above. Chunking is only legitimate if the numbers do not move, so this
-    asserts equality rather than closeness.
-    """
+    """Whole planes cost ~26 GB per microbatch at ``V=201088, S=8192`` on the stage carrying the head, why it
+    chunks."""
     vocab = 37
     monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", budget_rows * vocab)
     torch.manual_seed(batch * 100 + seq)
     base = torch.randn(batch, seq, vocab, dtype=torch.bfloat16)
     labels = torch.randint(0, vocab, (batch, seq))
     labels[:, :2] = -100
-    labels[-1, :] = -100  # an inert all-ignore row, as the PP eval row-padding emits
+    labels[-1, :] = -100  # An inert all-ignore row, as the PP eval row-padding emits.
 
     chunked_in = base.clone().requires_grad_(True)
     full_in = base.clone().requires_grad_(True)
@@ -154,8 +134,7 @@ def test_chunked_token_logprobs_match_the_full_plane(monkeypatch, batch, seq, bu
     ids=["rows", "negative-start", "past-the-end", "longer-than-labels"],
 )
 def test_next_token_logprobs_refuses_a_window_outside_the_labels(logits_shape, start):
-    """A chunk that does not lie inside the labels would score against a clipped or misaligned target
-    slice — read off shapes alone, so no host sync."""
+    """Read off shapes alone, so no host sync."""
     labels = torch.zeros(3, 8, dtype=torch.long)
     with pytest.raises(ValueError, match="do not lie inside labels"):
         next_token_logprobs(torch.zeros(logits_shape), labels, start)
@@ -163,8 +142,7 @@ def test_next_token_logprobs_refuses_a_window_outside_the_labels(logits_shape, s
 
 
 def test_token_logprobs_drop_the_final_position_after_scoring():
-    """The ``[B, S-1]`` contract is cut from the ``[B, S]`` log-probs: slicing the logits instead would
-    make its backward zero-fill and copy a whole ``[B, S, V]`` gradient plane."""
+    """Slicing the logits instead makes backward zero-fill and copy a whole ``[B, S, V]`` plane."""
     logits = torch.randn(2, 9, VOCAB, requires_grad=True)
     logps, _ = token_logprobs(logits, torch.randint(0, VOCAB, (2, 9)))
     sliced = [

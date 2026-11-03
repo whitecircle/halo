@@ -1,5 +1,4 @@
-"""The Ulysses all-to-all: an autograd-aware swap of the sequence and head dims, in both directions, each one
-``all_to_all_single`` however many tensors it carries."""
+"""The Ulysses all-to-all: an autograd-aware swap of the sequence and head dims, one ``all_to_all_single`` each way."""
 
 from __future__ import annotations
 
@@ -18,9 +17,8 @@ def _require_divisible(tensor: torch.Tensor, dim: int, world_size: int) -> None:
 
 
 def _exchange(rows: list[torch.Tensor], process_group: dist.ProcessGroup) -> tuple[torch.Tensor, ...]:
-    """COLLECTIVE over ``process_group``: ``rows`` are ``[world, ...]`` views sharing every dim but the last, row ``r``
-    of each bound for group rank ``r``. They travel side by side in one ``all_to_all_single`` and come back split the
-    same way, row ``i`` of each what group rank ``i`` sent here."""
+    """COLLECTIVE over ``process_group``: ``rows`` are ``[world, ...]`` views, row ``r`` of each bound for group rank
+    ``r``, sent side by side in one ``all_to_all_single``; row ``i`` of each result is what rank ``i`` sent here."""
     # A lone view that is already contiguous goes as it is, without the copy a cat makes.
     send = rows[0].contiguous() if len(rows) == 1 else torch.cat(rows, dim=-1)
     received = torch.empty_like(send)
@@ -44,7 +42,7 @@ def _swap_to_heads(tensors: tuple[torch.Tensor, ...], process_group: dist.Proces
 
 
 def _swap_to_sequence(tensors: tuple[torch.Tensor, ...], process_group: dist.ProcessGroup) -> tuple[torch.Tensor, ...]:
-    """``[batch, seq, heads/CP, dim]`` each → ``[batch, seq/CP, heads, dim]``, the inverse of :func:`_swap_to_heads`."""
+    """``[batch, seq, heads/CP, dim]`` each → ``[batch, seq/CP, heads, dim]``."""
     world_size = dist.get_world_size(process_group)
     for tensor in tensors:
         _require_divisible(tensor, 1, world_size)
@@ -59,10 +57,9 @@ def _swap_to_sequence(tensors: tuple[torch.Tensor, ...], process_group: dist.Pro
 
 
 class UlyssesAllToAll(torch.autograd.Function):
-    """COLLECTIVE over ``process_group``: Ulysses' swap of ``[batch, seq, heads, dim]`` tensors from sequence to head
-    sharding (``to_heads``) or back, all of them in one ``all_to_all_single``; the backward swaps the gradients the
-    other way. An output can be a view of the received buffer (the swap to heads at batch 1), which autograd refuses
-    to modify in place."""
+    """COLLECTIVE over ``process_group``: swap ``[batch, seq, heads, dim]`` tensors between sequence and head sharding
+    in one ``all_to_all_single``; the backward swaps gradients the other way. An output can be a view of the received
+    buffer (to heads at batch 1), which autograd refuses to modify in place."""
 
     @staticmethod
     def forward(
@@ -78,8 +75,7 @@ class UlyssesAllToAll(torch.autograd.Function):
 
 
 def heads_to_sequence(tensor: torch.Tensor, process_group: dist.ProcessGroup) -> torch.Tensor:
-    """COLLECTIVE over ``process_group``: ``[batch, seq, heads/CP, dim]`` → ``[batch, seq/CP, heads, dim]``, the
-    inverse of :func:`sequence_to_heads`."""
+    """COLLECTIVE over ``process_group``: ``[batch, seq, heads/CP, dim]`` → ``[batch, seq/CP, heads, dim]``."""
     if dist.get_world_size(process_group) == 1:
         return tensor
     (output,) = UlyssesAllToAll.apply(process_group, False, tensor)

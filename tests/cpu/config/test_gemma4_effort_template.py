@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for ``jinja-templates/gemma4/gemma4-reasoning-effort.jinja``: the Gemma 4 rollout template that states the
-episode's reasoning effort and thinking budget in the system turn, keeps thinking on without a template variable,
-and otherwise renders the hub template's thinking-enabled form token-for-token (tool declarations, tool calls,
-tool responses, carried reasoning).
-
-Run: python tests/cpu/config/test_gemma4_effort_template.py  (or pytest)
-"""
+"""``jinja-templates/gemma4/gemma4-reasoning-effort.jinja`` states the episode's reasoning effort and budget in the
+system turn, keeps thinking on, and otherwise renders the hub template's thinking-enabled form token-for-token."""
 
 from pathlib import Path
 
@@ -67,11 +62,8 @@ def template() -> str:
 
 
 def _stock_template() -> str | None:
-    """The hub template at the revision ``from_pretrained`` loads, from the local cache only.
-
-    A glob over the snapshots would pick whichever revision sorts first (a stale one left in the cache,
-    or another checkpoint's) and compare against a template this one was never cut from.
-    """
+    """The hub template at the revision ``from_pretrained`` loads, from the local cache only. A glob over the
+    snapshots could compare against a template this one was never cut from."""
     path = try_to_load_from_cache(STOCK_TEMPLATE_REPO, "chat_template.jinja")
     return Path(path).read_text() if isinstance(path, str) else None
 
@@ -155,8 +147,8 @@ def _as_content_parts(conversation):
 
 
 def test_string_and_content_parts_render_the_same_prompt(template):
-    """vLLM wraps every message into content parts before rendering and the trainer renders strings; a
-    system turn that renders differently between the two scores a prompt the policy never saw."""
+    """A system turn that renders differently between vLLM's content parts and the trainer's strings scores a prompt
+    the policy never saw."""
     kwargs = {"tools": TOOLS, "add_generation_prompt": True, "reasoning_effort": "high", "reasoning_budget": 16384}
     assert _render(template, _as_content_parts(CONVERSATION), **kwargs) == _render(template, CONVERSATION, **kwargs)
 
@@ -165,9 +157,8 @@ def test_matches_the_hub_template_with_thinking_on_apart_from_the_effort_line(te
     stock = _stock_template()
     if stock is None:
         skip_uncached(STOCK_TEMPLATE_REPO, "chat template of")
-    # Up to the last user message: the hub template renders a turn's reasoning only after that message
-    # (or on a tool-call turn under preserve_thinking); this template renders whatever a turn carries,
-    # which the render test above pins for the turn before a later user message.
+    # Up to the last user message: the hub template renders a turn's reasoning only after it, while this one renders
+    # whatever a turn carries.
     conversation = CONVERSATION[:-1]
     kwargs = {"tools": TOOLS, "add_generation_prompt": True}
     theirs = _render(stock, conversation, enable_thinking=True, preserve_thinking=True, **kwargs)

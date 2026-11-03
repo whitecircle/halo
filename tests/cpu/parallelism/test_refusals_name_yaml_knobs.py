@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Parallelism refusals name the knobs a user sets and print launch lines that run as written; the
-ep1 expert-sharding refusal links the docs for its trade-off.
-
-A run is configured through ``expert_parallel_size`` / ``tensor_parallel_size`` /
-``expert_tensor_parallel_size`` / ``context_parallel_size`` / ``pipeline_*``; ``ep_size`` /
-``tp_size`` / ``expert_tp_size`` / ``cp_size`` / ``pp_*`` are the dataclass fields behind them, and a
-refusal that prints those names points at a key no YAML accepts. ``ep_group_size`` is derived, not
-set, so the messages may keep it. Each case trips its real gate, one per message family.
-
-Run: python tests/cpu/parallelism/test_refusals_name_yaml_knobs.py
-"""
+"""Parallelism refusals name the knobs a user sets and print launch lines that run as written.
+``ep_size`` etc. are dataclass fields no YAML accepts; ``ep_group_size`` is derived, so the messages may keep it."""
 
 import re
 from types import SimpleNamespace
@@ -32,7 +23,7 @@ EP1_SHARDING_DOC = "agent-docs/parallelism/data-parallelism.md#ep1-expert-shardi
 
 
 class _ModelConfig:
-    """A stand-in HF config carrying only the fields a gate reads."""
+    """Only the fields a gate reads."""
 
     def __init__(self, **fields):
         self.__dict__.update(fields)
@@ -196,8 +187,7 @@ def test_runtime_refusal_names_the_yaml_knobs(refuse, knob):
 
 
 def test_ep1_sharding_refusal_points_at_the_docs_instead_of_a_benchmark():
-    """The trade-off figure lives in the owning doc; the refusal links it rather than restating a
-    number that drifts from the table."""
+    """The figure lives in the owning doc rather than a number that drifts."""
     with pytest.raises(ValueError) as err:
         make_parallelism_config(fsdp_shard_ep1_experts=False, tp_size=2, world_size=8, gpus_per_node=8)
     message = str(err.value)
@@ -212,8 +202,7 @@ def test_stock_adamw_refusal_names_the_yaml_knobs():
 
 
 def test_accelerate_refusal_launch_lines_pass_the_config(monkeypatch):
-    """The entry scripts take the YAML config as their positional, so a printed torchrun line
-    without it fails before the run starts."""
+    """The entry scripts take the YAML config as their positional."""
     monkeypatch.setenv("ACCELERATE_MIXED_PRECISION", "bf16")
     with pytest.raises(ValueError) as err:
         reject_accelerate_launch(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""The adapter tools grow the base to a grown-vocabulary adapter's tokenizer, and fill every added row.
-
-A run whose ``added_special_tokens`` outgrow its checkpoint's embedding grows it to the tokenizer's length
-(``configure_run_tokenizer``), and the added rows exist in no base checkpoint, so the adapter carries them. The merge
-(``merge_peft_adapter``) and the bf16 tool's adapter load (``load_model(is_peft=True)``) load onto the base, which
-holds the checkpoint's rows: unless the base grows the same way first, PEFT refuses the larger embedding. Pinned on a
-tiny Qwen3, tied and untied, and a tiny Qwen3-VL (a composite config): the merged model holds the trained added rows,
-the base grows only past its padding (and not where its own tokenizer already outran its rows), and an adapter saved
-before adapter saves carried those rows, wholly or for the untied head alone, merges with them rebuilt as the mean of
-the checkpoint's rows, the frozen init its run gave them, rather than served from uninitialized memory.
-
-    python tests/cpu/checkpoint/test_merge_grown_vocab_adapter.py
-"""
+"""The adapter tools grow the base to a grown-vocabulary adapter's tokenizer and fill every added row. Rows older
+adapters lack are rebuilt as the checkpoint's mean, their run's frozen init."""
 
 import logging
 import os
@@ -57,8 +46,7 @@ def _train(
     save_embedding_layers: bool,
     load_class=AutoModelForCausalLM,
 ) -> PeftModel:
-    """A LoRA run on ``base_dir`` through the script's tokenizer seam, its added rows and adapters moved off their
-    init, saved to ``adapter_dir`` with its tokenizer as a checkpoint is; returns the trained model."""
+    """Added rows and adapters moved off their init; returns the trained model."""
     model = load_class.from_pretrained(base_dir, dtype=torch.float32)
     rows = model.get_input_embeddings().num_embeddings
     tokenizer = grow_vocabulary(model, AutoTokenizer.from_pretrained(base_dir), added)
@@ -124,8 +112,7 @@ def _grow_lines(caplog) -> list[str]:
 
 @pytest.mark.parametrize(("added", "grows"), [(GROWING_TOKENS, True), (FITTING_TOKENS, False)], ids=["grown", "fits"])
 def test_both_tools_say_when_they_grow_the_base(base_dir, tmp_path, caplog, added, grows):
-    """The output then holds more rows than its base_model_name_or_path, so each tool names the grow and both
-    lengths; an adapter whose tokens fit the padding grows nothing and logs no such line."""
+    """The output holds more rows than its base_model_name_or_path, so each tool names the grow."""
     adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
     base_rows = AutoModelForCausalLM.from_pretrained(base_dir).get_input_embeddings().num_embeddings
     trained = _train(base_dir, adapter_dir, added, save_embedding_layers=grows)
@@ -149,8 +136,7 @@ def _rebuild_warnings(caplog) -> list[str]:
 
 
 def test_an_adapter_saved_without_its_added_rows_merges_them_rebuilt(base_dir, tmp_path, caplog):
-    """The adapter PEFT writes when it cannot tell that the vocabulary grew (offline, before adapter saves carried the
-    rows): the merge grows the base to the tokenizer and rebuilds the rows the adapter lacks from the checkpoint."""
+    """PEFT writes this when it cannot tell the vocabulary grew (offline, before adapter saves carried the rows)."""
     adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
     base = AutoModelForCausalLM.from_pretrained(base_dir, dtype=torch.float32)
     rows = base.get_input_embeddings().num_embeddings
@@ -170,7 +156,7 @@ def test_an_adapter_saved_without_its_added_rows_merges_them_rebuilt(base_dir, t
 
 
 def test_an_adapter_missing_the_untied_head_rows_rebuilds_only_those(base_dir, tmp_path, caplog):
-    """The rule is per role: the embedding rows the adapter holds merge as trained beside the head rows it lacks."""
+    """The rule is per role."""
     adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
     base = AutoModelForCausalLM.from_pretrained(base_dir, dtype=torch.float32)
     rows = base.get_input_embeddings().num_embeddings
@@ -196,7 +182,7 @@ def test_an_adapter_missing_the_untied_head_rows_rebuilds_only_those(base_dir, t
 
 
 def test_a_composite_config_merges_its_grown_vocabulary(tmp_path):
-    """A multimodal checkpoint holds ``vocab_size`` on its text config alone; the merge grows it all the same."""
+    """``vocab_size`` sits on its text config alone."""
     base_dir, adapter_dir, merged_dir = (str(tmp_path / name) for name in ("base", "adapter", "merged"))
     build_tiny_family_checkpoint(TINY_QWEN3_VL_FAMILY, base_dir, word_level_tokenizer(WORDS))
     load_class = TINY_QWEN3_VL_FAMILY.load_class
@@ -225,9 +211,8 @@ def test_added_tokens_within_the_padding_merge_onto_the_base_unchanged(base_dir,
 
 
 def test_a_base_whose_own_tokenizer_outruns_its_rows_merges_unchanged(tmp_path):
-    """Anti-vacuity: the tools read the run's grow, not the tokenizer's length alone. A checkpoint whose own tokenizer
-    already holds more ids than its rows (a truncated vocabulary) trains without a grow, so its adapter carries no
-    embedding and merges onto the base's rows."""
+    """A truncated vocabulary's tokenizer already outruns its rows and trains without a grow, so the adapter carries
+    no embedding."""
     base_dir, adapter_dir, merged_dir = (str(tmp_path / name) for name in ("base", "adapter", "merged"))
     build_tiny_family_checkpoint(
         TINY_DENSE_FAMILY, base_dir, overrides={"vocab_size": 64, "pad_token_id": 1, "eos_token_id": 1}

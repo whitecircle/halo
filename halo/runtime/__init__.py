@@ -1,2 +1,1 @@
-"""Process-level plumbing: ranks, the process group, collectives, cross-rank consensus, filesystem scope, the
-per-node load throttle and DTensor access; the parallelism strategies live in halo/distributed/."""
+"""Process-level plumbing below the parallelism strategies, which live in halo/distributed/."""

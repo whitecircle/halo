@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""The parallel resumable batch: one response per row at its own index, at most ``max_workers`` in
-flight, and the JSONL resume store a re-run replays — its name, its line format and its flush cadence.
-
-Run: python tests/cpu/inference/test_batch_requests.py  (or pytest)
-"""
+"""The parallel resumable batch: one response per row at its own index, at most ``max_workers`` in flight, and the
+JSONL resume store a re-run replays."""
 
 import asyncio
 import json
@@ -40,7 +37,6 @@ _WITHOUT_STORE = {"resume": False, "flush_interval": 1}
 
 
 def _stored_rows() -> list[OpenAIResponse]:
-    """The responses :data:`_STORE_LINES` was written from, by index."""
     call = {"id": "call_0", "type": "function", "function": {"name": "lookup", "arguments": '{"q": "Zürich"}'}}
     return [
         OpenAIResponse(
@@ -111,19 +107,17 @@ def _store_path_for(messages, tools=None):
 
 
 def test_parallel_requests_failed_request_yields_none_without_clobbering_others():
-    """A raising request must produce None at ITS index only: a recovery that resolved every failure
-    to index -1 would silently overwrite the LAST result."""
+    """A recovery that resolved every failure to index -1 would silently overwrite the last result."""
     client = _FlakyClient(fail_on={"m1"})
     results = asyncio.run(parallel_openai_requests("m", ["m0", "m1", "m2"], client=client, **_WITHOUT_STORE))
     assert results[0].answer == "echo:m0"
-    assert results[1] is None  # the failed request, at its own index
-    assert results[2] is not None and results[2].answer == "echo:m2"  # last result NOT clobbered
+    assert results[1] is None
+    assert results[2] is not None and results[2].answer == "echo:m2"
 
 
 def test_parallel_requests_stores_the_rows_that_succeeded_and_retries_the_failed_one(tmp_path, monkeypatch):
-    """A failed row stays out of the store, so a re-run requests it and only it; the rows beside it
-    are replayed from the store, which lives under HALO_DATA_ROOT: in the temp dir, it is gone with a
-    container whose TMPDIR is not mounted."""
+    """A failed row stays out of the store, so a re-run requests only it. The store lives under HALO_DATA_ROOT: in
+    the temp dir, it is gone with a container whose TMPDIR is not mounted."""
     monkeypatch.setattr(env, "HALO_DATA_ROOT", str(tmp_path))
     prompts = ["m0", "m1", "m2"]
 
@@ -140,8 +134,8 @@ def test_parallel_requests_stores_the_rows_that_succeeded_and_retries_the_failed
 
 
 def test_the_store_is_appended_every_flush_interval_completions_and_once_at_the_end(tmp_path, monkeypatch):
-    """A failed row counts toward the interval but is never stored; without resume nothing is written.
-    The fake answers without yielding, so rows complete in order."""
+    """A failed row counts toward the interval but is never stored. The fake answers without yielding, so rows
+    complete in order."""
     monkeypatch.setattr(env, "HALO_DATA_ROOT", str(tmp_path))
     flushes: list[list[int]] = []
     monkeypatch.setattr(
@@ -194,8 +188,7 @@ def test_the_store_is_appended_every_flush_interval_completions_and_once_at_the_
     ],
 )
 def test_the_store_name_is_pinned_per_request_identity(request_fields, tools, name):
-    """A changed key field, key spelling or digest renames the store, and a re-run would then miss the
-    one its interrupted run wrote."""
+    """A renamed store is one a re-run would miss after an interrupted run wrote it."""
     request_tools = resolve_request_tools(tools, len(request_fields["messages"]))
     assert Path(resume_store_path(**request_fields, request_tools=request_tools)).name == name
 
@@ -219,8 +212,7 @@ def test_a_store_in_the_line_format_replays_its_rows_and_is_written_line_for_lin
 
 
 def test_store_round_trip_restores_the_sampled_token_ids(tmp_path):
-    """A resumed row must carry the ids it was sampled with, as the live response did: a caller that
-    asked for them (``return_token_ids``) reads ``None`` as "the engine returned none"."""
+    """A caller that asked for ids (``return_token_ids``) reads ``None`` as the engine returning none."""
     store = str(tmp_path / "requests.jsonl")
     response = OpenAIResponse(answer="a", reasoning=None, finish_reason="stop", tool_calls=None, token_ids=[5, 6, 7])
     append_resume_records(store, [(0, response)])
@@ -229,8 +221,6 @@ def test_store_round_trip_restores_the_sampled_token_ids(tmp_path):
 
 
 def test_store_loader_retries_a_record_whose_answer_is_not_text(tmp_path):
-    """An answer is the reply's text: a record holding anything else (a parsed JSON object) is
-    re-requested rather than handed back as an answer no caller reads."""
     store = tmp_path / "requests.jsonl"
     store.write_text(
         json.dumps({"index": 0, "result": {"answer": {"value": 1}, "finish_reason": "stop"}}) + "\n",
@@ -315,7 +305,6 @@ def test_store_path_differs_for_a_different_request():
         "request_tools": request_tools,
     }
     baseline = resume_store_path(**base_kwargs)
-    # Every hashed field must change the resolved filename.
     assert resume_store_path(**{**base_kwargs, "model": "other"}) != baseline
     assert resume_store_path(**{**base_kwargs, "temperature": 0.7}) != baseline
     assert resume_store_path(**{**base_kwargs, "max_tokens": 64}) != baseline
@@ -323,10 +312,8 @@ def test_store_path_differs_for_a_different_request():
 
 
 def test_store_path_separates_a_resumed_subset_from_the_full_set():
-    """The resume path passes the PENDING rows, not the dataset, so a subset and its full set are two
-    different request sets and must key to two different files. A shared store replays one run's
-    results onto the other's rows by index — and a long shared system prompt is what makes the two
-    sets look alike for as far as any prefix of them reaches."""
+    """The resume path passes the pending rows, so a subset and its full set must key to two files; a shared store
+    replays one run's results onto the other's rows by index."""
     system = "S" * 1200  # one row is longer on its own than any fixed prefix of the set
     full = [[{"role": "system", "content": system}, {"role": "user", "content": f"q{i}"}] for i in range(10)]
     pending = full[7:]
@@ -335,7 +322,6 @@ def test_store_path_separates_a_resumed_subset_from_the_full_set():
 
 
 def test_store_path_covers_rows_past_the_first_few():
-    """An edit to any row changes the request set, including rows past the leading few."""
     base = [[{"role": "user", "content": "x" * 400}] for _ in range(8)]
     edited = [list(row) for row in base]
     edited[7] = [{"role": "user", "content": "a different final prompt"}]
@@ -344,8 +330,6 @@ def test_store_path_covers_rows_past_the_first_few():
 
 
 def test_store_path_covers_every_row_of_the_tools():
-    """The tools half of the key covers every row too: unchanged prompts with a tool schema edited on
-    any row are a different request set, and must not resolve to the unedited run's store."""
     schema = {"type": "function", "function": {"name": "search", "description": "d" * 600}}
     base = [[schema] for _ in range(6)]
     edited = [list(row) for row in base]
@@ -356,8 +340,6 @@ def test_store_path_covers_every_row_of_the_tools():
 
 
 def test_store_path_covers_a_common_tool_schema_to_its_full_length():
-    """A single shared tool list is covered to its full length, however long its descriptions run."""
-
     def tools(tail):
         return [{"type": "function", "function": {"name": "search", "description": "d" * 600 + tail}}]
 

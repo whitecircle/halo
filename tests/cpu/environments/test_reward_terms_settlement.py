@@ -1,11 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: the environment side of reward terms — grades priced into components that sum to the
-reward, external terms settled by the dispatcher after the closing step, the sample a scorer reads,
-scorer failures that invalidate the episode (or price it neutral), the veto gate on the objective,
-and the guards around a stale or unsettled reward.
-
-Run: python tests/cpu/environments/test_reward_terms_settlement.py  (or pytest)
-"""
+"""The environment side of reward terms: grades priced into components summing to the reward, external terms settled
+after the closing step, the sample a scorer reads, scorer failures, the veto gate on the objective, and the
+guards around a stale or unsettled reward."""
 
 import asyncio
 
@@ -101,9 +97,6 @@ async def _run(env, answer_text, answer="4"):
     return ids[0], steps[0].trajectory
 
 
-# --- EpisodeGrade ---
-
-
 @pytest.mark.parametrize("objective", [-0.01, 1.01, float("nan"), True, "1"])
 def test_grade_refuses_an_objective_outside_the_unit_interval(objective):
     with pytest.raises(ValueError, match=r"^EpisodeGrade: objective must be (in \[0, 1\]|a finite number), got"):
@@ -114,9 +107,6 @@ def test_grade_refuses_an_objective_outside_the_unit_interval(objective):
 def test_grade_refuses_reserved_or_malformed_shaping(shaping):
     with pytest.raises(ValueError):
         EpisodeGrade(1.0, shaping)
-
-
-# --- pricing without external terms ---
 
 
 def test_components_sum_to_the_reward_and_price_the_objective():
@@ -171,9 +161,6 @@ def test_a_stale_compute_reward_override_is_refused():
 
     with pytest.raises(TypeError, match="_compute_reward"):
         Stale()
-
-
-# --- external terms ---
 
 
 def test_external_terms_are_pending_until_settled_and_the_dispatcher_settles_them(fake_judge):
@@ -341,9 +328,6 @@ def test_verify_backend_probes_every_external_term(fake_judge):
     assert build_environment("native_math", {}).verify_backend() is None
 
 
-# --- the sample a scorer reads ---
-
-
 def test_the_sample_carries_the_turns_with_their_reasoning_and_flags():
     """What a judge reads: the prompt turns, then every policy turn with its reasoning, a cut turn
     flagged as such, the tools the policy could call, the protocol's final answer and the row's
@@ -395,8 +379,8 @@ def test_the_judge_reads_the_call_a_cut_turn_was_writing_and_no_other_turn_carri
 
 
 def test_a_turn_whose_reasoning_ran_to_its_cap_is_marked_for_the_judge():
-    """A turn whose counted reasoning reached the cap it ran under carries the mark a judge reads — what it
-    wrote came after the engine closed its reasoning — and a turn under its cap, or with no count, carries none."""
+    """A turn whose counted reasoning reached its cap carries the mark a judge reads, since what it wrote came after
+    the engine closed its reasoning; a turn under its cap, or with no count, carries none."""
     env = _native(max_turns=4)
     ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
     cut = {"answer": "4", "finish_reason": "length", "thinking_cap": 100}
@@ -451,9 +435,6 @@ def test_code_contests_hands_the_scorer_the_submitted_program():
     assert [(m["role"], m.get("tool_calls")) for m in sample.completion] == [("assistant", [call]), ("tool", None)]
 
 
-# --- config ---
-
-
 def test_environment_config_parses_terms_and_forwards_them():
     config = EnvironmentConfig(
         environment_type="native_math", rewards=[{"source": "environment", "exponent": 2.0}, JUDGE]
@@ -467,8 +448,8 @@ def test_environment_config_parses_terms_and_forwards_them():
 
 
 def test_environment_config_round_trips_a_veto_judge():
-    """A ``checks`` term parses as a veto judge with the defaults a config gives one — priced at 0,
-    neutral on error — and reaches the environment as the same term."""
+    """A ``checks`` term parses as a veto judge with a config's defaults (priced at 0, neutral on error) and reaches
+    the environment as the same term."""
     config = EnvironmentConfig(environment_type="native_math", rewards=[{"source": "environment"}, CHECKS])
     term = config.reward_terms[1]
     assert term.is_veto and term.weight == 0.0 and term.on_error is OnError.NEUTRAL
@@ -530,9 +511,8 @@ def test_an_undeclared_shaping_component_is_refused():
 
 
 def test_a_grade_that_is_not_an_episode_grade_is_refused():
-    """``_settle_grade`` reads ``.objective``/``.shaping`` off the return value; a bare float (the
-    retired ``_compute_reward`` shape) would otherwise fail deep inside pricing, or — for a duck-typed
-    stand-in — price an unvalidated objective straight into the reward."""
+    """``_settle_grade`` reads ``.objective``/``.shaping``; a bare float fails deep inside pricing, and a duck-typed
+    stand-in prices an unvalidated objective."""
 
     class NotAGrade(base_module.EnvironmentBase):
         def _reset_single(self, prompt, context=None):
@@ -551,9 +531,7 @@ def test_a_grade_that_is_not_an_episode_grade_is_refused():
 
 
 def test_a_shaping_component_declared_by_both_halves_is_refused():
-    """The protocol's ``_episode_shaping`` and the env's own grade both contribute shaping under bare
-    names. A name produced by both would silently take the grade's value (a plain dict update), losing
-    the protocol's — so the collision is refused instead."""
+    """A name both halves produce would silently take the grade's value, losing the protocol's."""
 
     class Colliding(base_module.EnvironmentBase):
         SHAPING_COMPONENTS = ("bonus",)

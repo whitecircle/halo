@@ -1,26 +1,8 @@
 """Add tokens to a model's vocabulary and resize its embeddings, saving a patched checkpoint.
 
-New token embeddings are initialized from the mean of the existing ones. ``--patterns`` takes a
-JSON list (inline or a file path) of the strings to add. ``--reset_sinks``
-additionally fills every attention sink with its dtype minimum, disabling the sink mechanism (same
-transform as ``scripts/after_training/reset_sinks.py``, applied before the save).
-
-Only patterns that currently tokenize to more than one token are added: a pattern already covered by
-a single token would gain nothing and would shift every id above it.
-
-Growth only: the rows above ``len(tokenizer)`` are unassigned padding and every special token
-(harmony EOS included) sits below it, so a shrink recovers only padding, while any target under
-``len(tokenizer)`` cuts into the specials and the model can no longer stop generating.
-
-``--output_dir`` is written fresh: after a completed save, every ``model*.safetensors`` and index
-the save did not produce is removed.
-
-Usage:
-    python scripts/before_training/patch_vocab.py \\
-        --model_id "unsloth/gpt-oss-120b-BF16" \\
-        --output_dir "./models/gpt-oss-120b-BF16-patched" \\
-        --patterns '["<tool_call>", "<tool_result>"]' --reset_sinks
-"""
+New embeddings are the mean of the existing ones. Only patterns tokenizing to more than one token are added: one
+already a single token would gain nothing and shift every id above it. Growth only: a target under ``len(tokenizer)``
+cuts into the specials and the model can no longer stop generating. ``--output_dir`` is written fresh."""
 
 import argparse
 import json
@@ -41,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Patch vocabulary of a model by adding new tokens")
-    # No --revision: the vocabulary patch threads none, and an unread flag would advertise a pin it
-    # ignores. Pin by downloading the source first, then pointing --model_id at it.
+    # No --revision: the patch threads none. Pin by downloading the source first, then pointing --model_id at it.
     add_hub_source_args(
         parser, source="The model whose vocabulary is patched (e.g. 'unsloth/gpt-oss-120b-BF16')", revision=False
     )
@@ -76,14 +57,12 @@ def parse_args():
     add_dtype_arg(parser)
     add_device_map_arg(parser)
     add_max_shard_size_arg(parser)
-    # --model_id is usually a Hub repo here (this is the tool that patches a freshly downloaded
-    # third-party checkpoint), so remote code stays opt-in.
+    # --model_id is usually a freshly downloaded third-party repo, so remote code stays opt-in.
     add_trust_remote_code_arg(parser, default=False)
     return parser.parse_args()
 
 
 def load_patterns(patterns_arg: str | None) -> list[str]:
-    """Load patterns from a JSON string on the command line or a JSON file path."""
     if patterns_arg:
         try:
             patterns = json.loads(patterns_arg)

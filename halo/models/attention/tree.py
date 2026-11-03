@@ -1,8 +1,5 @@
 """Tree attention: every token of a tree-packed row sees exactly its own root-to-leaf path. Each admitted family's
-sequence mixers read their part of the collator's plan (:mod:`halo.models.attention.tree_plan`): softmax attention
-at the flash interface, GatedDeltaNet and KDA at their conv and delta-rule scan, GLM-5 Next's sparse attention in
-its own forward (:mod:`halo.models.attention.tree_sparse`). Only backends pinned against every example run alone
-are admitted."""
+sequence mixers read their part of the collator's plan, on backends pinned against every example run alone."""
 
 import copy
 import functools
@@ -49,31 +46,23 @@ logger = logging.getLogger(__name__)
 # The one backend that returns the log-sum-exp the split form reads, with a gradient.
 _SPLIT_FORM_IMPLEMENTATION = "flash_attention_4"
 
-# The backends tree attention runs on: their varlen kernels take more keys than queries per sequence
-# and align the causal mask and the window bottom-right.
+# Their varlen kernels take more keys than queries per sequence and align the causal mask and the window bottom-right.
 TREE_ATTN_IMPLEMENTATIONS = (_SPLIT_FORM_IMPLEMENTATION, "flash_attention_2")
 
-# The arguments a delta-rule scan takes its state and segments through, and the flag that has it
-# normalize query and key itself, with the epsilon it then uses.
 _RECURRENCE_STATE_ARGS = ("initial_state", "output_final_state", "cu_seqlens", "cu_seqlens_cpu")
 _RECURRENCE_L2NORM_FLAG = "use_qk_l2norm_in_kernel"
 _RECURRENCE_L2NORM_EPS = 1e-6
 
-# Depth of the chains the warm-ups run. The split form needs a parent and a child; the recurrence
-# a state going out, one coming in and going out, one coming in — each a separate kernel compile.
+# The split form needs a parent and a child; the recurrence a state going out, one coming in and going out, and one
+# coming in, each a separate kernel compile.
 _SPLIT_WARMUP_DEPTH = 2
 _RECURRENCE_WARMUP_DEPTH = 3
 
 
 @dataclass(frozen=True)
 class _StatefulMixer:
-    """Where a linear-attention layer keeps state along the sequence, as its modeling module spells it.
-
-    ``conv`` and ``recurrence`` are the module-level functions the causal convolution and the
-    delta-rule scan run through, ``layer_attr`` the decoder-layer attribute holding the mixer,
-    ``conv_kernel_field`` the config field with the convolution's width, and ``mixer_class`` the
-    mixer's class where ``layer_attr`` also holds the family's softmax layers.
-    """
+    """``conv`` and ``recurrence`` are module-level functions of the modeling module; ``mixer_class`` is the mixer's
+    class where ``layer_attr`` also holds the family's softmax layers."""
 
     conv: str
     recurrence: str
@@ -84,10 +73,7 @@ class _StatefulMixer:
 
 @dataclass(frozen=True)
 class TreeFamily:
-    """How one family reads a tree row: the modeling module whose attention registry takes the view,
-    the stateful mixer its linear-attention layers are, where it has any, and the class of its
-    key-selecting softmax layers (``sparse``), which read the plan in their own forward instead of at
-    the attention interface."""
+    """``sparse`` is the class of key-selecting softmax layers, which read the plan in their own forward."""
 
     module: ModuleType
     stateful: _StatefulMixer | None = None
@@ -109,8 +95,7 @@ _KIMI_DELTA_ATTENTION = _StatefulMixer(
     mixer_class=modeling_glm5_next.Glm5NextTextLinearAttention,
 )
 
-# Families whose forward is verified against every example run alone (the CPU tree-attention oracle and the
-# sparse-attention test sweep this table), keyed by the decoder's exact model type.
+# Verified against every example run alone; the CPU tree-attention oracle and the sparse-attention test sweep it.
 TREE_FAMILIES = {
     "glm5_next_text": TreeFamily(
         modeling_glm5_next, _KIMI_DELTA_ATTENTION, sparse=modeling_glm5_next.Glm5NextTextAttention
@@ -124,11 +109,8 @@ TREE_FAMILIES = {
 
 
 class _GatherTokens(torch.autograd.Function):
-    """``index_select`` along the token axis whose backward sums a token's copies in fp32.
-
-    A shared token is gathered once per node below it, so its gradient is a sum of that many terms;
-    accumulated in bf16 by the stock backward it is percents off at a fan-out of fifteen.
-    """
+    """``index_select`` whose backward sums a token's copies in fp32. Accumulated in bf16 by the stock backward, a
+    shared token's gradient is percents off at a fan-out of fifteen."""
 
     @staticmethod
     def forward(ctx, states, index, dim):
@@ -140,7 +122,7 @@ class _GatherTokens(torch.autograd.Function):
     def backward(ctx, grad):
         (index,) = ctx.saved_tensors
         summed = torch.zeros(ctx.shape, dtype=torch.float32, device=grad.device)
-        # Widened a call's worth at a time: the gathered gradient can be many times the row.
+        # A call's worth at a time, as the gathered gradient can be many times the row.
         for start in range(0, index.numel(), GATHER_KEYS_PER_CALL):
             piece = index[start : start + GATHER_KEYS_PER_CALL]
             summed.index_add_(ctx.dim, piece, grad.narrow(ctx.dim, start, piece.numel()).float())
@@ -148,9 +130,8 @@ class _GatherTokens(torch.autograd.Function):
 
 
 class _PermuteTokens(torch.autograd.Function):
-    """``index_select`` by a permutation of the token axis, whose backward is the inverse permutation's
-    ``index_select``. Each token is read once, so there is nothing to sum; the stock backward of a gather
-    zero-fills a full-size gradient and scatters into it instead."""
+    """``index_select`` by a permutation, whose backward is the inverse permutation's. The stock backward of a gather
+    zero-fills a full-size gradient and scatters into it."""
 
     @staticmethod
     def forward(ctx, states, order, inverse, dim):
@@ -165,9 +146,7 @@ class _PermuteTokens(torch.autograd.Function):
 
 
 class _L2Norm(torch.autograd.Function):
-    """``x * rsqrt(sum(x**2) + eps)`` over the last dim: the delta-rule kernels' own query/key
-    normalization, at their precision (fp32 under bf16 states) and keeping what they keep for the
-    backward, the output and the per-vector scale."""
+    """``x * rsqrt(sum(x**2) + eps)``, the delta-rule kernels' q/k normalization, in fp32 under bf16 states."""
 
     @staticmethod
     def forward(ctx, states, eps):
@@ -186,14 +165,9 @@ class _L2Norm(torch.autograd.Function):
 
 
 class _MergeAncestors(torch.autograd.Function):
-    """Fold the ancestor pass into the per-node pass for the tokens that have ancestors.
-
-    A softmax over two disjoint key sets is the mix of the two partial softmaxes weighted by their
-    normalizers: with ``w = sigmoid(lse_own - lse_anc)`` the merged output is
-    ``w * out_own + (1 - w) * out_anc``. ``lse_own`` already holds the sink, so the sink needs no term
-    of its own. The backward is the closed form of that mix, which spares autograd three full-size
-    passes over the attention output.
-    """
+    """A softmax over two disjoint key sets is the mix of the partial softmaxes, ``w * out_own + (1 - w) * out_anc``
+    with ``w = sigmoid(lse_own - lse_anc)``. ``lse_own`` already holds the sink. The closed-form backward spares
+    autograd three full-size passes over the attention output."""
 
     @staticmethod
     def forward(ctx, out, lse, out_anc, lse_anc, index):
@@ -216,11 +190,8 @@ class _MergeAncestors(torch.autograd.Function):
 
 
 def _gather_form(interface, module, query, key, value, plan, part, **kwargs):
-    """The stock interface over per-node key sequences (window, sink and dtype handling are its own).
-
-    Keys are gathered once, so a token shared across calls still sums its gradient in fp32; a part
-    with ``chunks`` then attends one run of whole nodes per call, each node being its own sequence.
-    """
+    """Keys are gathered once, so a token shared across calls still sums its gradient in fp32; a part with ``chunks``
+    then attends one run of whole nodes per call."""
     key, value = (_GatherTokens.apply(states, part["k_index"], 2) for states in (key, value))
     if "chunks" not in part:
         return interface(
@@ -299,18 +270,14 @@ def _split_form(module, query, key, value, plan, *, dropout=0.0, scaling=None, s
 
 
 class TreeAttentionRegistry(FlashInterfaceViewBase):
-    """Flash interfaces that run a batch carrying a tree plan through tree attention.
-
-    A plan without attention parts describes a row of plain documents, which the stock interface
-    already isolates by their position resets.
-    """
+    """A plan without attention parts describes plain documents, which the stock interface isolates by itself."""
 
     def wrap_flash_interface(self, fn):
         @functools.wraps(fn)
         def with_tree_plan(module, query, key, value, attention_mask, **kwargs):
             plan = kwargs.pop(TREE_ATTENTION_KEY, None)
             if plan is not None and "sparse" in plan:
-                # A sparse family's plan carries no flash parts: a flash layer would run it as one sequence.
+                # A sparse family's plan carries no flash parts, so a flash layer would run it as one sequence.
                 raise ValueError(
                     f"a sparse-attention tree plan reached the flash interface of {type(module).__name__}"
                 )
@@ -334,7 +301,7 @@ def _tree_conv(conv):
         if plan is None:
             return conv(hidden_states, *args, **kwargs)
         part = plan["conv"]
-        # The CUDA kernel reads seq_idx from channel-last memory only: gather on the [B, T, C] view.
+        # The CUDA kernel reads seq_idx from channel-last memory only, hence the [B, T, C] view.
         behind = _GatherTokens.apply(hidden_states.transpose(1, 2), part["index"], 1).transpose(1, 2)
         out = conv(behind, *args, **{**kwargs, "seq_idx": part["seq_idx"]})
         return out.transpose(1, 2).index_select(1, part["own"]).transpose(1, 2)
@@ -344,8 +311,7 @@ def _tree_conv(conv):
 
 @functools.lru_cache(maxsize=1)
 def _host_bounds(bounds: tuple[int, ...]) -> torch.Tensor:
-    """A level's varlen bounds as the host tensor fla takes. Cached, so a one-level plan hands every layer the same
-    bounds objects, which fla's single-entry chunk-index cache keys on."""
+    """Cached, so a one-level plan hands every layer the same objects, which fla's chunk-index cache keys on."""
     return torch.tensor(bounds)
 
 
@@ -381,8 +347,7 @@ def _tree_recurrence(recurrence):
                 initial_state=None if state is None else state.index_select(0, level["parent"]),
                 output_final_state=depth + 1 < len(levels),
                 cu_seqlens=level["cu_seqlens"],
-                # fla builds its chunk indices from host bounds when given them, instead of reading the
-                # device copy back: a host sync per depth per layer.
+                # Given host bounds, fla skips reading the device copy back, a host sync per depth per layer.
                 cu_seqlens_cpu=_host_bounds(level["cu_seqlens_host"]),
                 **kwargs,
             )
@@ -393,7 +358,6 @@ def _tree_recurrence(recurrence):
 
 
 def _require_tree_family(model_config) -> TreeFamily:
-    """The family entry for this model, or the refusal of a family tree packing cannot run."""
     model_type = getattr(text_config(model_config), "model_type", None)
     family = TREE_FAMILIES.get(model_type)
     if family is None:
@@ -415,8 +379,6 @@ def resolve_tree_plan_options(model_config) -> dict[str, int | bool | None]:
 
 
 def _decoder_layer_modules(model, attr: str, of_class: type | None = None) -> list[torch.nn.Module]:
-    """The ``attr`` module of every decoder layer that has one, under any wrapper; of ``of_class`` only, where
-    given."""
     backbone = backbone_with_layers(base_transformers_model(model))
     layers = decoder_layers(backbone) if backbone is not None else ()
     modules = [getattr(layer, attr) for layer in layers if hasattr(layer, attr)]
@@ -430,15 +392,9 @@ def reject_unsupported_tree_attention(
     lora_target_modules: str | list[str] | None = None,
     quantization_config=None,
 ) -> None:
-    """Refuse, from the config and the attention backend it resolves to, what tree attention cannot run: a family
-    outside :data:`TREE_FAMILIES`, a backend with no tree form, the split form off FA4 or on its head_dim-256
-    kernel, and linear-attention kernels that ignore segments. A family with key-selecting softmax layers
-    (``family.sparse``) attends in their own forward on whatever backend the model resolved to, so neither the
-    backend nor ``full_form`` applies to it; what that forward would skip or misread is refused instead: a
-    training-time ``attention_dropout``, an adapter on the projection it folds under ``lora_target_modules`` (the
-    run's adapter targets, ``None`` for no adapter), and that projection quantized, by the run's
-    ``quantization_config`` or the checkpoint's own. Needs no weights, so a run checks it before the load;
-    :func:`install_tree_attention` repeats it on the loaded model, ahead of the adapters."""
+    """Refuse what tree attention cannot run, from the config alone, so a run checks before the load. A family with
+    key-selecting softmax layers attends in its own forward on any backend, so what is refused there is what that
+    forward would skip or misread: training-time dropout, an adapter on the folded projection, a quantized one."""
     family = _require_tree_family(model_config)
     if family.sparse is None:
         if attn_implementation not in TREE_ATTN_IMPLEMENTATIONS:
@@ -465,13 +421,8 @@ def reject_unsupported_tree_attention(
 
 
 def install_tree_attention(model, full_form: FullAttentionForm) -> None:
-    """Install tree attention for ``model``'s family, or refuse what it cannot run. Idempotent.
-
-    A plan that reaches a stock interface is dropped without a word and the row runs as one causal
-    sequence, so everything that would leave the plan unread is refused here: what
-    :func:`reject_unsupported_tree_attention` refuses, read off the loaded model, and attention layers built from
-    another module than the one the view goes on (a remote-code class of the same model type).
-    """
+    """Idempotent. A plan reaching a stock interface is dropped without a word and the row runs as one causal sequence,
+    so anything leaving the plan unread is refused, such as a remote-code class of the same model type."""
     reject_unsupported_tree_attention(model.config, effective_attn_implementation(model.config), full_form)
     family = _require_tree_family(model.config)
     module = family.module
@@ -507,8 +458,8 @@ def _on_device(plan, device: torch.device):
 def _warmup_plan(
     depth: int, device: torch.device, *, full_form: FullAttentionForm, conv_kernel: int | None = None
 ) -> dict:
-    """The plan of two root-to-leaf chains ``depth`` nodes deep, so every kernel compiles against a
-    real ``cu_seqlens``; nodes are long enough to land on the tiles a training row uses."""
+    """Two root-to-leaf chains ``depth`` nodes deep, so every kernel compiles against a real ``cu_seqlens``; nodes are
+    long enough to land on the tiles a training row uses."""
     lengths = np.full(2 * depth, WARMUP_MIN_SEQ_LEN)
     parents = np.array([-1 if node % depth == 0 else node - 1 for node in range(2 * depth)])
     table = NodeTable(starts=np.cumsum(lengths) - lengths, lengths=lengths, parents=parents)
@@ -517,8 +468,7 @@ def _warmup_plan(
 
 
 def warm_split_form_kernels(model_config, *, dtype: torch.dtype) -> None:
-    """Run the split form forward and backward over a small tree, compiling the kernels it adds: a
-    non-causal pass and a backward that takes a log-sum-exp gradient."""
+    """Compiles what the split form adds: a non-causal pass and a backward that takes a log-sum-exp gradient."""
     device = torch.device("cuda", torch.cuda.current_device())
     config = text_config(model_config)
     heads, kv_heads = config.num_attention_heads, resolve_num_key_value_heads(model_config)
@@ -536,8 +486,7 @@ def warm_split_form_kernels(model_config, *, dtype: torch.dtype) -> None:
 
 
 def warm_recurrent_mixer_kernels(model, *, dtype: torch.dtype) -> None:
-    """Run one stateful linear-attention layer forward and backward over a small tree, compiling
-    the recurrence kernels that take and return a state. A no-op for a family without one."""
+    """Compiles the recurrence kernels that take and return a state. A no-op for a family without one."""
     stateful = _require_tree_family(model.config).stateful
     if stateful is None:
         return
@@ -554,13 +503,8 @@ def warm_recurrent_mixer_kernels(model, *, dtype: torch.dtype) -> None:
 
 
 def warm_tree_kernels(model, *, dtype: torch.dtype, full_form: FullAttentionForm) -> None:
-    """Pre-compile the kernels tree attention adds to the stock ones. Rank-local, best-effort.
-
-    Left to the first batch that holds a branch, each of these compiles stalls that rank alone, so
-    the caller runs this on every rank behind one fence
-    (:func:`~halo.model_loading.parallel.whole_model.warm_tree_attention_kernels`). The gather form itself
-    runs the flash kernels the stock warm-up already compiled.
-    """
+    """Rank-local, best-effort. Left to the first batch that holds a branch, each compile stalls that rank alone, so
+    the caller runs this on every rank behind one fence."""
     try:
         if full_form == "split" and _require_tree_family(model.config).sparse is None:
             warm_split_form_kernels(model.config, dtype=dtype)
@@ -568,5 +512,5 @@ def warm_tree_kernels(model, *, dtype: torch.dtype, full_form: FullAttentionForm
         if is_global_main_process():
             logger.info(f"Tree attention kernel warmup done (full layers: {full_form}, dtype={dtype})")
     except Exception as e:
-        # Every rank: the skip is rank-local, and a rank without the warm-up stalls later.
+        # On every rank, as the skip is rank-local and a rank without the warm-up stalls later.
         logger.warning(f"Tree attention kernel warmup skipped (non-fatal): {type(e).__name__}: {e}")

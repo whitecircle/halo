@@ -1,26 +1,7 @@
 #!/usr/bin/env python
-"""Parse-time range checks on the training configs, ``AsyncRolloutConfig`` and ``EnvironmentConfig`` in depth.
-
-* Every numeric knob a training script parses refuses a bool and a non-finite value, and an int knob a
-  fraction: a bare range check reads ``true`` as 1 (``rollout_min_p: true`` samples every rollout
-  greedily) and passes a NaN, or an infinity past an open bound, and a fractional count reaches its
-  consumer as no count at all.
-* ``skip_update_masked_frac`` is a fraction in (0, 1]: 0 trips the breaker on every step, above 1 never.
-  Checked with the other knobs at parse time, not at trainer construction after the servers are up.
-* ``max_train_row_tokens`` must exceed ``rollout_max_tokens``: a training row is prompt + completion
-  and the completion alone may run to the per-turn budget, so a cap at or below it leaves out every
-  turn that used its budget — a length bias against long turns, not the memory bound the knob is.
-* ``rollout_max_episode_tokens`` bounds the episode's sampled tokens and must hold one whole turn,
-  so the first turn can use the per-turn cap the run states.
-* ``rollout_max_answer_tokens`` bounds what a turn generates past its reasoning cap: an int in
-  ``[1, rollout_max_tokens)``, since at or above the turn cap it shrinks no turn and below 1 a turn the
-  engine force-closed has no room to answer.
-* ``prefetch_depth`` is an int >= 1, and above 1 needs a run that prefetches (``enable_prefetch: true``, or
-  unset with two or more servers): elsewhere it would parse and hold no round, and the refusal names which
-  of the two turned prefetch off, so a one-server run is pointed at the opt-in rather than told it is off.
-
-    python tests/cpu/config/test_env_trainer_config_ranges.py
-"""
+"""Parse-time range checks on the training configs. A bare range check reads ``true`` as 1 and passes a NaN, and a
+fractional count reaches its consumer as no count, so every numeric knob refuses all three.
+``max_train_row_tokens`` must exceed ``rollout_max_tokens``, or a cap leaves out every turn that used its budget."""
 
 import ast
 import importlib
@@ -38,7 +19,6 @@ from tests.common.repo import REPO_ROOT
 # Keeps a TrainingArguments subclass constructible on a GPU-less runner, so a raise can only come from
 # the knob under test.
 _TRAINING_ARGS_BASE = {"output_dir": "/tmp/numeric-knob-sweep", "use_cpu": True, "bf16": False}
-# Fields a config refuses to construct without.
 _REQUIRED = {"TeacherDistillScriptArguments": {"teacher_model": "org/teacher"}}
 # A knob that is refused at its value only beside another one set.
 _COMPANIONS = {
@@ -50,11 +30,8 @@ _BAD_NUMBERS = {"true": True, "false": False, "nan": math.nan, "inf": math.inf}
 
 
 def _parse_targets() -> list[type]:
-    """Every toolkit dataclass a training entry script hands to ``parse_script_args``.
-
-    Read from the scripts' ASTs rather than a hand list, so a new entry script — or a new config tuple on
-    an existing one — is swept the moment it lands.
-    """
+    """Every toolkit dataclass a training entry script hands to ``parse_script_args``, read from the scripts' ASTs
+    so a new script is swept when it lands."""
     targets: dict[str, type] = {}
     for script in sorted((REPO_ROOT / "scripts" / "training").rglob("*.py")):
         tree = ast.parse(script.read_text())
@@ -125,8 +102,6 @@ _NUMERIC_KNOBS = _sweep()
 
 
 def test_the_sweep_reaches_the_knobs_of_every_parsed_config():
-    """Anti-vacuity: the script scan and the annotation scan find the knobs the sweep is for, inherited and
-    mixed-in ones included."""
     knobs = {param.values[1] for param in _NUMERIC_KNOBS}
     assert {
         "rollout_min_p",

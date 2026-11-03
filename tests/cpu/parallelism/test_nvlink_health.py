@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""NVLink health classification: only errors FEC did not absorb may fail the check.
-
-The check exists to separate a real fabric fault from the correctable churn that produces nonfatal
-``Xid 145`` log spam. Both directions matter: a marginal-but-corrected link must NOT fail a preflight
-gate (crying wolf makes the gate useless), and a hard error must never be downgraded to a warning.
-
-Run: ``pytest tests/cpu/parallelism/test_nvlink_health.py`` (or ``pytest -m cpu``).
-"""
+"""NVLink health classification: only errors FEC did not absorb fail the check, separating faults from the churn
+behind ``Xid 145`` spam."""
 
 from __future__ import annotations
 
@@ -20,7 +14,7 @@ nvlink_health = load_script_module("scripts/profiling/nvlink_health.py", registe
 
 
 def _counters(*, clean: int = 10**13, corrected: int = 0, deep: dict[int, int] | None = None, **hard: int):
-    """Counter dict in the shape ``nvidia-smi nvlink -e`` reports."""
+    """In the shape ``nvidia-smi nvlink -e`` reports."""
     values = {key: 0 for key in nvlink_health.HARD_ERROR_KEYS}
     values.update(hard)
     values["FEC Errors - 0"] = clean
@@ -38,7 +32,7 @@ def test_clean_link_is_neither_unhealthy_nor_marginal():
 
 
 def test_hard_error_fails_the_check():
-    """A replay/CRC/recovery counter means FEC did not absorb it — data was at risk."""
+    """FEC did not absorb it, so data was at risk."""
     for key in ("Rx Errors", "Link recovery successful events", "Symbol Errors"):
         result = nvlink_health.assess_link(_counters(**{key: 1}))
         assert result["unhealthy"], f"{key} must fail the check"
@@ -46,10 +40,7 @@ def test_hard_error_fails_the_check():
 
 
 def test_high_correction_rate_is_marginal_not_unhealthy():
-    """The observed real-world case: ~1e-7 corrected codewords, full bandwidth, no data at risk.
-
-    Failing here would make the preflight gate unusable on hardware that is working correctly.
-    """
+    """~1e-7 corrected codewords, full bandwidth, no data at risk; failing would make the preflight gate unusable."""
     result = nvlink_health.assess_link(_counters(clean=10**13, corrected=10**6))
     assert result["marginal"]
     assert not result["unhealthy"]
@@ -57,7 +48,7 @@ def test_high_correction_rate_is_marginal_not_unhealthy():
 
 
 def test_isolated_deep_bin_event_is_marginal_not_unhealthy():
-    """One codeword needing 3 symbol corrections out of ~1e13 is link noise, not a fault."""
+    """One codeword needing 3 symbol corrections out of ~1e13 is link noise."""
     result = nvlink_health.assess_link(_counters(corrected=10, deep={3: 1}))
     assert result["marginal"], "a deep-bin event is worth watching"
     assert not result["unhealthy"], "a single deep-bin event must not fail an otherwise healthy link"
@@ -65,29 +56,26 @@ def test_isolated_deep_bin_event_is_marginal_not_unhealthy():
 
 
 def test_hard_error_outranks_correctable_churn():
-    """A link with both must report unhealthy, never be softened to marginal."""
     result = nvlink_health.assess_link(_counters(corrected=10**6, deep={3: 5}, **{"Rx Errors": 2}))
     assert result["unhealthy"]
     assert not result["marginal"]
 
 
 def test_an_unrecognized_counter_set_fails_instead_of_reading_clean():
-    """The pre-FEC driver spelling (Replay/Recovery/CRC) matches none of the counters this check
-    reads; a link reporting only those carries a CRC fault the check would otherwise call clean."""
+    """The pre-FEC spelling (Replay/Recovery/CRC) matches no counter read here, so a CRC fault would read clean."""
     with pytest.raises(RuntimeError, match="unrecognized NVLink counter set"):
         nvlink_health.assess_link({"Replay Errors": 0, "Recovery Errors": 0, "CRC Errors": 3})
 
 
 def test_a_link_reporting_only_fec_bins_is_still_assessed():
-    """The guard keys on the counter families, not on every hard-error key being present."""
+    """The guard keys on the counter families."""
     result = nvlink_health.assess_link({"FEC Errors - 0": 10**13, "FEC Errors - 1": 10})
     assert not result["unhealthy"]
     assert not result["marginal"]
 
 
 def _stub_nvidia_smi(monkeypatch, speeds: dict[int, dict[int, str | None]]) -> None:
-    """``nvidia-smi`` for the GPUs keyed in ``speeds``: every listed link reports clean counters, and its
-    ``nvlink -s`` line the given speed (``None``: no line at all)."""
+    """Each listed link reports clean counters; ``None``: no ``nvlink -s`` line at all."""
 
     def _answer(*args: str) -> str:
         if args == ("--list-gpus",):
@@ -106,7 +94,7 @@ _UP = "53.125 GB/s"
 
 
 def test_a_fully_up_fabric_passes(monkeypatch, capsys):
-    """Anti-vacuity for the two checks below: equal, active link sets exit clean."""
+    """Anti-vacuity for the two checks below."""
     _stub_nvidia_smi(monkeypatch, {0: {0: _UP, 1: _UP}, 1: {0: _UP, 1: _UP}})
 
     assert nvlink_health.main() == 0
@@ -115,7 +103,7 @@ def test_a_fully_up_fabric_passes(monkeypatch, capsys):
 
 @pytest.mark.parametrize("speed", ["<inactive>", None])
 def test_an_inactive_link_fails_the_check(monkeypatch, capsys, speed):
-    """A down link has clean error counters, yet it takes its bandwidth from DeepEP and NCCL."""
+    """A down link has clean counters yet takes its bandwidth from DeepEP and NCCL."""
     _stub_nvidia_smi(monkeypatch, {0: {0: _UP, 1: speed}, 1: {0: _UP, 1: _UP}})
 
     assert nvlink_health.main() == 1
@@ -124,8 +112,7 @@ def test_an_inactive_link_fails_the_check(monkeypatch, capsys, speed):
 
 
 def test_a_link_down_on_every_gpu_fails_the_check(monkeypatch, capsys):
-    """Each link is judged on its own entry, not against its peers: the same link down on every GPU (an
-    NVSwitch plane out) leaves the peer counts equal, and an unwired link nvidia-smi lists reads the same."""
+    """An NVSwitch plane out leaves peer counts equal, so each link is judged on its own entry."""
     _stub_nvidia_smi(monkeypatch, {0: {0: _UP, 1: "<inactive>"}, 1: {0: _UP, 1: "<inactive>"}})
 
     assert nvlink_health.main() == 1
@@ -134,7 +121,7 @@ def test_a_link_down_on_every_gpu_fails_the_check(monkeypatch, capsys):
 
 
 def test_a_gpu_short_of_links_fails_the_check(monkeypatch, capsys):
-    """A link absent from both listings is invisible per link; its GPU has fewer active links than its peers."""
+    """A link absent from both listings is invisible per link."""
     _stub_nvidia_smi(monkeypatch, {0: {0: _UP}, 1: {0: _UP, 1: _UP}})
 
     assert nvlink_health.main() == 1

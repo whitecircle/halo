@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for three PEFT seams on ``DistributedTrainerMixin``:
-
-* ``reject_unmergeable_expert_lora_save`` — the flag must be rejected exactly where it cannot deliver a
-  merged checkpoint, and nowhere else. All three gates read the LIVE model rather than a mode list,
-  so every parallelism/model combination is covered by construction: no native expert adapters means
-  there is nothing to fold, accelerate-managed FSDP means the base Trainer owns the save, and a PEFT
-  layer the out-of-place fold cannot reproduce would otherwise raise only at the first checkpoint
-  save. A mixed attention+expert run is the flag's headline case and must pass —
-  ``save_ep_gathered_checkpoint`` folds both halves — so a blanket rejection of the mixed shape fails here.
-* ``save_model``'s routing — passing that guard is only half the promise. With the flag set, a mixed
-  run must skip ``save_peft_adapters`` (which never merges) and reach the EP strategy's merged write
-  with the attention delta already folded into the base weights being gathered. This is what makes
-  "re-save with ``merge_expert_lora_on_save=True``" a real export route for the mixed shape rather
-  than an adapter file no tool folds, and it is the behavior
-  ``halo.checkpoint.adapters.reject_expert_lora_adapter`` points users at.
-* the QLoRA post-backward sweep — it must honor
-  ``parallelism_config.fp32_grad_reduce`` (the QLoRA path bypasses FSDP2's ``reduce_dtype``, so
-  dropping the flag silently reduces adapter grads in bf16).
-
-Run: ``python tests/cpu/peft/test_merge_expert_lora_save_guard.py`` (or ``pytest -m cpu``).
-"""
+"""PEFT seams on ``DistributedTrainerMixin``: the merge-flag guard, ``save_model``'s routing and the QLoRA grad sweep.
+The guard reads the live model, so every parallelism and model combination is covered by construction."""
 
 from __future__ import annotations
 
@@ -83,16 +64,14 @@ def _reject(trainer: _StubTrainer) -> None:
 
 
 def test_merge_flag_with_attention_peft_passes():
-    """A MIXED run is the flag's headline case: the gathered EP save folds the expert deltas in the
-    family gather and the attention deltas via merge_adapter, so it must NOT be rejected."""
+    """The gathered EP save folds expert deltas in the family gather and attention deltas via merge_adapter."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
     with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
         _reject(trainer)
 
 
 def test_merge_flag_without_expert_adapters_raises():
-    """Nothing to fold: dense runs, MoE runs naming no expert projection, and expert_tp_size > 1
-    (where EPConfig rejects expert LoRA) all land here, and the flag would be silently ignored."""
+    """Dense runs, MoE runs naming no expert projection and expert_tp_size > 1 land here; the flag would be ignored."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
     with patch.object(adapter_rules, "model_has_expert_lora", return_value=False):
         with pytest.raises(ValueError, match="no native grouped expert"):
@@ -100,7 +79,7 @@ def test_merge_flag_without_expert_adapters_raises():
 
 
 def test_merge_flag_under_accelerate_fsdp_raises():
-    """Flat-param shards: the base Trainer owns that save, so the merged gather would write shard views."""
+    """The base Trainer owns that save, so the merged gather would write flat-param shard views."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
     trainer._accelerate_manages_fsdp = True
     with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
@@ -130,8 +109,7 @@ class _UnfoldableLM(nn.Module):
     ids=["trainable_tokens", "multihead_attention"],
 )
 def test_merge_flag_with_a_layer_the_fold_cannot_reproduce_raises(config):
-    """The merged save folds the attention half out of place and would raise on these at the first
-    checkpoint, after the run has trained; construction refuses them instead."""
+    """Otherwise these raise at the first checkpoint, after the run has trained."""
     trainer = _StubTrainer(get_peft_model(_UnfoldableLM(), LoraConfig(**config)), merge_expert_lora_on_save=True)
     with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
         with pytest.raises(ValueError, match="cannot be folded out of place"):
@@ -139,28 +117,19 @@ def test_merge_flag_with_a_layer_the_fold_cannot_reproduce_raises(config):
 
 
 def test_merge_flag_expert_only_run_passes():
-    """Expert-only native EP grouped-LoRA has no PeftModel wrapper — the merged-save path works."""
+    """Expert-only native EP grouped LoRA has no PeftModel wrapper."""
     with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
         _reject(_StubTrainer(_TinyLM(), merge_expert_lora_on_save=True))
 
 
 def test_no_merge_flag_skips_every_check():
-    """Flag off: adapter-only saves, so neither gate applies even with no expert adapters at all."""
+    """Adapter-only saves: neither gate applies, even with no expert adapters."""
     with patch.object(adapter_rules, "model_has_expert_lora", return_value=False):
         _reject(_StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=False))
 
 
-# --------------------------------------------------------------------------- #
-# save_model routing: the flag the merge guard's remedy names must reach the fold
-# --------------------------------------------------------------------------- #
-
-
 class _SaveRoutingTrainer(_StubTrainer):
-    """A mixed EP+LoRA run, carrying only the DATA ``save_model`` reads.
-
-    Every method below is the real mixin implementation, so the routing decision under test — and
-    the context it reads it from — is the production one.
-    """
+    """A mixed EP+LoRA run carrying only what ``save_model`` reads; every method below is the real mixin's."""
 
     def _ep_layers(self):
         return [object()]
@@ -192,22 +161,14 @@ class _SaveRoutingTrainer(_StubTrainer):
 
 
 def _mixed_run_model():
-    """The attention half of a mixed run, with a delta that is not zero.
-
-    PEFT zero-inits ``lora_B``, so an untouched adapter merges to a no-op and the fold assertion
-    below could not tell a merged save from one that never merged.
-    """
+    """The attention half of a mixed run. PEFT zero-inits ``lora_B``, and a no-op merge can't tell the saves apart."""
     peft_model = _attention_peft_model()
     randomize_adapters(peft_model, lora_b_only=True)
     return peft_model
 
 
 def _run_save(trainer):
-    """Drive ``save_model`` with the adapter writer faked and the real merged EP save recorded.
-
-    The record holds the merge flag the EP save saw, the LoRA-wrapped projection's weight it wrote, and
-    the live weight after it, which is what distinguishes a merged write from an adapter-only one.
-    """
+    """``save_model`` with the adapter writer faked; records the merge flag, the written weight and the live one."""
     ep_calls: list[dict] = []
     wrapped = trainer.model.base_model.model.q_proj
 
@@ -232,14 +193,7 @@ def _run_save(trainer):
 
 
 def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
-    """The mixed shape's export route: the flag reaches the fold, with BOTH halves in it.
-
-    ``save_peft_adapters`` never merges, so a mixed run that lands there gets the resume-only adapter
-    file. The flag must route past it to ``save_ep_gathered_checkpoint``, which asks the gather for the
-    expert deltas (``merge_lora``) and folds the attention adapters into the base weights it writes —
-    and the assertion on the written weight is what proves that second half is not just a flag being
-    passed: the base weight on disk carries the attention delta, the live one does not.
-    """
+    """``save_peft_adapters`` never merges. The weight on disk carries the attention delta; the live one does not."""
     model = _mixed_run_model()
     trainer = _SaveRoutingTrainer(model, True, str(tmp_path))
     unmerged = model.base_model.model.q_proj.base_layer.weight.detach().clone()
@@ -253,8 +207,7 @@ def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
     assert not torch.equal(written, unmerged.to(written.dtype)), (
         "the base weight on disk is the frozen one — the attention delta was not folded"
     )
-    # Folded out of place: the live base is the frozen one during and after the save, and the
-    # PeftModel stays unmerged, so the re-save the merge guard recommends is repeatable mid-run.
+    # Folded out of place: the PeftModel stays unmerged, so the re-save the merge guard recommends can repeat mid-run.
     assert torch.equal(ep_calls[0]["live_weight"], unmerged), "the save wrote the fold into the live base"
     wrapped = model.base_model.model.q_proj
     assert not wrapped.merged
@@ -262,11 +215,7 @@ def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
 
 
 def test_adapter_only_save_of_a_mixed_run_goes_to_the_peft_saver(tmp_path):
-    """Flag off is the branch that produces the shape ``reject_expert_lora_adapter`` refuses.
-
-    Without it the same mixed run writes an adapter file, which is exactly why the flag — not a
-    retrain — is the remedy that message hands out.
-    """
+    """Flag off writes the shape ``reject_expert_lora_adapter`` refuses, so the flag is the remedy, not a retrain."""
     trainer = _SaveRoutingTrainer(_mixed_run_model(), False, str(tmp_path))
 
     ep_calls, adapter_saver = _run_save(trainer)
@@ -275,14 +224,9 @@ def test_adapter_only_save_of_a_mixed_run_goes_to_the_peft_saver(tmp_path):
     assert not ep_calls
 
 
-# --------------------------------------------------------------------------- #
-# The QLoRA post-backward sweep must thread fp32_grad_reduce into reduce_grads_bucketed
-# --------------------------------------------------------------------------- #
-
-
 @pytest.mark.parametrize("fp32_flag", [True, False])
 def test_qlora_grad_sync_threads_fp32_grad_reduce(fp32_flag):
-    """bf16 sums lose precision, so the reduce dtype must follow the run's knob, not a default."""
+    """The QLoRA path bypasses FSDP2's ``reduce_dtype``; dropping the flag would reduce adapter grads in bf16."""
     trainer = _StubTrainer(_TinyLM(), merge_expert_lora_on_save=False)
     trainer.parallelism_config.fp32_grad_reduce = fp32_flag
 

@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""A LoRA run that grew its vocabulary saves the added rows with its adapters, resumes them, and exports them.
+"""A LoRA run that grew its vocabulary saves the added rows with its adapters, resumes them and exports them.
 
-``added_special_tokens`` outgrow the checkpoint's padded embedding, so ``configure_run_tokenizer`` grows it to the
-tokenizer's length, and those rows exist in no base checkpoint: every adapter save of the run carries them, with the
-Hub out of reach too (the GPU harness runs ``HF_HUB_OFFLINE=1``). A gathered save names a tied tensor once
-(``embed_tokens``) while the strict restore's live selection names it under ``lm_head`` too, so the restore takes the
-saved value under every name of the one tensor. Through the production path, on tied Qwen3-0.6B on one rank, under
-FSDP2 (``--mode fsdp``), CP2 and QLoRA on two ranks (``--mode qlora``, its 4-bit base unsharded), and on untied
-Qwen3-30B-A3B under EP2 (``--mode ep2``):
-
-  1. LoRA SFT to ``SAVE_STEP`` with a checkpoint there, which holds the grown embedding (and an untied head);
-  2. a fresh model, its vocabulary grown again and the added rows zeroed (so only a real restore can bring the saved
-     values back), resumed from that checkpoint to ``TOTAL_STEPS``: at the first resumed step the live embedding and
-     head equal the checkpoint's saved tensors, a tied pair is still one tensor, and the resumed steps are finite;
-  3. the checkpoint merged into its base (``merge_peft_adapter``, at bf16) loads complete at the grown vocabulary,
-     with the saved added rows.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_tied_vocab_resume.py --mode fsdp
+Those rows exist in no base checkpoint, and the harness runs ``HF_HUB_OFFLINE=1``, so every adapter save carries them.
+A gathered save names a tied tensor once while the strict restore names it under ``lm_head`` too. The resume model's
+added rows are zeroed, so only a real restore can bring them back.
 """
 
 import argparse
@@ -49,7 +36,7 @@ from tests.common.models import QWEN3_0_6B, QWEN3_30B_A3B
 from tests.common.rank_log import log
 from tests.common.training_checks import step_losses
 
-# The Qwen3 tokenizer holds 151,669 ids and its checkpoints 151,936 padded rows: 300 tokens grow them to 151,969.
+# 151,669 tokenizer ids and 151,936 padded checkpoint rows: 300 tokens grow them to 151,969.
 ADDED_TOKENS = [f"<grown_vocab_{i}>" for i in range(300)]
 SAVE_STEP = 2
 TOTAL_STEPS = 4
@@ -72,9 +59,8 @@ WORLD_SIZE, FIELDS, MODEL, ADAPTER = MODES[ARGS.mode]
 
 
 class _LiveEmbedding(TrainerCallback):
-    """At the first resumed step's start: the live tensor under each embedding key the restore's selection names,
-    spelled as the saver writes it (a CP wrapper's ``model.`` level dropped), gathered whole, and whether
-    ``embed_tokens`` and ``lm_head`` are one tensor. COLLECTIVE (every rank gathers the same keys in the same order)."""
+    """COLLECTIVE (every rank gathers the same keys in order). At the first resumed step: the live tensor under each
+    embedding key, spelled as the saver writes it, and whether ``embed_tokens`` and ``lm_head`` are one tensor."""
 
     def __init__(self, trainer):
         self.trainer = trainer
@@ -92,8 +78,6 @@ class _LiveEmbedding(TrainerCallback):
 
 
 def _build(output_dir: str, *, max_steps: int, zero_added_rows: bool):
-    """The LoRA policy with its vocabulary grown through the script's tokenizer seam, its trainer, the checkpoint's
-    row count and the grown tokenizer's length."""
     pc = ParallelismConfig(**FIELDS)
     model, tokenizer, peft_config = load_peft_model(ADAPTER, pc, model_name=MODEL)
     vocab = model.get_input_embeddings().num_embeddings

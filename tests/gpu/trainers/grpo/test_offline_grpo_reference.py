@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Offline GRPO full fine-tuning without context parallelism: run-start KL scores survive train, resume,
-evaluation and HF export, held to a full-logits oracle (:func:`~tests.common.offline_grpo_reference.run_reference_lifecycle`).
-
-``--mode ep8`` trains local tiny Qwen3-MoE weights at EP8, whose fp32 router masters must restore exactly
-(``--ep-loading`` picks the checkpoint loader); ``--mode tp`` (a local tiny Qwen3), ``--mode etp`` (Qwen3-MoE
-under pure ETP), ``--mode ep_tp`` (one EP group of four under attention TP) and ``--mode ep_etp`` (EP2 x expert
-TP2) score over two DP shards of collective-model siblings on four ranks.
-
-Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_reference.py --mode ep8 --ep-loading eager
-"""
+"""Offline GRPO full fine-tuning without CP: run-start KL scores survive train, resume, evaluation and HF export, held
+to a full-logits oracle."""
 
 from functools import partial
 
@@ -25,7 +17,7 @@ from tests.common.offline_grpo import OFFLINE_VOCAB, ep_loading_parser, make_off
 from tests.common.offline_grpo_reference import run_reference_lifecycle
 from tests.common.parallel_shape import parallel_shape_checks
 
-# The four-rank layouts, two DP shards of two siblings each: their ParallelismConfig fields.
+# Two DP shards of two siblings each.
 FOUR_RANK_LAYOUTS = {
     "tp": {"tp_size": 2},
     "etp": {"expert_tp_size": 2},
@@ -42,8 +34,8 @@ if (ARGS.ep_loading is None) == (ARGS.mode == "ep8"):
 
 
 class _MastersSnapshot(RestorePointSnapshot):
-    """The save point plus every plain fp32 master, which the resumed trainer must hold bit for bit before its
-    first forward."""
+    """The save point plus every plain fp32 master, which the resumed trainer must hold bit for bit before its first
+    forward."""
 
     def extra(self):
         return {

@@ -1,20 +1,6 @@
-"""CPU tests for the CodeContestsEnvironment agentic-loop reward ladder: the grade and shaping
-``_grade_episode`` returns, priced into ``reward_components`` by the base's ``_settle_grade``.
-
-The base model answers in plain text and rarely calls submit_solution, so the verifier alone gives no
-gradient to learn the loop. Small shaping rungs bootstrap it and self-neutralize per GRPO group:
-
-  plain-text giveup (0 tool calls)  -> -no_tool_use_penalty          (reward/tool_shaping)
-  tool call, no submission          ->  0
-  submitted (any test result)       -> +submission_reward            (reward/submission)
-  every hidden test passed          -> +weight                       (reward/objective, dominant;
-                                       the environment term, default weight 1)
-
-A grade that says nothing about the code — a backend outage, or one that stopped before any judged
-test failed — pays no rung and leaves the group baseline.
-
-    python tests/cpu/environments/test_code_contests_reward_ladder.py
-"""
+"""The CodeContestsEnvironment reward ladder, priced by the base's ``_settle_grade``: rungs that bootstrap the loop
+and self-neutralize per GRPO group. A giveup pays -no_tool_use_penalty, a submission +submission_reward, every
+hidden test passed +weight, and a grade saying nothing about the code pays no rung."""
 
 import pytest
 
@@ -100,9 +86,7 @@ def test_a_magnitude_refuses_a_negative_a_bool_or_a_nan(knob, value):
 
 
 def test_turn_overflow_penalty_on_truncation():
-    """An episode that burns ``max_turns`` without terminating (``trajectory.truncated``) pays
-    ``turn_overflow_penalty`` on top of whatever the ladder gave it — pricing the turn-cap overflow the
-    ladder otherwise leaves free. Applies to submitted and unsubmitted episodes alike; default 0 = off."""
+    """Pays ``turn_overflow_penalty`` on top of the ladder, submitted or not; default 0 is off."""
     env = _env(turn_overflow_penalty=0.2)
     capped = _traj(turns=6, tool_calls=5, submitted=False)
     capped.truncated = True
@@ -111,15 +95,14 @@ def test_turn_overflow_penalty_on_truncation():
     capped_sub.truncated = True
     assert _reward(env, capped_sub) == pytest.approx(1.0 + SUB - 0.2)
     assert _reward(env, _traj(turns=6, tool_calls=5, submitted=False)) == pytest.approx(0.0)
-    # Default 0: truncation alone changes nothing.
     off = _traj(turns=6, tool_calls=5, submitted=False)
     off.truncated = True
     assert _reward(_env(), off) == pytest.approx(0.0)
 
 
 def test_an_episode_its_driver_lost_pays_no_turn_overflow():
-    """A driver that lost the episode (a generation that raised) stamps ``EPISODE_ERROR_KEY`` before
-    finalizing it truncated: the fault is not the policy's, so the overflow price stays off."""
+    """A driver that lost the episode stamps ``EPISODE_ERROR_KEY`` before finalizing it truncated; the fault is not
+    the policy's."""
     env = _env(turn_overflow_penalty=0.2)
     lost = _traj(turns=2, tool_calls=2, submitted=False)
     lost.truncated = True
@@ -128,9 +111,8 @@ def test_an_episode_its_driver_lost_pays_no_turn_overflow():
 
 
 def test_tool_error_penalty_is_applied_negative():
-    """The per-call error knob is a MAGNITUDE: a failed tool call must REDUCE the reward. A signed knob
-    would silently turn a positive YAML value into +0.05 per malformed call — farmable above a solve's
-    objective reward and invisible in the logged components."""
+    """The knob is a magnitude; a signed one would turn a positive YAML value into +0.05 per malformed call,
+    farmable above a solve's objective."""
     env = _env(tool_error_penalty=0.5, tool_success_reward=0.05)
     traj = _traj()
     traj.info["successful_tool_calls"] = 0  # set by _reset_single in a real episode
@@ -155,9 +137,8 @@ _GRADES = {
 
 @pytest.mark.parametrize("case", list(_GRADES))
 def test_only_a_grade_that_judged_the_code_pays_and_trains(case):
-    """All-or-nothing, a grade short of every test scores 0 whatever the tests it never judged would
-    have said; one that saw no failure says nothing about the code and leaves the group baseline, as a
-    backend outage does. A failure among the judged tests is a verdict, however the grade then ended."""
+    """All-or-nothing: a grade short of every test scores 0. One that saw no failure says nothing about the code and
+    leaves the group baseline; a failure among the judged tests is a verdict."""
     (passed, graded, infra, ran_ok), verdict = _GRADES[case]
     env = _env()
     traj = _traj(
@@ -191,8 +172,8 @@ def test_only_a_grade_that_judged_the_code_pays_and_trains(case):
 
 
 def test_an_earlier_fault_keeps_its_own_reason_through_an_outage_grade():
-    """A sandbox fault a tool call booked names what voided the episode; the outage grade that follows must
-    not overwrite it with its own reason."""
+    """A sandbox fault a tool call booked names what voided the episode, and the outage grade after it must not
+    overwrite that."""
     env = _env()
     traj = _traj(tool_calls=2, submitted=True, passed=0, tests_graded=10, tests_infra_errors=10, tests_ran_ok=0)
     env._book_sandbox_fault(traj, env.test_tool_name, SandboxInfraError("backend down"))
@@ -204,8 +185,7 @@ def test_an_earlier_fault_keeps_its_own_reason_through_an_outage_grade():
 
 
 def test_a_zero_test_grade_pays_nothing():
-    """A grade over no tests passed all of none: read as a solve it would pay the objective and the
-    submission rung for code nothing judged."""
+    """Read as a solve it would pay the objective and submission rung for code nothing judged."""
     env = _env()
     traj = _traj(tool_calls=2, submitted=True, passed=0, total=0)
     assert _reward(env, traj) == 0.0
@@ -214,8 +194,7 @@ def test_a_zero_test_grade_pays_nothing():
 
 
 def test_rollout_metrics_decomposition_sums_to_reward():
-    # Components must sum EXACTLY to the scalar reward: the trainer's composition-residue metric
-    # flags any channel bypassing them.
+    # Components must sum exactly to the scalar reward, or the trainer's composition-residue metric flags it.
     env = _env()
     traj = _traj(turns=3, tool_calls=2, submitted=True, passed=10, total=10)
     reward = _reward(env, traj)
@@ -281,8 +260,7 @@ def _exam_traj(*, completed=True, answer="B", response="B", tool_calls=0, trunca
 
 
 def test_exam_qa_applies_tool_use_shaping():
-    """A YAML ``turn_overflow_penalty`` / ``no_tool_use_penalty`` on exam_qa must reach the priced
-    reward: the protocol's tool shaping settles alongside the task's own grade."""
+    """The protocol's tool shaping settles alongside the task's own grade."""
     env = ExamQAEnvironment(turn_overflow_penalty=0.2)
     assert _reward(env, _exam_traj()) == pytest.approx(1.0)
     assert _reward(env, _exam_traj(truncated=True)) == pytest.approx(1.0 - 0.2)

@@ -39,12 +39,8 @@ def _require_text_only_export(input_dir: str, trust_remote_code: bool) -> AutoCo
 
 
 def _require_text_tower_keys(input_dir: str, model_type: str, base_text_children: set[str]) -> None:
-    """Refuse an export whose keys are not the text-only layout its config declares.
-
-    Each text key is re-prefixed onto the base's text tower, so it must name one of the modules the
-    base stores there (``base_text_children``); anything else lands on no slot of the wrapper class
-    and reloads as random-initialized. Header-only.
-    """
+    """Refuse an export whose keys are not the text-only layout its config declares; a key naming no module of the
+    base's text tower lands on no wrapper slot and reloads random-initialized. Header-only."""
     misplaced = [
         key
         for _shard, _reader, key in iter_checkpoint_shard_entries(input_dir)
@@ -76,9 +72,7 @@ def _grafted_composite_config(base_dir: str, text_config: AutoConfig, trust_remo
             f"the base checkpoint's config ({base_dir}) declares no vision_config — it is not the "
             f"multimodal checkpoint this export trained from."
         )
-    # The graft is a plain attribute assignment, so the base is checked to be the family the export
-    # came from: a text tower grafted into another family's wrapper yields a config that loads but
-    # serves incorrect output.
+    # A text tower grafted into another family's wrapper yields a config that loads but serves incorrect output.
     base_text_type = composite.get_text_config().model_type
     if base_text_type != text_config.model_type:
         raise ValueError(
@@ -101,19 +95,16 @@ def reattach_vision_tower(
     reject_in_place_conversion(input_dir, output_dir)
     text_config = _require_text_only_export(input_dir, trust_remote_code)
     base_dir = resolve_checkpoint_source(model_id, revision)
-    # The base is streamed from while the writer's close removes every model*.safetensors it did not
-    # write, so an output aimed at the base directory would replace the base with the artifact.
+    # The writer's close removes every model*.safetensors it did not write, so an output at the base would replace it.
     reject_in_place_conversion(base_dir, output_dir)
     composite = _grafted_composite_config(base_dir, text_config, trust_remote_code)
 
     input_shards = checkpoint_shard_files(input_dir)
     base_shards = checkpoint_shard_files(base_dir)
 
-    # Header-only, ahead of the output directory. The trained export supersedes the base's text tower
-    # only where the base stores it under the wrapper prefix the export is re-prefixed to; a base
-    # keeping a vendor namespace (renamed inside from_pretrained) would be carried whole beside the
-    # trained tower, giving two text towers that collide on load. A base with nothing else to
-    # contribute is not the multimodal checkpoint this export trained from.
+    # Header-only, ahead of the output directory. The export supersedes the base's text tower only under the wrapper
+    # prefix; a base keeping a vendor namespace would be carried whole beside the trained tower, two towers colliding
+    # on load.
     base_keys = [key for _shard, _reader, key in iter_checkpoint_shard_entries(base_dir)]
     superseded = {key for key in base_keys if key.startswith((WRAPPER_TEXT_PREFIX, HEAD_PREFIX))}
     base_text_children = {
@@ -154,15 +145,13 @@ def reattach_vision_tower(
             carried += 1
         writer.close_as_hf_checkpoint()
 
-    # Tokenizer, template and similar files follow the trained export; the processor files come from
-    # the base, which is the only source for them.
+    # Tokenizer and templates follow the trained export; processor files come from the base, their only source.
     copy_checkpoint_aux_files(input_dir, output_dir)
     for name in PROCESSOR_FILES:
         src = os.path.join(base_dir, name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(output_dir, name))
-    # The composite config's own architectures already name the wrapper class; write it last so the
-    # artifact's config matches the wrapper-layout keys on disk.
+    # Written last so the artifact's config matches the wrapper-layout keys on disk.
     composite.save_pretrained(output_dir)
     finalize_exported_config(composite, output_dir, source=base_dir)
     logger.info(

@@ -1,9 +1,4 @@
-"""The low-precision vocabulary stays one closed set: every ``lowp_precision`` mode has a recipe, every
-recipe names a quantization format the kernels implement and a peak the MFU table spells, and
-``LowpSpec.validate`` refuses an unknown precision, a negative keep window and a scope that applies to nothing.
-
-    python tests/cpu/kernels/test_lowp_spec.py
-"""
+"""The low-precision vocabulary stays one closed set, and ``LowpSpec.validate`` refuses what cannot apply."""
 
 from typing import get_args
 
@@ -17,8 +12,7 @@ from halo.kernels.lowp.spec import LOWP_RECIPES, LowpPrecision, LowpSpec, QuantF
 
 
 def test_every_enabled_mode_has_a_recipe():
-    """A mode without a recipe would fall back to the parameter dtype's peak and to no quantization
-    format at all; a recipe without a mode is unreachable."""
+    """A mode without a recipe falls back to the parameter dtype's peak and no quantization format."""
     assert set(LOWP_RECIPES) == set(get_args(LowpPrecision)) - {"bf16"}
 
 
@@ -55,7 +49,7 @@ def test_validate_refuses(spec, message):
 
 
 def test_validate_accepts_an_off_spec_with_shape_fields_set():
-    """bf16 with tuning fields set is a warning at the config, not a refusal."""
+    """A warning at the config, not a refusal."""
     LowpSpec(apply_dense_mlp=False, apply_moe_experts=False).validate()
 
 

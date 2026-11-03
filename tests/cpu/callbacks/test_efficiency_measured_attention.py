@@ -1,14 +1,5 @@
-"""Measured attention work must reach the MFU accounting exactly, and fall back honestly.
-
-The trainer costs every micro-batch's documents through the layout the callback handed it; the
-callback reads that once per optimizer step and swaps it for the config term (every token in a
-``max_seq_len`` document). These tests pin the document-boundary rules, the hand-off, the divisors
-the measurement must carry (TP heads, CP sequence share, PP config-depth share) and the fallback
-when no batch exposed a document — a MFU that silently kept the ``max_length`` model would pass
-none of them.
-
-    python tests/cpu/callbacks/test_efficiency_measured_attention.py
-"""
+"""Measured attention work must reach the MFU accounting exactly: document boundaries, the hand-off, the divisors it
+carries (TP heads, CP sequence share, PP config-depth share) and the fallback when no batch exposed a document."""
 
 from types import SimpleNamespace
 
@@ -47,13 +38,11 @@ class _Trainer(TokenMetricsMixin):
 
 
 def _batch(lengths) -> dict:
-    """A padding-free batch of documents with the given lengths."""
     lengths = torch.as_tensor(lengths)
     return {"cu_seq_lens_q": torch.cat((torch.zeros(1, dtype=torch.long), lengths.cumsum(0)))}
 
 
 def _documents(lengths) -> list[int]:
-    """The non-empty entries of an extracted length buffer, sorted."""
     return sorted(int(length) for length in lengths.tolist() if length)
 
 
@@ -82,7 +71,6 @@ def _callback(parallelism=_NO_PARALLELISM, layout=LAYOUT, attention_share=1.0):
 
 
 def _step_tflops(monkeypatch, callback, tokens: int) -> tuple[float, float]:
-    """The dense and active TFLOP/s one hook-driven step of ``tokens`` tokens reports at its log."""
     clock = iter((0.0, STEP_SECONDS))
     monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
     callback.on_step_begin(None, SimpleNamespace(global_step=0, num_input_tokens_seen=0), None)
@@ -99,9 +87,6 @@ def _bound(parallelism=_NO_PARALLELISM, **kwargs):
     callback = _callback(parallelism, **kwargs)
     trainer = _Trainer([callback])
     return callback, trainer
-
-
-# --- document lengths off the batch -------------------------------------------------------------
 
 
 def test_cu_seq_lens_give_the_document_lengths():
@@ -158,9 +143,6 @@ def test_a_batch_without_input_ids_exposes_no_documents():
     assert _Trainer([])._extract_document_lengths(None) is None
 
 
-# --- the hand-off ------------------------------------------------------------------------------
-
-
 def test_the_first_accumulation_binds_the_callback_and_takes_its_layout():
     callback, trainer = _bound()
     trainer._accumulate_attention_flops(_batch([100, 200]))
@@ -192,7 +174,7 @@ def test_measured_work_replaces_the_config_term_in_both_estimates(monkeypatch):
 
 
 def test_the_measurement_differs_from_the_config_term_on_short_documents():
-    """The premise: at these lengths the config term over-reports, so a fallback would be visible."""
+    """At these lengths the config term over-reports, so a fallback would be visible."""
     lengths = torch.tensor([500] * 7 + [250])
     tokens = int(lengths.sum())
     assert float(LAYOUT.flops_for_documents(lengths)) < 0.25 * tokens * LAYOUT.flops_per_token(MAX_SEQ_LEN)

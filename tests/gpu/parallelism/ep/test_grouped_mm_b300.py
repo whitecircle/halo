@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""
-Grouped MM backward correctness on B300 (SM100+).
-
-``halo.kernels.grouped_mm.grouped_mm`` must carry the broadcast-gradient case,
-where the bare Blackwell path fails ``out.sum().backward()`` with
-``"Invalid strides/sizes, got [0, 0, 0]"``.
-
-Also validates that training converges, using dimensions
-matching the ``nikita-savelyev-cerebras/tiny-random-kimi-k2.5`` MoE model
-(DeepSeek V3-style: 32 routed experts, 8 per token, hidden=8, intermediate=64).
-
-The jagged forward against the per-expert loop and the int64 offset cast are pinned exactly in
-``tests/gpu/kernels/test_grouped_mm_empty_groups.py``.
-
-Run on single GPU:
-    torchrun --nproc_per_node=1 tests/gpu/parallelism/ep/test_grouped_mm_b300.py
-
-Requirements:
-    - 1x GPU (B300/B200 or any SM90+)
-    - No DeepEP required (tests the grouped_mm wrapper directly)
-"""
+"""``grouped_mm`` carries the broadcast-gradient case the bare Blackwell path fails with ``"Invalid strides/sizes, got
+[0, 0, 0]"``, and trains."""
 
 import torch
 import torch.nn as nn
@@ -28,7 +9,7 @@ from halo.kernels.grouped_mm import grouped_mm
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log
 
-# Model dimensions from tiny-random-kimi-k2.5
+# From tiny-random-kimi-k2.5.
 
 N_ROUTED_EXPERTS = 32
 HIDDEN_SIZE = 8
@@ -38,13 +19,12 @@ device = "cuda"
 G, M, K, N = N_ROUTED_EXPERTS, 16, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE
 TOKENS_PER_EXPERT = [3, 5, 2, 4, 6, 1, 8, 3]
 
-# bf16 grouped kernel vs a per-group matmul loop: accumulation order differs, magnitudes are O(1).
+# Accumulation order differs against a per-group loop; magnitudes are O(1).
 FORWARD_MAX_ABS_DIFF = 0.1
 GRAD_MAX_ABS_DIFF = 1.0
 
 
 def _jagged_operands(requires_grad: bool):
-    """MoE-style 2D jagged layout: variable tokens per expert, cumulative end offsets."""
     offs = torch.tensor(TOKENS_PER_EXPERT, dtype=torch.int32, device=device).cumsum(0)
     total_m = offs[-1].item()
     A = torch.randn(total_m, K, dtype=torch.bfloat16, device=device, requires_grad=requires_grad)
@@ -119,11 +99,10 @@ def test_jagged_backward_correctness():
 
 
 def test_swiglu_moe_forward_backward():
-    """Test the full MoE FFN: gate_proj, up_proj, down_proj with grouped_mm,
-    matching the compute path of EPMoELayerBase._compute_experts_gmm."""
+    """Matching the compute path of EPMoELayerBase._compute_experts_gmm."""
     G = N_ROUTED_EXPERTS
     M = 16
-    # Weights in matmul convention [E, K, N], as the EP MoE layers store them
+    # Matmul convention [E, K, N], as the EP MoE layers store them.
     gate_proj = torch.randn(G, K, N, dtype=torch.bfloat16, device=device)
     up_proj = torch.randn(G, K, N, dtype=torch.bfloat16, device=device)
     down_proj = torch.randn(G, N, K, dtype=torch.bfloat16, device=device)
@@ -141,11 +120,9 @@ def test_swiglu_moe_forward_backward():
 
 
 class MoEFFN(nn.Module):
-    """Mini MoE FFN using grouped_mm, matching the EP MoE layers' compute path."""
-
     def __init__(self, num_experts, hidden_size, intermediate_size):
         super().__init__()
-        # Weights stored [E, out, in]; forward transposes them to the [E, K, N] matmul convention
+        # Stored [E, out, in]; forward transposes to [E, K, N].
         self.gate_proj = nn.Parameter(
             torch.randn(num_experts, intermediate_size, hidden_size, dtype=torch.bfloat16) * 0.02
         )
@@ -164,12 +141,10 @@ class MoEFFN(nn.Module):
 
 
 def test_training_convergence():
-    """Train a MoE FFN with grouped_mm on one fixed batch and verify loss decreases."""
     num_experts, hidden, intermediate = 8, 64, 256
     model = MoEFFN(num_experts, hidden, intermediate).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
-    # Fixed target
     torch.manual_seed(99)
     with torch.no_grad():
         x_target = torch.randn(num_experts, 16, hidden, dtype=torch.bfloat16, device=device)
@@ -192,7 +167,7 @@ def test_training_convergence():
 
 
 def test_training_with_sum_loss():
-    """Train with .sum() loss (the exact zero-stride backward that crashes natively)."""
+    """The exact zero-stride backward that crashes natively."""
     num_experts, hidden, intermediate = 8, 64, 256
     model = MoEFFN(num_experts, hidden, intermediate).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)

@@ -1,6 +1,5 @@
-"""The trainer side of the rollout-engine weight sync, shared by the online and environmental GRPO trainers:
-every rank gathers the EP experts, then the dense FSDP2/TP shards, and the forwarding rank streams them to the
-engine under hub names, PEFT folded out of place. The construction gate refuses what the push cannot carry."""
+"""The trainer side of the rollout-engine weight sync: every rank gathers the EP experts, then the dense shards, and
+the forwarding rank streams them under hub names, PEFT folded out of place."""
 
 from __future__ import annotations
 
@@ -53,8 +52,8 @@ class WeightSyncSender(Protocol):
 def _dense_params(
     model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]
 ) -> Iterator[tuple[str, torch.nn.Parameter]]:
-    """The parameters the dense push sends, in ``named_parameters`` order: all but the EP experts and the
-    hand-sliced TP shards, which are not DTensors and go gathered through the drain."""
+    """All but the EP experts and the hand-sliced TP shards, which are not DTensors and go gathered through the
+    drain."""
     hand_sliced = hand_sliced_suffixes(model)
     for name, param in model.named_parameters():
         expert = any(
@@ -67,7 +66,6 @@ def _dense_params(
 
 
 def _reject_unpushed_folds(model: torch.nn.Module, folds: LoraFolds, pushed: set[int]) -> None:
-    """Refuse a LoRA fold target outside ``pushed`` (the ids the dense push sends), the only path that folds."""
     unpushed = folds.keys() - pushed
     if unpushed:
         names = sorted(name for name, param in model.named_parameters() if id(param) in unpushed)
@@ -79,7 +77,6 @@ def _reject_unpushed_folds(model: torch.nn.Module, folds: LoraFolds, pushed: set
 
 
 def _reject_model_state(model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]) -> None:
-    """Refuse a quantized base, PEFT layers the push cannot fold, and GptOss sinks removed or trainable."""
     if has_packed_quantized_params(model):
         raise ValueError(
             "QLoRA (quantized base weights) is not supported with rollout-engine weight sync: the sync forwards "
@@ -110,8 +107,8 @@ def _reject_model_state(model: torch.nn.Module, ep_layers: dict[str, EPMoELayerB
 
 
 def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
-    """Refuse a family the engine cannot serve, one whose spec carries a ``weight_sync_refusal``, and an EP family
-    without the live EP layer whose gather emits the layout the engine loads."""
+    """Refuses an unservable family, one with a ``weight_sync_refusal``, and an EP family without the live EP layer
+    whose gather emits the layout the engine loads."""
     client_cls = resolve_weight_sync_client(backend)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     unservable = sorted(client_cls.UNSERVABLE_MODEL_TYPES.keys() & config_model_types(config))
@@ -173,8 +170,7 @@ def _reject_balancing_state(model: torch.nn.Module) -> None:
 
 
 def reject_unsyncable_model(model: torch.nn.Module, backend: str) -> None:
-    """Refuse at construction a model the ``backend`` engine cannot take a weight sync for; structural, so every
-    rank raises alike."""
+    """Refuses at construction; structural, so every rank raises alike."""
     ep_layers = dict(named_ep_layers(model))
     _reject_model_state(model, ep_layers)
     _reject_engine_fit(model, backend, ep_layers)
@@ -182,11 +178,8 @@ def reject_unsyncable_model(model: torch.nn.Module, backend: str) -> None:
 
 
 class _HubForwarder:
-    """Forward gathered tensors on the forwarding rank under the hub keys a gathered checkpoint carries, since
-    the engine skips an unknown name silently: the EP layers' export renames, the PEFT base names (adapter-only
-    tensors dropped), then the gathered save's revert. A tensor a reverse ``WeightConverter`` claims is held
-    until :meth:`flush`, as a many-to-one revert needs all its sources. Every forward runs under ``guard``.
-    """
+    """The engine skips an unknown name silently, hence the hub keys. A tensor a reverse ``WeightConverter`` claims is
+    held until :meth:`flush`, as a many-to-one revert needs all its sources."""
 
     def __init__(
         self,
@@ -202,21 +195,17 @@ class _HubForwarder:
         self._peft_prefix = peft_prefix
         self._held: dict[str, torch.Tensor] = {}
         self._held_bytes = 0
-        # The list the gathered save inverts.
         self._model = base_transformers_model(model)
         self._conversions = export_conversions(self._model)
         self._renamings, self._converters = reversed_export_transforms(self._conversions)
 
     def send(self, name: str, tensor: torch.Tensor) -> None:
-        """Forward one live-tree tensor, deferring a failure to the sync's rank-uniform reject."""
         self._guard.run(partial(self._forward, name, tensor))
 
     def flush(self) -> None:
-        """Forward what the reverse converters make of the held tensors, under the same guard."""
         self._guard.run(self._revert_held)
 
     def _forward(self, name: str, tensor: torch.Tensor) -> None:
-        """Forward one tensor, or hold it for :meth:`flush` when a reverse converter claims it."""
         for layer_name, layer in self._ep_layers.items():
             prefix = f"{layer_name}."
             if name.startswith(prefix):
@@ -235,7 +224,6 @@ class _HubForwarder:
             return
         self._held[name] = tensor
         self._held_bytes += tensor.nbytes
-        # Bounded at one chunk, the budget the client streams by.
         if self._held_bytes > WEIGHT_SYNC_CHUNK_BYTES:
             raise RuntimeError(
                 f"weight sync is holding {self._held_bytes / 2**30:.2f} GiB on the forwarding rank: "
@@ -247,7 +235,6 @@ class _HubForwarder:
             )
 
     def _revert_held(self) -> None:
-        """Run the reverse converters over the held tensors and forward what they produce."""
         if not self._held:
             return
         held, self._held, self._held_bytes = self._held, {}, 0
@@ -260,11 +247,8 @@ def _send_ep_expert_weights(
     forwarder: _HubForwarder | None,
     guard: DeferredRankFailure,
 ) -> None:
-    """COLLECTIVE: gather each EP layer's experts in the family's hub layout and forward them.
-
-    The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and retaining
-    stops after a failure, with nothing left to send.
-    """
+    """COLLECTIVE. The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and
+    retaining stops after a failure."""
     for layer_name, module in ep_layers.items():
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
@@ -288,14 +272,13 @@ def _send_dense_weights(
     forwarder: _HubForwarder | None,
     folds: LoraFolds,
 ) -> None:
-    """COLLECTIVE: gather the dense params (one ``full_tensor()`` over FSDP2 DP and TP, the hand-sliced TP
-    shards through their own drain) and forward them, refusing a PEFT fold target the push did not send."""
+    """COLLECTIVE. One ``full_tensor()`` over FSDP2 DP and TP, the hand-sliced TP shards through their own drain;
+    refuses a PEFT fold target the push did not send."""
     folded: set[int] = set()
     # Stream gather→send→drop (a dict = full dense copy/rank: OOM at 70B+); param order keeps collectives in step.
     for name, param in _dense_params(model, ep_layers):
         if id(param) in folds:
             folded.add(id(param))
-        # Folded one tensor at a time, so the only extra memory is this param's temporaries.
         data = materialize_dtensor(lora_folded_data(param, folds))
         if forwarder is not None:
             # An unfolded param aliases the live weight; the client snapshots it, so no clone.
@@ -312,13 +295,9 @@ def _send_dense_weights(
 
 
 def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | None) -> None:
-    """COLLECTIVE: gather the EP and dense weights of ``model`` and forward them through ``sender``, the engine
-    client on the forwarding rank and ``None`` elsewhere; the caller closes the update afterwards.
-
-    The forwarding rank's sends sit between the gathers and can fail on that rank alone, so each runs under a
-    :class:`DeferredRankFailure` and the verdict is taken at a rank-uniform reject: a rank raising mid-loop
-    would leave every peer blocked in the next gather until the watchdog fires.
-    """
+    """COLLECTIVE. A send can fail on the forwarding rank alone, so each runs under a deferred failure: a rank raising
+    mid-loop would leave every peer blocked in the next gather until the watchdog fires. The caller closes the
+    update."""
     # Read the shards the optimizer steps, not the unsharded copies a forward can leave registered.
     reshard_fsdp2_modules(model)
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
@@ -334,7 +313,6 @@ def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | N
     folds = lora_fold_targets(model)
     _send_ep_expert_weights(ep_layers, forwarder, guard)
     _send_dense_weights(model, ep_layers, forwarder, folds)
-    # The sync writes none of the trainer's weights, so a failed one leaves them untouched.
     guard.reject()
 
 
@@ -358,14 +336,13 @@ def _reject_missing_client() -> None:
 def sync_weights_to_client(
     model: torch.nn.Module, client: WeightSyncSender | None, is_main: bool, is_tp_main: bool
 ) -> None:
-    """COLLECTIVE: gather the policy and push it to ``client``, then close the update. Only the forwarding rank
-    (global main, TP rank 0) sends, and its missing ``client`` is refused on every rank at the close's verdict."""
+    """COLLECTIVE. Only the forwarding rank (global main, TP rank 0) sends; its missing ``client`` is refused on every
+    rank at the close's verdict."""
     forwarding = is_main and is_tp_main
     sender = client if forwarding else None
     flush = DeferredRankFailure("weight-sync flush to the rollout engine")
     if forwarding and client is None:
         flush.run(_reject_missing_client)
-    # Co-load groups are scoped to the pushed module tree before the first chunk.
     if sender is not None:
         sender.scope_co_load_groups(name for name, _ in model.named_modules())
     try:
@@ -382,7 +359,7 @@ def sync_weights_to_client(
 
 
 def sync_trainer_weights(trainer, client: WeightSyncSender | None) -> None:
-    """COLLECTIVE: push a distributed trainer's policy to ``client``, the caller's handle on the main process."""
+    """COLLECTIVE. ``client`` is the caller's handle on the main process."""
     model = unwrap_framework_wrappers(trainer.model)
     config = trainer.parallelism_config
     is_main = trainer.accelerator.is_main_process

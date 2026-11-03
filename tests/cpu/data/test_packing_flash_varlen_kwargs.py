@@ -1,23 +1,7 @@
 #!/usr/bin/env python
-"""On a flash run the packing collators hand attention the varlen set transformers would derive itself.
-
-Without ``cu_seq_lens_q/k`` and ``max_length_q/k`` in the forward kwargs, transformers' flash path tests
-every attention layer's ``position_ids`` for a packed row (``_is_packed_sequence``, a device sync) and
-re-derives the set from them (``prepare_fa_kwargs_from_position_ids``: a ``nonzero`` and a tensor max length
-the kernel call reads back). The collator builds the same set on the host, so the kernel must see the same
-offsets and lengths: a multi-document row carries exactly what transformers derives, a one-document row
-carries nothing unless the caller opts in (``tests/cpu/data/test_one_document_flash_varlen.py``), and a non-flash
-run or a kept-rows (PP) batch carries nothing.
-
-Across the tiny roster of packing families (:mod:`tests.common.packed_flash_varlen`, one fresh interpreter
-each), a forward fed the set must take the kwargs branch in every layer that used to derive it, never call
-the derivation, hand the kernel identical arguments, and return bit-identical logits. Under gradient
-checkpointing, reentrant or not, the backward recompute must re-run attention on the same handed-over set. The
-SFT trainer's input preparation and loss, plain and under a LoRA wrapper, hand the decoder the set the collator
-built.
-
-    python tests/cpu/data/test_packing_flash_varlen_kwargs.py
-"""
+"""On a flash run the packing collators hand attention the varlen set transformers would derive, sparing each layer
+a device sync and a re-derivation. Across the roster (:mod:`tests.common.packed_flash_varlen`) kernel arguments
+and logits stay identical and the recompute re-runs on the same set. Non-flash and PP carry nothing."""
 
 from itertools import accumulate
 
@@ -114,8 +98,8 @@ def test_a_flash_run_gets_the_varlen_set_transformers_would_derive(rows, attn_im
 
 
 def test_the_batches_cover_the_cases():
-    """Anti-vacuity: the multi-document and mixed batches emit the set, the one-document batch does not, and
-    the mixed batch's unsegmented row keeps its trailing pads inside its document."""
+    """The multi-document and mixed batches emit the set and the one-document batch does not; the mixed batch's
+    unsegmented row keeps its trailing pads."""
     collator = _collator("flash_attention_2")
     assert "cu_seq_lens_q" in collator.torch_call(_rows(MULTI_DOCUMENT_ROWS))
     mixed = collator.torch_call(_rows(MIXED_ROWS))
@@ -169,9 +153,8 @@ def test_every_packing_family_reads_the_set_in_place_of_the_derivation(family):
 @pytest.mark.parametrize("gc_mode", list(GC_MODES))
 @pytest.mark.parametrize("family", RECOMPUTE_FAMILIES)
 def test_the_recompute_reads_the_handed_set(family, gc_mode):
-    """A checkpointed step's backward recompute re-runs attention on the set the forward was handed: no layer
-    derives it again, and a set with a shifted boundary trains the same loss and gradients with checkpointing as
-    without; set-vs-derived equality alone cannot see a recompute that re-derives the true boundaries."""
+    """No layer derives it again, and a set with a shifted boundary trains the same with checkpointing as without;
+    set-vs-derived equality alone cannot see a recompute that re-derives."""
     failures = probe_findings(
         "from tests.common.packed_flash_varlen import recompute_findings, report; "
         f"report(recompute_findings({family!r}, {gc_mode!r}))",
@@ -181,8 +164,7 @@ def test_the_recompute_reads_the_handed_set(family, gc_mode):
 
 
 def test_the_sweep_holds_a_flash_family():
-    """Anti-vacuity: the dense roster family runs flash and reads no GatedDeltaNet marker, so its sweep entry
-    cannot be a skip."""
+    """The dense roster family runs flash and reads no GatedDeltaNet marker, so its sweep entry cannot be a skip."""
     assert "dense:qwen3" in PACKING_FAMILIES and Qwen3ForCausalLM._supports_flash_attn
 
 

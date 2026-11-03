@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""A GRPO step that fails on one rank between two collectives must raise on EVERY rank.
-
-Each case is a rank-local failure ahead of a collective the peers are already headed for, so a lone
-raise leaves them there until the watchdog, with a traceback naming the collective instead of the cause:
-
-* component start (``_init_async_components``): every rank builds its own rollout manager and, under
-  ``isr_engine_reference``, its own score-only clients, whose constructor checks a server this rank may
-  not reach, and the main process its weight-sync client; the start's verdict and then the client
-  formation's join them.
-* the fenced weight sync: the collective gather runs on every rank and can fail on a non-main one.
-* the completions record: one writer rank writes the world's, every rank its own part (and then joins the
-  tables' sample gather even when its write failed), and the step's next collective follows.
-
-Proven on a real 2-rank gloo group with the external pieces (Ray, the actors, the engine) stubbed, so a
-regression is the hang it would be in production, bounded by the group timeout.
-
-    python tests/cpu/grpo/test_grpo_rank_local_failures.py
-"""
+"""A GRPO step that fails on one rank between two collectives must raise on every rank. A lone raise leaves the peers
+at the collective until the watchdog. Run on a real 2-rank gloo group with Ray, the actors and the engine stubbed."""
 
 import datetime
 import os
@@ -32,7 +16,7 @@ from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 FAILING_RANK = 1
-# A stuck peer must surface as a failed assertion, not a wedged suite; generous for an 8-way xdist host.
+# A stuck peer surfaces as a failed assertion; generous for an 8-way xdist host.
 PG_TIMEOUT = datetime.timedelta(seconds=90)
 _PUSH_SECONDS = 0.05
 
@@ -209,8 +193,8 @@ def test_a_rank_local_component_start_failure_raises_on_every_rank(tmp_path, fai
 
 
 def test_the_rescore_clients_are_built_at_component_start(monkeypatch):
-    """At start, under the start verdict: the batch build that reads them sits between collectives that
-    could no longer report a server this rank cannot reach."""
+    """At start, under the start verdict: the batch build that reads them sits between collectives that could not
+    report a server this rank cannot reach."""
     monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True))
     monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _Manager(fail_start=False))
     monkeypatch.setattr(async_mod, "resolve_weight_sync_client", lambda backend: _scorer_cls(False))

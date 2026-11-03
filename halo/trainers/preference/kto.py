@@ -9,12 +9,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Distributed KTO trainer (unpaired desirable/undesirable completions): EP, TP and PP; CP unsupported.
-
-CP would split the full-sequence log-prob sums and KL reference term KTO needs. Under EP/TP the reference is
-not parallelized: use PEFT/LoRA or ``precompute_ref_log_probs``. Under PP the trainer is precompute-only and
-``apo_zero_unpaired``-only (no KL term), so the objective is a per-row function of the last stage's logits.
-"""
+"""Distributed KTO trainer: EP, TP and PP; CP unsupported (it would split the full-sequence log-prob sums and KL term).
+Under EP/TP the reference is not parallelized. PP is precompute-only and ``apo_zero_unpaired``-only, a per-row function
+of the last stage's logits."""
 
 import torch
 from trl import KTOTrainer
@@ -36,8 +33,6 @@ from halo.trainers.trl_dataset_prep import TRLDatasetPrepMixin
 
 
 class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLDatasetPrepMixin, KTOTrainer):
-    """TRL's KTOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring)."""
-
     _tag_names = ["trl", "kto"]
 
     PP_REFUSAL = None
@@ -50,8 +45,8 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
     )
 
     def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Refuse the KTO options the PP last-stage loss cannot honor (it reproduces ``beta`` and both
-        desirability weights); ctor parameters are read from ``kwargs`` only, as in DPO."""
+        """The PP loss reproduces ``beta`` and both desirability weights; ctor parameters are read from ``kwargs``
+        only, as in DPO."""
         reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
         reject_kto_pp_loss_type(training_args)
@@ -88,14 +83,8 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         return {"max_length": self.args.max_length}
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
-        """KTO's pipeline-loss contract: unpaired rows + dataset-precomputed reference log-probs.
-
-        Rows are independent, so the microbatch split is safe at any size; ``ref_logps`` and the
-        per-row desirability ``label`` ship as extra targets to stay row-aligned. ``completion_mask``
-        rides ``pad_spec`` so the batch transform sees it at the width the fixed-shape collator pads
-        ``input_ids`` to. ``pin_runner_columns=False`` because KTO's dataset columns feed
-        TRL's unpaired-preference collator, which needs TRL's own signature set.
-        """
+        """Rows are independent, so the microbatch split is safe at any size. ``pin_runner_columns=False`` because
+        KTO's columns feed TRL's unpaired-preference collator, which needs TRL's own signature set."""
         return PipelineLossAdapter(
             token_loss_fn=self._pp_kto_token_loss,
             batch_transform=self._pp_kto_batch_transform,
@@ -107,13 +96,8 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         )
 
     def _pp_kto_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """TRL's unpaired-preference collator batch, already padded to ``args.max_length`` by the pipeline's
-        fixed-shape collator, → the pipeline's batch contract.
-
-        Labels are the completion token ids at their positions (ignore elsewhere) — exactly the positions
-        TRL's shifted ``completion_mask`` scores; ``label`` (a list of bools from the collator) becomes a
-        per-row float tensor so the microbatch split can carry it.
-        """
+        """Labels are the completion token ids at the positions TRL's shifted ``completion_mask`` scores; ``label``
+        becomes a per-row float tensor so the microbatch split can carry it."""
         input_ids = batch["input_ids"]
         return {
             "input_ids": input_ids,
@@ -124,16 +108,9 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         }
 
     def _pp_kto_token_loss(self, logits: torch.Tensor, target: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Summed per-row apo_zero_unpaired losses over one microbatch (÷ row count by the runner).
-
-        Reproduces TRL's ``_compute_loss`` for the PP subset: per-row log-ratio against the
-        precomputed reference, then ``desirable_weight · (1 − σ(β·logratio))`` for desirable rows
-        and ``undesirable_weight · σ(β·logratio)`` for undesirable ones. The per-row ``where``
-        makes a single-sided microbatch (all-desirable / all-undesirable) a plain partial sum, with
-        no empty-tensor branch. Deviation from TRL's reduction: TRL takes ``losses.nanmean()``;
-        sum ÷ row count is equivalent when no row is NaN, and lets a NaN from corrupted data or
-        references surface instead of being dropped from the mean.
-        """
+        """Summed per-row apo_zero_unpaired losses: ``desirable_weight · (1 − σ(β·logratio))`` and ``undesirable_weight
+        · σ(β·logratio)``. TRL takes ``losses.nanmean()``; sum ÷ row count is equivalent when no row is NaN, and lets a
+        NaN from corrupted data or references surface instead of being dropped from the mean."""
         seq_logps = sequence_logprobs(logits, target["labels"])
         logratios = seq_logps - target["ref_logps"].float()
         desirable = target["label"].bool()

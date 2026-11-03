@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Every model wrapper the trainer enables checkpointing on takes transformers' full keyword set.
-
-transformers' trainer calls ``gradient_checkpointing_enable(gradient_checkpointing_kwargs=...,
-every_n_layers=..., offload=...)`` on whatever model it holds, so a wrapper that drops a keyword fails
-every run with checkpointing on at that call. The delegating wrappers (the Ulysses CP model and the
-SentenceTransformer patch) hand ``offload`` to the transformers model, which then checkpoints into host
-memory; a pipeline stage builds its own checkpoint function and refuses it.
-
-    python tests/cpu/parallelism/test_gc_enable_signature.py
-"""
+"""Every wrapper the trainer enables checkpointing on takes transformers' full keyword set, or every such run fails at
+that call. A pipeline stage builds its own checkpoint function and refuses ``offload``."""
 
 import pytest
 import torch.nn as nn
@@ -33,7 +25,7 @@ def _qwen3() -> Qwen3ForCausalLM:
 
 
 class _Encoder(nn.Module):
-    """The shape of sentence-transformers' ``Transformer`` module: a transformers model held as ``auto_model``."""
+    """sentence-transformers' ``Transformer`` module: a transformers model held as ``auto_model``."""
 
     def __init__(self):
         super().__init__()

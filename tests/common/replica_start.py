@@ -1,11 +1,6 @@
-"""What the replica-start tests share: a tiny model whose copies the ranks must start alike, and the trainer's
-parallel-mode ladder run on it without a trainer.
-
-The base model is drawn from one shared seed, as a checkpoint load gives every rank the same weights; the LoRA
-adapters on the attention projections and one row of the frozen input embedding (the row a vocabulary resize adds)
-are drawn from each rank's own stream (``ADAPTER_SEED + rank``), as they are whenever the streams have parted before
-the draw.
-"""
+"""What the replica-start tests share: a tiny model whose copies ranks must start alike, and the trainer's mode ladder
+run with no trainer. The base comes from one seed; LoRA adapters and one frozen embedding row come from each rank's own
+stream, as when streams have parted."""
 
 from types import SimpleNamespace
 
@@ -18,7 +13,6 @@ from tests.common.adapters import mixer_linear_leaves
 from tests.common.tiny_models import TinyFamily, tiny_family_model
 
 BASE_SEED = 0
-# Each rank's adapter stream: ``ADAPTER_SEED + rank``.
 ADAPTER_SEED = 100
 
 
@@ -45,8 +39,8 @@ class ModeLadder(ModeSetupMixin, EPLayersMixin):
 
 
 def per_rank_lora_model(family: TinyFamily, rank: int) -> PeftModel:
-    """``family``'s tiny model from :data:`BASE_SEED`, with LoRA on its attention projections (its token mixers'
-    linears where the family names none) and its last input-embedding row drawn from this rank's own stream."""
+    """``family``'s tiny model from :data:`BASE_SEED`, with attention LoRA and its last embedding row from this rank's
+    own stream."""
     torch.manual_seed(BASE_SEED)
     model = tiny_family_model(family)
     targets = list(family.attention_targets) or mixer_linear_leaves(model)
@@ -58,6 +52,6 @@ def per_rank_lora_model(family: TinyFamily, rank: int) -> PeftModel:
 
 
 def per_rank_draws(model: PeftModel) -> list[torch.Tensor]:
-    """The tensors :func:`per_rank_lora_model` drew per rank: every ``lora_A`` and the last input-embedding row."""
+    """What :func:`per_rank_lora_model` drew per rank: every ``lora_A`` and the last embedding row."""
     lora_a = [param.data for name, param in model.named_parameters() if "lora_A" in name]
     return [*lora_a, model.get_input_embeddings().weight.data[-1]]

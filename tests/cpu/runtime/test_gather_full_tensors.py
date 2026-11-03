@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""``gather_full_tensors`` holds one handed-in item at a time.
-
-A gathered save hands it tensors derived lazily inside the loop (an injected-LoRA fold per weight), so an
-item still referenced while the next one is made doubles the transient peak: adjacent fold targets such as
-one layer's q/k/v would each live beside their successor.
-
-Run: python tests/cpu/runtime/test_gather_full_tensors.py
-"""
+"""``gather_full_tensors`` holds one handed-in item at a time, or adjacent lazily derived fold targets double the
+transient peak."""
 
 import weakref
 

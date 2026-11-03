@@ -23,13 +23,9 @@ def decay_groups(
     *,
     keep_empty: bool = False,
 ) -> list[dict[str, Any]]:
-    """``[decay group, no-decay group]`` over the trainable params, each in iteration order.
-
-    Each group carries its params' names under torch's ``param_names`` key, which the SR optimizers key
-    their noise by (:func:`~halo.optimizers.stochastic_rounding.sr_param_index`). ``decay_parameters=None``
-    decays everything. ``keep_empty`` keeps an empty group: the group count defines the index space of a
-    saved optimizer state and of a scheduler's per-group updates.
-    """
+    """``[decay group, no-decay group]`` with names under torch's ``param_names`` key, which SR optimizers key noise
+    by. ``keep_empty`` keeps an empty group, as the group count defines the index space of a saved optimizer state and
+    of a scheduler's per-group updates."""
     decay_names = None if decay_parameters is None else set(decay_parameters)
     decay: list[tuple[str, Parameter]] = []
     no_decay: list[tuple[str, Parameter]] = []
@@ -55,13 +51,9 @@ def build_tensor_type_grouped_optimizer(
     decay_parameters: Sequence[str],
     get_optimizer_cls_and_kwargs: Callable[[Any, torch.nn.Module], tuple[type, dict]],
 ):
-    """The args' optimizer over groups split by (weight decay, dtype, tensor type): each group fused when the
-    args ask for a fused optimizer, single-tensor otherwise.
-
-    FSDP2 params are DTensors and FSDP-ignored EP params plain tensors, which one foreach/fused update
-    cannot mix, while a group of one dtype and one tensor type is one a fused update takes whole. foreach
-    stays off, since torch refuses it beside fused. The dtype axis covers ``fp32_non_ep_params``.
-    """
+    """The args' optimizer over groups split by (weight decay, dtype, tensor type). FSDP2 params are DTensors and
+    FSDP-ignored EP params plain tensors, which one foreach/fused update cannot mix. foreach stays off, since torch
+    refuses it beside fused."""
     decay_names = set(decay_parameters)
     groups: dict[tuple, list] = {}
     for n, p in model.named_parameters():
@@ -77,8 +69,7 @@ def build_tensor_type_grouped_optimizer(
         {"params": params, "weight_decay": wd, "foreach": False, "fused": fused}
         for (wd, _dtype, _is_dt), params in groups.items()
     ]
-    # Factory-style optimizers (GaLore/LOMO/layerwise) couple kwargs to the model or a fixed param
-    # list; forwarding those alongside the grouped params here would bind the params twice.
+    # Factory-style optimizers (GaLore/LOMO/layerwise) couple kwargs to the model; forwarding would bind params twice.
     coupled = {"params", "model", "optimizer_dict"} & set(optimizer_kwargs)
     if coupled:
         raise ValueError(

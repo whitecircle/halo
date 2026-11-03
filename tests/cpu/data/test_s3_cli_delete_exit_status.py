@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""The ``s3.py delete`` CLI exits non-zero whenever the data it was asked to delete is still there.
-
-``S3Client.delete`` logs the ``ClientError`` and returns ``False`` for a single-object delete, and the
-two ``--recursive`` mismatches (a prefix without it, a single object with it) refuse before deleting
-anything; a CLI that only printed and exited 0 would let a ``&&`` chain proceed as if the data were
-gone. The client is stubbed at its own methods (no boto3 session), patched by dotted path like the
-sibling CLI tests.
-
-Run: pytest tests/cpu/data/test_s3_cli_delete_exit_status.py
-"""
+"""The ``s3.py delete`` CLI exits non-zero whenever the data it was asked to delete is still there, so a ``&&``
+chain cannot proceed as if it were gone. The client is stubbed at its own methods (no boto3 session), patched by
+dotted path."""
 
 import sys
 from unittest.mock import patch

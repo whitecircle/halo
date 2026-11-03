@@ -6,7 +6,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.preference.smpo_objective import SMPOObjective
 
-# The SMPOConfig fields those paths read, at values a test overrides per case.
+# What those paths read, at values a test overrides per case.
 _ARGS = {
     "beta": 2.0,
     "loss_type": "sigmoid",

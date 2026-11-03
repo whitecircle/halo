@@ -1,8 +1,5 @@
-"""``EPMoELayerBase``, the base class of every family's EP layer.
-
-The base owns construction, the dispatch -> expert compute -> combine forward and the expert-parameter
-views; compute, routing, grad sync, expert LoRA, the checkpoint gather and the balancing bias are mixins.
-"""
+"""``EPMoELayerBase``, the base of every family's EP layer: construction, the dispatch -> expert compute -> combine
+forward and the expert-parameter views; the rest are mixins."""
 
 from __future__ import annotations
 
@@ -46,13 +43,9 @@ class EPMoELayerBase(
     nn.Module,
     ABC,
 ):
-    """Base class for EP MoE layers on DeepEP.
+    """Base class for EP MoE layers on DeepEP. A family subclasses it, fills in the declarations below, implements
+    ``forward`` and overrides the ``_adopt_*`` hooks and compute kernels its expert layout needs."""
 
-    A family subclasses it, fills in the declarations below, implements ``forward`` and overrides the
-    ``_adopt_*`` construction hooks and the compute kernels its expert layout needs.
-    """
-
-    # The family's facts; every concrete family layer declares its own.
     FAMILY: ClassVar[MoEFamilySpec]
 
     # HF class name(s) of the MoE block this EP layer replaces; ``roster.MOE_LAYER_MAP`` claims them.
@@ -61,33 +54,25 @@ class EPMoELayerBase(
     # Per-family dotted paths on the original HF MoE module, probed by :meth:`detect_num_experts` first.
     _NUM_EXPERTS_ATTR_PATHS: tuple[str, ...] = ()
 
-    # Must match the family's checkpoint name — it becomes the export key in ``replicated_named_params``.
-    # Resolved per instance from ``FAMILY.shared_expert_attrs`` for a family that declares one.
+    # The family's checkpoint name, which becomes the export key in ``replicated_named_params``; resolved per instance
+    # from ``FAMILY.shared_expert_attrs`` for a family that declares one.
     _shared_expert_attr: str = "shared_experts"
 
     # True where the architecture always builds the shared expert: an absent or ``None`` slot is then an
     # upstream rename rather than a configuration, and adopting nothing would drop it from every output.
     _SHARED_EXPERT_REQUIRED: bool = False
 
-    # Activation name :meth:`_resolve_activation` falls back to when neither the expert container nor the
-    # wrapped block names one — the family's architectural default.
+    # Fallback when neither the expert container nor the wrapped block names an activation.
     _DEFAULT_ACTIVATION: str = "silu"
 
-    # Attribute the router hangs off, on the wrapped HF block (:meth:`_find_gate_or_router` reads it
-    # there) and on this EP layer, which re-registers it under the same name. Declared once per family so
-    # the probe, the fp32 upcast and the grad-sync hook cannot point at different modules. ``None`` = the
-    # router is external to the EP layer (Gemma4's sibling module): nothing is adopted here, no routing
-    # knob is read, and only expert grad-sync hooks register.
+    # Attribute the router hangs off, on the wrapped HF block and on this EP layer, declared once per family so the
+    # probe, the fp32 upcast and the grad-sync hook cannot point at different modules. ``None``: the router is external
+    # (Gemma4's sibling module), so nothing is adopted, no routing knob read, and only expert grad-sync hooks register.
     _ROUTER_ATTR: str | None = "gate"
 
     def __init__(self, original_layer: nn.Module, ep_config: EPConfig, weights_already_sharded: bool = False):
-        """Wrap ``original_layer``'s MoE compute for expert parallelism.
-
-        Every family runs this order and overrides a step's hook, never the sequence: router and expert
-        container, EP state, router adoption, routing knobs, shared expert, compute constants, this
-        rank's expert weights, the shared tail, the construction line. ``weights_already_sharded``: the
-        lazy loader already sliced the experts to this rank's range.
-        """
+        """Wrap ``original_layer``'s MoE compute. Every family runs this order and overrides a step's hook, never the
+        sequence. ``weights_already_sharded``: the lazy loader already sliced the experts to this rank's range."""
         router = self._find_gate_or_router(original_layer)
         experts = self._find_experts_container(original_layer)
         self._init_ep_state(ep_config, self._detect_hidden_dim(router, experts))
@@ -116,18 +101,13 @@ class EPMoELayerBase(
         raise AttributeError(f"Cannot detect num_experts from {type(layer).__name__}")
 
     def expert_named_params(self) -> list:
-        """``(name, param)`` for this rank's expert weights, then its expert LoRA adapters.
-
-        Read by grad sync, the fp32 upcast and the checkpoint skip-set. A family's layout is declared in
-        ``FAMILY.expert_weight_roots``, not overridden here.
-        """
+        """``(name, param)`` for this rank's expert weights, then its expert LoRA adapters; a family's layout is
+        declared in ``FAMILY.expert_weight_roots``, not overridden here."""
         return self._base_expert_named_params() + self.expert_lora_named_params()
 
     def replicated_named_params(self) -> list:
-        """``(name, param)`` for the fully replicated submodules the router hook DP-averages: the shared
-        expert under :attr:`_shared_expert_attr`, empty when that slot is ``None``. Qwen3.5/3.6 overrides it
-        for its second gate module.
-        """
+        """``(name, param)`` for the fully replicated submodules the router hook DP-averages: the shared expert, empty
+        when its slot is ``None``. Qwen3.5/3.6 overrides it for its second gate module."""
         return self._submodule_named_params(
             [(self._shared_expert_attr, getattr(self, self._shared_expert_attr, None))]
         )
@@ -137,7 +117,6 @@ class EPMoELayerBase(
 
     @classmethod
     def _find_experts_container(cls, layer: nn.Module) -> nn.Module:
-        """The block's expert container, under the first of ``FAMILY.experts_container_attrs`` it carries."""
         for attr in cls.FAMILY.experts_container_attrs:
             if hasattr(layer, attr):
                 return getattr(layer, attr)
@@ -149,15 +128,13 @@ class EPMoELayerBase(
 
     @classmethod
     def _detect_hidden_dim(cls, router: nn.Module | None, experts: nn.Module) -> int:
-        """The router projection's input width, else (an external or projection-less router) the fused
-        experts' ``gate_up_proj [E, 2M, H]``."""
+        """The router projection's input width, else the fused experts' ``gate_up_proj [E, 2M, H]``."""
         if router is not None and hasattr(router, "weight"):
             return router.weight.shape[1]
         return cls._require_fused_experts(experts).gate_up_proj.shape[2]
 
     def _init_ep_state(self, ep_config: EPConfig, hidden_dim: int):
-        """Build the EP state every EP layer shares; callable without an HF block, as construction probes
-        do."""
+        """Build the EP state every EP layer shares; callable without an HF block, as construction probes do."""
         super().__init__()
         self.ep_config = ep_config
         self.num_experts = ep_config.num_experts
@@ -216,13 +193,11 @@ class EPMoELayerBase(
         self._perf: Callable[[str], contextlib.AbstractContextManager] = torch.profiler.record_function
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
-        """Read the routing knobs the forward consumes; default ``top_k``. An override calls ``super()``
-        first and may read the adopted router."""
+        """Read the routing knobs the forward consumes. An override calls ``super()`` first and may read the router."""
         self.top_k = self._find_top_k(original_layer)
 
     def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
-        """Adopt the shared expert under the first ``FAMILY.shared_expert_attrs`` spelling the block carries,
-        which becomes its export key."""
+        """Adopt the shared expert under the first ``FAMILY.shared_expert_attrs`` spelling carried (its export key)."""
         for attr in self.FAMILY.shared_expert_attrs:
             if not hasattr(original_layer, attr):
                 continue
@@ -245,17 +220,15 @@ class EPMoELayerBase(
             setattr(self, self._shared_expert_attr, None)
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
-        """Adopt the constants the expert kernels read; default the activation. A family reads its extra
-        constants here directly, so an upstream rename raises instead of substituting a default."""
+        """A family reads its extra constants here directly, so an upstream rename raises instead of defaulting."""
         self._resolve_activation(experts, original_layer=original_layer, default=self._DEFAULT_ACTIVATION)
 
     def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False) -> None:
-        """Register this rank's expert weights; default the fused-GLU layout."""
         self._init_fused_glu_params(experts, weights_already_sharded=weights_already_sharded)
 
     def _finalize_expert_init(self) -> None:
-        """The shared init tail: device, expert LoRA, fp32 upcasts, grad-sync hooks. The upcast keeps the
-        ``requires_grad`` the LoRA freeze set and rebinds each tensor, so the hooks register after it."""
+        """Device, expert LoRA, fp32 upcasts, grad-sync hooks. The upcast keeps the LoRA freeze's ``requires_grad`` and
+        rebinds each tensor, so the hooks register after it."""
         self.to(self._resident_device())
         self._init_expert_lora()
         self._upcast_router_to_fp32()
@@ -263,8 +236,7 @@ class EPMoELayerBase(
         self._install_gradient_sync_hooks()
 
     def _resident_device(self) -> torch.device:
-        """Where this layer's state belongs: its parameters' device, so a layer materialized on CPU stays for
-        the trainer to move, else this rank's device."""
+        """A layer materialized on CPU stays for the trainer to move; one with no real device goes to this rank's."""
         device = next((p.device for p in self.parameters()), None)
         return current_device() if device is None or device.type == "meta" else device
 
@@ -273,8 +245,8 @@ class EPMoELayerBase(
         return ()
 
     def _log_init_summary(self, *extras: str) -> None:
-        """Log the construction line: rank-uniform fields at INFO on the main process only (thousands of
-        identical lines at scale otherwise), this rank's expert range at DEBUG."""
+        """Rank-uniform fields at INFO on the main process only (thousands of identical lines at scale otherwise), this
+        rank's expert range at DEBUG."""
         logger.debug(
             f"{type(self).__name__}: EP rank {self.ep_rank} owns experts "
             f"{self.expert_start}-{self.expert_end - 1} of {self.num_experts}"
@@ -295,13 +267,10 @@ class EPMoELayerBase(
         logger.info(f"{type(self).__name__}: {', '.join(fields)}")
 
     def _base_expert_named_params(self) -> list:
-        """``(name, param)`` for the ``FAMILY.expert_weight_roots`` this rank holds."""
         return [(n, getattr(self, n)) for n in self.FAMILY.expert_weight_roots if hasattr(self, n)]
 
     @staticmethod
     def _submodule_named_params(named_modules) -> list:
-        """Flatten ``(prefix, submodule)`` pairs into ``(prefix.name, param)``, skipping ``None``
-        submodules."""
         out = []
         for prefix, mod in named_modules:
             if mod is not None:
@@ -381,8 +350,8 @@ class EPMoELayerBase(
         return combined
 
     def _rank_uniform_dispatch_input(self, flat: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """``flat`` as a grad-requiring leaf when the experts train but no dispatch operand needs grad, so
-        every rank builds the same dispatch/combine backward nodes; ``flat`` itself otherwise."""
+        """``flat`` as a grad-requiring leaf when the experts train but no dispatch operand needs grad, so every rank
+        builds the same dispatch/combine backward nodes."""
         # Without the leaf a rank whose experts got no token joins the graph only through a constant,
         # skips DeepEP collectives its peers enter, and hangs or mispairs them; its grad is discarded.
         if flat.requires_grad or weights.requires_grad:
@@ -395,9 +364,6 @@ class EPMoELayerBase(
 
 
 def named_ep_layers(model: nn.Module) -> list[tuple[str, EPMoELayerBase]]:
-    """This model's EP MoE layers as ``(module path, layer)``, in ``named_modules`` order.
-
-    By ``isinstance``, not an attribute probe: a PEFT ``modules_to_save`` wrapper forwards ``__getattr__`` to
-    the layer it holds, so a probe would match the wrapper too.
-    """
+    """This model's EP layers as ``(module path, layer)``. By ``isinstance``, since a PEFT ``modules_to_save`` wrapper
+    forwards ``__getattr__`` to the layer it holds and a probe would match it too."""
     return [(name, module) for name, module in model.named_modules() if isinstance(module, EPMoELayerBase)]

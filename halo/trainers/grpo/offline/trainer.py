@@ -9,10 +9,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Offline GRPO trainer: group-relative policy optimization over stored completions and rewards, under
-EP / TP / CP / PP. Full fine-tuning scores raw run-start reference log-probs once and checkpoints them; CP
-owns token shards of the same rows, and PP's microbatch numerators share the whole-batch denominators.
-"""
+"""Offline GRPO over stored completions and rewards. Full fine-tuning scores raw run-start reference log-probs once and
+checkpoints them; CP owns token shards of the same rows, and PP's microbatch numerators share the whole-batch
+denominators."""
 
 import logging
 from collections import defaultdict
@@ -90,9 +89,8 @@ class OfflineGRPOTrainer(
     DistributedTrainerMixin,
     Trainer,
 ):
-    """Offline GRPO over ``prompt`` / ``completions`` / ``rewards`` rows. Full fine-tuning freezes run-start
-    per-token reference scores in each checkpoint; PEFT scores its base with adapters disabled; native
-    expert LoRA uses an explicit frozen base model."""
+    """Full fine-tuning freezes run-start per-token reference scores in each checkpoint; PEFT scores its base with
+    adapters disabled; native expert LoRA uses an explicit frozen base model."""
 
     _tag_names = ["trl", "offline-grpo"]
 
@@ -174,7 +172,6 @@ class OfflineGRPOTrainer(
         model, self._peft_has_been_casted_to_bf16 = prepare_policy_model(
             model, peft_config, args, disable_dropout=args.disable_dropout
         )
-        # The model rides through the distributed seam so PP can split it into this rank's stage.
         dist_kwargs = self._init_distributed_config(
             kwargs,
             training_args=args,
@@ -222,8 +219,8 @@ class OfflineGRPOTrainer(
         self._finish_offline_init(train_dataset, eval_dataset)
 
     def _configure_objective(self, args: OfflineGRPOConfig, tokenizer) -> None:
-        """Store the objective's settings. The loss-type and PG dispatches branch on these strings, so
-        they are refused here, before model and dataset construction, not at the first microbatch."""
+        """The loss-type and PG dispatches branch on these strings, so they are refused here rather than at the first
+        microbatch."""
         self.padding_value = args.padding_value if args.padding_value is not None else tokenizer.pad_token_id
         self.max_completion_length = args.max_completion_length
         self.min_log_prob = args.min_log_prob
@@ -252,8 +249,8 @@ class OfflineGRPOTrainer(
 
     @staticmethod
     def _with_min_log_prob_scheduler(args: OfflineGRPOConfig, model, callbacks):
-        """``callbacks`` plus the ``min_log_prob`` ramp when ``initial_min_log_prob`` schedules one, which
-        seeds the floor on ``model``."""
+        """Adds the ``min_log_prob`` ramp when ``initial_min_log_prob`` schedules one, which seeds the floor on
+        ``model``."""
         if args.initial_min_log_prob is not None and args.min_log_prob is not None:
             model.min_log_prob = args.initial_min_log_prob
             if is_global_main_process():
@@ -279,8 +276,7 @@ class OfflineGRPOTrainer(
         return callbacks
 
     def _finish_offline_init(self, train_dataset, eval_dataset) -> None:
-        """Post-``Trainer`` setup: tags, reference placement, the loaders' group ids, the parallel modes,
-        the head-path and memory checks, then the run-start reference sweep."""
+        """Post-``Trainer`` setup, ending in the run-start reference sweep."""
         self.model.add_model_tags(self._tag_names)
         if self.ref_model is not None:
             place_and_freeze(self.ref_model, self.model)
@@ -299,10 +295,8 @@ class OfflineGRPOTrainer(
                 self.ref_model = None
 
     def _loss_logits_width(self) -> LogitsWidth | None:
-        """The completion logits row the loss forward carries, one logit past the completion kept for
-        the next-token shift. ``None`` under PP, where the last stage's plane is the pipeline's and
-        use_chunked_grpo_logprobs cannot remove it, and with max_completion_length unset, which leaves
-        the width to the stored completions."""
+        """One logit past the completion is kept for the next-token shift. ``None`` under PP, where the last stage's
+        plane is the pipeline's, and with max_completion_length unset."""
         if self._pp_runner is not None or not is_bounded_length(self.max_completion_length):
             return None
         return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
@@ -347,11 +341,8 @@ class OfflineGRPOTrainer(
         return loss
 
     def _compute_cp_loss_inner(self, model, inputs):
-        """Score local CP targets and reduce only each logical row's token sums.
-
-        The collator right-pads full rows. The scorer shifts the target at every shard boundary;
-        reference values are stored at the target-token positions in that same full-row grid.
-        """
+        """Reduce only each logical row's token sums. The scorer shifts the target at every shard boundary; reference
+        values are stored at the target-token positions in that same full-row grid."""
         ids, attention_mask, labels = inputs["input_ids"], inputs["attention_mask"], inputs["labels"]
         local_logps, local_labels = self._cp_chunked_logps(model, ids, attention_mask, labels)
         advantages = inputs["advantage"]
@@ -387,16 +378,14 @@ class OfflineGRPOTrainer(
 
     @staticmethod
     def _joined_rows(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """``(input_ids, attention_mask, logits_to_keep)`` of a collated batch: each left-padded prompt joined
-        to its right-padded completion in one causal row, and the completion width the scorer keeps."""
+        """Each left-padded prompt joined to its right-padded completion in one causal row, and the width the scorer
+        keeps."""
         completion_ids = batch["completion_input_ids"]
         input_ids = torch.cat([batch["prompt_input_ids"], completion_ids], dim=1)
         attention_mask = torch.cat([batch["prompt_attention_mask"], batch["completion_attention_mask"]], dim=1)
         return input_ids, attention_mask, completion_ids.size(1)
 
     def _get_per_token_logps(self, model, input_ids, attention_mask, logits_to_keep):
-        """Raw per-token completion log-probs; full logits restricted with ``logits_to_keep``, or never
-        materialized at all under ``use_chunked_grpo_logprobs``."""
         if self._scores_full_logits:
             # +1 because the last logit (next-token pred) is excluded below.
             logits = model(
@@ -405,7 +394,7 @@ class OfflineGRPOTrainer(
             logits = logits[:, :-1, :]  # (B, L-1, V)
 
             input_ids = input_ids[:, -logits_to_keep:]
-            logits = logits[:, -logits_to_keep:]  # restrict to completion tokens
+            logits = logits[:, -logits_to_keep:]
             selected_logps = selective_log_softmax(logits, input_ids)
         else:
             selected_logps, _ = self._chunked_completion_logps(model, input_ids, attention_mask, logits_to_keep)
@@ -413,24 +402,17 @@ class OfflineGRPOTrainer(
 
     @property
     def _scores_full_logits(self) -> bool:
-        """Whether log-probs come from TRL's ``selective_log_softmax`` over full logits, which keeps the
-        logits' dtype, the run's compute dtype. The chunked kernel (always on under CP) and the
-        pipeline's last-stage loss score in fp32."""
+        """TRL's ``selective_log_softmax`` keeps the logits' compute dtype; the chunked kernel (always on under CP) and
+        the pipeline's last-stage loss score in fp32."""
         return not self._use_chunked_grpo_logprobs and self._pp_runner is None
 
     @property
     def _live_min_log_prob(self) -> float | None:
-        """The negative-advantage log-prob floor in force right now (``None`` = no clipping configured).
-
-        ``VariableSchedulerCallback`` writes the scheduled value onto the unwrapped ``self.model``; the
-        DDP/FSDP-wrapped module handed to ``compute_loss`` never carries it, and reading the floor off
-        that wrapper would pin step 0's value for the whole run.
-        """
+        """``VariableSchedulerCallback`` writes the scheduled value onto the unwrapped ``self.model``; reading the
+        wrapper ``compute_loss`` receives would pin step 0's value for the whole run."""
         return getattr(self.model, "min_log_prob", self.min_log_prob)
 
     def _token_objective(self, logps, advantages, ref_logps, min_log_prob):
-        """:func:`offline_token_objective` over raw policy and reference log-probs, each floored at
-        ``min_log_prob`` on the negative-advantage rows (:func:`clamp_negative_advantage_logps`)."""
         return offline_token_objective(
             clamp_negative_advantage_logps(logps, advantages, min_log_prob),
             logps,
@@ -450,12 +432,10 @@ class OfflineGRPOTrainer(
         mask: torch.Tensor,
         rows: torch.Tensor | None = None,
     ) -> None:
-        """Record the moments of one batch's per-sample means of the objective's diagnostics, split by advantage
-        sign, for ``log``'s flush (on device: a per-microbatch ``.item()`` would be dozens of host syncs a step).
-        ``rows`` selects the real rows of a row-padded pipeline batch, whose inert rows would count as zero-valued
-        positive samples."""
-        # Count and every detached diagnostic travel in one CP sum. Each CP shard owns
-        # tokens of the same logical rows; off CP this is the same local row reduction.
+        """Split by advantage sign, on device since a per-microbatch ``.item()`` would be dozens of host syncs a step.
+        ``rows`` selects a row-padded pipeline batch's real rows; inert rows would count as zero-valued positive
+        samples."""
+        # Count and every diagnostic travel in one CP sum, since each shard owns tokens of the same logical rows.
         keys = tuple(sample_values)
         totals = torch.stack(
             [mask.sum(dim=1, dtype=torch.float32)]
@@ -472,7 +452,6 @@ class OfflineGRPOTrainer(
                 metrics.moments(f"{sign}/{key}", totals[index] / counts, signs[sign])
 
     def _score_reference_batch(self, batch) -> list[torch.Tensor]:
-        """Mode-specific scoring inside the shared reference-sweep lifecycle."""
         if self.parallelism_config.is_cp_mode:
             return self._cp_score_reference_batch(batch)
         if self._pp_runner is not None:
@@ -498,8 +477,7 @@ class OfflineGRPOTrainer(
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys: list[str] | None = None):
         if self._pp_runner is not None:
-            # compute_loss (and its sign-metric recording) needs the full model, so the mixin drives
-            # the schedule instead.
+            # compute_loss and its sign metrics need the full model, so the mixin drives the schedule.
             return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
         inputs = self._prepare_inputs(inputs)
         with torch.no_grad():
@@ -509,10 +487,8 @@ class OfflineGRPOTrainer(
         return loss, None, None
 
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
-        # model.training, not control.should_evaluate: HF sets should_evaluate alongside should_log in
-        # on_step_end and only clears it after evaluate() runs, so on a step that both logs and evals
-        # the training log call would read "eval", dropping the train sign metrics (their records are
-        # never flushed) and prefixing eval_* onto a train line.
+        # model.training, since HF sets should_evaluate alongside should_log and clears it only after evaluate(): a
+        # step that logs and evals would read "eval", drop the train sign metrics and prefix eval_* onto a train line.
         mode = "train" if self.model.training else "eval"
         # COLLECTIVE when anything was recorded. Under PP only the last stage's ranks record anything, as DP
         # replicas of the whole sample set, so they fold over the stage group (a world flush would block the other
@@ -523,7 +499,7 @@ class OfflineGRPOTrainer(
         metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}
 
         current_min_log_prob = self._live_min_log_prob
-        if current_min_log_prob is not None:  # None = no clipping configured
+        if current_min_log_prob is not None:
             metrics["min_log_prob_restriction"] = current_min_log_prob
 
         if self._pp_runner is not None:

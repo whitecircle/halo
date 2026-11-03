@@ -1,42 +1,17 @@
 #!/usr/bin/env python
-"""
-Evaluate a model on competitive-programming problems (`code_contests` / `codeforces` env) against an
+"""Evaluate a model on competitive-programming problems (`code_contests` / `codeforces` env) against an
 OpenAI-compatible endpoint.
 
-Specific to the coding-contest task: it applies a dataset adapter that scores raw rows (every
-``CODE_DATASET_ADAPTERS`` entry without a ``normalize`` step) to a contest dataset, prompts in a chosen
-solution `language`, and reports `success@1` / `success@k` bucketed by the adapter's report field
-(rating on Codeforces, difficulty on LiveCodeBench, contest on ICPC-Eval and HLCE). The rollout loop
-and reward aggregation are shared with the other eval scripts via :mod:`halo.environments.eval_runner`.
-`--eval_protocol` names the evaluation contract (`harness`: the configured budgets; `leaderboard`: one
-graded program, no scratchpad), and on a benchmark that stamps contest dates
-`--start_date` / `--end_date` / `--platform` select the problems scored. A problem whose only tests are
-its statement's examples (a Codeforces row whose official tests are the statement's samples) is left
-out and counted unless `--include_examples_only`.
+Reports `success@1` / `success@k` bucketed by the adapter's report field. A solution counts as solved when it passes
+every test in the pool, whatever the shaped reward. The server needs tool calling enabled (vLLM `--tool-call-parser
+qwen3_xml --enable-auto-tool-choice`), and reasoning models need a large `--max_tokens`: too low truncates the chain of
+thought before any solution and scores 0. A problem whose only tests are its statement's examples is left out and
+counted unless `--include_examples_only`.
 
-The server must serve the model with tool calling enabled (e.g. vLLM
-`--tool-call-parser qwen3_xml --enable-auto-tool-choice`). A solution counts as solved when it passes
-every test in the pool, the environment's own verdict whatever the shaped reward. Reasoning models
-need a large `--max_tokens`: too low truncates the chain of thought before any solution and scores 0.
-
-Examples:
-    # Codeforces verifiable test split, 50 problems, success@1, on a local vLLM server
     python scripts/environments/inference/eval_code_contests.py \\
         --dataset open-r1/codeforces --config verifiable --split test --adapter codeforces \\
         --base_url http://localhost:8000/v1 --model Qwen/Qwen3.6-35B-A3B \\
         --num_examples 50 --max_tokens 24576
-
-    # DeepCoder (taco), success@4 against OpenRouter
-    python scripts/environments/inference/eval_code_contests.py \\
-        --dataset agentica-org/DeepCoder-Preview-Dataset --config taco --split train --adapter deepcoder \\
-        --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" \\
-        --model qwen/qwen3-235b-a22b --num_examples 100 --num_samples 4
-
-    # LiveCodeBench release_v6, AtCoder contests from 2025-01-04 on, leaderboard protocol, success@4
-    python scripts/environments/inference/eval_code_contests.py \\
-        --dataset livecodebench/code_generation_lite --config release_v6 --adapter livecodebench \\
-        --start_date 2025-01-04 --platform atcoder --eval_protocol leaderboard \\
-        --base_url http://localhost:8000/v1 --model <served-name> --num_examples 0 --num_samples 4
 """
 
 import argparse
@@ -62,10 +37,7 @@ from scripts.environments.eval_arguments import add_eval_args
 
 
 def _add_selection_args(p: argparse.ArgumentParser) -> None:
-    """The flags choosing which problems are scored: the split, the adapter, the date and platform windows,
-    the examples-only filter and the problem and sample counts."""
-    # Defaults to None so resolve_split can tell an explicit split, which a single-split source refuses,
-    # from an omitted one.
+    # None lets resolve_split tell an explicit split, which a single-split source refuses, from an omitted one.
     p.add_argument(
         "--split",
         default=None,
@@ -124,8 +96,6 @@ def _add_selection_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_generation_args(p: argparse.ArgumentParser) -> None:
-    """The flags shaping each episode: language, turn cap, sampling, reasoning effort, token budget,
-    concurrency and the extra env config."""
     p.add_argument(
         "--language",
         default=None,

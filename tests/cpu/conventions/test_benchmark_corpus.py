@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""The profiling benchmarks' corpus gives a model nothing to fit and is the same on every rank and run.
-
-``make bench`` holds each row's throughput and peak memory to a band drawn from five runs, so the corpus must
-not let a row's work drift within a run or between runs. An MoE model routes each token by its content, and on
-a corpus it can fit its routing (each EP rank's load, step time and peak) moves as it fits, differently on
-every run under non-deterministic dispatch. Uniform token ids over the regular vocabulary cannot be fitted,
-every token of every row is real and trained on, and a fixed seed makes every rank build the same rows.
-
-Run: python tests/cpu/conventions/test_benchmark_corpus.py
-"""
+"""The benchmark corpus gives a model nothing to fit and is the same on every rank and run, so an MoE row's routing,
+load and peak cannot drift within a run or between runs."""
 
 from collections import Counter
 from types import SimpleNamespace
@@ -17,7 +9,6 @@ import pytest
 
 from tests.common.datasets import create_benchmark_dataset
 
-# Only ``vocab_size`` is read: the corpus is token ids, never text.
 TOKENIZER = SimpleNamespace(vocab_size=1000)
 SEQ_LEN, NUM_SAMPLES = 256, 64
 # Uniform ids put 16.4 of the 16384 tokens on each id; a filler that repeats a word puts thousands on one.

@@ -1,9 +1,6 @@
-"""``optimizer_meta.pt``: the rank count and topology fingerprint that vouch for a per-rank optimizer shard set.
-
-The shards are raw local views (FSDP2 DTensor shards, plain per-rank EP tensors) that restore only into
-the sharding layout that wrote them, so a resume under a differing fingerprint drops them (a warm
-restart, or a raise under PP, whose stage-local FQNs would map moments onto the wrong layers).
-"""
+"""``optimizer_meta.pt``: the rank count and topology fingerprint vouching for a shard set. Shards are raw local views
+that restore only into the layout that wrote them, so a differing fingerprint drops them (a warm restart, or a raise
+under PP)."""
 
 from __future__ import annotations
 
@@ -25,14 +22,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class OptimizerStateFingerprint:
-    """Topology and optimizer identity of a per-rank shard save, its config fields named as
-    :class:`~halo.distributed.parallelism_config.ParallelismConfig`'s.
-
-    Every field changes the per-rank shard layout or, for ``optimizer_class``, the state schema. The
-    shape-preserving ones (``ep_scope``, ``use_grouped_gemm``, ``use_hsdp``, ``nvlink_domain_size``,
-    ``expert_replica_size``) move slice ownership, expert parameter names, the FSDP mesh rank or the
-    replica writer at identical shapes, so without them a restore reports success over permuted state.
-    """
+    """Topology and optimizer identity of a shard save. The shape-preserving fields (``ep_scope``,
+    ``use_grouped_gemm``, ``use_hsdp``, ``nvlink_domain_size``, ``expert_replica_size``) move slice ownership, expert
+    names, the FSDP mesh rank or the replica writer at identical shapes, so without them a restore reports success over
+    permuted state."""
 
     world_size: int
     ep_size: int
@@ -51,11 +44,10 @@ class OptimizerStateFingerprint:
 
     @classmethod
     def capture(cls, parallelism_config: Any, optimizer: Any, world_size: int) -> OptimizerStateFingerprint:
-        """Fingerprint the live run; rank-uniform, since ``parallelism_config`` is."""
+        """Rank-uniform, since ``parallelism_config`` is."""
         pc = parallelism_config
-        # The dedup runs only where the experts are the FSDP-ignored plain tensors every EP group
-        # replicates; elsewhere the EP-group count describes no shard layout, and stamping it would
-        # mismatch every checkpoint of a topology that never changed.
+        # The dedup runs only where experts are FSDP-ignored plain tensors every EP group replicates; stamping the
+        # group count elsewhere would mismatch every checkpoint of a topology that never changed.
         experts_replicated = not getattr(pc, "experts_fsdp_managed", True)
         return cls(
             world_size=world_size,
@@ -78,10 +70,9 @@ class OptimizerStateFingerprint:
         return {("hsdp" if name == "use_hsdp" else name): value for name, value in asdict(self).items()}
 
     def mismatches(self, saved: Mapping[str, Any]) -> list[str]:
-        """The keys where the ``saved`` fingerprint dict differs from this live one's :meth:`to_dict`; empty
-        means its shards are layout-compatible. The key sets must match exactly, a key either side lacks
-        being a mismatch, except ``expert_replica_size``: a meta written before the expert-replica dedup
-        lacks it, and its shards hold the expert moments on every rank, so they restore under any layout."""
+        """Keys where ``saved`` differs from this fingerprint; empty means layout-compatible. A key either side lacks
+        is a mismatch, except ``expert_replica_size``: a meta without it holds expert moments on every rank, restorable
+        anywhere."""
         live = self.to_dict()
         saved = {"expert_replica_size": live["expert_replica_size"], **saved}
         absent = "<absent>"
@@ -94,12 +85,8 @@ class OptimizerStateFingerprint:
 
 @dataclass(frozen=True)
 class SavedOptimizerMeta:
-    """What ``optimizer_meta.pt`` says about the save, as this rank could read it.
-
-    ``torn`` is why the meta cannot vouch for the shards beside it (missing, or unreadable), None when
-    it can. ``topology_ok`` is the rank-count gate's local verdict, False on a torn meta too. The rest
-    are the raw saved fields, ``None`` / ``-1`` where the meta did not carry them.
-    """
+    """What ``optimizer_meta.pt`` says, as this rank could read it. ``torn`` is why it cannot vouch for its shards
+    (missing or unreadable); ``topology_ok`` is the rank-count gate's local verdict, False when torn."""
 
     topology_ok: bool
     torn: str | None = None
@@ -109,11 +96,8 @@ class SavedOptimizerMeta:
 
 
 def read_optimizer_meta(checkpoint: str, *, shard_any: bool) -> SavedOptimizerMeta:
-    """``checkpoint``'s ``optimizer_meta.pt``, read rank-locally; every gate on it is consensus'd.
-
-    A missing meta beside shards is a failed gate (no rank-count or fingerprint gate can run on
-    ungated state), and a torn one never raises here, which would desync the caller's consensus.
-    """
+    """Read the meta rank-locally; every gate on it is consensus'd. A missing meta beside shards is a failed gate, and
+    a torn one never raises here, which would desync the caller's consensus."""
     meta_path = os.path.join(checkpoint, OPTIMIZER_META_FILE)
     if not os.path.exists(meta_path):
         torn = f"{OPTIMIZER_META_FILE} is missing beside the per-rank optimizer shards" if shard_any else None
@@ -151,8 +135,7 @@ def capture_pp_stage_partition(stage, parallelism_config) -> list[list[int] | No
 
 
 def write_optimizer_meta(output_dir: str, parallelism_config, optimizer, pp_stage_partition) -> None:
-    """Write ``optimizer_meta.pt``: the rank count, the topology fingerprint and, under PP, the stage
-    partition. Staged, so an interrupted write leaves no meta rather than a truncated one."""
+    """Staged, so an interrupted write leaves no meta rather than a truncated one."""
     fingerprint = OptimizerStateFingerprint.capture(parallelism_config, optimizer, get_global_world_size())
     meta = {"num_ranks": get_global_world_size(), "fingerprint": fingerprint.to_dict()}
     if pp_stage_partition is not None:

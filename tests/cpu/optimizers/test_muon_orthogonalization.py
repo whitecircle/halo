@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""Newton-Schulz orthogonality of Muon's matrix update (``halo/optimizers/muon.py``), on CPU.
-
-Muon replaces a matrix's momentum with an approximation of its polar factor ``U V^T``: five quintic
-Newton-Schulz steps after a Frobenius normalization push every singular value into the band
-``TOL.muon_orthogonal_sv_*``. The band holds only for inputs whose smallest singular value clears a
-fraction of the Frobenius norm that depends on the path (``TOL.muon_band_domain_*``): under the
-default ``ns_algorithm`` square matrices take the standard iteration and rectangular ones the Gram
-iteration, which needs a larger margin. A raw gradient's smallest singular values sit below either,
-where the iteration is not meant to converge, so every input here carries a prescribed spectrum
-inside its path's domain.
-
-The square case also runs at two decades: the first three steps only lift singular values below
-~1e-2 of the Frobenius norm, so a one-decade input passes with any of them dropped.
-
-The orthogonalizer under test is the one ``build_muon_optimizer`` configures, on its pure-torch
-backend. The fused Triton step around it is GPU-only, so ``tests/gpu/optimizers/test_muon.py``
-checks the update that step writes, on the CUDA-kernel backend where it runs.
-
-Run: pytest tests/cpu/optimizers/test_muon_orthogonalization.py
-"""
+"""Newton-Schulz orthogonality of Muon's matrix update (``halo/optimizers/muon.py``). The band holds only inside
+``TOL.muon_band_domain_*``, so inputs carry a prescribed spectrum."""
 
 import pytest
 import torch
@@ -31,7 +13,6 @@ from tests.common.tolerances import TOL
 
 @pytest.fixture(scope="module")
 def newton_schulz():
-    """The orthogonalizer a toolkit-built Muon runs, on the pure-torch backend."""
     holder = nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
     return build_muon_optimizer(holder, ns_use_kernels=False).newton_schulz
 
@@ -42,10 +23,10 @@ def newton_schulz():
     ids=["square", "square-two-decades", "wide", "tall"],
 )
 def test_matrix_update_is_orthogonal(newton_schulz, rows, cols, decades):
-    """bf16 momentum in (what the fused momentum kernel hands over), bf16 update out, in the band."""
+    """bf16 momentum in, bf16 update out."""
     generator = torch.Generator().manual_seed(rows * 1000 + cols)
     momentum = log_spectrum_matrix(rows, cols, generator, decades).to(torch.bfloat16)
-    # Premise: the input is far from orthogonal, so an orthogonalizer returning it unchanged fails.
+    # Premise: an orthogonalizer returning a far-from-orthogonal input unchanged fails.
     assert torch.linalg.svdvals(momentum.double()).min() < TOL.muon_orthogonal_sv_min / 2
 
     update = newton_schulz(momentum.unsqueeze(0))[0]
@@ -55,12 +36,8 @@ def test_matrix_update_is_orthogonal(newton_schulz, rows, cols, decades):
 
 
 def test_expert_stack_orthogonalizes_each_expert_on_its_own_scale(newton_schulz):
-    """A 3-D expert stack is a batch of matrices, each normalized by its own Frobenius norm.
-
-    Experts receive token counts orders of magnitude apart, and their momenta differ in scale the same
-    way: one normalization across the stack would leave the small experts' singular values near zero.
-    An expert no token reached carries zero momentum and must get a zero update, not NaN.
-    """
+    """One normalization across the stack leaves small experts near zero; an expert no token reached gets a zero
+    update, not NaN."""
     generator = torch.Generator().manual_seed(0)
     scales = (1e-3, 1.0, 1e3, 0.0)
     stack = torch.stack([log_spectrum_matrix(64, 96, generator) * scale for scale in scales]).to(torch.bfloat16)

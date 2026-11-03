@@ -1,33 +1,9 @@
 #!/usr/bin/env python
-"""
-Test: DPO's adapter-disabled reference under EP with native expert-LoRA is the frozen base.
+"""DPO's adapter-disabled reference under EP with native expert LoRA is the frozen base.
 
-A mixed run (stock PEFT on attention, native grouped LoRA on the EP experts) with no precomputed
-reference gets its reference log-probs from TRL, which scores the policy inside
-``use_adapter(accelerator.unwrap_model(model), None)`` -> ``PeftModel.disable_adapter()`` every step.
-PEFT's own context disables only the attention half: the expert adapters are not PEFT modules, and they
-drop out only because ``install_ep_aware_disable_adapter`` wraps that context on the trainer's PeftModel.
-The run is built as the dpo/kto scripts build it: the targets are peeled before the load, and the
-trainer's ``ref_model`` comes from ``load_reference_model_for_preference`` on that peeled config, whose
-gate must hand a mixed run ``None`` rather than refuse it for want of precomputed log-probs.
-Checks, each failing when a piece of that breaks:
-
-  1. The run is mixed, the loader's reference gate gives it no separate reference, and it trains on the
-     in-loop reference (precompute off): finite losses on every step.
-  2. Both adapter halves move the policy's sequence log-probs past a floor: zeroing only the expert
-     half, and only the attention half, each changes them. Without this, check 3 would also pass for an
-     adapter that does nothing, and a frozen attention half would go unnoticed.
-  3. The policy scored inside TRL's reference context equals the frozen base: the policy with both
-     adapter scalings set to 0, so the deltas add exact zeros while every other kernel and collective
-     runs as trained.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_pref_ep_expert_lora_reference.py
-
-Requirements:
-    - 2x GPUs (>=80GB), DeepEP installed. Model: unsloth/gpt-oss-20b-BF16 by default
-      (HALO_TEST_MODEL / HALO_TEST_ATTN / HALO_TEST_EP sweep the other MoE families).
+PEFT's ``disable_adapter()`` covers only the attention half: expert adapters drop out only because
+``install_ep_aware_disable_adapter`` wraps that context. ``load_reference_model_for_preference`` must hand a mixed run
+``None`` rather than refuse it for want of precomputed log-probs.
 """
 
 import contextlib
@@ -57,8 +33,7 @@ from tests.common.rank_log import log
 from tests.common.training_checks import step_losses
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
-# SDPA, the DPO script's padded default off Blackwell under reset sinks; the reference contract checked here
-# holds on every backend, so HALO_TEST_ATTN=flash_attention_4 runs the request it makes on Blackwell.
+# The DPO script's padded default off Blackwell under reset sinks; the contract holds on every backend.
 ATTN_IMPL = env_str("HALO_TEST_ATTN", "sdpa")
 EP_SIZE = env_int("HALO_TEST_EP", 2)
 MAX_STEPS = 3
@@ -66,12 +41,10 @@ LEARNING_RATE = 5e-4
 NUM_PAIRS = 16
 SEED = 42
 
-# Each adapter half must move some fp32 sequence log-prob by more than this (nats); 3 steps move each
-# half by tens of nats.
+# Nats; 3 steps move each half by tens of nats.
 MIN_HALF_EFFECT = 0.5
-# Reference vs frozen base, max over sequences (nats, fp32). Same tokens, same kernels, deltas adding
-# exact zeros: measured 0.0. A reference that kept the expert half is off by that half's whole effect,
-# which check 2 holds above MIN_HALF_EFFECT.
+# Nats, fp32, max over sequences. Same tokens and kernels, deltas adding exact zeros: measured 0.0. A reference keeping
+# the expert half is off by that half's whole effect.
 REFERENCE_VS_BASE_ABS = 1e-3
 
 
@@ -92,11 +65,7 @@ def _pairs(n: int) -> Dataset:
 
 @contextlib.contextmanager
 def _zero_adapter_scaling(model, *, attention: bool, experts: bool):
-    """The chosen halves stay enabled but add exact zeros.
-
-    Independent of the disable seams under test: it reads neither PEFT's disable flag nor the EP
-    layers' ``_expert_adapters_enabled``.
-    """
+    """The chosen halves stay enabled but add exact zeros, independent of the disable seams under test."""
     peft_layers = [(m, dict(m.scaling)) for m in model.modules() if isinstance(m, LoraLayer)] if attention else []
     ep_layers = (
         [(m, m.expert_lora_scaling) for m in model.modules() if isinstance(m, EPMoELayerBase)] if experts else []
@@ -115,11 +84,8 @@ def _zero_adapter_scaling(model, *, attention: bool, experts: bool):
 
 
 def _sequence_logps(trainer, batch, context) -> torch.Tensor:
-    """fp32 completion log-prob per sequence (chosen ⧺ rejected), under ``context``.
-
-    Scored in fp32 rather than through TRL's bf16 sum, whose rounding at these magnitudes would hide a
-    sub-nat difference; the forward runs as TRL's reference forward does, checkpointing off.
-    """
+    """In fp32, since rounding in TRL's bf16 sum would hide a sub-nat difference; checkpointing off, as TRL's reference
+    forward."""
     with (
         torch.no_grad(),
         disable_gradient_checkpointing(trainer.model, trainer.args.gradient_checkpointing_kwargs),

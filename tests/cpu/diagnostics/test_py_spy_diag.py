@@ -1,13 +1,6 @@
-"""``py_spy_diag.py`` against a stand-in ``py-spy`` on ``PATH``: a pid it cannot attach to fails the
-run by name, and ``record`` samples every rank over the same window.
-
-An attach that fails (no ptrace permission, another pid namespace, an exited rank) must not leave a
-partial artifact directory behind a success line and exit 0. The ranks are sampled together: one
-after another, the last of eight would be sampled seven windows after the first. And a sweep that
-stops early, on its timeout or an interrupt, must leave no py-spy attached to a training rank.
-
-Run: python tests/cpu/diagnostics/test_py_spy_diag.py
-"""
+"""``py_spy_diag.py`` against a stand-in ``py-spy`` on ``PATH``: a pid it cannot attach to fails the run by name,
+``record`` samples every rank over the same window, and a sweep that stops early leaves no py-spy attached to a
+training rank."""
 
 import json
 import os

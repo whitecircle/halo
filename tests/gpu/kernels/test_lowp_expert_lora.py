@@ -1,20 +1,8 @@
 #!/usr/bin/env python
 """Expert-LoRA adapter GEMMs stay bf16 under low-precision expert compute.
 
-``EPMoELayerBase._expert_proj`` runs the BASE expert weight at the layer's compute precision but
-passes ``lowp=False`` for the two adapter GEMMs: block-scale quantization along the rank axis is
-unrepresentable for r < 32 (the mx block size), and a divisible rank would silently train adapters
-in a numerics regime no serving stack has. Pinned at the seam, on the real unbound methods over a
-minimal stub (the ``test_ep_sort_sync_free`` idiom — no dispatcher, no model):
-
-- ``fake_quant`` still refuses a sub-block axis (r=16 with mxfp8) — the quantizer gate is unchanged;
-- ``_expert_proj`` with ``_lowp_quant_format="mxfp8"`` and r=16 adapters raises nothing, routes the base
-  GEMM through MXFP8 and BOTH adapter GEMMs through BF16 (asserted via a recording ``expert_gemm``),
-  and the adapter delta actually lands in the output;
-- forcing the adapter GEMMs back through the layer precision raises the r-not-divisible ValueError
-  — the in-file non-vacuity control.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_lowp_expert_lora.py
+Block-scale quantization along the rank axis is unrepresentable for r < 32 (the mx block size), and a divisible rank
+would train adapters in a regime no serving stack has.
 """
 
 from types import MethodType, SimpleNamespace
@@ -29,11 +17,10 @@ from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log
 
 DEV = "cuda"
-E, K, N, R, T_PER = 2, 64, 48, 16, 16  # r=16: NOT divisible by mxfp8's 32-element block
+E, K, N, R, T_PER = 2, 64, 48, 16, 16  # r=16: not divisible by mxfp8's 32-element block.
 
 
 def make_layer():
-    """Minimal stand-in carrying only what ``_expert_proj`` / ``_grouped_mm`` read off ``self``."""
     torch.manual_seed(0)
     stub = SimpleNamespace(
         _lowp_quant_format="mxfp8",
@@ -43,7 +30,7 @@ def make_layer():
         expert_lora_scaling=2.0,
         expert_lora_dropout=nn.Identity(),
         gate_proj=torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.05,
-        # Nonzero B (the real init zeroes it) so the adapter delta is visible in the output.
+        # Nonzero B (the real init zeroes it) so the adapter delta shows.
         gate_proj_lora_A=torch.randn(E, K, R, device=DEV, dtype=torch.bfloat16) * 0.05,
         gate_proj_lora_B=torch.randn(E, R, N, device=DEV, dtype=torch.bfloat16) * 0.05,
     )
@@ -60,7 +47,7 @@ def make_inputs():
 
 
 def test_fake_quant_refuses_sub_block_axis():
-    """The quantizer gate is unchanged: a 16-wide axis cannot be mxfp8-quantized (block size 32)."""
+    """A 16-wide axis cannot be mxfp8-quantized (block size 32)."""
     hidden = torch.randn(8, R, device=DEV, dtype=torch.bfloat16)
     try:
         fake_quant(hidden, "mxfp8", axis=-1)
@@ -72,8 +59,6 @@ def test_fake_quant_refuses_sub_block_axis():
 
 
 def test_adapter_gemms_stay_bf16():
-    """r=16 adapters under MXFP8 expert compute: no raise, base GEMM MXFP8, adapter GEMMs BF16,
-    and the adapter delta lands in the output."""
     layer = make_layer()
     x, offs = make_inputs()
 
@@ -102,8 +87,7 @@ def test_adapter_gemms_stay_bf16():
 
 
 def test_forced_lowp_adapter_gemm_raises():
-    """Non-vacuity control: routing the r=16 adapter GEMMs back through the layer precision must
-    raise — proving the lowp=False routing is what makes r=16 work."""
+    """Non-vacuity control: the lowp=False routing is what makes r=16 work."""
     layer = make_layer()
     x, offs = make_inputs()
     plain_grouped_mm = layer._grouped_mm

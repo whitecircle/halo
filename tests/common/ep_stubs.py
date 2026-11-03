@@ -1,12 +1,5 @@
-"""Concrete ``EPMoELayerBase`` subclasses for CPU tests, and a rank's real EP layer built on stubbed process groups:
-the boilerplate, not the payload.
-
-``EPMoELayerBase.__init__`` builds an ``EPConfig`` and DeepEP buffers, which a CPU test cannot call,
-so every EP unit test would otherwise restate the same bypass, the no-expert-LoRA default and a dummy
-``forward``. Keeping them here means a new abstract method on the real base surfaces in one place,
-and the export contract each test is about (its parameters, its ``expert_named_params``) stays
-visible in the test file.
-"""
+"""Concrete ``EPMoELayerBase`` subclasses for CPU tests, and a rank's real EP layer on stubbed process groups. A new
+abstract method on the real base surfaces here, and each test's export contract stays visible in its own file."""
 
 from __future__ import annotations
 
@@ -24,13 +17,13 @@ from tests.common.parallelism import stubbed_rank_ep_config
 
 
 class StubEPLayerBase(EPMoELayerBase):
-    """An EP MoE layer constructible without live EP process groups. Its spec claims no ``model_type``, so a
-    stub never joins the family roster."""
+    """An EP MoE layer constructible with no live EP groups; its spec claims no ``model_type``, so it never joins the
+    roster."""
 
     FAMILY = MoEFamilySpec(model_types=())
 
     def __init__(self):
-        nn.Module.__init__(self)  # EPMoELayerBase.__init__ needs live EP groups
+        nn.Module.__init__(self)  # EPMoELayerBase.__init__ needs live EP groups.
         self._expert_lora_attrs = frozenset()
 
     def forward(self, hidden_states, **kwargs):
@@ -38,9 +31,8 @@ class StubEPLayerBase(EPMoELayerBase):
 
 
 def bare_ep_layer(cls: type[EPMoELayerBase], *, ep_size: int = 1, expert_tp_size: int = 1, **expert_params):
-    """``cls`` without its constructor, holding the state the export reads on one process and ``expert_params``
-    (``name=tensor``) as its expert parameters: its real gather runs, every collective at world size 1 unless a
-    test fakes the transport."""
+    """``cls`` without its constructor, holding what the export reads on one process and ``expert_params``; its real
+    gather runs at world size 1."""
     layer = object.__new__(cls)
     nn.Module.__init__(layer)
     layer._expert_lora_attrs = frozenset()
@@ -53,7 +45,7 @@ def bare_ep_layer(cls: type[EPMoELayerBase], *, ep_size: int = 1, expert_tp_size
 
 
 class _NoDispatcher:
-    """DeepEP's stand-in for a layer whose expert compute a test calls on a dispatched view, never the dispatch."""
+    """DeepEP's stand-in for a layer whose expert compute a test calls on a dispatched view."""
 
     def __init__(self, *args, **kwargs):
         pass
@@ -69,11 +61,9 @@ def stubbed_rank_ep_layer(
     grouped: bool,
     **config_fields,
 ) -> EPMoELayerBase:
-    """Rank ``rank``'s ``layer_cls`` around ``block`` in a ``world_size``-rank job at ``ep_size``-way dispatch EP and the
-    quotient expert TP (:func:`stubbed_rank_ep_config`, with ``config_fields`` further :class:`EPConfig` fields), with no
-    DeepEP dispatcher: a test calls its expert compute on a dispatched view. ``grouped`` makes
-    ``EPConfig.grouped_gemm_enabled`` hold at construction, as on SM90+, so the layer stores the grouped layout. Built
-    outside the stubbed groups, so no grad-sync hook registers."""
+    """Rank ``rank``'s ``layer_cls`` around ``block`` at ``ep_size``-way dispatch and quotient expert TP, with no
+    dispatcher. ``grouped`` makes ``grouped_gemm_enabled`` hold, as on SM90+. Built outside the stubbed groups, so no
+    grad-sync hook registers."""
     config = stubbed_rank_ep_config(world_size, ep_size, rank, layer_cls.detect_num_experts(block), **config_fields)
     with (
         patch.object(layer_module, "DeepEPDispatcher", _NoDispatcher),

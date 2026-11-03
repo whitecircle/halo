@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: what a code-contests submission scores, and what the scratchpad says about a missing stdin.
-
-The grade is the judge's accept: 1 when the submitted program passes every hidden test, 0 otherwise, so a
-near miss scores like a wrong answer. Every graded submission after the first pays a flat price; neither
-the price nor the submission budget is stated to the model — a verdict is the grade alone, and the cap
-ends the episode at its last graded submission.
-
-The scratchpad half: a program run on no input (whitespace is none) says so, since one that reads input it
-was not given ends in a parse error, in silence or in a default answer, and the result names the cause so the
-next run is not spent the same way.
-
-Run: python tests/cpu/environments/test_submission_scoring.py  (or pytest)
-"""
+"""What a code-contests submission scores: 1 when it passes every hidden test, else 0; every graded submission after
+the first pays a flat price, stated to the model nowhere. A scratchpad run on no input says so, so the next run
+is not spent the same way."""
 
 import json
 
@@ -31,9 +21,8 @@ from tests.common.code_contests import StubSandbox, retired_budget_phrases
 
 PENALTY = 0.2
 PROFILES = {"high": {"max_submissions": 3, "max_test_calls": 8}}
-# Four hidden tests whose input is its own index; ``_PassesSandbox`` passes test ``i`` when the
-# submitted "program" contains the digit ``i``, so a program's text is its pass set (submitted as a
-# comment, which compiles as Python).
+# Four hidden tests whose input is its own index; ``_PassesSandbox`` passes test ``i`` when the submitted text contains
+# the digit ``i``, so a program's text is its pass set (submitted as a comment, which compiles as Python).
 TESTS = {"answer": {"tests": [{"input": str(i), "output": "ok"} for i in range(4)]}}
 # The resubmission-price rule no task message states.
 PRICE_RULE = "every resubmission costs part of the score"
@@ -141,8 +130,7 @@ def test_a_judge_check_exempt_under_a_fact_the_environment_never_establishes_is_
 
 
 def test_a_submission_passing_every_test_ends_the_episode():
-    """Past an accept a resubmission can only lose the solve, so the accept ends the episode the way
-    the submission cap does, completed, with graded submissions still unspent."""
+    """Past an accept a resubmission can only lose the solve, so the accept ends the episode as the cap does."""
     env = _env()
     ids, _ = env.reset(["solve it"], [{"reasoning_effort": "high", **TESTS}])
     first = _step_submit(env, ids, "01")
@@ -220,8 +208,7 @@ def test_every_graded_submission_after_the_first_pays_the_flat_price(programs):
 
 
 def test_the_task_message_states_neither_the_price_nor_the_budget():
-    """Whatever the ladder binds, the task message carries no price rule and no submission count; the
-    price is still charged (``test_every_graded_submission_after_the_first_pays_the_flat_price``)."""
+    """The price is still charged (``test_every_graded_submission_after_the_first_pays_the_flat_price``)."""
     for env in (
         _env(),
         _env(resubmission_penalty=0.0),

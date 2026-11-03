@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""``resolve_model_source`` — every rank must load the same checkpoint, fetched once per scope.
-
-Real gloo ranks simulate a 2-node job on one host: each "node" gets its own Hub cache (and its own
-working directory, for a relative checkpoint path), so the per-node filesystem the coordination
-reasons about is genuinely different per rank. The fetch itself is stood in by staging a snapshot
-into the fetching rank's cache; every other lookup is huggingface_hub's own cache resolution.
-
-1. per-node input: each node's local rank 0 fetches exactly once, and every rank loads one commit;
-2. a shared input declaration over node-local caches (only global rank 0 fetched) fails EVERY rank,
-   naming the flag to fix — the peers would otherwise each re-download against the NCCL watchdog —
-   including a node whose cache holds the weightless snapshot the metadata reads leave there;
-3. per-node caches holding different commits (staged at different times) fail every rank instead of
-   training different weights on different nodes;
-4. a checkpoint directory present on one node only fails every rank instead of stranding the ranks
-   that found it in the next collective, naming the local-checkpoint remedy online and offline;
-5. a trainer handed a path string loads the agreed commit, inside a world-joined load;
-6. a model load fetches the repo's top-level files alone, judged by huggingface_hub's own pattern
-   filter: the vendor weight dumps in its subfolders (gpt-oss's ``original/`` and ``metal/``) stay on
-   the Hub unless the loader reads subfolders;
-7. offline, the fetching rank reads its cache like every other rank, so a pinned commit resolves from a
-   complete snapshot whose tree listing the cache does not hold, and a missing one names the offline hub.
-
-    python tests/cpu/parallelism/test_model_source_agreement.py
-"""
+"""``resolve_model_source``: every rank loads one checkpoint, fetched once per scope. Real gloo ranks simulate 2 nodes,
+each with its own Hub cache and cwd; the fetch is a stand-in staging a snapshot."""
 
 import contextlib
 import datetime
@@ -48,8 +26,7 @@ REPO = "org/model"
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
 SHARDS = ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
-# A gpt-oss-shaped repo: what from_pretrained reads at the top level (remote code included), and the
-# same weights again in vendor formats under subfolders.
+# What from_pretrained reads at the top level, and the same weights again in vendor formats under subfolders.
 TOP_LEVEL_FILES = (
     ".gitattributes",
     "README.md",
@@ -80,9 +57,8 @@ def _storage(cache: Path) -> Path:
 
 
 def _stage_snapshot(cache: Path, commit: str, *, weights: bool = True, nested: tuple[str, ...] = ()) -> str:
-    """What a finished ``snapshot_download`` leaves in a Hub cache: the ref, and the snapshot dir —
-    without its weights for the config and tokenizer reads that precede the load — plus the ``nested``
-    files the fetch took. It writes no tree listing, which a cache an older huggingface_hub filled lacks too."""
+    """Weightless for the config and tokenizer reads that precede the load. No tree listing, as an older
+    huggingface_hub's cache lacks one."""
     storage = _storage(cache)
     (storage / "refs").mkdir(parents=True, exist_ok=True)
     (storage / "refs" / "main").write_text(commit)
@@ -101,7 +77,6 @@ def _stage_snapshot(cache: Path, commit: str, *, weights: bool = True, nested: t
 
 
 def _enter_node(rank: int, tmp_dir: str, *, ranks_per_node: int) -> Path:
-    """Make this rank one of ``ranks_per_node`` on its node, with that node's own cache and cwd."""
     node_dir = Path(tmp_dir) / f"node{rank // ranks_per_node}"
     node_dir.mkdir(parents=True, exist_ok=True)
     os.environ.update(LOCAL_RANK=str(rank % ranks_per_node), LOCAL_WORLD_SIZE=str(ranks_per_node))
@@ -111,9 +86,7 @@ def _enter_node(rank: int, tmp_dir: str, *, ranks_per_node: int) -> Path:
 
 
 def _fetching_stand_in(tmp_dir: str, rank: int, commit: str):
-    """``snapshot_download`` whose online call stages ``commit`` into this rank's cache (and records
-    that it fetched), its nested files filtered as huggingface_hub filters a repo listing; a cache-only
-    call is huggingface_hub's own resolution. The hub must read as online, as the CPU tier runs offline."""
+    """The hub must read as online, as the CPU tier runs offline."""
 
     def snapshot_download(repo_id, *, revision=None, local_files_only=False, ignore_patterns=None):
         if not local_files_only:
@@ -128,7 +101,7 @@ def _fetching_stand_in(tmp_dir: str, rank: int, commit: str):
 def _record(tmp_dir: str, rank: int, path: str) -> None:
     try:
         result = f"RETURNED {resolve_model_source(path, None, tag='policy').revision}"
-    except Exception as exc:  # the raise itself is the outcome under test
+    except Exception as exc:  # The raise itself is the outcome under test.
         result = f"{type(exc).__name__}: {exc}"
     Path(tmp_dir, f"rank{rank}.txt").write_text(result)
 
@@ -144,7 +117,7 @@ def _diverged_caches_worker(rank: int, tmp_dir: str) -> None:
     node_dir = _enter_node(rank, tmp_dir, ranks_per_node=RANKS_PER_NODE)
     if rank % RANKS_PER_NODE == 0:
         _stage_snapshot(node_dir / "hub", COMMIT_A if rank == 0 else COMMIT_B)
-    # An offline fetch: the cache answers, whatever commit it holds.
+    # The cache answers, whatever commit it holds.
     model_source.snapshot_download = lambda repo_id, *, revision=None, local_files_only=False, ignore_patterns=None: (
         huggingface_hub.snapshot_download(repo_id, revision=revision, local_files_only=True)
     )
@@ -184,10 +157,7 @@ def test_a_shared_declaration_over_node_local_caches_fails_every_rank(tmp_path):
 
 
 def test_a_weightless_snapshot_in_a_node_local_cache_fails_every_rank(tmp_path):
-    """The config and tokenizer reads ahead of the load leave a snapshot of the commit in every node's
-    own cache, and huggingface_hub's cache-only resolution returns it without checking its files: the
-    shared declaration over node-local caches must still fail every rank, naming the missing weights
-    and the flag to fix, rather than send node 1 to the hub or to a missing-shard error."""
+    """Cache-only resolution returns a weightless snapshot without checking files, which must still fail every rank."""
     _stage_snapshot(tmp_path / "node1" / "hub", COMMIT_A, weights=False)
     run_gloo_ranks(_fetch_worker, TWO_NODES, str(tmp_path), pg_timeout=PG_TIMEOUT, env={"DIST_SHARED_FILESYSTEM": "1"})
     for rank, outcome in enumerate(_outcomes(tmp_path, TWO_NODES)):
@@ -239,8 +209,7 @@ def test_a_local_directory_keeps_the_callers_revision(tmp_path):
 
 
 def test_the_model_fetch_rule_keeps_the_top_level_files_alone():
-    """huggingface_hub's own filter, whose fnmatch ``*`` crosses ``/``: everything from_pretrained reads
-    stays, every nested file goes."""
+    """huggingface_hub's fnmatch ``*`` crosses ``/``."""
     listing = [*TOP_LEVEL_FILES, *NESTED_FILES]
     kept = list(filter_repo_objects(listing, ignore_patterns=list(HUB_SUBFOLDER_IGNORE_PATTERNS)))
     assert kept == list(TOP_LEVEL_FILES)
@@ -263,9 +232,8 @@ def test_the_fetch_leaves_the_subfolders_unless_the_loader_reads_them(tmp_path, 
 
 @pytest.mark.parametrize("revision", [COMMIT_A, None], ids=["pinned", "main"])
 def test_offline_the_fetching_rank_resolves_from_its_cache_alone(tmp_path, monkeypatch, revision):
-    """huggingface_hub's own resolution, unstubbed. A call that may fetch lists a pinned commit's files
-    through the Hub unless the cache holds that listing, and offline that raises although the snapshot
-    is complete; the fetching rank must read its cache instead, as an unpinned main always did."""
+    """A call that may fetch lists a pinned commit's files through the Hub unless cached, and offline that raises
+    although the snapshot is complete."""
     monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
     monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
     snapshot = _stage_snapshot(tmp_path / "hub", COMMIT_A)
@@ -286,9 +254,6 @@ def test_offline_a_snapshot_missing_from_the_cache_names_the_offline_hub(tmp_pat
 
 
 def test_a_trainer_model_path_loads_the_agreed_commit_inside_the_joined_load(tmp_path, monkeypatch):
-    """A trainer handed a path string (SMPO, offline GRPO, teacher distillation) loads it like the
-    scripts' loaders do: the source agreed across ranks first, then the agreed commit read on every
-    rank inside a load whose failure joins the world."""
     checkpoint = tmp_path / "tiny"
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(checkpoint)
     events: list[tuple] = []

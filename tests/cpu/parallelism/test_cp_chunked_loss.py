@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The CP wrapper's logits loss runs its fp32 cross-entropy over checkpointed chunks of the chunk's logits.
-
-A whole fp32 copy of a CP rank's ``[tokens, V]`` logits, plus the log-softmax saved for its backward, is two fp32
-planes of the chunk, which a long sequence cannot hold. The loss now scores the logits a few rows at a time through
-the pipeline last stage's helper (``halo.kernels.logprobs.chunked_token_sum``), every chunk position against its
-next-token target, the final rank's last one ignored. On two gloo ranks a tiny Qwen3's loss and gradients match the
-unchunked fp32 form at several chunks per rank; the largest fp32 tensor a loss forward and backward builds stays
-within one chunk, where the unchunked form builds the whole plane.
-
-Run: python tests/cpu/parallelism/test_cp_chunked_loss.py
-"""
+"""The CP logits loss runs its fp32 CE over checkpointed chunks (``halo.kernels.logprobs.chunked_token_sum``). A
+whole fp32 copy plus the saved log-softmax is two planes, too much for a long sequence."""
 
 from pathlib import Path
 from unittest.mock import patch
@@ -31,7 +22,7 @@ from tests.common.ep_reference import random_token_batch
 from tests.common.equivalence.cp_equivalence import BATCH, CP_SIZE, SEED, SEQ, tier_controls, tiny_model
 from tests.common.gloo import run_gloo_ranks
 
-# Token rows per chunk: several chunks per rank's [BATCH * SEQ / CP_SIZE] rows.
+# Several chunks per rank's [BATCH * SEQ / CP_SIZE] rows.
 CHUNK_ROWS = 24
 VOCAB, ROWS = 96, 200
 # The two forms sum the same fp32 terms in a different order.
@@ -39,7 +30,7 @@ RELATIVE_TOLERANCE = 1e-5
 
 
 def _unchunked_cp_loss(self: UlyssesModel, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """The whole-plane form: one fp32 copy of the shifted logits and one cross-entropy over it."""
+    """One fp32 copy of the shifted logits and one cross-entropy over it."""
     shift_logits, shift_labels = cp_shift_against_full_labels(
         logits, labels, self.cp_config.cp_rank, self.cp_config.cp_size
     )
@@ -94,7 +85,7 @@ def test_the_chunked_loss_matches_the_unchunked_one_on_two_gloo_ranks(tmp_path):
 
 
 class _LargestFp32(TorchDispatchMode):
-    """The most elements of any fp32 tensor an op returns while active, backward included."""
+    """Backward included."""
 
     def __init__(self):
         super().__init__()

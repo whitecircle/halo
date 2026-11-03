@@ -48,22 +48,18 @@ from tests.common.rank_log import log, log_all
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tolerances import TOL
 
-# EP reorders the bf16 expert sum, and from layer 1 on the next router scores that reordered output, flipping a few
-# near-tied picks with no bug present: the mechanism this bound is derived for. gpt-oss (top-4-of-32): reference 5.607,
-# EP 5.589, rotated control 5.224. Qwen3 (top-8-of-128): reference 3.037, EP 3.005, rotated control 6.271.
+# EP reorders the bf16 expert sum, and later routers score that reordered output, flipping near-tied picks with no bug.
+# gpt-oss (top-4-of-32): reference 5.607, EP 5.589, rotated control 5.224. Qwen3 (top-8-of-128): 3.037, 3.005, 6.271.
 LOSS_TOL = TOL.router_pick_flip_loss_abs
-# The EP logits against the no-EP load's, and the share of each side's router gradients that must be non-zero.
 LOGIT_COSINE_MIN = 0.95
 LIVE_GRAD_FRACTION_MIN = 0.5
-# Every DP replica backpropagates the same batch, so the deferred sweep's sum over replicas, divided by their count,
-# hands each expert its own gradient back; a wrong divisor or a missing replica moves it by its own size.
+# Every replica backpropagates one batch, so the deferred sweep's sum divided by their count hands each expert its own
+# gradient back; a wrong divisor or a missing replica moves it by its own size.
 SWEEP_IDENTITY_REL_TOL = 1e-2
 
 
 @dataclass(frozen=True)
 class Checkpoint:
-    """A checkpoint and the load settings that keep its parallel load the model the plain reference loads."""
-
     name: str
     seq_len: int
     attn_implementation: str
@@ -71,8 +67,8 @@ class Checkpoint:
 
 
 CHECKPOINTS = {
-    # gpt-oss carries live attention sinks: eager is the one backend that keeps them, and reset_sinks=False keeps the
-    # pretrained ones the reference loads (the fine-tuning reset alone moves this batch's loss by 2.65).
+    # Eager is the one backend keeping gpt-oss's live sinks, and reset_sinks=False keeps the pretrained ones (the
+    # fine-tuning reset alone moves this batch's loss by 2.65).
     "gpt_oss_20b": Checkpoint(GPT_OSS_20B, 128, "eager", {"reset_sinks": False}),
     "qwen3_30b_a3b": Checkpoint(QWEN3_30B_A3B, 256, "flash_attention_2", {"use_liger_kernel": False}),
 }
@@ -80,8 +76,6 @@ CHECKPOINTS = {
 
 @dataclass(frozen=True)
 class Mode:
-    """A mode's parallel axes and the world it runs on."""
-
     axes: dict
     world_size: int = 2
 
@@ -95,15 +89,13 @@ MODES = {
 
 
 def _router_grads(model) -> dict[str, torch.Tensor | None]:
-    """Every router weight's gradient by name, None where the backward never reached it."""
     return {
         name: None if p.grad is None else p.grad.detach().float().clone() for name, p in named_router_weights(model)
     }
 
 
 def _no_ep_baseline(checkpoint: Checkpoint, batch) -> tuple[float, torch.Tensor, dict]:
-    """COLLECTIVE (the load). The checkpoint through the same loader with nothing distributed and grouped GEMM off,
-    which keeps the family's own MoE modules: its loss, logits and router gradients."""
+    """COLLECTIVE (the load). Nothing distributed and grouped GEMM off, which keeps the family's own MoE modules."""
     model, _ = load_distributed_model(
         model_name_or_path=checkpoint.name,
         parallelism_config=ParallelismConfig(use_grouped_gemm=False),
@@ -122,7 +114,7 @@ def _no_ep_baseline(checkpoint: Checkpoint, batch) -> tuple[float, torch.Tensor,
 
 
 def _layout_checks(model, pc: ParallelismConfig) -> dict[str, bool]:
-    """The model is really split the way ``pc`` asks: otherwise every comparison holds for a dense model too."""
+    """The model is split the way ``pc`` asks: otherwise every comparison holds for a dense model too."""
     layers = ep_layers(model)
     family_class = ep_layer_class_by_model_type()[model.config.model_type]
     checks = {"ep_layers_are_the_family_class": bool(layers) and all(type(layer) is family_class for layer in layers)}
@@ -157,8 +149,7 @@ def _layout_checks(model, pc: ParallelismConfig) -> dict[str, bool]:
 
 
 def _no_ep_checks(baseline, ep_logits, ep_router_grads, ref_loss, metrics) -> dict[str, bool]:
-    """The no-EP load against the reference, and the EP logits and every router gradient against the no-EP load.
-    Both losses are bounded against the reference only: the gap between two bounded deviations is not bounded."""
+    """Both losses are bounded against the reference only: the gap between two bounded deviations is not bounded."""
     baseline_loss, baseline_logits, baseline_grads = baseline
     metrics["baseline_loss"] = baseline_loss
     logit_cos = cos_sim(baseline_logits, ep_logits, label="logits")
@@ -202,10 +193,8 @@ def _reference(ctx, checkpoint: Checkpoint, batch, device: str) -> tuple[float, 
 
 
 def _deferred_sweep_checks(model, metrics: dict) -> dict[str, bool]:
-    """COLLECTIVE where the sweep reduces. With several EP groups no in-backward hook syncs the router or the experts:
-    the trainer's deferred sweep does, once per step, and runs here as it would before the optimizer. On the
-    identical batch every replica holds, it must leave each expert gradient as it was; the router comparisons that
-    follow read the router after it."""
+    """COLLECTIVE where the sweep reduces. With several EP groups only the trainer's deferred sweep syncs routers and
+    experts. On the identical batch every replica holds, it must leave each expert gradient as it was."""
     layers = ep_layers(model)
     if not layers or not layers[0].ep_config.sweep_reduces_across_replicas:
         return {}
@@ -231,8 +220,7 @@ def _deferred_sweep_checks(model, metrics: dict) -> dict[str, bool]:
 def _parallel_checks(
     model, batch, ref_loss: float, ref_grad: torch.Tensor, baseline, metrics: dict
 ) -> dict[str, bool]:
-    """COLLECTIVE (the forward). The parallel loss's rank agreement, its router gradient in scale and direction against
-    the reference, its expert gradients, and with a ``baseline`` the no-EP comparisons."""
+    """COLLECTIVE (the forward)."""
     model.train()
     outputs = model(**batch, use_cache=False)
     loss = outputs.loss.item()
@@ -258,8 +246,7 @@ def _parallel_checks(
 
 
 def _control_checks(model, batch, ref_loss: float, ref_grad: torch.Tensor, metrics: dict) -> dict[str, bool]:
-    """COLLECTIVE (the forward). NEGATIVE CONTROL: each rank's expert bank rotated by one expert must break both
-    comparisons, which would otherwise hold under any expert assignment."""
+    """COLLECTIVE (the forward). Negative control: a rotated expert bank must break both comparisons."""
     rotated = roll_expert_banks(model)
     model.zero_grad(set_to_none=True)
     control = model(**batch, use_cache=False)
@@ -277,8 +264,8 @@ def _control_checks(model, batch, ref_loss: float, ref_grad: torch.Tensor, metri
 
 
 def run_mode(ctx, checkpoint_key: str, mode_key: str, *, logits: bool = False) -> dict:
-    """COLLECTIVE. The checkpoint under the mode against the rank-0 reference; ``logits`` also loads it undistributed
-    on every rank, to compare per-token logits and every router gradient."""
+    """COLLECTIVE. ``logits`` also loads it undistributed on every rank, to compare per-token logits and router
+    gradients."""
     checkpoint = CHECKPOINTS[checkpoint_key]
     device = f"cuda:{ctx.local_rank}"
     log(f"{checkpoint.name} --mode {mode_key} (logits={logits}), attn={checkpoint.attn_implementation}")
@@ -287,7 +274,7 @@ def run_mode(ctx, checkpoint_key: str, mode_key: str, *, logits: bool = False) -
     tokenizer = AutoTokenizer.from_pretrained(checkpoint.name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # The same batch on every rank: the per-rank loss is then the undistributed one, and a spread a desync.
+    # The per-rank loss is then the undistributed one, and a spread a desync.
     batch = dict(
         zip(
             ("input_ids", "attention_mask", "labels"),
@@ -318,8 +305,8 @@ def run_mode(ctx, checkpoint_key: str, mode_key: str, *, logits: bool = False) -
     )
     checks |= _layout_checks(model, pc)
     if pc.ep_size > 1 and pc.tp_size == 1:
-        # Pure EP repeats bit for bit: DeepEP's receive order varies per call, but the grouped forward never reads it.
-        # Any difference means state survived between calls: a reused arena buffer, a mutated routing cache.
+        # Pure EP repeats bit for bit, since the grouped forward never reads DeepEP's receive order. A difference means
+        # state survived between calls: a reused arena buffer, a mutated routing cache.
         model.eval()
         with torch.no_grad():
             repeats = [model(**batch, use_cache=False).loss.item() for _ in range(2)]
@@ -328,8 +315,8 @@ def run_mode(ctx, checkpoint_key: str, mode_key: str, *, logits: bool = False) -
     checks |= _parallel_checks(model, batch, ref_loss, ref_grad, baseline, metrics)
     checks |= _control_checks(model, batch, ref_loss, ref_grad, metrics)
 
-    # TP's reduction order moves with NCCL topology state and flips near-tied picks with it: the loss may pass the
-    # flip bound while it stays well separated from the corrupted control, whose regime is O(1).
+    # TP's reduction order moves with NCCL topology state and flips near-tied picks: the loss may pass the flip bound
+    # while staying well separated from the corrupted control, whose regime is O(1).
     delta = metrics["loss_abs_err"]
     near_flips = pc.tp_size > 1 and delta < 2 * LOSS_TOL and delta < 0.5 * metrics["control_loss_shift"]
     checks["loss_matches_reference"] = delta < LOSS_TOL or near_flips

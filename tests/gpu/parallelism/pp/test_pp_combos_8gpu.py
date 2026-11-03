@@ -1,30 +1,8 @@
 #!/usr/bin/env python
-"""8-GPU PP-combination correctness matrix: PP composed with every supported intra-stage mode.
+"""PP composed with every supported intra-stage mode at world=8, over small NVLink domains so the pipeline crosses
+them.
 
-Five topologies at world=8, simulated as small NVLink domains (``gpus_per_node`` = 2, except
-``ep4``'s 4 — see MOE_MODES), so the pipeline always crosses domain boundaries — the placement PP
-is designed for. Each mode covers a shape no other GPU test exercises:
-
-  dense_pp2_dp4 — pp2 × dense FSDP dp4 at runner level: per-parameter fp32 grad exactness vs the
-                  unsplit model (the dual of test_pp_vs_single_gpu's 8-GPU pp4 × dp2 run).
-  ep4           — pp2 × ep4: one stage-wide 4-rank dispatch group per stage (NVLink domain ==
-                  node == stage; the 2-GPU-domain spellings are asserted at config time —
-                  node scope rejected, cross-domain global scope accepted; see MOE_MODES).
-  pp4_ep2       — pp4 × node-local ep2: EP at depth — 2-layer stages, two pure middle stages,
-                  3-hop boundary chains, 4 microbatches.
-  ep2_dp2       — pp2 × node-local ep2 with 2 domains per stage → two EP groups per stage (R=2):
-                  the deferred-FSDP stage branch (non-expert params sharded over the EP group),
-                  the expert replica-SUM/÷world sweep leg, and the ÷R clip aggregation.
-  ep1_dp4       — pp2 × ep1 grouped-GEMM × dp4: stage-mesh DTensor experts at width 4
-                  (fsdp_shard_ep1_experts), plain ``pp_clip_grad_norm``.
-
-The MoE modes drive the real DistributedSFTTrainer with the fp32-reference + bf16-twin
-methodology of test_pp_ep_vs_unsplit (shared blocks in tests/common/pp_equivalence.py): loss vs
-the reference's per-replica slice, router grads bit-identical across each stage's ranks +
-norm/cosine vs the reference, per-expert grads gathered over the dispatch group vs the twin,
-clip norm rank-uniform + within the reference band, and a working second step.
-
-Run: torchrun --nproc_per_node=8 tests/gpu/parallelism/pp/test_pp_combos_8gpu.py --mode <mode>
+The MoE modes drive the real trainer with the fp32-reference + bf16-twin methodology of test_pp_ep_vs_unsplit.
 """
 
 import argparse
@@ -44,37 +22,33 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.rank_log import log
 
-MODE = ""  # set from --mode before the harness runs
+MODE = ""  # Set from --mode before the harness runs.
 
-GLOBAL_BATCH = 8  # dp × per-device batch is 8 in every mode
+GLOBAL_BATCH = 8  # dp x per-device batch is 8 in every mode.
 DENSE_SEQ_LEN = 32
-DENSE_GRAD_TOLERANCE = 2e-3  # fp32 runner-level exactness
+DENSE_GRAD_TOLERANCE = 2e-3  # fp32 runner-level exactness.
 DENSE_LOSS_TOLERANCE = 1e-4
-EP1_GRAD_REL_TOL = 5e-2  # bf16 same-parametrization reference (matches the 4-GPU ep1 gate)
+EP1_GRAD_REL_TOL = 5e-2  # bf16 same-parametrization reference (matches the 4-GPU ep1 gate).
 EP1_CLIP_NORM_REL_TOL = 2e-2
 
 
 @dataclass(frozen=True)
 class MoEModeSpec:
-    """Topology knobs for one trainer-driven PP+EP mode (dp × per_device_batch == 8 always)."""
-
     pp_size: int
     ep_size: int
     ep_scope: str
     per_device_batch: int
     n_microbatches: int
-    kept_ep_layers: int  # 8 total layers / pp_size
+    kept_ep_layers: int  # 8 total layers / pp_size.
     gpus_per_node: int = 2
     nvlink_domain_size: int = 2
 
 
 MOE_MODES = {
-    # Stage-wide dispatch: one 4-rank EP group == the whole stage. The cross-domain spelling
-    # (nvlink_domain_size=2 + ep_scope="global") is asserted accepted at config time, but its DeepEP
-    # transport needs the inter-node NCCL GIN path and RDMA NICs a single host lacks, so the run
-    # widens the domain to 4 (== the stage) on NVLink transport. The simulated node widens with it:
-    # a 4-GPU domain over 2-GPU nodes is MNNVL, which validate_nvlink_domain_against_fabric rejects
-    # on a fabric-free host; two 4-GPU nodes spells the identical topology (stage == node == domain).
+    # One 4-rank EP group is the whole stage. The cross-domain spelling (nvlink_domain_size=2 + ep_scope="global") is
+    # asserted accepted at config time, but its DeepEP transport needs the inter-node NCCL GIN path and RDMA NICs a
+    # single host lacks, so the run widens the domain to 4. The node widens too: a 4-GPU domain over 2-GPU nodes is
+    # MNNVL, which validate_nvlink_domain_against_fabric rejects on a fabric-free host.
     "ep4": MoEModeSpec(
         pp_size=2,
         ep_size=4,
@@ -85,7 +59,7 @@ MOE_MODES = {
         gpus_per_node=4,
         nvlink_domain_size=4,
     ),
-    # 1F1B needs a full pipeline: 4 microbatches at pp4, so per-device batch 4 (microbatches of 1).
+    # 1F1B needs a full pipeline: 4 microbatches at pp4, so per-device batch 4.
     "pp4_ep2": MoEModeSpec(
         pp_size=4, ep_size=2, ep_scope="node", per_device_batch=4, n_microbatches=4, kept_ep_layers=2
     ),
@@ -95,15 +69,9 @@ MOE_MODES = {
 }
 
 
-# ── dense_pp2_dp4: runner-level fp32 grad exactness ────────────────────────────────────────────
-
-
 def run_dense_pp2_dp4(ctx):
-    """pp2 × dp4: every stage-local grad must equal the unsplit fp32 model's, per parameter.
-
-    No ignore_index anywhere: every DP replica holds the same token count, so the runner's
-    rank-local loss normalizer equals the reference's global G/dp and losses compare exactly.
-    """
+    """Every stage-local grad equals the unsplit fp32 model's. No ignore_index: every DP replica holds the same token
+    count, so the runner's rank-local normalizer equals the reference's G/dp and losses compare exactly."""
     checks, metrics = {}, {}
     device = ctx.device
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=2)
@@ -140,29 +108,24 @@ def run_dense_pp2_dp4(ctx):
     checks.update(c)
     metrics.update(m)
 
-    # Every stage must have contributed parameters, or the split silently produced empty stages.
+    # Or the split silently produced empty stages.
     checks["every_stage_has_params"] = world_min(m["params_compared"], device) > 0
     return {"checks": checks, "metrics": metrics}
 
 
-# ── trainer-driven PP+EP modes ──────────────────────────────────────────────────────────────────
-
-
 def _stage_dtensor_mesh_sizes(stage) -> set[int]:
-    """Mesh widths of every DTensor parameter on the stage (EP experts/routers are plain tensors)."""
+    """Mesh widths of every DTensor parameter on the stage (EP experts and routers are plain tensors)."""
     return {p.data.device_mesh.size() for _, p in stage.named_parameters() if isinstance(p.data, DTensor)}
 
 
 def _assert_ep4_topology(trainer, config, checks):
-    """One stage-wide 4-rank dispatch group spanning both of the stage's NVLink domains."""
     ep_cfg = trainer._ep_config
     checks["single_stage_wide_ep_group"] = ep_cfg.num_ep_groups == 1 and dist.get_world_size(ep_cfg.process_group) == 4
     checks["not_deferred_dp"] = not ep_cfg.is_deferred_dp
     checks["nonexpert_fsdp_over_stage"] = _stage_dtensor_mesh_sizes(trainer._top_level_model()) == {4}
-    # The 2-GPU-domain spellings of the same shape: node scope must stay config-rejected
-    # (ep_group 4 > domain 2), and the cross-domain global scope must stay config-accepted — it is
-    # the real multi-node spelling; only its DeepEP inter-node transport (NCCL GIN / RDMA) cannot
-    # run on a single host, which is a hardware constraint, not a config rejection.
+    # Node scope must stay config-rejected (ep_group 4 > domain 2) and the cross-domain global scope config-accepted:
+    # it is the real multi-node spelling, and only its inter-node transport (NCCL GIN / RDMA) can't run on a single
+    # host.
     try:
         ParallelismConfig(
             world_size=config.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=2, ep_size=4, ep_scope="node"
@@ -185,7 +148,6 @@ def _assert_ep4_topology(trainer, config, checks):
 
 
 def _assert_pp4_ep2_topology(trainer, config, checks):
-    """Each 2-rank stage is exactly one NVLink domain holding one node-local dispatch group."""
     ep_cfg = trainer._ep_config
     checks["single_domain_ep_group_per_stage"] = (
         ep_cfg.num_ep_groups == 1 and dist.get_world_size(ep_cfg.process_group) == 2
@@ -195,18 +157,14 @@ def _assert_pp4_ep2_topology(trainer, config, checks):
 
 
 def _assert_ep2_dp2_topology(trainer, config, checks):
-    """Two EP groups per 4-rank stage (R=2) with the deferred-FSDP branch engaged.
-
-    A config that silently collapsed to one group would pass the equivalence gates trivially
-    (single-group EP is the already-covered shape), so the group structure itself is asserted:
-    two distinct dispatch groups per stage, replica sets spanning the stage's two domains, and
-    non-expert params FSDP-sharded over the EP group (2), not the stage (4).
-    """
+    """Two EP groups per 4-rank stage (R=2). A config collapsed to one group would pass the equivalence gates
+    trivially, so the group structure is asserted: non-expert params FSDP-sharded over the EP group (2), not the stage
+    (4)."""
     ep_cfg = trainer._ep_config
     checks["two_ep_groups_per_stage"] = ep_cfg.num_ep_groups == 2
     checks["deferred_dp_engaged"] = bool(ep_cfg.is_deferred_dp) and bool(ep_cfg.sweep_reduces_across_replicas)
     checks["dispatch_group_is_2_rank"] = dist.get_world_size(ep_cfg.process_group) == 2
-    # This rank's replica peers: same ep_rank in the other domain of the same stage.
+    # Same ep_rank in the other domain of the same stage.
     expected_replicas = [
         config.stage_base_rank + ep_cfg.ep_rank,
         config.stage_base_rank + 2 + ep_cfg.ep_rank,
@@ -214,28 +172,18 @@ def _assert_ep2_dp2_topology(trainer, config, checks):
     checks["replica_group_spans_stage_domains"] = (
         ep_cfg.expert_replica_group is not None and sorted(ep_cfg.expert_replica_ranks) == expected_replicas
     )
-    # Both groups must actually exist: the stage's four ranks split 2+2 over group indices {0, 1}.
+    # The stage's four ranks split 2+2 over group indices {0, 1}.
     idx_t = torch.tensor([float(ep_cfg.ep_group_idx)], device=torch.cuda.current_device())
     gathered = [torch.zeros_like(idx_t) for _ in range(4)]
     dist.all_gather(gathered, idx_t, group=trainer._pp_stage_group)
     checks["stage_splits_into_two_dispatch_groups"] = sorted(int(t.item()) for t in gathered) == [0, 0, 1, 1]
-    # Deferred-FSDP branch: non-expert shards live on the EP-group mesh, not the stage mesh.
     mesh_sizes = _stage_dtensor_mesh_sizes(trainer._top_level_model())
     checks["nonexpert_fsdp_over_ep_group"] = mesh_sizes == {2}
 
 
 def _check_replica_expert_grads_identical(rank, ep_modules, replica_group) -> bool:
-    """Post-sweep expert grads must be bitwise identical across the replica group (R=2).
-
-    Replica algebra at R=2 (stage world 4, per-replica loss S_r/(G/4)): within one EP group the
-    DeepEP combine sums each expert's grad over that group's 2 replicas; the deferred sweep then
-    SUMs the two groups' partials over the replica group and divides by the stage world:
-        final = (1/4) · Σ_{r=0..3} d(S_r · 4/G) = d(S)/G
-    — exactly the twin's full-batch gradient, so the dispatch-group gather compares to the twin
-    directly (same as R==1). The replica-SUM leg is load-bearing: skipping it would leave each
-    group's grads covering only half the batch (rel_err ≈ 1 vs the twin). The all-reduce SUM also
-    leaves both replicas bitwise equal, which is what this check pins.
-    """
+    """Post-sweep expert grads are bitwise identical across the replica group (R=2). final = (1/4) · Σ_{r=0..3} d(S_r ·
+    4/G) = d(S)/G, the twin's full-batch gradient; skipping the replica SUM covers half the batch (rel_err ≈ 1)."""
     identical = True
     for _name, module in ep_modules:
         for attr, param in module.expert_named_params():
@@ -256,9 +204,8 @@ _TOPOLOGY_ASSERTS = {
 
 
 def run_moe_mode(ctx, mode: str):
-    """One PP+EP topology through the real trainer, gated by the fp32-reference + bf16-twin checks."""
     spec = MOE_MODES[mode]
-    torch.set_float32_matmul_precision("highest")  # keep the fp32 reference an actual fp32 reference
+    torch.set_float32_matmul_precision("highest")  # Keeps the fp32 reference an actual fp32 reference.
     checks, metrics = {}, {}
 
     config = ParallelismConfig(
@@ -299,7 +246,7 @@ def run_moe_mode(ctx, mode: str):
     batch = ppeq.dp_slice_batch(rows, labels, dp_rank, spec.per_device_batch)
 
     loss = trainer.training_step(trainer.model, dict(batch))
-    clip_norm = trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)  # runs sweep + norm, no scaling
+    clip_norm = trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)  # Runs sweep + norm, no scaling.
 
     c, m = ppeq.check_loss_vs_reference(loss, reference, dp_rank)
     checks.update(c)
@@ -330,15 +277,9 @@ def run_moe_mode(ctx, mode: str):
     return {"checks": checks, "metrics": metrics}
 
 
-# ── ep1_dp4: stage-mesh DTensor experts at width 4 ──────────────────────────────────────────────
-
-
 def run_ep1_dp4(ctx):
-    """pp2 × ep1 grouped-GEMM × dp4: the ep1-shard contract at stage width 4.
-
-    Same methodology as the 4-GPU pp2×ep1 test (bf16 reference with the same ep1 wrappers, every
-    stage param compared through global names), at the uncovered mesh width.
-    """
+    """pp2 x ep1 grouped-GEMM x dp4: the ep1-shard contract at stage width 4, every stage param compared by global
+    name."""
     checks, metrics = {}, {}
     rows, labels = ppeq.build_ragged_batch(GLOBAL_BATCH)
     reference = ppeq.ep1_reference(rows, labels, ctx.device, dp_size=4, rank=ctx.rank)
@@ -351,7 +292,7 @@ def run_ep1_dp4(ctx):
     ep_modules = named_ep_layers(stage)
     checks["stage_keeps_expected_ep_layers"] = len(ep_modules) == 4
 
-    # ep1-shard contract: experts are stage-mesh DTensors (width 4), no EP hooks, plain PP clip.
+    # Stage-mesh DTensor experts (width 4), no EP hooks, plain PP clip.
     expert_params = [p for _, m in ep_modules for _, p in m.expert_named_params()]
     checks["experts_are_stage_mesh_dtensors"] = all(
         isinstance(p, DTensor) and p.device_mesh.size() == config.stage_world_size for p in expert_params

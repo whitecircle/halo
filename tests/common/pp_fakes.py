@@ -1,5 +1,4 @@
-"""Hand-built pipeline stages, a stand-in torch schedule and the family-registration opt-in for the
-pipeline tests."""
+"""Hand-built pipeline stages, a stand-in torch schedule and the family-registration opt-in for the pipeline tests."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,7 +12,7 @@ from halo.distributed.pipeline_parallel.runner import PipelineRunner
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule, StageLayout
 from halo.distributed.pipeline_parallel.stage_losses import TokenLoss
 
-# The layout of a ``*ForCausalLM`` whose backbone sits under ``model`` and its head under ``lm_head``.
+# A ``*ForCausalLM`` with its backbone under ``model`` and head under ``lm_head``.
 CAUSAL_LM_LAYOUT = StageLayout(
     backbone_prefix="model",
     layer_attr="layers",
@@ -25,8 +24,8 @@ CAUSAL_LM_LAYOUT = StageLayout(
 
 @contextmanager
 def registered_pp_backbones(*names: str) -> Iterator[None]:
-    """Register the backbone classes ``names`` for pipeline parallelism inside the block (or the decorated
-    test): a claimed class keeps its spec with the refusal lifted, an unclaimed one takes the default probes."""
+    """Register ``names`` for PP inside the block: a claimed class keeps its spec with the refusal lifted, an unclaimed
+    one takes default probes."""
     saved = dict(PP_SPEC_MAP)
     PP_SPEC_MAP.update(
         {name: replace(PP_SPEC_MAP.get(name, GENERIC_PP), refusal=None, validated=True) for name in names}
@@ -39,7 +38,7 @@ def registered_pp_backbones(*names: str) -> Iterator[None]:
 
 
 class _StageSource(nn.Module):
-    """The unsplit model a hand-built stage is cut from: no config, so no checkpoint metadata."""
+    """The unsplit model a stage is cut from: no config, so no checkpoint metadata."""
 
     def __init__(self, backbone: nn.Module, head: nn.Module | None):
         super().__init__()
@@ -53,18 +52,14 @@ class _StageSource(nn.Module):
 def hand_built_stage(
     backbone: nn.Module, head: nn.Module | None, *, is_first: bool, is_last: bool, layer_offset: int
 ) -> PipelineStageModule:
-    """A stage over ``backbone`` (and ``head`` on the last stage) in the :data:`CAUSAL_LM_LAYOUT`."""
     return PipelineStageModule(
         _StageSource(backbone, head), CAUSAL_LM_LAYOUT, is_first=is_first, is_last=is_last, layer_offset=layer_offset
     )
 
 
 class FakeStage:
-    """Stand-in for a ``PipelineStage`` around an FSDP2 module.
-
-    ``perform_reduce_grad`` counts the reshard it would run, and is defined on the class: the runner
-    suppresses it by shadowing the attribute in the instance dict, so a failed restore stays visible.
-    """
+    """Stand-in for a ``PipelineStage``; ``perform_reduce_grad`` is on the class since the runner shadows it per
+    instance, so a failed restore shows."""
 
     def __init__(self):
         self.has_backward = True
@@ -80,8 +75,8 @@ class FakeStage:
 
 
 class FakeSchedule:
-    """Mirrors the single-stage schedules: ``step`` and ``eval`` both funnel through
-    ``_step_microbatches``, which ends in reduce-grad, and it records what it received."""
+    """Mirrors the single-stage schedules: ``step`` and ``eval`` funnel through ``_step_microbatches``, ending in
+    reduce-grad and recording its input."""
 
     def __init__(self, n_microbatches: int = 2, has_backward: bool = True):
         self._stage = FakeStage()

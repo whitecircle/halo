@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""``merge_pp_stage_parts``: the export step of a pipeline-parallel save on a non-shared filesystem.
-
-Each node's directory holds the whole-model index, the parts of the stages that node ran and the wrapper
-parts every node writes. Merged, the directories must load through plain ``from_pretrained`` as the unsplit
-model; a stage whose parts no directory holds must fail the merge instead of leaving a checkpoint that
-loads around the gap. Each node also holds its own ranks' optimizer shards and RNG states and an identical
-optimizer meta; the merge carries all of them, so the merged directory resumes exactly on the save's topology,
-hard-linked where the output shares their filesystem.
-
-Run: python tests/cpu/checkpoint/test_pp_stage_merge.py
-"""
+"""``merge_pp_stage_parts``: the export step of a PP save on a non-shared filesystem. A stage whose parts no
+directory holds fails the merge; resume state is hard-linked where it can be."""
 
 import os
 import shutil
@@ -36,9 +27,9 @@ from tests.common.models import TINY_QWEN3_CONFIG
 PP_SIZE = 2
 WRAPPER_KEYS = ("lm_head.weight",)
 RANKS_PER_NODE = 2
-# The step directory each node's save leaves under that node's own output_dir.
+# Under each node's own output_dir.
 STEP_DIR = "checkpoint-2"
-# The payload ``write_optimizer_meta`` writes, identical on every node of one save.
+# Identical on every node of one save.
 OPTIMIZER_META = {
     "num_ranks": PP_SIZE * RANKS_PER_NODE,
     "fingerprint": {"world_size": PP_SIZE * RANKS_PER_NODE, "pp_size": PP_SIZE, "optimizer_class": "AdamW"},
@@ -53,8 +44,8 @@ def _stage_of(key: str, first_stage_layers: int) -> int:
 
 
 def _write_node_directories(root: str, state: dict[str, torch.Tensor], config: Qwen3Config) -> list[str]:
-    """One step directory per stage-node as the per-node save leaves them: the stage's own parts (several, under
-    a small shard cap), the wrapper part on every node, the whole index and the config on each."""
+    """The stage's own parts under a small shard cap, the wrapper part on every node, the whole index and config on
+    each."""
     first_stage_layers = config.num_hidden_layers // 2
     weight_map, total = {}, 0
     node_dirs = [os.path.join(root, f"node{rank}", STEP_DIR) for rank in range(PP_SIZE)]
@@ -80,7 +71,6 @@ def _write_node_directories(root: str, state: dict[str, torch.Tensor], config: Q
 
 
 def _write_resume_state(node_dirs: list[str], meta: dict = OPTIMIZER_META) -> None:
-    """Each node's own ranks' optimizer shards and RNG states, and the meta every node writes."""
     for node, node_dir in enumerate(node_dirs):
         for rank in range(node * RANKS_PER_NODE, (node + 1) * RANKS_PER_NODE):
             torch.save(
@@ -92,8 +82,7 @@ def _write_resume_state(node_dirs: list[str], meta: dict = OPTIMIZER_META) -> No
 
 
 def _resume_holders(node_dirs: list[str]) -> dict[str, str]:
-    """Each resume file of the merged directory and the input file it carries: a rank's own node's, and the
-    first node's meta."""
+    """A rank's own node's, and the first node's meta."""
     holders = {OPTIMIZER_META_FILE: os.path.join(node_dirs[0], OPTIMIZER_META_FILE)}
     for rank in range(PP_SIZE * RANKS_PER_NODE):
         for name in (optimizer_shard_filename(rank), f"rng_state_{rank}.pth"):
@@ -143,8 +132,7 @@ def test_the_merged_directory_carries_every_ranks_resume_state(saved, tmp_path):
 
 
 def test_on_one_filesystem_the_resume_state_is_hard_linked_and_outlives_the_inputs(saved, tmp_path):
-    """Copied, every rank's optimizer shard would land on the volume twice; linked, removing the node
-    directories after the merge leaves the merged directory whole."""
+    """Copied, every optimizer shard lands on the volume twice; linked, removing the inputs leaves the merge whole."""
     node_dirs, _ = saved
     _write_resume_state(node_dirs)
     merged = tmp_path / "merged"
@@ -183,9 +171,8 @@ def test_across_filesystems_the_resume_state_is_copied_with_its_mode(saved, tmp_
 
 @pytest.mark.parametrize("resaved", ["input", "merged"])
 def test_a_save_that_rewrites_one_linked_directory_leaves_the_other_as_merged(saved, tmp_path, resaved):
-    """A run saving a step it saved before rewrites that ``checkpoint-N`` in place, and the optimizer-shard and
-    RNG writers truncate an existing name. Node 0's directory re-saved after the merge, or the merged directory
-    re-saved by a run resumed from it, must not change the other side's linked resume state with it."""
+    """The optimizer-shard and RNG writers truncate an existing name, which must not reach the other side through a
+    link."""
     node_dirs, _ = saved
     _write_resume_state(node_dirs)
     merged = tmp_path / "run" / STEP_DIR
@@ -244,7 +231,7 @@ def test_a_per_rank_file_held_at_different_sizes_is_refused(saved, tmp_path):
 
 
 def test_a_stage_part_no_node_holds_fails_the_merge(saved, tmp_path):
-    """Negative control: the index names a stage-1 part that no node directory carries."""
+    """Negative control: the index names a stage-1 part no node carries."""
     node_dirs, _ = saved
     missing = sorted(f for f in os.listdir(node_dirs[1]) if f.startswith("model-pp00001"))[0]
     os.remove(os.path.join(node_dirs[1], missing))

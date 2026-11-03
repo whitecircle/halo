@@ -1,43 +1,15 @@
 #!/usr/bin/env python
-"""
-Prepare a competitive-programming dataset for the coding RL environment
-(``environment_type: code_contests`` / ``codeforces``).
+"""Prepare a competitive-programming dataset for the coding RL environment (``code_contests`` / ``codeforces``).
 
-Composes each problem's statement into a single prompt and packs its grading payload (tests +
-optional special-judge checker + optional time limit) into one ``answer`` column, so the
-Environmental-GRPO training script consumes it with ``prompt_field: prompt`` / ``answer_field:
-answer``. Rows the stdin/stdout environment cannot grade are filtered out.
+Composes each statement into one prompt and packs its grading payload into one ``answer`` column; rows the stdin/stdout
+environment cannot grade are filtered out. Adapters in ``halo/environments/tasks/coding/contest_datasets.py`` define
+each dataset. A bulky test corpus is first reduced by ``compact_code_tests.py``; ``--tests_table`` joins it by problem
+id, and a table matching no row of any split exits. A problem whose only tests are its statement's examples is dropped
+and counted per split unless ``--include_examples_only``: a program printing a constant passes many of them.
 
-Prompt building, payload packing, and filtering come from the dataset adapters in
-``halo/environments/tasks/coding/contest_datasets.py`` (``CODE_DATASET_ADAPTERS``), so preparation,
-evaluation, and training share one definition per dataset. Add an adapter there to support a new one.
-
-Usage (inside the training image):
-    # Codeforces (open-r1/codeforces), rating-filtered
     python scripts/environments/preparation/prepare_code_dataset.py \\
         --adapter codeforces --dataset open-r1/codeforces --config verifiable \\
         --output_dir "$HALO_DATA_ROOT/datasets/codeforces-verifiable-rl" --min_rating 800 --max_rating 2200
-
-    # DeepCoder (agentica-org/DeepCoder-Preview-Dataset), the taco config
-    python scripts/environments/preparation/prepare_code_dataset.py \\
-        --adapter deepcoder --dataset agentica-org/DeepCoder-Preview-Dataset --config taco \\
-        --output_dir "$HALO_DATA_ROOT/datasets/deepcoder-taco-rl"
-
-    # HardTests, suites joined from a compacted tests table, 100 problems per rating band held out,
-    # pushed as one Hub config per training stage (full + one per band) over that shared test split
-    python scripts/environments/preparation/prepare_code_dataset.py \\
-        --adapter hardtests --dataset sigcp/hardtests_problems \\
-        --tests_table "$HALO_DATA_ROOT/hardtests-tests-compact" --holdout_per_band 100 \\
-        --min_rating 800 --push_to_hub org/hardtests-rl --push_bands
-
-A bulky test corpus (open-r1's generated tests, HardTests' suites) is first reduced by
-``compact_code_tests.py`` to one capped row per problem; ``--tests_table`` joins it onto the source
-rows by problem id, and the adapter packs the joined suite. A table may cover some splits only; one
-matching no row of any split exits.
-
-A problem whose only tests are its statement's examples (a Codeforces row whose official tests are
-the statement's samples and that no joined suite covers) is dropped and counted per split unless
-``--include_examples_only``: a program printing a constant passes many of them.
 """
 
 import argparse
@@ -46,14 +18,11 @@ from halo.entrypoints.code_pool_preparation import HOLDOUT_SEED, RATING_BANDS, p
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS
 from halo.log import configure_cli_logging
 
-# Adapters whose datasets load with a plain ``load_dataset`` (the RL training pools). Benchmark
-# adapters with a custom ``load`` (LiveCodeBench, ICPC-Eval) are eval-only: they are scored directly
-# by ``eval_code_contests.py`` rather than materialized into a training set here.
+# Benchmark adapters with a custom ``load`` are eval-only, scored directly by ``eval_code_contests.py``.
 _TRAINING_ADAPTERS = sorted(name for name, a in CODE_DATASET_ADAPTERS.items() if a.load is None)
 
 
 def _add_source_args(p: argparse.ArgumentParser) -> None:
-    """The adapter, the source dataset, the joined tests table, the excluded ids and the map processes."""
     p.add_argument(
         "--adapter", required=True, choices=_TRAINING_ADAPTERS, help="Dataset adapter to apply (RL training pools)."
     )
@@ -80,7 +49,6 @@ def _add_source_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
-    """The rating bounds and the suite checks a kept problem must pass."""
     p.add_argument(
         "--min_rating",
         type=int,
@@ -111,7 +79,6 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_split_args(p: argparse.ArgumentParser) -> None:
-    """The hold-out carved as the test split and the train-only drops after it."""
     p.add_argument(
         "--holdout_per_band",
         type=int,
@@ -129,7 +96,6 @@ def _add_split_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_publish_args(p: argparse.ArgumentParser) -> None:
-    """Where the prepared pool goes: a local save, a Hub push, and its configs."""
     p.add_argument("--output_dir", default=None, help="save_to_disk path on a large mounted volume.")
     p.add_argument("--push_to_hub", default=None, help="Hub repo id to push the prepared dataset to.")
     p.add_argument(

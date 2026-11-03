@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""
-Integration tests for stateful, multi-turn execution environments.
-
-These drive the environments through the real reset/step API with tool calls, asserting the
-behaviour that makes SWE / code-contest RL work:
-
-- SweEnvironment: a file written on one turn is readable by code run on a LATER turn (persistent
-  per-episode workspace), and two concurrent episodes never see each other's files.
-- SweEnvironment's run_bash_command: the shell shares that workspace, and its time limit and exit
-  code are observations while a backend outage is a failed tool call.
-- CodeContestsEnvironment: submit_solution grades against hidden tests through the sandbox, for
-  Python and (when g++ is present) C++ — including the language-aware test REPL tool name.
-
-Run: python tests/cpu/environments/test_stateful_envs.py
-"""
+"""Stateful multi-turn environments through the real reset/step API: SweEnvironment's per-episode workspace and
+shell, and CodeContestsEnvironment grading hidden tests through the sandbox, in Python and (when g++ is present)
+C++."""
 
 import json
 import os
@@ -36,19 +24,14 @@ def _skip(reason: str):
 
 
 def _tool_call(name: str, **arguments) -> dict:
-    """Build one OpenAI-format tool call for the env step context."""
     return {"id": f"call_{name}", "function": {"name": name, "arguments": json.dumps(arguments)}}
 
 
 def _last_tool_result(trajectory) -> str:
-    """Return the content of the most recent tool-result message in the trajectory."""
     for msg in reversed(trajectory.messages):
         if msg.role == "tool":
             return msg.content
     return ""
-
-
-# SweEnvironment — persistent workspace across turns
 
 
 def test_code_env_state_persists_across_turns():
@@ -98,7 +81,6 @@ def test_code_env_read_file_sees_prior_write():
 
 
 def test_code_env_episodes_are_isolated():
-    """Two episodes on one env instance must not share a workspace."""
     env = SweEnvironment(max_turns=10)
     try:
         ids, _ = env.reset(["task A", "task B"])
@@ -115,10 +97,8 @@ def test_code_env_episodes_are_isolated():
 
 
 def test_sandbox_backend_outage_voids_the_episode_unpriced():
-    """A sandbox BACKEND failure is a failed tool call, never a successful observation — and never
-    the policy's fault: it goes unpriced, ends the episode and marks it invalid, so the trainer drops
-    it from the GRPO group baseline. A program-level failure (non-zero exit) stays a successful call.
-    """
+    """A backend failure is unpriced, ends the episode and marks it invalid; a program-level non-zero exit stays a
+    successful call."""
     env = SweEnvironment(max_turns=5, tool_success_reward=0.05, tool_error_penalty=0.1)
     try:
         episode_ids, _ = env.reset(["task"])
@@ -154,12 +134,8 @@ def test_code_env_cleanup_closes_sessions():
     env.close()
 
 
-# SweEnvironment — run_bash_command
-
-
 def test_bash_tool_shares_the_workspace_with_the_file_tools():
-    """The shell runs in the SAME session working directory: it reads what ``write_file`` wrote, and
-    what it creates is readable through ``read_file`` (local backend)."""
+    """The shell reads what ``write_file`` wrote, and ``read_file`` reads what it creates."""
     env = SweEnvironment(max_turns=10)
     try:
         episode_ids, _ = env.reset(["task"])
@@ -181,8 +157,7 @@ def test_bash_tool_shares_the_workspace_with_the_file_tools():
 
 
 def test_bash_tool_timeout_is_an_observation_not_an_exception():
-    """A command that outruns ``code_timeout`` is killed and reported like any other time limit: the
-    model reads it and keeps going, and the call is not booked as a failed tool call."""
+    """Killed and reported like any time limit: the model reads it and keeps going, with no failed tool call booked."""
     env = SweEnvironment(max_turns=5, code_timeout=0.5)
     try:
         episode_ids, _ = env.reset(["task"])
@@ -195,8 +170,7 @@ def test_bash_tool_timeout_is_an_observation_not_an_exception():
 
 
 def test_bash_tool_nonzero_exit_is_an_observation_and_a_backend_outage_is_not():
-    """The ``run_code`` error split, which decides who pays ``tool_error_penalty``: the command's own
-    non-zero exit is a successful observation, a backend failure is a FAILED call."""
+    """The split that decides who pays ``tool_error_penalty``."""
     env = SweEnvironment(max_turns=5)
     try:
         episode_ids, _ = env.reset(["task"])
@@ -229,9 +203,6 @@ def test_bash_tool_is_advertised_in_the_openai_schema():
         assert parameters["required"] == ["command"]
     finally:
         env.close()
-
-
-# CodeContestsEnvironment — sandbox grading (python + cpp)
 
 
 def test_code_contests_python_grading():
@@ -269,10 +240,8 @@ def test_code_contests_cpp_grading():
 
 
 def test_code_contests_episodes_isolated_via_active_trajectory():
-    """Two episodes on ONE env instance must each grade submit_solution against THEIR OWN test
-    cases — the _ACTIVE_TRAJECTORY ContextVar must route per-episode even when episodes interleave
-    (the Ray-actor pattern: one env serving many concurrent episodes). If the ContextVar leaked
-    across episodes, A's doubler would be graded against B's tripler tests and fail."""
+    """The ``_ACTIVE_TRAJECTORY`` ContextVar routes per episode when episodes interleave; a leak would grade A's
+    doubler against B's tripler tests."""
     env = CodeContestsEnvironment(max_turns=5, language="python")
     ctx_double = {"answer": {"test_cases": [{"input": "3", "output": "6"}]}}
     ctx_triple = {"answer": {"test_cases": [{"input": "3", "output": "9"}]}}
@@ -289,7 +258,6 @@ def test_code_contests_episodes_isolated_via_active_trajectory():
 
 
 def test_code_contests_cpp_uses_run_code_test_tool():
-    """A C++ contest exposes a compile-and-run test tool (not the python REPL)."""
     env = CodeContestsEnvironment(max_turns=5, language="cpp")
     names = set(env.registry.names())
     assert "run_code" in names and "python_repl" not in names

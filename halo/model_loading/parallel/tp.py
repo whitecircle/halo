@@ -51,12 +51,9 @@ class _ToolkitMeshViews:
 
 @contextmanager
 def _toolkit_tp_mesh(device_mesh, tp_mesh):
-    """Shard an HF-native TP load over the toolkit's TP group instead of a mesh transformers builds.
-
-    transformers ignores a passed mesh and builds its own world-wide one, sized to the world unless
-    ``fsdp_size > 1``, which also FSDP-wraps the model the toolkit wraps itself. Its single hook for the
-    mesh is ``prepare_distribute_model``, answered here for the length of the load.
-    """
+    """Shard an HF-native TP load over the toolkit's TP group. transformers ignores a passed mesh and builds a
+    world-wide one, and ``fsdp_size > 1`` also FSDP-wraps the model; ``prepare_distribute_model`` is its single hook,
+    answered here for the load."""
     if "prepare_distribute_model" in PreTrainedModel.__dict__:
         raise RuntimeError("PreTrainedModel.prepare_distribute_model is already overridden")
     device = current_device()
@@ -105,8 +102,7 @@ def load_tp_model(
     model._is_distributed_loading_by_transformers = False
     model._tp_size = None
     precision_guard = DeferredRankFailure(f"FP32-master TP checkpoint load from {source.name}")
-    # Throttled: collective-free, and every rank stages each full FP32 tensor in host memory before
-    # keeping its own shard.
+    # Throttled: collective-free, and every rank stages each full FP32 tensor in host memory before keeping its shard.
     with joined_node_load(f"FP32-master TP restore from {source.name}", pc.max_concurrent_loading):
         precision_guard.run(
             lambda: restore_fp32_master_parameters(

@@ -15,24 +15,16 @@ from halo.runtime.ranks import has_process_group
 
 
 def loss_inputs_fp32(logits: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(logits, targets)`` in the fp32 every classification objective evaluates in.
-
-    A (weighted) cross-entropy is ``w_y * (logit_y - logsumexp(logits))``, a cancelling difference whose bf16
-    mantissa resolves ~1e-2 absolute: enough to reorder near-tied classes and round the class weights. Float
-    targets are upcast too, since ``binary_cross_entropy_with_logits`` takes its output dtype from the target;
-    integer class ids pass through, as ``F.cross_entropy`` requires.
-    """
+    """A (weighted) cross-entropy is a cancelling difference whose bf16 mantissa resolves ~1e-2 absolute, enough to
+    reorder near-tied classes and round the class weights. Float targets follow, since BCE takes its output dtype from
+    the target."""
     return logits.float(), targets.float() if targets.is_floating_point() else targets
 
 
 def focal_loss(logits, labels, gamma=2.0, alpha=None, weight=None, reduction="mean"):
-    """Focal loss for single-label (``[B]`` class ids) and multi-label (``[B, C]`` multi-hot) heads.
-
-    ``reduction="none"`` is the pipeline form, whose per-element values the caller masks and sums. ``alpha``
-    is the RetinaNet ``alpha_t = alpha*y + (1-alpha)*(1-y)``, meaningful only on the multi-label branch. The
-    modulator ``(1 - p_t) ** gamma`` reads the unweighted cross-entropy: ``exp(-ce)`` on a ``w_y``-weighted
-    one is ``p_y ** w_y``, so a class weight would distort the modulator instead of scaling the loss.
-    """
+    """Single-label (``[B]`` class ids) and multi-label (``[B, C]`` multi-hot); ``alpha`` is RetinaNet's ``alpha_t``,
+    multi-label only. The modulator reads the unweighted cross-entropy: ``exp(-ce)`` on a ``w_y``-weighted one is
+    ``p_y ** w_y``, so a class weight would distort the modulator instead of scaling the loss."""
     if labels.dim() == 1:
         ce_loss = F.cross_entropy(logits, labels, reduction="none")
         weighted = ce_loss if weight is None else F.cross_entropy(logits, labels, weight=weight, reduction="none")
@@ -59,12 +51,8 @@ def focal_loss(logits, labels, gamma=2.0, alpha=None, weight=None, reduction="me
 
 
 def balanced_class_weights(train_dataset: Dataset, model: nn.Module | None) -> torch.Tensor:
-    """COLLECTIVE on a process group. Per-class 'balanced' CE weights from the world's label counts.
-
-    A pre-sharded dataset gives each DP rank another shard, so the counts are summed over the world: DP shards
-    are disjoint, and TP siblings or replicated datasets only scale every count alike, to which the balanced
-    weights ``n_samples / (n_present_classes * count_c)`` are invariant.
-    """
+    """COLLECTIVE on a process group. World label counts: DP shards are disjoint, and TP siblings or replicated
+    datasets scale every count alike, to which the balanced weights are invariant."""
     columns = train_dataset.column_names if hasattr(train_dataset, "column_names") else list(train_dataset)
     label_column = next((c for c in ("labels", "label") if c in columns), None)
     if label_column is None:
@@ -100,23 +88,18 @@ def balanced_class_weights(train_dataset: Dataset, model: nn.Module | None) -> t
 
 @dataclass(frozen=True)
 class ClassificationLoss:
-    """A cross-entropy (single-label), BCE (multi-label) or focal loss, evaluated in fp32.
-
-    Never the head's built-in loss, which runs its cross-entropy in the logits' bf16 storage dtype, picks
-    single- vs multi-label by sniffing the label dtype and scores a single-logit head as regression.
-    """
+    """Evaluated in fp32. Never the head's built-in loss, which runs its cross-entropy in bf16 storage, picks single-
+    vs multi-label by sniffing the label dtype and scores a single-logit head as regression."""
 
     multi_label: bool
     # Class weights: CE's ``weight``, or the BCE/focal ``pos_weight`` on a multi-label head.
     weight: torch.Tensor | None = None
     label_smoothing: float = 0.0
-    # Set for the focal loss.
     focal_gamma: float | None = None
     focal_alpha: float | None = None
 
     def to(self, device) -> "ClassificationLoss":
-        """This loss with its weights on ``device`` (itself when already there), still fp32: under
-        ``derive_class_weights`` the entries span orders of magnitude."""
+        """Still fp32, since under ``derive_class_weights`` the entries span orders of magnitude."""
         if self.weight is None:
             return self
         weight = self.weight.to(device=device)
@@ -126,12 +109,9 @@ class ClassificationLoss:
         return self._evaluate(*loss_inputs_fp32(logits, targets), reduction="mean")
 
     def masked_sum(self, logits: torch.Tensor, targets: torch.Tensor, valid_rows: torch.Tensor) -> torch.Tensor:
-        """The loss summed over ``valid_rows``; ÷ :meth:`normalizer` it is the batch mean over them.
-
-        The sum form is additive over pipeline microbatches. Inert rows are zeroed in value space, not indexed
-        out (a boolean index syncs the host), and their logits before the objective: a saturated logit would
-        make the backward's ``softmax`` NaN. The extra zeros match summing the kept rows to ~2 fp32 ULP.
-        """
+        """Summed over ``valid_rows``, additive over pipeline microbatches. Inert rows are zeroed in value space (a
+        boolean index syncs the host), logits included, since a saturated logit would make the backward's ``softmax``
+        NaN. The extra zeros match summing the kept rows to ~2 fp32 ULP."""
         logits, targets = loss_inputs_fp32(logits, targets)
         row_mask = valid_rows.reshape(-1, *(1,) * (logits.dim() - 1))
         logits = torch.where(row_mask, logits, logits.new_zeros(()))
@@ -140,12 +120,9 @@ class ClassificationLoss:
         return torch.where(mask, per_element, per_element.new_zeros(())).sum()
 
     def normalizer(self, targets: torch.Tensor, valid_rows: torch.Tensor) -> torch.Tensor:
-        """The denominator torch's ``reduction="mean"`` divides by, over ``valid_rows``.
-
-        Element count ``B*C`` for BCE and multi-label focal (``pos_weight`` weights summands, not the
-        denominator); the target classes' weight sum for weighted CE; the row count otherwise (focal means
-        its per-row values even when class-weighted).
-        """
+        """The denominator of torch's ``reduction="mean"`` over ``valid_rows``: ``B*C`` for BCE and multi-label focal,
+        the target classes' weight sum for weighted CE, the row count otherwise (focal means its per-row values even
+        when class-weighted)."""
         rows = valid_rows.sum()
         if self.multi_label:
             return (rows * targets.size(-1)).float().clamp(min=1.0)
@@ -175,10 +152,7 @@ class ClassificationLoss:
 
 
 def build_classification_loss(args, model: nn.Module, train_dataset, *, multi_label: bool) -> ClassificationLoss:
-    """The loss ``args.loss_type`` names for ``model``'s head, refusing the options that head cannot honor.
-
-    COLLECTIVE under ``derive_class_weights`` (:func:`balanced_class_weights`).
-    """
+    """Refuses the options ``model``'s head cannot honor. COLLECTIVE under ``derive_class_weights``."""
     num_labels = model.config.num_labels
     if not multi_label and num_labels < 2:
         raise ValueError(

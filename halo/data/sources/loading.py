@@ -1,6 +1,4 @@
-"""Dataset loading from S3, the HuggingFace Hub or local disk into the train/test ``DatasetDict`` a trainer
-reads: one source, whole or by shard; a corpus of several (:mod:`halo.data.sources.corpus`); or a
-pre-processed artifact."""
+"""Dataset loading from S3, the Hub or local disk into the train/test ``DatasetDict`` a trainer reads."""
 
 import hashlib
 import pickle
@@ -46,7 +44,6 @@ logger = info_logger(__name__)
 # Fixed so every rank derives the same train/test split independently of the caller's data seed.
 _TRAIN_TEST_SPLIT_SEED = 42
 
-# The ratio-subsetting ``seed`` default of both entry points.
 _DEFAULT_DATA_SEED = 42
 
 # Separates the ``conversation`` fallback from a declared column, the only one worth failing on.
@@ -54,7 +51,7 @@ _UNDECLARED = object()
 
 
 def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
-    """Load a dataset from S3 URI, HuggingFace Hub (supports ``id:config`` suffix), or local path (auto-detected)."""
+    """S3 URI, Hub (``id:config`` suffix) or local path, auto-detected."""
     source_type, _bucket, _key = parse_dataset_source(path)
 
     if source_type == "s3":
@@ -100,9 +97,9 @@ def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
 
 
 def load_dataset_split(source: str, *, split: str, config: str | None = None) -> Dataset:
-    """One split of ``source``: a Hub dataset id read at ``config`` and ``split``, which name them in place of a
-    ``:config`` / ``@split`` suffix; any other source as :func:`load_dataset_from_source` reads it, a bare saved
-    Dataset and a local data file being their one split and a DatasetDict having to hold ``split``."""
+    """One split: a Hub id read at ``config`` and ``split``, which replace a ``:config`` / ``@split`` suffix; any other
+    source as :func:`load_dataset_from_source`, a bare Dataset or data file being its one split and a DatasetDict
+    having to hold ``split``."""
     source_type, _bucket, path = parse_dataset_source(source)
     if source_type == "hf_hub":
         reject_ambiguous_hub_source(source)
@@ -123,8 +120,7 @@ def load_dataset_split(source: str, *, split: str, config: str | None = None) ->
 
 
 def _warn_test_size_ignored(path: str, test_size: float | None, kind: str) -> None:
-    """Warn that ``test_size`` cannot re-split a sharded or pre-processed dataset, whose split was fixed
-    when it was prepared; silent when unset."""
+    """``test_size`` cannot re-split a sharded or pre-processed dataset, whose split was fixed at preparation."""
     if test_size is None:
         return
     if is_global_main_process():
@@ -136,7 +132,6 @@ def _warn_test_size_ignored(path: str, test_size: float | None, kind: str) -> No
 
 
 def _load_whole_dataset(path: str, test_size: float | None, *, placeholder_test: bool) -> DatasetDict:
-    """One rank's read of a non-sharded source, shaped into train/test (:func:`_load_dataset_from_path`)."""
     dataset = load_dataset_from_source(path)
 
     if isinstance(dataset, Dataset):
@@ -173,9 +168,8 @@ def _load_whole_dataset(path: str, test_size: float | None, *, placeholder_test:
 
 
 def _share_within_input_scope(loaded: tuple[DatasetDict, bytes] | None, path: str) -> DatasetDict:
-    """COLLECTIVE: the DatasetDict each input scope's load rank ``loaded`` (with its pickle), on every rank of that
-    scope. The pickle of memory-mapped tables holds their file paths under ``HF_DATASETS_CACHE``, whose sharing
-    across the scope the run's startup probe verified, so the other ranks open the load rank's files."""
+    """COLLECTIVE: the load rank's DatasetDict on every rank of its input scope. The pickle of memory-mapped tables
+    holds paths under ``HF_DATASETS_CACHE``, whose sharing the startup probe verified, so peers open its files."""
     loading_rank = is_fs_load_rank()
     scope = None if is_input_shared_filesystem() else get_node_rank()
     by_scope = combine_across_ranks(
@@ -194,10 +188,8 @@ def _share_within_input_scope(loaded: tuple[DatasetDict, bytes] | None, path: st
 
 
 def _load_replicated(path: str, test_size: float | None, *, placeholder_test: bool) -> DatasetDict:
-    """A non-sharded source, loaded whole on every rank (the first fills the source's cache, the rest read
-    it back) and agreed across them. A Hub source loads on each input scope's load rank alone, which hands
-    its copy to the scope (:func:`_share_within_input_scope`): the others would resolve it online again, about
-    ten requests each."""
+    """Loaded whole on every rank (the first fills the cache) and agreed. A Hub source loads on each scope's load rank
+    alone, which hands its copy over: the others would resolve it online again, about ten requests each."""
 
     def load() -> DatasetDict:
         return _load_whole_dataset(path, test_size, placeholder_test=placeholder_test)
@@ -220,9 +212,8 @@ def _load_replicated(path: str, test_size: float | None, *, placeholder_test: bo
 def _load_sharded(
     path: str, data_parallel_rank: int, data_parallel_size: int
 ) -> tuple[DatasetDict, ShardedDatasetLoader]:
-    """COLLECTIVE: this rank's shard load and the loader that read it, joined on the c10d store, so a
-    rank-local failure reaches every rank as the real cause and disjoint shards' download times are absorbed
-    under ``DIST_STORE_TIMEOUT_HOURS`` rather than the next collective's NCCL budget."""
+    """COLLECTIVE: joined on the c10d store, so a rank-local failure reaches every rank as the real cause and disjoint
+    shards' downloads are absorbed under ``DIST_STORE_TIMEOUT_HOURS``, not the next collective's NCCL budget."""
     if is_global_main_process():
         logger.info(f"Loading sharded dataset from {path}")
         logger.info(f"  Data parallel rank: {data_parallel_rank}/{data_parallel_size}")
@@ -246,8 +237,7 @@ def _load_sharded(
 
 
 def is_sharded_dataset_across_ranks(path) -> bool:
-    """COLLECTIVE: ``ShardedDatasetLoader.is_sharded_dataset`` agreed across ranks. The per-rank S3 probe
-    only errs toward False (a creds flake), so the agreed MAX recovers "sharded" for every rank."""
+    """COLLECTIVE: the per-rank S3 probe only errs toward False (a creds flake), so the agreed MAX recovers it."""
     local = isinstance(path, str) and ShardedDatasetLoader.is_sharded_dataset(path)
     return agree_probe_across_ranks(local, path, "is_sharded_dataset")
 
@@ -260,10 +250,9 @@ def _load_dataset_from_path(
     *,
     placeholder_test: bool = True,
 ) -> tuple[DatasetDict, bool]:
-    """``(dataset, sharded)``: this rank's shards of a sharded source, else the whole source with its test
-    split (its validation split, a ``test_size`` re-split, or a placeholder). ``placeholder_test=False``
-    leaves a train-only source train-only, for a corpus that decides its held-out split itself.
-    """
+    """``(dataset, sharded)``: this rank's shards, else the whole source with its test split (validation, a
+    ``test_size`` re-split or a placeholder). ``placeholder_test=False`` leaves a train-only source train-only, for a
+    corpus deciding its held-out split."""
     # No dp_size gate: a sharded layout has no root dataset_info.json, so a fall-through load crashes at dp==1.
     if is_sharded_dataset_across_ranks(path):
         _warn_test_size_ignored(path, test_size, kind="sharded")
@@ -272,8 +261,8 @@ def _load_dataset_from_path(
 
 
 def _content_signature(dataset: DatasetDict) -> str:
-    """The per-split ``_fingerprint`` of a freshly loaded DatasetDict: content-derived until a coordinated
-    map diverges it per rank, so a re-push with identical shapes still changes the forced cache keys."""
+    """Content-derived until a coordinated map diverges it per rank, so a re-push with identical shapes still changes
+    the forced cache keys."""
     return ",".join(f"{name}:{dataset[name]._fingerprint}" for name in sorted(dataset))
 
 
@@ -290,27 +279,24 @@ def _load_single(
     conversation_knob: str,
     tools_field: str | None,
 ) -> tuple[DatasetDict, bool, str]:
-    """One source's checked, filtered and subset ``DatasetDict``, whether it loaded sharded, and its
-    :func:`_content_signature` (read before any filter)."""
+    """A checked, filtered and subset ``DatasetDict``, whether it loaded sharded, and its pre-filter signature."""
     ds, sharded = _load_dataset_from_path(path, test_size, data_parallel_rank, data_parallel_size)
-    # Only a raw sharded load can return a partial DatasetDict (missing splits are skipped) — fail loud here.
+    # Only a raw sharded load can return a partial DatasetDict (missing splits are skipped).
     reject_partial_splits(ds, path)
     content_sig = _content_signature(ds)
     apply_conversation_field(ds, path, conversation_field, required=conversation_declared, knob=conversation_knob)
     if tools_field:
-        # Optional knob, so a typo NEVER surfaces downstream: rows just render without tools.
+        # An optional knob's typo never surfaces downstream: rows just render without tools.
         reject_missing_render_column(ds, path, "tools_field", tools_field)
     return subset_dataset_dict(ds, ratio, seed), sharded, content_sig
 
 
 def _reject_empty_splits(ds: DatasetDict, sharded: bool) -> None:
-    """COLLECTIVE when ``sharded``: refuse an empty train or test split, logging each split's size and columns
-    as it passes. Sharded, an empty train slice on any rank raises on every rank, while the test split raises
-    only when empty on all of them."""
+    """COLLECTIVE when ``sharded``: an empty train slice on any rank raises on every rank, while the test split raises
+    only when empty on all."""
     train_empty = len(ds["train"]) == 0
     if sharded:
-        # Ratio subsetting can floor one rank's slice to zero rows; its peers must raise with it, not block in
-        # the test verdict's all-reduce below.
+        # Subsetting can floor one rank's slice to zero rows; peers must raise with it, not block in the test verdict.
         train_empty = not rank_consensus(not train_empty).all_ok
     if train_empty:
         raise ValueError("No training data after schema normalization. Please check your dataset.")
@@ -320,8 +306,7 @@ def _reject_empty_splits(ds: DatasetDict, sharded: bool) -> None:
 
     test_empty = len(ds["test"]) == 0
     if sharded:
-        # A rank-local empty eval split is the trainer's pre-sharded equalization's to refuse, world-uniformly;
-        # a rank raising alone here would leave its peers blocked in their next collective.
+        # A rank-local empty eval split is the trainer's equalization's to refuse; raising alone here strands peers.
         test_empty = rank_consensus(test_empty).all_ok
     if test_empty:
         raise ValueError("No test data after schema normalization. Please check your dataset.")
@@ -341,11 +326,8 @@ def load_datasets(
     tools_field: str | None = None,
     conversation_knob: str = "conversation_field",
 ):
-    """Load one raw dataset or a list of them into a fingerprinted train/test ``DatasetDict``.
-
-    A declared ``conversation_field`` must exist; the refusal names ``conversation_knob``, the config
-    field the caller read the column name from (``prompt_field`` on the GRPO prompt scripts).
-    """
+    """A declared ``conversation_field`` must exist; the refusal names ``conversation_knob``, the config field the
+    caller read it from (``prompt_field`` on GRPO prompt scripts)."""
     dataset_ratio = resolve_dataset_ratios(path, dataset_ratio)
     conversation_declared = conversation_field is not _UNDECLARED
     if not conversation_declared:
@@ -358,8 +340,7 @@ def load_datasets(
     }
     # No outer barrier: _load_dataset_from_path coordinates the downloads and the rest is rank-deterministic.
     if isinstance(path, list):
-        # Each entry loads FULLY: the list is replicated and sharded once as a whole, so a DP slice of a
-        # sharded entry here would be 1/dp of its own 1/dp — silent data loss.
+        # Each entry loads fully: the list is sharded once as a whole, so a DP slice of a sharded entry loses data.
         loaded = [_load_dataset_from_path(entry, test_size, placeholder_test=False) for entry in path]
         content_sig = ",".join(_content_signature(entry_ds) for entry_ds, _ in loaded)
         ds, sharded = build_corpus(path, loaded, dataset_ratio, seed, **render), False
@@ -389,9 +370,7 @@ def load_datasets(
 
 
 def share_s3_control_files(path: str | list) -> None:
-    """COLLECTIVE: read each S3 source's control files (its ``metadata.json`` stamp and each split's shard index)
-    once for the launch (:func:`share_control_files`), so the probes and loads that follow read no S3 object
-    of them on any other rank."""
+    """COLLECTIVE: read each S3 source's control files once for the launch; later probes read none on other ranks."""
     for entry in path if isinstance(path, list) else [path]:
         source_type, bucket, key = parse_dataset_source(entry)
         if source_type == "s3":
@@ -403,8 +382,8 @@ def share_s3_control_files(path: str | list) -> None:
 
 
 def is_presharded_dataset_load(path, data_parallel_size: int) -> bool:
-    """COLLECTIVE: whether loading ``path`` gives each of several DP ranks a disjoint slice, which the
-    trainers pass as ``dataset_presharded`` so the DataLoader does not re-shard it."""
+    """COLLECTIVE: whether ``path`` gives each of several DP ranks a disjoint slice, which trainers pass as
+    ``dataset_presharded`` so the DataLoader does not re-shard."""
     return data_parallel_size > 1 and isinstance(path, str) and is_sharded_dataset_across_ranks(path)
 
 
@@ -413,12 +392,11 @@ def load_preprocessed_dataset(
     data_parallel_rank: int = 0,
     data_parallel_size: int = 1,
 ) -> DatasetDict:
-    """Load a pre-processed dataset, only this rank's shards of a sharded one. Pass the DATA-PARALLEL
-    rank/size: CP/TP-group siblings share data, EP ranks (orthogonal to DP) get disjoint shards."""
+    """Pass the DATA-PARALLEL rank/size: CP/TP-group siblings share data, EP ranks (orthogonal to DP) do not."""
     if parse_dataset_source(path)[0] == "hf_hub":
         reject_ambiguous_hub_source(path)
-        # Refused on every rank alike, off the path string. ``load_dataset`` infers the Json builder
-        # from the saved tree's ``state.json`` sidecars and would hand back those as rows.
+        # Refused on every rank alike. ``load_dataset`` infers the Json builder from the saved tree's ``state.json``
+        # and would return those as rows.
         raise ValueError(
             f"Pre-processed dataset {path} is on the Hub, which training does not read in place. "
             f"Download it (hf download {hub_repo_id(path)} --repo-type dataset --local-dir <dir>) "
@@ -456,8 +434,7 @@ def load_datasets_auto(
     data_parallel_size: int = 1,
     tools_field: str | None = None,
 ) -> tuple[DatasetDict, bool]:
-    """``(DatasetDict, is_preprocessed)``: a single-path pre-processed dataset as baked, else the raw load.
-    Pass the DATA-PARALLEL rank/size, so CP/TP-group siblings share shards."""
+    """``(DatasetDict, is_preprocessed)``. Pass the DATA-PARALLEL rank/size, so CP/TP-group siblings share shards."""
     # Cross-rank agreed: a transient S3 error must not split ranks onto the raw and preprocessed paths.
     preprocessed = isinstance(path, str) and agree_input_probe_across_ranks(
         lambda: is_preprocessed_dataset(path), path, "is_preprocessed_dataset"

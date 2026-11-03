@@ -1,5 +1,4 @@
-"""SMPO preference collators: the text pair-padder and its VLM subclass, emitting the same batch keys, and
-``concatenate_pairs``, which joins a collated batch into the trainer's one ``[chosen ⧺ rejected]`` forward.
+"""SMPO preference collators and ``concatenate_pairs``, which joins a batch into one ``[chosen ⧺ rejected]`` forward.
 Prompts are left-padded so the completion boundary aligns across a batch; completions are right-padded."""
 
 from dataclasses import dataclass
@@ -25,8 +24,6 @@ _PREFERENCE_BATCH_KEYS = frozenset(
 
 @dataclass
 class DataCollatorForSMPO(DataCollatorMixin):
-    """Data collator for SMPO preference data; pads prompt/chosen/rejected to per-batch max lengths."""
-
     pad_token_id: int
     return_tensors: str = "pt"
 
@@ -52,11 +49,8 @@ class DataCollatorForSMPO(DataCollatorMixin):
 
 @dataclass
 class DataCollatorForVLMSMPO(DataCollatorForSMPO):
-    """SMPO collator for VLM rows (templated ``prompt_text`` + ``images``, pre-tokenized completions): the
-    images expand here rather than in the Arrow cache, and every extra processor tensor is concatenated
-    row-major. The prompt ends before the tokens its completions start with (``prompt_overlap``). Prompts are
-    never truncated (that desyncs placeholders from pixels): an over-length one raises.
-    """
+    """For VLM rows: images expand here rather than in the Arrow cache, and extra processor tensors concatenate
+    row-major. Prompts are never truncated (that desyncs placeholders from pixels): an over-length one raises."""
 
     processor: ProcessorMixin | None = None
     max_prompt_length: int | None = None
@@ -74,8 +68,7 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
             encoded = run_vlm_processor(self.processor, example["prompt_text"], [example.get("images") or []])
             prompt_length = encoded["input_ids"].size(1) - example[PROMPT_OVERLAP_COLUMN]
 
-            # run_vlm_processor tokenizes with add_special_tokens=False, so the BOS the tokenizer's
-            # own post-processor emits is restored here, as on the text path.
+            # run_vlm_processor adds no specials, so the post-processor's BOS is restored here, as on the text path.
             prompt_ids = encoded["input_ids"][0, :prompt_length].tolist()
             bos_prepended = lacks_emitted_bos(prompt_ids, tokenizer)
             if bos_prepended:
@@ -109,9 +102,8 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
 
 
 def _flush_rows_left(attention_mask: torch.Tensor, *tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """Roll each row left by its leading-pad count, so every pad trails its real tokens; ``tensors``
-    share the mask's shape and move with it, and the mask returns first. Unlike TRL's ``flush_left``
-    no column is truncated, so nothing is read back from the device."""
+    """Roll each row left by its leading-pad count; ``tensors`` move with the mask, which returns first. Unlike TRL's
+    ``flush_left`` no column is truncated, so nothing is read back from the device."""
     width = attention_mask.size(1)
     leading_pads = (attention_mask.cumsum(dim=1) == 0).sum(dim=1, keepdim=True)
     index = (torch.arange(width, device=attention_mask.device) + leading_pads) % width
@@ -119,13 +111,10 @@ def _flush_rows_left(attention_mask: torch.Tensor, *tensors: torch.Tensor) -> tu
 
 
 def concatenate_pairs(batch: dict[str, torch.Tensor], pad_token_id: int, cp_size: int = 1) -> dict[str, torch.Tensor]:
-    """One ``[chosen ⧺ rejected]`` batch (``input_ids``/``attention_mask``/``labels``) for a single forward.
-
-    Every row is flushed left (:func:`_flush_rows_left`), so a model's default positions are its real tokens'
-    positions: attention that reads absolute positions (Mistral4's llama-4 query scale) or cuts KV windows at fixed
-    indices (DeepSeek-V4's compressors) scores a padded row as unpadded, and the CP attention, which ignores the
-    mask, never reaches a pad from a real token. Under CP the rows are then right-padded to a multiple of ``cp_size``.
-    """
+    """One ``[chosen ⧺ rejected]`` batch for a single forward. Rows are flushed left so default positions are real
+    tokens' positions: attention reading absolute positions (Mistral4's llama-4 query scale) or cutting KV windows at
+    fixed indices (DeepSeek-V4's compressors) scores a padded row as unpadded, and mask-ignoring CP attention never
+    reaches a pad from a real token. Under CP rows are then right-padded to a multiple of ``cp_size``."""
     max_completion_len = max(
         batch["chosen_input_ids"].shape[1],
         batch["rejected_input_ids"].shape[1],

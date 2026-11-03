@@ -1,11 +1,5 @@
-"""The CP equivalence harness: its roster covers every Ulysses wrapper class, its CPU stand-in for the flash
-kernel keeps its contract, two launches of today's CP code match bit for bit, the envelope rule judges a base that
-does not repeat, each seeded change to the CP path shows up in exactly the records it touches, a negative control
-that raises fails the verdict, a family either tree's roster lacks is skipped rather than handed to a producer, and
-a tree whose harness cannot import fails with its own error.
-
-Run: python tests/cpu/parallelism/test_cp_equivalence_harness.py
-"""
+"""The CP equivalence harness: roster coverage, flash stand-in contract, bitwise repeat, the envelope rule, seeded
+deltas, and failure handling."""
 
 import contextlib
 from pathlib import Path
@@ -49,8 +43,7 @@ from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import tiny_family_model
 
 MODULE = produce.__module__
-# A windowed family per wrapper path that windows (GPT-OSS on the optimized path with its own rotary, Cohere2 MoE
-# on its interleaved one) and an unwindowed one.
+# A windowed family per wrapper path that windows, and an unwindowed one.
 SAMPLE_FAMILIES = ("gpt_oss", "cohere2_moe", "qwen3")
 ATTEND = UlyssesAttention._attend
 CP_LOSS = UlyssesModel._compute_cp_loss
@@ -75,7 +68,7 @@ def _halved_cp_loss(self, logits, labels):
 
 
 def _chunk_local_llama4_scale(self, q, k, cos, sin, position_ids=None):
-    """The llama-4 query scale read off positions restarting at each chunk instead of the sequence's."""
+    """Read off positions restarting at each chunk instead of the sequence's."""
     return APPLY_ROTARY(self, q, k, cos, sin, position_ids % position_ids.shape[-1])
 
 
@@ -130,7 +123,6 @@ def test_the_roster_covers_every_ulysses_wrapper_class_with_one_model_class_per_
 
 
 def _tree_harness(tree: Path, source: str) -> Path:
-    """A tree whose CP harness module is ``source``."""
     package = tree
     for part in MODULE.split(".")[:-1]:
         package = package / part
@@ -141,9 +133,7 @@ def _tree_harness(tree: Path, source: str) -> Path:
 
 
 def test_a_family_a_tree_roster_lacks_is_skipped_rather_than_handed_to_a_producer(tmp_path):
-    """A producer refuses a ``--families`` name its own roster lacks, so the comparison runs the requested families
-    both trees hold and names every family one tree lacks, requested or not; each roster is read off that tree's
-    own harness module."""
+    """A producer refuses a ``--families`` name its own roster lacks; each roster is read off that tree's harness."""
     trees = {
         "base": _tree_harness(tmp_path / "base", 'FAMILIES = {"qwen3": None, "gpt_oss": None, "glm4": None}\n'),
         "head": _tree_harness(tmp_path / "head", 'FAMILIES = {"qwen3": None, "qwen3_moe": None, "gpt_oss": None}\n'),
@@ -194,7 +184,7 @@ def test_the_reference_attention_refuses_a_keyword_it_does_not_implement():
 
 
 def test_two_launches_of_every_family_match_bit_for_bit(tmp_path):
-    """Base against base: each run is its own ``torchrun`` launch, as ``make verify-cp`` runs them."""
+    """Each run is its own ``torchrun`` launch, as ``make verify-cp`` runs them."""
     outputs = [tmp_path / "first", tmp_path / "second"]
     for output in outputs:
         run_in_tree(REPO_ROOT, MODULE, "--produce", str(output), "--tier", "cpu", nproc=CP_SIZE)

@@ -1,5 +1,5 @@
-"""The non-finite step guard (``halo/trainers/step_guard.py``) composed as every distributed trainer composes it, on
-a toy model, for tests that drive its verdict one optimizer step at a time without a training loop."""
+"""The non-finite step guard composed as every distributed trainer composes it, on a toy model, for one-step-at-a-time
+tests."""
 
 from types import SimpleNamespace
 
@@ -11,8 +11,8 @@ from halo.trainers.step_guard import NonFiniteStepGuardMixin
 
 
 class HFBase:
-    """The transformers methods the guard extends: the norm as the trainer runs it, and a log/save/evaluate pass
-    that records what the optimizer's state counted when it ran, as a checkpoint written there would."""
+    """The transformers methods the guard extends: the norm, and a log/save/evaluate pass recording the optimizer
+    state's count."""
 
     _get_grad_norm = Trainer._get_grad_norm
 
@@ -32,8 +32,8 @@ def guarded(
     device: str = "cpu",
     dtype: torch.dtype = torch.float32,
 ) -> Guarded:
-    """The guard over a ``Linear(4, 2)`` in ``dtype`` on ``device`` that ``optimizer_cls`` steps; ``install`` routes
-    the optimizer's step through it, as ``create_optimizer`` does."""
+    """The guard over a ``Linear(4, 2)``; ``install`` routes the optimizer's step through it, as ``create_optimizer``
+    does."""
     torch.manual_seed(0)
     me = object.__new__(Guarded)
     me.model = torch.nn.Linear(4, 2).to(device=device, dtype=dtype)

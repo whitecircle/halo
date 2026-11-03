@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""Qwen3.8-Flash-Next's multimodal class (``Qwen4ExpForConditionalGeneration``) under the family patches, loaded as a
-run loads it: its text tower runs the document forwards behind the vision tower.
-
-An image batch, padded, computes transformers' logits, and a packed text row keeps each document to itself there
-too, where transformers' forwards leak it into the next.
-
-    python tests/cpu/models/test_qwen4_exp_composite.py
-"""
+"""``Qwen4ExpForConditionalGeneration`` under the family patches, loaded as a run loads it: its text tower runs the
+document forwards behind the vision tower."""
 
 import pytest
 import torch
@@ -31,7 +25,6 @@ VOCAB = 1000
 
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory) -> str:
-    """The tiny composite, random norm weights included, saved as transformers saves it."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_VLM_FAMILIES["qwen4_exp"])
     with torch.no_grad():

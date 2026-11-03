@@ -1,33 +1,9 @@
 #!/usr/bin/env python
-"""DPO / KTO reference-log-prob PRECOMPUTE under Expert Parallelism (ep2, tiny Qwen3-MoE).
+"""DPO / KTO reference-log-prob precompute under EP (ep2, tiny Qwen3-MoE), on rank-private dataset directories.
 
-``precompute_ref_log_probs`` is the only way to run a *full-finetune* DPO/KTO under EP: the
-reference model cannot be parallelized, so the EP-patched policy is swept once inside ``__init__``
-and the log-probs become dataset columns. TRL hands them to the ranks through an Arrow cache file
-the main process writes beside the dataset and every rank reads back, which fails wherever the
-ranks do not share that directory. ``TRLPreferenceMixin`` runs the sweep itself
-and attaches the gathered columns in memory on every rank.
-
-This test pins that seam three ways, and fails when any of them breaks:
-
-  * **the mechanism** — each rank loads the dataset from its OWN directory, the shape of per-node
-    storage, so no rank can read a file another rank wrote beside its copy. Every rank must end
-    with the same columns.
-  * **the values** — the cached columns must equal per-sequence reference log-probs recomputed on a
-    DENSE, un-EP-patched copy of the same seeded weights, row by row, under TRL's exact shifted
-    completion-mask convention. This catches a sweep that silently ran on the wrong rows (a
-    mis-ordered ``gather_for_metrics``), on a stale cache from another model, or that copied rank
-    0's log-probs onto rank r's rows. Anti-vacuity: the same comparison with chosen/rejected swapped
-    (DPO) or against the mismatched KL completions (KTO) must MISS by orders of magnitude.
-  * **no deadlock** — construction and a short ``train()`` complete. A rank failing on a missing
-    file leaves its peers in the next collective, so the manifest timeout is the assertion; keep it
-    tight.
-
-Also pins the pre-sharded rejection (per-rank shards + one gathered set of log-probs = every
-non-zero rank training on rank 0's log-probs).
-
-Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_preference_precompute.py \
-         --trainer dpo
+The only way to run a full-finetune DPO/KTO under EP. TRL hands columns over through an Arrow cache beside the dataset,
+which fails wherever ranks don't share that directory, so ``TRLPreferenceMixin`` runs the sweep itself. A rank failing
+on a missing file leaves its peers in the next collective, so the manifest timeout is the assertion; keep it tight.
 """
 
 import argparse
@@ -53,22 +29,16 @@ N_STEPS = 4
 BATCH_SIZE = 2
 MAX_LENGTH = 96
 
-# The REAL Qwen tokenizer tokenizes the text rows, so the tiny model must span its full id range.
+# The real Qwen tokenizer tokenizes the text rows, so the tiny model must span its full id range.
 VOCAB_SIZE = 151936
 
-# Per-sequence log-prob sums run to ~-1e2 (untrained model over a 151936-way vocab). The EP path
-# routes the expert FFN through DeepEP dispatch/combine in bf16 while the reference runs the dense
-# HF experts, so the two agree only to bf16 kernel/reduction-order noise: measured max relative
-# error on this model is 3.1e-3. 1e-2 clears that floor without flaking, and still sits two orders
-# of magnitude under the smallest real bug this can see — a swapped or permuted row moves the sum
-# by ~1.0 relative (measured by the controls below).
+# bf16 kernel and reduction-order noise against the dense reference: measured max relative error 3.1e-3 on sums of
+# ~-1e2. A swapped or permuted row moves the sum by ~1.0 relative, two orders above this.
 LOGP_RTOL = 1e-2
-# The controls must MISS by far more than the tolerance, or the comparison proves nothing.
 CONTROL_MIN_RTOL = 0.05
 
 
 def build_model() -> Qwen3MoeForCausalLM:
-    """The seeded tiny MoE. Called identically on every rank and for the dense reference."""
     torch.manual_seed(1234)
     config = Qwen3MoeConfig(
         **{**TINY_QWEN3_MOE_CONFIG, "vocab_size": VOCAB_SIZE},
@@ -79,12 +49,8 @@ def build_model() -> Qwen3MoeForCausalLM:
 
 
 def build_rows(kind: str) -> dict:
-    """Text preference rows with RAGGED completion lengths.
-
-    Ragged chosen/rejected lengths are what give the swap control its teeth: two completions of
-    equal length over an untrained model would sum to nearly the same log-prob, and a swapped-row
-    comparison would then pass by accident.
-    """
+    """Ragged lengths give the swap control its teeth: equal-length completions on an untrained model sum to nearly the
+    same."""
     rows: dict[str, list] = {"prompt": []}
     for i in range(N_ROWS):
         rows["prompt"].append(f"Question {i}: what is {i} plus {i}?")
@@ -102,24 +68,16 @@ def build_rows(kind: str) -> dict:
 
 
 def rank_private_dataset(kind: str, ctx, subdir: str) -> Dataset:
-    """The dataset loaded from this rank's OWN arrow directory, as per-node storage leaves it.
-
-    TRL's cache lives beside the dataset's arrow files, so here the main process's cache file is
-    invisible to every other rank: a sweep that hands the columns over through it fails on them.
-    """
+    """From this rank's own arrow directory, as per-node storage leaves it, so another rank's cache file is
+    invisible."""
     path = os.path.join(ctx.output_dir, subdir, f"{kind}_dataset")
     Dataset.from_dict(build_rows(kind)).save_to_disk(path)
     return load_from_disk(path)
 
 
 def sequence_logprobs(model, prompt_ids: list[list[int]], completion_ids: list[list[int]], device) -> torch.Tensor:
-    """TRL's reference log-prob per row, on a DENSE model, independent of ``halo/``.
-
-    Mirrors ``compute_ref_log_probs``: forward prompt⧺completion, shift by one, score the tokens the
-    shifted completion mask marks, sum. Both TRL collators right-pad only, so under causal attention
-    a row's value does not depend on the batch it was collated with — one row per forward is
-    numerically the same batch of one.
-    """
+    """TRL's reference log-prob per row on a dense model, independent of ``halo/``. Both TRL collators right-pad, so
+    under causal attention one row per forward is numerically the same as any batch."""
     values = []
     for prompt, completion in zip(prompt_ids, completion_ids, strict=True):
         ids = torch.tensor([prompt + completion], device=device)
@@ -188,7 +146,6 @@ def run(ctx):
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
-    # ── The values: the cached columns vs a DENSE reference over the trainer's OWN tokenized rows.
     prepared = trainer.train_dataset
     columns = prepared.column_names
     reference_model = build_model().to(ctx.device).eval()
@@ -196,12 +153,12 @@ def run(ctx):
 
     if kind == "dpo":
         completions = {"ref_chosen_logps": prepared["chosen_ids"], "ref_rejected_logps": prepared["rejected_ids"]}
-        # Control: score each row's REJECTED completion against the CHOSEN column (and vice versa).
+        # Control: each row's rejected completion against the chosen column, and vice versa.
         controls = {"ref_chosen_logps": prepared["rejected_ids"], "ref_rejected_logps": prepared["chosen_ids"]}
     else:
         completions = {"ref_logps": prepared["completion_ids"]}
-        # Control: the KL column comes from the MISMATCHED completions TRL cycles within a batch, so
-        # scoring the true completions against it must miss.
+        # Control: the KL column comes from the mismatched completions TRL cycles in a batch, so true completions must
+        # miss.
         controls = {"ref_logps": prepared["KL_completion_ids"]} if trainer.calculate_KL else {}
         if trainer.calculate_KL:
             completions["ref_KL_logps"] = prepared["KL_completion_ids"]
@@ -219,11 +176,10 @@ def run(ctx):
         error = max_relative_error(actual, reference)
         metrics[f"{name}_max_rel_err"] = error
         checks[f"{name}_matches_dense_reference"] = error < LOGP_RTOL
-        # Anti-vacuity: real, non-degenerate values (an all-zero or constant column would match a
-        # broken reference trivially).
+        # Anti-vacuity: an all-zero or constant column would match a broken reference trivially.
         checks[f"{name}_finite"] = bool(torch.isfinite(actual).all())
         checks[f"{name}_nondegenerate"] = bool(actual.std() > 1.0 and actual.abs().min() > 1.0)
-        # Every rank must hold the same values byte-for-byte, each from its own gather.
+        # Byte for byte, each from its own gather.
         checks[f"{name}_identical_across_ranks"] = all_ranks_agree(actual.tolist(), ctx)
         if name in controls:
             control_error = max_relative_error(
@@ -232,14 +188,13 @@ def run(ctx):
             metrics[f"{name}_control_rel_err"] = control_error
             checks[f"{name}_control_misses"] = control_error > CONTROL_MIN_RTOL
 
-    # ── No deadlock through the training loop either (the sweep leaves the EP buffers live).
+    # No deadlock through the training loop (the sweep leaves the EP buffers live).
     checks.update(training_run_checks(trainer.train(), trainer, N_STEPS, grad_norms=True))
     losses = step_losses(trainer)
     checks["every_step_logged"] = len(losses) == N_STEPS
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    # ── Pre-sharded data + one gathered set of log-probs would train every non-zero rank on rank 0's
-    # log-probs; that must raise rather than silently mis-train.
+    # Pre-sharded data + one gathered set would train every non-zero rank on rank 0's log-probs, so this must raise.
     try:
         trainer_cls(
             model=model,

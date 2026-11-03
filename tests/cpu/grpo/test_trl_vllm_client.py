@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``TrlVLLMClient``: the request it sends vLLM, the ids it hands TRL, and every use TRL makes of it.
-
-The completion ids must be the server's sampled ``token_ids``: ids rebuilt from the decoded text can
-differ from the sampled stream token for token, which silently desyncs the GRPO importance-sampling
-ratio, so a missing field raises. Online GRPO installs the class in place of TRL's ``VLLMClient`` and
-TRL keeps the instance, so a method or keyword TRL uses that the class lacks fails only mid-run, at the
-first generation or weight sync. The surface tests read TRL's own source, so a TRL bump that uses
-something new fails here.
-"""
+"""``TrlVLLMClient``: the request it sends vLLM, the ids it hands TRL, and every use TRL makes of it. A method or
+keyword TRL uses that the class lacks fails only mid-run, so the surface tests read TRL's own source."""
 
 import ast
 import inspect
@@ -34,10 +27,7 @@ class _JsonReply:
 
 
 def _serve(choices: list[dict], tokens: dict[str, list[int]] | None = None):
-    """A real client whose server tokenizes from ``tokens`` and answers completions with ``choices``.
-
-    Returns the client, the texts sent to ``/tokenize`` and the ``/v1/completions`` bodies, in order.
-    """
+    """Returns a real client, the texts sent to ``/tokenize`` and the ``/v1/completions`` bodies, in order."""
     tokens = {"prompt": [11, 12]} if tokens is None else tokens
     tokenized, bodies = [], []
 
@@ -58,10 +48,8 @@ def _serve(choices: list[dict], tokens: dict[str, list[int]] | None = None):
 
 
 def test_generate_sends_one_completions_request_carrying_every_sampling_field():
-    """``generation_kwargs`` override the named fields but not ``return_token_ids``, ``logprobs`` is
-    floored at 1 (the route fills ``token_logprobs`` only from 1, and GRPO asks for 0), the regex goes
-    out as ``structured_outputs`` (the server keeps an unknown field such as ``guided_regex`` without
-    applying it), and only text prompts go through ``/tokenize``."""
+    """``logprobs`` is floored at 1 (the route fills ``token_logprobs`` only from 1, and GRPO asks for 0), and the
+    regex goes out as ``structured_outputs`` (the server keeps an unknown field like ``guided_regex`` unapplied)."""
     client, tokenized, bodies = _serve([], tokens={"p": [11, 12]})
 
     out = client.generate(
@@ -189,9 +177,8 @@ def test_choices_are_returned_in_index_order():
 
 
 def test_generate_raises_when_the_server_omits_token_ids():
-    """A server that ignores ``return_token_ids`` must stop the rollout, not be worked around:
-    ids rebuilt from the decoded text can disagree with the sampled stream and silently desync the
-    GRPO importance-sampling ratio, which no later gate catches."""
+    """Ids rebuilt from the decoded text can disagree with the sampled stream and silently desync the GRPO IS ratio,
+    which no later gate catches."""
     client, _, _ = _serve(
         [
             {
@@ -208,8 +195,8 @@ def test_generate_raises_when_the_server_omits_token_ids():
 
 
 def test_a_prompt_with_an_image_is_refused_before_any_request():
-    """The completions route is text-only: an image would be dropped and the rollout image-blind. TRL
-    processes images through ``image_features`` before it generates with the features it returns."""
+    """The completions route is text-only, so an image would be dropped and the rollout image-blind. TRL processes
+    images through ``image_features`` before it generates with the features it returns."""
     client, tokenized, bodies = _serve([])
 
     with pytest.raises(NotImplementedError, match="text-only"):
@@ -239,8 +226,7 @@ def test_no_prompts_sends_no_request():
 
 
 def _client_references() -> tuple[set[str], set[str]]:
-    """What TRL reads off ``self.vllm_client`` outside the methods online GRPO replaces: every
-    attribute, and the subset it calls."""
+    """Attributes TRL reads off ``self.vllm_client`` outside the methods online GRPO replaces, and those it calls."""
     replaced = {
         id(node)
         for function in ast.walk(_TRL_TREE)

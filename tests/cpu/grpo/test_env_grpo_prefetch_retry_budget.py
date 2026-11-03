@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""Env-GRPO refuses a prefetched round that spans more weight syncs than a turn's retries on an engine whose
-pause aborts the turns in flight.
-
-The refusal reads ``PAUSE_ABORTS_IN_FLIGHT`` off the configured backend's client: SGLang's pause aborts the turns
-in flight, vLLM's keeps them. The rollout actor re-issues an aborted turn up to ``max_retries`` times before its
-episode fails. A prefetched round is in flight from the step that submits it to the one that trains it
-``prefetch_depth`` rounds later, ``steps_per_generation × num_iterations ÷ gradient_accumulation_steps`` optimizer
-steps per round, so with a sync every ``sync_weights_every_n_steps`` it can span the ceiling of their quotient.
-Above ``max_retries`` the run is refused at trainer construction; a run that does not prefetch rolls no round out
-across a sync, and one server that opts in (``enable_prefetch: true``) spans the syncs as several do. Each client
-with that one fact flipped takes the other verdict.
-
-Every shipped env-GRPO recipe passes as shipped; each shipped SGLang recipe is refused at ``prefetch_depth: 2``
-and passes the same depth on vLLM, with syncs half as often, or with a retry per sync. The script runs the same
-refusal ahead of the model load.
-
-    python tests/cpu/grpo/test_env_grpo_prefetch_retry_budget.py
-"""
+"""Env-GRPO refuses a prefetched round spanning more weight syncs than a turn's retries on an engine whose pause aborts
+the turns in flight. The span is ``prefetch_depth`` rounds of optimizer steps, rounded up to whole sync periods."""
 
 import dataclasses
 from types import SimpleNamespace
@@ -51,20 +35,17 @@ class _ModelLoadReached(Exception):
 
 
 def _script_parse(config, *overrides: str) -> tuple:
-    """Every dataclass the script parses, as a launch of the recipe with ``overrides`` builds them."""
     parser = parser_for(ENV_GRPO_SCRIPT)
     return parser.parse_dict(parser.load_values([str(config), *overrides]))
 
 
 def _parsed(config, *overrides: str) -> tuple[AsyncRolloutConfig, GRPOConfig]:
-    """The recipe's rollout and GRPO configs as a launch with ``overrides`` builds them."""
     parsed = _script_parse(config, *overrides)
     async_config = next(obj for obj in parsed if isinstance(obj, AsyncRolloutConfig))
     return async_config, next(obj for obj in parsed if isinstance(obj, GRPOConfig))
 
 
 def _gate(async_config: AsyncRolloutConfig, args: GRPOConfig) -> None:
-    """The refusal as the trainer and the script run it: against the configured backend's client."""
     reject_prefetch_past_retry_budget(resolve_weight_sync_client(async_config.rollout_backend), async_config, args)
 
 
@@ -127,8 +108,7 @@ def test_a_round_within_its_retry_budget_or_on_vllm_passes(config, overrides):
 
 
 def test_a_single_sglang_server_at_the_default_prefetch_passes_any_round_length():
-    """One server at the default ``enable_prefetch`` does not prefetch: every round collects on the trainer thread
-    between syncs, so no sync lands on it however many steps it trains."""
+    """One server does not prefetch by default: every round collects on the trainer thread between syncs."""
     async_config, args = _parsed(_GPTOSS_SGLANG, "--num_iterations=2")
     async_config = dataclasses.replace(
         async_config, rollout_server_configs=None, enable_prefetch=AsyncRolloutConfig.enable_prefetch
@@ -143,8 +123,7 @@ def test_a_single_sglang_server_at_the_default_prefetch_passes_any_round_length(
     ids=["depth2", "two-iterations-per-round", "depth1"],
 )
 def test_a_single_sglang_server_that_opts_in_is_held_to_the_same_budget(overrides, syncs):
-    """``enable_prefetch: true`` prefetches on one server, whose every sync aborts the round's turns as two servers'
-    do: the same span is refused, and the shipped one-sync span passes."""
+    """``enable_prefetch: true`` prefetches on one server, whose every sync aborts the round's turns as with two."""
     async_config, args = _parsed(_GPTOSS_SGLANG, "--enable_prefetch=true", *overrides)
     async_config = dataclasses.replace(async_config, rollout_server_configs=None)
     assert async_config.prefetch_active() and len(async_config.get_server_urls()) == 1
@@ -157,8 +136,7 @@ def test_a_single_sglang_server_that_opts_in_is_held_to_the_same_budget(override
 
 @pytest.mark.parametrize("backend", rollout_backends())
 def test_the_refusal_follows_the_clients_declared_pause(backend):
-    """The same depth-2 round, two syncs on one retry, against the backend's client and a copy of it with only
-    ``PAUSE_ABORTS_IN_FLIGHT`` flipped: refused exactly under the client that declares an aborting pause."""
+    """Two syncs on one retry, against the backend's client and a copy with only ``PAUSE_ABORTS_IN_FLIGHT`` flipped."""
     async_config, args = _parsed(_GPTOSS_SGLANG, "--prefetch_depth=2", f"--rollout_backend={backend}")
     client = resolve_weight_sync_client(backend)
     flipped = type(
@@ -174,8 +152,7 @@ def test_the_refusal_follows_the_clients_declared_pause(backend):
     ("overrides", "refused"), [(["--prefetch_depth=2"], True), ([], False)], ids=["depth2", "shipped"]
 )
 def test_the_script_refuses_before_the_model_load(monkeypatch, overrides, refused):
-    """The trainer's refusal follows the policy load, minutes on a large model on every rank; the script runs it
-    first, and lets the shipped recipe through to the load."""
+    """The trainer's refusal follows the policy load, minutes on a large model on every rank."""
     parsed = _script_parse(_GPTOSS_SGLANG, *overrides)
 
     def model_load(*_args, **_kwargs):

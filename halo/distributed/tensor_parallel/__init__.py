@@ -1,3 +1,1 @@
-"""Tensor parallelism, two mechanisms: HF-native ``tp_plan="auto"`` for dense models and selective attention-only TP
-for MoE models (EP owns the experts), both computing their linears on the local shards, plus the plain-tensor shards
-both leave on the model."""
+"""Tensor parallelism: HF-native ``tp_plan="auto"`` for dense models, selective attention-only TP for MoE."""

@@ -1,12 +1,9 @@
 #!/usr/bin/env python
-"""A tiny ``TINY_MOE_FAMILIES`` model under EP=2 against the stock model it was copied from: loss, and every
-gradient of every MoE block, the experts through the export's own gather and layout transform.
-``--expert-tp-size 2`` splits each expert FFN two ways as well (ep2 x etp2 on four ranks, pure ETP on two).
-A family in ``PINNED_ROUTING_FAMILIES`` runs its stock model on the EP model's top-k picks
-(:func:`tests.common.routed_first_step.pinned_reference_routing`), which must be the stock router's own up to bf16
-near-ties and name each expert of a token once.
+"""A tiny ``TINY_MOE_FAMILIES`` model under EP=2 against the stock model it was copied from: loss and every MoE block
+gradient.
 
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family qwen3_moe
+``--expert-tp-size 2`` also splits each expert FFN two ways. A ``PINNED_ROUTING_FAMILIES`` member runs its stock model
+on the EP model's top-k picks, which must be the stock router's own up to bf16 near-ties.
 """
 
 import argparse
@@ -44,12 +41,10 @@ from tests.common.tolerances import TOL
 
 SEED = 42
 BATCH, SEQ = 2, 64
-# The gradient-direction floor the Inkling EP and Bailing V3 block comparisons hold: bf16 gradients of a tiny model,
-# where fp32 EP routing against bf16 stock scoring flips occasional near-ties. Expert TP keeps the default floor.
+# bf16 gradients of a tiny model, where fp32 EP routing against bf16 stock scoring flips occasional near-ties.
 TIGHT_GRAD_COS_MIN = 0.97
 GRAD_COS_MIN = {"inkling_text": TIGHT_GRAD_COS_MIN}
-# Knobs each EP layer must adopt from its block rather than default, as the tiny configs set them; Cohere2's
-# "average" shared-expert combination halves the sum.
+# Knobs each EP layer must adopt from its block; Cohere2's "average" shared-expert combination halves the sum.
 ADOPTED_KNOBS = {
     "cohere2_moe": {"_output_scale": 0.5, "expert_selection_fn": "sigmoid"},
     "glm4_moe_lite": {
@@ -63,7 +58,7 @@ ADOPTED_KNOBS = {
     },
     "step3p7": {"routed_scaling_factor": TINY_STEP3P7_CONFIG["moe_router_scaling_factor"]},
 }
-# Ling-3.0-tiny's config shrunk to one small MoE block; hidden 256 sits at DeepEP's token-dim padding boundary.
+# Ling-3.0-tiny shrunk to one small MoE block; hidden 256 sits at DeepEP's token-dim padding boundary.
 BAILING_V3_BLOCK = {
     "hidden_size": 256,
     "moe_intermediate_size": 64,
@@ -74,14 +69,13 @@ BAILING_V3_BLOCK = {
     "topk_group": 1,
     "hidden_act": "silu",
 }
-# bf16 grouped GEMM against the stock block's per-expert loop, which accumulates in another order.
+# bf16 grouped GEMM against the stock per-expert loop, which accumulates in another order.
 BAILING_V3_OUTPUT_TOL = 2e-2
 
 
 def _stock_expert_grads(experts: nn.Module) -> dict[str, torch.Tensor | None]:
-    """The stock expert container's gradients as fused banks (``[E, 2M, H]`` gate-up and ``[E, H, M]`` down, or
-    GPT-OSS's interleaved banks and biases); Bailing's per-expert modules are stacked into that form, an expert no
-    token reached at zero."""
+    """As fused banks, or GPT-OSS's interleaved banks and biases; Bailing's per-expert modules are stacked, an
+    unreached expert at zero."""
     if not isinstance(experts, nn.ModuleList):
         return {name: param.grad for name, param in experts.named_parameters()}
     banks = {
@@ -97,9 +91,8 @@ def _stock_expert_grads(experts: nn.Module) -> dict[str, torch.Tensor | None]:
 
 
 def _compare_blocks(model, reference, ep_cls: type, ep_size: int, metrics: dict, *, cos_min: float) -> dict[str, bool]:
-    """COLLECTIVE (the expert gradient gather). ``model``'s EP layers against the stock blocks of ``reference`` they
-    replaced: one ``ep_cls`` layer per block, nothing else changed, the bank split ``ep_size`` ways, every gradient
-    of the block matching; then bias balancing adopts the family's exported slot."""
+    """COLLECTIVE (the expert gradient gather). EP layers against the stock blocks they replaced, then bias balancing
+    adopts the family's exported slot."""
     blocks = dict(ep_claimed_blocks(reference))
     layers = dict(named_ep_layers(model))
     unclaimed = [
@@ -128,8 +121,8 @@ def _compare_blocks(model, reference, ep_cls: type, ep_size: int, metrics: dict,
                 hasattr(layer, "gate_proj") and hasattr(layer, "up_proj") and not hasattr(layer, "gate_up_proj")
             )
         if layer.expert_tp_rank > 0:
-            # A tensor expert TP cannot shard (GptOss's down bias) stays whole on expert-TP rank 0, which compares
-            # it; a copy here would be added once per partner by the token-space reduce.
+            # A tensor expert TP can't shard (GptOss's down bias) stays whole on expert-TP rank 0; a copy here would be
+            # added once per partner by the token-space reduce.
             etp_unsharded_on_rank0.append(
                 all(name in layer.EXPERT_TP_SHARD_DIMS for name, _ in layer.expert_named_params())
             )
@@ -158,9 +151,8 @@ def _compare_blocks(model, reference, ep_cls: type, ep_size: int, metrics: dict,
 
 
 def _bailing_v3_block_checks(model, layers, input_ids) -> dict[str, bool]:
-    """EP claims Ling 3.0's MoE block on the strength of its being V2's (per-expert modules, gate arithmetic), so
-    the stock V3 block is compared with its wrapper alone: the decoder's KDA layers JIT ``fla`` kernels and test
-    nothing about experts."""
+    """EP claims Ling 3.0's block on the strength of its being V2's, so the stock V3 block is compared alone: the
+    decoder's KDA layers JIT ``fla`` kernels and test nothing about experts."""
     config = AutoConfig.from_pretrained(BAILING_LING_3_TINY, trust_remote_code=True)
     config.update(BAILING_V3_BLOCK)
     block_cls = get_class_from_dynamic_module(
@@ -174,7 +166,7 @@ def _bailing_v3_block_checks(model, layers, input_ids) -> dict[str, bool]:
     outputs = []
     for container in (stock, wrapped):
         out = container.mlp(hidden)
-        out = out[0] if isinstance(out, tuple) else out  # the stock block also returns its router logits
+        out = out[0] if isinstance(out, tuple) else out  # The stock block also returns its router logits.
         out.sum().backward()
         outputs.append(out.detach().float())
     sweep_ep_grads(wrapped)
@@ -204,8 +196,8 @@ def _deepseek_v4_checks(model, layers, input_ids) -> dict[str, bool]:
 
 
 def _step3p7_checks(model, layers, input_ids) -> dict[str, bool]:
-    """Per-layer clamp bounds (0 = unclamped, stored as inf); no aux machinery in the modeling and a native exported
-    slot make ``auto`` balancing ``bias_update``."""
+    """Per-layer clamp bounds (0 = unclamped, stored as inf); a native exported slot makes ``auto`` balancing
+    ``bias_update``."""
     config = model.config.get_text_config()
     sparse = [index for index, kind in enumerate(config.mlp_layer_types) if kind == "sparse"]
     return {
@@ -215,7 +207,7 @@ def _step3p7_checks(model, layers, input_ids) -> dict[str, bool]:
     }
 
 
-# What a family checks beyond the shared comparison, after it: ``(model, EP layers, input_ids) -> checks``.
+# ``(model, EP layers, input_ids) -> checks``, after the shared comparison.
 FAMILY_CHECKS = {
     "bailing_moe": _bailing_v3_block_checks,
     "deepseek_v4": _deepseek_v4_checks,
@@ -223,18 +215,14 @@ FAMILY_CHECKS = {
 }
 
 
-# Families whose stock model runs on the EP model's top-k picks, each router's gate in
-# tests.common.routed_first_step.PINNED_GATE_WEIGHTS. The tiny GptOss's random-init routers hold exact bf16 logit ties
-# (top-2 of 8), so EP's and expert TP's reduction order flips a few picks per block and moves whole tokens' router and
-# expert gradients (router bias cosine down to 0.70 at ep2 x etp2) with no parallelism bug; pinned, both models route
-# alike and only the gradient math differs.
+# Each router's gate is in tests.common.routed_first_step.PINNED_GATE_WEIGHTS. The tiny GptOss's random routers hold
+# exact bf16 logit ties (top-2 of 8), so reduction order flips picks and moves whole tokens' gradients (router bias
+# cosine down to 0.70 at ep2 x etp2) with no parallelism bug.
 PINNED_ROUTING_FAMILIES = frozenset({"gpt_oss"})
 
 
 def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dict:
-    """COLLECTIVE. ``family``'s tiny model with its experts sharded over the world (``expert_tp_size``-way expert TP,
-    EP over the rest) against the stock model, on one batch every rank shares; ``cos_min`` floors every gradient's
-    direction."""
+    """COLLECTIVE. ``cos_min`` floors every gradient's direction."""
     pc = ParallelismConfig(ep_size=ctx.world_size // expert_tp_size, expert_tp_size=expert_tp_size)
     log(f"{family}: {pc.mode_string}")
     torch.manual_seed(SEED)
@@ -276,11 +264,10 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
     if pinned_routing:
         regret = metrics["pinned_pick_regret_max"] = max(pinned.regrets, default=math.nan)
         log(f"pinned picks: worst shortfall below the stock router's k-th logit {regret:.3e}")
-        # Every block pinned once, each pick the stock router's own or a near-tie of it; a wrong selection falls short
-        # by a whole top-k gap.
+        # A wrong selection falls short by a whole top-k gap.
         every_block_pinned = len(pinned.regrets) == len(layers) and not any(pinned.unconsumed.values())
         checks["ep_picks_are_reference_near_ties"] = every_block_pinned and regret <= TOL.router_near_tie_logit_abs
-        # A token naming one expert twice falls short by nothing, so its duplicates are counted apart.
+        # A token naming one expert twice falls short by nothing, so duplicates are counted apart.
         duplicated = metrics["pinned_duplicate_pick_tokens"] = routed.duplicate_pick_tokens()
         checks["ep_picks_are_distinct_experts"] = duplicated == 0
     ep_cls = ep_layer_class_by_model_type()[family]

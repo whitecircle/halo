@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: Ulysses CP's config-only gate refuses exactly the models declaring linear-attention layers.
-
-A meta-init shell instantiates no mixer, so the gate reads ``layer_types``; it reads them through the shared
-``has_linear_attention_layers`` predicate, so a composite release whose text sub-config alone declares the layers
-is refused as its text tower is. Swept over every transformers config.
-
-Run: python tests/cpu/parallelism/test_cp_linear_attention_gate.py
-"""
+"""Ulysses CP's config-only gate refuses exactly the models declaring linear-attention layers, read through
+``has_linear_attention_layers``. A meta shell instantiates no mixer; swept over every transformers config."""
 
 import pytest
 import torch.nn as nn
@@ -22,7 +16,7 @@ COMPOSITE_RELEASES = ("qwen3_5", "qwen3_5_moe", "glm5_next", "qwen4_exp")
 
 
 class _ConfigOnlyShell(nn.Module):
-    """A model before its modules are built: the config and nothing else."""
+    """The config and nothing else."""
 
     def __init__(self, config):
         super().__init__()
@@ -30,7 +24,7 @@ class _ConfigOnlyShell(nn.Module):
 
 
 def _default_configs():
-    """Every transformers config that builds with its defaults and names one text config."""
+    """That build with defaults and name one text config."""
     transformers.logging.set_verbosity_error()
     configs = {}
     for model_type in sorted(CONFIG_MAPPING.keys()):

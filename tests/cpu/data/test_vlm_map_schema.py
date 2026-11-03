@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""VLM map Arrow-schema stability on mixed datasets + cache-key coverage of captured helpers.
-
-Shard-wise type inference diverges when image rows and text-only rows land in different map worker
-shards (struct vs Json content, null vs Image lists). `vlm_map_features` pins the schema so the
-multiprocess map succeeds for every mix; `_closure_fingerprint` must cover closure-captured
-helper functions so editing them invalidates the dataset cache.
-
-Usage:
-    python tests/cpu/data/test_vlm_map_schema.py
-"""
+"""VLM map Arrow-schema stability on mixed datasets: ``vlm_map_features`` pins the schema, since shard-wise
+inference diverges when image and text rows land in different workers. ``_closure_fingerprint`` covers captured
+helpers, so editing one invalidates the cache."""
 
 import importlib.util
 
@@ -27,7 +20,7 @@ def _image(color: int) -> Image.Image:
 
 
 def _mixed_dataset() -> Dataset:
-    """Image rows first, text-only rows second — clusters modalities into separate map shards."""
+    """Image rows first, text-only rows second, clustering modalities into separate map shards."""
     rows = {
         "texts": (
             [[{"user": f"describe image {i}", "assistant": f"answer {i}"}] for i in range(4)]
@@ -70,7 +63,6 @@ def _probe_wrapper(tmp_path, module_name: str, helper_body: str):
 
 
 def test_function_identifier_covers_module_global_helpers(tmp_path):
-    """Editing a module-global helper a map function calls must change the caller's cache identity."""
     root = map_cache_key.__name__.partition(".")[0]
     id_a = function_cache_id(_probe_wrapper(tmp_path, f"{root}.fake_cache_probe_a", "x + 1"))
     id_b = function_cache_id(_probe_wrapper(tmp_path, f"{root}.fake_cache_probe_b", "x + 2"))
@@ -80,8 +72,8 @@ def test_function_identifier_covers_module_global_helpers(tmp_path):
 
 
 def test_helper_fold_follows_the_first_party_prefixes(tmp_path, monkeypatch):
-    """After a package rename a helper under the new root must still be folded, and one outside every
-    first-party root never is: the fold reads the derived prefixes, not a spelled-out package name."""
+    """The fold reads the derived prefixes, so a helper under a renamed root is still folded and one outside every
+    first-party root never is."""
     monkeypatch.setattr(map_cache_key, "_FIRST_PARTY_PREFIXES", ("renamed_pkg.", "scripts."))
     renamed = [
         function_cache_id(_probe_wrapper(tmp_path, f"renamed_pkg.fake_cache_probe_{i}", body))

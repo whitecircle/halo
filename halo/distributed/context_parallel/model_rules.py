@@ -15,13 +15,10 @@ from halo.models.config_access import get_config_field, text_config
 
 logger = logging.getLogger(__name__)
 
-# The labels CP accepts: the flash builds whose kernels its attention calls.
 SUPPORTED_ATTN_IMPLEMENTATIONS = VARLEN_ATTN_IMPLEMENTATIONS
 
 
 def _sequence_axis_detail(mechanism: str, remedy: str) -> str:
-    """A refusal for a layer carrying state along the sequence axis, which the Ulysses path never exchanges
-    across chunk boundaries."""
     return (
         f"{mechanism} over the sequence axis, which the Ulysses CP path does not halo-exchange across "
         f"ranks — a CP shard severs it at every chunk boundary. {remedy}"
@@ -38,8 +35,6 @@ _DEEPSEEK_V4_DETAIL = _sequence_axis_detail(
     "this DeepSeek-V4 compressor/indexer pools non-overlapping token windows",
     "DeepSeek-V4 does not support CP — use EP (and expert LoRA) instead.",
 )
-# Every family declaring the ``linear_attention`` layer type runs a causal convolution and a recurrent scan;
-# the config-only refusal for a model whose modules are not instantiated yet.
 _LINEAR_ATTENTION_DETAIL = _sequence_axis_detail(
     "a ``linear_attention`` layer runs a causal convolution and a recurrent scan",
     "Train the family without Context Parallelism, and shard the experts with EP instead.",
@@ -76,9 +71,8 @@ _UNSUPPORTED_SEQUENCE_AXIS_LAYERS: dict[str, str] = {
 
 
 def reject_unsupported_ulysses_model(model: nn.Module, cp_size: int) -> None:
-    """Raise :class:`CPConfigError` unless Ulysses CP can run ``model``: no layer carrying state along the
-    sequence axis, a wrapped attention class, a flash label where the family's own forward is what the label
-    describes, and Q/KV head counts ``cp_size`` divides."""
+    """Raise :class:`CPConfigError` unless Ulysses CP can run ``model``: no layer carrying sequence-axis state, a
+    wrapped attention class, a flash label where it describes the forward, and head counts ``cp_size`` divides."""
     config = model.config
     model_type = getattr(config, "model_type", "unknown")
     effective_config = text_config(config)

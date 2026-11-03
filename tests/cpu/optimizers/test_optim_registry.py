@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``register_custom_optimizers`` must create GENUINE ``OptimizerNames`` members (CPU).
-
-A planted plain-string attribute (the naive extension) makes ``OptimizerNames("muon")`` return a
-``str`` instead of a member, leaves ``OptimizerNames.MUON`` raising, keeps the name out of the
-argparse ``choices`` HfArgumentParser builds from member iteration (rejecting a pure-CLI
-``--optim muon``), and — because an enum member's hash follows its NAME — silently misses every
-value-keyed dict lookup unless ``optim_name`` normalizes first. Each of those seams is pinned here.
-
-Run: pytest tests/cpu/optimizers/test_optim_registry.py  (or python <file>)
-"""
+"""``register_custom_optimizers`` creates genuine ``OptimizerNames`` members. A planted string breaks
+``OptimizerNames.MUON``, CLI ``--optim muon``, and value-keyed lookups, since a member's hash follows its name."""
 
 import tempfile
 
@@ -24,9 +16,7 @@ CUSTOM_NAMES = tuple(NAMED_OPTIMIZER_BUILDERS)
 
 
 def test_the_registry_holds_the_optimizers_the_configs_name():
-    """Pins the parametrization source. Every test below loops over ``CUSTOM_NAMES`` with its
-    assertions inside the loop, so a registry entry lost from ``NAMED_OPTIMIZER_BUILDERS`` would
-    make them all pass vacuously while ``--optim muon`` stopped parsing for every Muon YAML."""
+    """A registry entry lost from ``NAMED_OPTIMIZER_BUILDERS`` would make the loops below pass vacuously."""
     assert set(CUSTOM_NAMES) == {"muon", "flash_adamw"}, f"custom-optimizer registry changed: {CUSTOM_NAMES}"
 
 
@@ -78,15 +68,13 @@ def test_stock_members_unaffected():
 
 
 def test_pure_cli_optim_parses():
-    """The user-facing seam: ``--optim muon`` on the CLI must pass HfArgumentParser's choices
-    (built from member iteration) and TrainingArguments' own validation."""
+    """Choices are built from member iteration."""
     for name in CUSTOM_NAMES:
         with tempfile.TemporaryDirectory() as tmp:
             parser = HfArgumentParser(TrainingArguments)
             (args,) = parser.parse_args_into_dataclasses(["--output_dir", tmp, "--optim", name])
             assert optim_name(args.optim) == name
-            # No `or args.optim == name` fallback: a planted plain string is the exact failure this
-            # module exists to catch, and the disjunct would accept it.
+            # An `or args.optim == name` fallback would accept the planted string.
             assert isinstance(args.optim, OptimizerNames)
 
 

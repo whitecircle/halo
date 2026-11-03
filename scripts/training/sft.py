@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""Distributed SFT (text or VLM): the model class follows the checkpoint, the data path the run (``resolve_vlm_run``).
-
-Usage: torchrun --nproc_per_node=8 scripts/training/sft.py examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
-"""
+"""Distributed SFT (text or VLM): the model class follows the checkpoint, the data path the run."""
 
 import logging
 
@@ -93,8 +90,7 @@ def _reject_empty_split(dataset, split: str, max_length: int) -> None:
 
 
 def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_kwargs):
-    """Raw splits to tree rows, as ``(train, eval)``; ``processor_kwargs`` are the render and map arguments of
-    the flat path."""
+    """``processor_kwargs`` are the render and map arguments of the flat path."""
     reject_unusable_response_marker(
         tokenizer, args.assistant_message_template, args.train_on_completions_only, "tree packing"
     )
@@ -114,13 +110,11 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
 
 
 def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
-    """COLLECTIVE: raw text splits to ``(train, eval, generate)``: one chat-template tokenize, as flat rows or
-    trees, then the packing; ``generate`` is ``None`` unless ``generate_eval_examples`` is set."""
+    """COLLECTIVE: ``(train, eval, generate)``, one chat-template tokenize as flat rows or trees, then the packing."""
     render_kwargs = text_render_kwargs(args)
     num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
     generate_dataset = None
-    # Only for the examples callback, its one reader: the map tokenizes the whole test split. From the raw split,
-    # before the train map consumes it.
+    # Only for the examples callback, as the map tokenizes the whole test split; before the train map consumes it.
     if args.generate_eval_examples:
         generate_dataset = coordinated_map_and_filter(
             ds["test"],
@@ -154,8 +148,6 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
 
 
 def _verify_metadata(metadata, args, sft_config, model_config, processing_class) -> None:
-    """Verify the pre-processed dataset's metadata against this run's length, model, masking, render, packing and
-    the chat template ``processing_class`` (the trainer's, after the tokenizer setup) exports."""
     verify_preprocessed_dataset(
         metadata,
         required_max_length=sft_config.max_length,
@@ -168,8 +160,8 @@ def _verify_metadata(metadata, args, sft_config, model_config, processing_class)
 
 
 def _packs_rows(sft_config, metadata) -> bool:
-    """Whether the collator packs: a pre-processed corpus (``metadata``) as it was baked, since offline-packed rows
-    still need the packing collator's per-document position_ids, a raw one as ``packing`` says."""
+    """A pre-processed corpus as it was baked, since offline-packed rows still need the packing collator's per-document
+    position_ids; a raw one as ``packing`` says."""
     return metadata.packed if metadata is not None else sft_config.packing
 
 
@@ -184,8 +176,7 @@ def _prepare_text_data(
     parallelism_config,
     hf_config,
 ):
-    """Text dataset path: the pre-processed splits as baked (``metadata`` set), or the raw ones tokenized and
-    packed; returns ``(train, eval, generate, collator)``."""
+    """Pre-processed splits as baked, or raw ones tokenized and packed; ``(train, eval, generate, collator)``."""
     if metadata is not None:
         _verify_metadata(metadata, args, sft_config, model_config, processing_class)
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
@@ -207,8 +198,8 @@ def _prepare_text_data(
         tokenizer=tokenizer,
         padding_free=sft_config.padding_free,
         packing=_packs_rows(sft_config, metadata),
-        # Preprocessed labels are baked (completion masking included); runtime re-masking would overwrite them —
-        # re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
+        # Preprocessed labels are baked; re-masking a chunk whose marker landed in the previous chunk would drop
+        # trained tokens.
         train_on_completions_only=args.train_on_completions_only and metadata is None,
         assistant_message_template=args.assistant_message_template,
         pad_to_multiple_of=pad_to_multiple_of,
@@ -227,8 +218,8 @@ def _prepare_text_data(
 def _prepare_vlm_data(
     ds, metadata: PreprocessedDatasetMetadata | None, args, sft_config, model_config, processor, tokenizer, hf_config
 ):
-    """VLM dataset path: the pre-processed splits as baked (``metadata`` set), or the raw VLM map; returns
-    ``(train, eval, None, collator)``, since GenerateExamplesCallback needs tokenized input_ids."""
+    """The pre-processed splits as baked, or the raw VLM map; returns ``(train, eval, None, collator)``, since
+    GenerateExamplesCallback needs tokenized input_ids."""
     if metadata is None:
         train_dataset, eval_dataset, collator = prepare_raw_vlm_split(
             ds, args, sft_config, processor, tokenizer, hf_config, desc="Processing train/eval dataset"

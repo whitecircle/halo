@@ -1,28 +1,9 @@
 #!/usr/bin/env python
-"""End-to-end pipeline parallelism through the real OfflineGRPOTrainer (kl_beta == 0; the KL term
-has its own gate, test_pp_offline_grpo_kl.py).
+"""End-to-end PP through the real OfflineGRPOTrainer at kl_beta == 0, step-1 loss pinned against an unsplit copy.
 
-Offline GRPO under PP folds each loss type's whole-batch denominator into the runner's per-step
-normalizer while the microbatch loss produces the bare numerator — every seam yields a silently
-wrong number, not a crash, so the step-1 logged loss is pinned against the exact offline-GRPO
-objective computed on an unsplit copy of the model over the captured batches:
-
-  * the prompt|completion concat + labels derivation (split collator keys → runner contract)
-  * the per-loss-type normalizer (grpo: Σ group weights; bnpo: group-weighted token count;
-    dr_grpo: Σ group weights × max_completion_length) with heterogeneous group sizes, so the
-    denominators genuinely differ across the microbatch split
-  * the negative-advantage min_log_prob clamp (live off the model attr)
-  * both pg formulations (reinforce in the main/bnpo runs, prob_weighted in the dr_grpo run)
-  * loss-only PP evaluation: init-weights eval_loss pinned against the exact per-batch objective
-    (the eval dataloader's BatchSampler drops partial tails, so full batches only), two in-loop
-    evals staying finite and rank-identical, and a direct partial-batch prediction_step proving
-    the inert row-padding contributes exactly 0 (pad_spec group_size=1 — a 0 filler would NaN
-    via inf x 0)
-  * construction-time rejections (undersized max_length, compute_metrics)
-
-Topology: 4 GPUs as 2 simulated nodes of 2, pp=2 x dp=2 (stage FSDP over 2 ranks).
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_offline_grpo.py
+Each loss type's whole-batch denominator folds into the runner's normalizer while the microbatch loss has the bare
+numerator, and every seam yields a silently wrong number. Inert row-padding uses group_size filler 1, since 0 would NaN
+via inf x 0.
 """
 
 import sys
@@ -49,9 +30,8 @@ PP_SIZE = 2
 MICROBATCHES = 2
 BATCH = 4
 N_STEPS = 10
-# Eval group sizes: 16 completions split 8/8 across dp=2 by the contiguous MultiGroupSampler
-# split — exactly 2 full batches per DP shard (the eval BatchSampler drops partial tails) and a
-# zero gather-trim remainder, so HF's eval_loss is the plain mean over the 4 per-batch losses.
+# 16 completions split 8/8 across dp=2: exactly 2 full batches per DP shard (the eval BatchSampler drops partial tails)
+# and a zero gather-trim remainder, so HF's eval_loss is the plain mean over the 4 per-batch losses.
 EVAL_GROUP_SIZES = [4, 4, 2, 3, 3]
 EVAL_STEPS = 5
 MAX_PROMPT = 16
@@ -64,12 +44,8 @@ VOCAB_SIZE = 151936
 
 
 def build_dataset(sizes: list[int] | None = None, prompt_offset: int = 0) -> Dataset:
-    """(prompt, completions, rewards) groups with heterogeneous sizes and distinct rewards.
-
-    Distinct rewards give nonzero z-norm advantages of both signs (exercising the clamp's
-    negative-advantage gating); varied group sizes make the group-weight denominators differ per
-    microbatch split. ``prompt_offset`` keeps a second (eval) dataset's prompts distinct.
-    """
+    """Distinct rewards give z-norm advantages of both signs for the clamp; varied sizes make denominators differ per
+    split."""
     sizes = sizes if sizes is not None else [2, 3, 4, 3, 2, 4, 3, 3]
     rows = {"prompt": [], "completions": [], "rewards": []}
     for g, size in enumerate(sizes):
@@ -92,7 +68,6 @@ def offline_grpo_reference(
     policy_gradient_formulation,
     min_log_prob,
 ) -> float:
-    """The exact offline-GRPO objective (kl_beta=0) on an unsplit model, fp32, independent of halo/."""
     with torch.no_grad():
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.float()
     shift_labels = labels[:, 1:]
@@ -119,7 +94,7 @@ def build_args(output_dir: str, **overrides) -> OfflineGRPOConfig:
         **{
             "max_steps": N_STEPS,
             "per_device_train_batch_size": BATCH,
-            "per_device_eval_batch_size": BATCH,  # PP freezes eval batches to the train shape
+            "per_device_eval_batch_size": BATCH,  # PP freezes eval batches to the train shape.
             "max_prompt_length": MAX_PROMPT,
             "max_completion_length": MAX_COMPLETION,
             "kl_beta": 0.0,
@@ -133,13 +108,9 @@ def build_args(output_dir: str, **overrides) -> OfflineGRPOConfig:
 
 
 def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
-    """Build a PP offline-GRPO trainer with its runner spied, train it, and return the first step's batch.
-
-    With ``eval_dataset``, before training (weights still init, so an unsplit copy can reproduce
-    them): an init-weights ``evaluate()`` runs, then a direct partial-batch ``prediction_step`` (2 rows
-    < the frozen 4) exercises the inert row padding — its post-pad batch lands in the eval captures too
-    and its loss is returned.
-    """
+    """With ``eval_dataset``, before training (so an unsplit copy can reproduce the weights): an init-weights
+    ``evaluate()``, then a partial-batch ``prediction_step`` (2 rows < the frozen 4) through the inert row padding, its
+    loss returned."""
     trainer, steps, evals = build_pp_trainer(
         OfflineGRPOTrainer,
         model=build_dense_model(tokenizer, vocab_size=VOCAB_SIZE),
@@ -152,12 +123,11 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
     init_eval_metrics = partial_loss = None
     if eval_dataset is not None:
         init_eval_metrics = trainer.evaluate()
-        # Collective — every rank calls it with the same rows (eval_dataset is rank-identical).
+        # COLLECTIVE: every rank calls it with the same rows.
         partial_batch = trainer.data_collator([trainer.eval_dataset[i] for i in range(2)])
         loss, _, _ = trainer.prediction_step(trainer.model, partial_batch, prediction_loss_only=True)
         partial_loss = float(loss)
-    # In-loop evals keep appending to evals; trained-weights batches must stay out of the
-    # init-weights reference.
+    # In-loop evals keep appending; trained-weights batches must stay out of the init-weights reference.
     init_eval_calls = list(evals)
     trainer.train()
     return trainer, steps[0], init_eval_calls, init_eval_metrics, partial_loss
@@ -170,7 +140,7 @@ def run(ctx):
     dataset = build_dataset()
     checks, metrics = {}, {}
 
-    # ── Construction-time rejections (all raise before any collective or model load) ─────────────
+    # All raise before any collective or model load.
     expect_construction_error(
         OfflineGRPOTrainer,
         "undersized_max_length_rejected",
@@ -182,9 +152,8 @@ def run(ctx):
         processing_class=tokenizer,
         parallelism_config=config,
     )
-    # This trainer's own prediction_step returns (loss, None, None) in every mode, so there is no
-    # prediction convention for the pipeline to reproduce — serving compute_metrics under PP would
-    # broadcast the raw logits plane and feed metrics a tensor no non-PP run produces.
+    # This prediction_step returns (loss, None, None) in every mode, so compute_metrics under PP would broadcast the
+    # raw logits plane and feed metrics a tensor no non-PP run produces.
     expect_construction_error(
         OfflineGRPOTrainer,
         "compute_metrics_rejected",
@@ -198,7 +167,6 @@ def run(ctx):
         compute_metrics=lambda eval_pred: {"noop": 0.0},
     )
 
-    # ── Main run: loss_type=grpo, reinforce, live min_log_prob clamp, loss-only PP eval leg ──────
     args = build_args(ctx.output_dir, eval_strategy="steps", eval_steps=EVAL_STEPS)
     eval_dataset = build_dataset(sizes=EVAL_GROUP_SIZES, prompt_offset=100)
     trainer, captured, eval_calls, init_eval_metrics, partial_loss = run_trainer(
@@ -211,12 +179,8 @@ def run(ctx):
     checks["max_length_derived_from_caps"] = args.max_length == MAX_PROMPT + MAX_COMPLETION
     checks["fixed_shape_batch"] = captured["input_ids"].shape == (BATCH, MAX_PROMPT + MAX_COMPLETION)
 
-    # ── Row pinning: captured rows must map back to the raw dataset, transform-independently. The
-    # equivalence reference consumes batch_transform's output, so a transform bug corrupting both
-    # sides identically (labels off the wrong mask, prompt/completion concat misaligned) would pass
-    # it; here the supervised label span must be a raw completion's tokenization (trainer contract:
-    # add_special_tokens=False + EOS, truncated at the cap), the preceding real tokens that prompt's
-    # left-truncated tokenization, and group_size the raw group's size.
+    # Captured rows map back to the raw dataset, transform-independently: the equivalence reference consumes
+    # batch_transform's output, so a transform bug corrupting both sides identically would pass it.
     completion_index = {}
     for g, completions in enumerate(dataset["completions"]):
         for j, completion in enumerate(completions):
@@ -249,7 +213,7 @@ def run(ctx):
     expected_normalizer = float((1.0 / captured["group_size"].float()).sum())
     checks["normalizer_is_group_weight_sum"] = abs(captured["num_items"] - expected_normalizer) < 1e-6
 
-    # Step-1 logged loss == the exact objective on the unsplit model over the captured batches.
+    # Step-1 logged loss is the exact objective on the unsplit model over the captured batches.
     reference_model = build_dense_model(tokenizer, vocab_size=VOCAB_SIZE).to(ctx.device).eval()
     reference = offline_grpo_reference(
         reference_model,
@@ -266,8 +230,7 @@ def run(ctx):
     metrics["step1_loss"], metrics["step1_reference"] = losses[0], expected
     checks["step1_loss_matches_reference"] = abs(losses[0] - expected) < REL_TOL * max(1.0, abs(expected))
 
-    # The clamp genuinely enters the loss: an unclamped reference must not match (random-init logps
-    # ~ -11.9 sit far below the -3.0 floor on every negative-advantage row).
+    # An unclamped reference must not match (random-init logps ~ -11.9 sit far below the -3.0 floor).
     unclamped = world_mean(
         offline_grpo_reference(
             reference_model,
@@ -283,10 +246,8 @@ def run(ctx):
     )
     checks["min_log_prob_clamp_wired"] = abs(losses[0] - unclamped) > 1e-2
 
-    # ── Eval leg: captures are the two evaluate() batches plus the direct partial-batch call. The
-    # init-weights eval_loss must equal HF's averaging (zero remainder here — plain mean over the
-    # per-batch losses) of the exact per-batch objective; each batch's reference runs over its
-    # real rows only, which for the partial capture is what proves the inert rows contribute 0.
+    # The captures are the two evaluate() batches plus the direct partial-batch call. Each reference runs over its real
+    # rows only, which for the partial capture proves the inert rows contribute 0.
     checks["pad_spec_declares_group_size_filler"] = dict(trainer._pp_adapter.pad_spec) == {"group_size": 1}
     checks["eval_captured_two_batches_plus_partial"] = len(eval_calls) == 3
 
@@ -316,16 +277,13 @@ def run(ctx):
     metrics["init_eval_loss"], metrics["init_eval_reference"] = eval_loss, expected_eval
     checks["eval_loss_matches_reference"] = abs(eval_loss - expected_eval) < REL_TOL * max(1.0, abs(expected_eval))
 
-    # The eval normalizer must be the same per-loss-type denominator as training, over real rows.
     checks["eval_normalizer_is_group_weight_sum"] = all(
         abs(call["num_items"] - float((1.0 / call["group_size"][(call["labels"] != -100).any(dim=-1)].float()).sum()))
         < 1e-6
         for call in eval_calls
     )
 
-    # Direct partial-batch prediction step (init weights): 2 real rows row-padded to the frozen 4
-    # with group_size filler 1 — finite (a 0 filler would NaN via inf x 0) and exactly the 2-row
-    # objective. Its capture must really carry inert rows.
+    # 2 real rows row-padded to the frozen 4 with group_size filler 1: finite and exactly the 2-row objective.
     partial_call = eval_calls[2]
     partial_real = (partial_call["labels"] != -100).any(dim=-1)
     checks["partial_batch_row_padded"] = partial_call["input_ids"].size(0) == BATCH and int(partial_real.sum()) == 2
@@ -337,7 +295,6 @@ def run(ctx):
 
     checks["eval_loss_identical_across_ranks"] = losses_identical_across_ranks([eval_loss])
 
-    # Two in-loop evals (steps 5 and 10) ran on trained weights: finite and rank-identical.
     inloop_eval = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
     checks["inloop_evals_ran_finite"] = len(inloop_eval) == 2 and bool(torch.isfinite(torch.tensor(inloop_eval)).all())
 
@@ -349,7 +306,6 @@ def run(ctx):
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
 
-    # ── dr_grpo run: constant-length denominator, prob_weighted formulation, no clamp ────────────
     dr_args = build_args(
         ctx.output_dir + "/dr",
         max_steps=2,
@@ -379,7 +335,6 @@ def run(ctx):
     dr_expected_normalizer = float((1.0 / dr_captured["group_size"].float()).sum()) * MAX_COMPLETION
     checks["dr_grpo_normalizer"] = abs(dr_captured["num_items"] - dr_expected_normalizer) < 1e-5
 
-    # ── bnpo run: group-weighted token-count denominator ─────────────────────────────────────────
     bnpo_args = build_args(ctx.output_dir + "/bnpo", max_steps=2, loss_type="bnpo", min_log_prob=None)
     bnpo_trainer, bnpo_captured, _, _, _ = run_trainer(config, bnpo_args, dataset, tokenizer)
     bnpo_losses = [e["loss"] for e in bnpo_trainer.state.log_history if "loss" in e]

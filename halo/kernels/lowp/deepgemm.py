@@ -1,8 +1,6 @@
-"""Native fp8/fp4 grouped MoE GEMM on DeepGEMM's ``m_indices`` kernel (Blackwell image only): opt-in
-(``HALO_DEEPGEMM_NATIVE=1``), since its separate activation-quantization pass outweighs the low-precision
-matmul at training shapes. The forward pads each expert's tokens to a 128-row segment; the backward is
-bf16 ``F.grouped_mm`` on the unpadded tokens.
-"""
+"""Native fp8/fp4 grouped MoE GEMM on DeepGEMM's ``m_indices`` kernel: opt-in (``HALO_DEEPGEMM_NATIVE=1``), since its
+activation-quantization pass outweighs the low-precision matmul at training shapes. The forward pads each expert's
+tokens to a 128-row segment; the backward is bf16 ``F.grouped_mm`` on the unpadded tokens."""
 
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ from halo.log import warn_once
 
 logger = logging.getLogger(__name__)
 
-# MXFP4 has no native DeepGEMM grouped kernel: simulated only.
+# MXFP4 has no native DeepGEMM grouped kernel, so it is simulated only.
 DEEPGEMM_FORMATS: tuple[QuantFormat, ...] = ("mxfp8", "nvfp4")
 
 _MIN_TOKENS_PER_EXPERT = env_int("HALO_DEEPGEMM_MIN_TOKENS_PER_EXPERT", 1024)
@@ -34,8 +32,7 @@ _warned_fallback_shapes: set[tuple] = set()  # (fmt, N, K, E): bounded by the di
 
 @functools.lru_cache(maxsize=1)
 def _deep_gemm():
-    """``(deep_gemm, deep_gemm.utils)`` with the process-global contiguous-layout alignment set, or None
-    when the package (Blackwell image only) does not import."""
+    """None when the package (Blackwell image only) does not import."""
     try:
         import deep_gemm  # noqa: PLC0415
         from deep_gemm import utils  # noqa: PLC0415
@@ -52,8 +49,6 @@ def deepgemm_available() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _warn_absent_once() -> None:
-    """Warn that the opt-in cannot be honored: the simulated path that runs instead differs in both speed
-    and numerics."""
     logger.warning(
         "HALO_DEEPGEMM_NATIVE=1 but the deep_gemm package is not importable — the native fp8/fp4 "
         "kernel is unavailable and the simulated fake-quant path runs instead. The wheel ships in "
@@ -63,7 +58,6 @@ def _warn_absent_once() -> None:
 
 
 def use_deepgemm(tokens_per_expert: float, n: int) -> bool:
-    """Whether to route fp8/fp4 to native DeepGEMM: opt-in and only above the shape floor."""
     if not env_flag("HALO_DEEPGEMM_NATIVE"):
         return False
     if not deepgemm_available():
@@ -73,8 +67,7 @@ def use_deepgemm(tokens_per_expert: float, n: int) -> bool:
 
 
 def _warn_fallback_once(shape_key: tuple, detail: str, exc: Exception) -> None:
-    """Warn once per rejected weight shape that the native path reverted to bf16. ``shape_key`` is the
-    weight's ``(fmt, N, K, E)``: the token count and the exception text change every forward."""
+    """``shape_key`` is the weight's ``(fmt, N, K, E)``, as token count and exception text change every forward."""
     warn_once(
         logger,
         _warned_fallback_shapes,
@@ -88,12 +81,11 @@ def _warn_fallback_once(shape_key: tuple, detail: str, exc: Exception) -> None:
 
 
 def _quant_weight(w: torch.Tensor, fmt: QuantFormat, k_pad: int, cacheable: bool = True):
-    """The ``[E, N, K]`` quantized operand of an ``[E, K, N]`` master, zero-padded to ``k_pad`` along the
-    contraction and cached per optimizer step unless ``cacheable`` is False (FSDP2's pinned version
-    counter would serve the step-0 quantization forever)."""
+    """Cached per optimizer step unless ``cacheable`` is False, as FSDP2's pinned version counter would serve the
+    step-0 quantization forever."""
     _, dg_utils = _deep_gemm()
 
-    # Leaf params only: a non-leaf `.to(bf16)` copy churns its id at _version 0.
+    # A non-leaf `.to(bf16)` copy churns its id at _version 0.
     cacheable = cacheable and w.is_leaf
     fingerprint = (w._version, fmt)
     if cacheable:
@@ -121,15 +113,13 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, k_pad: int, cacheable: bool
 
 
 def _deepgemm_forward(x, w, offs, fmt, weight_cacheable):
-    """The contiguous grouped forward as bf16 ``[T, N]``, or None for a shape the kernel rejects. Both
-    kernels take an fp8 activation; only the weight format differs."""
+    """bf16 ``[T, N]``, or None for a shape the kernel rejects. Both kernels take an fp8 activation."""
     deep_gemm, dg_utils = _deep_gemm()
     align = dg_utils.align
     E, K, N = w.shape
     T = x.shape[0]
     ends = offs.tolist()
-    # ``ends[-1] == T`` matters as much as length and order: ``out`` is uninitialized and only rows
-    # inside ``[starts[g], ends[g])`` are written, so a short offs would return uninitialized rows.
+    # Rows outside ``[starts[g], ends[g])`` of the uninitialized ``out`` stay unwritten, so ``ends[-1]`` must be ``T``.
     covers_all_tokens = bool(ends) and len(ends) == E and ends[0] >= 0 and ends[-1] == T
     if not covers_all_tokens or any(b < a for a, b in zip(ends, ends[1:], strict=False)):
         raise ValueError(
@@ -155,7 +145,7 @@ def _deepgemm_forward(x, w, offs, fmt, weight_cacheable):
     k_pad = align(K, _FP4_K_ALIGN) if fmt == "nvfp4" else K
     if k_pad != K:
         xp = F.pad(xp, (0, k_pad - K))
-    a_op = dg_utils.per_token_cast_to_fp8(xp, use_ue8m0=True, gran_k=_ALIGN)  # fp8 activation for both kernels
+    a_op = dg_utils.per_token_cast_to_fp8(xp, use_ue8m0=True, gran_k=_ALIGN)
     b_op = _quant_weight(w, fmt, k_pad, cacheable=weight_cacheable)
     d = x.new_empty(M, N, dtype=torch.bfloat16)
     try:
@@ -169,7 +159,7 @@ def _deepgemm_forward(x, w, offs, fmt, weight_cacheable):
         _warn_fallback_once((fmt, N, K, E), f"m_grouped {fmt} GEMM on M={M} N={N} K={K} E={E}", exc)
         return None
 
-    out = x.new_empty(T, N, dtype=torch.bfloat16)  # gather valid rows back to unpadded layout
+    out = x.new_empty(T, N, dtype=torch.bfloat16)
     dst = 0
     for g in range(E):
         if counts[g]:
@@ -179,13 +169,11 @@ def _deepgemm_forward(x, w, offs, fmt, weight_cacheable):
 
 
 class _DeepGEMMGroupedFn(torch.autograd.Function):
-    """Native fp8/fp4 grouped forward, bf16 grouped backward."""
-
     @staticmethod
     def forward(ctx, x, w, offs, fmt, weight_cacheable):
         ctx.save_for_backward(x, w, offs)
         out = _deepgemm_forward(x, w, offs, fmt, weight_cacheable)
-        if out is None:  # unsupported shape -> bf16 forward
+        if out is None:
             out = F.grouped_mm(x.to(torch.bfloat16), w.to(torch.bfloat16), offs=offs)
         return out.to(x.dtype)
 
@@ -208,11 +196,7 @@ class _DeepGEMMGroupedFn(torch.autograd.Function):
 
 
 def deepgemm_grouped_gemm(x, w, *, offs, quant_format: QuantFormat, weight_cacheable=True):
-    """``[T, K]`` expert-stacked activations times ``[E, K, N]`` expert weights (``offs`` the ``[E]``
-    cumulative token counts) with a native forward in ``quant_format`` and a bf16 backward. ``mxfp4`` has
-    no native kernel and raises rather than being downgraded; ``weight_cacheable`` is as in
-    :func:`~halo.kernels.expert_gemm.expert_gemm`.
-    """
+    """Native forward in ``quant_format``, bf16 backward. ``mxfp4`` has no native kernel and raises."""
     if quant_format not in DEEPGEMM_FORMATS:
         raise ValueError(
             f"deepgemm_grouped_gemm supports only {DEEPGEMM_FORMATS}, got {quant_format!r} (mxfp4 is simulated-only)"

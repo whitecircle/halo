@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for where a softcapped model (Gemma 2) trains on FlashAttention-4, per size, row shape and GPU.
-
-FA4 trains a softcap on its dense call only. Its head_dim-256 backward refuses one outright (Gemma 2 2B and 9B), and a
-softcap stays off its varlen kernels at any width (not validated there): a packed, padding-free or padded training
-batch unpads to that call, so Gemma 2 27B (head_dim 128) trains on FA4 only one unpadded row per batch at a time,
-evaluation batches included. Every other row shape takes FA2, chosen before the load; a pinned FA4 there is refused
-with the remedy; a host with no FA2 build refuses rather than fall back to a kernel that drops the softcap. Whatever
-still reaches FA4's varlen entry point with a softcap (a pinned FA4 on a padded script) raises there, before the kernel
-launches.
-
-A stand-in ``flash_attn.cute`` checks the premise against the installed transformers: an unpadded row reaches the
-dense entry point, a padded batch and a packed row the varlen one.
-
-Run: ``python tests/cpu/models/test_softcap_varlen_attention.py`` (or ``pytest -m cpu``).
-"""
+"""Where Gemma 2 trains on FA4. FA4 trains a softcap on its dense call only: its head_dim-256 backward refuses one and
+its varlen kernels are not validated with one, so only 27B (head_dim 128) on one unpadded row per batch keeps FA4."""
 
 from __future__ import annotations
 
@@ -47,20 +34,19 @@ FA2, FA3, FA4, SDPA = "flash_attention_2", "flash_attention_3", "flash_attention
 _DETECTED = {"blackwell": FA4, "hopper": FA3}
 _UNSET = types.SimpleNamespace(attn_implementation=None)
 
-# The release attention geometry of each Gemma 2 size, at two layers; every size softcaps its scores at 50.
+# Release attention geometry per Gemma 2 size; every size softcaps its scores at 50.
 _GEMMA2_SIZES = {
     "2b": {"hidden_size": 2304, "num_attention_heads": 8, "num_key_value_heads": 4, "head_dim": 256},
     "9b": {"hidden_size": 3584, "num_attention_heads": 16, "num_key_value_heads": 8, "head_dim": 256},
     "27b": {"hidden_size": 4608, "num_attention_heads": 32, "num_key_value_heads": 16, "head_dim": 128},
 }
-# The training rows each SFT collator builds, as (packing, padding_free, per_device_train_batch_size).
+# (packing, padding_free, per_device_train_batch_size) of each SFT collator's rows.
 _SFT_ROWS = {
     "unpacked-bs1": (False, False, 1),
     "unpacked-bs4": (False, False, 4),
     "packed": (True, False, 1),
     "padding-free": (False, True, 1),
 }
-# The default's row arguments for an unpacked single row (no varlen call) and a packed one.
 _UNPADDED_ROW = {"packing": False, "padding_free": False, "per_device_train_batch_size": 1}
 _PACKED_ROW = {"packing": True, "padding_free": False, "per_device_train_batch_size": 1}
 
@@ -90,7 +76,6 @@ def _resolve(config, request) -> str:
 
 
 def _sft_backend(config, rows: str) -> str:
-    """What an unpinned SFT policy load resolves for ``rows``."""
     packing, padding_free, batch_size = _SFT_ROWS[rows]
     request = default_training_rows_attn_implementation(
         _UNSET,
@@ -104,15 +89,13 @@ def _sft_backend(config, rows: str) -> str:
 
 
 def _padded_script_backend(config) -> str:
-    """What an unpinned padded script (DPO, GRPO, RM, ...) resolves."""
     request = default_padded_attn_implementation(_UNSET, sinks_reset=True, checkpoint_config=config)
     return _resolve(config, request)
 
 
 # (size, arch) -> backend per SFT row shape, then the padded scripts'. 2B/9B leave FA4 on every row (its hd256 kernel
-# takes no softcap); 27B keeps it on one unpadded row per batch only; Hopper's FA3 trains the softcap on every row.
-# The padded scripts request FA2 on Blackwell, and their SDPA request lands on FA3 on Hopper, since SDPA drops the
-# softcap.
+# takes no softcap); 27B keeps it on one unpadded row per batch only. The padded scripts request FA2 on Blackwell; on
+# Hopper their SDPA request lands on FA3, since SDPA drops the softcap.
 _EXPECTED = {
     ("2b", "blackwell"): {"unpacked-bs1": FA2, "unpacked-bs4": FA2, "packed": FA2, "padding-free": FA2, "padded": FA2},
     ("9b", "blackwell"): {"unpacked-bs1": FA2, "unpacked-bs4": FA2, "packed": FA2, "padding-free": FA2, "padded": FA2},
@@ -140,8 +123,6 @@ def test_the_backend_per_gemma2_size_row_shape_and_gpu(size, arch, rows):
 
 @pytest.mark.parametrize("rows", ["unpacked-bs4", "packed", "padding-free"])
 def test_fa4_keeps_every_row_shape_without_a_softcap(rows):
-    """Anti-vacuity: the route reads the softcap, not the family. The 27B geometry without one, and Qwen3, keep FA4
-    on every row shape, and on the padded scripts too."""
     for config in (_gemma2("27b", attn_logit_softcapping=None), Qwen3Config()):
         with _on("blackwell"):
             assert _sft_backend(config, rows) == FA4
@@ -150,8 +131,7 @@ def test_fa4_keeps_every_row_shape_without_a_softcap(rows):
 
 @pytest.mark.parametrize("family", sorted(name for name in PACKING_FAMILIES if name.startswith("dense:")))
 def test_the_packed_varlen_sweep_runs_each_dense_family_on_its_packed_sft_backend(family):
-    """The sweep's flash label per family is the one an unpinned packed SFT run resolves on Blackwell: FA2 for Gemma 2's
-    softcap and for Gemma 3's windows on FA4's head_dim-256 kernel, FA4 for the rest."""
+    """FA2 for Gemma 2's softcap and for Gemma 3's windows on FA4's head_dim-256 kernel, FA4 for the rest."""
     config = tiny_family_model(PACKING_FAMILIES[family]).config
     with _on("blackwell"):
         resolved = _sft_backend(config, "packed")
@@ -159,9 +139,8 @@ def test_the_packed_varlen_sweep_runs_each_dense_family_on_its_packed_sft_backen
 
 
 def test_a_softcapped_forward_only_companion_takes_the_padded_scripts_off_fa4():
-    """A distillation teacher only forwards, but a softcap stays off FA4's varlen forward too, so a softcapped teacher
-    moves the shared request off the loader's pick as a softcapped policy does; the softcap then lands the teacher on
-    FA2."""
+    """A distillation teacher only forwards, but a softcap stays off FA4's varlen forward too, so it moves the shared
+    request off the loader's pick."""
     with _on("blackwell"):
         assert (
             default_padded_attn_implementation(
@@ -173,9 +152,7 @@ def test_a_softcapped_forward_only_companion_takes_the_padded_scripts_off_fa4():
 
 
 def test_a_softcapped_policy_requests_fa2_on_its_padded_batches():
-    """A softcapped policy's padded scripts request FA2 themselves, the softcap named as the reason, rather than an
-    SDPA the resolver then refuses for the softcap; without an FA2 build the request stays SDPA, whose refusal routes
-    on to a softcap-carrying backend as before."""
+    """The scripts request FA2 themselves, naming the softcap, over an SDPA the resolver would refuse."""
     with _on("blackwell"), patch.object(selection.logger, "warning") as warn:
         request = default_padded_attn_implementation(_UNSET, sinks_reset=True, checkpoint_config=_gemma2("27b"))
         assert request == FA2
@@ -241,8 +218,6 @@ def test_the_evaluation_batch_counts_only_where_the_run_evaluates(eval_strategy,
 
 
 def test_padded_evaluation_batches_take_a_softcapped_run_off_fa4():
-    """One unpadded training row would keep 27B on FA4, but an evaluation batch of eight pads and unpads to the
-    varlen call, which a softcap stays off."""
     with _on("blackwell"):
         trains_only = default_training_rows_attn_implementation(
             _UNSET, **_UNPADDED_ROW, dtype=torch.bfloat16, checkpoint_config=_gemma2("27b")
@@ -257,13 +232,9 @@ def test_padded_evaluation_batches_take_a_softcapped_run_off_fa4():
     assert (trains_only, evaluates) == (None, FA2)
 
 
-# --- no FA2 build -----------------------------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("size", ["2b", "9b"])
 def test_a_head_dim_256_softcap_without_flash_attention_2_is_refused_with_the_remedy(size):
-    """FA4 cannot run 2B/9B at all; with no FA2 build the resolver raises naming what to set, instead of falling
-    through to a label the model build would refuse."""
+    """FA4 cannot run 2B/9B at all, and falling through would reach a label the model build refuses."""
     with _on("blackwell", fa2=False), pytest.raises(ValueError, match="no FlashAttention-2 build") as error:
         _resolve(_gemma2(size), None)
     assert "attention logit softcapping" in str(error.value)
@@ -277,8 +248,7 @@ def test_a_varlen_softcap_route_without_flash_attention_2_is_refused():
 
 @pytest.mark.parametrize("fa2", [True, False], ids=["fa2", "no-fa2"])
 def test_an_fp32_run_leaves_the_softcap_to_the_resolvers_flex_attention(fa2):
-    """fp32 runs no flash kernel: the resolver takes flex_attention, which applies the softcap, so the request names
-    no FA2 that the resolver would drop, and a host without an FA2 build is not refused."""
+    """fp32 runs no flash kernel, so the request names no FA2 and a host without an FA2 build is not refused."""
     config = _gemma2("27b")
     with _on("blackwell", fa2=fa2):
         request = default_training_rows_attn_implementation(
@@ -301,7 +271,7 @@ def test_a_half_precision_run_on_varlen_rows_requests_fa2(dtype):
 
 
 def test_flash_attention_2_absence_moves_nothing_fa4_runs():
-    """Anti-vacuity: the refusal is reached only through a route to FA2."""
+    """The refusal is reached only through a route to FA2."""
     with _on("blackwell", fa2=False):
         assert _sft_backend(_gemma2("27b"), "unpacked-bs1") == FA4
         assert _sft_backend(Qwen3Config(), "packed") == FA4
@@ -315,9 +285,6 @@ def test_the_route_names_the_kernel_limit():
         "varlen kernels are not validated with attention logit softcapping" in call.args[0]
         for call in warn.call_args_list
     )
-
-
-# --- the collator rule: a pinned FA4 ----------------------------------------------------------------------------
 
 
 def _resolved_config(size: str, attn_impl: str) -> Gemma2Config:
@@ -344,7 +311,6 @@ def test_fa4_on_varlen_rows_of_a_softcapped_model_is_refused_with_the_remedy(row
 
 
 def test_the_rule_passes_every_run_fa4_trains():
-    """Anti-vacuity: one unpadded row per batch, FA2, and an uncapped model all pass."""
     reject_fa4_varlen_training(_resolved_config("27b", FA4), varlen_rows=False)
     reject_fa4_varlen_training(_resolved_config("27b", FA2), varlen_rows=True)
     uncapped = _resolved_config("27b", FA4)
@@ -353,7 +319,6 @@ def test_the_rule_passes_every_run_fa4_trains():
 
 
 def test_the_collator_rule_refuses_fa4_on_padded_evaluation_batches():
-    """The collator serves the evaluation batches too: a single training row does not clear eight padded ones."""
     with pytest.raises(ValueError, match="per_device_eval_batch_size: 1"):
         select_data_collator(
             tokenizer=types.SimpleNamespace(pad_token_id=0, eos_token_id=1, padding_side="right"),
@@ -371,8 +336,6 @@ def test_the_rule_reads_a_handed_backend_over_the_config():
     reject_fa4_varlen_training(_resolved_config("27b", FA4), varlen_rows=True, attn_impl=FA2)
 
 
-# --- premise: which flash entry point a training batch reaches --------------------------------------------------
-
 # The transformers module globals the flash path caches the bound kernel and its kwarg map in.
 _FLASH_CACHE_GLOBALS = (
     "_loaded_implementation",
@@ -387,8 +350,7 @@ _FLASH_CACHE_GLOBALS = (
 
 
 class _RecordingCute(types.ModuleType):
-    """``flash_attn.cute`` whose two entry points record whether each call was varlen and softcapped, and pass the
-    query through."""
+    """``flash_attn.cute`` recording whether each call was varlen and softcapped, passing the query through."""
 
     def __init__(self):
         super().__init__("flash_attn.cute")
@@ -422,8 +384,7 @@ class _RecordingCute(types.ModuleType):
 
 @pytest.fixture
 def cute(monkeypatch) -> _RecordingCute:
-    """The stand-in installed where transformers' flash path imports FA4 from, with the path's cached binding reset
-    (and restored afterwards)."""
+    """Installed where transformers' flash path imports FA4 from, with the path's cached binding reset and restored."""
     fake = _RecordingCute()
     monkeypatch.setitem(sys.modules, "flash_attn.cute", fake)
     # ``import flash_attn.cute`` reads the package attribute first, which an earlier real import leaves bound.
@@ -445,8 +406,7 @@ _PREMISE_ROWS = {
 
 @pytest.mark.parametrize("rows", list(_PREMISE_ROWS))
 def test_a_padded_or_packed_batch_reaches_fa4s_varlen_call(cute, rows):
-    """Premise of the route: a softcapped model's training rows reach FA4's varlen call packed or padded, softcap
-    included; one unpadded row reaches the dense call."""
+    """Premise of the route; one unpadded row reaches the dense call."""
     batch_rows, extra, reaches_varlen = _PREMISE_ROWS[rows]
     torch.manual_seed(0)
     model = Gemma2ForCausalLM(Gemma2Config(**TINY_GEMMA2_CONFIG, attn_logit_softcapping=50.0)).to(torch.bfloat16)
@@ -459,14 +419,10 @@ def test_a_padded_or_packed_batch_reaches_fa4s_varlen_call(cute, rows):
     loss.backward()
 
 
-# --- the varlen entry point's own refusal ----------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("rows", list(_PREMISE_ROWS))
 def test_fa4s_varlen_entry_point_refuses_a_softcapped_call_in_the_forward(cute, rows):
-    """Installed, the refusal turns the varlen call a padded or packed batch reaches into an error in the forward,
-    before the kernel launches; one unpadded row reaches the dense call, which trains. The premise test above is the
-    negative control: without the refusal the same forward reaches the varlen kernel with the softcap."""
+    """The refusal raises before the kernel launches. The premise test above is the negative control: without it the
+    same forward reaches the varlen kernel with the softcap."""
     assert install_fa4_varlen_softcap_refusal()
     batch_rows, extra, reaches_varlen = _PREMISE_ROWS[rows]
     torch.manual_seed(0)
@@ -483,7 +439,6 @@ def test_fa4s_varlen_entry_point_refuses_a_softcapped_call_in_the_forward(cute, 
 
 
 def test_the_refusal_passes_an_uncapped_varlen_call(cute):
-    """Anti-vacuity: the refusal reads the call's softcap, so a model without one keeps FA4's varlen kernels."""
     install_fa4_varlen_softcap_refusal()
     torch.manual_seed(0)
     model = Gemma2ForCausalLM(Gemma2Config(**TINY_GEMMA2_CONFIG, attn_logit_softcapping=None)).to(torch.bfloat16)
@@ -504,8 +459,7 @@ def test_the_refusal_passes_an_uncapped_varlen_call(cute):
     ids=["softcapped-fa4", "uncapped-fa4", "softcapped-fa2"],
 )
 def test_every_softcapped_fa4_load_installs_the_refusal(monkeypatch, config, attn_implementation, installs):
-    """``apply_family_patches`` runs before every policy, frozen and trainer-path build, so each FA4 load of a softcapped
-    model, a padded script's pinned policy or a frozen teacher, takes the refusal; no other load does."""
+    """``apply_family_patches`` runs before every policy, frozen and trainer-path build."""
     calls = []
     monkeypatch.setattr(model_preparation, "install_fa4_varlen_softcap_refusal", lambda: calls.append(1))
     monkeypatch.setattr(model_preparation, "patch_transformers_flash_varlen_int_seqlen", lambda: None)

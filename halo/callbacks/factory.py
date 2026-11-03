@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 def _metric_log_period(training_config) -> int:
-    """Step period on which MoE load metrics are worth deriving: only ``on_log`` consumes them. A
-    ``logging_steps`` below 1 is a ratio of total steps and carries no period, so every step derives."""
+    """Only ``on_log`` consumes MoE load metrics. A ``logging_steps`` below 1 is a ratio of total steps and carries no
+    period, so every step derives."""
     logging_steps = getattr(training_config, "logging_steps", 1) or 1
     return int(logging_steps) if logging_steps >= 1 else 1
 
@@ -35,13 +35,9 @@ def build_run_callbacks(
     generate_callback: TrainerCallback | None = None,
     max_seq_len: int | None = None,
 ) -> list[TrainerCallback | type[TrainerCallback]]:
-    """The callbacks ``args`` enable, in roster order, for the mode
-    :func:`~halo.callbacks.balancing.configure_moe_balancing` returned. Runs no collective.
-
-    Enabling the efficiency callback sets ``training_config.include_num_input_tokens_seen="all"``;
-    ``max_seq_len`` is its length bound where the declared length fields do not sum to one (a
-    multi-turn RL trajectory).
-    """
+    """The callbacks ``args`` enable, in roster order. Runs no collective. Enabling the efficiency callback sets
+    ``include_num_input_tokens_seen="all"``; ``max_seq_len`` is its length bound where the declared length fields do
+    not sum to one (a multi-turn RL trajectory)."""
     if balancing_mode == "auto":
         raise ValueError("build_run_callbacks needs the balancing mode configure_moe_balancing resolved, got 'auto'.")
     routing = resolve_moe_routing(model)
@@ -107,11 +103,8 @@ def build_run_callbacks(
 
 
 def reorder_integration_callbacks_last(trainer) -> None:
-    """Move HF report-to integration callbacks to the tail of the callback handler (idempotent).
-
-    HF wires integrations before user callbacks, so their ``on_log`` would relay the logs dict before
-    user callbacks add keys via ``logs.update(...)``.
-    """
+    """Move HF report-to callbacks to the tail: HF wires them first, so their ``on_log`` would relay the logs dict
+    before user callbacks add keys."""
     handler = trainer.callback_handler
     integrations, others = [], []
     for cb in handler.callbacks:

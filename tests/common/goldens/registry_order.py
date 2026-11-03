@@ -1,15 +1,6 @@
-"""Registry-order golden: what each toolkit registry holds, in the order it holds it.
-
-A registry fills as its classes are defined and its modules imported, and whatever walks it does so in that
-order: the claim maps fill in it, the Liger appliers run in it, a roster reads in it. A change that moves
-modules or reorders imports can change that order without changing any class. Classes and functions are
-recorded by qualified name, not by module, so a move that keeps every name and its order leaves the file
-unchanged; the Liger specs and the MoE family specs are recorded by value. The check renders in a fresh
-interpreter, so the order is the one the generator's imports and the code produce, never a caller's.
-
-Only the toolkit's own classes are recorded: a test double subclassing a registry base joins the live
-subclass tree of whatever process imported it.
-"""
+"""Registry-order golden: what each toolkit registry holds, in order, since moving modules or imports can reorder it
+with no class change. Recorded by qualified name, so a move keeping names and order leaves the file unchanged; rendered
+in a fresh interpreter, toolkit classes only."""
 
 from __future__ import annotations
 

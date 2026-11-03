@@ -1,13 +1,5 @@
-"""Loader collective-trace golden: what ``load_distributed_model`` issues on the ranks of a 4-rank job on
-two 2-GPU nodes, for every branch of its loader ladder from a local directory and from the Hub, and
-what the frozen reference load beside it issues.
-
-Each case runs the real loader on a tiny checkpoint under :func:`recording_rank`, so the trace holds
-the process-group builds with their members, the collectives with their operation, payload and group,
-the device meshes, the c10d-store operations with their keys, the node-load phases with their labels
-and, between them, the model builds :func:`cpu_model_builds` stands in for, one event each.
-``max_concurrent_loading`` is 1, so rank 1 waits on rank 0 in every node-throttled load.
-"""
+"""Loader collective-trace golden: what ``load_distributed_model`` issues on a 4-rank job on two 2-GPU nodes, per
+loader branch. ``max_concurrent_loading`` is 1, so rank 1 waits on rank 0 in every node-throttled load."""
 
 from __future__ import annotations
 
@@ -46,23 +38,17 @@ from tests.common.tiny_models import (
 GOLDEN_PATH = Path(__file__).with_suffix(".json")
 WORLD_SIZE = 4
 GPUS_PER_NODE = 2
-# Pinned rather than auto-selected off the host's GPU and flash builds; Ulysses CP requires a flash backend.
+# Pinned rather than auto-selected off the host; Ulysses CP requires a flash backend.
 ATTN_IMPLEMENTATION = "flash_attention_2"
-# The namespace of the repos the fake Hub cache holds, one per checkpoint.
 HUB_NAMESPACE = "golden"
-# What a trace writes in place of the host's temporary checkpoint root.
+# Written in place of the host's temporary checkpoint root.
 CHECKPOINTS_PLACEHOLDER = "<checkpoints>"
 
 
 @dataclasses.dataclass(frozen=True)
 class LoadCase:
-    """One loader branch: the checkpoint it reads, the ``ParallelismConfig`` fields that route it there
-    and the variables it adds to the launcher's environment.
-
-    ``from_hub`` names the checkpoint by its repo id in the fake Hub cache instead of by its directory,
-    and ``frozen_reference`` loads it as a run's frozen reference. ``ranks`` are the ranks traced: a
-    per-node case adds rank 2, which leads node 1's scope.
-    """
+    """One loader branch: its checkpoint, the ``ParallelismConfig`` fields routing there and its env additions. A
+    per-node case adds rank 2, which leads node 1's scope."""
 
     key: str
     checkpoint: str
@@ -116,8 +102,7 @@ LOAD_CASES = (
 
 @dataclasses.dataclass(frozen=True)
 class Checkpoints:
-    """The cases' checkpoints: a directory each under ``root``, and the same files as repos of the Hub
-    cache under ``root``, the only cache a traced load reads."""
+    """A directory each under ``root``, and the same files as Hub-cache repos, the only cache a traced load reads."""
 
     root: Path
 
@@ -126,17 +111,14 @@ class Checkpoints:
         return self.root / "hub"
 
     def source(self, case: LoadCase) -> str:
-        """What ``case`` names its checkpoint by: its repo id when it loads from the Hub, else its directory."""
         return f"{HUB_NAMESPACE}/{case.checkpoint}" if case.from_hub else str(self.root / case.checkpoint)
 
     def portable(self, events: list[str]) -> list[str]:
-        """``events`` with the host's checkpoint root written as :data:`CHECKPOINTS_PLACEHOLDER`."""
         return [event.replace(str(self.root), CHECKPOINTS_PLACEHOLDER) for event in events]
 
     @contextlib.contextmanager
     def offline_hub(self) -> Iterator[None]:
-        """The Hub as nothing but :attr:`hub_cache`, read offline. huggingface_hub reads both settings at
-        call time, for transformers as well."""
+        """The Hub as nothing but :attr:`hub_cache`, read offline; huggingface_hub reads both settings at call time."""
         with (
             patch.object(hub_constants, "HF_HUB_CACHE", str(self.hub_cache)),
             patch.object(hub_constants, "HF_HUB_OFFLINE", True),
@@ -145,9 +127,8 @@ class Checkpoints:
 
 
 def build_checkpoints(root: Path) -> Checkpoints:
-    """The checkpoints the cases read, written under ``root``: a tiny Qwen3, a tiny Qwen3-MoE in
-    safetensors and as a ``pytorch_model.bin`` no lazy loader reads, and a tiny MoE of a family no EP
-    layer class wraps. Each is also its namesake repo's ``main`` in the Hub cache."""
+    """The cases' checkpoints: tiny Qwen3, Qwen3-MoE in safetensors and as a ``pytorch_model.bin``, and a MoE no EP
+    class wraps."""
     tokenizer = word_level_tokenizer()
     directories = {name: root / name for name in ("dense", "moe", "moe_bin", "moe_no_ep_class")}
     build_tiny_family_checkpoint(TINY_DENSE_FAMILY, str(directories["dense"]), tokenizer)
@@ -166,7 +147,6 @@ def build_checkpoints(root: Path) -> Checkpoints:
 
 
 def _off_gpu(value):
-    """``value``, with a CUDA device replaced by the CPU."""
     if isinstance(value, (str, torch.device)) and torch.device(value).type == "cuda":
         return torch.device("cpu")
     return value
@@ -174,13 +154,8 @@ def _off_gpu(value):
 
 @contextlib.contextmanager
 def cpu_model_builds(trace: CollectiveTrace) -> Iterator[None]:
-    """Every model build as one event, on the CPU whatever device the loader names.
-
-    A load handed a TP ``distributed_config`` is sharded by transformers' ``apply_tensor_parallelism``,
-    the step ``from_pretrained`` takes for one, over the TP mesh the loader's ``prepare_distribute_model``
-    hook answers (the recorder's CPU mesh). A module moved to a GPU stays on
-    the CPU, and a flash attention label is accepted without a GPU, since no traced load runs attention.
-    """
+    """Every model build as one event, on the CPU; a flash label is accepted with no GPU, since no traced load runs
+    attention."""
     real_from_pretrained = PreTrainedModel.from_pretrained.__func__
     real_from_config = PreTrainedModel._from_config.__func__
     real_module_to = torch.nn.Module.to
@@ -222,7 +197,7 @@ def cpu_model_builds(trace: CollectiveTrace) -> Iterator[None]:
 
 
 def recorded_load_phases(trace: CollectiveTrace) -> contextlib.AbstractContextManager[None]:
-    """Each ``joined_node_load`` as an event carrying its phase label, ahead of the load's own events."""
+    """Each ``joined_node_load`` as an event with its phase label, ahead of the load's own events."""
     real_joined_node_load = load_coordination.joined_node_load
 
     def joined_node_load(what: str, max_concurrent: int | None):
@@ -235,12 +210,8 @@ def recorded_load_phases(trace: CollectiveTrace) -> contextlib.AbstractContextMa
 def trace_rank(
     case: LoadCase, rank: int, checkpoints: Checkpoints, rank0: CollectiveTrace | None = None
 ) -> CollectiveTrace:
-    """What ``case``'s load issues as ``rank``, receiving the object broadcasts of ``rank0``, global rank
-    0's trace of it.
-
-    The parallelism config is built before the recording starts and the rank-uniform EP environment
-    counts as verified, as the entry scripts do both in their distributed setup, before the load.
-    """
+    """What ``case``'s load issues as ``rank``; the config is built before recording, as the entry scripts do in their
+    setup."""
     config = make_parallelism_config(
         world_size=WORLD_SIZE, gpus_per_node=GPUS_PER_NODE, rank=rank, max_concurrent_loading=1, **case.parallelism
     )
@@ -276,15 +247,13 @@ def golden_key(rank: int) -> str:
 
 
 def trace_case(case: LoadCase, checkpoints: Checkpoints) -> dict[str, list[str]]:
-    """``case``'s trace on each of its ranks, keyed by :func:`golden_key`. Rank 0 is traced first, and
-    every other rank receives its object broadcasts."""
+    """``case``'s trace on each rank; rank 0 goes first and the others receive its object broadcasts."""
     rank0 = trace_rank(case, 0, checkpoints)
     traces = {rank: rank0 if rank == 0 else trace_rank(case, rank, checkpoints, rank0) for rank in case.ranks}
     return {golden_key(rank): checkpoints.portable(trace.events) for rank, trace in traces.items()}
 
 
 def render_golden() -> str:
-    """The golden file: every case's trace on each of its ranks, one event a line."""
     with tempfile.TemporaryDirectory() as root:
         checkpoints = build_checkpoints(Path(root))
         traces = {case.key: trace_case(case, checkpoints) for case in LOAD_CASES}

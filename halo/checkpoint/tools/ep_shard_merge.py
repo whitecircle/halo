@@ -1,8 +1,6 @@
-"""Merge a per-rank EP-sharded save (``save_sharded_ep: true``) into one ``from_pretrained``-loadable checkpoint.
-
-The merge streams one MoE layer's experts (or one replicated tensor) at a time through the family's
-``ExpertLayout``, the transform the gathered save applies, and carries the save's resume state.
-"""
+"""Merge a per-rank EP-sharded save into one ``from_pretrained``-loadable checkpoint, streaming one MoE layer's experts
+at a time through the family's ``ExpertLayout``, the transform the gathered save applies, and carry its resume
+state."""
 
 import logging
 import os
@@ -36,28 +34,17 @@ from halo.models.moe.family_specs import (
 
 logger = logging.getLogger(__name__)
 
-# Union of every family's expert-weight roots (MoEFamilySpec.expert_weight_roots), derived rather than
-# hand-listed so a new family's expert shards cannot pass through as non-expert weights.
+# Derived so a new family's expert shards cannot pass through as non-expert weights.
 EP_EXPERT_SUFFIXES = tuple(sorted(expert_weight_roots(), key=lambda s: (-len(s), s)))
 
-# Expert keys are ...{container}.{suffix}. The container is captured verbatim (mlp, feed_forward, or
-# the block itself) so transforms re-emit experts under the same container.
-# Captures (prefix_with_container, param_suffix).
+# Captures (prefix_with_container, param_suffix); the container (mlp, feed_forward, the block itself) stays verbatim so
+# transforms re-emit experts under it.
 EP_EXPERT_PATTERN = re.compile(r"^(.+)\.(" + "|".join(re.escape(s) for s in EP_EXPERT_SUFFIXES) + r")$")
 
 
 def group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
-    """Separate expert weights from non-expert weights and group by MoE layer.
-
-    Values pass through untouched, so this classifies tensors and read plans alike (the streaming
-    merge groups keys before any tensor is materialized). A declared shared-expert container
-    (:func:`~halo.models.moe.family_specs.shared_expert_attrs`) is not an expert group,
-    whatever its parameters are called.
-
-    Returns:
-        expert_groups: {layer_prefix: {param_suffix: value}} for expert weights
-        non_expert: {key: value} for all other weights
-    """
+    """Split into ``{layer_prefix: {param_suffix: value}}`` expert groups and the rest; values pass through untouched,
+    so this classifies tensors and read plans alike."""
     expert_groups = defaultdict(dict)
     non_expert = {}
 
@@ -78,14 +65,10 @@ def group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
 def resolve_merge_transform(
     model_type: str, has_expert_groups: bool, had_expert_shards: bool, total_tensors: int, verbose: bool
 ) -> MoEFamilySpec | None:
-    """The family spec whose ``expert_layout`` this checkpoint merges into, or ``None`` for pass-through.
-
-    Raises the two dead ends instead of writing an unloadable checkpoint: merged shards that match
-    no declared expert attribute, and a ``model_type`` no family spec claims.
-    """
+    """The family spec whose ``expert_layout`` this checkpoint merges into, or ``None`` for pass-through; raises rather
+    than write an unloadable checkpoint."""
     if not has_expert_groups:
-        # Only expert params are sharded, so merged shards matching nothing means the suffix union
-        # missed this family.
+        # Only expert params are sharded, so merged shards matching nothing means the suffix union missed this family.
         if had_expert_shards:
             raise ValueError(
                 f"Merged {total_tensors} tensors from per-rank expert shards, but none matched an "
@@ -116,9 +99,8 @@ def _ep_save_layout(input_dir: str, verbose: bool) -> tuple[str, int, list[str]]
         logger.info(f"Detected model type: {model_type}")
 
     metadata = read_checkpoint_index(input_dir, missing_ok=True).get("metadata", {})
-    # A gathered (or PP/TP) checkpoint already carries HF-layout expert keys matching the pattern
-    # below, so merging one doubles the ``experts.experts.`` prefix and from_pretrained then reads
-    # those keys as missing.
+    # A gathered (or PP/TP) checkpoint already carries HF-layout expert keys, so merging one doubles the
+    # ``experts.experts.`` prefix and from_pretrained reads them as missing.
     if not is_ep_sharded_checkpoint(input_dir) or "ep_size" not in metadata:
         raise ValueError(
             f"{input_dir} is not a per-rank EP-sharded checkpoint: no index there declares the "
@@ -134,8 +116,7 @@ def _ep_save_layout(input_dir: str, verbose: bool) -> tuple[str, int, list[str]]
         logger.info(f"  EP size: {ep_size}")
         logger.info(f"  Format: {metadata.get('format', 'unknown')}")
 
-    # EP shards only: a bare .safetensors glob would pull in adapter_model.safetensors or a stale
-    # model.safetensors.
+    # EP shards only, since a bare glob would pull in adapter_model.safetensors or a stale model.safetensors.
     shard_files = sorted(f for f in os.listdir(input_dir) if is_ep_shard(f))
     if not shard_files:
         raise FileNotFoundError(f"No EP shards ({ep_shard_filename(0, ep_size)} and siblings) found in {input_dir}")
@@ -145,8 +126,7 @@ def _ep_save_layout(input_dir: str, verbose: bool) -> tuple[str, int, list[str]]
 
 
 class _RankShards:
-    """The tensors of a per-rank EP save, read lazily: a logical key is either one stored tensor or the
-    ``ep_size`` per-rank slices of an expert tensor, concatenated on the expert dimension."""
+    """A per-rank EP save read lazily: a logical key is one tensor or ``ep_size`` slices joined on the expert dim."""
 
     def __init__(self, key_reader: dict, shard_groups: dict[str, dict[int, str]], verbose: bool):
         self.key_reader = key_reader
@@ -154,18 +134,15 @@ class _RankShards:
         self.verbose = verbose
 
     def logical_keys(self) -> dict:
-        """Every logical tensor in the reference order: passthrough keys first, concatenated shard groups
-        after, matching the order loading every file into one dict produces."""
+        """Passthrough keys first, concatenated groups after, the order loading every file into one dict produces."""
         logical = dict.fromkeys(key for key in self.key_reader if not EP_SHARD_KEY_RE.match(key))
         logical.update(dict.fromkeys(self.shard_groups))
         return logical
 
     def read(self, name: str) -> torch.Tensor:
-        """Materialize one logical tensor: a verbatim read, or the ep_size shard concat."""
         tensors = [self.key_reader[key].get_tensor(key) for key in self._input_keys(name)]
         if name not in self.shard_groups:
             return tensors[0]
-        # dim 0 is the expert dimension
         merged = torch.cat(tensors, dim=0)
         if self.verbose:
             logger.info(f"  Merged {name}: {len(tensors)} shards -> {list(merged.shape)}")
@@ -184,12 +161,8 @@ class _RankShards:
 def _open_rank_shards(
     stack: ExitStack, input_dir: str, shard_files: list[str], ep_size: int, verbose: bool
 ) -> _RankShards:
-    """Open every input shard once on ``stack`` and group the per-rank expert slices, refusing a group
-    that does not hold all ``ep_size`` ranks.
-
-    Tensors are read lazily: only the group being merged is ever resident, so peak host RAM is one
-    gathered MoE layer, not the model.
-    """
+    """Open every input shard once on ``stack`` and group the per-rank slices, refusing a group missing a rank. Reads
+    are lazy, so peak host RAM is one gathered MoE layer."""
     key_reader = {}
     for name in shard_files:
         reader = stack.enter_context(safe_open(os.path.join(input_dir, name), framework="pt"))
@@ -229,16 +202,10 @@ def _write_merged_tensors(
     model_type: str,
     verbose: bool,
 ) -> int:
-    """Stream the non-expert tensors, then each MoE layer through the family's ``ExpertLayout``, into
-    ``writer`` under their hub spelling; returns the number of tensors written.
-
-    Written at the dtype the shards store: the sharded writer already applied ``save_dtype_caster``
-    (the module-tree keep-set of norms, balancing tensors and the family's fp32 pins that the gathered
-    save uses; nothing cast in a training checkpoint, whose fp32 masters the merge keeps so it still
-    resumes). A second, name-only cast here has no model tree to derive the pins from and would fold
-    them to bf16 (GLM-5 Next's linear-attention ``A_log``/``dt_bias``, Inkling's short convolutions,
-    DeepSeek-V4's ``attn_hc``), so merged-from-sharded would no longer match a gathered save.
-    """
+    """Stream the non-expert tensors, then each layer through ``ExpertLayout``, under hub spellings; returns the tensor
+    count. Written at the stored dtype, since the sharded writer already cast and a name-only cast here has no module
+    tree to derive fp32 pins from (GLM-5 Next's ``A_log``/``dt_bias``, Inkling's short convolutions, DeepSeek-V4's
+    ``attn_hc``)."""
 
     def emit(state: dict) -> None:
         if spec is not None:
@@ -275,20 +242,9 @@ def merge_ep_shards(
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     delete_input_shards: bool = False,
 ):
-    """
-    Merge EP-sharded checkpoint into a single model, streaming one tensor group at a time.
-
-    The save's per-rank resume files and optimizer meta are hard-linked into ``output_dir`` where it shares
-    the input's filesystem, and copied with their mode otherwise. A linked file outlives the input's deletion,
-    and a training save into either directory replaces it there rather than writing through the link.
-
-    Args:
-        input_dir: Path to EP-sharded checkpoint
-        output_dir: Path to save merged checkpoint
-        verbose: Log progress messages
-        max_shard_size: Maximum shard size for output safetensors
-        delete_input_shards: Delete input shard files after the merged checkpoint is fully saved
-    """
+    """Merge an EP-sharded checkpoint into one model, one tensor group at a time. Resume files and the optimizer meta
+    are hard-linked where the filesystem allows, else copied; a training save into either directory replaces a linked
+    file rather than writing through it."""
     # Every input gate runs before the output directory is created, so a refused merge writes nothing.
     reject_in_place_conversion(input_dir, output_dir)
     reject_sibling_adapter(input_dir)
@@ -304,10 +260,8 @@ def merge_ep_shards(
         )
 
         writer = stack.enter_context(StreamingShardWriter(output_dir, max_shard_size, enabled=True))
-        # Peak RAM is about twice the largest group (the concatenated inputs plus the transform's
-        # copies) on top of the writer's staged output parts. On disk the merged artifact is the
-        # input shards' size, since tensors are re-emitted at their stored dtype, plus the resume state
-        # it cannot hard-link.
+        # Peak RAM is about twice the largest group on top of the writer's staged parts. On disk the artifact is the
+        # input shards' size, as tensors keep their stored dtype, plus the resume state it cannot hard-link.
         largest_group = max(
             [sum(shards.nbytes(f"{prefix}.{suffix}") for suffix in params) for prefix, params in expert_groups.items()]
             + [shards.nbytes(name) for name in non_expert],
@@ -333,10 +287,9 @@ def merge_ep_shards(
     # merge that died midway leaves a directory the resume refuses rather than one that warm-restarts.
     for name in resume_files:
         link_or_copy_file(os.path.join(input_dir, name), os.path.join(output_dir, name))
-    # The inputs go LAST, once the merged weights and their index are on disk, so a merge that died
-    # earlier leaves the only copy of the weights where it found them. generation_config.json rides
-    # across verbatim: the format gate admits only this toolkit's sharded writer's output, which
-    # emits that file only for a generating model off an already-sanitized config.
+    # The inputs go LAST, so a merge that died earlier leaves the only copy where it found it. generation_config.json
+    # rides across verbatim, since the format gate admits only this toolkit's writer, which emits it off a sanitized
+    # config.
     copy_checkpoint_aux_files(input_dir, output_dir, carried=resume_files, verbose=verbose)
     if delete_input_shards:
         for shard_file in shard_files:

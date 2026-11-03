@@ -1,28 +1,9 @@
 #!/usr/bin/env python
-"""PP+EP and PP+ETP checkpoint save, resume and export through the real DistributedSFTTrainer (gpt-oss tiny
-MoE): pp2 × ep2 (``--mode ep2``, the default) or pp2 × etp2 (``--mode etp2``, every expert on both ranks of a
-stage at half the FFN width).
+"""PP+EP and PP+ETP checkpoint save, resume and export through the real trainer on a tiny gpt-oss MoE.
 
-The expert-specific seams on top of the dense PP resume test:
-
-  * the export: the checkpoint's merged index reloads through stock ``from_pretrained`` with no missing,
-    unexpected or mis-shaped key and reproduces the pipeline's loss on its final weights, so each stage
-    wrote its experts whole (dispatch-EP slices or expert-TP shards gathered) under global names;
-  * PP+EP weight resume loads at construction (the loader cannot ingest HF-format keys into the
-    per-rank expert layout), so the resume trainer's model is built from_pretrained(ckpt) —
-    exactly what prepare_distributed_resume arranges in the training scripts;
-  * the construction guard: a model built from base weights must be rejected by the load path
-    (its experts would silently resume from base weights);
-  * router balancing biases restore through the stage's global_parameter_name remap — post-load
-    biases bitwise equal the saved global-named entries for this stage's layers (without the
-    remap, stage 1 would look up stage 0's names and keep zero biases);
-  * expert optimizer moments (plain per-rank tensors) restore bitwise from this rank's shard, an exact
-    resume with no warm restart;
-  * end-to-end: train(resume) continues to completion with finite losses.
-
-Topology: 4 GPUs as 2 simulated NVLink domains of 2, moe_balancing=bias_update.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep_resume.py [--mode etp2]
+PP+EP weight resume loads at construction, since the loader can't ingest HF-format keys into the per-rank expert
+layout, and a model built from base weights must be rejected or its experts silently resume from base. Without the
+``global_parameter_name`` remap, stage 1 would look up stage 0's balancing biases and keep zeros.
 """
 
 import json
@@ -58,7 +39,6 @@ SEQ_LEN = 64
 N_STEPS = 8
 SAVE_STEP = 4
 BATCH = 4
-# The expert axis inside each two-rank stage.
 MODES = {"ep2": {"ep_size": 2}, "etp2": {"expert_tp_size": 2}}
 MODE = "ep2"
 
@@ -88,21 +68,18 @@ def run(ctx):
             max_length=SEQ_LEN,
             save_every=save_steps,
             bf16=True,
-            gradient_checkpointing=False,  # resume compares optimizer state, not the checkpoint path
+            gradient_checkpointing=False,  # Resume compares optimizer state, not the checkpoint path.
         )
         return build_bias_balanced_sft_trainer(model, args, config, tokenizer, rows)
 
-    # ── train 4 steps, checkpoint at step 4 (EP gather + biases + optimizer shards) ─────────────
     trainer_a = build_trainer("runA", SAVE_STEP, save_steps=SAVE_STEP)
     ctx.on_teardown(trainer_a.cleanup_ep)
     trainer_a.train()
     ckpt = os.path.join(root, "runA", f"checkpoint-{SAVE_STEP}")
     dist.barrier()
     rank = dist.get_rank()
-    # TRL copies the (full-size) tokenizer's special-token ids into the tiny config during
-    # training, so the saved config would fail from_pretrained's padding_idx assert — restore ids
-    # that exist in the tiny vocab so the resume path exercises PP mechanics, not the test's
-    # tokenizer/model size mismatch.
+    # TRL copies the full-size tokenizer's special-token ids into the tiny config, which fails from_pretrained's
+    # padding_idx assert; restore ids that exist in the tiny vocab.
     if rank == 0:
         for name in ("config.json", "generation_config.json"):
             path = os.path.join(ckpt, name)
@@ -119,7 +96,6 @@ def run(ctx):
         and os.path.isfile(os.path.join(ckpt, "router_balancing_biases.pt"))
     )
 
-    # ── the export: the merged index reloads unsplit and scores the final weights as the pipeline does ──
     # The save is the run's last step, so one more pipeline step with no update scores the saved weights.
     probe_batch, probe_loss = probe_step(trainer_a, rows, BATCH)
     exported = False
@@ -136,7 +112,6 @@ def run(ctx):
     dist.broadcast(flag, src=0)
     checks["export_reloads_unsplit_and_reproduces_the_probe_loss"] = bool(flag.item())
 
-    # ── the construction guard: a base-built model must be rejected by the load path ────────────
     trainer_base = build_trainer("runBase", N_STEPS)
     ctx.on_teardown(trainer_base.cleanup_ep)
     guard_raised = False
@@ -147,21 +122,19 @@ def run(ctx):
         log(f"[guard] raised as expected: {str(exc)[:120]}")
     checks["base_built_model_rejected"] = world_all(guard_raised)
 
-    # ── the production resume path: model constructed from the checkpoint ───────────────────────
     trainer_b = build_trainer("runB", N_STEPS, from_ckpt=ckpt)
     ctx.on_teardown(trainer_b.cleanup_ep)
     trainer_b._load_from_checkpoint(ckpt)
     stage = unwrap_toolkit_wrappers(trainer_b.model)
 
-    # Balancing biases: restored through the global remap, bitwise equal the file's entries for
-    # exactly this stage's layers.
+    # Restored through the global remap, bitwise equal to the file's entries for exactly this stage's layers.
     saved_biases = torch.load(os.path.join(ckpt, "router_balancing_biases.pt"), weights_only=False)
     live_biases = {
         name: module.balancing_biases
         for name, module in stage.named_modules()
         if getattr(module, "balancing_biases", None) is not None
     }
-    biases_ok = len(live_biases) == 4  # 8 layers, 4 per stage
+    biases_ok = len(live_biases) == 4  # 8 layers, 4 per stage.
     nonzero = False
     for name, bias in live_biases.items():
         reference = saved_biases.get(stage.global_parameter_name(name))
@@ -171,9 +144,9 @@ def run(ctx):
         elif bool((reference.abs() > 0).any()):
             nonzero = True
     checks["balancing_biases_restored_global_named"] = biases_ok
-    checks["balancing_biases_nonzero"] = nonzero  # zero saved biases would make the check vacuous
+    checks["balancing_biases_nonzero"] = nonzero  # Zero saved biases would make the check vacuous.
 
-    # Expert optimizer moments: plain per-rank tensors keyed by stage-local FQN, restored bitwise.
+    # Plain per-rank tensors keyed by stage-local FQN, restored bitwise.
     trainer_b.create_optimizer_and_scheduler(num_training_steps=N_STEPS)
     trainer_b._load_optimizer_and_scheduler(ckpt)
     expert_prefixes = tuple(f"{name}." for name, _ in named_ep_layers(stage))
@@ -182,7 +155,6 @@ def run(ctx):
     checks["expert_optimizer_moments_bitwise_equal_shard"] = expert_ok
     metrics["expert_state_fqns"] = n_expert_fqns
 
-    # ── end-to-end: resume to completion with finite losses ─────────────────────────────────────
     trainer_b.train(resume_from_checkpoint=ckpt)
     losses = [e["loss"] for e in trainer_b.state.log_history if "loss" in e]
     checks["resume_trained_to_completion"] = trainer_b.state.global_step == N_STEPS and len(losses) == N_STEPS

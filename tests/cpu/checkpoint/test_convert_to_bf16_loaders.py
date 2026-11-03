@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for ``halo.checkpoint.tools.bf16_conversion``'s loader dispatch.
-
-One table must drive both call sites that load a model (convert, inference check) instead of a repeated
-``--task`` if-ladder, whose trailing ``else`` silently loads a bare ``AutoModel`` for any unknown
-type. An unknown / PEFT-unsupported type must fail loudly.
-
-Which class each type resolves to is asserted at the gate the load actually goes through
-(``from_pretrained_verified`` / ``auto_load_model``), because reaching ``from_pretrained`` around it
-is the other way this dispatch goes wrong — see
-``tests/cpu/checkpoint/test_after_training_load_gates.py``. Every load also reaches
-``finalize_loaded_model``: ``--check_inference`` generates from what the loader returns, and
-transformers 5 hands back uninitialized non-persistent buffers.
-
-Run: ``python tests/cpu/checkpoint/test_convert_to_bf16_loaders.py`` (or ``pytest -m cpu``).
-"""
+"""``halo.checkpoint.tools.bf16_conversion``'s loader dispatch: one table drives both call sites, an unknown type
+fails loudly, and each load reaches ``finalize_loaded_model``."""
 
 from __future__ import annotations
 
@@ -32,8 +19,7 @@ from scripts.after_training import merge_peft_adapters as merge_script
 
 @pytest.fixture
 def finalized(monkeypatch) -> list:
-    """Records what reaches the post-load seam. Stubbed because these tests hand the loader
-    sentinels rather than modules, and returned so each can assert the load reached it."""
+    """Stubbed because these tests hand the loader sentinels rather than modules."""
     seen: list = []
     monkeypatch.setattr(convert_module, "finalize_loaded_model", seen.append)
     return seen
@@ -44,8 +30,6 @@ class _ParserBuilt(Exception):
 
 
 def _task_choices(monkeypatch, entry) -> set[str]:
-    """The ``--task`` choices a tool's CLI advertises, read off the parser ``entry`` builds."""
-
     def capture(self, *args, **kwargs):
         raise _ParserBuilt(self)
 
@@ -57,14 +41,12 @@ def _task_choices(monkeypatch, entry) -> set[str]:
 
 
 def test_table_covers_exactly_the_cli_choices(monkeypatch):
-    """Read off the parser, not transcribed: a choice added without a loader entry (or a loader
-    added without a choice) must fail here rather than silently fall through to a bare AutoModel."""
+    """A choice without a loader entry must not fall through to a bare AutoModel."""
     assert set(TASK_MODEL_CLASSES) == _task_choices(monkeypatch, convert_script.parse_args)
 
 
 def test_the_merge_and_the_conversion_spell_one_head_flag(monkeypatch):
-    """A command line carries from the conversion to the merge: both take ``--task``, over the same names,
-    the merge over the tasks an adapter is trained for."""
+    """A command line carries from the conversion to the merge."""
     assert _task_choices(monkeypatch, merge_script.main) == set(ADAPTER_TASKS) < set(TASK_MODEL_CLASSES)
 
 
@@ -80,9 +62,7 @@ def test_peft_unsupported_type_names_the_supported_ones():
 
 
 def test_known_types_dispatch_to_their_registered_class_through_the_gate(monkeypatch, finalized):
-    """Each type loads with the class the table registers, and every one of them reaches the
-    checkpoint-coverage gate — ``causal_lm`` through the config-resolving loader that is itself
-    gated (a VLM base must keep its vision tower), the rest with their pinned class."""
+    """``causal_lm`` goes through the config-resolving loader, since a VLM base must keep its vision tower."""
     calls: dict = {}
     monkeypatch.setattr(
         offline_export,
@@ -108,8 +88,7 @@ def test_known_types_dispatch_to_their_registered_class_through_the_gate(monkeyp
 
 
 def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
-    """The weights come from the BASE under ``--peft``, so that is the directory the gate must see —
-    PEFT's own auto-class would load it through a raw ``from_pretrained``."""
+    """PEFT's own auto-class would load the base through a raw ``from_pretrained``."""
     seen: dict = {}
     monkeypatch.setattr(
         convert_module.PeftConfig,
@@ -131,7 +110,7 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
 
 
 def test_the_task_head_excuse_follows_the_adapters_declaration(monkeypatch, finalized):
-    """``modules_to_save`` is the only thing that makes an absent seq-cls head legitimate."""
+    """``modules_to_save`` alone makes an absent seq-cls head legitimate."""
     seen: dict = {}
     monkeypatch.setattr(
         convert_module.PeftConfig,

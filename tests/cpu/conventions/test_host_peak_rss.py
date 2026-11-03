@@ -1,12 +1,6 @@
-"""The peak host memory the gathered-save benchmark reports follows what the process holds, and restarts from
-the current size on a reset, so a save's peak is not the model load's.
-
-The probe runs in a fresh interpreter pinned to one CPU: the kernel restarts the peak from its per-CPU batched
-resident-set count, which a long-lived process whose threads ran on many CPUs (an xdist worker) can leave hundreds of
-MiB above what it holds on a many-CPU host, enough to hide the whole block.
-
-Run: python tests/cpu/conventions/test_host_peak_rss.py
-"""
+"""The gathered-save benchmark's peak host memory follows what the process holds and restarts from the current size
+on a reset. The probe pins a fresh interpreter to one CPU: the kernel's per-CPU batched RSS count can leave a
+long-lived xdist worker hundreds of MiB high, enough to hide the whole block."""
 
 import pytest
 

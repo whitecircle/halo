@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The Ulysses exchange refuses a head count or sequence length that cp_size does not divide.
-
-The exchange reshapes each tensor's heads (or sequence) into ``cp_size`` per-rank slices of the flattened rows, so a
-head count cp_size does not divide, whose flattened width still divides (3 heads of dim 4 on 2 ranks), would cut a
-head in two with no error: wrong attention, silently. The wrappers validate divisibility before ever reaching the
-exchange; this pins the exchange's own guard, on every rank before any collective, so nothing hangs.
-
-    python tests/cpu/parallelism/test_ulysses_all_to_all_divisibility.py
-"""
+"""The Ulysses exchange refuses a head count or sequence length cp_size does not divide, on every rank before any
+collective. 3 heads of dim 4 on 2 ranks flatten evenly, cutting a head in two with no error."""
 
 from unittest.mock import patch
 
@@ -29,9 +22,9 @@ def _qkv(q_heads: int, kv_heads: int) -> tuple[torch.Tensor, torch.Tensor, torch
 def _worker(rank: int) -> None:
     group = dist.group.WORLD
     refusals = (
-        lambda: sequence_to_heads(*_qkv(3, 2), group),  # Q heads
-        lambda: sequence_to_heads(*_qkv(4, 3), group),  # K/V heads, Q's divisible
-        lambda: heads_to_sequence(torch.randn(BATCH, 5, 2, HEAD_DIM), group),  # sequence
+        lambda: sequence_to_heads(*_qkv(3, 2), group),  # Q heads.
+        lambda: sequence_to_heads(*_qkv(4, 3), group),  # K/V heads, Q's divisible.
+        lambda: heads_to_sequence(torch.randn(BATCH, 5, 2, HEAD_DIM), group),
     )
     no_collective = AssertionError(f"rank {rank}: an indivisible exchange reached the collective")
     with patch.object(dist, "all_to_all_single", side_effect=no_collective):

@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""A reward model scores on ``--rm_device cpu`` whatever its head width.
-
-On a CUDA device ``load_reward_model`` builds through ``apply_family_patches``; on CPU it builds the backend as
-given. For a model with heads wider than flash runs (Gemma 4), the seam pins ``sdpa`` process-wide to the
-mem-efficient kernel, which also turns off the math and flash backends CPU SDPA runs on, so a CPU scorer under the
-pin raises at its first forward. Scoring on CPU on a host with GPUs, taken by the generation server, is the common
-case, so the host's CUDA is mocked both ways; a mocked GPU answers the device queries the post-load step makes.
-
-    python tests/cpu/inference/test_rm_cpu_scoring.py
-"""
+"""A reward model scores on ``--rm_device cpu`` whatever its head width. For heads wider than flash runs (Gemma 4)
+the seam pins ``sdpa`` process-wide to the mem-efficient kernel, which also turns off the backends CPU SDPA runs
+on, so a CPU scorer under the pin raises at its first forward."""
 
 import numpy as np
 import pytest

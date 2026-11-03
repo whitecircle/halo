@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Every registered EP family builds on its tiny model.
-
-``apply_ep_layers`` replaces each MoE block whose class a family claims (its own
-``HF_MODULE_NAMES``) with that family's layer, built through the shared construction template. Every
-family registered by its blocks or by its ``model_type`` is patched on its own tiny model, so one that
-loses its block claim fails here rather than dropping out. A family that stops building (an abstract
-method left unimplemented, a construction step lost from the shared base class) fails here on CPU
-instead of at the first EP run. The wrapped model must also hold every parameter the blocks held: the
-layers adopt the blocks' weights, neither dropping nor copying any.
-
-Run: python tests/cpu/parallelism/test_ep_family_instantiation.py
-"""
+"""Every registered EP family builds on its tiny model and adopts all the block's parameters, neither dropping nor
+copying any."""
 
 import pytest
 import torch

@@ -1,29 +1,8 @@
 #!/usr/bin/env python
-"""
-VLM SFT Training Test for Qwen3.5-4B (natively multimodal dense model).
+"""VLM SFT on Qwen3.5-4B, natively multimodal with a hybrid of GatedDeltaNet and attention layers and a double-width
+q_proj.
 
-Qwen3.5 models are natively multimodal (Image-Text-to-Text) with a unified
-vision-language architecture, unlike Qwen3 which has separate "-VL" variants.
-
-Architecture:
-  - Vision encoder: 24-layer ViT (1024 hidden, patch_size=16)
-  - Language model: 32 decoder layers with hybrid attention
-    - 24 linear attention layers (Qwen3_5GatedDeltaNet)
-    - 8 full attention layers (Qwen3_5Attention)
-  - Dense MLP (no MoE)
-  - Double-width q_proj (query + sigmoid gate)
-
-Note: Flash Attention 2 is incompatible with Qwen3.5's M-RoPE varlen path
-(crashes with cudaErrorIllegalAddress). Use attn_implementation="sdpa".
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_vlm_qwen3_5.py
-
-Requirements:
-    - 2x GPUs (tested on B200)
-    - causal-conv1d and flash-linear-attention installed (for GatedDeltaNet kernels)
-    - Model: Qwen/Qwen3.5-4B (auto-downloaded)
+FA2 is incompatible with its M-RoPE varlen path (cudaErrorIllegalAddress), so this runs sdpa.
 """
 
 import math
@@ -91,7 +70,7 @@ def run(ctx):
         MODEL_NAME,
         dtype=torch.bfloat16,
         trust_remote_code=True,
-        attn_implementation="sdpa",  # FA2 crashes on Qwen3.5's M-RoPE varlen path
+        attn_implementation="sdpa",  # FA2 crashes on Qwen3.5's M-RoPE varlen path.
     )
 
     param_count = sum(p.numel() for p in model.parameters())
@@ -126,7 +105,7 @@ def run(ctx):
         max_length=MAX_SEQ_LENGTH,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # Liger has no qwen3_5 support
+        use_liger_kernel=False,  # Liger has no qwen3_5 support.
         logging_steps=1,
         eval_strategy="steps",
         eval_steps=NUM_TRAIN_STEPS,
@@ -136,7 +115,7 @@ def run(ctx):
         dataloader_num_workers=0,
         dataloader_drop_last=True,
         remove_unused_columns=False,
-        ddp_find_unused_parameters=True,  # Vision encoder unused with text-only data
+        ddp_find_unused_parameters=True,  # Vision encoder unused with text-only data.
     )
 
     parallelism_config = ParallelismConfig()

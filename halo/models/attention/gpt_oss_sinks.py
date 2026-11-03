@@ -1,9 +1,5 @@
-"""GptOss attention-sink policy: neutralized, live-frozen, or trainable.
-
-GptOss appends a per-head learnable logit (``self_attn.sinks``) to every softmax. The run's policy is
-applied once at load by :func:`apply_sinks_policy`, stamped on the model for the trainer gates and the
-adapter's provenance, and mirrored by the checkpoint writers (:func:`neutralized_gpt_oss_sinks`).
-"""
+"""GptOss attention-sink policy: neutralized, live-frozen, or trainable. GptOss appends a per-head learnable logit
+(``self_attn.sinks``) to every softmax; :func:`apply_sinks_policy` applies the run's policy once at load."""
 
 from __future__ import annotations
 
@@ -25,36 +21,31 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# Where :func:`apply_sinks_policy` stamps the run's :class:`SinksPolicy`: a module attribute, so it never
-# serializes into a ``config.json`` and attribute lookup falls through PEFT/FSDP2 wrappers.
+# A module attribute, so it never serializes into a ``config.json`` and lookup falls through PEFT/FSDP2 wrappers.
 SINKS_POLICY_ATTR = "_halo_live_attention_sinks"
 
 # The sink-reset verdict the attention validator records, run-scoped, on the config instance.
 RESOLVED_SINKS_RESET_ATTR = "_halo_sinks_reset"
 
-# Implementations under which a trainable sink receives a gradient: FA4 through the rescale below,
-# eager natively. FA3's fused backward returns none, and flex_attention's compiled backward NaNs on it.
+# FA4 through the rescale below, eager natively. FA3's fused backward returns no sink gradient, and flex_attention's
+# compiled backward NaNs on it.
 _TRAINABLE_SINK_ATTN_IMPLEMENTATIONS = ("flash_attention_4", "eager")
 
-# The implementations that carry live sinks, as the refusals name them; ``_attn_impl_handles_sinks`` in
-# halo/models/attention/selection.py decides the set.
+# ``_attn_impl_handles_sinks`` decides the set.
 SINK_CARRYING_ATTN_HINT = "flash_attention_4 on Blackwell; flex_attention or eager"
 # Why a GptOss teacher must keep its sinks: unlike a student, a frozen teacher never trains back from neutralized ones.
 NEUTRALIZED_TEACHER_SINKS_COST = (
     "a frozen pretrained teacher without its sinks predicts far from itself (~6 nats/token KL on gpt-oss-20b)"
 )
 
-# Marker on the wrapped ``flash_attn.cute`` entry points.
 _FA4_RESCALE_ATTR = "_halo_trainable_sink_rescale"
 
-# The fraction of a dtype's most negative value at or below which a sink reads as neutralized: a bf16 dtype-min sink
-# loaded at fp32 sits just above fp32's own minimum.
+# A fraction of the dtype's minimum, as a bf16 dtype-min sink loaded at fp32 sits just above fp32's own minimum.
 _NEUTRALIZED_SINK_FLOOR = 0.99
 
 
 class SinksPolicy(enum.StrEnum):
-    """The sink state a GptOss run trains under, shared by the trainer gates, the adapter's
-    ``training_provenance.json`` and the merge tools; ``str``-valued so it serializes as plain JSON."""
+    """Shared by the trainer gates, the adapter's ``training_provenance.json`` and the merge tools."""
 
     NEUTRALIZED = "neutralized"
     LIVE = "live"
@@ -62,7 +53,6 @@ class SinksPolicy(enum.StrEnum):
 
     @classmethod
     def from_flags(cls, *, reset_sinks: bool, train_sinks: bool = False) -> SinksPolicy:
-        """The policy the ``reset_sinks`` and ``train_sinks`` knobs select."""
         if reset_sinks and train_sinks:
             raise ValueError(
                 "train_sinks: true contradicts reset_sinks: true — a dtype-min sink has zero softmax mass "
@@ -74,33 +64,25 @@ class SinksPolicy(enum.StrEnum):
 
     @property
     def live(self) -> bool:
-        """Whether the sink column participates in the softmax (LIVE and TRAINABLE alike)."""
         return self is not SinksPolicy.NEUTRALIZED
 
 
 def is_sink_key(key: str) -> bool:
-    """Whether a parameter / state-dict name refers to an attention-sink tensor."""
     return ".sinks" in key
 
 
 def neutralized_sink_value(dtype: torch.dtype) -> float:
-    """The value a neutralized sink of ``dtype`` holds: the most negative finite one, which zeroes its
-    softmax term."""
+    """The most negative finite value, which zeroes the sink's softmax term."""
     return torch.finfo(dtype).min
 
 
 def uses_gpt_oss_sinks(model_config) -> bool:
-    """Whether this architecture's sinks constrain the attention implementation (GptOss).
-
-    Narrower than "has attention sinks": DeepSeek-V4 carries them too but runs eager, which applies the
-    sink column itself; widening this would reset its pretrained sinks.
-    """
+    """DeepSeek-V4 carries sinks too but runs eager, which applies them; widening this would reset its sinks."""
     return find_moe_family_spec_for_config(model_config) is GPT_OSS
 
 
 def install_sdpa_for_reset_sinks(model_config) -> bool:
-    """Flip GptOss's class-level ``_supports_sdpa = False``, valid only once its sinks are reset (the
-    column SDPA drops then contributes 0). Returns True if flipped."""
+    """Valid only once the sinks are reset, as the column SDPA drops then contributes 0."""
     if not uses_gpt_oss_sinks(model_config):
         return False
     model_cls = mapped_model_class(model_config, AutoModelForCausalLM)
@@ -120,26 +102,17 @@ def install_sdpa_for_reset_sinks(model_config) -> bool:
 
 
 def ensure_gpt_oss_local_flash() -> None:
-    """Keep every flash label a GptOss build is given on the local build (idempotent).
-
-    transformers swaps a label its class's compatible list does not name (FA2, FA3) for the list's first
-    entry, the kernel-hub vllm-flash-attn3: SM 9.0 binaries that crash on Blackwell, fetched through the
-    ``kernels`` package the image does not ship, and not the build the sink checks validated.
-    """
+    """transformers swaps a label its class's compatible list does not name (FA2, FA3) for the list's first entry, the
+    kernel-hub vllm-flash-attn3: SM 9.0 binaries that crash on Blackwell, through a package the image lacks."""
     GptOssPreTrainedModel._compatible_flash_implementations = None
 
 
-# At import rather than per load: transformers decides the swap in each model's __init__, so a build no attention
-# validator ran for would otherwise take it.
+# At import, as transformers decides the swap in each model's __init__, so a build no validator ran for would take it.
 ensure_gpt_oss_local_flash()
 
 
 def _gpt_oss_sink_attentions(model, model_config=None):
-    """Yield ``(layer_index, attention)`` for each decoder layer of a GptOss model; nothing otherwise.
-
-    Yields the module that owns ``sinks``, under the CP wrapper too, so the FA2 rebind lands where the
-    save paths read. ``model_config`` overrides ``model.config``.
-    """
+    """Yields the module owning ``sinks``, under the CP wrapper too, so the FA2 rebind lands where saves read."""
     config = model_config if model_config is not None else getattr(model, "config", None)
     if config is None or not uses_gpt_oss_sinks(config):
         return
@@ -159,11 +132,8 @@ def _reset_gpt_oss_sinks(
     model_config: AutoConfig,
     attn_implementation: str | None = None,
 ) -> int:
-    """Neutralize GptOss sinks; returns the number of layers reset.
-
-    ``flash_attention_2`` gets ``sinks = None`` (its s_aux path rejects any tensor); every other backend
-    reads the parameter's shape, so it is filled with ``dtype.min`` and frozen (it has no gradient left).
-    """
+    """``flash_attention_2`` gets ``sinks = None``, as its s_aux path rejects any tensor; every other backend reads the
+    parameter's shape, so it is filled with ``dtype.min`` and frozen."""
     use_none = attn_implementation == "flash_attention_2"
     reset_count = 0
     with torch.no_grad():
@@ -189,7 +159,6 @@ def _reset_gpt_oss_sinks(
 
 
 def _set_gpt_oss_sinks_trainable(model: PreTrainedModel, model_config: AutoConfig, *, trainable: bool) -> int:
-    """Keep GptOss sinks at their pretrained values, frozen or trainable; returns the layers touched."""
     touched = 0
     for _, attn in _gpt_oss_sink_attentions(model, model_config):
         sinks = getattr(attn, "sinks", None)
@@ -217,7 +186,6 @@ def _rescale(out, lse, sink, head_dim: int):
 
 
 def _with_sink_grad(fn, varlen: bool):
-    """``fn`` (an FA4 entry point) running a grad-requiring sink through :func:`_rescale`."""
     # lse is [heads, tokens] beside a varlen out [tokens, heads, dim], [batch, heads, seq] beside a dense one.
     lse_head_dim = 0 if varlen else 1
 
@@ -233,13 +201,8 @@ def _with_sink_grad(fn, varlen: bool):
 
 
 def install_fa4_trainable_sink_rescale() -> bool:
-    """Route FA4 calls with a grad-requiring sink through a rescale that carries the sink gradient.
-
-    The sink-less kernel's output gated by ``sigmoid(lse - sink)`` in autograd-visible ops gives the
-    fused forward and complete gradients: the sink's from the gate, dq/dk/dv through ``dout`` and the
-    kernel's ``dlse`` path. The kernel's own sink backward is not validated here. Idempotent; False when
-    ``flash_attn.cute`` is not importable.
-    """
+    """The sink-less kernel's output gated by ``sigmoid(lse - sink)`` gives the fused forward and complete gradients:
+    the sink's from the gate, dq/dk/dv through ``dout`` and ``dlse``. The kernel's sink backward is unvalidated."""
     return install_fa4_entry_point_wrapper(
         _FA4_RESCALE_ATTR,
         _with_sink_grad,
@@ -254,11 +217,8 @@ def apply_sinks_policy(
     policy: SinksPolicy,
     attn_implementation: str | None = None,
 ) -> None:
-    """Apply the run's sink policy to a freshly loaded model and stamp it there.
-
-    Every loader routes through here: a neutralized policy is what approved a sink-dropping backend,
-    so skipping the reset would run sdpa over live sinks. A model without sinks stays unstamped.
-    """
+    """Every loader routes through here, as a neutralized policy is what approved a sink-dropping backend and skipping
+    the reset would run sdpa over live sinks. A model without sinks stays unstamped."""
     has_sinks = uses_gpt_oss_sinks(model_config)
     if (
         has_sinks
@@ -277,7 +237,7 @@ def apply_sinks_policy(
         touched = _set_gpt_oss_sinks_trainable(model, model_config, trainable=policy is SinksPolicy.TRAINABLE)
     if not has_sinks:
         return
-    # Every FA4 sinks run: inert on frozen sinks, and a sink unfrozen by another route still trains.
+    # On every FA4 sinks run, as it is inert on frozen sinks and a sink unfrozen by another route still trains.
     fa4 = attn_implementation == "flash_attention_4"
     if fa4 and not install_fa4_trainable_sink_rescale() and policy is SinksPolicy.TRAINABLE:
         raise RuntimeError(
@@ -295,8 +255,7 @@ def apply_sinks_policy(
 
 
 def stamped_sinks_policy(model) -> SinksPolicy | None:
-    """The policy :func:`apply_sinks_policy` stamped on this model, or ``None`` when none ran. Walks
-    ``.module`` wrapper chains, since a wrapper that does not delegate attributes would hide the stamp."""
+    """Walks ``.module`` wrapper chains, since a wrapper that does not delegate attributes would hide the stamp."""
     seen: set[int] = set()
     node = model
     while node is not None and id(node) not in seen:
@@ -309,11 +268,8 @@ def stamped_sinks_policy(model) -> SinksPolicy | None:
 
 
 def has_live_attention_sinks(model) -> bool:
-    """Whether this model runs its pretrained attention sinks live (frozen or trainable).
-
-    Read off the stamp: a neutralized sink stays a tensor off FA2, and by validation time it is a
-    sharded DTensor. An unstamped sinks model (one TRL built) kept its pretrained sinks live.
-    """
+    """Read off the stamp, as a neutralized sink stays a tensor off FA2, by validation time a sharded DTensor. An
+    unstamped sinks model (one TRL built) kept its pretrained sinks live."""
     policy = stamped_sinks_policy(model)
     if policy is not None:
         return policy.live
@@ -322,8 +278,7 @@ def has_live_attention_sinks(model) -> bool:
 
 
 def holds_unneutralized_sinks(model) -> bool:
-    """Whether a GptOss attention of ``model`` holds a sink above the neutralized value, read off the tensors rather
-    than the policy stamp, so a model loaded without a policy answers with the sinks its checkpoint carries."""
+    """Read off the tensors, so a model loaded without a policy answers with the sinks its checkpoint carries."""
     for _, attn in _gpt_oss_sink_attentions(model):
         sinks = getattr(attn, "sinks", None)
         if sinks is not None and bool((sinks.detach() > _NEUTRALIZED_SINK_FLOOR * torch.finfo(sinks.dtype).min).any()):
@@ -332,10 +287,9 @@ def holds_unneutralized_sinks(model) -> bool:
 
 
 def neutralized_gpt_oss_sinks(model) -> dict:
-    """``{checkpoint_key: neutralized sink}`` for each GptOss sink the flash_attention_2 reset set to
-    ``None``, which would otherwise leave every save; empty when the sinks are present."""
+    """``{checkpoint_key: neutralized sink}`` for each sink the FA2 reset set to ``None``, absent from every save."""
     config = getattr(model, "config", None)
-    # Family gate first: a per-layer-heterogeneous config (step3p7) raises on the bare head count.
+    # Family gate first, as a per-layer-heterogeneous config (step3p7) raises on the bare head count.
     if config is None or not uses_gpt_oss_sinks(config):
         return {}
     num_heads = int(getattr(text_config(config), "num_attention_heads", 0) or 0)
@@ -357,8 +311,7 @@ def neutralized_gpt_oss_sinks(model) -> dict:
 
 @contextlib.contextmanager
 def gpt_oss_sinks_restored(model):
-    """Temporarily re-attach neutralized sinks so a plain ``save_pretrained`` writes them, restoring
-    ``None`` on exit (FA2 rejects a tensor). The parallel savers re-emit them themselves."""
+    """Re-attach neutralized sinks for a plain ``save_pretrained``, restoring ``None`` as FA2 rejects a tensor."""
     restored = neutralized_gpt_oss_sinks(model)
     touched = []
     if restored:

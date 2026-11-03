@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: SMPO's PP and non-PP losses score a bf16 model's tokens identically.
-
-Both paths take their per-token log-probs from one fp32 primitive
-(:func:`~halo.kernels.logprobs.next_token_logprobs`), so the same batch must give
-the same loss and the same gradient whether it runs as one padded forward or as interleaved pipeline
-microbatches, up to fp32 summation order. Agreement alone would also hold if both paths went back to
-a bf16 ``log_softmax`` (TRL's ``selective_log_softmax`` on bf16 logits), which rounds every token's
-log-prob to bf16's 8-bit mantissa, so both are also held to an fp64 oracle: the same pipeline over
-the same bf16-rounded logits held in fp64.
-
-The prediction both paths report is the per-pair ``[pairs, 2]`` (chosen, rejected) rewards, one row
-per pair so the evaluation gather can cut a final round's padding pairs; the pipeline's must be the
-non-PP step's. In eval the non-PP loss and metrics read the split's own pairs: a batch whose last
-pairs pad the split's final round scores as its real pairs alone, while its rewards keep every row.
-
-    python tests/cpu/trainers/test_smpo_logprob_parity.py
+"""SMPO's PP and non-PP losses score a bf16 model's tokens identically, and both match an fp64 oracle.
+Agreement alone would also hold if both went back to a bf16 ``log_softmax``, which rounds log-probs to 8 mantissa bits.
 """
 
 from types import SimpleNamespace
@@ -35,11 +21,8 @@ REL_TOL = 1e-5
 
 
 class _TokenTableLM(nn.Module):
-    """bf16 logits looked up per token, so both paths see bit-identical logits for every position.
-
-    The table itself is fp32, so its gradient accumulates in fp32 whatever row order a path uses.
-    ``oracle`` hands back the same bf16-rounded logits in fp64.
-    """
+    """bf16 logits looked up per token, so both paths see bit-identical logits.
+    The table is fp32, so its gradient accumulates in fp32; ``oracle`` returns the same bf16-rounded logits in fp64."""
 
     def __init__(self, oracle: bool = False):
         super().__init__()
@@ -62,7 +45,6 @@ def _pipeline(trainer: SMPOTrainer) -> SMPOPipelineLoss:
 
 
 def _batch() -> dict[str, torch.Tensor]:
-    """Four pairs with ragged prompts and completions."""
     generator = torch.Generator().manual_seed(1)
 
     def ids(length):
@@ -89,8 +71,7 @@ def _non_pp_loss_and_grad(batch, oracle: bool = False) -> tuple[torch.Tensor, to
 
 
 def _pp_loss_and_grad(batch, rows_per_microbatch: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """The pipeline's contract: one transform and step-state refresh over the batch, then a loss per
-    microbatch, summed."""
+    """The pipeline's contract: one transform and state refresh over the batch, then a loss per microbatch, summed."""
     model = _TokenTableLM()
     pipeline = _pipeline(_trainer())
     inputs = pipeline.batch_transform(batch)
@@ -125,8 +106,8 @@ def test_pp_and_non_pp_losses_agree_on_a_bf16_model(rows_per_microbatch):
 
 @torch.no_grad()
 def test_the_pp_logit_means_accumulate_in_fp32():
-    """Each microbatch hands the step its masked logit sums over the vocab; summed in the bf16 logits'
-    own dtype they round each row's total to 8 mantissa bits, which this vocab's logits resolve."""
+    """Summed in the bf16 logits' own dtype, the masked logit sums would round each row's total to 8 mantissa bits,
+    which this vocab's logits resolve."""
     model = _TokenTableLM()
     pipeline = _pipeline(_trainer())
     inputs = pipeline.batch_transform(_batch())
@@ -158,8 +139,7 @@ def test_the_pipeline_predicts_the_non_pp_rewards():
 
 @torch.no_grad()
 def test_a_pipeline_step_of_padding_alone_scores_zero():
-    """An eval step whose every pair pads the final round reaches the schedule as filler rows alone:
-    the step state counts no pair, and the margin loss divides by 1 rather than by that 0."""
+    """The step state counts no pair, and the margin loss divides by 1 rather than by that 0."""
     pipeline, model = _pipeline(_trainer()), _TokenTableLM()
     inputs = pipeline.batch_transform(_batch())
     pipeline.refresh_constants({key: value[:0] for key, value in inputs.items()})
@@ -181,8 +161,7 @@ def _eval_trainer(real_pairs: int) -> SMPOTrainer:
 
 @torch.no_grad()
 def test_an_eval_batch_scores_its_real_pairs_alone():
-    """Pairs 2 and 3 pad the eval split's final round; they repeat the split's first pairs, so read as
-    real they would count those pairs twice. The loss and every metric are the two real pairs' own."""
+    """Pairs 2 and 3 pad the final round by repeating the first pairs, which would count twice if read as real."""
     model, batch = _TokenTableLM(), _batch()
     alone = {key: value[:2] for key, value in batch.items()}
     loss, metrics, rewards = _eval_trainer(2).get_batch_loss_metrics(model, batch, train_eval="eval")
@@ -198,7 +177,7 @@ def test_an_eval_batch_scores_its_real_pairs_alone():
 
 @torch.no_grad()
 def test_a_rank_of_eval_padding_alone_scores_zero():
-    """Every pair pads the final round: the margin mean and the SFT terms mean over nothing, which is 0."""
+    """The margin mean and the SFT terms mean over nothing, which is 0."""
     loss, metrics, rewards = _eval_trainer(0).get_batch_loss_metrics(_TokenTableLM(), _batch(), train_eval="eval")
 
     assert loss.item() == 0.0

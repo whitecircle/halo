@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: EP grad sync must be a no-op on a single-process launch.
-
-A bare ``python`` run (dist never initialized) still builds EP layers at ``ep_size=1`` (grouped
-GEMM default); with ``fsdp_shard_ep1_experts=False`` the layer registers its router post-accumulate
-hooks. A router hook built without consulting the live process state issues
-``dist.all_reduce(group=None)``, and the first backward crashes with "Default process group has not
-been initialized". The hooks must detect the single-process state and no-op, and the trainer's expert
-sweep, whose other legs run collectives, must never be armed.
-
-Run: ``python tests/cpu/parallelism/test_ep_grad_sync_single_process.py`` (or ``pytest -m cpu``).
-"""
+"""EP grad sync is a no-op on a single-process launch, which still builds EP layers at ``ep_size=1``.
+Otherwise the first backward crashes with "Default process group has not been initialized"."""
 
 from __future__ import annotations
 
@@ -32,26 +23,24 @@ def _param_with_grad() -> nn.Parameter:
 
 
 def test_router_hook_noop_without_process_group():
-    """The router hook must not touch dist collectives when no process group exists."""
     ep_config = single_process_ep_config(E, experts_fsdp_managed=False)
     assert not has_grad_sync_peers(ep_config), "a single-process run must report no grad-sync peers"
 
     param = _param_with_grad()
     before = param.grad.clone()
-    build_router_grad_hook(ep_config)(param)  # a live collective: ValueError from all_reduce(group=None)
+    build_router_grad_hook(ep_config)(param)  # A live collective: ValueError from all_reduce(group=None).
     assert torch.equal(param.grad, before), "single-process router hook must leave the grad untouched"
 
 
 def test_expert_sweep_not_armed_without_process_group():
-    """No peers, nothing to divide by: the post-backward sweep stays off, its collectives with no group."""
+    """The sweep's collectives have no group."""
     ep_config = single_process_ep_config(E, experts_fsdp_managed=False)
     assert not ep_config.runs_post_backward_sweep
     assert not ep_config.sweep_reduces_across_replicas
 
 
 class _Lfm2Gate(nn.Module):
-    # Mirrors Lfm2MoeTopKRouter's attribute surface: the wrapper reads the routing constants off
-    # the gate without defaults, so the stub must carry them.
+    # Mirrors Lfm2MoeTopKRouter: the wrapper reads the routing constants off the gate without defaults.
     def __init__(self):
         super().__init__()
         self.weight = nn.Parameter(torch.randn(E, H))
@@ -79,15 +68,12 @@ class _Lfm2Block(nn.Module):
 
 
 def test_first_backward_survives_single_process_launch():
-    """End-to-end over the crash path: a real EP family layer built at ep1 single-process with
-    ``fsdp_shard_ep1_experts=False`` registers its grad-sync hooks; the first backward fires them.
-    A live collective in the router hook raises here."""
     torch.manual_seed(0)
     layer = EPLfm2MoELayer(_Lfm2Block(), single_process_ep_config(E, experts_fsdp_managed=False)).cpu()
     layer.train()
 
     out = layer(torch.randn(2, 3, H))
-    out.sum().backward()  # a live collective raises "Default process group has not been initialized"
+    out.sum().backward()  # A live collective raises "Default process group has not been initialized".
 
     assert layer.gate.weight.grad is not None, "router grad missing after backward"
     assert layer.gate_up_proj.grad is not None, "expert grad missing after backward"

@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Attention patches whose transformers hook is missing must fail, not no-op in silence.
-
-Each patch fixes a defect that stays invisible when it is skipped: a masked batch runs FA4's head_dim-256
-varlen kernels on a variant the warm-up does not compile, or a packed row attends across document boundaries on
-flash attention. A transformers
-upgrade that renames the private hook must stop the load rather than drop the fix.
-
-Run: pytest tests/cpu/models/test_attention_patch_hook_loss.py
-"""
+"""Attention patches whose transformers hook is missing must stop the load, not no-op.
+Skipped, a masked batch runs an FA4 variant the warm-up does not compile, or a packed row attends across documents."""
 
 import types
 

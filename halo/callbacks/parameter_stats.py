@@ -1,8 +1,5 @@
-"""Pre-training parameter / dtype summary.
-
-Counts are per rank throughout (``local_numel``): the callback runs on the wrapped model, where a plain
-``numel()`` would report FSDP2/TP DTensor params globally but FSDP-ignored EP experts locally.
-"""
+"""Pre-training parameter and dtype summary. Counts are per rank (``local_numel``): on the wrapped model a plain
+``numel()`` would report FSDP2/TP DTensors globally but FSDP-ignored EP experts locally."""
 
 import logging
 import re
@@ -32,7 +29,6 @@ def _normalize_module_name(module_name: str) -> str:
 
 
 def _module_trainable_stats(model: torch.nn.Module) -> dict[str, tuple[int, int]]:
-    """Per-module ``(total, trainable)`` counts, keyed by normalized name."""
     stats: defaultdict[str, list[int]] = defaultdict(lambda: [0, 0])
     for param_name, param in model.named_parameters():
         numel = local_numel(param)
@@ -43,7 +39,7 @@ def _module_trainable_stats(model: torch.nn.Module) -> dict[str, tuple[int, int]
 
 
 def _dtype_stats(model: torch.nn.Module) -> dict[torch.dtype, tuple[int, int, int]]:
-    """Parameter counts grouped by dtype: ``dtype -> (total, trainable, memory_bytes)``."""
+    """``dtype -> (total, trainable, memory_bytes)``."""
     stats: defaultdict[torch.dtype, list[int]] = defaultdict(lambda: [0, 0, 0])
     for param in model.parameters():
         numel = local_numel(param)
@@ -55,7 +51,6 @@ def _dtype_stats(model: torch.nn.Module) -> dict[torch.dtype, tuple[int, int, in
 
 
 def _format_memory_size(bytes_size: float) -> str:
-    """Human-readable byte count."""
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if bytes_size < 1024.0:
             return f"{bytes_size:.2f} {unit}"
@@ -64,9 +59,7 @@ def _format_memory_size(bytes_size: float) -> str:
 
 
 class ParameterStatsCallback(TrainerCallback):
-    """Log before training: total/trainable param counts (+%), deduplicated module groups with
-    per-group trainable %, and a dtype breakdown with memory usage.
-    """
+    """Log param counts, deduplicated module groups with trainable %, and a dtype breakdown with memory usage."""
 
     def on_train_begin(self, args, state, control, **kwargs):
         model = kwargs["model"]

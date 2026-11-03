@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""The fused AdamWBF16 launch: its host tables, and its kernel against the per-parameter one it replaced.
-
-One launch steps every bf16 parameter of a dtype and specialization group, so each program must find its tensor and
-that tensor's block index from the tables alone, and key its rounding noise exactly as a launch over that tensor would.
-The kernel comparison runs under Triton's interpreter in a fresh process (``TRITON_INTERPRET`` is read when a
-kernel is defined); the CUDA leg, where FMA contraction applies, is ``tests/gpu/optimizers/test_adamw_bf16_fused.py``.
-The compiled-code check builds both kernels for sm_90, sm_100 and sm_103 without a GPU, each under one tensor's launch
-specialization and at the table size that target launches with: the full table on sm_100/103, one tensor elsewhere,
-with and without the step's skip flag. Every launch takes that one table size whatever count of tensors it steps, so
-the count selects no variant: a step whose set of gradient-bearing tensors changes keys one only for a specialization
-no earlier step launched.
-
-Run: python tests/cpu/optimizers/test_adamw_bf16_fused_launch.py
-"""
+"""The fused AdamWBF16 launch: its host tables, and its kernel against the per-parameter one. In a fresh process,
+since ``TRITON_INTERPRET`` is read at kernel definition."""
 
 import collections
 import math
@@ -72,7 +60,6 @@ os.environ["TRITON_INTERPRET"] = "1"
 from tests.common.adamw_bf16_reference import lookup_mismatches
 print({_LOOKUP_MARKER!r} + "|".join(lookup_mismatches()))
 """
-# The architectures the training images target: Hopper and data-center Blackwell.
 _TARGETS = tuple(GPUTarget("cuda", arch, 32) for arch in (90, 100, 103))
 # Hopper, the two Blackwell capabilities the multi-tensor launch is gated to, and two Blackwell ones outside it.
 _CAPABILITIES = ((9, 0), (10, 0), (10, 3), (11, 0), (12, 0))
@@ -81,17 +68,13 @@ _TENSOR_OP = re.compile(r"^\s*(?:(%[\w.]+) = )?(\w+\.\w+)\b(.*)$")
 _SSA_NAME = re.compile(r"%[\w.]+")
 _ATTRIBUTES = re.compile(r"\{[^{}]*\}")
 _LAYOUT_NAME = re.compile(r"#\w+")
-# An op with several results (``%a:2 = ``, ``%a, %b = ``), which _TENSOR_OP does not take apart.
+# ``%a:2 = ``, ``%a, %b = ``, which _TENSOR_OP does not take apart.
 _MULTI_RESULT = re.compile(r"^\s*%[\w.]+(?::\d+|, %)")
 _GLOBAL_ACCESS = re.compile(r"^\s+(?:@%p\d+\s+)?((?:ld|st)\.global[\w.]*)", re.M)
 _FLOAT_OP = re.compile(r"^\s*(?:@%p\d+\s+)?((?:fma|mul|add|sub|div|sqrt|rcp|cvt|max|min|neg|abs|mad)\.[\w.]+)\s", re.M)
-# The fused kernel's own reads: the int64 index rows and the fp32 scalar rows.
 _TABLE_LOADS = ("ld.global.b64", "ld.global.v2.b64", "ld.global.v4.b64", "ld.global.b32")
-# The read of the step's skip flag, a bool.
 _SKIP_FLAG_LOAD = "ld.global.b8"
-# (grad dtype, grad scale, _FusedUpdate.divisible): what step() meets (aligned shards, fresh tensors of an odd size, an
-# FSDP2 grad view off the boundary, fused-parameter slices and their grad views, an fp32 grad off the boundary), two
-# other partial alignments, and none.
+# (grad dtype, grad scale, _FusedUpdate.divisible): what step() meets, two other partial alignments, and none.
 _SPECIALIZATIONS = (
     ("bf16", False, (True, True, True, True, True)),
     ("bf16", True, (False, True, True, True, True)),
@@ -114,8 +97,6 @@ def _update(
 
 
 class _CudaParameter(nn.Parameter):
-    """A CPU parameter ``step()`` routes to the fused launch, as it would a CUDA one."""
-
     @property
     def is_cuda(self) -> bool:
         return True
@@ -123,7 +104,6 @@ class _CudaParameter(nn.Parameter):
 
 @pytest.fixture
 def capability(monkeypatch):
-    """Set the compute capability every device reports, read afresh by the launch-size gate."""
     _tensors_per_launch.cache_clear()
     yield lambda major_minor: monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: major_minor)
     _tensors_per_launch.cache_clear()
@@ -132,8 +112,7 @@ def capability(monkeypatch):
 def _compiled_asm(
     kernel, target: GPUTarget, signature: dict, constexprs: dict, divisible: tuple[str, ...], **options
 ) -> dict:
-    """``kernel`` compiled for ``target`` at the step's launch width (and ``options``) with ``divisible`` arguments
-    marked 16-divisible, as Triton's launch specialization marks a 16-byte-aligned pointer or a multiple-of-16
+    """Marked 16-divisible, as Triton's launch specialization marks a 16-byte-aligned pointer or a multiple-of-16
     integer."""
     names = kernel.arg_names
     attrs = {(names.index(name),): [["tt.divisibility", 16]] for name in divisible}
@@ -145,11 +124,8 @@ def _compiled_asm(
 
 
 def _store_dataflow(ttgir: str, interned: dict) -> list[int]:
-    """Each tensor store's value, address and mask as a graph of the tensor ops that compute it, each op with its
-    layouts resolved: the per-element code. The layout decides which register of its thread an element sits in, and
-    the compiled FMA association can differ between registers. Graphs are hash-consed into ``interned``, so two
-    kernels whose stores get the same ids compute every element alike, wherever the compiler placed each op (inside
-    the block loop or hoisted above it). Scalars, which the two kernels source differently, are opaque leaves."""
+    """Each store as a graph of tensor ops with layouts resolved, since FMA association can differ between
+    registers. Hash-consed: same ids compute every element alike."""
     layouts = dict(_LAYOUT_DEF.findall(ttgir))
     defs, stores = {}, []
     for line in ttgir.splitlines():
@@ -191,14 +167,10 @@ def _store_dataflow(ttgir: str, interned: dict) -> list[int]:
 
 
 def _launcher_marks_divisible(arg) -> bool:
-    """Whether Triton's launcher specializes ``arg``, a tensor or an int, as divisible."""
     return native_specialize_impl(BaseBackend, arg, False, True, True)[1] == "D"
 
 
 def test_tables_address_every_tensor_and_count_its_programs():
-    """Each role's element offset lands on the tensor's own storage (behind the base too), first programs
-    accumulate each tensor's blocks in programs of ``_BLOCKS_PER_PROGRAM``, and the scalars are the fp32 a float
-    argument becomes."""
     per_program = SR_BLOCK_SIZE * _BLOCKS_PER_PROGRAM
     shared = torch.zeros(2 * per_program + 5000, dtype=torch.bfloat16)
     params = [
@@ -230,7 +202,7 @@ def test_tables_address_every_tensor_and_count_its_programs():
 
 
 def test_tables_keep_per_tensor_scalars_and_seeds():
-    """Params at different steps (a resumed run) share a launch: each column carries its own step's scalars."""
+    """Params at different steps (a resumed run) share a launch."""
     first = _update(torch.zeros(4, dtype=torch.bfloat16), 5, hparams=(0.9, 0.999, 0.5, 0.25, 1e-8, 1.0))
     second = _update(torch.zeros(4, dtype=torch.bfloat16), 6, hparams=(0.8, 0.99, 0.125, 0.75, 1e-6, 0.9))
 
@@ -244,9 +216,9 @@ def test_tables_keep_per_tensor_scalars_and_seeds():
 @pytest.mark.parametrize(
     "grad",
     [
-        torch.zeros(8, 4, dtype=torch.bfloat16).t(),  # strided: the kernel indexes flat storage
-        torch.zeros(64, dtype=torch.bfloat16)[::2],  # viewable as 1-D, yet not contiguous
-        torch.zeros(31, dtype=torch.bfloat16),  # a different element count
+        torch.zeros(8, 4, dtype=torch.bfloat16).t(),  # Strided: the kernel indexes flat storage.
+        torch.zeros(64, dtype=torch.bfloat16)[::2],  # Viewable as 1-D, yet not contiguous.
+        torch.zeros(31, dtype=torch.bfloat16),
     ],
 )
 def test_tables_refuse_tensors_the_kernel_would_misread(grad):
@@ -258,9 +230,8 @@ def test_tables_refuse_tensors_the_kernel_would_misread(grad):
 
 @pytest.mark.parametrize("table_size", [2, 3], ids=["smaller", "not_a_power_of_two"])
 def test_launch_refuses_a_table_its_lookup_cannot_cover(table_size):
-    """The lookup halves a power-of-two table down to one slot: a tensor past ``table_size`` slots, or past the
-    largest power of two below a table of another size, would resolve to another tensor's slot. Refused before any
-    launch."""
+    """The lookup halves a power-of-two table to one slot, so a tensor past it would resolve to another tensor's
+    slot."""
     updates = [_update(torch.zeros(4, dtype=torch.bfloat16), seed) for seed in range(3)]
     index, hparams, num_programs = _launch_tables(updates)
     with pytest.raises(ValueError, match=f"got a table of {table_size} for 3 tensors"):
@@ -279,8 +250,6 @@ def test_group_key_separates_what_one_launch_cannot_mix():
 
 
 def test_divisibility_is_each_tensors_launch_specialization():
-    """Each flag is what Triton's launcher marks in a launch over that tensor alone: its element count, then each of
-    its four tensors' starts, a 16-byte-aligned fp32 grad included."""
     bf16 = torch.zeros(4096, dtype=torch.bfloat16)
     fp32 = torch.zeros(4096)
     updates = [
@@ -310,8 +279,6 @@ def test_divisibility_is_each_tensors_launch_specialization():
 
 
 def test_fused_update_carries_its_param_step_scalars_and_seed():
-    """What ``step()`` hands the kernel per param: its own local tensors, the Adam scalars of its step and group,
-    and the first seed of its name's pair, for params at mixed steps across two groups."""
     params = {f"w{i}": nn.Parameter(torch.zeros(32, dtype=torch.bfloat16)) for i in range(4)}
     groups = [
         {"params": [params["w0"], params["w1"]], "param_names": ["w0", "w1"], "weight_decay": 0.1},
@@ -369,7 +336,7 @@ def test_only_sm100_and_sm103_launch_many_tensors_at_once(capability, major_mino
     ids=["sm103", "sm90", "off_cuda"],
 )
 def test_the_build_line_names_the_step_the_bf16_params_take(capability, caplog, parameter, major_minor, named_step):
-    """The launch width moves step time between GPUs, so the build line names it, or the eager step off CUDA."""
+    """The launch width moves step time between GPUs."""
     capability(major_minor)
     model = nn.Module()
     model.weight = parameter(torch.zeros(4, 4, dtype=torch.bfloat16))
@@ -384,11 +351,7 @@ def test_the_build_line_names_the_step_the_bf16_params_take(capability, caplog, 
 
 @pytest.mark.parametrize("major_minor", [(10, 0), (9, 0)], ids=["sm100", "sm90"])
 def test_step_launches_full_chunks_from_each_steps_tensors(monkeypatch, capability, major_minor):
-    """``step()`` sends a launch out once its group key holds as many non-empty updates as one launch steps there
-    (``_MAX_TENSORS_PER_LAUNCH`` on sm_100, one on sm_90), in param order, over a table of that width whatever its
-    count, skips empty shards and a key left empty, hands every launch the deferred clip scale, bumps every fused
-    param's version, and builds each launch's table from that step's local tensors and seeds: grads reallocated between
-    steps (an FSDP2 reshard) are addressed where they now live."""
+    """Grads reallocated between steps (an FSDP2 reshard) are addressed where they now live."""
     capability(major_minor)
     launches = []
     monkeypatch.setattr(
@@ -449,12 +412,8 @@ def test_step_launches_full_chunks_from_each_steps_tensors(monkeypatch, capabili
 
 @pytest.mark.parametrize("deferred", [False, True], ids=["plain", "clip_and_guard"])
 def test_a_changing_set_of_gradients_compiles_one_variant_per_specialization(monkeypatch, capability, deferred):
-    """An EP rank whose local experts in a layer receive no tokens holds no gradient for them that step, so the count
-    of tensors a launch steps moves from step to step: here through a lone tensor, a multiple of 16 and a full
-    launch's remainder on either side of a power of two, with and without the clip scale and skip flag the EP clip and
-    step guard hand every step. Keyed as Triton's launcher keys them (its own binder over the kernel's parameters),
-    the launches of every step run one variant per specialization, the ones the first step compiled. Run on sm_103:
-    elsewhere every launch steps one tensor, so the count never moves."""
+    """An EP rank whose local experts get no tokens holds no gradient, so the count moves per step. Run on sm_103;
+    elsewhere every launch steps one tensor."""
     capability((10, 3))
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
     kernel = adamw_bf16._adam_bf16_sr_kernel
@@ -475,8 +434,7 @@ def test_a_changing_set_of_gradients_compiles_one_variant_per_specialization(mon
     sizes = [32] * 300 + [33] * 5
     params = [_CudaParameter(torch.zeros(n, dtype=torch.bfloat16)) for n in sizes]
     optimizer = AdamWBF16([(f"w{i}", p) for i, p in enumerate(params)], lr=1e-2)
-    # The 32-element key steps 300, 272, 257, 300 and 200 tensors (a full launch beside 44, 16, 1 and 44, then one
-    # launch of 200), the 33-element key 5, 5, 5, 1 and 2.
+    # The 32-element key steps 300, 272, 257, 300 and 200 tensors, the 33-element key 5, 5, 5, 1 and 2.
     with_grads = [range(305), range(28, 305), range(43, 305), range(301), [*range(100, 300), 303, 304]]
     for step, indices in enumerate(with_grads, start=1):
         for p in params:
@@ -507,11 +465,8 @@ def test_a_changing_set_of_gradients_compiles_one_variant_per_specialization(mon
     ids=[f"{g}-{'scale' if s else 'no_scale'}-{''.join(str(int(f)) for f in d)}" for g, s, d in _SPECIALIZATIONS],
 )
 def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, divisible, has_skip, target):
-    """Compiled for each target under a tensor's launch specialization and the table that target launches with, the
-    fused kernel runs the per-parameter kernel's per-element code: the same graph of tensor ops behind every store,
-    each op in the same layout, and the same vector widths and float ops (the PTX schedule may place them around the
-    table loads and the block loop). The step's skip flag adds its one read and changes none of that, so an
-    unskipped step under the flag writes what a step without it does."""
+    """The PTX schedule may place ops around the table loads and block loop; the skip flag adds its one read and
+    changes nothing else."""
     scale_ptr = "*fp32" if has_scale else f"*{grad_dtype}"
     oracle_signature = {
         "p_ptr": "*bf16",
@@ -585,17 +540,10 @@ def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, div
 
 
 def test_lookup_matches_the_block_scan_interpreted():
-    """Every program resolves each block it steps to the tensor and block index the per-block scan of the
-    block-start row gave, block for block: one tensor and two (TABLE_SIZE 1 and 2), three in a table padded to the
-    cap, a full table at the cap with empty tensors at both ends and a table just past a power of two, both ragged
-    over empty, one-block and multi-program tensors."""
     assert probe_findings(_LOOKUP_PROBE, _LOOKUP_MARKER) == []
 
 
 def test_fused_kernel_matches_per_parameter_kernel_interpreted():
-    """Bit for bit on every output against the per-parameter launch: empty, one-element, block-boundary and
-    multi-block tensors at mixed steps, a tensor of several programs, odd-offset views, weight decay on and off, both
-    grad-scale modes, three chained steps."""
     assert probe_findings(_PROBE, _MARKER) == []
 
 

@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""sft.py's raw-text split preparation: a split the length filter empties fails loud before packing hides the cause,
-and the test split is mapped for generation only when the run generates examples.
-
-The chat processor drops (never truncates) every conversation longer than ``max_length``. Packing an
-emptied split raises ``Columns ['seq_lengths'] not in the dataset`` from deep inside the packer,
-which names neither the split nor ``max_length``. Both splits are checked: a guard covering ``train``
-alone lets an eval split of long conversations crash that way.
-
-The generation map tokenizes the whole test split, and the examples callback is its one reader.
-
-Unpacked rows on a flash run take TRL's collator from the factory, opted into the one-document varlen set and built
-with the run's ``pad_to_multiple_of``, as TRL builds its own.
-
-Usage:
-    python tests/cpu/data/test_sft_raw_text_splits.py
-"""
+"""sft.py's raw-text split preparation: a split the length filter empties fails loud before the packer hides the
+cause behind ``Columns ['seq_lengths'] not in the dataset``, and the test split is mapped for generation only
+when the run generates examples."""
 
 from types import SimpleNamespace
 
@@ -100,7 +87,6 @@ def _prepare(train_messages, test_messages, generate_eval_examples: bool = False
 
 
 def test_emptied_eval_split_names_the_split_and_the_cap():
-    """Every eval conversation over max_length: raise here, not inside the packer."""
     with pytest.raises(ValueError, match=f"All evaluation rows were dropped.*max_length={_MAX_LENGTH}"):
         _prepare([_SHORT] * 4, [_LONG] * 2)
 
@@ -111,7 +97,6 @@ def test_emptied_train_split_names_the_split_and_the_cap():
 
 
 def test_both_splits_within_the_cap_still_pack():
-    """Anti-over-rejection: the guard must not fire on a dataset the filter kept."""
     train_dataset, eval_dataset, _generate, _collator = _prepare([_SHORT] * 4, [_SHORT] * 2)
 
     assert len(train_dataset) > 0 and len(eval_dataset) > 0
@@ -142,7 +127,7 @@ def test_unpacked_rows_on_a_flash_run_take_trls_collator_with_the_one_document_s
     if pad_to_multiple_of is None:
         assert batch["cu_seq_lens_q"].tolist() == [0, width] and batch["max_length_q"] == width
     else:
-        # Anti-vacuity: the row is shorter than the multiple, so the padded batch keeps transformers' mask path.
+        # The row is shorter than the multiple, so the padded batch keeps transformers' mask path.
         assert width % pad_to_multiple_of and batch["input_ids"].shape[1] == pad_to_multiple_of
         assert not any(key in batch for key in VARLEN_KEYS)
 

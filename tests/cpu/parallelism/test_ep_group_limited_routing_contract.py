@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the DeepSeek-V3 group-limited routing contract on EP layers.
-
-``EPGroupLimitedMoELayerBase`` owns one routing body — score, selection-only bias, group-limited
-top-k, unbiased gate weights — for every family that routes this way, plus the single writer of the
-six attributes it reads (``n_routed_experts``, ``n_group``, ``topk_group``, ``norm_topk_prob``,
-``routed_scaling_factor``, ``top_k``). Writer and reader in one class is what stops a family from
-half-populating the contract; the shared body is what stops near-identical copies from
-drifting, which is a SILENT routing change (a bias added in the wrong order, a knob defaulted)
-rather than a crash.
-
-These tests fail if a family forks the body, or if a knob resolves to its neutral default against
-the real upstream block.
-
-Run: ``python tests/cpu/parallelism/test_ep_group_limited_routing_contract.py`` (or ``pytest -m cpu``).
-"""
+"""The DeepSeek-V3 group-limited routing contract: one shared body and one writer of its six attributes. These fail
+if a family forks the body or a knob goes neutral against the real block."""
 
 from __future__ import annotations
 
@@ -35,7 +22,7 @@ from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
-# The knobs _group_limited_topk consumes — keep in lockstep with the method body.
+# Keep in lockstep with _group_limited_topk's body.
 _ROUTING_KNOBS = (
     "n_routed_experts",
     "n_group",
@@ -66,8 +53,6 @@ class _FusedExperts(nn.Module):
 
 
 class _GroupRoutedBlock(nn.Module):
-    """HF block carrying the DeepSeek-V3 group-routing knobs explicitly."""
-
     def __init__(self, **overrides):
         super().__init__()
         self.config = _Config()
@@ -84,7 +69,7 @@ class _GroupRoutedBlock(nn.Module):
 
 
 class _BareBlock(_GroupRoutedBlock):
-    """Same block with ``norm_topk_prob`` ABSENT, so the family default applies."""
+    """``norm_topk_prob`` absent, so the family default applies."""
 
     def __init__(self):
         super().__init__()
@@ -92,8 +77,7 @@ class _BareBlock(_GroupRoutedBlock):
 
 
 class _Step3p7Block(_GroupRoutedBlock):
-    """The same block carrying what Step-3.7's own hooks read: an always-built shared expert and the
-    per-layer clamp bound on the expert container."""
+    """What Step-3.7's own hooks read: an always-built shared expert and the per-layer clamp bound."""
 
     def __init__(self, **overrides):
         super().__init__(**overrides)
@@ -106,8 +90,6 @@ def _build(cls, block):
 
 
 def _group_limited_families() -> list[type]:
-    """Every registered family routing through the shared body — from the class hierarchy, so a
-    family joining it is covered here without editing a list."""
     return [
         cls
         for cls in ep_layer_classes()
@@ -115,9 +97,8 @@ def _group_limited_families() -> list[type]:
     ]
 
 
-# Whose knob writer is exercised against a real block: the two families that build from the shared
-# one, plus every family EXTENDING _adopt_routing. An extension that skipped super() would leave all
-# six knobs at their neutral defaults with no attribute missing, so only the values catch it.
+# An extension that skipped super() would leave all six knobs neutral with no attribute missing, so only the values
+# catch it.
 _KNOB_WRITER_FAMILIES = sorted(
     {EPGlm4MoELayer, EPMistral4MoELayer, *(cls for cls in _group_limited_families() if "_adopt_routing" in vars(cls))},
     key=lambda cls: cls.__name__,
@@ -125,9 +106,7 @@ _KNOB_WRITER_FAMILIES = sorted(
 
 
 def test_the_roster_routing_this_way_is_exactly_the_five_families_that_do():
-    """Anti-vacuity for the derived roster, as an EQUALITY: a superset check passes just as happily
-    when a family is reparented off this base, which silently drops its fork check below (and, with
-    it, the only thing pinning that it still routes the shared way)."""
+    """Equality, since a superset check passes when a family is reparented off this base, dropping its fork check."""
     assert {cls.__name__ for cls in _group_limited_families()} == {
         "EPGlm4MoELayer",
         "EPLagunaMoELayer",
@@ -139,10 +118,7 @@ def test_the_roster_routing_this_way_is_exactly_the_five_families_that_do():
 
 @pytest.mark.parametrize("cls", _group_limited_families(), ids=lambda c: c.__name__)
 def test_no_family_forks_the_shared_routing_body(cls):
-    """A family may declare how it SCORES its logits and where its knobs live; re-implementing the
-    selection itself lets the copies drift apart, and every way they can disagree —
-    the order the two biases are added in, which scores the weights come from, whether replay runs
-    — is silent."""
+    """Every way copies can disagree is silent: bias order, which scores the weights come from, whether replay runs."""
     forked = [name for name in ("route_tokens_to_experts", "_group_limited_topk") if name in vars(cls)]
     assert not forked, (
         f"{cls.__name__} re-implements {forked} instead of inheriting the shared group-limited "
@@ -154,9 +130,7 @@ def test_no_family_forks_the_shared_routing_body(cls):
 
 @pytest.mark.parametrize("cls", _KNOB_WRITER_FAMILIES, ids=lambda c: c.__name__)
 def test_every_consumed_knob_is_populated(cls):
-    """Every knob the shared top-k reads, at the value the real block carries — which is also what
-    pins that a family extending ``_adopt_routing`` (GLM-4 materializes a meta correction bias first)
-    still calls ``super()``."""
+    """Also pins that a family extending ``_adopt_routing`` still calls ``super()``."""
     torch.manual_seed(0)
     layer = _build(cls, _GroupRoutedBlock(norm_topk_prob=True))
     for knob in _ROUTING_KNOBS:
@@ -169,9 +143,7 @@ def test_every_consumed_knob_is_populated(cls):
 
 
 def test_the_family_default_decides_only_where_the_family_opted_the_knob_out():
-    """Step-3.7's router renormalizes unconditionally and nothing in its chain declares the knob, so
-    it opts out and its default decides. A family that does NOT opt out may not fall back at all: the
-    default would silently change routed-weight scale on a block that simply renamed the attribute."""
+    """A fallback would silently change routed-weight scale on a block that simply renamed the attribute."""
     torch.manual_seed(0)
     assert "norm_topk_prob" in EPStep3p7MoELayer._OPTIONAL_ROUTING_KNOBS
     assert _build(EPStep3p7MoELayer, _Step3p7Block()).norm_topk_prob is EPStep3p7MoELayer._NORM_TOPK_PROB_DEFAULT
@@ -180,7 +152,6 @@ def test_the_family_default_decides_only_where_the_family_opted_the_knob_out():
     with pytest.raises(AttributeError, match="norm_topk_prob"):
         _build(EPGlm4MoELayer, _BareBlock())
 
-    # An explicit block value is what every family reads.
     for value in (True, False):
         assert _build(EPGlm4MoELayer, _GroupRoutedBlock(norm_topk_prob=value)).norm_topk_prob is value
 
@@ -234,9 +205,8 @@ def _real_glm4_block():
     [(EPMistral4MoELayer, _real_mistral4_block), (EPGlm4MoELayer, _real_glm4_block)],
 )
 def test_real_upstream_blocks_deliver_non_neutral_knobs(cls, build):
-    """Against the INSTALLED transformers modules, with knobs at non-neutral values — the synthetic
-    block above carries the knobs on the block, while the installed ``*TopkRouter`` modules carry them
-    on the gate (spelled ``num_group``), which only a real block exercises."""
+    """The installed ``*TopkRouter`` modules carry the knobs on the gate (spelled ``num_group``), which only a real
+    block exercises."""
     torch.manual_seed(0)
     layer = _build(cls, build())
     assert layer.n_routed_experts == E
@@ -248,9 +218,8 @@ def test_real_upstream_blocks_deliver_non_neutral_knobs(cls, build):
 
 @pytest.mark.parametrize("cls", [EPStep3p7MoELayer, EPGlm4MoELayer])
 def test_a_routing_knob_that_vanished_raises_instead_of_defaulting(cls):
-    """The neutral 1.0 is not a safe fallback for ``routed_scaling_factor``: it under-scales every
-    routed weight by 2.5x on Step-3.7-Flash and 1.8x on GLM-4, with no attribute missing anywhere. No
-    family opts that knob out, so an upstream rename raises on all of them."""
+    """The neutral 1.0 under-scales routed weights by 2.5x on Step-3.7-Flash and 1.8x on GLM-4 with no attribute
+    missing."""
     torch.manual_seed(0)
     block = _Step3p7Block() if cls is EPStep3p7MoELayer else _GroupRoutedBlock(norm_topk_prob=True)
     del block.routed_scaling_factor
@@ -259,8 +228,7 @@ def test_a_routing_knob_that_vanished_raises_instead_of_defaulting(cls):
 
 
 def test_an_opted_out_knob_keeps_its_neutral_default():
-    """The escape hatch itself: GLM-4 also serves revisions that declare no group limiting, so those
-    two knobs fall through to the neutral 1 rather than refusing to construct."""
+    """GLM-4 also serves revisions declaring no group limiting."""
     torch.manual_seed(0)
     block = _GroupRoutedBlock(norm_topk_prob=True)
     del block.n_group
@@ -270,13 +238,10 @@ def test_an_opted_out_knob_keeps_its_neutral_default():
 
 
 def test_a_knob_can_be_opted_out_under_either_of_its_spellings():
-    """``n_group`` is ``num_group`` on the ``*TopkRouter`` modules. Matching the opt-out against one
-    canonical spelling would leave a family whose router carries only the alias unable to declare it —
-    the same trap in reverse: it could never construct."""
+    """Matching one canonical spelling would leave a family whose router carries only the alias unable to construct."""
 
     class _AliasSpelled(EPGlm4MoELayer):
-        # Claims nothing: a test-local subclass that inherited GLM-4's registrations would shadow the
-        # real family in every registry walked by module name or model_type.
+        # A test-local subclass inheriting GLM-4's registrations would shadow the real family in every registry walk.
         HF_MODULE_NAMES = ()
         FAMILY = MoEFamilySpec(model_types=())
         _OPTIONAL_ROUTING_KNOBS = ("num_group", "topk_group")
@@ -289,23 +254,19 @@ def test_a_knob_can_be_opted_out_under_either_of_its_spellings():
 
 
 def test_the_weight_norm_floor_is_the_familys_own():
-    """``_TOPK_WEIGHT_NORM_EPS`` is only meaningful if it reaches the division.
-
-    DeepSeek-V3 floors the top-k weight sum at 1e-20; Step-3.7 renormalizes with no floor at all, so
-    it declares 0.0. The two agree everywhere the sum is O(1) — which is why this feeds a sum small
-    enough for the floor to dominate, the regime a diverged router reaches. A knob nothing can
-    distinguish would be a knob nobody can trust."""
+    """DeepSeek-V3 floors at 1e-20, Step-3.7 declares 0.0; they agree where the sum is O(1), so this feeds a sum
+    small enough for the floor to dominate."""
     torch.manual_seed(0)
     floored = _build(EPGlm4MoELayer, _GroupRoutedBlock(norm_topk_prob=True))
     unfloored = _build(EPStep3p7MoELayer, _Step3p7Block(norm_topk_prob=True))
     assert (floored._TOPK_WEIGHT_NORM_EPS, unfloored._TOPK_WEIGHT_NORM_EPS) == (1e-20, 0.0)
 
     scores = torch.full((1, E), 1e-30)
-    scores[0, 0] = 2e-30  # a strict top-2 order, so both wrappers select the same experts
+    scores[0, 0] = 2e-30  # A strict top-2 order, so both wrappers select the same experts.
     _floored_idx, floored_weights = floored._group_limited_topk(scores, scores)
     _unfloored_idx, unfloored_weights = unfloored._group_limited_topk(scores, scores)
 
-    # Without a floor the tiny sum normalizes exactly; with one, 1e-20 swamps it and the weights collapse.
+    # Without a floor the tiny sum normalizes exactly; with one, 1e-20 swamps it.
     assert torch.allclose(unfloored_weights.sum(), torch.tensor(1.0) * unfloored.routed_scaling_factor)
     assert floored_weights.abs().max() < 1e-9, floored_weights
 

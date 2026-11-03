@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`halo.trainers.grpo.rollout.completions_logging.emit_completion_artifacts`.
-
-Locks the decoupling contract used by the online + env GRPO trainers: the durable parquet record is
-gated by ``save`` (CommonScriptArguments.save_completions) and the rich console table by ``console``
-(TRL's log_completions) — independently. Recoupling them, e.g. skipping the parquet unless the
-console prints, is the failure this forbids. The record follows the per-node writer election, the
-console table global rank 0 alone.
-
-Also pins the environmental trainer's record (``rollout_metrics._populate_completion_logs``): each
-rank keeps only its own rows (a TP/ETP follower none) and writes them as its part, ``rank<NN>.parquet``
-in the step's directory, gathering nothing for it; only the tables' bounded sample reaches global rank 0
-(on a real gloo group). Each row carries its own episode's reward components and scored-term rationale.
-WHEN it is called relative to the env-GRPO trust-region breaker is pinned where the breaker lives
-(``test_grpo_update_breaker_and_group_effort.py``).
-
-Run::
-
-    python tests/cpu/grpo/test_completions_logging.py
-"""
+"""The completion record: ``save`` gates the parquet and ``console`` the rich table, independently. The record follows
+the per-node writer election, the table global rank 0. Also pins the environmental trainer's per-rank parts."""
 
 from __future__ import annotations
 
@@ -80,8 +63,7 @@ def _fresh_logs() -> dict:
 
 
 class _Trainer:
-    """Minimal stand-in exposing exactly what emit_completion_artifacts reads: the online trainer's shape, whose
-    logs hold the world's rows."""
+    """The online trainer's shape, whose logs hold the world's rows."""
 
     RANK_LOCAL_COMPLETION_LOGS = False
 
@@ -100,12 +82,10 @@ def _parquet_path(output_dir, step=7, part=""):
 
 
 def _part_path(output_dir, step=9, rank=0, mode=""):
-    """A rank's part of a step's record under per-rank completion logs."""
     return os.path.join(output_dir, "completions", f"completions_{step:05d}{mode}", f"rank{rank:02d}.parquet")
 
 
 def test_save_writes_parquet_without_console(tmp_path, monkeypatch) -> None:
-    """save=True, console=False: parquet is written, console table is NOT printed."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
 
@@ -125,7 +105,6 @@ def test_save_writes_parquet_without_console(tmp_path, monkeypatch) -> None:
 
 
 def test_console_only_without_save(tmp_path, monkeypatch) -> None:
-    """console=True, save=False: console table prints, NO parquet written."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
     monkeypatch.setattr(cl, "is_rich_available", lambda: True)
@@ -138,16 +117,8 @@ def test_console_only_without_save(tmp_path, monkeypatch) -> None:
 
 
 def test_non_writer_rank_writes_nothing(tmp_path, monkeypatch) -> None:
-    """Only the elected writer persists artifacts (else N ranks race the same file).
-
-    The election is ``is_fs_save_rank`` — the same predicate every other output artifact uses —
-    not ``accelerator.is_main_process``: on a non-shared output filesystem each node must write its
-    own completions, and gating on the accelerator flag would lose nodes 1..N entirely.
-
-    Driven through the real flag chain (``is_global_main_process`` / ``is_local_main_process`` +
-    the env flags) rather than by patching ``is_fs_save_rank`` itself, so the test pins WHICH
-    predicate is consulted, not merely that some boolean gates the write.
-    """
+    """Only the ``is_fs_save_rank`` writer persists artifacts, else N ranks race one file. Driven through the real flag
+    chain to pin which predicate is consulted."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
     monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
@@ -164,9 +135,7 @@ def test_non_writer_rank_writes_nothing(tmp_path, monkeypatch) -> None:
 
 
 def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, monkeypatch) -> None:
-    """Anti-vacuity for the test above, and the reason the election is per node: with a per-node output
-    filesystem this same non-global-main rank IS its node's writer — gating on global rank 0 would
-    silently drop that node's completions."""
+    """Anti-vacuity for the test above: gating on global rank 0 would silently drop this node's completions."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
@@ -180,8 +149,7 @@ def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, mo
 
 
 def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_rank_zero(tmp_path, monkeypatch) -> None:
-    """The writer election is per node on a per-node output filesystem; the console is not: a table
-    printed by every node's writer would reach the log once per node."""
+    """A table printed by every node's writer would reach the log once per node."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
     monkeypatch.setattr(cl, "is_rich_available", lambda: True)
@@ -197,7 +165,6 @@ def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_ran
 
 
 def test_eval_mode_writes_suffixed_parquet(tmp_path, monkeypatch) -> None:
-    """model.training=False: the parquet gets the ``_eval`` suffix and never overwrites the train file."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
 
     trainer = _Trainer(str(tmp_path))
@@ -219,8 +186,7 @@ def _buffer_lengths(logs) -> set[int]:
 
 
 def test_emit_empties_the_buffer_so_the_next_log_writes_only_its_own_rows(tmp_path, monkeypatch) -> None:
-    """The async trainer's buffers are unbounded (an eval round is the whole eval set), so a write
-    must consume them: rows would otherwise repeat in every later parquet and grow for the run."""
+    """The async trainer's unbounded buffers would repeat unconsumed rows in every later parquet and grow all run."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
@@ -232,8 +198,7 @@ def test_emit_empties_the_buffer_so_the_next_log_writes_only_its_own_rows(tmp_pa
 
 
 def test_a_non_writer_rank_empties_its_buffer_too(tmp_path, monkeypatch) -> None:
-    """Non-writers hold nothing useful after the step; left alone, their unbounded slots would keep
-    every row the online trainer's generation path appends on every process."""
+    """Left alone, a non-writer's unbounded slots would keep every row the online trainer's generation path appends."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
@@ -248,8 +213,7 @@ def test_a_non_writer_rank_empties_its_buffer_too(tmp_path, monkeypatch) -> None
 
 
 def test_unbounded_completion_logs_hold_a_round_larger_than_one_generation_batch() -> None:
-    """TRL caps each slot at ``generation_batch_size``, which keeps only the tail of an eval round
-    larger than one generation batch; the async trainer's buffers take the whole round."""
+    """TRL caps each slot at ``generation_batch_size``, which keeps only the tail of a larger eval round."""
     logs = cl.unbounded_completion_logs()
     logs["prompt"].extend(f"p{i}" for i in range(432))
     logs["rewards"]["environment_reward"].extend(range(432))
@@ -259,7 +223,6 @@ def test_unbounded_completion_logs_hold_a_round_larger_than_one_generation_batch
 
 
 def test_empty_logs_is_noop(tmp_path) -> None:
-    """Nothing generated yet (empty buffer): no parquet, no crash."""
     trainer = _Trainer(str(tmp_path))
     trainer._logs["prompt"] = []
     emit_completion_artifacts(trainer, console=True, save=True)
@@ -272,7 +235,7 @@ class _Parallelism:
 
 
 class _MetricsHost(rm.RolloutMetricsMixin, TPLeaderBroadcastMixin):
-    """Minimal stand-in exposing exactly what ``_populate_completion_logs`` reads."""
+    """Stand-in for what ``_populate_completion_logs`` reads."""
 
     def __init__(self, save=True, console=False):
         self._save_completions = save
@@ -292,8 +255,7 @@ def _rollouts(*prompts):
 
 
 def _fake_world(monkeypatch, *, world: int, rank: int, shared_fs: bool) -> None:
-    """Simulate rank ``rank`` of a ``world``-rank job whose every gather raises: the record must never gather
-    another rank's trajectories. The write's verdict is taken on this rank alone."""
+    """A ``world``-rank job whose every gather raises: the record must never gather another rank's rows."""
 
     def refuse(*args, **kwargs):
         raise AssertionError("the completions record gathered across ranks")
@@ -325,9 +287,8 @@ def _logging_host(tmp_path, step=9) -> _MetricsHost:
 
 @pytest.mark.parametrize("shared_fs", [True, False], ids=["shared", "per-node"])
 def test_every_rank_keeps_and_writes_only_its_own_rows_with_no_collective(tmp_path, monkeypatch, shared_fs):
-    """The rendered trajectories are the heaviest payload the trainer holds: gathered, they stage the world's
-    text through a device and, per node, leave every writer holding every rank's record. Each rank, the
-    filesystem save ranks or not, keeps its own rows and writes them as its own part."""
+    """Gathered, the rendered trajectories would stage the world's text through a device and leave every writer holding
+    every rank's record."""
     _fake_world(monkeypatch, world=16, rank=9, shared_fs=shared_fs)
     host = _logging_host(tmp_path)
 
@@ -342,7 +303,6 @@ def test_every_rank_keeps_and_writes_only_its_own_rows_with_no_collective(tmp_pa
 
 
 def test_the_ranks_parts_together_are_the_steps_record(tmp_path, monkeypatch):
-    """Parts of one step never collide, and the step's directory reads back as every rank's rows."""
     for rank in (0, 3):
         _fake_world(monkeypatch, world=4, rank=rank, shared_fs=True)
         host = _logging_host(tmp_path)
@@ -355,8 +315,8 @@ def test_the_ranks_parts_together_are_the_steps_record(tmp_path, monkeypatch):
 
 
 def test_a_tp_follower_keeps_no_rows_so_each_episode_is_recorded_once(tmp_path, monkeypatch):
-    """Under TP or ETP every rank of a group holds its leader's broadcast rollouts: kept by all, each episode
-    would land in the record once per group rank. 4 ranks in TP groups of 2: one part per data-parallel rank."""
+    """Under TP or ETP every rank of a group holds its leader's broadcast rollouts. 4 ranks in TP groups of 2 write one
+    part per data-parallel rank."""
     for rank in range(4):
         _fake_world(monkeypatch, world=4, rank=rank, shared_fs=True)
         host = _logging_host(tmp_path)
@@ -378,8 +338,6 @@ _LONG = "x" * (cl._TABLE_CELL_CHARS + 100)
 
 
 class _FakeWandb:
-    """What the wandb table path touches: a live run, ``Table`` and ``log``."""
-
     run = object()
 
     def __init__(self):
@@ -426,9 +384,8 @@ def _sample_worker(rank: int, root: str) -> None:
 
 
 def test_the_tables_show_a_bounded_sample_of_every_ranks_rows_on_rank_zero(tmp_path):
-    """The console and wandb tables cover the world, not rank 0 alone, yet each rank sends only its share of
-    ``num_completions_to_print`` (ceil(4 / 3) = 2 of its 5 rows), cut to the table's cell width: the full text
-    and every row stay in the rank's own part."""
+    """Each rank sends only its share of ``num_completions_to_print`` (ceil(4 / 3) = 2 of its 5 rows), cut to the cell
+    width. The full text and every row stay in its own part."""
     run_gloo_ranks(_sample_worker, _SAMPLE_WORLD, str(tmp_path), pg_timeout=datetime.timedelta(seconds=60))
     results = [json.loads((tmp_path / f"tables_{rank}.json").read_text()) for rank in range(_SAMPLE_WORLD)]
 
@@ -444,10 +401,8 @@ def test_the_tables_show_a_bounded_sample_of_every_ranks_rows_on_rank_zero(tmp_p
 
 
 def test_each_row_carries_its_episodes_reward_components_and_scored_term_rationale(tmp_path, monkeypatch) -> None:
-    """The parquet row of an episode holds that episode's settled components and every scored term's
-    rationale (a veto judge's fired checks with their quotes) as JSON, aligned with its prompt: a vetoed
-    solve is told from an honest failure on the record alone. An episode that kept neither (a lost
-    rollout, no scored term) records ``{}``."""
+    """A vetoed solve is told from an honest failure on the record alone. An episode with neither (a lost rollout, no
+    scored term) records ``{}``."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     host = _MetricsHost()
     host.args, host.state, host.model = _Args(str(tmp_path)), _State(step=9), _Model(training=True)
@@ -482,8 +437,6 @@ def test_each_row_carries_its_episodes_reward_components_and_scored_term_rationa
 
 
 def test_the_record_shows_the_call_a_cut_turn_was_writing_marked_as_never_run() -> None:
-    """The completion column renders a turn cut inside its call with the partial call it was writing, tagged
-    as never run, after the calls that did; a turn without one renders as before."""
     ran = {"id": "c0", "function": {"name": "run_code", "arguments": '{"code": "print(1)"}'}}
     cut = {"id": "c1", "function": {"name": "run_code", "arguments": '{"code": "# still reasoning about n'}}
     trajectory = Trajectory(
@@ -503,8 +456,7 @@ def test_the_record_shows_the_call_a_cut_turn_was_writing_marked_as_never_run() 
 
 
 def test_a_mode_switch_writes_the_pending_rows_under_their_own_mode(tmp_path, monkeypatch) -> None:
-    """With ``logging_steps > 1`` an eval round can begin before the train rows since the last log were
-    written; they must reach the train parquet, not the eval one, and never disappear."""
+    """With ``logging_steps > 1`` an eval round can begin before the last train rows were written."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     host = _MetricsHost()
     host.args, host.state, host.model = _Args(str(tmp_path)), _State(step=9), _Model(training=False)
@@ -521,7 +473,6 @@ def test_a_mode_switch_writes_the_pending_rows_under_their_own_mode(tmp_path, mo
 
 
 def test_completion_logs_skipped_entirely_when_no_artifact_is_wanted(tmp_path) -> None:
-    """Neither parquet nor console: the rows are not even rendered."""
     host = _logging_host(tmp_path)
     host._save_completions = host.log_completions = False
 
@@ -531,7 +482,7 @@ def test_completion_logs_skipped_entirely_when_no_artifact_is_wanted(tmp_path) -
 
 
 class _BaseLog:
-    """Stands for the rest of the MRO the mixin delegates to: records TRL's flag as ``log`` saw it."""
+    """The rest of the MRO the mixin delegates to; records TRL's flag as ``log`` saw it."""
 
     def log(self, logs, start_time=None):
         self.seen_by_base = (dict(logs), self.log_completions)

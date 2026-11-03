@@ -33,7 +33,7 @@ class _PySpyCapture:
 
 
 def torchrun_python_pids() -> set[int]:
-    """Best-effort enumeration of training Python processes (torchrun children) on this node."""
+    """Best-effort: training Python processes (torchrun children) on this node."""
     try:
         out = subprocess.check_output(["pgrep", "-f", "torchrun"], text=True, timeout=_PGREP_TIMEOUT_S)
     except (subprocess.SubprocessError, OSError):
@@ -52,15 +52,13 @@ def torchrun_python_pids() -> set[int]:
 
 
 def _py_spy_artifact_dir(output_dir: str | Path) -> Path:
-    """Create and return this rank's timestamped artifact sub-dir under ``output_dir``."""
     target = Path(output_dir) / f"{time.strftime('%Y%m%d-%H%M%S')}-{rank_tag()}"
     target.mkdir(parents=True, exist_ok=True)
     return target
 
 
 def _py_spy_target_pids(pids: Iterable[int] | None, *, include_children: bool) -> set[int]:
-    """Processes to attach to: explicit ``pids`` verbatim, else this process plus, with
-    ``include_children``, torchrun's children."""
+    """Explicit ``pids`` verbatim, else this process plus, with ``include_children``, torchrun's children."""
     if pids is not None:
         return set(pids)
     targets = {os.getpid()}
@@ -70,7 +68,6 @@ def _py_spy_target_pids(pids: Iterable[int] | None, *, include_children: bool) -
 
 
 def _stop_running(processes: dict[int, subprocess.Popen]) -> None:
-    """Kill and reap every process in ``processes`` that is still running."""
     for process in processes.values():
         if process.poll() is None:
             process.kill()
@@ -85,9 +82,8 @@ def _run_py_spy_per_pid(
     timeout: int,
     output_suffix: str,
 ) -> _PySpyCapture:
-    """Run ``build_command(pid, target)`` for every pid at once, so all ranks share one window; output
-    lands in ``pid<pid><output_suffix>`` and a failed attach writes ``pid<pid>.error`` while the rest run on.
-    """
+    """Run every pid at once so all ranks share one window; output lands in ``pid<pid><output_suffix>``, and a failed
+    attach writes ``pid<pid>.error`` while the rest run on."""
     running: dict[int, subprocess.Popen] = {}
     failures: dict[int, str] = {}
     with ExitStack() as stack:
@@ -119,12 +115,8 @@ def dump_distributed_stacks(
     *,
     pids: Iterable[int] | None = None,
 ) -> _PySpyCapture | None:
-    """Capture a ``py-spy dump`` for every Python rank on this node.
-
-    Writes one file per pid into a timestamped sub-directory and returns the capture, or ``None``
-    without py-spy. A hang on one rank dumps the whole node (this process plus torchrun's other
-    children); explicit ``pids`` overrides that discovery.
-    """
+    """``py-spy dump`` of every Python rank on this node into a timestamped sub-directory; ``None`` without py-spy.
+    A hang on one rank dumps the whole node unless explicit ``pids`` are given."""
     if not shutil.which("py-spy"):
         return None
 
@@ -146,13 +138,9 @@ def record_distributed_flamegraph(
     this_rank_only: bool = True,
     pids: Iterable[int] | None = None,
 ) -> _PySpyCapture | None:
-    """Record a ``py-spy`` CPU flame graph (SVG) for this node's ranks.
-
-    Samples over ``duration`` seconds to find CPU-side bottlenecks (dataloader stalls,
-    tokenization), where :func:`dump_distributed_stacks` snapshots a hang instead. Writes one
-    ``pid<pid>.svg`` (and its ``pid<pid>.log``) per process; ``this_rank_only=False`` profiles every
-    torchrun child, and explicit ``pids`` overrides discovery. ``None`` without py-spy.
-    """
+    """Record a CPU flame graph (SVG) over ``duration`` seconds, for dataloader or tokenization stalls, where
+    :func:`dump_distributed_stacks` snapshots a hang. ``this_rank_only=False`` profiles every torchrun child; explicit
+    ``pids`` override discovery. ``None`` without py-spy."""
     if not shutil.which("py-spy"):
         return None
 

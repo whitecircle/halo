@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the rank-uniform EP autograd graph under expert-only training.
-
-With only the experts trainable, nothing upstream of the first MoE layer requires grad. A rank whose
-local experts receive no token computes a constant there, so its combine carries no autograd node
-unless the dispatch has a grad-requiring input, and every later layer whose input loses grad through
-it goes the same way. Its backward then takes fewer DeepEP collectives than its peers'. The layer
-therefore makes such an input a grad-requiring leaf (``_rank_uniform_dispatch_input``).
-
-A recording transport stands in for DeepEP here with the same autograd shape (dispatch backward = a
-collective, combine backward = a collective, rows ``[:received]`` reach the local experts), under the
-real ``_dispatch_compute_combine`` and per-expert compute. Asserted: an idle rank and a busy rank run
-the same backward collectives in the same order; the leaf changes no parameter gradient; and it is
-made only for a grad-enabled training forward over a transport whose experts train and whose dispatch
-has no grad-requiring operand.
-
-Run: python tests/cpu/parallelism/test_ep_rank_uniform_dispatch_input.py
-"""
+"""The rank-uniform EP autograd graph under expert-only training. A rank with no tokens has no combine node without
+a grad-requiring input, so its backward takes fewer collectives than its peers'."""
 
 import contextlib
 
@@ -61,7 +46,7 @@ class _Combine(torch.autograd.Function):
 
 
 class _RecordingTransport:
-    """DeepEP's autograd shape: ``received`` rows reach this rank's experts; both backwards log."""
+    """``received`` rows reach this rank's experts; both backwards log."""
 
     def __init__(self, name: str, received: int, log: list):
         self.name, self.received, self.log = name, received, log
@@ -77,8 +62,6 @@ class _RecordingTransport:
 
 
 class _Layer(StubEPLayerBase):
-    """Just enough EP state for the real dispatch → per-expert compute → combine path."""
-
     def __init__(self, transport: _RecordingTransport, seed: int, ep_size: int = 2):
         super().__init__()
         self.dispatcher = transport
@@ -102,7 +85,7 @@ class _Layer(StubEPLayerBase):
 
 
 def _two_layer_step(received: tuple[int, int], *, bypass_leaf: bool = False):
-    """One forward+backward through two stacked layers; returns (backward log, param grads)."""
+    """Returns (backward log, param grads)."""
     log: list = []
     layers = [_Layer(_RecordingTransport(f"l{i}", received[i], log), seed=i) for i in range(2)]
     if bypass_leaf:
@@ -120,7 +103,6 @@ def _two_layer_step(received: tuple[int, int], *, bypass_leaf: bool = False):
 
 @pytest.mark.parametrize("idle", [(0, TOKENS), (0, 0), (TOKENS, 0)], ids=["first", "all", "second"])
 def test_idle_rank_runs_the_busy_ranks_backward_collectives(idle):
-    """Every collective a busy rank's backward enters, an idle rank's enters too, in the same order."""
     busy_log, _ = _two_layer_step((TOKENS, TOKENS))
     idle_log, _ = _two_layer_step(idle)
     assert busy_log == idle_log, f"busy rank {busy_log} vs idle rank {idle_log}"
@@ -130,7 +112,7 @@ def test_idle_rank_runs_the_busy_ranks_backward_collectives(idle):
 
 
 def test_leaf_changes_no_parameter_gradient():
-    """The leaf's own gradient is discarded; every expert gradient is what it was without it."""
+    """The leaf's own gradient is discarded."""
     _, with_leaf = _two_layer_step((TOKENS, TOKENS))
     _, without = _two_layer_step((TOKENS, TOKENS), bypass_leaf=True)
     assert all(g is not None for g in with_leaf)
@@ -154,8 +136,8 @@ def test_leaf_shares_the_input_and_requires_grad():
     "case", ["input_requires_grad", "weights_require_grad", "eval", "no_grad", "ep1", "experts_frozen"]
 )
 def test_no_leaf_where_the_dispatch_needs_none(case):
-    """A grad-requiring operand already gives the dispatch its node; a reference/eval pass and ep1
-    build no backward collective; frozen experts leave nothing to differ across ranks."""
+    """A grad-requiring operand gives the dispatch its node; eval and ep1 build no backward collective; frozen
+    experts leave nothing to differ."""
     layer = _Layer(_RecordingTransport("l0", TOKENS, []), seed=0, ep_size=1 if case == "ep1" else 2)
     if case == "eval":
         layer.eval()

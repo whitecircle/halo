@@ -1,29 +1,6 @@
 #!/usr/bin/env python
-"""
-Collator comparison benchmark: Standard vs Packing vs Padding-Free.
-
-Uses variable-length data where avg sequence length << max_length to expose
-padding waste. With fixed-length data all collators perform identically;
-this benchmark demonstrates the throughput advantage of packing and
-padding-free approaches on realistic variable-length training data.
-
-Usage:
-    # Default: Qwen3-30B-A3B EP=2, max_length=4096, avg_ratio=0.25
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_collators.py --ep 2
-
-    # Custom avg_ratio (0.1 = avg 10% of max_length → 90% padding waste)
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_collators.py --ep 2 --avg_ratio 0.1
-
-    # Single collator mode
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_collators.py --ep 2 --mode packing
-
-    # Dense model (FSDP, no EP)
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_collators.py --model qwen3-8b --seq 4096
-"""
+"""Standard vs packing vs padding-free collators on variable-length data, where avg length << max_length exposes
+padding."""
 
 import gc
 import sys
@@ -57,12 +34,7 @@ from tests.common.models import MODEL_CONFIGS
 from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
 
-# Constants
-
 ALL_MODES = ["standard", "packing", "padding_free"]
-
-
-# Benchmark Logic
 
 
 def run_collator_mode(
@@ -74,11 +46,6 @@ def run_collator_mode(
     rank: int,
     output_dir: str,
 ) -> dict | None:
-    """Run a single collator benchmark mode.
-
-    Loads the model fresh, configures the collator per mode, trains for
-    the specified steps, and returns metrics from EfficiencyCallback.
-    """
     if rank == 0:
         print(f"\n{'=' * 60}")
         print(f"  COLLATOR: {mode}")
@@ -88,7 +55,6 @@ def run_collator_mode(
     ep_size = getattr(args, "ep", 1)
     use_liger = not args.no_liger
 
-    # --- Load model ---
     if ep_size > 1:
         parallelism_config = ParallelismConfig(ep_size=ep_size)
         model, _ = load_distributed_model(
@@ -117,7 +83,6 @@ def run_collator_mode(
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"  Model loaded: {trainable / 1e9:.2f}B params, {gpu_mem_gb():.1f} GB")
 
-    # --- SFT Config ---
     sft_config = SFTConfig(
         output_dir=output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -131,17 +96,13 @@ def run_collator_mode(
         dataloader_pin_memory=False,
         report_to=[],
         logging_nan_inf_filter=False,
-        # padding_free without packing forbids an enforced max_length in current TRL;
-        # the synthetic inputs are already generated <= args.seq, so dropping the cap is safe.
+        # padding_free without packing forbids an enforced max_length in TRL; the inputs are already <= args.seq.
         max_length=None if mode == "padding_free" else args.seq,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        # Count REAL tokens (attention_mask.sum), not the padded tensor's numel.
-        # A bare True counts inputs[input_ids].numel() (pads included), which credits
-        # `standard` padding-as-throughput while `padding_free` counts only real tokens —
-        # inverting the collator comparison. "non_padding" makes the metric mode-comparable.
+        # Counts real tokens: a bare True counts pads, crediting `standard` padding as throughput and inverting the
+        # comparison.
         include_num_input_tokens_seen="non_padding",
-        # Collator mode
         padding_free=(mode == "padding_free"),
         packing=(mode == "packing"),
         use_liger_kernel=False,
@@ -149,14 +110,12 @@ def run_collator_mode(
     # Liger is already applied; TRL's flag follows what was applied (a fused loss returns no logits).
     finalize_liger_after_direct_load(sft_config, use_liger, model)
 
-    # --- Efficiency Callback ---
     efficiency_cb = EfficiencyCallback(
         parallelism_config,
         n_warmup_steps=args.warmup,
         num_full_model_params=model_cfg["full_params"],
     )
 
-    # --- Create Trainer ---
     trainer = DistributedSFTTrainer(
         model=model,
         args=sft_config,
@@ -166,7 +125,6 @@ def run_collator_mode(
         parallelism_config=parallelism_config,
     )
 
-    # --- Train ---
     barrier()
     torch.cuda.reset_peak_memory_stats()
 
@@ -174,7 +132,6 @@ def run_collator_mode(
     trainer.train()
     train_elapsed = time.perf_counter() - train_start
 
-    # --- Collect metrics ---
     results = None
     if rank == 0:
         results = {
@@ -193,7 +150,6 @@ def run_collator_mode(
         emit_benchmark(f"collator_{mode}_{args.model}_ep{ep_size}_s{args.seq}", efficiency_cb)
         print(f"  Total Time:   {results['total_time_sec']:.1f}s")
 
-    # --- Cleanup ---
     if hasattr(trainer, "cleanup_ep"):
         trainer.cleanup_ep()
     barrier()
@@ -208,7 +164,6 @@ def run_collator_mode(
 
 
 def print_summary(all_results: list[dict], args, model_cfg: dict, avg_tokens: int):
-    """Print comparison table of all collator modes."""
     model_name = args.model_path or model_cfg["hf_name"]
     ep_size = getattr(args, "ep", 1)
     padding_pct = (1.0 - args.avg_ratio) * 100
@@ -232,7 +187,6 @@ def print_summary(all_results: list[dict], args, model_cfg: dict, avg_tokens: in
             f"{r['peak_memory_gb']:>6.1f}"
         )
 
-    # Speedup vs standard
     std = next((r for r in all_results if r["mode"] == "standard"), None)
     if std and std["avg_tps_gpu"] > 0 and len(all_results) > 1:
         print("\n  Throughput vs Standard (tokens/sec per GPU):")
@@ -243,9 +197,6 @@ def print_summary(all_results: list[dict], args, model_cfg: dict, avg_tokens: in
             print(f"    {r['mode']:<14}: {speedup:.1f}x")
 
     print(f"\n{'=' * 80}")
-
-
-# Main
 
 
 def main():
@@ -275,7 +226,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # --- Distributed setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
 
@@ -304,15 +254,12 @@ def main():
 
     output_dir, cache_dir = setup_cache_dirs("bench_collator", rank)
     try:
-        # --- Ensure model is cached ---
         ensure_model_downloaded(model_name, rank)
 
-        # --- Load tokenizer ---
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # --- Create variable-length dataset ---
         dataset = create_variable_length_sft_dataset(
             tokenizer=tokenizer,
             max_length=args.seq,
@@ -321,7 +268,6 @@ def main():
         )
 
         if rank == 0:
-            # Show actual token distribution
             sample_lengths = []
             for i in range(min(20, len(dataset))):
                 toks = len(tokenizer.encode(dataset[i]["text"]))
@@ -333,12 +279,10 @@ def main():
                 f"avg={actual_avg:.0f}"
             )
 
-        # --- Determine modes to run ---
         modes = [args.mode] if args.mode else ALL_MODES
         if rank == 0:
             print(f"\n  Modes to benchmark: {modes}")
 
-        # --- Run benchmarks ---
         all_results = []
         failed = False
         for mode in modes:
@@ -356,18 +300,15 @@ def main():
                 barrier()
                 continue
 
-        # --- Print summary ---
         if rank == 0 and all_results:
             print_summary(all_results, args, model_cfg, avg_tokens)
     finally:
         cleanup_dirs(output_dir, cache_dir)
 
-    # On rank 0 the per-mode results gate success; on other ranks fall back to
-    # whether any mode raised (results are only collected on rank 0).
+    # Results are collected on rank 0 only, so other ranks gate on whether any mode raised.
     if rank == 0 and not all_results:
         failed = True
 
-    # --- Cleanup ---
     barrier()
     teardown_distributed()
 

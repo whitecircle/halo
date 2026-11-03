@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""A ``fully_shard`` layer recomputed K>1 times in one backward reaches the optimizer with every segment's
-gradient, through the trainer's own ``training_step``, on 2 gloo ranks.
-
-Halo runs MoE, EP and CP gradient checkpointing reentrant, around each decoder layer's ``__call__``, and
-env-GRPO scores every turn row in its own forward, so one backward recomputes each layer K = rows times.
-torch 2.11's FSDP2 registers its post-backward hook in only one of those recomputes: the other K-1 segments
-stay in the unsharded gradient, the layer groups stay gathered past the optimizer step, and their sharded
-gradients survive ``model.zero_grad()``. ``DistributedTrainerMixin.training_step`` completes that
-post-backward after the backward and refuses one still undone.
-
-Two families run through ``apply_fsdp2_per_layer`` and scoped reentrant checkpointing, in one-layer groups and in
-the wrap's ZeRO-2 units of several layers (whose K>1 leftovers torch's final callback reduces itself, as it visits a
-unit's state once per module): a tiny dense Qwen3 (also with its MLPs held in another dtype, so each layer carries
-a nested shard group) and a tiny Qwen3-MoE under EP layers at ep1 with FSDP-sharded experts; the dense one also
-under HSDP on 4 ranks. Each is trained 3 SGD steps beside an unsharded model without checkpointing that averages
-its gradients over the ranks, with HF's step order (backward per microbatch, clip, step, ``model.zero_grad()``).
-At K=1 the step must leave every gradient and weight bit for bit what the same step without the completion
-leaves. Under a reduce dtype wider than the parameters' (fp64 over fp32), a deferred window's microsteps park
-their gradients in FSDP2's accumulator and the window still ends at the reference's gradient. The non-finite step
-guard reads its verdict off the completed gradient: a K>1 step whose backward overflows on one rank is skipped
-everywhere, and nothing of it reaches a later step.
-
-    python tests/cpu/parallelism/test_fsdp2_reentrant_recompute.py
-"""
+"""A ``fully_shard`` layer recomputed K>1 times in one backward reaches the optimizer with every segment's gradient.
+torch 2.11's FSDP2 hooks one recompute only; ``training_step`` completes the rest."""
 
 import contextlib
 import datetime
@@ -59,14 +37,14 @@ SEED = 0
 VOCAB = 128
 STEPS = 3
 LR = 0.05
-# The clip threshold is this fraction of the reference's own norm, so every step's clip scales.
+# A fraction of the reference's own norm, so every step's clip scales.
 CLIP_FRACTION = 0.5
-# Forwards of each decoder layer per backward: env-GRPO's turn rows per microbatch.
+# Env-GRPO's turn rows per microbatch.
 K_VALUES = (1, 2, 4)
 WINDOW_K_VALUES = (1, 4)
 GRAD_ACCUM = 3
-# fp32 throughout: FSDP2's reduce-scatter and the reference's all-reduce sum in different orders (observed
-# below 1e-7); the dropped segments this guards against are 30-80% of the layer gradient.
+# FSDP2's reduce-scatter and the reference's all-reduce sum in different orders (observed below 1e-7); dropped segments
+# are 30-80% of the layer gradient.
 PARITY_RTOL = 1e-5
 FAMILY_OVERRIDES = {
     "dense": {"num_hidden_layers": 2, "vocab_size": VOCAB},
@@ -80,24 +58,20 @@ FAMILY_OVERRIDES = {
         "num_experts": 4,
     },
 }
-# Each window arms FSDP2's post-backward work only on the window's last backward (``_set_window_end``).
+# Each window arms FSDP2's post-backward work only on its last backward (``_set_window_end``).
 WINDOWS = {
     "defer": {"fsdp_reshard_after_backward": True, "fsdp_defer_grad_sync": True},
     "keep_gathered": {"fsdp_reshard_after_backward": False, "fsdp_defer_grad_sync": False},
     "both": {"fsdp_reshard_after_backward": False, "fsdp_defer_grad_sync": True},
 }
 NO_WINDOW = {"fsdp_reshard_after_backward": True, "fsdp_defer_grad_sync": False}
-# Windows that defer the reduce, run with the dense model reducing in fp64 over fp32 parameters.
 MIXED_REDUCE_WINDOWS = ("defer", "both")
-# HSDP over 4 ranks: 2 replicas of 2 shards, each group's reduce a reduce-scatter then an all-reduce.
+# 2 replicas of 2 shards, each group's reduce a reduce-scatter then an all-reduce.
 HSDP_MESH = (2, 2)
 HSDP_K_VALUES = (1, 4)
-# The step whose backward overflows on the last rank, and the rows each of its backwards recomputes.
 POISONED_STEP = 1
 POISONED_K = 4
-# Decoder layers per shard group by ``reshard_after_forward``: one-layer groups, and the wrap's own count.
 UNIT_SIZES = {raf: sorted({1, fsdp.layers_per_shard_group(raf)}) for raf in (False, True)}
-# Each trained shape, by name; the dense family also with its MLPs in another dtype.
 SHAPES = {
     f"{family}-raf{raf}-units{units}-micro{micro}-nested{nested}": {
         "family": family,
@@ -116,14 +90,12 @@ MAIN = list(SHAPES)
 
 
 def _rows(k: int, step: int, micro: int, rank: int) -> list[torch.Tensor]:
-    """``k`` token rows of different lengths, distinct per step, microbatch and rank."""
     generator = torch.Generator().manual_seed(10_000 * step + 100 * micro + rank)
     lengths = [5 + 3 * i + int(torch.randint(0, 4, (1,), generator=generator)) for i in range(k)]
     return [torch.randint(0, VOCAB, (1, length), generator=generator) for length in lengths]
 
 
 def _rows_loss(model: nn.Module, rows: list[torch.Tensor]) -> torch.Tensor:
-    """Next-token cross entropy summed over the rows, each row its own forward."""
     loss = 0.0
     for ids in rows:
         logits = model(input_ids=ids).logits
@@ -132,7 +104,7 @@ def _rows_loss(model: nn.Module, rows: list[torch.Tensor]) -> torch.Tensor:
 
 
 class _InfGrad(torch.autograd.Function):
-    """Identity forward, infinite backward: a finite loss whose every gradient overflows."""
+    """A finite loss whose every gradient overflows."""
 
     @staticmethod
     def forward(ctx, x):
@@ -148,8 +120,7 @@ class _PoisonedRows(list):
 
 
 class _RowsBackward:
-    """The step the trainer seam wraps: one backward through every row's forward. The step guard extends
-    transformers' own norm read."""
+    """The step guard extends transformers' own norm read."""
 
     _get_grad_norm = Trainer._get_grad_norm
 
@@ -162,8 +133,6 @@ class _RowsBackward:
 
 
 class _Trainer(DistributedTrainerMixin, _RowsBackward):
-    """``DistributedTrainerMixin.training_step`` and its clips over the minimum state they read."""
-
     def __init__(self, model: nn.Module, ep_config: EPConfig | None, window: dict):
         self.model = model
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, **window)
@@ -185,15 +154,14 @@ class _Trainer(DistributedTrainerMixin, _RowsBackward):
             self._install_ep_clip()
 
     def clip(self, max_norm: float) -> torch.Tensor:
-        """The clip HF runs on the sync step: the EP clip under EP layers, torch's own on plain FSDP2."""
+        """The EP clip under EP layers, torch's own on plain FSDP2."""
         if self._ep_config is not None:
             return self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm)
         return torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm)
 
 
 def _param_groups(model: nn.Module) -> list:
-    """Each FSDP2 parameter group once (a unit's modules share one), read off torch's own state rather than the
-    code under test."""
+    """Read off torch's own state rather than the code under test."""
     groups = (module._get_fsdp_state()._fsdp_param_group for module in fsdp2_modules(model))
     return list({id(group): group for group in groups if group is not None}.values())
 
@@ -222,9 +190,7 @@ def _sharded(
     units: int,
     reduce_dtype: torch.dtype | None = None,
 ) -> nn.Module:
-    """``family``'s model under scoped reentrant checkpointing and the toolkit's FSDP2 wrap in groups of ``units``
-    decoder layers; ``nested`` holds each MLP in float64, which the wrap splits into a shard group inside its
-    layer's; ``reduce_dtype`` reduces the fp32 gradients in another dtype."""
+    """``nested`` holds each MLP in float64, which the wrap splits into a shard group inside its layer's."""
     model = _build(family, ep_config)
     if nested:
         for layer in model.model.layers:
@@ -257,20 +223,19 @@ def _rel(actual: list[torch.Tensor], reference: list[torch.Tensor]) -> float:
 
 
 def _average(params: list[nn.Parameter]) -> None:
-    """The reference trains data-parallel too: its grads averaged over the ranks in place."""
+    """The reference trains data-parallel too."""
     for param in params:
         dist.all_reduce(param.grad)
         param.grad /= dist.get_world_size()
 
 
 class _ReductionLog:
-    """FSDP2's reduce-scatters per group, and every reduction event the reduce-scatter stream records, against
-    the waits the compute stream makes. On CPU an event is ``None``; a token stands in for each, so a reduction
-    whose completion the compute stream never waited on shows up as an unwaited token."""
+    """On CPU an event is ``None``, so a token stands in for each: a reduction never waited on shows up as an
+    unwaited token."""
 
     def __init__(self, groups: list):
         self._owner = {id(fsdp_param): id(group) for group in groups for fsdp_param in group.fsdp_params}
-        # Read at each event: the root's lazy init gives every group the shared communication context.
+        # The root's lazy init gives every group the shared communication context.
         self._group = groups[0]
         self.reduces: dict[int, int] = {}
         self.recorded: list[object] = []
@@ -326,9 +291,8 @@ def _train(
     complete: bool = True,
     reduce_dtype: torch.dtype | None = None,
 ) -> dict:
-    """``STEPS`` optimizer steps of ``micro`` microbatches of ``k`` rows through the trainer's step; ``complete``
-    off runs the same step without the post-backward completion (the K=1 twin). Every collective runs on
-    every rank in the same order, before anything is compared."""
+    """``complete`` off is the K=1 twin. Every collective runs on every rank in the same order, before anything is
+    compared."""
     reference = _build(family, ep_config)
     model = _sharded(family, ep_config, mesh, raf=raf, nested=nested, units=units, reduce_dtype=reduce_dtype)
     trainer = _Trainer(model, None if family == "dense" else ep_config, window)
@@ -400,9 +364,7 @@ def _train(
 
 
 def _skipped_step_run(mesh, units: int) -> dict:
-    """``STEPS`` steps of the dense model at ``POISONED_K`` rows per backward, ``POISONED_STEP``'s backward
-    overflowing on the last rank, through the trainer's step and the step guard on its optimizer; the reference
-    takes no step there."""
+    """The reference takes no step at ``POISONED_STEP``."""
     rank = dist.get_rank()
     reference = _build("dense", None)
     model = _sharded("dense", None, mesh, raf=False, nested=False, units=units)
@@ -444,8 +406,7 @@ def _skipped_step_run(mesh, units: int) -> dict:
 
 
 def _guard_cases(ep_config: EPConfig, mesh) -> dict:
-    """The guard on a backward the completion cannot finish, and on each leftover injected by hand, in one-layer
-    groups: torch's final callback finishes a unit of several layers itself."""
+    """One-layer groups, since torch's final callback finishes a unit of several layers itself."""
     out = {}
     model = _sharded("dense", ep_config, mesh, raf=False, nested=False, units=1)
     trainer = _Trainer(model, ep_config=None, window=NO_WINDOW)
@@ -548,7 +509,6 @@ def _skip_worker(rank: int, out: str) -> None:
 
 
 def _hsdp_worker(rank: int, out: str) -> None:
-    """The dense model under HSDP, 2 replicas of 2 shards: a completion's reduce-scatter and all-reduce."""
     mesh = init_device_mesh("cpu", HSDP_MESH, mesh_dim_names=("dp_replicate", "dp_shard"))
     results = {}
     for units in UNIT_SIZES[False]:
@@ -604,8 +564,6 @@ def _run(rank_runs: dict, name: str) -> dict:
 
 @pytest.mark.parametrize("case", MAIN)
 def test_every_recomputed_segment_reaches_the_sharded_gradient(runs, case):
-    """Each step's gradient, read off the sharded parameters the optimizer holds, is the reference's: the K-1
-    segments FSDP2's hooks missed are reduce-scattered too, nested groups included."""
     for rank_runs in runs:
         for k in K_VALUES:
             run = _run(rank_runs, f"{case}-k{k}")
@@ -615,8 +573,7 @@ def test_every_recomputed_segment_reaches_the_sharded_gradient(runs, case):
 
 @pytest.mark.parametrize("case", MAIN)
 def test_one_forward_per_backward_leaves_the_step_bit_identical(runs, case):
-    """At K=1 the completion is a no-op: every gradient and weight equals the step without it, and the step
-    issues one reduce-scatter per layer group; a K>1 step costs exactly one more."""
+    """A K>1 step costs exactly one more reduce-scatter per layer group."""
     for rank_runs in runs:
         run, twin = _run(rank_runs, f"{case}-k1"), _run(rank_runs, f"{case}-k1-twin")
         assert run["grads"] == twin["grads"]
@@ -628,8 +585,6 @@ def test_one_forward_per_backward_leaves_the_step_bit_identical(runs, case):
 
 @pytest.mark.parametrize("case", MAIN)
 def test_clip_norms_the_gradient_the_optimizer_steps(runs, case):
-    """The sync step's clip returns the reference's total norm and scales the sharded gradients to its
-    clipped ones (torch's clip on plain FSDP2, the EP clip under EP layers)."""
     for rank_runs in runs:
         for k in K_VALUES:
             run = _run(rank_runs, f"{case}-k{k}")
@@ -639,8 +594,8 @@ def test_clip_norms_the_gradient_the_optimizer_steps(runs, case):
 
 @pytest.mark.parametrize("case", MAIN)
 def test_no_gradient_carries_across_model_zero_grad(runs, case):
-    """Steps 2 and 3 match the reference too: HF's ``model.zero_grad()`` clears the registered parameters only,
-    so a group left gathered keeps its sharded gradient into the next step."""
+    """HF's ``model.zero_grad()`` clears registered parameters only, so a gathered group keeps its sharded gradient
+    into the next step."""
     for rank_runs in runs:
         for k in K_VALUES:
             run = _run(rank_runs, f"{case}-k{k}")
@@ -649,8 +604,6 @@ def test_no_gradient_carries_across_model_zero_grad(runs, case):
 
 @pytest.mark.parametrize("case", MAIN)
 def test_groups_reshard_and_the_next_forward_sees_the_step(runs, case):
-    """After every step each group is sharded and registers its DTensor shards, and a forward after the last
-    step computes with the stepped weights, not a gathered pre-step copy."""
     for rank_runs in runs:
         for k in K_VALUES:
             run = _run(rank_runs, f"{case}-k{k}")
@@ -660,8 +613,7 @@ def test_groups_reshard_and_the_next_forward_sees_the_step(runs, case):
 
 @pytest.mark.parametrize("case", MAIN)
 def test_the_compute_stream_waits_on_every_reduction(runs, case):
-    """Every reduction the step issues, the completion's extra reduce-scatter per layer group included, is
-    waited on by the compute stream before the step returns, where the clip and the optimizer read it."""
+    """The clip and the optimizer read these gradients before the step returns."""
     for rank_runs in runs:
         for k in K_VALUES[1:]:
             run = _run(rank_runs, f"{case}-k{k}")
@@ -673,10 +625,8 @@ def test_the_compute_stream_waits_on_every_reduction(runs, case):
 @pytest.mark.parametrize("family", list(FAMILY_OVERRIDES))
 @pytest.mark.parametrize("window", list(WINDOWS))
 def test_accumulation_windows_keep_their_semantics(runs, family, window, units):
-    """Inside a grad-accum window the completion follows each group's armed flags: a deferred reduce issues no
-    reduce-scatter before the window's last backward, nor does the completion; a kept-gathered window keeps
-    its layers gathered between microsteps, and every other microstep ends them sharded; the last backward
-    reduces every segment."""
+    """A deferred reduce issues no reduce-scatter before the window's last backward; a kept-gathered window stays
+    gathered between microsteps."""
     flags = WINDOWS[window]
     for rank_runs in runs:
         for k in WINDOW_K_VALUES:
@@ -696,9 +646,7 @@ def test_accumulation_windows_keep_their_semantics(runs, family, window, units):
 @pytest.mark.parametrize("units", UNIT_SIZES[False])
 @pytest.mark.parametrize("window", MIXED_REDUCE_WINDOWS)
 def test_a_wider_reduce_dtype_keeps_every_segment_across_the_window(runs, window, units):
-    """fp32 parameters reducing in fp64: each deferred microstep parks its gradient, K-1 recomputed segments
-    included, in FSDP2's accumulator, and the window's last backward reduces it all to the reference's gradient,
-    with the groups sharded after every step."""
+    """Deferred microsteps park K-1 recomputed segments in FSDP2's accumulator."""
     for rank_runs in runs:
         for k in WINDOW_K_VALUES:
             run = _run(rank_runs, f"dense-units{units}-window_{window}-k{k}-reduce_fp64")
@@ -710,8 +658,6 @@ def test_a_wider_reduce_dtype_keeps_every_segment_across_the_window(runs, window
 
 @pytest.mark.parametrize("units", UNIT_SIZES[False])
 def test_hsdp_completes_the_reduce_scatter_and_the_replica_all_reduce(hsdp_runs, units):
-    """Under HSDP each completed group reduce-scatters over its shard group and all-reduces over its replicas:
-    every segment reaches the gradient, waited on, and K=1 stays bit-identical."""
     for rank_runs in hsdp_runs:
         run, twin = _run(rank_runs, f"units{units}-k1"), _run(rank_runs, f"units{units}-k1-twin")
         assert run["grads"] == twin["grads"] and run["weights"] == twin["weights"]
@@ -727,8 +673,7 @@ def test_hsdp_completes_the_reduce_scatter_and_the_replica_all_reduce(hsdp_runs,
 
 @pytest.mark.parametrize("units", UNIT_SIZES[False])
 def test_a_recomputed_step_that_overflows_on_one_rank_is_skipped_on_every_rank(skip_runs, units):
-    """The step guard's norm is the completed gradient's: the poisoned step leaves every rank's weights bit for
-    bit, and the steps around it, the first one after it included, match the reference that never took it."""
+    """The guard reads the completed gradient, so nothing of the poisoned step reaches a later one."""
     for rank_runs in skip_runs:
         run = _run(rank_runs, f"units{units}")
         assert run["skipped"] == 1, run["skipped"]
@@ -738,7 +683,7 @@ def test_a_recomputed_step_that_overflows_on_one_rank_is_skipped_on_every_rank(s
 
 
 def test_the_guard_refuses_a_backward_left_unfinished(guard_runs):
-    """With the completion disabled a K>1 step raises instead of stepping partial gradients."""
+    """Raises instead of stepping partial gradients."""
     for rank_runs in guard_runs:
         message = rank_runs["uncompleted_backward"]
         assert message is not None and "post-backward left undone" in message
@@ -749,8 +694,6 @@ def test_the_guard_refuses_a_backward_left_unfinished(guard_runs):
     [("unreduced", 1, 0), ("gathered", 0, 1)],
 )
 def test_the_guard_names_each_leftover(guard_runs, injected, unreduced, gathered):
-    """An unsharded gradient on a group whose reduce is armed, or a group still gathered with its reshard
-    armed, each raises, counted under its own leg."""
     for rank_runs in guard_runs:
         message = rank_runs[injected]
         assert message is not None and "post-backward left undone" in message, message

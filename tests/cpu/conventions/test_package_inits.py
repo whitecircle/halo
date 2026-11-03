@@ -1,6 +1,5 @@
-"""Every package init under ``halo/`` re-exports nothing: a symbol has one import path, the module that
-defines it, and importing a leaf never pays for a package's whole tree. ``halo/__init__.py`` is the
-process bootstrap and the one exception."""
+"""Every package init under ``halo/`` re-exports nothing: a symbol has one import path, and importing a leaf never
+pays for a package's whole tree. ``halo/__init__.py`` is the process bootstrap and the one exception."""
 
 import ast
 

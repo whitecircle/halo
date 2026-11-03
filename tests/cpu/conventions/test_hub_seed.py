@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The Hub seed and the cache-miss policy that makes a repo outside it fail instead of skip.
-
-``tests.common.hub_seed`` derives what ``make seed-hf-cache`` downloads; ``HALO_TEST_REQUIRE_HUB_CACHE``
-turns a cache miss on any Hub repo the seed could hold into a failure, so a test that starts reading a
-new repo cannot pass an offline CPU-tier run over the seeded cache as a skip. Gated repos and local
-checkpoint paths still skip.
-
-Run: python tests/cpu/conventions/test_hub_seed.py
-"""
+"""The Hub seed and its cache-miss policy: ``HALO_TEST_REQUIRE_HUB_CACHE`` turns a miss on any repo the seed could
+hold into a failure, so a new repo cannot pass an offline run as a skip. Gated repos and local paths still skip."""
 
 import json
 
@@ -19,7 +12,6 @@ from tests.common.models import GEMMA3_4B_IT, GEMMA4_26B_A4B, GPT_OSS_20B_PATCHE
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import REQUIRE_HUB_CACHE, require_cached, try_cached_config, try_cached_tokenizer
 
-# Well-formed and certainly absent from any cache.
 _UNSEEDED = "halo-tests/no-such-repo"
 
 
@@ -100,7 +92,6 @@ def test_gated_repos_and_local_paths_may_miss_where_the_cache_must_be_complete(m
 
 
 def test_a_broken_config_raises_instead_of_reading_as_not_cached(tmp_path):
-    """Only a miss is a miss: an unknown ``model_type`` must not skip as "not in the cache"."""
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "halo-no-such-model-type"}))
     with pytest.raises(ValueError, match="halo-no-such-model-type"):
         try_cached_config(str(tmp_path))

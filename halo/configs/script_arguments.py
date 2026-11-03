@@ -1,6 +1,5 @@
-"""The arguments training scripts share: ``ModelArguments`` (TRL's model config plus remote-code trust),
-``CommonScriptArguments`` (the dataset / logging / callback knobs every script parses) and the field bundles
-several script-argument and trainer-config dataclasses mix in."""
+"""The arguments training scripts share: ``ModelArguments``, ``CommonScriptArguments`` and the field bundles several
+script-argument and trainer-config dataclasses mix in."""
 
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
@@ -16,7 +15,6 @@ from halo.models.moe.balancing import BalancingMode
 
 _DEFAULT_PROJECT = "default-project"
 
-# The dataset column a ground-truth answer is read from unless a config renames it.
 DEFAULT_ANSWER_FIELD = "answer"
 
 # Optimizer steps in a row whose gradient norm may be non-finite (each skipped) before the run raises.
@@ -28,8 +26,6 @@ _REGEX_ONLY_CHARACTERS = frozenset("\\*+?()[]{}|^$")
 
 @dataclass
 class CheckpointArguments:
-    """How a run writes and resumes its checkpoints."""
-
     overwrite_output_dir: bool = field(
         default=False,
         metadata={
@@ -69,8 +65,6 @@ class CheckpointArguments:
 
 @dataclass
 class ModelLoadArguments:
-    """How the policy model is built from its checkpoint."""
-
     text_only_model: bool = field(
         default=False,
         metadata={
@@ -100,13 +94,9 @@ class ModelLoadArguments:
 
 @dataclass
 class ModelArguments(ModelConfig):
-    """TRL's ``ModelConfig`` with ``trust_remote_code``, which TRL moved onto its own trainer configs.
-
-    The toolkit's loaders read it here for every method, including those whose training config is not a TRL
-    one; a YAML key shared with a TRL config reaches both dataclasses. ``lora_target_modules`` keeps the form it
-    was given: a list names modules at any length, a string is PEFT's own spelling (the ``all-linear``
-    sentinel or a regex fullmatched against each full module path).
-    """
+    """TRL's ``ModelConfig`` with ``trust_remote_code``, which TRL moved onto its own trainer configs; a YAML key
+    shared with a TRL config reaches both dataclasses. ``lora_target_modules`` keeps its form: a list names modules at
+    any length, a string is PEFT's own (``all-linear`` or a regex fullmatched against each full module path)."""
 
     trust_remote_code: bool = field(
         default=False,
@@ -126,15 +116,12 @@ class ModelArguments(ModelConfig):
                 f"YAML (lora_target_modules: '<regex>'), matched against each full module path, or list the "
                 f"module names."
             )
-        # TRL collapses a one-entry list to its bare entry, which PEFT reads as a regex: `[o_proj]` would match
-        # no full module path and adapt nothing.
+        # TRL collapses a one-entry list to its bare entry, which PEFT reads as a regex: `[o_proj]` adapts nothing.
         self.lora_target_modules = list(targets)
 
 
 @dataclass
 class TorchProfilerArguments(ValidatedConfig):
-    """The opt-in ``TorchProfilerCallback`` and its ``torch.profiler`` schedule."""
-
     enable_torch_profiler: bool = field(
         default=False,
         metadata={
@@ -181,8 +168,7 @@ class TorchProfilerArguments(ValidatedConfig):
 
 @dataclass
 class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLoadArguments):
-    # The tracking project a run lands in when the config names none, declared per script class so the
-    # ``project_name`` field and its help stay declared once rather than redeclared in every subclass.
+    # The tracking project a run lands in when the config names none, declared per script class.
     PROJECT_NAME: ClassVar[str] = _DEFAULT_PROJECT
 
     dataset: str | list[str] = field(
@@ -193,8 +179,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             "file. Can be a list of any of these."
         },
     )
-    # Annotated `float` though a per-dataset YAML list is supported: HfArgumentParser builds only `Optional[X]`
-    # unions, and `parse_dict` assigns a YAML list uncoerced (it just cannot be spelled on the command line).
+    # Annotated `float` though a YAML list is supported: HfArgumentParser builds only `Optional[X]` unions, and
+    # `parse_dict` assigns a list uncoerced.
     dataset_ratio: float | None = field(
         default=None,
         metadata={
@@ -360,8 +346,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
-        # A YAML null would reach os.environ as None and raise later in the run; annotated ``str``, so the
-        # parser leaves a CLI null spelling as literal text.
+        # A YAML null would reach os.environ as None and raise later; annotated ``str``, so the parser leaves a CLI
+        # null spelling as literal text.
         project = self.project_name
         if not isinstance(project, str) or not project.strip() or is_null_string(project):
             raise ValueError(
@@ -370,8 +356,7 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
                 f"and the command line alike — to take this script's own default."
             )
         owner = type(self).__name__
-        # One ratio per dataset when a list: each keeps that share of its rows, so 0 empties it and
-        # above 1 cannot be drawn without replacement.
+        # One ratio per dataset when a list: 0 empties a dataset and above 1 cannot be drawn without replacement.
         if self.dataset_ratio is not None:
             for ratio in self.dataset_ratio if isinstance(self.dataset_ratio, list) else [self.dataset_ratio]:
                 require_finite(owner, gt=0, le=1, dataset_ratio=ratio)
@@ -384,8 +369,6 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
 
 @dataclass
 class GenerationEvalArguments(ValidatedConfig):
-    """Eval-time example-generation knobs (SFT, DPO, SMPO, offline GRPO)."""
-
     generate_eval_examples: bool = field(default=True, metadata={"help": "Generate text examples during evaluation."})
     num_eval_examples: int = field(default=50, metadata={"help": "Examples to generate per evaluation."})
 
@@ -396,8 +379,7 @@ class GenerationEvalArguments(ValidatedConfig):
 
 @dataclass
 class DatasetNumProcArguments(ValidatedConfig):
-    """Dataset-preprocessing worker count of the trainer configs that map their own data, read through
-    :func:`~halo.data.pipeline.coordinated_map.resolve_map_num_proc`."""
+    """Worker count of trainer configs that map their own data, read through ``resolve_map_num_proc``."""
 
     dataset_num_proc: int | None = field(
         default=None,
@@ -429,9 +411,8 @@ class ModelInitKwargsArguments:
 
 @dataclass
 class CrossDocumentLinearAttentionArguments:
-    """The opt-in of the configs whose multi-document rows (``packing``, ``padding_free``) are refused on
-    sequence mixers no document boundary reaches
-    (:func:`~halo.models.segment_markers.reject_unmarked_linear_attention_rows`)."""
+    """The opt-in of configs whose multi-document rows (``packing``, ``padding_free``) are refused on sequence mixers
+    no document boundary reaches."""
 
     allow_cross_document_linear_attention: bool = field(
         default=False,

@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""Expert-load recording counts each microbatch EXACTLY ONCE, in every checkpoint mode.
-
-``_record_expert_load`` feeds the bias-update balancer's per-step counts, so the gate has to hold
-across the whole matrix:
-
-* no gradient checkpointing — the single forward counts;
-* REENTRANT checkpointing (forced for every non-PP EP/CP run) — the original forward runs under
-  ``no_grad``, so a bare grad gate would record NOTHING and the bias would never move; the recompute
-  must not count it a second time;
-* non-reentrant checkpointing (the PP mode) — both passes run with grad enabled, so only the scope's
-  pass counter separates them;
-* eval and a genuine ``no_grad`` pass outside any checkpoint — a frozen reference or teacher scoring
-  through the same modules drives no optimizer step, so counting it would skew the balance.
-
-The hub-router Zaya patch gates through the same predicate.
-
-    python tests/cpu/parallelism/test_expert_load_recording.py
-"""
+"""Expert-load recording counts each microbatch exactly once in every checkpoint mode, for the bias-update balancer.
+The recompute must not recount; a reference scoring through the same modules must not count."""
 
 import types
 from unittest import mock
@@ -38,7 +22,7 @@ _EXPECTED = torch.tensor([1.0, 2.0, 0.0, 1.0])
 
 
 def _stub(num_experts: int = 4):
-    """EP-layer stand-in carrying only what ``_record_expert_load`` reads."""
+    """Carries only what ``_record_expert_load`` reads."""
     return types.SimpleNamespace(
         balancing_biases=torch.zeros(num_experts),
         training=True,
@@ -48,12 +32,7 @@ def _stub(num_experts: int = 4):
 
 
 def _checkpointed_step(stub, *, use_reentrant: bool) -> torch.Tensor:
-    """Run one forward+backward through a checkpointed body that records a load, as training does.
-
-    The body is wrapped with the toolkit's own :func:`scoped_checkpoint_func` — the same wrapper
-    ``install_recompute_scopes`` installs on every module after ``gradient_checkpointing_enable``
-    — so both passes share one scope, exactly as they do in a real run.
-    """
+    """Wrapped with the toolkit's :func:`scoped_checkpoint_func`, so both passes share one scope as in a real run."""
     checkpoint_func = scoped_checkpoint_func(
         lambda function, *args: torch_checkpoint.checkpoint(function, *args, use_reentrant=use_reentrant)
     )
@@ -75,9 +54,8 @@ def test_training_forward_counts():
 
 
 def test_token_weights_count_a_shared_token_once_per_example():
-    """A tree-packed row routes a shared prefix token once for the three examples that contain it;
-    flat packing would have routed it three times. The balancer must see the flat load."""
-    selections = torch.tensor([[0, 1], [1, 3], [2, 3]])  # three tokens, top-2
+    """Flat packing would have routed the prefix three times; the balancer must see the flat load."""
+    selections = torch.tensor([[0, 1], [1, 3], [2, 3]])  # Three tokens, top-2.
     stub = _stub()
     with expert_load_token_weights(torch.tensor([3, 1, 1])):
         EPMoELayerBase._record_expert_load(stub, selections)
@@ -88,7 +66,6 @@ def test_token_weights_count_a_shared_token_once_per_example():
 
 
 def _sft_step_load(inputs: dict) -> list[float]:
-    """Expert load recorded by a forward the SFT trainer's own ``compute_loss`` drives."""
     stub = _stub()
 
     def routed(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -115,17 +92,15 @@ def test_the_sft_trainer_weights_a_tree_batch_by_its_leaf_count():
 
 
 def test_token_weights_for_another_forward_are_refused():
-    """Weights that do not cover this forward's tokens would be scattered onto the wrong ones."""
+    """They would be scattered onto the wrong tokens."""
     with expert_load_token_weights(torch.ones(5)), pytest.raises(ValueError, match="do not describe this forward"):
         EPMoELayerBase._record_expert_load(_stub(), torch.tensor([[0, 1], [1, 3], [2, 3]]))
 
 
 @pytest.mark.parametrize("use_reentrant", [True, False])
 def test_checkpointed_step_counts_exactly_once(use_reentrant):
-    """Reentrant checkpointing runs its ORIGINAL forward under no_grad, so a
-    ``torch.is_grad_enabled()`` gate records nothing at all — and every shipped balancing config
-    sets ``gradient_checkpointing: true``, so the bias never moves. The recompute must still not
-    double-count."""
+    """Reentrant runs its original forward under no_grad, so a ``torch.is_grad_enabled()`` gate records nothing and
+    the bias never moves."""
     stub = _stub()
     grad = _checkpointed_step(stub, use_reentrant=use_reentrant)
     assert grad is not None, "premise: the checkpointed body actually ran its backward"
@@ -150,10 +125,8 @@ def test_eval_mode_does_not_count():
 
 
 def test_no_grad_forward_through_a_checkpointed_block_does_not_count():
-    """Offline GRPO's KL reference pass runs ``torch.no_grad()`` through a TRAIN-mode GC model —
-    HF gates checkpointing on ``self.training``, not grad mode, so the checkpoint scope is still
-    entered. The scope must carry the OUTER grad mode: counting here folds the reference forward's
-    routing into the same counter the bias update consumes, balancing a policy+reference mixture."""
+    """HF gates checkpointing on ``self.training``, so a no_grad reference pass enters the scope; counting it
+    balances a policy+reference mixture."""
     stub = _stub()
     checkpoint_func = scoped_checkpoint_func(
         lambda function, *args: torch_checkpoint.checkpoint(function, *args, use_reentrant=False)

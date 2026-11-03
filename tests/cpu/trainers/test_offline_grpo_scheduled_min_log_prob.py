@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Test that offline GRPO's loss reads the SCHEDULED ``min_log_prob`` the callback actually set.
-
-``VariableSchedulerCallback`` unwraps DDP/accelerate (``target_obj.module``) before setting the
-attribute, so the scheduled value lands on the trainer's unwrapped ``self.model``. Reading it off
-the wrapped ``model`` handed to ``compute_loss`` finds nothing and silently falls back to the
-config's start value for the whole run, while ``log()`` (which reads ``self.model``) reports the
-ramp — the loss and the logged metric disagree.
-
-Run: python tests/cpu/trainers/test_offline_grpo_scheduled_min_log_prob.py
-"""
+"""Offline GRPO's loss reads the scheduled ``min_log_prob`` the callback set on the unwrapped model.
+Read off the wrapped ``model``, it would silently stay at the config's start value while ``log()`` reports the ramp."""
 
 import contextlib
 import types
@@ -38,11 +30,7 @@ def _inputs(batch=2, prompt_len=3, completion_len=4):
 
 
 def _trainer_and_wrapped(*, scheduled_on_module):
-    """A stub trainer plus the DDP-style wrapper compute_loss receives.
-
-    ``self.model`` is the unwrapped module (what the callback writes to); ``wrapped.module`` is it,
-    mirroring DDP, and the wrapper itself carries no ``min_log_prob``.
-    """
+    """``self.model`` is the unwrapped module the callback writes to; the DDP-style wrapper has no ``min_log_prob``."""
     unwrapped = types.SimpleNamespace()
     wrapped = types.SimpleNamespace(module=unwrapped)
     me = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
@@ -84,7 +72,6 @@ def _min_log_prob_used(*, scheduled_on_module):
 
 
 def test_callback_writes_to_the_unwrapped_module():
-    # Guards the premise: the scheduler unwraps, so the attribute is NOT on the wrapper.
     _, wrapped, _ = _trainer_and_wrapped(scheduled_on_module=True)
     assert wrapped.module.min_log_prob == _SCHEDULED
     assert not hasattr(wrapped, "min_log_prob")

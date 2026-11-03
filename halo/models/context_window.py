@@ -1,6 +1,4 @@
-"""A model's context window, and whether a length knob states a real bound: what a ``max_length``
-left unset resolves to.
-"""
+"""A model's context window, and whether a length knob states a real bound."""
 
 import logging
 
@@ -11,26 +9,19 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# Bound below which a ``model_max_length`` is a real context window. HF's "this tokenizer declares no
-# length" sentinel (``VERY_LARGE_INTEGER``, 1e30) sits above it and is a positive int, so
-# :func:`is_bounded_length` alone would read it as one.
+# HF's no-length sentinel (``VERY_LARGE_INTEGER``, 1e30) sits above this and is a positive int, so
+# :func:`is_bounded_length` alone would read it as a real window.
 UNSET_MODEL_MAX_LENGTH = int(1e9)
-# The config fields a family spells its position budget with, in precedence order.
 _CONTEXT_WINDOW_FIELDS = ("max_position_embeddings", "max_seq_length", "n_positions")
 
 
 def is_bounded_length(value: int | None) -> bool:
-    """Whether a length knob states a real bound: a positive int; ``None`` and any non-positive value
-    mean "unset" (getting it wrong is silent: ``ids[-0:]`` is the whole list)."""
+    """``None`` and any non-positive value mean unset; a wrong read is silent, as ``ids[-0:]`` is the whole list."""
     return value is not None and value > 0
 
 
 def context_window_from_config(config: PretrainedConfig) -> int | None:
-    """A model's context window as ``config.json`` alone states it, or ``None`` when it states none.
-
-    Read off the text sub-config, where a composite (VLM) config keeps the position budget; the
-    config-time gates read it before any model or tokenizer exists.
-    """
+    """Read off the text sub-config, where a composite (VLM) config keeps the position budget."""
     decoder_config = text_config(config)
     for attr in _CONTEXT_WINDOW_FIELDS:
         value = getattr(decoder_config, attr, None)
@@ -40,8 +31,6 @@ def context_window_from_config(config: PretrainedConfig) -> int | None:
 
 
 def resolve_model_context_window(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> int:
-    """A model's max context window in tokens: the config's (:func:`context_window_from_config`), else
-    ``tokenizer.model_max_length`` below :data:`UNSET_MODEL_MAX_LENGTH`; raises when neither states one."""
     window = context_window_from_config(model.config)
     if window is not None:
         return window
@@ -58,8 +47,7 @@ def resolve_model_context_window(model: PreTrainedModel, tokenizer: PreTrainedTo
 
 
 def resolve_length_to_context(value: int | None, model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> int:
-    """``value`` when it is a positive length, else the model's context window (``max_length: null``
-    truncates at the real window rather than a small dataclass default)."""
+    """``max_length: null`` truncates at the real window rather than a small dataclass default."""
     if is_bounded_length(value):
         return value
     context = resolve_model_context_window(model, tokenizer)
@@ -69,14 +57,9 @@ def resolve_length_to_context(value: int | None, model: PreTrainedModel, tokeniz
 
 
 def bounded_row_length(*sources, one_sided: bool = False) -> int | None:
-    """The token cap ``sources`` put on one row: the first bounded ``max_length`` across them, else the
-    first bounded ``max_prompt_length`` plus the first bounded ``max_completion_length`` when both
-    exist, else None (a one-sided budget leaves the other half unbounded). ``one_sided`` takes a lone
-    bounded half instead, for a figure that needs a typical length rather than a cap (the MFU sequence).
-
-    Several sources because on the RL surface the bound is split across objects: ``trl.GRPOConfig``
-    declares neither ``max_length`` nor ``max_prompt_length``, and the scripts carry the latter.
-    """
+    """The first bounded ``max_length``, else the prompt plus completion budgets when both exist, else None;
+    ``one_sided`` takes a lone bounded half. Several sources because ``trl.GRPOConfig`` declares neither ``max_length``
+    nor ``max_prompt_length``, and the scripts carry the latter."""
 
     def first_bounded(field: str) -> int | None:
         return next(

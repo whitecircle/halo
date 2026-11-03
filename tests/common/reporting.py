@@ -1,25 +1,5 @@
-"""Structured perf/mem reporting for GPU tests and benchmarks.
-
-Three jobs:
-
-1. Snapshot an :class:`~halo.callbacks.efficiency.EfficiencyCallback`
-   into a flat, JSON-serializable dict with a stable schema. The **headline**
-   metrics are hardware-anchored and unambiguous — tokens/s/GPU, cluster
-   tokens/s, peak memory (GiB), step time. MFU / S-MFU / achieved-TFLOPS are
-   kept only under a ``diagnostics`` sub-key: setup-dependent, easy to
-   misread, never the gated number.
-
-2. Emit a single machine-readable result line that the pytest launcher
-   (``tests/gpu/conftest.py``) parses to tell a real FAIL (``status="fail"``)
-   from an infra ERROR (process died, no line emitted). The line is prefixed
-   with :data:`RESULT_SENTINEL` so it survives interleaved torchrun stdout.
-
-3. Emit and parse the :data:`BENCH_SENTINEL` lines a benchmark prints, one per
-   rank and key. The key names the golden ``tests/baselines/bench/<key>.json``
-   that ``tests/common/equivalence/bench_band.py`` holds a ``make bench`` run to.
-
-Standard library only: the launcher process imports this module and stays free of torch.
-"""
+"""Structured perf and memory reporting for GPU tests and benchmarks: a flat metrics snapshot, the launcher's result
+line, benchmark lines. Standard library only: the launcher process imports this module and stays free of torch."""
 
 import json
 import os
@@ -30,18 +10,15 @@ from collections.abc import Iterator
 
 RESULT_SENTINEL = "__HALO_TEST_RESULT__"
 BENCH_SENTINEL = "__HALO_BENCH__"
-# A benchmark line's metrics carry two decimals, as the EfficiencyCallback rounds them.
+# As the EfficiencyCallback rounds them.
 BENCH_DECIMALS = 2
 
 
 def snapshot_efficiency(cb) -> dict:
-    """Flatten an ``EfficiencyCallback`` into a baseline-ready dict.
-
-    Headline metrics live at the top level; MFU/S-MFU/TFLOPS diagnostics are
-    nested under ``"diagnostics"`` so a golden-value diff never gates on them.
-    """
+    """Flatten an ``EfficiencyCallback``; MFU/S-MFU/TFLOPS nest under ``"diagnostics"`` so a golden-value diff never
+    gates on them."""
     headline = {
-        "tokens_per_second": cb.tps.avg_tokens_per_second,  # per-GPU — the headline golden-gate metric
+        "tokens_per_second": cb.tps.avg_tokens_per_second,  # Per GPU, the headline golden-gate metric.
         "cluster_tokens_per_second": cb.tps.avg_cluster_tokens_per_second,
         "peak_allocated_gb": cb.memory.peak_allocated_gb,
         "training_peak_allocated_gb": cb.memory.training_peak_allocated_gb,
@@ -68,7 +45,6 @@ def snapshot_efficiency(cb) -> dict:
 
 
 def format_table(payload: dict) -> str:
-    """Render the headline metrics as a small aligned table for the log."""
     rows = [
         ("tokens/s/GPU", payload.get("tokens_per_second")),
         ("cluster tokens/s", payload.get("cluster_tokens_per_second")),
@@ -81,12 +57,7 @@ def format_table(payload: dict) -> str:
 
 
 def format_benchmark_report(cb) -> str:
-    """Render an ``EfficiencyCallback`` as a benchmark report.
-
-    Headline is the hardware-anchored set (tokens/s/GPU, cluster tokens/s, peak
-    memory, step time); MFU / S-MFU / achieved-TFLOPS follow under a clearly
-    labelled ``diagnostics`` block (setup-dependent — not the comparison metric).
-    """
+    """Render an ``EfficiencyCallback`` as a benchmark report, headline first and setup-dependent diagnostics below."""
     snap = snapshot_efficiency(cb)
     diag = snap["diagnostics"]
     lines = [
@@ -106,16 +77,15 @@ def format_benchmark_report(cb) -> str:
 
 
 def _print_sentinel_line(sentinel: str, payload: dict) -> None:
-    """Print ``payload`` after ``sentinel`` in one write. torchrun starts its workers unbuffered, where ``print``
-    writes the newline on its own and lines the ranks print at once run into each other; a line written whole
-    stays whole on a pipe up to ``PIPE_BUF`` bytes."""
+    """Print ``payload`` after ``sentinel`` in one write: unbuffered ``print`` writes the newline apart, and ranks'
+    lines would run together."""
     sys.stdout.write(f"{sentinel} {json.dumps(payload)}\n")
     sys.stdout.flush()
 
 
 def _emit_bench_line(key: str, metrics: dict) -> None:
-    """Print this rank's benchmark line for ``key``: the rank, the world size and the command that measured
-    ``metrics``, so a baseline records how it was measured and a run is compared only with its own row."""
+    """Print this rank's benchmark line, with rank, world size and command, so a run is compared only with its own
+    row."""
     line = {
         "key": key,
         "rank": int(os.environ.get("RANK", "0")),
@@ -127,10 +97,8 @@ def _emit_bench_line(key: str, metrics: dict) -> None:
 
 
 def emit_benchmark(key: str, cb) -> None:
-    """Print this rank's training-throughput line for ``key``, the golden ``tests/baselines/bench/<key>.json``
-    (e.g. ``"sft_ep_gpt-oss-20b_ep8_s4096"``): the :func:`snapshot_efficiency` of ``cb``, plus the mean and the
-    median of its measured step times in milliseconds, fine enough for the band to tell a mean a few stalled
-    steps moved from a slower steady step."""
+    """Print this rank's throughput line for ``key``: the snapshot plus mean and median step ms, so the band tells
+    stalled steps from a slower steady step."""
     step_ms = [seconds * 1e3 for seconds in cb.measured_step_times]
     metrics = {
         **snapshot_efficiency(cb),
@@ -141,8 +109,7 @@ def emit_benchmark(key: str, cb) -> None:
 
 
 def emit_save_benchmark(key: str, seconds: float, peak_rss_gib: float) -> None:
-    """Print this rank's checkpoint-save line for ``key``: the save's wall time and this rank's peak resident host
-    memory while it ran."""
+    """Print this rank's checkpoint-save line: wall time and peak resident host memory."""
     metrics = {"save_seconds": seconds, "save_peak_rss_gib": peak_rss_gib}
     _emit_bench_line(key, {name: round(value, BENCH_DECIMALS) for name, value in metrics.items()})
 
@@ -153,12 +120,8 @@ def emit_result(
     metrics: dict | None = None,
     error: str | None = None,
 ) -> None:
-    """Print the single machine-readable result line the launcher parses.
-
-    ``status`` is one of ``"pass" | "fail" | "error"``. ``checks`` is the
-    name→bool map of assertions; ``metrics`` is an optional headline snapshot;
-    ``error`` carries an exception summary when ``status == "error"``.
-    """
+    """Print the single machine-readable result line the launcher parses; ``status`` is ``"pass" | "fail" |
+    "error"``."""
     line = {
         "status": status,
         "checks": checks or {},
@@ -170,7 +133,6 @@ def emit_result(
 
 
 def _sentinel_payloads(stdout: str, sentinel: str) -> Iterator[str]:
-    """The text after ``sentinel`` on each line of ``stdout`` that carries it, in order."""
     for raw in stdout.splitlines():
         idx = raw.find(sentinel)
         if idx != -1:
@@ -178,7 +140,6 @@ def _sentinel_payloads(stdout: str, sentinel: str) -> Iterator[str]:
 
 
 def parse_result(stdout: str) -> dict | None:
-    """Extract the last emitted result line from captured ``stdout`` (launcher side)."""
     found = None
     for payload in _sentinel_payloads(stdout, RESULT_SENTINEL):
         try:
@@ -189,8 +150,7 @@ def parse_result(stdout: str) -> dict | None:
 
 
 def parse_benchmarks(stdout: str) -> list[dict]:
-    """Every benchmark line in ``stdout``, in order. A line that does not parse raises: a lost line would drop one
-    rank's measurement from the run it belongs to."""
+    """Every benchmark line in order; one that does not parse raises, since it would drop a rank's measurement."""
     lines = []
     for payload in _sentinel_payloads(stdout, BENCH_SENTINEL):
         try:

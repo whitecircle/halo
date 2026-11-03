@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the special-judge CheckerVerdict (coding/grading.py).
-
-The Codeforces ``generated_checker`` contract: the checker prints its verdict to
-stdout and the LAST whitespace token decides accept (``"1"``) vs reject. A crashing
-checker or a final ``"0"`` rejects; a sandbox *backend* failure raises
-``CheckerInfraError`` so the grader buckets the test into ``infra_errors``.
-
-These drive ``CheckerVerdict`` against a stub sandbox whose ``run`` returns a canned
-:class:`SandboxResult`, so the verdict logic is tested deterministically without
-spawning subprocesses (no network, no real interpreter).
-
-Run: python tests/cpu/environments/test_grading_verdict.py  (or pytest)
-"""
+"""The special-judge ``CheckerVerdict``: the last whitespace token of stdout decides accept, a crash or a final
+``"0"`` rejects, and a sandbox backend failure raises ``CheckerInfraError``. Runs against a stub sandbox."""
 
 import json
 import logging
@@ -45,17 +34,14 @@ def _verdict(result: SandboxResult) -> bool:
 
 
 def test_last_token_one_accepts():
-    """Final whitespace token "1" accepts even with debug noise before it."""
     assert _verdict(SandboxResult(stdout="debug 0\n1", returncode=0)) is True
 
 
 def test_last_token_not_one_rejects():
-    """Final token is not "1" (a "1" earlier in the stream does not count)."""
     assert _verdict(SandboxResult(stdout="1\nfailed", returncode=0)) is False
 
 
 def test_empty_output_rejects():
-    """No tokens at all -> reject (cannot read an accept token)."""
     assert _verdict(SandboxResult(stdout="", returncode=0)) is False
     assert _verdict(SandboxResult(stdout="   \n  ", returncode=0)) is False
 
@@ -69,13 +55,7 @@ def test_lone_zero_rejects():
 
 
 def test_crashing_checker_scores_fail_not_pass():
-    """A checker that printed "1" but exited non-zero (result.ok False) must REJECT.
-
-    This is the security-relevant case: the verdict gate is ``result.ok AND last
-    token == "1"``. A non-zero exit (SystemExit(1), uncaught exception, segfault)
-    means the checker did not complete cleanly, so its stdout cannot be trusted —
-    even though "1" is the last token.
-    """
+    """The gate is ``result.ok`` and last token ``"1"``: a non-zero exit means stdout cannot be trusted."""
     crashed = SandboxResult(stdout="1", returncode=1)
     assert crashed.ok is False
     assert _verdict(crashed) is False
@@ -86,20 +66,15 @@ def test_timed_out_checker_rejects():
 
 
 def test_backend_error_raises_infra_error():
-    """A sandbox backend failure is NOT a wrong answer: a plain False verdict would score a grading
-    outage as a zero grade for the whole group (fake signal) and hide it from the
-    ``is_grading_infra_outage`` guard. It must raise for the grader to bucket into ``infra_errors``."""
+    """A plain False would score a grading outage as a zero grade for the whole group and hide it from
+    ``is_grading_infra_outage``."""
     with pytest.raises(CheckerInfraError, match="backend down"):
         _verdict(SandboxResult(stdout="1", returncode=None, error="backend down"))
 
 
 class _RaisingSandbox(SandboxExecutor):
-    """A backend that fails by RAISING, the way a local executor does.
-
-    ``RemoteSandbox`` reports a lost run as ``SandboxResult(error=...)``, but ``LocalSubprocessSandbox``
-    lets the fault out: ``Popen`` raises on a missing interpreter/``bwrap`` or an exhausted fork table,
-    and the working-dir write raises on ENOSPC.
-    """
+    """Fails by raising, the way a local executor does: ``Popen`` on a missing interpreter or exhausted fork table,
+    the dir write on ENOSPC."""
 
     def __init__(self, exc: Exception):
         self._exc = exc
@@ -114,10 +89,8 @@ class _RaisingSandbox(SandboxExecutor):
 
 
 def test_executor_exception_counts_as_infra_error_not_a_failed_test():
-    """A raising executor must bucket as ``infra_errors``, exactly like the remote backend's error
-    result. Letting the exception out leaves ``submit_solution`` an ordinary tool error: the episode
-    then grades 0 with the invalid-episode guard never firing, and a host-level fault
-    is averaged into the GRPO group baseline as a wrong program."""
+    """Letting the exception out leaves an ordinary tool error: the episode grades 0 and a host fault is averaged
+    into the group baseline."""
     sandbox = _RaisingSandbox(FileNotFoundError(2, "No such file or directory", "/bin/bash"))
     grade = run_solution_against_tests(
         "print(42)",
@@ -131,8 +104,7 @@ def test_executor_exception_counts_as_infra_error_not_a_failed_test():
 
 
 def test_checker_executor_exception_raises_checker_infra_error():
-    """The checker leg honours the same contract: a raising backend surfaces as CheckerInfraError
-    (bucketed into infra_errors), never as a raw OSError escaping the grade."""
+    """Surfaces as CheckerInfraError, never as a raw OSError escaping the grade."""
     checker = CheckerVerdict("# unused", _RaisingSandbox(OSError(28, "No space left on device")))
     with pytest.raises(CheckerInfraError, match="No space left on device"):
         checker("input", "expected", "actual")
@@ -154,8 +126,7 @@ class _ScriptedSandbox(SandboxExecutor):
 
 
 def test_checker_backend_failure_buckets_into_infra_errors():
-    """run_solution_against_tests must count a checker-run backend failure as an infra-lost test
-    (no pass, no ran_ok), so an all-infra special-judge outage trips the no-signal guard."""
+    """Counts as infra-lost (no pass, no ran_ok), so an all-infra special-judge outage trips the no-signal guard."""
     # Per test: a clean solution run, then a checker run that fails at the backend.
     sandbox = _ScriptedSandbox(
         [
@@ -192,9 +163,8 @@ class _TickingSandbox(_ScriptedSandbox):
 
 
 def test_every_grade_states_how_many_tests_it_judged():
-    """``graded`` separates a partial grade from a wrong solution, so no construction may fall back
-    to a default: 0 is the wrong answer for a fully judged run, and ``total`` is the wrong answer for
-    a budget stop. The empty-pool grade states 0 of 0 explicitly."""
+    """``graded`` separates a partial grade from a wrong solution, so no construction falls back to a default: 0 is
+    wrong for a fully judged run, ``total`` for a budget stop."""
     assert "graded" not in GradeResult._field_defaults, "graded must be stated at every construction"
 
     tests = [{"input": str(i), "output": "42"} for i in range(3)]
@@ -207,10 +177,8 @@ def test_every_grade_states_how_many_tests_it_judged():
 
 
 def test_max_grading_seconds_bounds_the_sequential_grading_cost():
-    """Each test is a sequential sandbox run; the wall-clock budget must stop grading between tests
-    — an unbounded several-hundred-test row otherwise stalls a whole rollout round behind one
-    episode's grade. The FULL pool stays the denominator: the budget only ever stops slow solutions,
-    so crediting the ungraded remainder would make being slow the higher-reward strategy."""
+    """An unbounded several-hundred-test row would stall a whole round behind one grade. The full pool stays the
+    denominator, since crediting the ungraded remainder would reward being slow."""
     tests = [{"input": str(i), "output": "42"} for i in range(50)]
     clock = {"t": 0.0}
 
@@ -243,13 +211,8 @@ def test_max_grading_seconds_bounds_the_sequential_grading_cost():
 
 
 def test_partial_grading_reaches_the_episode_metrics():
-    """A grade cut short must be visible per episode, or a whole run's partial grading is unreadable.
-
-    ``outcome/test_pass_frac`` keeps the FULL pool as its denominator, so a budget stop looks exactly
-    like a wrong solution there. ``episode/tests_graded_frac`` and ``episode/grading_budget_hit`` are
-    the only signals that grading stopped early — they must survive the whole path (``GradeResult`` ->
-    ``trajectory.info`` -> ``rollout_metrics``), not just the grader.
-    """
+    """``outcome/test_pass_frac`` keeps the full pool as denominator, so a budget stop looks like a wrong solution
+    there. ``episode/tests_graded_frac`` and ``episode/grading_budget_hit`` are the only signals."""
     tests = [{"input": str(i), "output": "42"} for i in range(50)]
     ok = SandboxResult(stdout="42\n", returncode=0)
     submit = {
@@ -260,7 +223,6 @@ def test_partial_grading_reaches_the_episode_metrics():
     context = {"answer": {"tests": tests}}
     clock = {"t": 0.0}
 
-    # 10s/test against a 25s budget: tests 1-3 run, t=30 stops grading before test 4.
     stopped = CodeContestsEnvironment(
         language="python",
         max_submissions=1,
@@ -325,10 +287,8 @@ _WRONG = SandboxResult(stdout="41\n", returncode=0)
 
 
 def test_a_budget_stop_before_any_failure_leaves_the_group_baseline():
-    """All-or-nothing, the budget's ungraded remainder would score a solution that passed every test it
-    reached 0 — a correct but slow-to-grade program trained as a wrong one. Nothing failed, so the
-    grade says nothing about the code: the episode is invalid and pays no rung, and the halt and the
-    eval runner read why."""
+    """All-or-nothing, the ungraded remainder would score a correct but slow program 0. Nothing failed, so the
+    episode is invalid and pays no rung."""
     env, traj = _budget_stopped_episode([_OK, _OK, _OK])
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert traj.episode_invalid
@@ -353,14 +313,14 @@ def test_a_budget_stop_after_a_failure_is_a_wrong_answer():
     [([_OK, _WRONG, _OK], [_OK, _OK, _OK], True), ([_OK, _OK, _OK], [_WRONG, _OK, _OK], False)],
 )
 def test_the_last_submissions_grade_decides_whether_the_episode_trains(first, last, invalid):
-    """The last submission is the graded one, so its stop — not an earlier one's — is what is judged."""
+    """The last submission is the graded one, so its stop is what is judged."""
     _, traj = _budget_stopped_episode(first, last)
     assert traj.episode_invalid is invalid
 
 
 def test_grade_solution_gives_checker_infra_timeout_not_solution_limit():
-    """The checker runs at the infra default timeout, never the solution's clamped per-test limit —
-    a tight C++-tuned time_limit must TLE the solution, not the trusted judge grading it."""
+    """The checker runs at the infra default timeout: a tight time_limit must TLE the solution, not the trusted
+    judge."""
     sandbox = _ScriptedSandbox(
         [
             SandboxResult(stdout="ok\n", returncode=0),
@@ -383,9 +343,8 @@ def test_grade_solution_gives_checker_infra_timeout_not_solution_limit():
 
 
 def test_outcome_verdict_hides_expected_and_produced_output():
-    """Under ``verdict_detail="outcome"``, the default, a wrong answer is a verdict, not a diff. With
-    the expected output shown, the graded channel doubles as a free test oracle and submit-first
-    out-earns test-first within a GRPO group."""
+    """With the expected output shown, the graded channel is a free test oracle and submit-first out-earns
+    test-first within a group."""
     sandbox = StubSandbox(SandboxResult(stdout="X\n", returncode=0))
     tests = [{"input": "1", "output": "Y"}, {"input": "2", "output": "X"}]
     full = run_solution_against_tests("code", tests, sandbox=sandbox, verdict_detail="full")
@@ -410,8 +369,8 @@ def test_outcome_verdict_hides_expected_and_produced_output():
     ],
 )
 def test_an_outcome_verdict_carries_no_channel_the_program_controls(result, full_shows, outcome_verdict):
-    """Stderr, the exit status and the output size are all the program's to set, so under ``outcome``
-    each would read the hidden input back through the judge; the verdict class alone stays."""
+    """Stderr, exit status and output size are the program's to set, so each would read the hidden input back
+    through the judge."""
     tests = [{"input": "42", "output": "Y"}]
     full = run_solution_against_tests(
         "code", tests, sandbox=StubSandbox(result), max_output_size=100, verdict_detail="full"
@@ -446,9 +405,8 @@ def test_a_compile_errors_excerpt_is_indented_on_every_line():
 
 @pytest.mark.parametrize("verdict_detail", ["outcome", "full"])
 def test_a_python_source_that_does_not_compile_is_a_compile_error_naming_its_first_error(verdict_detail):
-    """A SyntaxError stops the interpreter before the program reads its input, so every test fails the
-    same way: graded once as a build failure, like a C++ compile error, without a run. The error line
-    quotes the source alone, so it shows under ``outcome`` too, where a runtime error's stderr may not."""
+    """A SyntaxError stops the interpreter before the program reads input, so it grades once as a build failure,
+    without a run. The line quotes the source alone, so it shows under ``outcome``."""
     sandbox = _HostPythonSandbox([])
     tests = [{"input": str(i), "output": "42"} for i in range(3)]
     grade = run_solution_against_tests(
@@ -471,8 +429,7 @@ def test_a_python_source_that_does_not_compile_is_a_compile_error_naming_its_fir
 
 
 def test_a_backend_running_its_own_python_runs_the_source_the_host_would_not_compile():
-    """A backend stating no Python toolchain (a remote service) may run another interpreter version, so
-    the host does not judge its syntax: the program runs, and the sandbox's result is the verdict."""
+    """A backend stating no Python toolchain may run another version, so the host does not judge its syntax."""
     sandbox = _ScriptedSandbox([SandboxResult(stderr="SyntaxError: invalid syntax", returncode=1)])
     grade = run_solution_against_tests("print(n +)", [{"input": "1", "output": "42"}], sandbox=sandbox)
     assert len(sandbox.calls) == 1 and "Test 1: RUNTIME ERROR" in grade.details, grade.details
@@ -580,9 +537,8 @@ def test_verdict_detail_travels_with_the_grading_contract():
     ],
 )
 def test_the_grading_contract_refuses_a_bad_value_wherever_it_is_built(field, env_knob, value):
-    """The contract checks its own fields, so a block the re-grader restores through ``with_meta`` is
-    refused when it loads, not at its first grade, and the env constructor refuses the knob through the
-    same check."""
+    """A block restored through ``with_meta`` is refused when it loads, not at its first grade, and the env
+    constructor refuses through the same check."""
     spec = GradingSpec(sandbox=StubSandbox())
     with pytest.raises(ValueError, match=field):
         spec.with_meta({field: value})
@@ -593,7 +549,6 @@ def test_the_grading_contract_refuses_a_bad_value_wherever_it_is_built(field, en
 
 
 def test_build_verdict_prefers_checker():
-    """A non-empty checker always wins over the comparison mode."""
     v = build_verdict("# checker", "tokens", StubSandbox(SandboxResult(stdout="1", returncode=0)))
     assert isinstance(v, CheckerVerdict)
 
@@ -635,8 +590,8 @@ def test_tests_failing_identically_fold_into_one_verdict_outside_the_cap():
 
 
 def test_a_correct_answer_larger_than_the_default_cap_passes():
-    """The cap follows the test's own expected output, so a correct answer of any legitimate size is judged
-    on its content: a fixed 1 MB cap would fail every correct solution to a problem whose answer is 2 MB."""
+    """The cap follows the test's expected output; a fixed 1 MB cap would fail every correct solution to a problem
+    whose answer is 2 MB."""
     answer = "7 " * 1_000_000
     tests = [{"input": "", "output": answer}]
     grade = run_solution_against_tests(

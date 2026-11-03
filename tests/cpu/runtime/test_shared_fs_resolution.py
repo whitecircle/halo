@@ -1,14 +1,5 @@
 #!/usr/bin/env python
-"""Input/output shared-filesystem resolution.
-
-``DIST_INPUT_SHARED_FILESYSTEM`` (read side: downloads, dataset processing, HF caches) and
-``DIST_OUTPUT_SHARED_FILESYSTEM`` (write side: checkpoints, run.log, dumped artifacts) each fall
-back to the ``DIST_SHARED_FILESYSTEM`` umbrella, so single-flag configs keep their behavior while
-a multi-node run over a flaky NFS export can combine per-node input caches (avoids cross-node
-stale-file-handle reads) with single-writer shared-mount checkpoints.
-
-    python tests/cpu/runtime/test_shared_fs_resolution.py
-"""
+"""Input/output shared-filesystem resolution: each side falls back to the ``DIST_SHARED_FILESYSTEM`` umbrella."""
 
 import logging
 import os
@@ -59,7 +50,7 @@ def test_specific_overrides_umbrella(monkeypatch):
 
 
 def test_set_falsey_specific_var_does_not_fall_back(monkeypatch):
-    # env_flag only falls back when the var is ABSENT; a set "0" must win over a truthy umbrella.
+    # env_flag only falls back when the var is absent; a set "0" wins over a truthy umbrella.
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
     assert not filesystem.is_output_shared_filesystem()
@@ -81,14 +72,7 @@ def test_set_falsey_specific_var_does_not_fall_back(monkeypatch):
     ],
 )
 def test_resolved_shared_filesystem_scope_is_logged(monkeypatch, caplog, env, expected):
-    """The resolved scope must reach the log, per var.
-
-    It decides whether the dataset cache is filled once or once per node, and a wrong setting is
-    otherwise silent — the run stays correct while every rank re-maps the corpus, so nothing but the
-    wall clock says so. Reading it back from the env is not the same check: the side vars fall back to
-    the umbrella and rank 0's values override a disagreeing rank's, so only the agreed dict is the
-    scope the run actually used.
-    """
+    """The side vars fall back and rank 0's values override, so only the agreed dict is the scope the run used."""
     reset_shared_filesystem_consensus()
     for var, value in env.items():
         monkeypatch.setenv(var, value)
@@ -109,9 +93,9 @@ def test_resolved_shared_filesystem_scope_is_logged(monkeypatch, caplog, env, ex
 def test_load_rank_follows_input_flag(monkeypatch):
     monkeypatch.setattr(filesystem, "is_global_main_process", lambda: True)
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: False)
-    assert filesystem.is_fs_load_rank()  # shared input → global main
+    assert filesystem.is_fs_load_rank()  # Shared input → global main.
     monkeypatch.setenv("DIST_INPUT_SHARED_FILESYSTEM", "0")
-    assert not filesystem.is_fs_load_rank()  # per-node input → local main
+    assert not filesystem.is_fs_load_rank()  # Per-node input → local main.
     # The output flag must not leak into the load rank.
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "1")
     assert not filesystem.is_fs_load_rank()
@@ -120,22 +104,16 @@ def test_load_rank_follows_input_flag(monkeypatch):
 def test_save_rank_follows_output_flag(monkeypatch):
     monkeypatch.setattr(filesystem, "is_global_main_process", lambda: True)
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: False)
-    assert filesystem.is_fs_save_rank()  # shared output → global main
+    assert filesystem.is_fs_save_rank()  # Shared output → global main.
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
-    assert not filesystem.is_fs_save_rank()  # per-node output → local main
+    assert not filesystem.is_fs_save_rank()  # Per-node output → local main.
     monkeypatch.setenv("DIST_INPUT_SHARED_FILESYSTEM", "1")
     assert not filesystem.is_fs_save_rank()
 
 
 def test_log_tee_elects_its_writer_with_is_fs_save_rank(monkeypatch, tmp_path):
-    """``run.log`` is an output artifact, so the tee must elect its writer through
-    ``is_fs_save_rank`` — the same predicate, and therefore the same output flag, the checkpoint
-    writers use (pinned above). A tee carrying its own rank rule would drift from that flag and let
-    two nodes both believe they are the sole writer, interleaving one ``run.log``.
-
-    Only the non-writer path is exercised: the writer path ``dup2``s fds 1/2 into a ``tee``
-    subprocess, which would hijack the test runner's own output.
-    """
+    """A tee with its own rank rule would let two nodes interleave one ``run.log``. The writer path ``dup2``s into a
+    subprocess, hijacking the runner, so only the non-writer is exercised."""
     consulted = []
 
     def _not_the_writer():
@@ -152,14 +130,8 @@ def test_log_tee_elects_its_writer_with_is_fs_save_rank(monkeypatch, tmp_path):
 
 
 def test_coordinated_dataset_map_elects_on_the_input_side(monkeypatch):
-    """The dataset map fills a cache the OTHER ranks then read, so it is read-side work and must
-    elect with ``is_fs_load_rank``.
-
-    Reverting it to ``is_fs_save_rank`` is invisible whenever the two agree — i.e. every
-    single-flag config, which is what the GPU coordination test exercises. It only surfaces on
-    ``DIST_INPUT_SHARED_FILESYSTEM=0`` with a shared output, exactly the config the split exists for,
-    where every node re-maps the whole corpus or reads a peer's half-written cache.
-    """
+    """Reverting to ``is_fs_save_rank`` shows only at ``DIST_INPUT_SHARED_FILESYSTEM=0`` with shared output, where
+    every node re-maps the corpus or reads a half-written cache."""
     consulted: list[str] = []
     monkeypatch.setattr(coordinated_map_module, "is_fs_load_rank", lambda: consulted.append("load") or True)
     monkeypatch.setattr(
@@ -173,16 +145,12 @@ def test_coordinated_dataset_map_elects_on_the_input_side(monkeypatch):
 
 
 def test_fs_aware_makedirs_honours_the_writer_rank_side(monkeypatch, tmp_path):
-    """``fs_aware_makedirs`` defaults to the output side, and the read-side caller (the
-    ``HF_DATASETS_CACHE`` dir) passes ``is_fs_load_rank``. A parameter that were ignored would put
-    every read-side cache dir back on the output flag with no visible symptom until the two diverge.
-    """
-    # Drive the real chain rather than patching the predicates: the default argument binds the
-    # function OBJECT at import, so a patched name would never reach it.
+    """An ignored parameter would put read-side cache dirs on the output flag with no symptom until the two diverge."""
+    # The default argument binds the function object at import, so a patched name would never reach it.
     monkeypatch.setattr(filesystem, "is_global_main_process", lambda: True)
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: False)
-    monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")  # save rank → local main → False
-    monkeypatch.setenv("DIST_INPUT_SHARED_FILESYSTEM", "1")  # load rank → global main → True
+    monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")  # Save rank → local main → False.
+    monkeypatch.setenv("DIST_INPUT_SHARED_FILESYSTEM", "1")  # Load rank → global main → True.
     assert not filesystem.is_fs_save_rank() and filesystem.is_fs_load_rank()
 
     default_dir = tmp_path / "output_side"
@@ -195,8 +163,6 @@ def test_fs_aware_makedirs_honours_the_writer_rank_side(monkeypatch, tmp_path):
 
 
 def test_the_flags_answer_from_the_agreed_memo_and_read_the_environment_until_agreed(monkeypatch):
-    """The flags are agreed ONCE per process and then answered from the memo, whatever the environment
-    says; before the agreement they read this rank's environment."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     monkeypatch.setattr(filesystem, "_shared_filesystem_consensus", dict.fromkeys(FS_VARS, False))
     assert not filesystem.is_shared_filesystem(), "the memo is not being consulted at all"
@@ -206,11 +172,8 @@ def test_the_flags_answer_from_the_agreed_memo_and_read_the_environment_until_ag
 
 
 def test_a_second_log_tee_for_another_output_dir_warns_instead_of_silently_dropping_it(monkeypatch, caplog):
-    """The fd redirect is process-global and one-shot, so a second output_dir cannot get one.
-
-    Silently returning would leave that run's console output in the FIRST run's run.log with no
-    trace; the guard must name both paths.
-    """
+    """The fd redirect is process-global and one-shot; silently returning leaves that run's output in the first
+    run's run.log."""
     monkeypatch.setattr(run_logger, "_tee_log_path", os.path.abspath("/first/log/run.log"))
     monkeypatch.setattr(run_logger, "is_fs_save_rank", lambda: True)
 
@@ -224,7 +187,7 @@ def test_a_second_log_tee_for_another_output_dir_warns_instead_of_silently_dropp
 
 
 def test_a_second_log_tee_for_the_same_output_dir_is_a_silent_no_op(monkeypatch, caplog):
-    """Re-entering the same run's setup is ordinary (the parser can run twice) — no warning there."""
+    """Re-entering the same run's setup is ordinary (the parser can run twice)."""
     monkeypatch.setattr(run_logger, "_tee_log_path", os.path.abspath("/same/log/run.log"))
     monkeypatch.setattr(run_logger, "is_fs_save_rank", lambda: True)
 
@@ -235,8 +198,7 @@ def test_a_second_log_tee_for_the_same_output_dir_is_a_silent_no_op(monkeypatch,
 
 
 def test_a_log_tee_that_cannot_start_warns(monkeypatch, caplog, tmp_path):
-    """The writer rank whose run.log cannot be set up (no ``tee``, an unwritable output_dir) loses the
-    run's whole console record; the run goes on, but not in silence."""
+    """The run goes on, but not in silence."""
     monkeypatch.setattr(run_logger, "_tee_log_path", None)
     monkeypatch.setattr(run_logger, "is_fs_save_rank", lambda: True)
 

@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Qwen3.8-Flash-Next (``qwen4_exp``) family contract: both model types resolve the family and its EP layer, the
-layer reproduces the stock block under either ``norm_topk_prob``, the gathered export is the hub's fused expert
-layout, balancing resolves with and without the fused loss, and the family refuses weight sync, TP, CP,
-``padding_free`` and tree packing (the PP refusal is a row of ``tests/cpu/parallelism/test_pp_stage_split.py``).
-
-``Qwen4ExpTextSparseMoeBlock`` is Qwen3.5-MoE's block under Qwen3-Next's router, which renormalizes the top-k
-weights only under ``norm_topk_prob``; the EP layer inherits Qwen3-Next's, so every gate weight it re-derives reads
-the flag. The n-gram table lives in ``test_qwen4_exp_ngram_table.py``, its export in
-``tests/cpu/checkpoint/test_qwen4_exp_table_export.py``.
-
-    python tests/cpu/models/test_qwen4_exp_support.py
-"""
+"""Qwen3.8-Flash-Next (``qwen4_exp``) family contract. ``Qwen4ExpTextSparseMoeBlock`` is Qwen3.5-MoE's block under
+Qwen3-Next's router, which renormalizes the top-k weights only under ``norm_topk_prob``."""
 
 from __future__ import annotations
 
@@ -62,7 +52,7 @@ def _tiny_model(**overrides) -> PreTrainedModel:
 
 
 def _wrapped_block(norm_topk_prob: bool) -> tuple[torch.nn.Module, EPQwen4ExpMoELayer]:
-    """``(untouched stock block, EP layer around an identical copy)``, fp32, non-trivial weights."""
+    """``(untouched stock block, EP layer around an identical copy)``."""
     block = _tiny_model(norm_topk_prob=norm_topk_prob).model.layers[0].mlp
     for parameter in block.parameters():
         torch.nn.init.normal_(parameter, std=0.2)
@@ -105,8 +95,7 @@ def test_the_ep_layer_reproduces_the_block_and_its_input_gradient(norm_topk_prob
 
 @pytest.mark.parametrize("norm_topk_prob", [True, False])
 def test_a_zero_balancing_bias_reproduces_the_router(norm_topk_prob):
-    """The balancing-biased route (``bias_update_transient``) gates as the router does under either
-    ``norm_topk_prob``; Qwen3.5-MoE's always-renormalizing route would mis-gate ``norm_topk_prob: false``."""
+    """Qwen3.5-MoE's always-renormalizing route would mis-gate ``norm_topk_prob: false``."""
     _block, layer = _wrapped_block(norm_topk_prob)
     assert layer.enable_bias_balancing() is True
     hidden = torch.randn(TOKENS, H, generator=torch.Generator().manual_seed(3))
@@ -119,8 +108,7 @@ def test_a_zero_balancing_bias_reproduces_the_router(norm_topk_prob):
 
 
 def test_the_gathered_export_is_the_release_fused_layout():
-    """The gather writes the block's own fused ``experts.gate_up_proj`` / ``experts.down_proj`` tensors, the layout
-    and orientation the release ships (``[E, 2·I, H]`` and ``[E, H, I]``), never one tensor per expert."""
+    """The layout and orientation the release ships (``[E, 2·I, H]`` and ``[E, H, I]``), with no per-expert tensors."""
     model = _tiny_model()
     stock = [
         {
@@ -137,8 +125,7 @@ def test_the_gathered_export_is_the_release_fused_layout():
 
 
 def test_the_release_ships_its_experts_fused():
-    """The release index names one fused bank per projection and layer under the block's own attribute names, so
-    ``from_pretrained`` loads them unconverted and the gather above writes them back as the release ships them."""
+    """One fused bank per projection and layer under the block's names, so ``from_pretrained`` converts nothing."""
     try:
         index = hf_hub_download(QWEN3_8_FLASH_NEXT, SAFETENSORS_INDEX_FILE, local_files_only=True)
     except LocalEntryNotFoundError:
@@ -159,8 +146,8 @@ def test_auto_balancing_takes_the_aux_loss_on_the_family_head():
 
 
 def test_auto_balancing_trains_unbalanced_under_the_fused_head(caplog):
-    """The spec's fused head refuses ``output_router_logits``, and no checkpoint slot carries a routing bias, so
-    ``auto`` resolves to ``none`` and says so; the recipes pick the mode instead."""
+    """The fused head refuses ``output_router_logits`` and no checkpoint slot carries a routing bias. The recipes pick
+    the mode instead."""
     (spec,) = [spec for spec in LIGER_FAMILY_SPECS if "qwen4_exp_text" in spec.model_types]
     model = _tiny_model()
     _wrap_every_block(model)
@@ -196,8 +183,8 @@ def test_tensor_parallelism_is_refused_on_the_unplanned_attention():
 
 
 def test_a_flash_request_falls_back_to_sdpa_and_padding_free_is_refused():
-    """The class supports no flash kernel, so the run takes SDPA; a padding-free row is refused on the M-RoPE
-    decoder, whose flattened rows no backend serves (SDPA reads no ``cu_seqlens``)."""
+    """The class supports no flash kernel. No backend serves a padding-free row on the M-RoPE decoder (SDPA reads no
+    ``cu_seqlens``)."""
     config = _config()
     config._attn_implementation = resolve_attn_implementation(
         config, "flash_attention_2", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED

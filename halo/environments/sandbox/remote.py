@@ -1,7 +1,5 @@
-"""Remote SandboxFusion-compatible backend (https://github.com/bytedance/SandboxFusion): an HTTP client for the
-stateless ``/run_code`` API. :class:`RemoteSession` carries the working set client-side: written files are resent
-with each run and the service rebuilds a compiled language every request; files the service produces are not read
-back."""
+"""Remote SandboxFusion-compatible backend (https://github.com/bytedance/SandboxFusion). :class:`RemoteSession` carries
+the working set client-side, resent with each run; files the service produces are not read back."""
 
 import math
 
@@ -16,8 +14,7 @@ from halo.environments.sandbox.results import (
     compile_limit_verdict,
 )
 
-# HTTP budget on top of the program's own timeout: the service still has to queue, provision and
-# tear down the run, so the client must not give up before the server's own deadline.
+# The service still has to queue, provision and tear down the run; the client must not give up before its deadline.
 _REQUEST_OVERHEAD_SECONDS = 30.0
 
 # SandboxFusion ``CommandRunStatus`` values that mean the step ran to completion (lower-cased).
@@ -28,12 +25,11 @@ _PROGRAM_FAILED_STATUS = "failed"
 
 
 def _command_result(value: object) -> dict[str, object]:
-    """A SandboxFusion ``compile_result`` / ``run_result`` block; ``{}`` when absent or malformed."""
     return value if isinstance(value, dict) else {}
 
 
 def _return_code(value: object) -> int | None:
-    """``return_code`` may arrive as an int, a numeric string, or be absent; normalize to int/None."""
+    """May arrive as an int, a numeric string, or be absent."""
     if isinstance(value, int):
         return value
     if isinstance(value, str):
@@ -49,11 +45,7 @@ def _is_time_limit(status: str) -> bool:
 
 
 class RemoteSandbox(SandboxExecutor):
-    """HTTP client for a SandboxFusion-compatible ``/run_code`` service.
-
-    The ``/run_code`` suffix is appended to ``url`` if absent; inject ``session`` to share a
-    connection pool across rollout workers (or a fake one in tests).
-    """
+    """The ``/run_code`` suffix is appended to ``url`` if absent; inject ``session`` to share a connection pool."""
 
     # The program runs in the service, never in this process.
     isolated = True
@@ -64,7 +56,6 @@ class RemoteSandbox(SandboxExecutor):
         self._session = session or requests.Session()
 
     def open_session(self) -> "RemoteSession":
-        """Open a session that accumulates files client-side and resends them each run."""
         return RemoteSession(self)
 
     def run(
@@ -93,9 +84,8 @@ class RemoteSandbox(SandboxExecutor):
             resp.raise_for_status()
             data = resp.json()
         except requests.Timeout:
-            # The service enforces ``run_timeout`` itself and reports it in ``run_result.status``, so the
-            # client deadline fires only when the service does not answer: an infra fault, never the
-            # program's time limit (``timed_out`` stays False).
+            # The service enforces ``run_timeout`` and reports it in ``run_result.status``, so this deadline fires only
+            # when it does not answer: an infra fault, never the program's time limit.
             return SandboxResult(error="remote sandbox request timed out")
         except (requests.RequestException, ValueError) as exc:
             return SandboxResult(error=f"remote sandbox error: {exc}")
@@ -103,10 +93,8 @@ class RemoteSandbox(SandboxExecutor):
 
     @staticmethod
     def _parse(data: dict[str, object]) -> SandboxResult:
-        """A SandboxFusion response as a :class:`SandboxResult`, tolerant of partial bodies, split as the local backend
-        splits: a compile rejection or compile timeout is ``compile_failed``, a ``Failed`` run that exited non-zero or
-        timed out is the program's verdict, and only the service's own failure sets ``error``.
-        """
+        """As the local backend splits: a compile rejection or timeout is ``compile_failed``, a ``Failed`` run that
+        exited non-zero or timed out is the program's verdict, and only the service's own failure sets ``error``."""
         compile_step = _command_result(data.get("compile_result"))
         compile_status = str(compile_step.get("status", "")).lower()
         if _is_time_limit(compile_status):
@@ -115,8 +103,7 @@ class RemoteSandbox(SandboxExecutor):
         if compile_step and (
             compile_status not in _STEP_FINISHED_STATUSES or compile_rc == COMMAND_NOT_FOUND_RETURNCODE
         ):
-            # The compiler step did not run to completion (or the compiler is absent): the service's
-            # fault, never a verdict on the source.
+            # The service's fault, never a verdict on the source.
             diagnostics = str(compile_step.get("stderr") or compile_step.get("stdout") or compile_status)
             return SandboxResult(
                 stderr=diagnostics.strip(), error=f"remote compile step failed: {diagnostics.strip()}"
@@ -150,9 +137,7 @@ class RemoteSandbox(SandboxExecutor):
 
 
 class RemoteSession(SandboxSession):
-    """Stateful view over a stateless ``/run_code`` service: tracked files are merged into every
-    :meth:`run` request (per-call ``files`` win on key collisions).
-    """
+    """A stateful view over a stateless service: tracked files merge into every request (per-call ``files`` win)."""
 
     def __init__(self, executor: RemoteSandbox):
         self._executor = executor

@@ -1,8 +1,5 @@
-"""Weight sync to an SGLang server: the engine joins a plain c10d group and receives typed tensors in declared
-order, one ``torch.distributed.broadcast`` each. Its server container needs ``NCCL_CUMEM_ENABLE=1``, which
-SGLang otherwise turns off process-wide, failing the first cross-container import. The sglang package is
-never imported; ``Dockerfile.sglang`` asserts the server side of this contract at build.
-"""
+"""Weight sync to an SGLang server: a plain c10d group, one typed broadcast per tensor in declared order. The server
+needs ``NCCL_CUMEM_ENABLE=1``; SGLang otherwise turns cuMem off and the first cross-container import fails."""
 
 import logging
 from collections import deque
@@ -41,8 +38,6 @@ _INFLIGHT_CHUNKS = 2
 
 
 class SGLangWeightSyncClient(WeightSyncClientBase):
-    """Weight-sync client for an SGLang server."""
-
     BACKEND_KEY = "sglang"
     BACKEND_NAME = "SGLang"
     ENGINE_RELEASE = "SGLang 0.5.22"
@@ -69,8 +64,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             "fused pair, and no end-to-end sync has been validated for the family"
         ),
     }
-    # The MLA loaders fuse this pair from a cache local to one ``load_weights`` call and silently drop a half
-    # that arrives alone; the fusion exists only where the model has both (``q_lora_rank`` set).
+    # The MLA loaders fuse this pair from a cache local to one ``load_weights`` call and silently drop a lone half.
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     PAUSE_ENDPOINT = "/pause_generation"
     # The post-update flush needs an idle scheduler, so in-flight requests are aborted.
@@ -93,14 +87,11 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def __init__(self, *args, group_name: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
-        # One per server under SGLang's default prefix: c10d registers group names process-globally, and a
-        # group_port of 0 (auto-pick) would collide every auto-port client on one name.
+        # c10d registers group names process-globally, and keying on group_port 0 would collide auto-port clients.
         self.group_name = group_name or f"weight_update_group_{urlparse(self.base_url).netloc}"
 
     def _fetch_engine_world_size(self) -> int:
-        """``tp_size`` from ``/server_info``: each worker joins as ``rank_offset + tp_rank``, and under
-        ``--enable-dp-attention`` ``tp_rank`` already spans every GPU. Plain ``--dp-size`` replicas each restart
-        ``tp_rank`` at 0, so no sizing can address them."""
+        """Workers join as ``rank_offset + tp_rank``; under ``--enable-dp-attention`` ``tp_rank`` spans every GPU."""
         info = self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
         try:
             tp_size = int(info["tp_size"])
@@ -120,8 +111,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         return tp_size
 
     def _request_engine_join(self, master_address: str, port: int, world_size: int) -> AsyncCall:
-        # The engine registers the name on the join request and refuses a second join under it, so a stale
-        # registration a dead trainer left is cleared first.
+        # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first.
         self._destroy_remote_group()
         return self._start_collective_rpc(
             "/init_weights_update_group",
@@ -150,8 +140,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         )
 
     def _release_transport(self, *, at_exit: bool) -> None:
-        # The engine drops its half while the local destroy runs, since under cuMem each side's finalize waits
-        # for the other; it runs even with no local group, or the server refuses every later join.
+        # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
+        # no local group, or the server refuses every later join.
         remote = AsyncCall(self._destroy_remote_group)
         group = None if self._transport is None else self._transport[0]
         # Interpreter exit skips the local NCCL destroy, and an aborted group is already gone from torch.
@@ -164,16 +154,13 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def _reset_transport_state(self) -> None:
         # Set once a drain deadline aborted the group, on which a destroy raises and a broadcast hangs.
         self._aborted = False
-        # The device arena each chunk's uploads are carved from.
         self._arena: torch.Tensor | None = None
         # Events recorded after the latest chunks' broadcasts, settled _INFLIGHT_CHUNKS later.
         self._inflight: deque[torch.cuda.Event] = deque()
-        # Uploads and broadcasts run here, never on the caller's stream, which a synchronous broadcast would
-        # order behind the collective with the next chunk's copies and the trainer's own work.
+        # On the caller's stream a synchronous broadcast would order the next copies and the trainer's work behind it.
         self._send_stream: torch.cuda.Stream | None = None
 
     def _start_engine_update(self) -> None:
-        """Quiesce the engine and open its weight-update session, unwinding both on failure."""
         if self._transport is None:
             raise RuntimeError("Call init_communicator() first")
         if self._aborted:
@@ -193,10 +180,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             raise
 
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
-        """Declare one chunk, then broadcast its tensors in declared order; the cache flush rides the final one.
-        The engine allocates every declared tensor before receiving any, so the chunk budget bounds it."""
+        """The engine allocates every declared tensor before receiving any, so the chunk budget bounds it."""
         names, dtypes, shapes = describe_chunk(chunk)
-        # The engine keys its receive buffers by name, so a repeated name puts every later send out of step.
         if len(set(names)) != len(names):
             repeated = sorted({name for name in names if names.count(name) > 1})
             raise ValueError(
@@ -216,8 +201,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 "flush_cache": final,
             },
         )
-        # The engine replies once it queued the receives, so the sends may still be pending; they are settled
-        # two chunks later, or here under a short deadline on failure.
+        # The engine replies on queueing its receives; the sends settle two chunks later, or below on failure.
         if self._send_stream is None:
             self._send_stream = torch.cuda.Stream(device=self.sync_device)
         caller_stream = torch.cuda.current_stream(self.sync_device)
@@ -233,9 +217,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             self._inflight.append(event)
             server_call.wait(timeout=CHUNK_SYNC_TIMEOUT_S)
         except Exception as e:
-            # A kernel whose peer failed spins and hangs every later device sync; the drain's deadline aborts
-            # it. The whole stream is drained, as the failing chunk recorded no event of its own. A passed
-            # deadline is the usual shape of the engine's own rejection, so that is read first.
+            # A kernel whose peer failed spins and hangs every later device sync, so the drain's deadline aborts it.
+            # A passed deadline is usually the engine's own rejection, so that is read first.
             self._inflight.clear()
             drain_error: RuntimeError | None = None
             try:
@@ -260,8 +243,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             raise
 
     def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        """Send the final chunk with the cache flush, settle the sends, drop the arena and close the session; the
-        close runs on every path."""
         try:
             if tail:
                 self._transmit_chunk(tail, final=True)
@@ -276,8 +257,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
     ) -> list[float]:
-        """One prefill through ``/generate``: the window opens on the last prompt token (its entry, which carries no
-        log-prob, is dropped) and every id is checked, so an off-by-one is a miss, never a shifted reference."""
+        """One prefill through ``/generate``. The window opens on the last prompt token and every id is checked, so
+        an off-by-one is a miss, never a shifted reference."""
         if not prompt_ids:
             raise ValueError(f"{self.BACKEND_NAME} re-score needs at least one prompt token to anchor the window")
         body = {
@@ -309,7 +290,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         return values
 
     def _destroy_remote_group(self):
-        """Drop the engine's registration of this client's group name; best-effort, never masks a failure."""
+        """Best-effort; never masks the caller's failure."""
         try:
             self.request(
                 "POST",
@@ -318,17 +299,13 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 timeout=CLEANUP_TIMEOUT_S,
                 json={"group_name": self.group_name},
             )
-        except Exception as e:  # advisory cleanup; never mask the caller's failure
+        except Exception as e:
             logger.debug(f"Could not clear weight-update group {self.group_name!r} on {self.base_url}: {e}")
 
     def _upload_to_arena(self, params: list[torch.Tensor], pool_stream: torch.cuda.Stream) -> Iterator[torch.Tensor]:
-        """Upload a chunk into the device arena, yielding each tensor's view as its copy is issued.
-
-        One arena, not one allocation per tensor: a block freed mid-chunk carries a pending NCCL event the
-        next upload would wait on inside the allocator. Reuse across chunks is safe by stream order, as uploads
-        and sends share ``_send_stream``. The arena is sized to the chunk budget (grown for a larger tensor),
-        drawn from ``pool_stream``'s pool and lives for one sync.
-        """
+        """Yield each tensor's arena view as its copy is issued. One arena, since a block freed mid-chunk carries a
+        pending NCCL event the next upload would wait on inside the allocator. Reuse across chunks is safe by stream
+        order, as uploads and sends share ``_send_stream``."""
         self._settle_inflight(keep=_INFLIGHT_CHUNKS - 1)
         offsets: list[int] = []
         total = 0
@@ -337,7 +314,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             # 256-byte aligned, a multiple of every dtype's size, so a uint8 slice views as the tensor.
             total += (param.nbytes + 255) // 256 * 256
         if self._arena is None or self._arena.numel() < total:
-            # Regrown only once the previous sends retired: they still read the old arena.
+            # Only once the previous sends retired, as they still read the old arena.
             self._release_arena()
             self._arena = allocate_send_buffer(
                 max(total, WEIGHT_SYNC_CHUNK_BYTES),
@@ -353,7 +330,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             yield view
 
     def _settle_inflight(self, *, keep: int) -> None:
-        """Wait for the oldest chunks' sends until ``keep`` remain in flight, under the drain deadline."""
         while len(self._inflight) > keep:
             bounded_event_sync(
                 self._inflight.popleft(),
@@ -363,11 +339,10 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             )
 
     def _abort_group(self) -> None:
-        """Abort the group; ``_aborted`` keeps close from destroying a group torch already dropped."""
         self._aborted = True
         abort_weight_update_group(self._transport[0])
 
     def _release_arena(self) -> None:
-        """Settle the outstanding sends and drop the arena, which held across syncs would pin the sync GPU."""
+        """Held across syncs, the arena would pin the sync GPU."""
         self._settle_inflight(keep=0)
         self._arena = None

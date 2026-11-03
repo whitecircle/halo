@@ -31,19 +31,15 @@ class ShardedDatasetLoader:
         self.dp_size = dp_size
         self.source_type, self.bucket, self.key = parse_dataset_source(dataset_path)
         self._shard_indices: dict[str, ShardIndex] = {}
-        # Latched by an UNREACHABLE S3 only: a fully cached offline run must not pay a connection
-        # timeout per shard. An empty listing is a real absence, not a transport fault.
+        # Latched by an unreachable S3 only: a fully cached offline run must not pay a connection timeout per shard.
         self._s3_fingerprint_unavailable = False
         # Built on first use: an S3Client opens boto3 sessions a local-source loader never needs.
         self._s3_client: S3Client | None = None
 
     @staticmethod
     def is_sharded_dataset(path: str) -> bool:
-        """Whether ``path`` has a ``train/shard_index.json``, read on S3 through the control-file mirror.
-
-        Never raises (the caller agrees it across ranks, so a rank-local raise would hang the peers): a
-        failure the mirror cannot serve errs toward "non-sharded" with a warning.
-        """
+        """Never raises, since the caller agrees it across ranks and a rank-local raise would hang the peers: a failure
+        the mirror cannot serve errs toward non-sharded with a warning."""
         source_type, bucket, key = parse_dataset_source(path)
         if source_type == "s3":
             index_key = s3_object_key(key, "train", SHARD_INDEX_FILE)
@@ -63,8 +59,7 @@ class ShardedDatasetLoader:
         return False
 
     def load(self) -> DatasetDict:
-        """This rank's train and test splits; a split without a shard index is skipped, a listed shard the
-        source lacks raises."""
+        """A split without a shard index is skipped; a listed shard the source lacks raises."""
         result = DatasetDict()
         try:
             self._load_shard_index("train")
@@ -81,9 +76,7 @@ class ShardedDatasetLoader:
         return result
 
     def load_split(self, split: str = "train") -> Dataset:
-        """Load and concatenate this rank's assigned shards for the split."""
-        # Both verdicts are read off the index, which every rank loads itself — the same answer on
-        # every rank, so a refusal here cannot skew a collective.
+        # Both verdicts are read off the index every rank loads, so a refusal here cannot skew a collective.
         index = self._load_shard_index(split)
         if index.num_shards == 0 or not index.shards:
             self._reject_unusable_split(
@@ -116,24 +109,21 @@ class ShardedDatasetLoader:
         return shard_datasets[0] if len(shard_datasets) == 1 else concatenate_datasets(shard_datasets)
 
     def get_assigned_shards(self, split: str = "train") -> list[ShardInfo]:
-        """ShardInfo list assigned to this rank for the split."""
         index = self._load_shard_index(split)
         start, end = self._compute_shard_assignment(index.num_shards)
         return index.shards[start:end]
 
     def total_examples(self, split: str = "train") -> int:
-        """Total examples in a split across all ranks."""
         return self._load_shard_index(split).total_examples
 
     def shard_index_digests(self) -> dict[str, str]:
-        """Content digest of every shard index this loader read, by split — what all ranks must share."""
+        """Content digest of every shard index read, by split: what all ranks must share."""
         return {
             split: hashlib.md5(json.dumps(index.to_dict(), sort_keys=True).encode()).hexdigest()
             for split, index in sorted(self._shard_indices.items())
         }
 
     def _load_shard_index(self, split: str) -> ShardIndex:
-        """Load shard index for a split."""
         if split in self._shard_indices:
             return self._shard_indices[split]
 
@@ -154,8 +144,8 @@ class ShardedDatasetLoader:
         logger.warning(message)
 
     def _starved_split(self, split: str, index: ShardIndex) -> Dataset:
-        """An empty split WITH the split's schema (its first shard, no rows) for a rank the assignment left
-        with nothing: downstream ``column_names`` tests gate coordinated operations and must answer alike."""
+        """An empty split with the first shard's schema: downstream ``column_names`` tests gate coordinated operations
+        and must answer alike."""
         logger.warning(
             f"Rank {self.dp_rank} has no shards assigned for {split} "
             f"({index.num_shards} shards over {self.dp_size} ranks); serving an empty split."
@@ -165,14 +155,12 @@ class ShardedDatasetLoader:
         return self._load_shard(index.shards[0]).select([])
 
     def _load_shard(self, shard: ShardInfo) -> Dataset:
-        """One shard, from whichever source this dataset lives on."""
         if self.source_type == "s3":
             return self._load_shard_from_s3(shard)
         return load_from_disk(os.path.join(self.dataset_path, shard.path))
 
     def _load_shard_from_s3(self, shard: ShardInfo) -> Dataset:
-        """One shard through its own cache keyed by md5(bucket/key/shard.path) (:func:`serve_cached_tree`):
-        identical shards download once, and a shard re-preprocessed in place on S3 is re-downloaded."""
+        """Keyed by md5(bucket/key/shard.path): identical shards download once, one re-preprocessed in place again."""
         shard_key = f"{self.key.rstrip('/')}/{shard.path}"
         shard_uri = f"s3://{self.bucket}/{shard_key}"
         cache_path = os.path.join(HALO_S3_DATASET_CACHE_DIR, "shards", s3_cache_key(self.bucket, shard_key), "shard")
@@ -190,19 +178,16 @@ class ShardedDatasetLoader:
         return load_from_disk(cache_path)
 
     def _s3(self) -> S3Client:
-        """The source bucket's client, built on first use."""
         if self._s3_client is None:
             self._s3_client = S3Client(bucket=self.bucket)
         return self._s3_client
 
     def _shard_fingerprint(self, shard_key: str) -> str | None:
-        """The aggregate ETag fingerprint of a shard prefix, or ``None`` ("cannot validate"); an unreachable
-        S3, unlike an empty listing, stops the remaining probes."""
+        """``None`` when it cannot validate; an unreachable S3, unlike an empty listing, stops the remaining probes."""
         if self._s3_fingerprint_unavailable:
             return None
         try:
-            # Client construction is inside the probe's guard: it resolves credentials and a region,
-            # so a warm-cache relaunch without either would otherwise die here instead of serving.
+            # Construction is inside the guard: it resolves credentials and a region a warm-cache relaunch may lack.
             return compute_etag_fingerprint(self._s3().content_entries(shard_key))
         except Exception as e:  # any transport/credential fault, cache stays servable
             self._s3_fingerprint_unavailable = True
@@ -214,7 +199,7 @@ class ShardedDatasetLoader:
             return None
 
     def _compute_shard_assignment(self, num_shards: int) -> tuple[int, int]:
-        """Shard range (start, end-exclusive) for this rank."""
+        """``(start, end-exclusive)`` for this rank."""
         shards_per_rank = num_shards // self.dp_size
         remainder = num_shards % self.dp_size
 

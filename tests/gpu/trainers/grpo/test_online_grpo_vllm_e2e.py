@@ -69,8 +69,7 @@ from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
 MOE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_MOE_MODEL", QWEN3_30B_A3B)
 DENSE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_DENSE_MODEL", QWEN3_0_6B)
 MOE_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-# Comma-separated, each serving DENSE_MODEL on a GPU of its own; the first is the one every one-process row
-# drives.
+# Comma-separated, each serving DENSE_MODEL on a GPU of its own; every one-process row drives the first.
 SERVER_URLS = [
     url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_DENSE_SERVER_URL).split(",") if url.strip()
 ]
@@ -93,15 +92,14 @@ if ARGS.prefetch_depth is not None and ARGS.trainer != "environmental":
 
 
 def _row_index() -> int:
-    """This row's place in its policy's matrix. A pinned group port is offset by it, so back-to-back rows of
-    one pass never bind the same port; a resume row rebinds its own for phase 2, which phase 1's
-    close_communicator makes available again on both ends."""
+    """A pinned group port is offset by this, so back-to-back rows of one pass never bind the same port. A resume row
+    rebinds its own for phase 2, which phase 1's close_communicator frees on both ends."""
     rows = [(t, m, r) for t in ("online", "sdpg") for m in modes_for(POLICY) for r in (False, True)]
     return rows.index((ARGS.trainer, ARGS.mode, ARGS.resume))
 
 
 def probe_server(url: str) -> None:
-    """The server is healthy, exposes the native weight-transfer routes, and answers a chat request."""
+    """Healthy, exposes the native weight-transfer routes, and answers a chat request."""
     requests.get(f"{url}/health", timeout=10).raise_for_status()
     routes = requests.get(f"{url}/openapi.json", timeout=10).json()["paths"]
     missing = [route for route in WEIGHT_TRANSFER_ROUTES if route not in routes]

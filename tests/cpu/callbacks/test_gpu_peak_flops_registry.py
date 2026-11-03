@@ -1,11 +1,5 @@
-"""Cross-checks on the hardware peak-FLOPS registry every MFU number divides by.
-
-Every MFU number the toolkit reports divides by an entry of ``GPU_PEAK_FLOPS``, so a wrong entry
-silently rescales the headline metric with nothing else in the system disagreeing. These tests pin the
-registry against an INDEPENDENT source — the die's own SM count and clock — rather than against the
-constants themselves, so they also reject the next SKU added with a marketing (or sparsity) figure.
-The device-name detection that picks the entry is pinned too, nvidia-smi fallback included.
-"""
+"""Cross-checks on the peak-FLOPS registry every MFU divides by. A wrong entry silently rescales the headline metric,
+so peaks are pinned against the die's own SM count and clock, which rejects a marketing or sparsity figure too."""
 
 import subprocess
 
@@ -14,8 +8,7 @@ import pytest
 import halo.hardware as hardware
 from halo.hardware import GPU_PEAK_FLOPS, GpuPeak, _classify_gpu_name, detect_gpu_model, get_gpu_peak_flops
 
-# Dense bf16/fp16 tensor-core FLOPs per SM per clock, by architecture. Blackwell doubles Hopper's
-# per-SM rate; GA102 (workstation) ships a lower per-SM tensor rate than GA100.
+# Dense bf16/fp16 tensor-core FLOPs per SM per clock. GA102 (workstation) ships a lower per-SM rate than GA100.
 _ARCH_BF16_FLOPS_PER_SM_CLOCK = {
     "ampere_ga100": 2048,
     "ampere_ga102": 1024,
@@ -23,8 +16,7 @@ _ARCH_BF16_FLOPS_PER_SM_CLOCK = {
     "blackwell": 8192,
 }
 
-# (SM count, max boost clock in GHz, architecture) per registry key, from the vendor die specs.
-# Independent of the registry: the ceiling below is computed from these, never from the table.
+# (SM count, max boost GHz, architecture) from the vendor die specs, independent of the registry the ceiling checks.
 _DIE_SPECS = {
     "H100_SXM": (132, 1.980, "hopper"),
     "H100_PCIE": (114, 1.755, "hopper"),
@@ -37,12 +29,10 @@ _DIE_SPECS = {
     "A6000": (84, 1.860, "ampere_ga102"),
 }
 
-# Published peaks embed a nominal rather than max boost clock; allow a little headroom so the test
-# rejects marketing/sparsity inflation (tens of percent) without tripping on clock rounding.
+# Published peaks embed a nominal clock. This allows clock rounding but not marketing inflation (tens of percent).
 _CLOCK_TOLERANCE = 1.02
 
-# Dense tensor-core rate of each dtype relative to bf16, fixed by the tensor-core datapath widths.
-# ``fp32`` is a CUDA-core (non-tensor) rate and has no such relation, so it is excluded.
+# Set by the tensor-core datapath widths. ``fp32`` is a CUDA-core rate with no such relation, so it is excluded.
 _DTYPE_RATIO_TO_BF16 = {"fp16": 1.0, "fp8": 2.0, "fp4": 4.0, "tf32": 0.5}
 
 
@@ -52,7 +42,6 @@ def _bf16_ceiling(gpu_key: str) -> float:
 
 
 def test_every_registry_key_has_a_die_spec():
-    """A new SKU must arrive with the die spec that lets the ceiling test police it."""
     missing = sorted(set(GPU_PEAK_FLOPS) - set(_DIE_SPECS))
     assert not missing, (
         f"GPU_PEAK_FLOPS keys {missing} have no entry in _DIE_SPECS, so their peaks are unchecked. "
@@ -61,12 +50,8 @@ def test_every_registry_key_has_a_die_spec():
 
 
 def test_a_new_registry_entry_needs_no_classifier_branch(monkeypatch):
-    """An SKU added to the registry is classifiable from its own declaration alone.
-
-    This is what the per-entry aliases buy: with the classification held somewhere else, a row added
-    without its matching branch is worse than an absent one — ``detect_gpu_model`` answers None and
-    every MFU / S-MFU line silently drops out of the run's metrics on that hardware.
-    """
+    """A row without a matching classifier branch is worse than an absent one: ``detect_gpu_model`` answers None and
+    every MFU line silently drops out on that hardware."""
     monkeypatch.setitem(GPU_PEAK_FLOPS, "B400", GpuPeak(aliases=("B400",), flops={"bf16": 4000.0e12}))
 
     assert _classify_gpu_name("NVIDIA B400 180GB HBM4") == "B400"
@@ -74,12 +59,7 @@ def test_a_new_registry_entry_needs_no_classifier_branch(monkeypatch):
 
 
 def test_every_entry_is_reachable_through_its_own_aliases():
-    """Each alias must resolve to the entry that declares it, upper-cased as the names arrive.
-
-    Aliases are ranked by specificity rather than by declaration order, so the case this catches is
-    one SKU's name containing another's (``GB200`` over ``B200``): shadowed, the shadowed die's MFU
-    would be divided by the wrong peak instead of going missing.
-    """
+    """Aliases rank by specificity, so this catches one SKU's name containing another's (``GB200`` over ``B200``)."""
     for key, entry in GPU_PEAK_FLOPS.items():
         assert entry.aliases, f"{key} declares no alias, so no reported device name can resolve to it"
         for alias in entry.aliases:
@@ -91,7 +71,6 @@ def test_every_entry_is_reachable_through_its_own_aliases():
 
 
 def _fake_device(monkeypatch, torch_name: str, smi):
-    """A CUDA device torch names ``torch_name``; ``smi`` is the nvidia-smi stdout, or an exception."""
     monkeypatch.setattr(hardware.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(hardware.torch.cuda, "get_device_name", lambda index: torch_name)
 
@@ -114,19 +93,14 @@ def test_detection_prefers_the_torch_name_and_falls_back_to_nvidia_smi(monkeypat
     "smi", [FileNotFoundError("nvidia-smi"), subprocess.TimeoutExpired("nvidia-smi", 5), "Unknown GPU\n"]
 )
 def test_detection_answers_none_when_no_name_classifies(monkeypatch, smi):
-    """An absent, hung or unrecognized nvidia-smi is "unknown model", never an exception: MFU is
-    then left out of the metrics rather than taking the run down."""
+    """MFU is then left out of the metrics rather than taking the run down."""
     _fake_device(monkeypatch, "GRID vGPU", smi=smi)
     assert detect_gpu_model() is None
 
 
 @pytest.mark.parametrize("gpu_key", sorted(_DIE_SPECS))
 def test_bf16_peak_does_not_exceed_architectural_ceiling(gpu_key):
-    """bf16 peak must sit under SMs x clock x FLOPs-per-SM-per-clock.
-
-    This is the assertion that catches a dense figure replaced by a sparsity (2x) or marketing
-    multiplier: such a number exceeds what the die can physically retire.
-    """
+    """A dense figure replaced by a sparsity (2x) or marketing multiplier exceeds what the die can retire."""
     entry = GPU_PEAK_FLOPS[gpu_key].flops
     ceiling = _bf16_ceiling(gpu_key) * _CLOCK_TOLERANCE
     assert entry["bf16"] <= ceiling, (
@@ -140,7 +114,6 @@ def test_bf16_peak_does_not_exceed_architectural_ceiling(gpu_key):
 
 @pytest.mark.parametrize("gpu_key", sorted(_DIE_SPECS))
 def test_bf16_peak_is_not_implausibly_low(gpu_key):
-    """Guard the other direction: a peak far below the ceiling would inflate MFU past 100%."""
     entry = GPU_PEAK_FLOPS[gpu_key].flops
     floor = _bf16_ceiling(gpu_key) * 0.5
     assert entry["bf16"] >= floor, (
@@ -151,10 +124,7 @@ def test_bf16_peak_is_not_implausibly_low(gpu_key):
 
 @pytest.mark.parametrize("gpu_key", sorted(GPU_PEAK_FLOPS))
 def test_tensor_core_dtype_ratios_match_the_datapath(gpu_key):
-    """fp16/fp8/fp4/tf32 peaks are fixed multiples of bf16 on every supported architecture.
-
-    Catches a single-dtype typo, and catches a row where only some dtypes were rescaled.
-    """
+    """Catches a single-dtype typo, and a row where only some dtypes were rescaled."""
     entry = GPU_PEAK_FLOPS[gpu_key].flops
     bf16 = entry["bf16"]
     for dtype, ratio in _DTYPE_RATIO_TO_BF16.items():
@@ -169,11 +139,8 @@ def test_tensor_core_dtype_ratios_match_the_datapath(gpu_key):
 
 
 def test_b300_matches_the_b200_dense_tensor_core_rates():
-    """B300 is the same 148-SM die as B200: Blackwell Ultra's uplift is FP4 and HBM, not bf16.
-
-    A ~1.47x-inflated B300 row would understate every MFU on the toolkit's primary training hardware
-    by ~32%.
-    """
+    """Same 148-SM die, since Blackwell Ultra's uplift is FP4 and HBM.
+    A ~1.47x-inflated B300 row would understate every MFU by ~32%."""
     for dtype in ("bf16", "fp16", "fp8", "tf32"):
         assert GPU_PEAK_FLOPS["B300"].flops[dtype] == GPU_PEAK_FLOPS["B200"].flops[dtype], (
             f"B300 {dtype} peak diverges from B200's; both are the 148-SM Blackwell die and a "

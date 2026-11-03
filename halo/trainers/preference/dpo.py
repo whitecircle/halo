@@ -9,12 +9,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Distributed DPO trainer: EP, TP and PP; CP unsupported (the Bradley-Terry loss needs full-sequence sums).
-
-Under EP/TP the reference model is not parallelized: use PEFT/LoRA or ``precompute_ref_log_probs``. Under PP
-the trainer is precompute-only (``ref_chosen_logps`` / ``ref_rejected_logps`` as dataset columns), the
-``[chosen ⧺ rejected]`` concat is interleaved into pairs, and only the re-implemented loss types run.
-"""
+"""Distributed DPO trainer: EP, TP and PP; CP unsupported (the Bradley-Terry loss needs full-sequence sums). Under
+EP/TP the reference is not parallelized: use PEFT/LoRA or ``precompute_ref_log_probs``. PP is precompute-only and
+interleaves the concat into pairs."""
 
 from collections.abc import Callable
 
@@ -48,9 +45,7 @@ from halo.trainers.trl_dataset_prep import TRLDatasetPrepMixin
 def _ipo_pair_loss(
     beta: float, chosen_scores: torch.Tensor, rejected_scores: torch.Tensor, labels: torch.Tensor
 ) -> torch.Tensor:
-    """IPO's per-sequence normalization uses the unshifted completion-token count, matching TRL's
-    ``completion_mask.sum(dim=1)`` (labels are built from ``completion_mask``, so the label count is
-    that count)."""
+    """IPO normalizes by the unshifted completion-token count, matching TRL's ``completion_mask.sum(dim=1)``."""
     counts = (labels != LABEL_IGNORE_INDEX).sum(dim=-1).clamp(min=1).float()
     chosen_counts, rejected_counts = split_pairs(counts)
     ipo_delta = chosen_scores / chosen_counts - rejected_scores / rejected_counts
@@ -67,8 +62,6 @@ _PP_PAIR_LOSSES: dict[str, Callable[[float, torch.Tensor, torch.Tensor, torch.Te
 
 
 class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLDatasetPrepMixin, DPOTrainer):
-    """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring)."""
-
     _tag_names = ["trl", "dpo"]
 
     PP_REFUSAL = None
@@ -82,8 +75,8 @@ class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
     )
 
     def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Refuse the DPO options the PP last-stage loss cannot honor; ctor parameters are read from
-        ``kwargs`` only, since a positional argument would rebind TRL's ``model`` slot."""
+        """Ctor parameters are read from ``kwargs`` only, since a positional argument would rebind TRL's ``model``
+        slot."""
         reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
         reject_pp_ref_model(
@@ -123,13 +116,9 @@ class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         }
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
-        """DPO's pipeline-loss contract: interleaved pairs + dataset-precomputed reference log-probs.
-
-        ``completion_mask`` rides ``pad_spec`` so the batch transform sees full-length tensors; the
-        reference log-probs ship interleaved as a per-example extra target, keeping them row-aligned
-        with their pairs across the microbatch split. ``pin_runner_columns=False`` because DPO's
-        dataset columns feed TRL's preference collator, which needs TRL's own signature set.
-        """
+        """``completion_mask`` rides ``pad_spec`` for full-length tensors; reference log-probs ship interleaved to stay
+        row-aligned. ``pin_runner_columns=False`` because DPO's columns feed TRL's preference collator, which needs
+        TRL's own signature set."""
         return PipelineLossAdapter(
             token_loss_fn=self._pp_dpo_token_loss,
             batch_transform=self._pp_dpo_batch_transform,
@@ -141,12 +130,8 @@ class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         )
 
     def _pp_dpo_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """``[chosen ⧺ rejected]`` → interleaved ``[c0, r0, ...]``, labels from the completion mask.
-
-        TRL's collator emits the chunk-style concat, which ``tensor_split`` would break into
-        microbatches comparing unrelated examples; interleaving keeps every pair together. Labels are
-        the completion token ids at their positions — those TRL's ``shift_completion_mask`` scores.
-        """
+        """``tensor_split`` of the concat would compare unrelated examples. Labels are the completion token ids at the
+        positions TRL's ``shift_completion_mask`` scores."""
         input_ids = interleave_halves(batch["input_ids"])
         attention_mask = interleave_halves(batch["attention_mask"])
         completion_mask = interleave_halves(batch["completion_mask"])
@@ -160,12 +145,8 @@ class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         }
 
     def _pp_dpo_token_loss(self, logits: torch.Tensor, target: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Summed per-pair DPO losses over one interleaved microbatch (÷ pair count by the runner).
-
-        Reproduces TRL's ``_compute_loss`` for the supported subset: reverse-KL scores against the
-        precomputed reference, then the weighted sum over the configured loss types of their
-        ``_PP_PAIR_LOSSES`` implementations — the same mapping ``_reject_unsupported_pp_options`` gates on.
-        """
+        """Summed per-pair DPO losses over one interleaved microbatch; reproduces TRL's ``_compute_loss`` for the
+        subset ``_reject_unsupported_pp_options`` gates on."""
         labels = target["labels"]
         seq_logps = sequence_logprobs(logits, labels)
         chosen_logps, rejected_logps = split_pairs(seq_logps)

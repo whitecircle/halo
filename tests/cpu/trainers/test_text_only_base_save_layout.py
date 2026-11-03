@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """A ``text_only_model`` full fine-tune saved through the base Trainer writes its text-only layout.
-
-``text_only_model: true`` loads a multimodal Qwen3.5/3.6 checkpoint as its ``*ForCausalLM`` sibling,
-and transformers records the ``PrefixChange(prefix_to_remove="language_model")`` that load consumed.
-Where no parallel saver claims the write (single GPU, DDP, accelerate FSDP), the trainer falls back to
-HF's ``Trainer.save_model``, whose stock ``save_pretrained`` replays that record: a ``*_text`` config
-over ``model.language_model.*`` keys. transformers re-strips the prefix on reload, so a reload alone
-proves nothing; engine loaders keyed on the architectures and ``reattach_vision_tower.py`` do not.
-These tests pin the on-disk keys to what a fresh model of the saved config writes.
-
-    python tests/cpu/trainers/test_text_only_base_save_layout.py
-"""
+transformers re-strips ``language_model`` on reload; engine loaders and ``reattach_vision_tower.py`` do not."""
 
 from __future__ import annotations
 

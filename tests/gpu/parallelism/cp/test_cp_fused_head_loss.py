@@ -1,23 +1,9 @@
 #!/usr/bin/env python
-"""CP's fused head loss on GPU: Liger's fused linear cross-entropy kernel, which the CPU tier replaces with a
-plain-torch stand-in, against the fp32 logits loss the CP wrapper runs without ``fused_linear_cross_entropy``.
+"""CP's fused head loss on GPU: Liger's fused kernel, which the CPU tier stubs, against the fp32 logits loss the CP
+wrapper otherwise runs.
 
-Three checks per launch, on each of the two ranks:
-
-  * **Kernel.** :func:`fused_head_ce_sum` against ``transform.project`` and fp32 cross-entropy for every head
-    transform field (hidden scale, logit scale, softcap, vocabulary cut): the summed loss, the argmax of every
-    supervised row and the hidden and weight gradients.
-  * **Memory.** At Qwen3's vocabulary the fused loss's forward-and-backward peak stays under a quarter of the
-    logits loss's, which holds the bf16 logits, their fp32 copy and the saved log-softmax.
-  * **Model.** The family's tiny model (``tests/common/equivalence/cp_equivalence.py``) under CP=2, once per path
-    on one seeded weight set and one batch whose rank-0 chunk supervises its boundary target alone in one row: the
-    rank-averaged loss and gradients, the router aux term, the chunk accuracy the fused forward returns in place
-    of logits, and the head projecting one position on the fused path. Bailing's remote-code forward takes no
-    ``logits_to_keep`` and must keep the logits loss.
-  * **Wrapper memory.** Where the fused path runs, the same tiny model at Qwen3's vocabulary: the fused training step's peak stays under the
-    logits step's and under the bf16 logits plane alone, which a forward building that plane would reach.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/cp/test_cp_fused_head_loss.py --family qwen3
+The fused peak must stay under a quarter of the logits loss's at Qwen3's vocabulary, and a wrapper step under the bf16
+logits plane alone. Bailing's remote-code forward takes no ``logits_to_keep`` and must keep the logits loss.
 """
 
 import argparse
@@ -56,20 +42,20 @@ KERNEL_TRANSFORMS = {
     "vocab_cut": HeadTransform(vocab_size=4089),
     "all": HeadTransform(hidden_scale=2.0, logit_scale=0.25, softcap=30.0, vocab_size=4089),
 }
-KERNEL_SHAPE = (2048, 256, 4096)  # tokens, hidden, vocab
+KERNEL_SHAPE = (2048, 256, 4096)  # Tokens, hidden, vocab.
 # Both sides round the same bf16 logits; the fused kernel softcaps in fp32 where the projection softcaps in bf16.
 KERNEL_LOSS_RTOL = 2e-3
 KERNEL_GRAD_COSINE_MIN = 0.9999
 KERNEL_GRAD_NORM_RTOL = 1e-2
-# Qwen3's vocabulary at a modest width: the logits loss holds ~10 B per logit at its peak, the fused one a chunk.
+# The logits loss holds ~10 B per logit at its peak, the fused one a chunk.
 MEMORY_SHAPE = (8192, 1024, 151936)
 MEMORY_RATIO_MAX = 0.25
-# A wrapper step whose bf16 logits plane (2 B x local tokens x vocab) dwarfs the tiny model's activations, gradients
-# and the fused kernel's fp32 weight gradient; the tiny configs' 512 positions bound the sequence.
+# The bf16 logits plane (2 B x local tokens x vocab) dwarfs the tiny model's activations and the fused kernel's fp32
+# weight gradient.
 WRAPPER_MEMORY_VOCAB = 151936
 WRAPPER_MEMORY_BATCH, WRAPPER_MEMORY_SEQ = 16, 512
 MOE_AUX_OVERRIDES = {"output_router_logits": True, "router_aux_loss_coef": 0.1}
-# Two bf16 paths over one backbone: only the head rounds differently (one GEMM against per-chunk GEMMs).
+# Only the head rounds differently (one GEMM against per-chunk GEMMs).
 MODEL_LOSS_RTOL = 2e-3
 
 
@@ -98,9 +84,8 @@ def kernel_checks(device, metrics: dict) -> dict[str, bool]:
         loss.backward()
         got = {"hidden": hidden.grad, "weight": head.weight.grad}
         loss_gap = _relative_gap(loss, reference)
-        # Liger writes -1 at an ignored target, and a -1 on a supervised row is a miss. The bf16 softcap can round a
-        # near-tie into an exact tie that argmax breaks by index, so the kernel's token must hold its row's maximal
-        # logit.
+        # Liger writes -1 at an ignored target. The bf16 softcap can round a near-tie into an exact tie argmax breaks
+        # by index, so the kernel's token must hold its row's maximal logit.
         supervised = targets != LABEL_IGNORE_INDEX
         rows, tokens_at = logits[supervised], predicted[supervised]
         picked = rows.gather(-1, tokens_at.clamp(min=0)[:, None]).squeeze(-1)
@@ -228,7 +213,6 @@ def model_checks(family: str, device, metrics: dict) -> dict[str, bool]:
 
 
 def wrapper_memory_checks(family: str, device, metrics: dict) -> dict[str, bool]:
-    """The fused and logits training steps' peaks through the CP wrapper over one family model each."""
     cp_config = ParallelismConfig(cp_size=CP_SIZE).cp_config()
     ids, labels = random_token_batch(WRAPPER_MEMORY_VOCAB, WRAPPER_MEMORY_BATCH, WRAPPER_MEMORY_SEQ, device, seed=SEED)
     peaks = {}

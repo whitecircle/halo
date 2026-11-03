@@ -31,7 +31,6 @@ EPISODE_SLICES_KEY = "slices"
 
 
 def solve_verdict(metrics: Mapping[str, float]) -> bool | None:
-    """Whether an episode solved its task, read off its rollout metrics: the environment's own verdict
-    (:data:`SOLVE_RATE_KEY`), or ``None`` where the environment reports none."""
+    """``None`` where the environment reports no verdict."""
     verdict = metrics.get(SOLVE_RATE_KEY)
     return None if verdict is None else verdict >= 1.0

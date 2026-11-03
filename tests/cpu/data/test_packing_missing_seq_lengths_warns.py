@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""The packing collator must say so when rows carry no ``seq_lengths``.
-
-``packing_strategy: wrapped`` (and any path that hands the packing collator unpacked rows)
-delivers rows without ``seq_lengths``; each row then collates as ONE document and concatenated
-documents attend across each other. That can be intended (wrapped pretraining) — but never
-silently: the collator warns once per instance.
-
-Run: python tests/cpu/data/test_packing_missing_seq_lengths_warns.py
-"""
+"""The packing collator warns once per instance when rows carry no ``seq_lengths``: each row then collates as one
+document and concatenated documents attend across each other, which wrapped pretraining may intend but never
+silently."""
 
 import warnings
 from unittest.mock import MagicMock
@@ -46,13 +40,12 @@ def test_rows_without_seq_lengths_warn_once():
     with pytest.warns(UserWarning, match="seq_lengths"):
         collator.torch_call(rows)
 
-    # Once per instance — a per-step warning would flood the log.
+    # A per-step warning would flood the log.
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         collator.torch_call(rows)
 
-    # Per instance, not per process: a fresh collator (a new eval loader, a second trainer) must
-    # warn again — a class-level latch would silence every instance after the first.
+    # A fresh collator warns again; a class-level latch would silence every instance after the first.
     with pytest.warns(UserWarning, match="seq_lengths"):
         DataCollatorWithPacking(tokenizer=make_tokenizer()).torch_call(rows)
 

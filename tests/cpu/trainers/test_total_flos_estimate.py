@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """``state.total_flos`` keeps HF's estimate while the parameter walk behind it runs once per model.
-
-HF's ``Trainer.floating_point_ops`` multiplies each micro-batch's input tokens by
-``model.num_parameters(exclude_embeddings=True)``, which walks every module and parameter: 1.6 ms per
-micro-batch on an 8B model, 7 ms with all-linear LoRA, exposed on host-bound steps. The spine's override must
-return the same number for every batch, walk the model once, and walk again only for a different model.
-
-Run: python tests/cpu/trainers/test_total_flos_estimate.py
-"""
+HF's ``Trainer.floating_point_ops`` walk costs 1.6 ms per micro-batch on an 8B model, 7 ms with all-linear LoRA."""
 
 import pytest
 import torch

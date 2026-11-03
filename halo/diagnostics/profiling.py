@@ -1,7 +1,4 @@
-"""Opt-in profiling: CUDA memory reads, allocation history and snapshots, torch profiler traces.
-
-Artifacts are rank-tagged; global rank 0 profiles by default, ``ranks="all"`` every rank.
-"""
+"""Opt-in CUDA memory and torch-profiler capture; artifacts are rank-tagged, global rank 0 profiles by default."""
 
 from __future__ import annotations
 
@@ -48,7 +45,6 @@ def _parse_rank_spec(spec: str | int | None) -> set[int] | None:
 
 
 def should_profile_this_rank(spec: str | int | None) -> bool:
-    """Whether the current global rank is selected by ``spec``."""
     selected = _parse_rank_spec(spec)
     if selected is None:
         return True
@@ -56,7 +52,6 @@ def should_profile_this_rank(spec: str | int | None) -> bool:
 
 
 def read_cuda_memory() -> CudaMemoryGiB | None:
-    """This rank's current and peak CUDA memory, or ``None`` without CUDA."""
     if not torch.cuda.is_available():
         return None
     return CudaMemoryGiB(
@@ -68,7 +63,6 @@ def read_cuda_memory() -> CudaMemoryGiB | None:
 
 
 def log_cuda_memory(tag: str = "") -> None:
-    """Log this rank's current and peak CUDA memory (GiB); nothing without CUDA."""
     memory = read_cuda_memory()
     if memory is None:
         return
@@ -81,8 +75,7 @@ def log_cuda_memory(tag: str = "") -> None:
 
 
 def start_memory_history(max_entries: int = _MEMORY_HISTORY_MAX_ENTRIES) -> bool:
-    """Start recording CUDA allocation history with stacks; False without CUDA. Costly, so scope it to a
-    few steps."""
+    """Costly, so scope it to a few steps; False without CUDA."""
     if not torch.cuda.is_available():
         return False
     torch.cuda.memory._record_memory_history(max_entries=max_entries)
@@ -90,15 +83,13 @@ def start_memory_history(max_entries: int = _MEMORY_HISTORY_MAX_ENTRIES) -> bool
 
 
 def stop_memory_history() -> None:
-    """Stop CUDA allocation history recording."""
     if not torch.cuda.is_available():
         return
     torch.cuda.memory._record_memory_history(enabled=None)
 
 
 def dump_memory_snapshot(path: str) -> str | None:
-    """Dump the recorded CUDA memory snapshot to ``path`` (a ``.pickle`` for
-    https://pytorch.org/memory_viz); the path, or None on failure."""
+    """Dump to ``path`` (a ``.pickle`` for https://pytorch.org/memory_viz); the path, or None on failure."""
     if not torch.cuda.is_available():
         return None
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -119,8 +110,7 @@ def cuda_memory_history(
     max_entries: int = _MEMORY_HISTORY_MAX_ENTRIES,
     label: str = "snapshot",
 ) -> Iterator[None]:
-    """Record CUDA allocation history over the region on the selected ``ranks`` and dump
-    ``<output_dir>/<label>-rankNN.pickle``."""
+    """Record allocation history over the region on ``ranks`` and dump ``<output_dir>/<label>-rankNN.pickle``."""
     output_dir = output_dir or data_path("profiling", "memory")
     active = torch.cuda.is_available() and should_profile_this_rank(ranks)
     if not active:
@@ -148,8 +138,8 @@ def build_profiler(
     schedule: Callable[[int], ProfilerAction] | None = None,
     on_trace_ready: Callable[[profile], None] | None = None,
 ) -> profile:
-    """An unentered ``torch.profiler.profile`` tracing CUDA when available and CPU ops with
-    ``cpu_activity``; creates ``output_dir`` without a barrier, which unselected ranks would never join."""
+    """An unentered profiler tracing CUDA, and CPU ops with ``cpu_activity``; creates ``output_dir`` without a barrier,
+    which unselected ranks would never join."""
     activities = [ProfilerActivity.CPU] if cpu_activity else []
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)
@@ -234,8 +224,8 @@ def torch_profiler_session(
     with_flops: bool = False,
     export_memory_timeline: bool = True,
 ) -> Iterator[profile | None]:
-    """Profile a bounded region on the selected ``ranks`` (yielding the profiler, else ``None``) and
-    write its artifacts on exit; in-loop Trainer profiling is ``TorchProfilerCallback``."""
+    """Profile a bounded region on ``ranks`` (yielding the profiler, else ``None``) and write artifacts on exit;
+    in-loop profiling is ``TorchProfilerCallback``."""
     output_dir = output_dir or torch_trace_dir()
     if not should_profile_this_rank(ranks):
         yield None

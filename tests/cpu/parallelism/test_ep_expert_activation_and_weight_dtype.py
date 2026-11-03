@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""Silent-failure invariants of the EP layers, checked against the real HF blocks.
-
-* **The expert activation comes from the wrapped module.** Every family's expert container resolves
-  ``ACT2FN[config.hidden_act]``; a wrapper that restates ``F.silu`` instead trains a checkpoint with
-  ``hidden_act != "silu"`` on the wrong non-linearity — same shapes, same dtypes, no error.
-* **And when the container carries none, the NAME is resolved off the wrapped block.** That fallback
-  is one chain in ``_resolve_activation`` (block ``hidden_act`` → block ``config`` → the family
-  default), not a per-wrapper spelling: a wrapper that stops handing its block over lands on the SiLU
-  default with no error, which is the same silent wrong non-linearity one rung down.
-* **The fused SwiGLU kernel is armed exactly when the block gates with SiLU.** Every SiLU-gated family
-  swaps one Triton kernel in for the activation and the multiply; disarming it costs only throughput, so
-  nothing but a real block at ``hidden_act: silu`` catches a gate that stopped recognizing SiLU.
-* **Routing weights reach the dispatch boundary in fp32.** ``DeepEPDispatchFunction.forward``
-  upcasts them, so a bf16 weight tensor still produces the right FORWARD; but
-  the backward then hands DeepEP's fp32 ``grad_topk_weights`` back to a bf16 graph input and the
-  autograd engine downcasts it silently, so the router-weight gradient of that family alone is
-  computed in bf16. Under ETP the same tensor is the operand of ``SumGradAcrossGroup``, whose reduce
-  would likewise run in bf16.
-
-Each is checked over a table of families built from their real ``transformers`` classes, so a wrapper
-that hard-codes any of these properties fails here rather than in a training run.
-
-Run: ``python tests/cpu/parallelism/test_ep_expert_activation_and_weight_dtype.py`` (or ``pytest -m cpu``).
-"""
+"""Silent-failure invariants of the EP layers against real HF blocks: expert activation, the fused SwiGLU latch,
+fp32 routing weights. A restated ``F.silu`` trains the wrong non-linearity."""
 
 from __future__ import annotations
 
@@ -67,7 +45,7 @@ from halo.kernels.fused_glu import GluCombine, is_silu_activation, silu_mul_eage
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 16, 32, 2  # experts, hidden, moe intermediate, top_k
-ACT = "gelu"  # deliberately NOT silu: no wrapper may assume it
+ACT = "gelu"  # Deliberately not silu: no wrapper may assume it.
 
 _COMMON = {
     "hidden_size": H,
@@ -82,8 +60,8 @@ _COMMON = {
 
 
 class _BailingExpertMLP(nn.Module):
-    """`BailingMoeV2MLP`: Bailing is remote-code, so its per-expert module is mirrored here — including
-    the ``act_fn`` attribute the wrapper must read."""
+    """Bailing is remote-code, so `BailingMoeV2MLP` is mirrored here, including the ``act_fn`` the wrapper must
+    read."""
 
     def __init__(self):
         super().__init__()
@@ -94,7 +72,7 @@ class _BailingExpertMLP(nn.Module):
 
 
 class _BailingGate(nn.Module):
-    """`BailingMoeV2Gate`: returns ``(topk_idx, topk_weight, logits)`` with all routing internal."""
+    """`BailingMoeV2Gate` returns ``(topk_idx, topk_weight, logits)`` with all routing internal."""
 
     def __init__(self):
         super().__init__()
@@ -182,7 +160,7 @@ def _mistral4():
 
 
 def _cohere2_moe(**overrides):
-    """Cohere2's experts are ``intermediate_size`` wide; that field carries M here."""
+    """Its experts are ``intermediate_size`` wide; that field carries M here."""
     config = {key: value for key, value in _COMMON.items() if key != "moe_intermediate_size"}
     return Cohere2MoeSparseMoeBlock(
         Cohere2MoeConfig(
@@ -199,7 +177,7 @@ FAMILIES = [
     ("qwen3_5", EPQwen3_5MoELayer, _qwen3_5, "experts", True),
     ("glm4_moe_lite", EPGlm4MoELayer, _glm4_lite, "experts", True),
     ("laguna", EPLagunaMoELayer, _laguna, "experts", True),
-    ("lfm2", EPLfm2MoELayer, _lfm2, "experts", False),  # Lfm2MoeExperts pins F.silu on the container
+    ("lfm2", EPLfm2MoELayer, _lfm2, "experts", False),  # Lfm2MoeExperts pins F.silu on the container.
     ("mistral4", EPMistral4MoELayer, _mistral4, "experts", True),
     ("bailing", EPBailingMoELayer, _BailingBlock, "experts.0", True),
     ("inkling", EPInklingMoELayer, _inkling, "experts", True),
@@ -208,17 +186,16 @@ FAMILIES = [
 _FAMILY_FIELDS = ("name", "wrapper", "factory", "act_owner", "tracks_hidden_act")
 _FAMILY_IDS = [family[0] for family in FAMILIES]
 
-# The both-ways matrix needs a factory buildable at a NON-silu hidden_act.
 FUSED_SWIGLU_FAMILIES = [
     (name, wrapper, factory)
     for name, wrapper, factory, _owner, _tracks in FAMILIES
-    # The factories take ``**overrides``: keying on a NAMED hidden_act param empties this list.
+    # Keying on a named hidden_act param would empty this list.
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in inspect.signature(factory).parameters.values())
 ]
-# An empty derivation must fail loudly: a zero-case parametrize is a SKIP, which reads green.
+# A zero-case parametrize is a skip, which reads green.
 assert FUSED_SWIGLU_FAMILIES, "no factory accepts a hidden_act override; the fused-SwiGLU matrix would not run"
 
-# The name fallback's second rung needs a block that KEEPS its config; only some HF blocks do.
+# Only some HF blocks keep their config.
 CONFIG_CARRYING_FAMILIES = [
     (name, wrapper, factory, act_owner)
     for name, wrapper, factory, act_owner, _tracks in FAMILIES
@@ -245,31 +222,23 @@ def _build(factory, wrapper, dtype=torch.float32, prepare=None):
 
 @pytest.mark.parametrize(_FAMILY_FIELDS, FAMILIES, ids=_FAMILY_IDS)
 def test_expert_activation_is_read_from_the_wrapped_module(name, wrapper, factory, act_owner, tracks_hidden_act):
-    """Identity, not equality: the wrapper must hold the very activation object the HF experts use,
-    so a checkpoint's ``hidden_act`` can never be overridden by the wrapper's own assumption."""
+    """Identity, so a checkpoint's ``hidden_act`` can never be overridden by the wrapper's own assumption."""
     block, layer = _build(factory, wrapper)
     expected = _resolve(block, act_owner).act_fn
 
     assert layer.act_fn is expected, f"{name} did not adopt the wrapped module's activation"
-    # Anti-vacuity: families honouring hidden_act must land on the table's non-silu; LFM2 pins F.silu.
+    # Anti-vacuity: LFM2 pins F.silu; the others land on the table's non-silu.
     assert (layer.act_fn is not F.silu) is tracks_hidden_act
 
 
 @pytest.mark.parametrize(_FAMILY_FIELDS, FAMILIES, ids=_FAMILY_IDS)
 def test_the_activation_name_fallback_reads_the_wrapped_block(name, wrapper, factory, act_owner, tracks_hidden_act):
-    """With no live ``act_fn`` on the expert container, the activation is rebuilt from the BLOCK's own
-    ``hidden_act`` — for every family, not just the one wrapper that spelled that probe itself.
-
-    This is the rung an upstream rename lands on: the container moves or loses ``act_fn``, and the
-    only thing between the run and a silent SiLU is this resolution. A wrapper that resolves the name
-    itself (or stops handing its block to ``_resolve_activation``) drops to the default instead, and
-    the whole expert stack trains on the wrong non-linearity with no error.
-    """
+    """An upstream rename lands here: a wrapper that stops handing its block to ``_resolve_activation`` drops to the
+    SiLU default with no error."""
 
     def strip_container_activation(block):
         delattr(_resolve(block, act_owner), "act_fn")
-        # A third activation: distinct from the table's ``ACT`` (which every config here carries) and
-        # from the ``silu`` default, so neither a config read nor the default can fake this pass.
+        # Distinct from ``ACT`` and the ``silu`` default, so neither a config read nor the default can fake this pass.
         block.hidden_act = "relu"
 
     _block, layer = _build(factory, wrapper, prepare=strip_container_activation)
@@ -284,24 +253,19 @@ def test_the_activation_name_fallback_reads_the_wrapped_block(name, wrapper, fac
     ids=[family[0] for family in CONFIG_CARRYING_FAMILIES],
 )
 def test_the_activation_name_fallback_falls_through_to_the_block_config(name, wrapper, factory, act_owner):
-    """Second rung of the same chain: a block carrying no ``hidden_act`` of its own must resolve the
-    name from its ``config`` rather than dropping to the SiLU default."""
     _block, layer = _build(factory, wrapper, prepare=lambda block: delattr(_resolve(block, act_owner), "act_fn"))
 
     assert type(layer.act_fn) is type(ACT2FN[ACT]), f"{name} ignored config.hidden_act={ACT!r}"
 
 
 def test_gemma4_activation_name_fallback_reads_the_wrapped_experts_module():
-    """Gemma 4 is off the table above — its wrapped block IS the expert container and its forward
-    takes the router outputs — but it runs the same chain, so the block rung must still be handed the
-    block. A positional-only source leaves ``original_layer=None`` and drops straight to the default.
-    """
+    """Off the table above: its block is the expert container and its forward takes the router outputs."""
     experts = Gemma4TextExperts(
         Gemma4TextConfig(hidden_size=H, moe_intermediate_size=M, num_experts=E, top_k_experts=K, hidden_activation=ACT)
     )
     delattr(experts, "act_fn")
-    # A third activation, as above: distinct from the config's ``hidden_activation`` and from the
-    # gelu_pytorch_tanh default, so neither can fake this pass.
+    # Distinct from the config's ``hidden_activation`` and the gelu_pytorch_tanh default, so neither can fake this
+    # pass.
     experts.hidden_act = "relu"
 
     layer = EPGemma4MoELayer(experts, single_process_ep_config(E)).cpu()
@@ -312,18 +276,8 @@ def test_gemma4_activation_name_fallback_reads_the_wrapped_experts_module():
 
 @pytest.mark.parametrize(_FAMILY_FIELDS, FAMILIES, ids=_FAMILY_IDS)
 def test_every_silu_family_arms_the_fused_kernel(name, wrapper, factory, act_owner, tracks_hidden_act):
-    """A SiLU-gated family must get the fused kernel — ALL of them, not the one that wired it.
-
-    A fused branch living on a single family's ``_glu_combine`` override leaves the other SiLU
-    families silently running the eager activation plus a separate multiply (and the separate
-    autograd chain) on every base compute path, per MoE layer, per step. It is numerically invisible
-    — pure lost throughput — which is exactly why it survives unnoticed.
-
-    The latch is DERIVED in ``_resolve_activation`` from the resolved activation, so what this pins
-    across the whole roster is that correspondence, not a hand-kept list. The blocks here are
-    built at ``hidden_act: gelu`` on purpose (see ``ACT``), so most families assert the disarmed
-    direction and LFM2 — whose upstream pins ``F.silu`` regardless — asserts the armed one.
-    """
+    """Numerically invisible when lost, pure lost throughput. Blocks are built at ``hidden_act: gelu``, so most
+    assert disarmed and LFM2, pinned to ``F.silu``, armed."""
     _block, layer = _build(factory, wrapper)
     expected = GluCombine.silu() if is_silu_activation(layer.act_fn) else None
 
@@ -339,10 +293,7 @@ def test_every_silu_family_arms_the_fused_kernel(name, wrapper, factory, act_own
 def test_the_fused_swiglu_kernel_is_armed_exactly_when_the_block_gates_with_silu(
     name, wrapper, factory, hidden_act, fused, monkeypatch
 ):
-    """`_fused_glu_mul` decides whether one Triton kernel replaces the activation and the multiply on
-    every base compute path. Getting it wrong the safe way is numerically invisible — pure lost
-    throughput — so nothing but a real block built at ``hidden_act: silu`` can hold the line, and the
-    check has to be behavioural: the block's `ACT2FN["silu"]` is neither `nn.SiLU` nor `F.silu`."""
+    """The check is behavioural: the block's `ACT2FN["silu"]` is neither `nn.SiLU` nor `F.silu`."""
     torch.manual_seed(0)
     layer = wrapper(factory(hidden_act=hidden_act), single_process_ep_config(E)).cpu()
 
@@ -357,7 +308,6 @@ def test_the_fused_swiglu_kernel_is_armed_exactly_when_the_block_gates_with_silu
         calls.append(gate.shape)
         return silu_mul_eager(gate, up)
 
-    # The fused branch dispatches through the latched attribute on the BASE seam, one call site.
     if layer._fused_glu_mul is not None:
         monkeypatch.setattr(layer, "_fused_glu_mul", spy)
     gate, up = torch.randn(6, M), torch.randn(6, M)
@@ -376,8 +326,8 @@ def test_the_fused_swiglu_kernel_is_armed_exactly_when_the_block_gates_with_silu
 def test_routing_weights_reach_the_dispatch_boundary_in_fp32(
     name, wrapper, factory, act_owner, tracks_hidden_act, monkeypatch
 ):
-    """Every family must hand ``_dispatch_compute_combine`` fp32 weights even when the block runs in
-    bf16 — the tensor is a graph input of the DeepEP dispatch, whose backward returns fp32 grads."""
+    """The tensor is a graph input of the DeepEP dispatch, whose backward returns fp32 grads; a bf16 input silently
+    downcasts them."""
     _block, layer = _build(factory, wrapper, dtype=torch.bfloat16)
     seen: list[torch.dtype] = []
 

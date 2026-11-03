@@ -1,7 +1,6 @@
-"""Run setup before any model loads: the ``output_dir`` guard, caches, log verbosity, tracking env,
-seed, resume detection and the ``run.log`` console tee. Read-side work follows
-``DIST_INPUT_SHARED_FILESYSTEM``, write-side ``DIST_OUTPUT_SHARED_FILESYSTEM``.
-"""
+"""Run setup before any model loads: the ``output_dir`` guard, caches, tracking env, seed, resume detection and the
+``run.log`` tee. Read-side work follows ``DIST_INPUT_SHARED_FILESYSTEM``, write-side
+``DIST_OUTPUT_SHARED_FILESYSTEM``."""
 
 import atexit
 import contextlib
@@ -31,21 +30,16 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# Seconds allowed for tee to flush its block-buffered tail once the fds are restored at exit. It is
-# draining an already-closed pipe, so a longer wait would only mask a stuck process.
+# Seconds for tee to flush at exit. It drains an already-closed pipe, so a longer wait would only mask a stuck process.
 _TEE_DRAIN_TIMEOUT_S = 5
 
-# The run.log this process's fds are redirected into: a path, not a bool, since the redirect is
-# one-shot and a later call naming another output_dir must be reported.
+# A path, since the redirect is one-shot and a later call naming another output_dir must be reported.
 _tee_log_path: str | None = None
 
 
 def _validate_output_dir(output_dir: str) -> None:
-    """Raise ``ValueError`` if output_dir exists and holds anything beyond internal artifacts.
-
-    An unreadable directory gets the same verdict, so the ``OSError`` is translated to a
-    ``ValueError`` here rather than escaping as a second error type through the cross-rank seam.
-    """
+    """Raise ``ValueError`` if output_dir holds anything beyond internal artifacts; an unreadable one gets the same
+    verdict, so no second error type crosses the rank seam."""
     if os.path.exists(output_dir):
         try:
             entries = os.listdir(output_dir)
@@ -54,9 +48,8 @@ def _validate_output_dir(output_dir: str) -> None:
                 f"Output directory '{output_dir}' exists but could not be read ({e}). Fix its "
                 f"permissions or mount, or use a new output_dir."
             ) from e
-        # Toolkit scratch and logging, not training state: probe suffixes, reference-cache parents and the
-        # checkpointing-plan record a crash before the first checkpoint leaves can outlive a failed run, and NFS
-        # may retain live mmap inodes.
+        # Scratch, not training state: probe suffixes, reference-cache parents and the checkpointing-plan record can
+        # outlive a failed run, and NFS may retain live mmap inodes.
         contents = [
             item
             for item in entries
@@ -74,8 +67,7 @@ def _validate_output_dir(output_dir: str) -> None:
 
 
 def _validate_output_dir_across_ranks(output_dir: str) -> None:
-    """COLLECTIVE: run ``_validate_output_dir`` on the FS-aware setup ranks and raise on every rank
-    alike, as the ``ValueError`` callers of this guard match on."""
+    """COLLECTIVE: validate on the FS-aware setup ranks and raise the ``ValueError`` callers match on every rank."""
     validation_error: str | None = None
     if is_fs_save_rank():
         try:
@@ -96,8 +88,7 @@ def _configure_tracking_env_vars(args, training_config, script_name: str) -> Non
         else f"{script_name}-{os.path.basename(training_config.output_dir)}"
     )
     os.environ["CLEARML_TASK"] = run_name
-    # transformers passes args.run_name straight to wandb.init and ignores WANDB_NAME, so the
-    # shortened name reaches wandb only through the config.
+    # transformers passes args.run_name to wandb.init and ignores WANDB_NAME, so the short name goes via the config.
     training_config.run_name = run_name
 
     # Broadcast unconditionally: gating on a per-rank env var makes this a rank-divergent collective.
@@ -109,18 +100,15 @@ def _configure_tracking_env_vars(args, training_config, script_name: str) -> Non
 
 
 def configure_training_run(args, training_config, script_name: str, *, overwrite_output_dir: bool) -> None:
-    """COLLECTIVE: set the run up before any model loads: kernel caches, fp32 matmul precision, the
-    ``output_dir`` guard, the datasets cache, log verbosity (the root level is set earlier, by
-    ``parse_script_args``), tracking env vars and the seed."""
-    # Both kernel caches, anchored on HF_HOME, before any model/attention import: they read their env
-    # lazily at first compile, and a cold cache re-benchmarks per packed-row width (fla keys on
-    # ceil(tokens/1024)) while every peer waits in the next collective.
+    """COLLECTIVE: kernel caches, fp32 matmul precision, the ``output_dir`` guard, the datasets cache, log verbosity,
+    tracking env vars and the seed."""
+    # Before any model/attention import: both read their env lazily at first compile, and a cold cache re-benchmarks
+    # per packed-row width (fla keys on ceil(tokens/1024)) while every peer waits in the next collective.
     ensure_fa4_kernel_cache_env()
     anchor_jit_cache_dir("TRITON_CACHE_DIR", "triton_cache")
 
-    # Process-global so every entry point gets it: the embedding script's SentenceTransformer branch
-    # does not load through load_distributed_model, and the image's TF32 default collapses adjacent
-    # RoPE positions past 2048 tokens.
+    # Process-global: the embedding script's SentenceTransformer branch skips load_distributed_model, and the image's
+    # TF32 default collapses adjacent RoPE positions past 2048 tokens.
     configure_float32_matmul_precision()
 
     # Config-derived → rank-uniform; a resume request defers this guard to resume_checkpoint_from_config.
@@ -144,13 +132,9 @@ def configure_training_run(args, training_config, script_name: str, *, overwrite
 
 
 def resume_checkpoint_from_config(training_config, *, overwrite_output_dir: bool) -> str | None:
-    """COLLECTIVE: the checkpoint ``training_config.resume_from_checkpoint`` names, or ``None``.
-
-    ``True`` (or its YAML string forms) picks the newest checkpoint in ``output_dir`` complete on every
-    rank, and a path must be complete on every rank; ``None``/``False`` skips resume. Incomplete step
-    directories are moved out of rotation's sight (:func:`resolve_resume_checkpoint`). Picking nothing
-    means a fresh run, so the ``output_dir`` guard :func:`configure_training_run` skipped runs here.
-    """
+    """COLLECTIVE: the checkpoint ``resume_from_checkpoint`` names, or ``None``. ``True`` picks the newest complete on
+    every rank, and a path must be complete on every rank; incomplete step directories move out of rotation's sight.
+    Picking nothing is a fresh run, so the ``output_dir`` guard :func:`configure_training_run` skipped runs here."""
     resume = getattr(training_config, "resume_from_checkpoint", None)
     if not resume:
         return None
@@ -170,22 +154,16 @@ def resume_checkpoint_from_config(training_config, *, overwrite_output_dir: bool
 def prepare_distributed_resume(
     training_config, model_config, parallelism_config, *, overwrite_output_dir: bool
 ) -> tuple[str | None, str]:
-    """COLLECTIVE: ``(resume_checkpoint, policy_weights_source)`` before the model loads: the checkpoint
-    for trainer state, and where the policy reads its weights (:func:`resolve_resume_weights_source`)."""
+    """COLLECTIVE: ``(resume_checkpoint, policy_weights_source)`` before the model loads."""
     checkpoint = resume_checkpoint_from_config(training_config, overwrite_output_dir=overwrite_output_dir)
     weights_source = resolve_resume_weights_source(checkpoint, model_config, parallelism_config)
     return checkpoint, weights_source
 
 
 def install_log_tee(output_dir: str | None) -> None:
-    """Tee the run's console output into ``<output_dir>/log/run.log``.
-
-    Redirects fds 1 and 2 through a ``tee`` subprocess so logging, ``print``, progress bars and native
-    torch/NCCL writes all land in the file while still showing live; a log directory or ``tee`` that
-    cannot be set up is warned. A no-op without ``output_dir`` or off ``is_fs_save_rank``: run.log is
-    an output artifact, so it follows the checkpoint writers' rank-agreed filesystem flags, and a
-    per-node env override cannot leave two nodes writing into one file.
-    """
+    """Tee fds 1 and 2 into ``<output_dir>/log/run.log`` through a ``tee`` subprocess, so print, progress bars and
+    native torch/NCCL writes land there too; a setup failure is warned. A no-op off ``is_fs_save_rank``: the log
+    follows the checkpoint writers' rank-agreed flags, so a per-node env override cannot split it."""
     global _tee_log_path
     if not output_dir or not is_fs_save_rank():
         return

@@ -1,9 +1,5 @@
-"""The hub's tensor names on save: the transformers load conversions a save reverts, and the view that reads a
-saved layout back under the live module names.
-
-transformers reverts its load conversions inside ``save_pretrained``; the gathered, TP, PP and EP writers bypass
-that call, so they revert through the list resolved here.
-"""
+"""The hub's tensor names on save and the view reading a saved layout back under live names. transformers reverts its
+load conversions only inside ``save_pretrained``, which the gathered, TP, PP and EP writers bypass."""
 
 from __future__ import annotations
 
@@ -35,9 +31,8 @@ def _has_child_at_prefix(model: torch.nn.Module, dotted_prefix: str) -> bool:
 
 
 def _is_sub_model_prefix_change(conversion) -> bool:
-    """Whether ``conversion`` strips the leading level of a sub-model's own keys: a ``PrefixChange`` scoped to
-    the sub-model, such as the ``vision_model`` level of a SigLIP tower (Command A+, LFM2-VL), which the hub
-    index and both engines' loaders keep and the module tree drops."""
+    """Whether ``conversion`` strips a sub-model's leading level (SigLIP's ``vision_model`` in Command A+, LFM2-VL),
+    which the hub index and both engines' loaders keep and the module tree drops."""
     return (
         isinstance(conversion, PrefixChange)
         and bool(conversion.scope_prefix)
@@ -47,14 +42,10 @@ def _is_sub_model_prefix_change(conversion) -> bool:
 
 
 def conversions_to_revert(model: torch.nn.Module) -> list:
-    """The conversions a save-side revert, or a hub-namespace weight sync, inverts.
-
-    What the load recorded, minus a ``PrefixChange`` the saved tree cannot carry; an empty record means
-    the source was already in the module layout. Without a record (built from config, or lazily) the
-    family's registry mapping minus its model-level ``PrefixChange``, as transformers does. A
-    dequantizing load reverts the registry mapping instead, since a quantizer op's reverse respells keys
-    into names no checkpoint has. A sub-model's own ``PrefixChange`` is its hub spelling and always stays.
-    """
+    """The conversions a save-side revert or hub-namespace sync inverts: the load's record (empty means module layout),
+    else the registry mapping minus its model-level ``PrefixChange``. A dequantizing load takes the registry mapping
+    too, since a quantizer op's reverse respells keys into names no checkpoint has. A sub-model's own ``PrefixChange``
+    always stays."""
     conversions = getattr(model, "_weight_conversions", None)
     quantized = conversions is not None and any(
         hasattr(op, "hf_quantizer") for c in conversions for op in getattr(c, "operations", ())
@@ -81,8 +72,7 @@ def conversions_to_revert(model: torch.nn.Module) -> list:
 
 @contextmanager
 def save_pretrained_layout(model: torch.nn.Module) -> Iterator[None]:
-    """Hold a ``save_pretrained`` of ``model`` to :func:`conversions_to_revert`'s list, the one the
-    gathered writers revert through, by swapping it into the load's record for the block."""
+    """Hold ``save_pretrained`` to :func:`conversions_to_revert` by swapping it into the load's record."""
     recorded = getattr(model, "_weight_conversions", None)
     model._weight_conversions = conversions_to_revert(model)
     try:
@@ -92,7 +82,7 @@ def save_pretrained_layout(model: torch.nn.Module) -> Iterator[None]:
 
 
 def revert_conversions(model: torch.nn.Module, state_dict: dict, conversions: list) -> dict:
-    """transformers' save-side revert of ``state_dict`` through ``conversions``, raising on failure."""
+    """transformers' save-side revert through ``conversions``, raising on failure."""
     if not conversions:
         return state_dict
     recorded = getattr(model, "_weight_conversions", None)
@@ -104,12 +94,9 @@ def revert_conversions(model: torch.nn.Module, state_dict: dict, conversions: li
 
 
 def revert_to_load_layout(model: torch.nn.Module, state_dict: dict) -> dict:
-    """Map a module-layout state dict back to the checkpoint layout the model was loaded from.
-
-    Without it a MoE save with no EP layer emits fused expert keys that per-expert engine loaders refuse or
-    drop. A failure warns instead of raising: the config may be on disk with the peers past their
-    barrier, and the pre-revert dict is loadable after ``unfuse_moe_experts.py``.
-    """
+    """Map a module-layout state dict back to its load layout, or a MoE save with no EP layer emits fused keys
+    per-expert engines refuse. A failure warns: peers may be past their barrier, and the dict loads after
+    ``unfuse_moe_experts.py``."""
     try:
         return revert_conversions(model, state_dict, conversions_to_revert(model))
     except Exception as e:
@@ -122,10 +109,8 @@ def revert_to_load_layout(model: torch.nn.Module, state_dict: dict) -> dict:
 
 
 def reversed_export_transforms(conversions: list) -> tuple[list[WeightRenaming], list[WeightConverter]]:
-    """``conversions`` (:func:`export_conversions`)
-    reversed in transformers' save-side order and split for a key-by-key respell
-    (``rename_source_key(..., reverse=True)``): a rename maps one key on its own, a key a reverse converter
-    claims needs that converter's other sources beside it."""
+    """``conversions`` reversed in save-side order and split for a key-by-key respell: a rename maps one key alone, a
+    key a reverse converter claims needs that converter's other sources beside it."""
     renamings: list[WeightRenaming] = []
     converters: list[WeightConverter] = []
     for transform in (c.reverse_transform() for c in conversions[::-1]):
@@ -135,15 +120,8 @@ def reversed_export_transforms(conversions: list) -> tuple[list[WeightRenaming],
 
 @dataclass(frozen=True)
 class CheckpointNamespace:
-    """How a model's checkpoint keys reach its live names: the family's whole conversion mapping, as
-    ``from_pretrained`` replays it, the base-model prefix a key may carry or lack, and the
-    :func:`export_conversions` a save inverts.
-
-    transformers resolves the mapping off a whole model's module tree, scoping each sub-model's entries
-    by its path, so a module holding only part of a model (a pipeline stage, named stage-locally) takes
-    this snapshot of the whole one and reads its checkpoint through :class:`ModuleLayoutView` as that
-    model would.
-    """
+    """How a model's checkpoint keys reach its live names. transformers resolves the mapping off a whole model's tree,
+    so a module holding part of a model (a PP stage) takes this snapshot of the whole one."""
 
     conversions: tuple[WeightRenaming | WeightConverter, ...] = ()
     base_model_prefix: str | None = None
@@ -159,11 +137,9 @@ class CheckpointNamespace:
 
 
 class ModuleLayoutView:
-    """A checkpoint's tensors under the live model's own names (the read side of :func:`revert_to_load_layout`),
-    planned by :func:`~halo.model_loading.checkpoint_keys.build_key_plan` through the family's whole conversion
-    mapping, so any layout a save wrote reads back. ``live_names`` and ``namespace`` stand in for a module
-    holding part of the model (a PP stage).
-    """
+    """A checkpoint's tensors under live names, planned through the family's whole conversion mapping so any saved
+    layout reads back. ``live_names`` and ``namespace`` stand in for a module holding part of the model (a PP
+    stage)."""
 
     def __init__(
         self,
@@ -183,8 +159,7 @@ class ModuleLayoutView:
         self.sources = self._plan.sources
 
     def items(self, read: Callable[[str], torch.Tensor]) -> Iterator[tuple[str, torch.Tensor]]:
-        """``(live name, tensor)`` for every live tensor the checkpoint supplies, one converted group at a
-        time; ``read`` serves one checkpoint tensor by key, called only when its group is reached."""
+        """``(live name, tensor)`` one converted group at a time; ``read`` serves a tensor by key when reached."""
         for target, key in self._plan.live_renames().items():
             yield target, read(key)
         config = getattr(self._model, "config", None)
@@ -204,11 +179,7 @@ class ModuleLayoutView:
 
 
 def export_conversions(model: torch.nn.Module) -> list:
-    """The conversions an EP export inverts: :func:`conversions_to_revert` minus the expert-bank merges.
-
-    Every other recorded rename and converter is reverted, on the non-expert params and the gathered layers
-    alike, so the export writes the namespace the load read (a SigLIP tower's ``vision_model`` level, Inkling's
-    ``model.llm.*``); the expert banks keep the layout their family's gather emits, which ``from_pretrained``
-    and both engines read either way.
-    """
+    """:func:`conversions_to_revert` minus the expert-bank merges, so the export writes the namespace the load read
+    while expert banks keep their family's gather layout, which ``from_pretrained`` and both engines read either
+    way."""
     return [c for c in conversions_to_revert(model) if not is_expert_bank_merge(c)]

@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the grouped-GEMM capability predicate.
-
-The answer picks the expert weight layout, so every rank must reach the same one: a capability read
-that fails on one rank has to raise there, never fall back to the per-expert loop while its peers
-take grouped GEMM and later hang in the expert all-gather.
-
-    pytest -m cpu tests/cpu/kernels/test_supports_grouped_mm.py
-"""
+"""The grouped-GEMM capability predicate picks the expert layout, so a failed read raises, never falling back while
+peers hang in the all-gather."""
 
 from __future__ import annotations
 

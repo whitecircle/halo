@@ -1,23 +1,8 @@
 #!/usr/bin/env python
-"""Test: an embedding checkpoint, LoRA folded or fully fine-tuned, serves and resumes exactly.
+"""An embedding checkpoint, LoRA folded or fully fine-tuned, serves and resumes exactly.
 
-The body is :func:`tests.common.embedding_lora_resume.run_embedding_lora_resume`. ``--mode`` picks the run
-shape: ``single`` (one process: plain tensors, the base Trainer's ``optimizer.pt``), ``fsdp`` (torchrun:
-mixin FSDP2, DTensor adapters), ``ddp`` (what ``accelerate launch`` with a MULTI_GPU config runs),
-``presharded`` (FSDP2 over per-rank dataset slices), the FSDP2 knobs (``zero3``, ``hsdp`` on four ranks, and
-``ep1`` / ``ep1_unsharded``, a MoE on the grouped-GEMM EP layers, and ``ep1_single``, those layers on one process,
-where LoRA only checks the refusal), ``tp``,
-``ep``, ``etp``, ``eptp`` and on four ranks ``epetp``, ``ep2dp2`` and ``ep2x2dom``, where LoRA only checks the
-refusal too, and ``tpdp`` (TP over FSDP2 on four ranks: the resume built from the checkpoint, the best-model load
-refused rather than run over FSDP2's stacked TP shards). ``--lora`` picks the adapted modules (``attention``, the
-input embedding beside them as ``mixed``, ``embedding`` alone, or DoRA on the attention projections as ``dora``),
-or ``off`` for a full fine-tune. ``--head`` instead checks construction over a
-pipeline with a projection head after the pooling: refused under FSDP2, TP and EP, accepted under DDP.
-``--gradient-checkpointing`` runs a full fine-tune with checkpointing on, every trainable tensor moving.
-The core rows run the ST encoder and a decoder; the full rows the rest of the family roster.
-
-Usage:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_embedding_lora_resume.py --family bert --mode fsdp
+EP shapes only check LoRA's refusal. ``--head`` checks construction with a projection head after the pooling: refused
+under FSDP2, TP and EP, accepted under DDP.
 """
 
 import argparse

@@ -18,10 +18,8 @@ def reject_uneven_sentence_transformers_batches(
     *,
     toolkit_loader: bool,
 ) -> None:
-    """Refuse a multi-process run whose sentence-transformers train loader (plain DP, pure EP: not
-    ``toolkit_loader``) cannot give every rank its batches alike under accelerate's ``even_batches`` off: a
-    remainder-keeping map-style dataset, or an iterable one that is dispatched or split by more file shards
-    than processes. Decided from the config, the shard count and the launcher's world size alone."""
+    """A sentence-transformers loader cannot give every rank its batches alike with ``even_batches`` off on a
+    remainder-keeping map-style dataset, or an iterable one dispatched or split by more file shards than processes."""
     world_size = launcher_global_world_size()
     if args is None or toolkit_loader or world_size <= 1:
         return
@@ -49,8 +47,8 @@ def reject_uneven_sentence_transformers_batches(
 
 
 def reject_unresolved_max_length(args: EmbeddingConfig | None) -> None:
-    """Refuse a non-positive ``max_length``, which means the backbone's context window only once the embedding
-    script resolves it; unresolved, the collator would cut every text to its special tokens."""
+    """A non-positive ``max_length`` means the context window only once the script resolves it; unresolved, the
+    collator would cut every text to its special tokens."""
     if args is None or args.max_length is None or args.max_length > 0:
         return
     raise ValueError(
@@ -61,8 +59,8 @@ def reject_unresolved_max_length(args: EmbeddingConfig | None) -> None:
 
 
 def reject_batch_sampler_on_toolkit_loader(args: EmbeddingConfig | None, *, toolkit_loader: bool) -> None:
-    """Refuse a batch sampler the toolkit's DP-sharded loader would drop: it builds plain batches and never
-    reads ``batch_sampler``, so ``no_duplicates`` would let in-batch duplicates through as false negatives."""
+    """The toolkit's DP-sharded loader never reads ``batch_sampler``, so ``no_duplicates`` would let in-batch
+    duplicates through as false negatives."""
     if args is None or not toolkit_loader:
         return
     if BatchSamplers(args.batch_sampler) is BatchSamplers.BATCH_SAMPLER:
@@ -78,10 +76,8 @@ def reject_batch_sampler_on_toolkit_loader(args: EmbeddingConfig | None, *, tool
 def reject_injected_lora_parallelism(
     parallelism_config: ParallelismConfig, *, has_injected_lora: bool, has_ep_layers: bool
 ) -> None:
-    """Refuse in-place-injected LoRA under EP and on a backbone carrying EP layers (``has_ep_layers``: the
-    grouped-GEMM layers at ``expert_parallel_size`` 1 too): the save folds the adapters over the backbone's own
-    parameters, which there hold the EP layers' expert tensors in the layers' own layout and names (this rank's
-    shards under EP). The mixin's LoRA gate refuses TP."""
+    """The save folds adapters over the backbone's own parameters, which under EP layers (grouped-GEMM at
+    ``expert_parallel_size`` 1 too) hold expert tensors in the layers' own layout and names."""
     if not has_injected_lora or not (parallelism_config.has_ep_group or has_ep_layers):
         return
     raise ValueError(
@@ -95,9 +91,8 @@ def reject_injected_lora_parallelism(
 
 
 def reject_modules_outside_backbone(model: nn.Module, backbone: nn.Module, *, saves_rank_locally: bool) -> None:
-    """Refuse what the save and resume cannot carry outside the ``auto_model`` backbone: any tuner layer, and
-    where the save writes the other modules rank-locally (``saves_rank_locally``: FSDP2, TP, EP or the
-    grouped-GEMM EP layers), a parameter that trains or that FSDP2 sharded."""
+    """Refuse what the save and resume cannot carry outside the ``auto_model`` backbone: any tuner layer and, where the
+    save writes the other modules rank-locally, a parameter that trains or that FSDP2 sharded."""
     backbone_modules = {id(module) for module in backbone.modules()}
     tuners = [
         name

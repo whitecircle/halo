@@ -11,15 +11,9 @@ from halo.models.moe.family_specs import COHERE2_MOE
 
 
 class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
-    """EP layer for Cohere2 MoE (Cohere2MoeSparseMoeBlock) using DeepEP.
-
-    Fused gate_up_proj/down_proj routed experts (base fused-GLU helpers). ``Cohere2MoeTopKRouter``
-    selects top-k on the raw logits and activates only the selected scores: softmax over the k
-    scores, or sigmoid with optional top-k renorm. The shared expert is one fused MLP on every
-    token, combined with the routed output by ``sum`` or ``average`` (``(routed + shared) / 2``).
-    Layers whose ``mlp_layer_types`` entry is ``dense`` instantiate ``Cohere2MoeMLP`` instead of the
-    sparse block, so they are never wrapped.
-    """
+    """EP layer for ``Cohere2MoeSparseMoeBlock``. ``Cohere2MoeTopKRouter`` selects top-k on the raw logits and
+    activates only the selected scores. The shared expert combines with the routed output by ``sum`` or ``average``.
+    Layers whose ``mlp_layer_types`` entry is ``dense`` build ``Cohere2MoeMLP`` instead, so they are never wrapped."""
 
     HF_MODULE_NAMES = ("Cohere2MoeSparseMoeBlock",)
     FAMILY = COHERE2_MOE
@@ -34,8 +28,7 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
     _NUM_EXPERTS_ATTR_PATHS = ("num_experts", "experts.num_experts", "experts", "gate.weight")
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
-        """Top-k plus the router's activation choice: ``Cohere2MoeTopKRouter`` activates only the
-        selected raw scores, so the activation and the renorm flag determine every gate weight."""
+        """Top-k plus the router's activation choice and renorm flag, which determine every gate weight."""
         super()._adopt_routing(original_layer)
         self.expert_selection_fn = getattr(self.gate, "expert_selection_fn", "softmax")
         if self.expert_selection_fn not in ("softmax", "sigmoid"):
@@ -64,20 +57,14 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
         )
 
     def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Top-k on the raw logits (bias-perturbable), gate weights from the unbiased selected scores.
-
-        Without balancing, ``_biased_topk`` selects on the raw logits as the HF router does (and
-        applies routing replay); a transient bias perturbs selection only, leaving the weights below
-        as the family's own gating computes them.
-        """
+        """Top-k on the raw logits (bias-perturbable), gate weights from the unbiased selected scores."""
         topk_indices = self._biased_topk(router_logits)
         topk_weights = self._gate_weights_at(router_logits, topk_indices)
         self._record_expert_load(topk_indices)
         return topk_indices, topk_weights
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """``Cohere2MoeTopKRouter`` weights at ``indices``: activate only the selected raw scores,
-        softmax over the k scores or sigmoid with optional top-k renorm."""
+        """Router weights at ``indices``: softmax over the k scores, or sigmoid with optional renorm."""
         scores = router_logits.gather(-1, indices)
         if self.expert_selection_fn == "softmax":
             return F.softmax(scores, dim=-1, dtype=torch.float)

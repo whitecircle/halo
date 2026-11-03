@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""Converter-backed lazy loading of a hub-layout composite checkpoint, vs a from_pretrained reference.
+"""Lazy loading of hub-layout composites (GLM-5 Next, Step-3.7) matches a from_pretrained reference, under EP=2 and
+pure ETP.
 
-GLM-5 Next and Step-3.7 ship in a layout transformers bridges only inside ``from_pretrained``:
-GLM-5 Next's vendor-namespace KDA / hyper-connection keys, per-expert projections and the
-three-source ``q/k/v_conv1d → conv1d`` Concatenate; Step-3.7's prefix renames, ``moe.*`` → ``mlp.*``,
-the two-source per-layer ``moe.gate_proj + moe.up_proj → gate_up_proj`` Concatenate and the Step-3.5
-vision tower's chunked, RoPE-permuted ``in_proj``. The lazy loaders plan their keys on that mapping
-(``checkpoint_keys.build_key_plan``), as ``from_pretrained`` does, so this gate proves, against a
-``from_pretrained`` reference on the same checkpoint (written by the family's own ``save_pretrained``):
-
-  1. **EP=2** — every expert shard equals the reference's slice bitwise (a fan-in sliced through
-     EVERY source), every other tensor equals it bitwise at the run's dtype, and the loss matches.
-  2. **Pure ETP (ep1 × etp2)** — the fused halves split on the concatenated tensor (a half-read
-     source would hand each rank the wrong half); the loss matches.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_lazy_load_converted.py --family glm5_next
+Their layout is bridged only inside ``from_pretrained``, including fan-in Concatenates. A half-read source hands each
+ETP rank the wrong half.
 """
 
 import sys
@@ -70,7 +57,6 @@ def _checkpoint_dir() -> str:
 
 
 def _build_checkpoint(model_class, make_config) -> None:
-    """Rank 0: save the tiny composite through its own ``save_pretrained`` — the hub layout."""
     torch.manual_seed(SEED)
     model = model_class(make_config()).to(torch.bfloat16)
     model.save_pretrained(_checkpoint_dir())
@@ -79,12 +65,12 @@ def _build_checkpoint(model_class, make_config) -> None:
 
 
 def _tensors_match(model, reference_sd) -> tuple[bool, str]:
-    """Every loaded tensor equals the reference; EP-wrapped experts equal the local slice, in the
-    wrapper's matmul convention (``[E_local, H, 2M]`` / ``[E_local, M, H]``)."""
+    """EP-wrapped experts equal the local slice, in the wrapper's matmul convention (``[E_local, H, 2M]`` / ``[E_local,
+    M, H]``)."""
     for key, live in model.state_dict().items():
         ref = reference_sd.get(key)
         if ref is None:
-            continue  # EP-rewrapped expert params are compared through the wrapper below
+            continue  # EP-rewrapped expert params are compared through the wrapper below.
         if not tensors_equal_at_narrower_dtype(live.cpu(), ref):
             return False, key
     compared = 0
@@ -118,7 +104,6 @@ def run(ctx):
 
     checks["lazy_gate_admits_checkpoint"] = is_lazy_loadable(ckpt)
 
-    # ── Reference: from_pretrained on the same hub-layout checkpoint ──────────
     ref = model_class.from_pretrained(ckpt, dtype=torch.bfloat16, attn_implementation="eager").to(device)
     ref.train()
     ref_loss = ref(input_ids=input_ids, labels=labels).loss.item()
@@ -128,7 +113,6 @@ def run(ctx):
     cleanup_memory()
     metrics["ref_loss"] = ref_loss
 
-    # ── Leg 1: EP=2 lazy load — bitwise tensors + loss ─────────────────────────
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = load_ep_model_lazy(
         ckpt,
@@ -152,7 +136,7 @@ def run(ctx):
     del model, ep_layers
     cleanup_memory()
 
-    # ── Leg 2: pure ETP (ep1 × etp2) lazy load — split on the concatenated halves ─
+    # Split on the concatenated halves.
     pc = ParallelismConfig(ep_size=1, expert_tp_size=2)
     model = load_ep_model_lazy(
         ckpt,

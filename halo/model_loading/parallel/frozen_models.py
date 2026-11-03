@@ -42,11 +42,7 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass(frozen=True)
 class ReferenceAlternatives:
-    """A caller's ways around holding a frozen reference, named by every reference warning and refusal.
-
-    ``peft`` is named only where an adapter can train: tensor parallelism refuses every LoRA shape, so
-    under TP the text is ``always`` alone.
-    """
+    """A caller's ways around a frozen reference; ``peft`` only where an adapter can train, as TP refuses LoRA."""
 
     always: str
     peft: str | None = None
@@ -58,14 +54,12 @@ class ReferenceAlternatives:
         return f"{self.always} {self.peft}"
 
 
-# The DPO/KTO way around a dense reference, shared by the script loader and the trainer gate so the
-# two report it once.
+# The DPO/KTO way around a dense reference, shared by the script loader and the trainer gate.
 PREFERENCE_REFERENCE_ALTERNATIVES = ReferenceAlternatives(
     always="precompute_ref_log_probs: true scores the same reference once, from the untrained policy, exactly "
     "and with no second model.",
     peft="PEFT (use_peft: true, ref_model=None) is the other way around it.",
 )
-# The on-policy GRPO way around it, shared the same way.
 ON_POLICY_GRPO_REFERENCE_ALTERNATIVES = ReferenceAlternatives(
     always="beta: 0 drops the KL term and its reference.",
     peft="use_peft: true with an attention target scores the reference as the policy with its adapter disabled.",
@@ -76,11 +70,8 @@ _reported_references: set[str] = set()
 
 
 def warn_unparallelized_reference(parallelism_config: ParallelismConfig, avoid: ReferenceAlternatives) -> None:
-    """Warn that a frozen reference beside a policy sharded by EP, ETP or TP is a whole dense replica per rank.
-
-    Its log-probs differ from the policy's by kernel numerics only (the EP layers reproduce the model's own
-    MoE forward), so the cost is memory and time. ``avoid`` is the caller's way around it.
-    """
+    """Warn that a frozen reference beside a policy sharded by EP, ETP or TP is a whole dense replica per rank; its
+    log-probs differ by kernel numerics only, so the cost is memory and time."""
     if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
         message = (
             f"A frozen, unparallelized reference beside a policy sharded by EP/ETP/TP "
@@ -95,9 +86,8 @@ def warn_unparallelized_reference(parallelism_config: ParallelismConfig, avoid: 
 
 
 def on_policy_grpo_holds_reference(beta: float, peft_config, model=None) -> bool:
-    """TRL ``GRPOTrainer``'s own rule for holding a frozen KL reference: ``beta != 0`` on a policy no PEFT
-    adapter wraps, neither through a ``peft_config`` nor as a ``PeftModel`` passed in. Native expert-only LoRA
-    builds no ``PeftModel``, so it holds one. ``model`` may be a name or absent, which no adapter wraps."""
+    """TRL ``GRPOTrainer``'s rule for holding a frozen KL reference: ``beta != 0`` on a policy no PEFT adapter wraps.
+    Native expert-only LoRA builds no ``PeftModel``, so it holds one."""
     wrapped = isinstance(model, torch.nn.Module) and is_peft_model(model)
     return beta != 0.0 and peft_config is None and not wrapped
 
@@ -114,15 +104,10 @@ def load_frozen_auxiliary_model(
     device_map: dict | str | int | torch.device | None = None,
     download_tag: str | None,
 ) -> PreTrainedModel:
-    """Load an unparallelized frozen model that scores the policy: a reference or a distillation teacher.
-
-    Each logprob here is one half of the objective, so a mismatch against the policy biases the loss
-    rather than raising: the load resolves its attention backend, family patches, sinks policy and dtype
-    exactly as the policy loader does, against this model's own config at its own ``revision``, builds on that
-    patched config, and keeps the coverage gate on the task head. ``is_vlm`` pins
-    ``AutoModelForImageTextToText``; a ``download_tag`` makes the load COLLECTIVE-EQUIVALENT, agreeing the source
-    across ranks first, while ``None`` is a single-process load.
-    """
+    """Load an unparallelized frozen reference or teacher, matching the policy load in attention backend, family
+    patches, sinks and dtype, as a mismatch biases the loss rather than raising. ``is_vlm`` pins
+    ``AutoModelForImageTextToText``; a ``download_tag`` makes the load COLLECTIVE-EQUIVALENT, ``None``
+    single-process."""
     # This path's first hub contact for the repo: on a cold cache every rank of every node would
     # otherwise hit the hub at once, and per-node caches could each hold a different commit.
     source = resolve_model_source(model_name_or_path, revision, tag=download_tag) if download_tag else None
@@ -141,9 +126,8 @@ def load_frozen_auxiliary_model(
         "device_map": device_map,
         "excuse_task_head": False,
     }
-    # Joined, so a load failing on one node (a torn local copy, a host OOM) raises on every rank.
-    # Unthrottled: the text path keeps each rank's copy in host memory until the trainer places it,
-    # so admitting the ranks in batches would bound nothing.
+    # Joined, so a load failing on one node raises on every rank. Unthrottled: each rank's copy stays in host memory
+    # until the trainer places it, so admitting ranks in batches would bound nothing.
     with (
         joined_node_load(f"Frozen model load from {model_name_or_path}", max_concurrent=0)
         if download_tag
@@ -168,11 +152,8 @@ def load_frozen_auxiliary_model(
 
 
 def place_and_freeze(auxiliary: PreTrainedModel, policy: torch.nn.Module) -> torch.device:
-    """Move ``auxiliary`` onto ``policy``'s device, switch it to eval and freeze it. Returns the device.
-
-    All three steps are needed together: on a different device the forward raises, in train mode
-    dropout perturbs every target, and with live gradients the optimizer would step the model.
-    """
+    """Move ``auxiliary`` to ``policy``'s device, eval and freeze it: on another device the forward raises, in train
+    mode dropout perturbs every target, and with live gradients the optimizer would step it."""
     device = policy.device
     auxiliary.to(device)
     auxiliary.eval()
@@ -192,12 +173,9 @@ def load_frozen_reference_model(
     reset_sinks: bool,
     attn_default: str | None,
 ) -> PreTrainedModel:
-    """Load the frozen reference a policy is scored against, from ``model_name_or_path``, as the policy loaded.
-
-    The policy's remote-code flag, attention request and sinks policy, then the same tokenizer-driven
-    vocabulary and special-token ids. ``model_name_or_path`` is the run's configured model (never a
-    trained resume checkpoint), at the policy's revision pin, or a separate reference repo at its main.
-    """
+    """Load the frozen reference as the policy loaded: its remote-code flag, attention request, sinks policy and
+    tokenizer state. ``model_name_or_path`` is the run's configured model (never a trained resume checkpoint) at the
+    policy's revision pin, or a separate reference repo at its main."""
     model_ref = load_frozen_auxiliary_model(
         model_name_or_path,
         dtype=resolve_training_dtype(training_config),
@@ -208,14 +186,12 @@ def load_frozen_reference_model(
             else None
         ),
         trust_remote_code=model_config.trust_remote_code,
-        # The policy's own request, resolved against the reference's config: a logratio is a
-        # difference of two logprobs, so a kernel differing between them biases the objective. The
-        # fallback must be the policy's too, or an unset config auto-detects against a pinned policy.
+        # The policy's own request, as a logratio is a difference of two logprobs and a differing kernel biases the
+        # objective; the fallback too, or an unset config auto-detects against a pinned policy.
         attn_implementation=model_config.attn_implementation or attn_default,
         reset_sinks=reset_sinks,
         is_vlm=is_vlm,
-        # When the reference loads before the policy's snapshot this is the repo's first hub contact,
-        # so every rank would otherwise fetch at once.
+        # Possibly the repo's first hub contact, so every rank would otherwise fetch at once.
         download_tag="reference_model",
     )
     configure_run_tokenizer(args, model_ref, tokenizer, embeddings_sharded=is_input_embedding_tp_sharded)
@@ -233,13 +209,9 @@ def load_reference_model_for_on_policy_grpo(
     reset_sinks: bool,
     attn_default: str | None,
 ) -> PreTrainedModel | None:
-    """Load the frozen KL reference of an on-policy GRPO run, or ``None`` where TRL's ``GRPOTrainer`` holds none.
-
-    TRL holds one at ``beta != 0`` on a policy no PEFT adapter wraps (a full fine-tune, or native
-    expert-only LoRA); a PEFT policy is its own reference with the adapter disabled. This model replaces
-    the one TRL would build from the policy's name (fp32, hub main, default attention, no buffer repair),
-    so ``reset_sinks`` and ``attn_default`` must be the policy's.
-    """
+    """The frozen KL reference of an on-policy GRPO run, or ``None`` where TRL holds none. It replaces the one TRL
+    would build (fp32, hub main, default attention, no buffer repair), so ``reset_sinks`` and ``attn_default`` must be
+    the policy's."""
     if not on_policy_grpo_holds_reference(training_config.beta, peft_config):
         return None
     warn_unparallelized_reference(parallelism_config, ON_POLICY_GRPO_REFERENCE_ALTERNATIVES)
@@ -267,13 +239,9 @@ def load_reference_model_for_preference(
     reset_sinks: bool,
     attn_default: str | None,
 ):
-    """Load the frozen reference model for a preference trainer (DPO/KTO), or ``None`` where none is held.
-
-    Under PEFT the reference is the adapter-free base (``None``), which expert-only LoRA lacks, so it
-    must precompute the reference log-probs. A full fine-tune loads an unparallelized copy, or
-    precomputes where the parallelism shards the policy. ``reset_sinks`` and ``attn_default`` must
-    mirror the policy load.
-    """
+    """The frozen reference for DPO/KTO, or ``None``. Under PEFT it is the adapter-free base, which expert-only LoRA
+    lacks, so that must precompute. A full fine-tune loads an unparallelized copy, or precomputes where parallelism
+    shards the policy."""
     if model_config.use_peft:
         if (
             parallelism_config.expert_lora is not None

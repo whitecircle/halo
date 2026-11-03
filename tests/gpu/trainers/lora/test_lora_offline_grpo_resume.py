@@ -1,41 +1,9 @@
 #!/usr/bin/env python
-"""Adapter checkpoint RESUME on the Offline GRPO trainer, across the adapter x parallelism matrix.
+"""Adapter checkpoint resume on the Offline GRPO trainer, across the adapter x parallelism matrix.
 
-``test_lora_offline_grpo.py`` proves an adapter run TRAINS and round-trips a save; this file proves it
-RESUMES. Phase 1 trains 4 steps saving at step 2; phase 2 builds a FRESH trainer from the base model
-(an adapter checkpoint carries no base weights, so the loader restores only the adapters) and resumes
-that checkpoint to step 4, so phase 1 is also the continuous reference its tail is compared against.
-Every check fails when a piece of the resume breaks:
-
-  - the restored adapters equal the checkpoint FILE bit for bit — re-saved through the same
-    ``save_model`` that wrote the checkpoint, so the two files differ only if the restore did;
-  - the frozen base the adapters ride on is byte-identical to the pre-training one;
-  - this rank's optimizer state at ``on_train_begin`` is bit-equal to the phase-1 step-2 snapshot,
-    and the LR scheduler is back at step 2;
-  - the resumed run's steps 3-4 replay phase 1's: step 3 is a forward on the restored WEIGHTS, step 4
-    follows an update driven by the restored MOMENTS. Under EP every DeepEP buffer is built in
-    deterministic mode (:func:`~tests.common.distributed.pin_deterministic_ep_dispatch`), without
-    which the atomic receive order alone changes how each expert adapter's gradient is summed;
-  - the resumed adapters, DISABLED, score a fixed batch as the frozen base scored it before any
-    training — the reference log-probs offline GRPO computes at ``kl_beta > 0``. Anti-vacuous by the
-    companion check that the same adapters ENABLED move those log-probs by orders more. The base
-    reading is taken with the adapters live but still zero-init, where ``lora_B @ lora_A`` is exactly
-    zero and the adapted model IS the base (asserted, not assumed).
-
-Modes / parallelism (``--mode``):
-    lora        — attention PEFT LoRA, dense Qwen3-0.6B, FSDP2
-    lora_ep     — attention PEFT LoRA, GptOss-20B MoE, ep_size=2
-    expert_lora — native grouped LoRA on the MoE expert FFNs, GptOss-20B, ep_size=2
-    lora_etp    — attention PEFT LoRA, GptOss-20B MoE, ep_size=1 + expert_tp_size=2 (pure ETP)
-
-``expert_lora`` adds a third phase: the ep_size=2 checkpoint resumed at ep_size=1. The adapters are
-saved gathered to the full expert count, so the ep1 restore must still be exact even though the
-optimizer shards cannot map onto the new topology and warm-restart loudly.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_offline_grpo_resume.py --mode lora
-    ... --mode lora_ep | --mode expert_lora | --mode lora_etp
+``expert_lora`` adds ep2 resumed at ep1: adapters are saved gathered, so the restore stays exact while the optimizer
+shards warm-restart loudly. Under EP every DeepEP buffer is deterministic, without which receive order changes how an
+adapter's gradient is summed.
 """
 
 import argparse
@@ -82,37 +50,30 @@ ARGS, _ = parser.parse_known_args()
 
 SAVE_AT_STEP = 2
 TOTAL_STEPS = 4
-LEARNING_RATE = 1e-3  # large, so the steps before the save move the adapters well clear of every tolerance below
+LEARNING_RATE = 1e-3  # Large, so the steps before the save move the adapters well clear of every tolerance below.
 MAX_PROMPT_LENGTH = 512
 MAX_COMPLETION_LENGTH = 512
 NUM_TRAIN_SAMPLES = 32
 BASE_PROBE_TENSORS = 8
 BASE_PROBE_ELEMENTS = 4096
 SEED = 42
-# One whole completion group per optimizer step: a step of only negative-advantage rows yields NO
-# gradient (every token pins to the flat ``min_log_prob`` floor), while a full group always carries
-# unclamped positive-advantage rows. Accumulated rather than batched — a 4-row gpt-oss forward
-# routes past the first MoE layer's cached DeepEP capacity and is refused.
+# One whole completion group per step: a step of only negative-advantage rows has no gradient (every token pins to the
+# ``min_log_prob`` floor). Accumulated rather than batched: a 4-row gpt-oss forward routes past the first MoE layer's
+# cached DeepEP capacity and is refused.
 NUM_COMPLETIONS = 4
-# Live at every step on the PEFT-wrapped rows, so the resumed loss depends on the base-vs-adapter gap
-# the restore is supposed to reproduce. The expert-only row builds no PeftModel: a live beta there
-# loads a second DENSE 20B reference instead of reverting adapters, so it stays at the 0.0 default
-# and its reference invariant is probed directly (``_probe_logps``) like every other row's.
+# Live at every step on the PEFT rows, so the resumed loss depends on the base-vs-adapter gap the restore reproduces.
+# An expert-only row builds no PeftModel, and a live beta there loads a second dense 20B reference, so it stays at 0.0.
 KL_BETA = 0.02
 
-# Fixed-batch probe of the policy function. Half the tokens are scored, mirroring the
-# prompt/completion split the trainer's own reference pass runs on.
+# Half the tokens are scored, mirroring the prompt/completion split of the trainer's reference pass.
 PROBE_TEXT = (
     "User: What is 17 plus 25?\nAssistant: The answer is 42. A resumed adapter must score this "
     "batch exactly as the checkpoint's adapter did, and score it as the frozen base once disabled."
 )
 PROBE_MAX_TOKENS = 64
 
-# Measured, all four rows: |reference - base| = 0.0 exactly. Disabling the adapters restores
-# the base computation itself, and the EP forward reproduces itself (gpt-oss top-4 on ep2 takes the
-# fused permute, whose output does not depend on DeepEP's receive order), so the bound is kernel
-# headroom. The trained adapters move the same log-probs by 0.94 (dense) to 7.5 (ETP) nats; the
-# separation guard keeps the equality from passing on a model whose adapters do nothing.
+# Measured on all four rows: |reference - base| = 0.0, so the bound is kernel headroom. The trained adapters move the
+# same log-probs by 0.94 (dense) to 7.5 (ETP) nats; the separation guard rejects adapters that do nothing.
 REF_LOGP_TOL = 1e-4
 ADAPTER_EFFECT_MIN = 0.25
 
@@ -126,8 +87,7 @@ def _config(
         per_device_train_batch_size=1,
         gradient_accumulation_steps=NUM_COMPLETIONS,
         learning_rate=LEARNING_RATE,
-        # Step-count-invariant: phase 1 stops at 3 and phase 2 at 4, so a decaying schedule would
-        # give the same global step a different LR in each and break the loss comparison.
+        # Phase 1 stops at 3 and phase 2 at 4, so a decaying schedule would give one global step two LRs.
         lr_scheduler_type="constant",
         kl_beta=0.0 if mode == "expert_lora" else KL_BETA,
         bf16=True,
@@ -148,8 +108,8 @@ def _config(
 
 
 def _make_trainer(mode: str, pc: ParallelismConfig, tokenizer, dataset, config) -> OfflineGRPOTrainer:
-    # gpt-oss needs flex_attention once the experts are distributed; dense qwen and the ep1 leg,
-    # whose sinks the default reset neutralizes, take the auto default.
+    # gpt-oss needs flex_attention once the experts are distributed; dense qwen and the ep1 leg, whose sinks the
+    # default reset neutralizes, take the auto default.
     model, _, peft_config = load_peft_model(
         mode, pc, attn_implementation="flex_attention" if pc.has_ep_group else None
     )
@@ -164,32 +124,21 @@ def _make_trainer(mode: str, pc: ParallelismConfig, tokenizer, dataset, config) 
 
 
 def _probe_batch(tokenizer, device):
-    """(input_ids, attention_mask, logits_to_keep) — identical tokens in every phase."""
     ids = tokenizer(PROBE_TEXT, return_tensors="pt", truncation=True, max_length=PROBE_MAX_TOKENS)["input_ids"]
     ids = ids.to(device)
     return ids, torch.ones_like(ids), ids.size(1) // 2
 
 
 def _adapters_disabled(model):
-    """The production reference context for this model's adapter kind.
-
-    A PEFT-wrapped policy uses ``disable_adapter()`` — already EP-aware where native expert adapters
-    ride along, patched by ``install_ep_aware_disable_adapter``. An expert-only run builds no PeftModel,
-    so its adapters are reverted by the EP-side context directly.
-    """
+    """A PEFT-wrapped policy uses ``disable_adapter()``; an expert-only run has no PeftModel and reverts on the EP
+    side."""
     peft_model = find_peft_model(model)
     return peft_model.disable_adapter() if isinstance(peft_model, PeftModel) else disable_expert_adapters(model)
 
 
 def _probe_logps(trainer, probe, *, adapters_disabled: bool) -> torch.Tensor:
-    """Per-token log-probs of the fixed probe, through the trainer's own reference kernel.
-
-    ``reshard_fsdp2_modules`` afterwards for the reason its own docstring gives. ``adapters_disabled``
-    is used only AFTER the last training step: opening ``disable_adapter()`` here would restore
-    ``requires_grad`` onto the unsharded copies this forward creates and leave the sharded adapters
-    frozen (``agent-docs/optimization/peft.md``), which is why the frozen-base reading below is taken from
-    the zero-init adapters rather than by disabling them.
-    """
+    """``adapters_disabled`` only after the last step: ``disable_adapter()`` restores ``requires_grad`` onto the
+    unsharded copies and leaves the sharded adapters frozen (``agent-docs/optimization/peft.md``)."""
     ids, mask, keep = probe
     unwrapped = trainer.accelerator.unwrap_model(trainer.model)
     was_training = trainer.model.training
@@ -209,16 +158,9 @@ def _probe_logps(trainer, probe, *, adapters_disabled: bool) -> torch.Tensor:
 
 
 def _base_weight_probe(model) -> dict[str, torch.Tensor]:
-    """A strided sample of frozen base tensors, for the "the restore touched only adapters" comparison.
-
-    Local shards, no collective: a rank-local divergence is the failure this looks for, and averaging
-    it across an all-gather would hide exactly that. Strided on both axes because a prefix would
-    certify the wrong thing — the first frozen tensors of every family here are the embedding and
-    layer 0's attention, while the restore that CAN corrupt base weights is the expert-LoRA one, whose
-    ``copy_`` targets are resolved per expert projection deep in the stack. Within a tensor the sample
-    is strided too: the corruption is a whole-tensor ``copy_`` into the wrong parameter, so a spread
-    of elements catches it without holding gigabytes of a 20B model's experts across two phases.
-    """
+    """A strided sample of frozen base tensors, local to the rank: an all-gather would average away a rank-local
+    divergence. The expert-LoRA restore's ``copy_`` targets sit deep in the stack, past the embedding and layer 0 a
+    prefix would sample."""
     frozen = [
         (name, param) for name, param in model.named_parameters() if "lora_" not in name and not param.requires_grad
     ]
@@ -242,12 +184,8 @@ def _base_weights_unchanged(before: dict, after: dict) -> tuple[bool, str]:
 
 
 def _optimizer_state_is_warm_restarted(snapshot: dict) -> tuple[bool, str]:
-    """No TRAINED optimizer state survived: every entry is back at its freshly-initialized value.
-
-    Not "the state is empty": ``optimizer.state`` is a defaultdict, so a bare read inserts an empty
-    entry, and an entry torch's zero-LR init step materialized counts that step. The discriminating
-    reading is that every moment is zero and no ``step`` counter reached the checkpoint's.
-    """
+    """No trained optimizer state survived. ``optimizer.state`` is a defaultdict and torch's zero-LR init step counts,
+    so an empty check won't do: every moment must be zero and no ``step`` reach the checkpoint's."""
     carried = [
         f"{fqn}.{key}"
         for fqn, entry in snapshot["state"].items()
@@ -264,7 +202,6 @@ def _adapter_file(directory: str) -> dict[str, torch.Tensor]:
 
 
 def _adapter_files_identical(reference: str, candidate: str) -> tuple[bool, str]:
-    """Rank 0: two adapter saves hold the same tensors, key for key, bit for bit."""
     ref, cand = _adapter_file(reference), _adapter_file(candidate)
     if set(ref) != set(cand):
         missing, extra = sorted(set(ref) - set(cand)), sorted(set(cand) - set(ref))
@@ -278,12 +215,8 @@ def _adapter_files_identical(reference: str, candidate: str) -> tuple[bool, str]
 
 
 def _checkpoint_carries_trained_adapters(checkpoint: str) -> tuple[bool, str]:
-    """Rank 0 anti-vacuity: the file every restore is compared against must hold TRAINED adapters.
-
-    ``lora_B`` is zero-init, so an all-zero B half would mean phase 1 wrote its adapters before
-    training them, and every "restored == file" verdict would then also hold for a resume that
-    restored nothing at all.
-    """
+    """The file every restore is compared against holds trained adapters. ``lora_B`` is zero-init, so an all-zero B
+    half would pass every "restored == file" check even for a resume that restored nothing."""
     saved = _adapter_file(checkpoint)
     b_tensors = {k: v for k, v in saved.items() if is_lora_b_key(k)}
     if not b_tensors:
@@ -295,7 +228,6 @@ def _checkpoint_carries_trained_adapters(checkpoint: str) -> tuple[bool, str]:
 
 
 def _fresh_adapters_are_zero_init(model, *, expert_lora: bool) -> tuple[bool, str]:
-    """Every ``lora_B`` of a freshly built model is zero — the state a resume has to overwrite."""
     snapshot = snapshot_adapters(model, expert_lora=expert_lora)
     b_tensors = {k: v for k, v in snapshot.items() if is_lora_b_key(k)}
     if not b_tensors:
@@ -307,11 +239,8 @@ def _fresh_adapters_are_zero_init(model, *, expert_lora: bool) -> tuple[bool, st
 
 
 class _Phase1Capture(TrainerCallback):
-    """Phase 1: the frozen-base reading before step 1, and the state the shards hold at the save.
-
-    Both are taken from inside ``train()`` so they are comparable with the resumed run's — the model
-    is wrapped and the parameters sharded exactly as they will be at ``on_train_begin`` of phase 2.
-    """
+    """The frozen-base reading before step 1 and the state at the save, taken inside ``train()`` to match the resumed
+    run's."""
 
     def __init__(self, holder: dict, probe):
         self.holder = holder
@@ -324,8 +253,7 @@ class _Phase1Capture(TrainerCallback):
         return control
 
     def on_save(self, args, state, control, **kwargs):
-        # HF writes a second checkpoint when training stops, so pin the snapshot to the step whose
-        # shards the resume actually reads — otherwise the comparison is against the later state.
+        # HF writes a second checkpoint when training stops; the resume reads this step's shards.
         if state.global_step != SAVE_AT_STEP:
             return control
         trainer = self.holder["trainer"]
@@ -337,14 +265,9 @@ class _Phase1Capture(TrainerCallback):
 
 
 class _ResumeCapture(TrainerCallback):
-    """Snapshot restored state at on_train_begin: after the resume hooks, before the first step.
-
-    The adapters are captured by re-saving them through ``save_model`` — the very writer that
-    produced the checkpoint — so the two files are comparable bit for bit and no test-side
-    re-implementation of the adapter key transform can drift away from the real one. The save carries
-    one effect into the run: ``restore_config_fields`` re-asserts its config snapshot permanently,
-    which is inert here, as the offline-GRPO masks come from the collator.
-    """
+    """Restored state at on_train_begin. Adapters are re-saved through ``save_model``, the writer that produced the
+    checkpoint, so no test-side copy of the key transform can drift. ``restore_config_fields`` re-asserts its config
+    snapshot permanently, inert here since the masks come from the collator."""
 
     def __init__(self, holder: dict, verify_dir: str):
         self.holder = holder
@@ -362,12 +285,8 @@ class _ResumeCapture(TrainerCallback):
 
 
 def _release(live: dict) -> None:
-    """End a phase: DeepEP buffers first, then the callback cycle holding the model.
-
-    ``live`` is the same dict the phase's callbacks hold, so popping it here breaks the cycle that
-    would otherwise keep a 20B model resident through the next phase. The caller must drop its own
-    binding as well — a name in another scope is not reachable from here.
-    """
+    """DeepEP buffers first, then the callback cycle that would keep a 20B model resident. The caller drops its own
+    binding."""
     trainer = live.pop("trainer", None)
     if trainer is not None:
         trainer.cleanup_ep()
@@ -385,8 +304,7 @@ def run(ctx) -> dict:
     layout = parallelism_config_for(mode, ctx.world_size)
     if layout.ep_size > 1:
         pin_deterministic_ep_dispatch()
-    # The trainer writes the checkpoint on the save rank and every rank resumes from it, so the
-    # output dir must be one shared path rather than a per-rank temp dir.
+    # The save rank writes the checkpoint and every rank resumes from it, so the output dir is one shared path.
     workspace = shared_scratch_dir(f"lora_offgrpo_resume_{mode}")
     if ctx.rank == 0:
         ctx.on_teardown(lambda: shutil.rmtree(workspace, ignore_errors=True))
@@ -401,11 +319,9 @@ def run(ctx) -> dict:
     dataset = create_offline_grpo_dataset(tokenizer, NUM_TRAIN_SAMPLES, seed=SEED, num_completions=NUM_COMPLETIONS)
     probe = _probe_batch(tokenizer, ctx.device)
 
-    # Every phase registers its trainer here, so a body that raises still releases its DeepEP buffers.
+    # So a body that raises still releases its DeepEP buffers.
     live: dict = {}
     ctx.on_teardown(lambda: _release(live))
-
-    # Phase 1: train 4 steps, checkpoint at step 2
 
     log(f"\n--- Phase 1 ({mode}): train {TOTAL_STEPS} steps, save at {SAVE_AT_STEP} ---")
     pc = parallelism_config_for(mode, ctx.world_size)
@@ -414,8 +330,8 @@ def run(ctx) -> dict:
     expert_lora = is_expert_lora_active(trainer.accelerator.unwrap_model(trainer.model))
     checks["adapter_kind_as_declared"] = expert_lora == (mode == "expert_lora")
 
-    # Premise for the base reading the callback takes below: at zero-init lora_B the adapted model
-    # IS the frozen base, so the reading needs no disable_adapter() before a training step.
+    # At zero-init lora_B the adapted model is the frozen base, so the reading needs no disable_adapter() before a
+    # step.
     ok, detail = _fresh_adapters_are_zero_init(
         trainer.accelerator.unwrap_model(trainer.model), expert_lora=expert_lora
     )
@@ -435,15 +351,13 @@ def run(ctx) -> dict:
     checks["save_capture_fired"] = saved_state is not None and saved_state["step"] == SAVE_AT_STEP
     checks["base_reference_captured"] = base_logps is not None and bool(base_probe)
     _release(live)
-    del trainer  # _release cannot unbind this scope's name, and the next phase loads a second model
+    del trainer  # _release cannot unbind this scope's name, and the next phase loads a second model.
 
     if ctx.rank == 0:
         ok, detail = _checkpoint_carries_trained_adapters(checkpoint)
         log(f"checkpoint adapters: {detail}")
         checks["checkpoint_carries_trained_adapters"] = ok
     ctx.barrier()
-
-    # Phase 2: a fresh trainer resumes the checkpoint to step 4
 
     log(f"\n--- Phase 2 ({mode}): resume checkpoint-{SAVE_AT_STEP} to step {TOTAL_STEPS} ---")
     verify_dir = os.path.join(workspace, "restored_adapters")
@@ -464,8 +378,7 @@ def run(ctx) -> dict:
     log(f"resumed losses: {[f'{loss:.5f}' for loss in resumed_losses]}")
 
     checks["resumed_reached_final_step"] = trainer.state.global_step == TOTAL_STEPS
-    # The resumed run's log_history opens with the checkpoint's own entries (steps 1-2, restored from
-    # trainer_state.json) and appends steps 3-4, so it holds TOTAL_STEPS rows.
+    # log_history opens with the checkpoint's entries for steps 1-2, then appends steps 3-4.
     checks["resumed_losses_finite"] = len(resumed_losses) == TOTAL_STEPS and all(
         math.isfinite(loss) for loss in resumed_losses
     )
@@ -514,8 +427,6 @@ def run(ctx) -> dict:
         checks["restored_adapters_match_checkpoint_file"] = ok
     ctx.barrier()
 
-    # Phase 3 (expert_lora): the ep_size=2 checkpoint resumed at ep_size=1
-
     if mode == "expert_lora":
         log(f"\n--- Phase 3 ({mode}): resume the ep_size=2 checkpoint at ep_size=1 ---")
         ep1_dir = os.path.join(workspace, "restored_adapters_ep1")
@@ -537,13 +448,11 @@ def run(ctx) -> dict:
         checks["ep1_resume_capture_fired"] = restored is not None
         if restored is not None:
             checks["ep1_scheduler_restored"] = restored["sched_last_epoch"] == SAVE_AT_STEP
-            # Per-rank, unlike the warning below: the warm restart must have happened on every rank,
-            # not merely been announced on the one that logs.
+            # Per-rank: the warm restart must have happened on every rank, not only the one that logs.
             ok, detail = _optimizer_state_is_warm_restarted(restored["optimizer"])
             log(f"ep1 optimizer: {detail}")
             checks["ep1_optimizer_warm_restarted"] = ok
-        # The warm restart is what the fingerprint promises when the topology changes; it logs on the
-        # main process only, so the other rank asserts the run continued rather than the message.
+        # The warm restart logs on the main process only, so the other rank asserts the run continued.
         if ctx.rank == 0:
             warned = any("fingerprint mismatch" in msg and "ep_size" in msg for msg in store_log)
             if not warned:

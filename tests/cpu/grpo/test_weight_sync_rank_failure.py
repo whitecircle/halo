@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""A weight-sync send that fails on the forwarding rank must raise on EVERY rank, never hang the rest.
-
-The push is a loop of GROUP-WIDE gathers — one ``full_tensor()`` per dense param, one gather per EP
-layer — with the forwarding rank's client calls interleaved between them. Those calls are the only
-part of the sync that can fail on one rank alone: an HTTP error from the engine, a host OOM pinning
-the snapshot, a tensor the engine's key space rejects. A rank that raises out of that loop stops
-entering the gathers, so every peer blocks in the next one until the NCCL watchdog fires half an hour
-later, with a traceback naming a collective rather than the engine. At 512 GPUs that is 511 ranks
-parked on one rank's HTTP 500, and the real cause is in a log nobody reads.
-
-So the sends run under a :class:`DeferredRankFailure`: the forwarding rank records the failure, keeps
-entering every remaining collective, and the verdict is taken at a rank-uniform ``reject`` that
-raises on all ranks with the originating rank and its real cause. Both halves of the push are covered
-here — the streamed sends and the buffered flush (``finish_weight_update``, where the broadcast
-actually lands) — plus the retaining expert gather, whose assembly is the largest rank-local
-allocation in the sync and therefore the likeliest thing to fail on the forwarding rank alone.
-
-Proven on a real 2-rank gloo group whose params are DTensors, so the gathers are genuine collectives
-and the regression manifests as the hang it is: rank 1 can only be *told* the cause if rank 0 stayed
-in every gather after the one that failed. The process-group timeout and the join are both bounded —
-a regression fails this suite instead of wedging it.
-
-    python tests/cpu/grpo/test_weight_sync_rank_failure.py
-"""
+"""A weight-sync send that fails on the forwarding rank must raise on every rank. The push is a loop of group-wide
+gathers, and a rank leaving it parks every peer in the next gather until the NCCL watchdog fires."""
 
 from __future__ import annotations
 
@@ -43,10 +21,8 @@ NUM_PARAMS, ROWS, COLS = 5, 8, 4
 # Mid-loop by construction: gathers must still run for the params after it.
 FAIL_AT = 3
 
-# A stuck rank must surface as a failed assertion, not a wedged worker: gloo aborts the blocked
-# collective at the group timeout, the rank writes what it saw, and the runner's join deadline covers
-# the process itself. The group timeout is far above the work it bounds (spawn + torch import, then
-# microseconds of gloo) because the suite runs 8-way under xdist, where a starved rendezvous is not a
+# A stuck rank surfaces as a failed assertion, since gloo aborts the blocked collective at the group timeout. That
+# timeout is far above the work it bounds because the suite runs 8-way under xdist, where a starved rendezvous is no
 # regression.
 PG_TIMEOUT = datetime.timedelta(seconds=90)
 
@@ -56,11 +32,8 @@ class _EngineRejected(RuntimeError):
 
 
 class _FakeClient:
-    """Records what it was handed, and fails where the scenario says to.
-
-    Non-forwarding ranks get one too, so the test also pins that ``sync_weights_to_client``'s rank
-    gate keeps them from sending anything.
-    """
+    """Records what it was handed and fails where the scenario says. Non-forwarding ranks get one too, to pin the rank
+    gate in ``sync_weights_to_client``."""
 
     def __init__(self, fail_send_at: int = 0, fail_flush: bool = False):
         self._fail_send_at = fail_send_at
@@ -87,8 +60,7 @@ class _FakeClient:
 
 
 class _ShardedPolicy(nn.Module):
-    """A policy whose params are DTensors, as ``fully_shard`` leaves them — so the sync's
-    ``materialize_dtensor`` is a real group-wide collective per parameter."""
+    """Params are DTensors, as ``fully_shard`` leaves them, so ``materialize_dtensor`` is a group-wide collective."""
 
     def __init__(self, mesh):
         super().__init__()
@@ -101,8 +73,7 @@ class _ShardedPolicy(nn.Module):
 
 
 def _worker(rank: int, tmp_dir: str, mode: str) -> None:
-    """One rank of the sync. Writes its verdict to a file — an exception here must not be the signal,
-    since the failure under test is a rank that never returns at all."""
+    """Writes its verdict to a file, since the failure under test is a rank that never returns."""
     model = _ShardedPolicy(init_device_mesh("cpu", (WORLD_SIZE,)))
     client = _FakeClient(fail_send_at=FAIL_AT if mode == "send" else 0, fail_flush=mode == "flush")
     try:
@@ -117,7 +88,6 @@ def _worker(rank: int, tmp_dir: str, mode: str) -> None:
 
 
 def _run_ranks(tmp_path, mode: str) -> tuple[dict[int, str], dict[int, tuple[int, int, int]]]:
-    """Run both ranks to completion (bounded) and return their verdicts and client counters."""
     run_gloo_ranks(_worker, WORLD_SIZE, str(tmp_path), mode, pg_timeout=PG_TIMEOUT)
     results, counters = {}, {}
     for rank in range(WORLD_SIZE):
@@ -129,12 +99,8 @@ def _run_ranks(tmp_path, mode: str) -> tuple[dict[int, str], dict[int, tuple[int
 
 
 def test_a_mid_loop_send_failure_raises_on_every_rank(tmp_path):
-    """Rank 0's client fails on the 3rd param while rank 1 still has two gathers to go.
-
-    Rank 1 reaching the uniform error is the whole proof — it can only get there if rank 0 entered
-    every gather after the failure and joined the reject. Without the deferral rank 1 sits in
-    ``full_tensor()`` for param 4 until gloo aborts it, and reports a transport error instead.
-    """
+    """Rank 1 reaching the uniform error is the proof: it gets there only if rank 0 entered every gather after the
+    failure and joined the reject. Without the deferral it sits in ``full_tensor()`` for param 4 until gloo aborts."""
     results, counters = _run_ranks(tmp_path, "send")
 
     for rank, result in results.items():
@@ -152,11 +118,8 @@ def test_a_mid_loop_send_failure_raises_on_every_rank(tmp_path):
 
 
 def test_a_failing_flush_raises_on_every_rank(tmp_path):
-    """The buffered broadcast is where the weights actually go out, and it fails on rank 0 alone.
-
-    It sits after every gather, so nothing hangs — but a peer that sails past it drives its next
-    rollout round against an engine left paused mid-update, and the run dies later somewhere else.
-    """
+    """The flush sits after every gather, so nothing hangs, but a peer that sails past drives its next rollout round
+    against an engine left paused mid-update."""
     results, counters = _run_ranks(tmp_path, "flush")
 
     for rank, result in results.items():
@@ -165,18 +128,14 @@ def test_a_failing_flush_raises_on_every_rank(tmp_path):
         assert "rank 0" in result, f"rank {rank} was not told which rank failed: {results}"
 
     assert counters[1][1] == 0, "a non-forwarding rank flushed the engine — the rank gate is gone"
-    # The flush closes the update only on the paths that REACH the close: a raise before it (the
-    # completion of the tail's staged copies, a chunk the engine rejects) leaves the engine quiesced
+    # The flush closes the update only on paths that reach the close. A raise before it leaves the engine quiesced
     # behind an open reload, and nothing else on this path ends it.
     assert counters[0][2] == 1, "the failing flush left the engine's update open — no abort followed it"
 
 
 class _FakeEPLayer:
-    """An EP layer whose gather assembles ONLY when it retains, as the real ones do.
-
-    Every rank runs the same collectives inside the gather; only the forwarding rank builds the
-    per-expert copies from their outputs, which is what doubles a layer's peak there.
-    """
+    """A gather that assembles only when it retains. Every rank runs the collectives; only the forwarding rank builds
+    the per-expert copies, which doubles a layer's peak there."""
 
     def __init__(self, oom_when_retaining: bool = False):
         self._oom = oom_when_retaining
@@ -205,15 +164,8 @@ class _CountingForwarder:
 
 
 def test_a_retaining_gather_that_ooms_defers_and_stops_retaining():
-    """The forwarding rank's ASSEMBLY is the sync's largest rank-local allocation, and it sits
-    between two group-wide gathers.
-
-    Raising out of it takes this rank out of the loop while every peer blocks in the next layer's
-    gather until the watchdog fires — the exact hang the deferral exists for, and the reason the
-    gathers must run under the same guard the sends do. Once the failure IS recorded there is
-    nothing left to send, so retaining must stop: paying the doubled peak for every remaining layer
-    is what turns one OOM into an OOM on every layer.
-    """
+    """The assembly sits between two group-wide gathers, so raising out of it parks every peer in the next layer's
+    gather until the watchdog fires. Once a failure is recorded retaining must stop, or one OOM hits every layer."""
     layers = {f"layers.{i}": _FakeEPLayer(oom_when_retaining=i == 1) for i in range(4)}
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
 
@@ -230,7 +182,6 @@ def test_a_retaining_gather_that_ooms_defers_and_stops_retaining():
 
 
 def test_a_healthy_gather_retains_and_forwards_every_layer():
-    """Anti-vacuity: the guard must not turn retention off on a sync nobody failed."""
     layers = {f"layers.{i}": _FakeEPLayer() for i in range(4)}
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
     forwarder = _CountingForwarder()
@@ -243,7 +194,6 @@ def test_a_healthy_gather_retains_and_forwards_every_layer():
 
 
 def test_a_clean_sync_still_pushes_every_param(tmp_path):
-    """Anti-vacuity: the guard must not swallow a healthy sync, nor reject one nobody failed."""
     results, counters = _run_ranks(tmp_path, "clean")
 
     assert results == {0: "NO RAISE", 1: "NO RAISE"}, f"a clean sync raised: {results}"

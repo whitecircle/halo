@@ -1,10 +1,6 @@
-"""CP equivalence harness: Ulysses attention and the CP model wrapper on a roster of tiny models covering every
-Ulysses wrapper class, compared between two commits (``make verify-cp BASE=<sha>``) into
-``evidence/cp_equivalence-<head sha>.json``. A family either tree's roster lacks is skipped and named. The base
-tree runs twice: a record it repeats is compared bit for bit, one it does not with each gradient inside the base's
-own spread. The GPU tier runs bf16 with CP's own flash kernel made deterministic; the CPU tier runs fp32 on gloo
-with a plain-torch attention under the flash contract.
-"""
+"""CP equivalence harness: Ulysses attention and the CP wrapper on tiny models covering every wrapper class, compared
+between two commits. ``make verify-cp BASE=<sha>``. The base runs twice: a repeated record compares bit for bit, others
+within the base's own spread."""
 
 from __future__ import annotations
 
@@ -74,15 +70,14 @@ SEQ = 128
 LEVELS = ("attention", "model")
 DTYPE = {"cpu": torch.float32, "gpu": torch.bfloat16}
 DEFAULT_ATTN_IMPLEMENTATION = "flash_attention_2"
-# Where Mistral4's llama-4 query scale steps up: inside SEQ, so the scale varies along the sequence (it is 1
-# at every position below the tiny config's own 256).
+# Inside SEQ, so Mistral4's llama-4 query scale varies along the sequence; it is 1 below the tiny config's own 256.
 MISTRAL4_SCALE_PERIOD = 32
 
 
 @dataclass(frozen=True)
 class CPFamily:
-    """A tiny model one Ulysses wrapper class runs on: its builder, the text-config fields that make every layer
-    one the wrapper takes, and whether its MoE blocks take the EP layers."""
+    """A tiny model one Ulysses wrapper class runs on: builder, text-config fields making every layer one it takes, and
+    EP-layer use."""
 
     tiny: TinyFamily
     overrides: dict = field(default_factory=dict)
@@ -91,8 +86,7 @@ class CPFamily:
 
 FAMILIES: dict[str, CPFamily] = {
     "qwen3": CPFamily(TINY_DENSE_FAMILY, moe=False),
-    # The Qwen3 wrapper's other model classes: a routed MoE with its router aux term, and a multimodal backbone in
-    # front of the head.
+    # The Qwen3 wrapper's other model classes: a routed MoE with its aux term, and a multimodal backbone.
     "qwen3_moe": CPFamily(TINY_MOE_FAMILIES["qwen3_moe"]),
     "qwen3_vl": CPFamily(TINY_QWEN3_VL_FAMILY, moe=False),
     "gpt_oss": CPFamily(TINY_MOE_FAMILIES["gpt_oss"]),
@@ -108,7 +102,7 @@ FAMILIES: dict[str, CPFamily] = {
             }
         },
     ),
-    # Full attention in every layer: the gated DeltaNet layers run a sequence-axis scan Ulysses refuses.
+    # Full attention in every layer: gated DeltaNet layers run a sequence-axis scan Ulysses refuses.
     "qwen3_5_moe_text": CPFamily(
         TINY_MOE_FAMILIES["qwen3_5_moe_text"],
         {"layer_types": ["full_attention"] * TINY_QWEN35_MOE_CONFIG["num_hidden_layers"]},
@@ -123,9 +117,8 @@ class _Captured(Exception):
 def reference_flash_attn(
     q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), deterministic=False
 ):
-    """``flash_attn_func``'s contract in plain torch, for the keywords CP passes: ``[B, S, H, D]`` in and out,
-    native GQA, and the causal mask and sliding window aligned to the bottom right of the score matrix. Plain
-    torch is deterministic either way, so ``deterministic`` asks nothing of it."""
+    """``flash_attn_func``'s contract in plain torch for CP's keywords: ``[B, S, H, D]``, native GQA, mask and window
+    aligned bottom right."""
     if dropout_p:
         raise ValueError(f"the reference attention runs no dropout, got dropout_p={dropout_p}")
     groups = q.shape[2] // k.shape[2]
@@ -148,8 +141,8 @@ def reference_flash_attn(
 
 @contextlib.contextmanager
 def tier_controls(tier: str) -> Iterator[None]:
-    """The kernel CP runs on in ``tier``: on GPU its own flash kernel made deterministic under HF's
-    ``full_determinism``; on CPU :func:`reference_flash_attn`, as flash has no CPU build."""
+    """The kernel CP runs on: on GPU flash made deterministic under ``full_determinism``; on CPU
+    :func:`reference_flash_attn`."""
     if tier == "cpu":
         with patch.object(cp_attention, "_flash_attn_func", lambda allow_fa4=True: reference_flash_attn):
             yield
@@ -159,8 +152,8 @@ def tier_controls(tier: str) -> Iterator[None]:
 
 
 def tiny_model(name: str, tier: str, device, **overrides) -> torch.nn.Module:
-    """``name``'s seeded tiny model (with ``overrides`` over its text config) on ``device`` at the tier's dtype,
-    labelled with the attention CP validates, its GPT-OSS sinks neutralized as the CP loaders leave them."""
+    """``name``'s seeded tiny model on ``device`` at the tier's dtype, with CP's attention label and GPT-OSS sinks
+    neutralized."""
     family = FAMILIES[name]
     torch.manual_seed(SEED)
     model = tiny_family_model(family.tiny, overrides={**family.overrides, **overrides})
@@ -176,7 +169,7 @@ def _first_attention(module: torch.nn.Module) -> UlyssesAttention:
 
 
 def _nudge(attention: UlyssesAttention) -> None:
-    """The negative control: the first element of the attention's first weight moved by a few ulps."""
+    """The negative control: the attention's first weight element moved by a few ulps."""
     weight = next(attention.parameters())
     finfo = torch.finfo(weight.dtype)
     with torch.no_grad():
@@ -185,8 +178,7 @@ def _nudge(attention: UlyssesAttention) -> None:
 
 
 def decoder_attention_inputs(model: torch.nn.Module, input_ids, position_ids) -> dict:
-    """The keyword inputs the decoder hands its first attention layer on ``input_ids`` without a cache, the
-    forward stopped there."""
+    """The keyword inputs the decoder hands its first attention layer, the forward stopped there."""
     attention = next(module for module in model.modules() if type(module).__name__ in ULYSSES_ATTENTION_MAP)
     captured = {}
 
@@ -251,8 +243,7 @@ CASE_BODIES = {"attention": _attention_case, "model": _model_case}
 
 
 def record_rank(output: Path, families, levels, *, tier: str, device, perturb: bool = False) -> None:
-    """Record this rank's cases under ``output/<family>/<level>``, on the default process group as the CP
-    group; the tier's controls are the caller's. Accelerate's process state comes first: the GPT-OSS sinks
+    """Record this rank's cases, with the default group as the CP group; accelerate's state first, since the sinks
     policy logs through it."""
     PartialState()
     cp_config = ParallelismConfig(cp_size=CP_SIZE).cp_config()
@@ -264,7 +255,7 @@ def record_rank(output: Path, families, levels, *, tier: str, device, perturb: b
 
 
 def produce(output: Path, families, levels, *, tier: str, perturb: bool) -> None:
-    """:func:`record_rank` as one ``torchrun`` rank: the process group, the tier's controls and the teardown."""
+    """:func:`record_rank` as one ``torchrun`` rank: process group, tier controls, teardown."""
     with quiet_logs():
         if tier == "gpu":
             _, _, local_rank = init_distributed()
@@ -285,9 +276,8 @@ def _without_gradients(record: Mapping) -> dict:
 
 
 def judged_deltas(base: Mapping, repeat: Mapping, head: Mapping) -> list[str]:
-    """``head``'s differences from ``base``: bit for bit where ``repeat`` matches ``base``; otherwise everything
-    but the gradients bit for bit and each gradient within its ``base``-vs-``repeat`` max-abs envelope (zero
-    for one ``repeat`` lacks)."""
+    """``head``'s differences from ``base``: bit for bit where ``repeat`` matches; else gradients within the
+    base-vs-repeat max-abs envelope."""
     if not record_deltas(base, repeat) or any(RAISED in record for record in (base, repeat, head)):
         return record_deltas(base, head)
     deltas = record_deltas(_without_gradients(base), _without_gradients(head))
@@ -304,9 +294,8 @@ def judged_deltas(base: Mapping, repeat: Mapping, head: Mapping) -> list[str]:
 
 
 def judge(base_root: Path, repeat_root: Path, head_root: Path) -> tuple[list[dict], list[str]]:
-    """``head``'s records against ``base``'s, each pair by :func:`judged_deltas`, as
-    :func:`~tests.common.equivalence.revisions.compare_outputs` lists them, and the records the envelope judged
-    (those the base tree's two runs did not repeat). Raises when those two runs recorded different records."""
+    """``head``'s records vs ``base``'s by :func:`judged_deltas`, and the records the envelope judged. Raises when the
+    base's runs recorded different sets."""
     base_paths, repeat_paths = record_paths(base_root), record_paths(repeat_root)
     if base_paths.keys() != repeat_paths.keys():
         raise RuntimeError(
@@ -321,8 +310,8 @@ def judge(base_root: Path, repeat_root: Path, head_root: Path) -> tuple[list[dic
 
 
 def assess(base: Path, repeat: Path, head: Path, control: Path, accept=()) -> tuple[str, dict]:
-    """The verdict on four recorded outputs and its findings: it fails on a :func:`judge` delta outside the cases
-    ``accept`` names, on any head raise, and on a control record that matches its base one or raised."""
+    """The verdict and findings: fails on a delta outside ``accept``, any head raise, or a control that matches its
+    base or raised."""
     compared, enveloped = judge(base, repeat, head)
     deltas, accepted = split_accepted(compared, accept)
     raised = raised_records(head)

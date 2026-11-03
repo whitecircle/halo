@@ -1,32 +1,26 @@
-"""Log-probs (and entropy) of target tokens straight from hidden states, never materializing the logits: a
-dual-chunked (sequence × vocab) matmul with online softmax and a recompute backward, the head's logit scale, softcap
-and temperature applied inside every tile, whose post-GEMM work is one compiled function per direction
-(:func:`_forward_tile`, :func:`_backward_tile`). The logits-plane form is :mod:`halo.kernels.logprobs`."""
+"""Log-probs (and entropy) of target tokens straight from hidden states, never materializing the logits: a dual-chunked
+(sequence × vocab) matmul with online softmax and a recompute backward."""
 
 import torch
 
 from halo.kernels.fp32_matmul import gemm_dtype, mm_fp32
 
-# The working set is a few [seq, vocab] fp32 tiles (4096 × 16384 × 4 B = 256 MiB each); the loop runs
-# (T / seq) × (V / vocab) iterations, so tiles sized well below this leave the sweep launch-bound on
-# large-vocabulary models.
+# The working set is a few [seq, vocab] fp32 tiles (4096 × 16384 × 4 B = 256 MiB each); tiles sized well below this
+# leave the sweep launch-bound on large-vocabulary models.
 SEQ_TILE = 4096
 VOCAB_TILE = 16384
 
-# Device types whose tiles run compiled. A CPU compile costs seconds per graph on a path only tests take,
-# so there the same functions run eagerly.
+# A CPU compile costs seconds per graph on a path only tests take, so there the same functions run eagerly.
 _COMPILED_DEVICE_TYPES = frozenset({"cuda"})
 
-# ``deterministic`` picks kernel configs without benchmarking on the device, so ranks that see the same tiles
-# (TP and ETP replicas) and reruns compile the same kernels. Each graph is a few small kernels, so one compile
-# thread builds them in-process instead of starting a pool of up to 32 compile workers per rank.
+# ``deterministic`` skips on-device benchmarking, so ranks seeing the same tiles (TP, ETP replicas) and reruns compile
+# the same kernels. One thread builds a graph's few small kernels in-process, over a pool of up to 32 workers per rank.
 _TILE_COMPILE_OPTIONS = {"deterministic": True, "compile_threads": 1}
 
 
 def _head_logits(raw, bias, vocab_start, logit_scale, softcap) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """The head's fp32 logits on one GEMM tile before the temperature (the fp32 bias, the logit scale, then the
-    softcap ``cap · tanh(logits / cap)``, as the model's forward orders them), and the cap's ``tanh``, which
-    its derivative reuses (``None`` uncapped)."""
+    """Before the temperature: the fp32 bias, the logit scale, then the softcap, as the model's forward orders them.
+    Also returns the cap's ``tanh``, which its derivative reuses."""
     logits = raw
     if bias is not None:
         logits = logits + bias.narrow(0, vocab_start, raw.shape[1])
@@ -39,20 +33,16 @@ def _head_logits(raw, bias, vocab_start, logit_scale, softcap) -> tuple[torch.Te
 
 
 def _is_target(targets, vocab_start, width) -> torch.Tensor:
-    """``[rows, width]`` one-hot of each row's target inside the tile, all false for a target outside it. An
-    iota compare rather than an index write, so a compiled tile keeps it inside its one kernel."""
+    """An iota compare rather than an index write, so a compiled tile keeps the one-hot inside its one kernel."""
     return torch.arange(width, device=targets.device) == (targets - vocab_start).unsqueeze(-1)
 
 
 def _forward_tile(
     raw, bias, targets, vocab_start, max_old, sum_exp, sum_exp_z, target_logit, inv_t, logit_scale, softcap
 ):
-    """One vocab tile folded into a sequence tile's online-softmax accumulators over the temperature-scaled
-    logits ``z``: ``(max, Σ exp(z − max), Σ exp(z − max)·z or None, target logit)``, each ``(rows,)`` fp32.
-
-    The entropy needs only ``Σ exp(z − max)·z`` on top of the softmax accumulators, so it rides the same
-    sweep (``entropy = log Z − Σ exp(z − max)·z / Σ exp(z − max)``) instead of a second full-vocab matmul.
-    """
+    """One vocab tile folded into ``(max, Σ exp(z − max), Σ exp(z − max)·z or None, target logit)`` over
+    temperature-scaled logits ``z``. The entropy rides the same sweep (``log Z − Σ exp(z − max)·z / Σ exp(z − max)``),
+    sparing a second full-vocab matmul."""
     logits = _head_logits(raw, bias, vocab_start, logit_scale, softcap)[0] * inv_t
     max_new = torch.maximum(max_old, logits.amax(dim=-1))
     rescale = torch.exp(max_old - max_new)
@@ -66,10 +56,8 @@ def _forward_tile(
 
 
 def _backward_tile(raw, bias, targets, vocab_start, log_z, grad, inv_t, logit_scale, softcap, grad_dtype):
-    """The loss gradient on one GEMM tile, ``grad · (onehot − softmax)`` carried through the temperature, the
-    cap's ``1 − tanh²`` and the logit scale: ``(gradient in grad_dtype, its fp32 column sum or None)``. The
-    gradient comes out in the dtype the two gradient GEMMs take; the column sum, the bias's gradient, is
-    taken before that cast."""
+    """``grad · (onehot − softmax)`` carried through the temperature, the cap's ``1 − tanh²`` and the logit scale, in
+    the dtype the gradient GEMMs take. The column sum, the bias's gradient, is taken before that cast."""
     logits, tanh = _head_logits(raw, bias, vocab_start, logit_scale, softcap)
     probs = torch.exp(logits * inv_t - log_z.unsqueeze(-1))
     grad = grad.unsqueeze(-1)
@@ -83,8 +71,7 @@ def _backward_tile(raw, bias, targets, vocab_start, log_z, grad, inv_t, logit_sc
 
 
 def _compile_tile(fn):
-    """``fn`` compiled whole (a graph break raises) for every tile shape at once: rows, tile width and vocab
-    offset are symbolic, and the head's scalars are graph inputs."""
+    """Compiled whole (a graph break raises): rows, tile width and vocab offset are symbolic, head scalars inputs."""
     return torch.compile(fn, dynamic=True, fullgraph=True, options=_TILE_COMPILE_OPTIONS)
 
 
@@ -92,39 +79,33 @@ _COMPILED_TILES = (_compile_tile(_forward_tile), _compile_tile(_backward_tile))
 
 
 def _tile_functions(raw: torch.Tensor):
-    """``(forward_tile, backward_tile)`` for the GEMM tile ``raw``: compiled on a compiled device type, eager on
-    a tile one row or one column wide. Dynamo specializes a size of 1, so such a tile, which a ragged batch can
-    end on at any step, would otherwise compile a graph of its own mid-run, on that rank alone."""
+    """Eager on a tile one row or column wide. Dynamo specializes a size of 1, so such a tile, which a ragged batch can
+    end on at any step, would compile a graph of its own mid-run, on that rank alone."""
     if raw.device.type in _COMPILED_DEVICE_TYPES and min(raw.shape) > 1:
         return _COMPILED_TILES
     return _forward_tile, _backward_tile
 
 
 def _rows(t: torch.Tensor, start: int, end: int) -> torch.Tensor:
-    """``t[start:end]`` as a contiguous tensor of its own, for a compiled tile, whose guards would otherwise key on
-    its layout: a view's base sizes (the sweep's row count, a caller's batch), which change from step to step, or
-    the stride 0 of an expanded upstream gradient (``logps.sum()``)."""
+    """A contiguous copy, as a compiled tile's guards would key on a view's base sizes, which change from step to step,
+    or the stride 0 of an expanded upstream gradient (``logps.sum()``)."""
     return t[start:end].clone(memory_format=torch.contiguous_format)
 
 
 def _tile_bias(bias: torch.Tensor | None) -> torch.Tensor | None:
-    """The bias as the tiles take it, fp32 and detached, so neither its dtype nor whether it trains (a policy's
-    head, then a frozen reference's) gives a compiled tile a graph of its own."""
+    """fp32 and detached, so neither its dtype nor whether it trains gives a compiled tile a graph of its own."""
     return None if bias is None else bias.detach().float()
 
 
 def _autocast_off(device: torch.device):
-    """Autocast off around a sweep, which picks every GEMM dtype itself
-    (:func:`~halo.kernels.fp32_matmul.mm_fp32`): a caller's bf16 autocast would round an fp32 GEMM's logits to
-    bf16, and give the compiled tiles a graph per autocast state."""
+    """A caller's bf16 autocast would round an fp32 GEMM's logits to bf16 and give compiled tiles a graph per state."""
     return torch.autocast(device.type, enabled=False)
 
 
 def _online_softmax_tile(
     hidden_chunk, weight, targets_chunk, bias, inv_t, logit_scale, softcap, compute_entropy
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """One sequence tile swept over every vocab tile: ``(target logit, log Z, entropy or None)``, each
-    ``(rows,)`` fp32."""
+    """One sequence tile swept over every vocab tile: ``(target logit, log Z, entropy or None)``."""
     device = hidden_chunk.device
     n_chunk = hidden_chunk.shape[0]
     max_old = torch.full((n_chunk,), float("-inf"), device=device, dtype=torch.float32)
@@ -158,7 +139,6 @@ def _online_softmax_tile(
 def _logprobs_forward(
     hidden, weight, targets, bias, temperature, logit_scale, softcap, compute_entropy
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(logprobs, log_z, entropy)``, each ``(n_rows,)`` fp32; the entropy is zeros unless ``compute_entropy``."""
     n_rows = hidden.shape[0]
     inv_t = 1.0 / temperature
     bias = _tile_bias(bias)
@@ -188,13 +168,8 @@ def _logprobs_forward(
 def _logprobs_backward(
     hidden, weight, targets, bias, log_z, grad_logprobs, temperature, logit_scale, softcap, needs_grad
 ):
-    """``(grad_hidden, grad_weight, grad_bias)`` in fp32, ``None`` where ``needs_grad`` (the
-    ``(hidden, weight, bias)`` flags) is false, so a frozen head builds no ``[V, H]`` buffer and runs no
-    weight-gradient GEMM.
-
-    Each logits tile is recomputed from the saved ``log_z`` instead of a stored ``[T, V]`` plane, and its
-    gradient (:func:`_backward_tile`) feeds the gradient GEMMs in the activations' GEMM dtype, accumulated in
-    fp32 (:func:`~halo.kernels.fp32_matmul.mm_fp32`)."""
+    """``None`` where ``needs_grad`` is false, so a frozen head builds no ``[V, H]`` buffer and runs no weight-gradient
+    GEMM. Each logits tile is recomputed from the saved ``log_z`` instead of a stored ``[T, V]`` plane."""
     inv_t = 1.0 / temperature
     bias = _tile_bias(bias)
     n_rows, _ = hidden.shape
@@ -245,8 +220,7 @@ def _logprobs_backward(
 
 
 class _HeadLogprobFunction(torch.autograd.Function):
-    """Selective log-probs and entropy in one vocab sweep, with the recompute backward. Only the
-    log-probs carry gradient; the entropy is a detached diagnostic (``mark_non_differentiable``)."""
+    """Only the log-probs carry gradient; the entropy is a detached diagnostic."""
 
     @staticmethod
     def forward(ctx, hidden, weight, targets, bias, temperature, logit_scale, softcap, compute_entropy):
@@ -306,11 +280,7 @@ def chunked_head_logprobs(
     compute_entropy: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """``(logps, entropy)`` of ``targets`` under ``softcap(logit_scale · (hidden @ weight.T + bias)) / temperature``.
-
-    ``hidden`` ``(..., H)``, ``weight`` ``(V, H)``, ``targets`` ``(...)``; both outputs are shaped like
-    ``targets``. Differentiable in ``hidden``, ``weight`` and ``bias``; ``temperature`` matches TRL's
-    pre-softmax division. ``entropy`` (``-Σ p·log p`` over the vocabulary) is ``None`` unless ``compute_entropy``.
-    """
+    ``hidden`` ``(..., H)``, ``weight`` ``(V, H)``, ``targets`` ``(...)``; both outputs are shaped like ``targets``."""
     logps, entropy = _HeadLogprobFunction.apply(
         hidden.reshape(-1, hidden.shape[-1]),
         weight,

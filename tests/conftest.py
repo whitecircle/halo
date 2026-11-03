@@ -1,14 +1,5 @@
-"""Root pytest configuration shared by the CPU and GPU tiers.
-
-- Registers every marker the GPU manifest uses (single source of truth:
-  ``tests.gpu.manifest.ALL_MARKERS``) without the list being duplicated in ``pyproject.toml``.
-- Ensures the project root is importable (CPU tests do ``from halo. ...``) and runs every test from it.
-- Sweeps stale scratch dirs left by crashed test runs out of the launcher's ``TMPDIR``
-  (they sit on the volume the training data does, so leaks eat it).
-
-CPU tests run inside the image (they import torch); GPU nodes are launched as torchrun
-subprocesses by ``tests/gpu/conftest.py``.
-"""
+"""Root pytest configuration shared by the CPU and GPU tiers: markers from the GPU manifest, the import path, and a
+stale-scratch sweep."""
 
 import glob
 import os
@@ -28,7 +19,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 from tests.common.scratch import SCRATCH_DIR_TAG
 from tests.gpu.manifest import ALL_MARKERS
 
-# Extra markers beyond the GPU manifest's set.
 _EXTRA_MARKERS = {
     "cpu": "CPU-only test (no GPU required)",
 }
@@ -47,13 +37,8 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-apply the ``cpu`` marker to everything under ``tests/cpu/``.
-
-    The CPU tests are plain pytest modules with no per-file marker, so ``-m cpu``
-    (and ``make test-cpu``) would otherwise select nothing. Marking by path keeps the
-    selection in one place instead of decorating every file. GPU tests get their markers
-    from the manifest in ``tests/gpu/conftest.py``.
-    """
+    """Auto-apply the ``cpu`` marker to everything under ``tests/cpu/``, so ``-m cpu`` selects them with no per-file
+    marker."""
     cpu_root = _PROJECT_ROOT / "tests" / "cpu"
     for item in items:
         path = str(item.fspath).replace(os.sep, "/")
@@ -66,13 +51,8 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_sessionstart(session):
-    """Sweep stale test scratch dirs (a crash skips the in-test cleanup).
-
-    ``tests.common.distributed.setup_cache_dirs`` and ``tests/cpu/conftest.py`` build them with
-    ``mkdtemp``, so they land under the launcher's ``TMPDIR`` — read it rather than name a host path,
-    which is wrong on every box whose large volume is not ``/mnt``. Only names carrying
-    ``SCRATCH_DIR_TAG`` are touched, since that ``TMPDIR`` may be shared with other programs.
-    """
+    """Sweep stale test scratch dirs under the launcher's ``TMPDIR``, which a crash leaves behind; only
+    ``SCRATCH_DIR_TAG`` names, since it may be shared."""
     cutoff = time.time() - 6 * 3600
     for path in glob.glob(os.path.join(tempfile.gettempdir(), f"{SCRATCH_DIR_TAG}*")):
         try:
@@ -84,8 +64,8 @@ def pytest_sessionstart(session):
 
 @pytest.fixture(autouse=True, scope="session")
 def _run_from_the_project_root():
-    """Run from the project root, as ``halo launch`` runs a recipe: a recipe's relative paths (a judge's
-    ``context_file``, read when the config parses) resolve against it, wherever pytest was started."""
+    """Run from the project root, as ``halo launch`` does, so a recipe's relative paths resolve wherever pytest
+    started."""
     started_in = Path.cwd()
     os.chdir(_PROJECT_ROOT)
     yield
@@ -94,13 +74,9 @@ def _run_from_the_project_root():
 
 @pytest.fixture(autouse=True)
 def _reset_shared_filesystem_consensus():
-    """Drop the process-wide shared-filesystem memo after every test.
-
-    ``hub_metadata_main_first`` agrees the ``DIST_*_SHARED_FILESYSTEM`` flags the first time any test
-    probes a real checkpoint config and memoizes them for the process; a later test that varies the
-    env (order- and xdist-dependent) would otherwise assert against that stale scope. Reset only when
-    the filesystem module was actually imported — no torch import for tests that never touched it.
-    """
+    """Drop the process-wide shared-filesystem memo after every test, since a later test varying the env would assert
+    against a stale scope. Reset only when the filesystem module was imported, so tests that never touched it import no
+    torch."""
     yield
     filesystem = sys.modules.get("halo.runtime.filesystem")
     if filesystem is not None:

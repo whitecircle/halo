@@ -1,43 +1,19 @@
 """Quantize a bf16/fp32 checkpoint to a block-scaled low-precision checkpoint (mxfp8 / mxfp4 / nvfp4).
 
-Pairs with the mixed-precision QAT training path (``lowp_precision: fp8|fp4|mxfp4``, i.e.
-mxfp8/nvfp4/mxfp4): a model trained that way keeps bf16/fp32 master weights and its forward already
-computes in the block-scaled format. Quantizing those master weights to the same format here
-reproduces the training forward exactly (``relerr = 0`` for both mxfp8 and nvfp4), so the converted
-model runs in low precision with no accuracy loss beyond what training already saw. A model trained
-in plain bf16 can also be converted, but that is post-training quantization rather than QAT.
+Pairs with QAT (``lowp_precision: fp8|fp4|mxfp4``): quantizing the master weights reproduces the training forward
+exactly (``relerr = 0``). Each quantized ``<name>.weight`` is stored in ``compressed-tensors``' block-scaled
+convention:
 
-For each quantized weight ``<name>.weight`` the output stores, following the ``compressed-tensors``
-block-scaled convention:
+  - ``<name>.weight_packed``: ``float8_e4m3fn`` (mxfp8) or packed ``uint8`` with two ``e2m1`` nibbles per byte (nvfp4),
+  - ``<name>.weight_scale``: one scale per block along the contraction axis: ``uint8`` e8m0 (mxfp8, block 32) or
+    ``float8_e4m3fn`` (nvfp4, block 16),
+  - ``<name>.weight_shape``: the original ``[out, in]`` shape (the packed nvfp4 data halves the last dim),
+  - ``<name>.weight_global_scale``: nvfp4 only; an element is ``code x weight_scale / weight_global_scale``, so the
+    stored value is the reciprocal of :class:`~halo.kernels.lowp.quantization.BlockScaledTensor`'s multiplier.
 
-  - ``<name>.weight_packed`` — quantized data: ``float8_e4m3fn`` (mxfp8) or packed ``uint8`` with two
-    ``e2m1`` nibbles per byte (nvfp4),
-  - ``<name>.weight_scale``  — one scale per block along the contraction axis: ``uint8`` e8m0 (mxfp8,
-    block 32) or ``float8_e4m3fn`` (nvfp4, block 16),
-  - ``<name>.weight_shape``  — the original ``[out, in]`` shape (the packed nvfp4 data halves the last dim),
-  - ``<name>.weight_global_scale`` — nvfp4 only: the per-tensor fp32 scale of its two-level scaling, in
-    compressed-tensors' spelling: an element is ``code x weight_scale / weight_global_scale``, so the
-    stored value is the reciprocal of :class:`~halo.kernels.lowp.quantization.BlockScaledTensor`'s
-    multiplier (dropping it rescales the weight).
-
-Which weights those are is derived from the rosters that decide what QAT quantized (the trainer's
-dense ``MLP_PROJECTIONS`` plus the family specs' expert layouts), so the export cannot quantize a
-weight the training forward left in bf16. Every other tensor (attention, embeddings, norms, lm_head,
-biases, and a VLM's vision tower / projector) is copied unchanged in its original dtype. The four
-``lowp_*`` scope knobs the run trained with must be passed back in (``--lowp_apply_dense_mlp`` /
-``--lowp_apply_moe_experts`` / ``--lowp_keep_first_blocks`` / ``--lowp_keep_last_blocks``, defaulting
-to the training defaults); they are not recoverable from the checkpoint. A
-``quantization_config.json`` records the scheme so a loader (an inference engine, or the toolkit's
-:mod:`halo.kernels.lowp.quantization` dequantizer) can reconstruct the weights. The block layout is OCP
-microscaling (mxfp8) / NVFP4 (1x16 e4m3), the formats TensorRT-LLM and vLLM consume via
-``compressed-tensors`` / ModelOpt; mapping this manifest to a specific engine's loader remains an
-integration step.
-
-Usage:
-  python scripts/after_training/quantize_to_lowp.py \\
-      --input_dir <large-volume>/models/my-bf16-ckpt --output_dir <large-volume>/models/my-mxfp8-ckpt \\
-      --format mxfp8 --verify
-"""
+The quantized weights derive from the rosters that decide what QAT quantized, so the export cannot quantize a weight
+the forward left in bf16; all else is copied unchanged. The ``lowp_*`` scope knobs the run trained with must be passed
+back in, as the checkpoint does not carry them."""
 
 import argparse
 
@@ -66,8 +42,7 @@ def parse_args():
         help="Regex narrowing the quantized set (dense MLP projections and declared expert weights).",
     )
     p.add_argument("--exclude", default=DEFAULT_EXCLUDE, help="Regex of weight names to keep high precision.")
-    # The training run's lowp scope, which the checkpoint does not carry. Same names and defaults as
-    # the ParallelismConfig knobs, so a config's values transfer verbatim.
+    # The training run's lowp scope, which the checkpoint does not carry; same names and defaults as ParallelismConfig.
     p.add_argument(
         "--lowp_apply_dense_mlp",
         action=argparse.BooleanOptionalAction,

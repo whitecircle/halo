@@ -1,9 +1,5 @@
-"""A markdown page as GitHub renders it: the heading anchors it generates, the links, the code and the tables.
-
-Headings are ATX (``#``) or raw ``<h1>``–``<h6>``; an underlined (setext) heading has no anchor here.
-An explicit ``<a id>`` / ``<a name>`` is an anchor too. A ``{#id}`` heading attribute is collected
-apart: GitHub renders the braces as heading text, so the id never exists.
-"""
+"""A markdown page as GitHub renders it. Headings are ATX (``#``) or raw ``<h1>``–``<h6>``; an underlined (setext)
+heading has no anchor here. An explicit ``<a id>`` / ``<a name>`` is an anchor too."""
 
 from __future__ import annotations
 
@@ -118,8 +114,7 @@ def code_spans(paragraph: list[tuple[int, str]]) -> list[tuple[int, str]]:
 
 
 def parse_markdown(text: str) -> Document:
-    """Anchors, ``{#id}`` heading attributes, ``(line, target)`` links and ``(line, code)`` code of one
-    markdown source; the code is each inline code span and each line of fenced code."""
+    """Anchors, ``{#id}`` attributes, ``(line, target)`` links and ``(line, code)`` code (spans, fenced lines)."""
     lines = text.splitlines()
     start = 0
     if lines and lines[0] == "---":
@@ -188,10 +183,7 @@ def load_document(path: Path) -> Document:
 
 
 def fragment_page(target: Path) -> Path | None:
-    """The markdown page a ``#fragment`` on ``target`` lands in, or None when GitHub renders none.
-
-    A directory link renders the directory's ``README.md`` below its listing, so its anchors are that
-    page's.
-    """
+    """The page a ``#fragment`` on ``target`` lands in, or None. A directory link renders its ``README.md`` below the
+    listing, so its anchors are that page's."""
     page = target / "README.md" if target.is_dir() else target
     return page if page.suffix == ".md" and page.is_file() else None

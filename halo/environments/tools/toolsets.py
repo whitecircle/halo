@@ -1,7 +1,5 @@
-"""The tool sets an environment registers (math, code, search, files). The plain builders are stateless (Python runs
-in the in-process sandbox unless a ``sandbox`` or another ``language`` asks for a real interpreter); the
-``build_session_*`` ones bind the active episode's :class:`SandboxSession`, resolved per call, whose working dir
-persists across turns."""
+"""The tool sets an environment registers. The plain builders are stateless; the ``build_session_*`` ones bind the
+active episode's :class:`SandboxSession`, resolved per call, whose working dir persists across turns."""
 
 import functools
 from collections.abc import Callable
@@ -45,9 +43,8 @@ _WORKSPACE_FILE_TEXTS = {
 
 
 def build_math_tools(timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> NativeToolRegistry:
-    """A safe-calculator tool, ``timeout`` bounding one evaluation: an expression the AST guard admits can still run
-    indefinitely, and sync tool execution occupies a Ray actor's loop.
-    """
+    """``timeout`` bounds one evaluation: an expression the AST guard admits can still run indefinitely, and sync tool
+    execution occupies a Ray actor's loop."""
     registry = NativeToolRegistry()
     registry.register(
         NativeTool(
@@ -72,11 +69,9 @@ def build_code_tools(
     sandbox: SandboxExecutor | None = None,
     tool_name: str | None = None,
 ) -> NativeToolRegistry:
-    """A single-language code-execution tool named ``tool_name`` (default: the language's canonical name) for any
-    ``language`` the sandbox registry holds, ``timeout`` seconds per run. ``sandbox`` runs it as a subprocess with
-    imports and the stdlib (confined on ``bubblewrap`` / ``remote``); ``None`` keeps the in-process Python REPL, and a
-    non-Python language takes the default backend.
-    """
+    """A single-language code tool. ``sandbox`` runs it as a subprocess with imports and the stdlib (confined on
+    ``bubblewrap`` / ``remote``); ``None`` keeps the in-process Python REPL, and a non-Python language takes the
+    default backend."""
     spec = require_language(language)
 
     if spec.name == "python" and sandbox is None:
@@ -121,15 +116,13 @@ def build_code_tools(
 def build_python_tools(
     timeout: float = SANDBOX_DEFAULT_TIMEOUT, sandbox: SandboxExecutor | None = None
 ) -> NativeToolRegistry:
-    """A sandboxed Python REPL tool (named ``python``). See :func:`build_code_tools`."""
     return build_code_tools(language="python", timeout=timeout, sandbox=sandbox, tool_name="python")
 
 
 def build_search_tools(backend: str | None = None) -> NativeToolRegistry:
-    """A web_search tool; ``backend=None`` auto-selects by available API key (Serper, Brave, Tavily, then keyless
-    DuckDuckGo), and ``mock`` also needs ``HALO_ALLOW_MOCK_SEARCH=1`` (its fabricated snippets score as a success). The
-    name is validated here, so an environment never runs every episode on a backend it cannot select.
-    """
+    """``backend=None`` auto-selects by available API key (Serper, Brave, Tavily, then keyless DuckDuckGo); ``mock``
+    also needs ``HALO_ALLOW_MOCK_SEARCH=1``. Validated here, so an environment never runs every episode on a backend it
+    cannot select."""
     validate_search_backend(backend)
     registry = NativeToolRegistry()
     registry.register(
@@ -162,8 +155,7 @@ def _file_tools(
     list_files: Callable[..., str],
     texts: dict[str, str],
 ) -> NativeToolRegistry:
-    """The read/write/list file trio over any store, given its three handlers and its wording (``texts``): the
-    model calls the same three tools with the same parameters whichever store backs them."""
+    """The model calls the same three tools with the same parameters whichever store backs them."""
     registry = NativeToolRegistry()
     registry.register(
         NativeTool(
@@ -196,9 +188,7 @@ def _file_tools(
 
 
 def build_simulated_file_tools() -> NativeToolRegistry:
-    """Simulated in-memory filesystem tools (tests, closed-world demos) over a per-context store, so episodes share no
-    process-wide state; writes carry across turns while the driver keeps one context per episode.
-    """
+    """In-memory tools (tests, closed-world demos) over a per-context store, so episodes share no global state."""
     # None default so each context lazily seeds its own dict (a shared mutable default breaks isolation).
     files_var: ContextVar[dict[str, str] | None] = ContextVar("native_file_tools_store", default=None)
 
@@ -228,8 +218,6 @@ def build_combined_tools(
     sandbox: SandboxExecutor | None = None,
     search_backend: str | None = None,
 ) -> NativeToolRegistry:
-    """Registry with all native tools: math, python, search (on ``search_backend``, see
-    :func:`build_search_tools`), and (simulated) file."""
     return NativeToolRegistry.combine(
         build_math_tools(timeout=timeout),
         build_python_tools(timeout=timeout, sandbox=sandbox),
@@ -239,11 +227,8 @@ def build_combined_tools(
 
 
 def _require_session(session_getter: Callable[[], SandboxSession]) -> SandboxSession:
-    """Resolve the active episode's session, raising when there is none.
-
-    A missing session is an infrastructure fault, not a tool outcome: returned as a string, the protocol
-    would score the call as a successful observation; raised untyped, it would price it as the policy's.
-    """
+    """A missing session is an infrastructure fault: returned as a string, the protocol would score a successful
+    observation; raised untyped, it would price it as the policy's."""
     session = session_getter()
     if session is None:
         raise SandboxInfraError("no active sandbox session for this episode")
@@ -256,10 +241,7 @@ def build_session_code_tools(
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     tool_name: str | None = None,
 ) -> NativeToolRegistry:
-    """A code-execution tool on the active episode's :class:`SandboxSession`, which ``session_getter`` resolves per
-    call, so earlier turns' files are in scope and concurrent episodes keep their own working dirs; ``tool_name``
-    defaults to ``run_<language>``.
-    """
+    """Resolved per call, so earlier turns' files are in scope and concurrent episodes keep their own working dirs."""
     spec = require_language(language)
 
     def _run(code: str) -> str:
@@ -284,9 +266,7 @@ def build_session_bash_tools(
     session_getter: Callable[[], SandboxSession],
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
 ) -> NativeToolRegistry:
-    """A shell tool (``run_bash_command``) on the active episode's session, the backend, working directory and limits
-    of :func:`build_session_code_tools`; a non-zero exit is an ordinary observation, a sandbox fault raises by class.
-    """
+    """A non-zero exit is an ordinary observation; a sandbox fault raises by class."""
 
     def _run(command: str) -> str:
         return run_code_via_sandbox(command, _require_session(session_getter), timeout=timeout, language="bash")
@@ -311,10 +291,8 @@ def build_session_bash_tools(
 def build_session_file_tools(
     session_getter: Callable[[], SandboxSession],
 ) -> NativeToolRegistry:
-    """Real read/write/list file tools on the active episode's session, sharing its working dir with the code it runs.
-    A path that leaves the workspace or that UTF-8 cannot encode raises ``ValueError`` (a failed call); a missing
-    session or a replaced working directory raises its sandbox fault; an absent file is a valid string result.
-    """
+    """A path that leaves the workspace or that UTF-8 cannot encode raises ``ValueError`` (a failed call); a missing
+    session or a replaced working directory raises its sandbox fault; an absent file is a valid string result."""
 
     def write_file(path: str, content: str) -> str:
         _require_session(session_getter).write_file(path, content)

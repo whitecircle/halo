@@ -73,7 +73,7 @@ def gradient_agreement(
 
 
 def optimizer_step_agreement(actual, expected, initial, **gradient_bounds):
-    """Compare the applied update, not large unchanged weights that hide an omitted optimizer step."""
+    """Compare the applied update, since large unchanged weights hide an omitted optimizer step."""
     if actual.keys() != expected.keys() or expected.keys() != initial.keys():
         return False
     actual_update = torch.cat([(actual[name] - initial[name]).flatten() for name in sorted(initial)])
@@ -85,12 +85,8 @@ def optimizer_step_agreement(actual, expected, initial, **gradient_bounds):
 
 
 def same_layout_optimizer_step(model, optimizer, gradients):
-    """Apply independent full gradients with the tested shard layout and SR parameter order.
-
-    AdamWBF16's noise is keyed by local offset: a CP1 update cannot be compared directly to another
-    CP degree's write. This cold-step oracle preserves the tested optimizer's groups but never reads
-    its gradients or moments.
-    """
+    """Apply independent full gradients with the tested shard layout and SR parameter order. AdamWBF16's noise is keyed
+    by local offset, so a CP1 update cannot compare directly. Reads none of the optimizer's gradients or moments."""
     if not isinstance(optimizer, AdamWBF16) or optimizer.state:
         raise ValueError("the same-layout oracle requires a fresh AdamWBF16 optimizer")
     reshard_fsdp2_modules(model)
@@ -122,11 +118,8 @@ def same_layout_optimizer_step(model, optimizer, gradients):
 
 
 def boundary_loss_negative_control(scorer, model, ids, mask, advantages, group_sizes, full_logps, cp_config):
-    """Dropping the shard-edge targets must break the same numeric loss oracle that passes normally.
-
-    Only CP4's internal boundaries are supervised, so the mutation deletes the whole objective
-    rather than diluting a few lost targets among dozens of other completion tokens.
-    """
+    """Dropping the shard-edge targets must break the same loss oracle. Only CP4's internal boundaries are supervised,
+    so it deletes the whole objective."""
     if cp_config.cp_size != 4:
         raise ValueError("the boundary-only fixture requires CP4")
     boundary_labels = torch.full_like(ids, LABEL_IGNORE_INDEX)

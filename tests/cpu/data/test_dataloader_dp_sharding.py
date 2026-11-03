@@ -1,10 +1,6 @@
-"""DP row-ownership contract of ``DataParallelLoaderMixin._prepare_dataloader``.
-
-Covers the two halves that must agree for any DP < world_size topology: the loader hands TP/CP/ETP
-siblings IDENTICAL rows while DP ranks partition the dataset, and the gather inverse
-(``dp_representative_ranks`` + ``_select_gathered_chunks``) turns a world-order gather of those rows
-back into dataset order. Also pins ``data_seed`` to the sampler, not to the ambient torch seed.
-"""
+"""DP row-ownership contract of ``DataParallelLoaderMixin._prepare_dataloader``: TP/CP/ETP siblings get identical
+rows, DP ranks partition the dataset, and ``dp_representative_ranks`` + ``_select_gathered_chunks`` invert a
+world-order gather. ``data_seed`` owns the sampler."""
 
 import datetime
 from types import SimpleNamespace
@@ -31,9 +27,8 @@ WORLD_SIZE = 8
 DATASET_SIZE = 32
 BATCH_SIZE = 2
 
-# Topologies where data_parallel_size < world_size, i.e. every rank has siblings that must replay its
-# rows: attention TP, Ulysses CP, and expert-TP (whose DP rank is a dispatch-coordinate, not a
-# floor-division — so the sibling pairs are not adjacent global ranks).
+# Topologies where data_parallel_size < world_size, so every rank has siblings replaying its rows: attention TP,
+# Ulysses CP, and expert-TP, whose DP rank is a dispatch coordinate, so sibling pairs are not adjacent global ranks.
 SIBLING_TOPOLOGIES = {
     "tp2": {"tp_size": 2},
     "tp4": {"tp_size": 4},
@@ -47,8 +42,6 @@ def _parallelism_config(rank: int, **kwargs) -> ParallelismConfig:
 
 
 class _Trainer(DataParallelLoaderMixin):
-    """Minimal host exposing exactly what ``_prepare_dataloader`` reads off a trainer."""
-
     def __init__(self, parallelism_config: ParallelismConfig, data_seed: int | None = None):
         self.parallelism_config = parallelism_config
         self._dataset_presharded = False
@@ -66,7 +59,6 @@ class _Trainer(DataParallelLoaderMixin):
 
 
 def _rank_batches(trainer: _Trainer, *, shuffle: bool) -> list[torch.Tensor]:
-    """Batches one rank consumes from a DP-prepared loader over ``range(DATASET_SIZE)``."""
     dataset = list(range(DATASET_SIZE))
     sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, sampler=sampler, collate_fn=torch.tensor)
@@ -95,18 +87,13 @@ def test_siblings_share_rows_and_dp_ranks_partition_the_dataset(topology):
         for sibling in sibling_rows[1:]:
             assert sibling == sibling_rows[0], f"DP rank {dp_rank} siblings disagree: {sibling_rows}"
 
-    # Every example exactly once across the DP ranks — no rank silently replays another's slice.
     covered = [row for sibling_rows in rows_by_dp_rank.values() for row in sibling_rows[0]]
     assert sorted(covered) == list(range(DATASET_SIZE))
 
 
 @pytest.mark.parametrize("topology", sorted(SIBLING_TOPOLOGIES))
 def test_sibling_deduplicated_gather_reproduces_dataset_order(topology):
-    """A world gather of the DP-sharded rows, deduplicated, is the dataset-ordered block per step.
-
-    This is the contract TRL's precompute sweep indexes by: ``cat(per-step gathers)[i]`` must be
-    example ``i``.
-    """
+    """The contract TRL's precompute sweep indexes by: ``cat(per-step gathers)[i]`` is example ``i``."""
     configs = [_parallelism_config(rank, **SIBLING_TOPOLOGIES[topology]) for rank in range(WORLD_SIZE)]
     dp_size = configs[0].data_parallel_size
     keep = dp_representative_ranks([config.get_data_parallel_rank() for config in configs])
@@ -155,7 +142,6 @@ def test_the_dp_rank_map_lists_every_global_rank_s_dp_rank_in_global_order():
 
 
 def test_data_seed_owns_the_shuffle_order_not_the_ambient_torch_seed():
-    """``data_seed`` must reach the seedable sampler: same seed → same order under any global seed."""
     config = _parallelism_config(0, tp_size=2)
 
     torch.manual_seed(0)
@@ -173,7 +159,6 @@ def test_data_seed_owns_the_shuffle_order_not_the_ambient_torch_seed():
 
 
 def test_data_seed_unset_falls_back_to_the_ambient_torch_seed():
-    """No data_seed keeps accelerate's documented fallback — the sharding must not hardcode a seed."""
     config = _parallelism_config(0, tp_size=2)
 
     torch.manual_seed(0)

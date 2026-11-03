@@ -109,26 +109,25 @@ from tests.common.rank_log import log
 FAMILY = "qwen3_moe"
 TOTAL_STEPS = 5
 POISON_STEP = 3
-# Two runs of one row agree on a step's logged loss up to reduction order; a divisor that counts the skipped step
-# misses it by a fifth.
+# Two runs of one row agree on a step's logged loss up to reduction order; a divisor counting the skipped step misses
+# it by a fifth.
 LOSS_RTOL = 2e-2
 BATCH_SIZE = 2
 MAX_LENGTH = 128
 PP_MAX_LENGTH = 64
 LEARNING_RATE = 2e-3
-# A clipping threshold no step's norm reaches: the clip path's sweeps, then a coefficient of exactly 1.
+# No step's norm reaches this: the clip path's sweeps, then a coefficient of exactly 1.
 NONBINDING_MAX_GRAD_NORM = 1e9
-# Two runs of one step differ only where an expert's gradient sums its tokens in DeepEP's arrival order (bf16
-# rounding, under one ULP); a skipped sweep, or a non-idempotent leg (the expert SUM, the per-head norm SUM) run
-# twice, moves a gradient by its own size.
+# Two runs of one step differ only where an expert's gradient sums tokens in DeepEP's arrival order (bf16 rounding,
+# under one ULP); a skipped sweep, or a non-idempotent leg run twice, moves a gradient by its own size.
 RERUN_GRAD_REL_TOL = 2e-2
 RERUN_GRAD_NORM_REL_TOL = 1e-3
 
 
 class _Mode(NamedTuple):
     world_size: int
-    # "moe": the tiny family checkpoint; "dense" / "qlora": Qwen3-0.6B; "pp": the tiny dense Qwen3; "pp_moe": the
-    # tiny GptOss, a pipeline-registered MoE family.
+    # "moe": the tiny family checkpoint; "dense" / "qlora": Qwen3-0.6B; "pp": the tiny dense Qwen3; "pp_moe": tiny
+    # GptOss.
     model: str
     axes: dict
 
@@ -141,13 +140,13 @@ MODES = {
     # Node-local EP+CP needs ep_group_size == the NVLink domain, so on two ranks EP and CP share them.
     "ep2_cp2": _Mode(2, "moe", {"ep_size": 2, "cp_size": 2}),
     "etp2": _Mode(2, "moe", {"ep_size": 1, "expert_tp_size": 2}),
-    # One EP group of four filling the domain: dispatch groups [0, 1] and [2, 3], expert-TP groups [0, 2] and [1, 3].
+    # Dispatch groups [0, 1] and [2, 3], expert-TP groups [0, 2] and [1, 3].
     "ep2_etp2": _Mode(4, "moe", {"ep_size": 2, "expert_tp_size": 2}),
     "dense": _Mode(2, "dense", {}),
     "tp": _Mode(2, "dense", {"tp_size": 2}),
     "cp": _Mode(2, "dense", {"cp_size": 2}),
     "qlora": _Mode(2, "qlora", {}),
-    # A stage needs two ranks and must end on an NVLink-domain boundary: one two-GPU domain per stage.
+    # A stage needs two ranks and must end on an NVLink-domain boundary.
     "pp": _Mode(4, "pp", {"pp_size": 2, "gpus_per_node": 2, "nvlink_domain_size": 2}),
     "pp_ep": _Mode(4, "pp_moe", {"pp_size": 2, "ep_size": 2, "gpus_per_node": 2, "nvlink_domain_size": 2}),
 }
@@ -178,7 +177,6 @@ NORM_ONLY = ARGS.max_grad_norm <= 0
 
 
 def _final_norm(model) -> torch.nn.Module:
-    """The decoder's final norm, the one module named ``norm`` (the per-layer and per-head norms are not)."""
     (norm,) = [module for name, module in model.named_modules() if name.split(".")[-1] == "norm"]
     return norm
 
@@ -212,7 +210,6 @@ def _steps_counted(trainer) -> set[int]:
 
 
 def _local_state(trainer) -> tuple[dict[str, torch.Tensor], list[torch.Tensor]]:
-    """This rank's parameter shards and optimizer moments, copied."""
     model = trainer.model
     reshard_fsdp2_modules(model)
     shards = {name: to_local(param.detach()).clone() for name, param in model.named_parameters()}
@@ -242,8 +239,8 @@ class _AroundStep(TrainerCallback):
 
 
 class _StepGrads(TrainerCallback):
-    """This rank's gradients as optimizer step ``step`` took them: after the clip's sweeps and the optimizer's step
-    pre-hooks, before ``zero_grad``."""
+    """This rank's gradients as step ``step`` took them: after the clip's sweeps and step pre-hooks, before
+    ``zero_grad``."""
 
     def __init__(self, trainer, step: int):
         self.trainer, self.step = trainer, step
@@ -302,7 +299,6 @@ def _sft_config(
 
 
 def _trainer_inputs(pc: ParallelismConfig, moe_checkpoint: str | None) -> dict:
-    """The row's model, tokenizer, dataset and the trainer kwargs that go with them."""
     if MODE.model in ("pp", "pp_moe"):
         moe = MODE.model == "pp_moe"
         return {
@@ -349,7 +345,6 @@ def _same(a: list[torch.Tensor], b: list[torch.Tensor]) -> bool:
 
 
 def _raised(trainer) -> str | None:
-    """The RuntimeError ``trainer.train()`` raised on this rank, or None."""
     try:
         trainer.train()
     except RuntimeError as error:
@@ -358,14 +353,12 @@ def _raised(trainer) -> str | None:
 
 
 def _first_grad_norm(trainer) -> float | None:
-    """The gradient norm ``trainer`` logged at its first step, or None."""
     return next((e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e), None)
 
 
 def _tp_replicated(param: DTensor) -> bool:
-    """Whether every rank of the TP group holds the same local values of ``param``: replicated on its mesh's ``tp``
-    dim, on a bare (unnamed) TP mesh, or on a mesh without a ``tp`` dim (FSDP's dp shard of a TP-replicated
-    parameter)."""
+    """Whether every TP-group rank holds the same local values: replicated on the mesh's ``tp`` dim, a bare TP mesh, or
+    a mesh without a ``tp`` dim (FSDP's dp shard of a TP-replicated parameter)."""
     names = mesh_dim_names(param.device_mesh)
     if MeshDim.TP in names:
         return param.placements[names.index(MeshDim.TP)].is_replicate()
@@ -375,10 +368,9 @@ def _tp_replicated(param: DTensor) -> bool:
 
 
 def _replica_sets(trainer) -> dict[str, tuple[dist.ProcessGroup | None, list[tuple[str, torch.Tensor]]]]:
-    """The trainable parameters this rank holds copies of on other ranks, by the group whose ranks hold them alike:
-    the distributed expert shards across the EP groups (``experts``), the plain non-expert parameters every rank
-    holds whole (``replicated``, the world), and the TP-replicated DTensors across the TP group (``tp``). Read off
-    each parameter's layout, not off the sweeps' own classification. A kind whose group does not exist has none."""
+    """Parameters this rank holds copies of elsewhere, by group: expert shards across EP groups (``experts``), whole
+    non-expert parameters (``replicated``), TP-replicated DTensors (``tp``). Read off each parameter's layout,
+    independent of the sweeps' own classification."""
     model = trainer._top_level_model()
     layers = [layer for _, layer in named_ep_layers(model)]
     experts = {
@@ -426,9 +418,8 @@ def _replica_checks(trainer, pc: ParallelismConfig, metrics: dict) -> dict[str, 
 
 
 def _fp32_master_checks(trainer, around: _AroundStep, metrics: dict) -> dict[str, bool]:
-    """COLLECTIVE. Every trainable parameter of each fp32-master group, and both its moments, held at fp32, so the
-    skipped-step checks read AdamWBF16's fp32 path; and masters of every group trained on the steps after the skip
-    ``around`` watched."""
+    """COLLECTIVE. Every trainable parameter of each fp32-master group and both moments stay fp32, so the skipped-step
+    checks read AdamWBF16's fp32 path, and masters of every group trained on the steps after the skip."""
     groups = fp32_master_groups(trainer.model)
     state = _stepped_optimizer(trainer).state
     metrics |= {f"fp32_masters_{group}": len(params) for group, params in groups.items()}
@@ -459,7 +450,7 @@ def run(ctx):
     def make_trainer(
         *, poison_steps=(), logging_steps=1, max_grad_norm=ARGS.max_grad_norm, max_steps=TOTAL_STEPS, **guard_kwargs
     ):
-        # Seeds every random draw of a row's build (QLoRA's adapters), so two runs of one row take the same steps.
+        # So two runs of one row take the same steps (QLoRA's adapters draw at build).
         torch.manual_seed(SEED)
         pc = ParallelismConfig(**AXES)
         trainer = DistributedSFTTrainer(

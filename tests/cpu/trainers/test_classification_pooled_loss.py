@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""``ClassificationTrainer``'s pooled loss: fp32 evaluation, a micro-batch path free of host syncs,
-and no token-label check on class ids.
-
-Three properties are pinned here, each silent when it breaks:
-
-* **fp32.** The head's logits are the toolkit's bf16 storage dtype, and a (class-weighted) CE is
-  ``w_y * (logit_y - logsumexp(logits))`` — a cancelling difference. Evaluated in bf16 — the class
-  weights rounded to bf16 to satisfy torch's dtype rule, or transformers' own head loss, which
-  never upcasts — the loss lands ~0.3–1% off its exact value; the ``bf16_path`` / head-loss
-  comparisons below measure that gap, so the assertions cannot pass on a bf16 evaluation.
-* **No device→host sync per micro-batch.** The pipeline-parallel token loss runs on every
-  micro-batch of every step, so it masks in value space rather than gathering the surviving rows:
-  ``bool(valid.any())`` plus two boolean-mask gathers would stall the pipeline three times there.
-  The masked form must stay numerically identical to indexing those rows out.
-* **Class ids are not token ids.** The mixin's empty-label check compares ``labels`` against the
-  tokenizer's pad/eos ids, which a class id can equal on every row.
-
-Run: python tests/cpu/trainers/test_classification_pooled_loss.py
-"""
+"""``ClassificationTrainer``'s pooled loss: fp32, no host sync per micro-batch, no token-label check on class ids.
+Each breaks silently. CE is a cancelling difference, so in bf16 it lands ~0.3-1% off its exact value."""
 
 import types
 
@@ -35,14 +18,12 @@ from halo.trainers.reward.classification import ClassificationTrainer
 from halo.trainers.reward.classification_loss import ClassificationLoss, build_classification_loss, focal_loss
 
 NUM_CLASSES = 6
-# Not bf16-representable, and spanning two orders of magnitude — the shape derive_class_weights
-# produces on an imbalanced corpus, where rounding the vector is a visible reweighting.
+# Not bf16-representable and spanning two orders of magnitude, as derive_class_weights gives on an imbalanced corpus.
 CLASS_WEIGHTS = torch.tensor([0.2571, 17.3, 1.379, 0.6153, 4.77, 0.9091])
 _PAD_ID = 0
 
 
 def _trainer(loss: ClassificationLoss):
-    """A trainer stub carrying only what the loss seams read (no model)."""
     trainer = ClassificationTrainer.__new__(ClassificationTrainer)
     trainer._classification_loss = loss
     trainer.is_multi_label = loss.multi_label
@@ -57,11 +38,7 @@ def _weighted_ce() -> ClassificationLoss:
 
 
 def _head(dtype, *, num_labels=NUM_CLASSES, seed=0):
-    """A tiny randomly-initialised sequence-classification model in ``dtype``.
-
-    The score head is scaled up so the logits span a trained head's range: at the 0.02 init they
-    sit near zero, where bf16 and fp32 cross-entropy barely differ.
-    """
+    """The score head is scaled up: at the 0.02 init the logits sit near zero, where bf16 and fp32 CE barely differ."""
     torch.manual_seed(seed)
     config = Qwen3Config(
         vocab_size=64,
@@ -81,7 +58,6 @@ def _head(dtype, *, num_labels=NUM_CLASSES, seed=0):
 
 
 def _head_batch(*, num_labels=NUM_CLASSES, multi_label=False, rows=16, seq=12, seed=1):
-    """Right-padded rows of random lengths plus their class targets (multi-hot floats when multi-label)."""
     generator = torch.Generator().manual_seed(seed)
     input_ids = torch.randint(1, 64, (rows, seq), generator=generator)
     lengths = torch.randint(3, seq + 1, (rows,), generator=generator)
@@ -98,22 +74,18 @@ def _head_batch(*, num_labels=NUM_CLASSES, multi_label=False, rows=16, seq=12, s
 
 
 def _built_trainer(model, *, is_multi_label=False, **overrides):
-    """A trainer stub whose loss is what ``build_classification_loss`` returns for the config (shipped defaults
-    plus ``overrides``)."""
     config = ClassificationConfig(output_dir="unused", **overrides)
     return _trainer(build_classification_loss(config, model, None, multi_label=is_multi_label))
 
 
 def _bf16_batch(rows=16, seed=3):
-    """(bf16 logits, class targets). The logits are EXACT in bf16, so any difference between the
-    paths is the arithmetic's dtype, never the input's."""
+    """The logits are exact in bf16, so any difference between the paths is the arithmetic's dtype."""
     generator = torch.Generator().manual_seed(seed)
     logits = (torch.randn(rows, NUM_CLASSES, generator=generator) * 6.0).bfloat16()
     return logits, torch.randint(0, NUM_CLASSES, (rows,), generator=generator)
 
 
 def _plane(rows, valid_rows, values, seq=5):
-    """A pooling plane: ``LABEL_IGNORE_INDEX`` everywhere except one marker per VALID row."""
     plane = torch.full((rows, seq), LABEL_IGNORE_INDEX, dtype=torch.long)
     for row in range(rows):
         if valid_rows[row]:
@@ -121,18 +93,8 @@ def _plane(rows, valid_rows, values, seq=5):
     return plane
 
 
-# --------------------------------------------------------------------------------------------
-# fp32 evaluation
-# --------------------------------------------------------------------------------------------
-
-
 def test_weighted_ce_matches_an_fp64_reference_on_bf16_logits():
-    """The weighted path must be as accurate as the unweighted one, not ~0.5% off it.
-
-    Compared against fp64, and against the bf16 formulation (bare ``F.cross_entropy`` on bf16
-    logits with the weights downcast to match), which is what the bound has to separate — a plain
-    "close to fp64" tolerance loose enough for bf16 would pass either way.
-    """
+    """Also bounded against the bf16 path: a tolerance around fp64 loose enough for bf16 would pass either way."""
     logits, targets = _bf16_batch()
     valid = torch.ones(logits.size(0), dtype=torch.bool)
 
@@ -151,8 +113,7 @@ def test_weighted_ce_matches_an_fp64_reference_on_bf16_logits():
 
 
 def test_weighted_ce_normalizer_matches_an_fp64_reference():
-    """The denominator is a sum of the same class weights, so rounding them biases it too — and it
-    divides the loss, so the error does not cancel against the numerator's."""
+    """Rounding the weights biases the denominator too, and that error does not cancel against the numerator's."""
     _, targets = _bf16_batch()
     valid = torch.ones(targets.size(0), dtype=torch.bool)
 
@@ -165,10 +126,8 @@ def test_weighted_ce_normalizer_matches_an_fp64_reference():
 
 
 def test_the_weighted_normalizer_never_divides_an_all_inert_batch_by_zero():
-    """An all-inert micro-batch sums to zero on both sides, and the runner's ``sum / normalizer`` is
-    then NaN — carried into every stage's reported loss and into the nan/inf filter. The row-count
-    branches floor at 1.0; the weight-sum branch owes the same floor, and only at zero, so a real
-    batch's denominator (the sum of its rows' class weights) is untouched."""
+    """``sum / normalizer`` would be NaN on an all-inert micro-batch.
+    The floor applies only at zero, so a real batch's denominator is untouched."""
     targets = torch.full((4,), LABEL_IGNORE_INDEX, dtype=torch.long)
 
     normalizer = _weighted_ce().normalizer(targets, torch.zeros(4, dtype=torch.bool))
@@ -178,8 +137,6 @@ def test_the_weighted_normalizer_never_divides_an_all_inert_batch_by_zero():
 
 
 class _StubHead:
-    """A sequence-classification model returning fixed bf16 logits — the toolkit's storage dtype."""
-
     def __init__(self, logits):
         self._logits = logits
 
@@ -188,7 +145,6 @@ class _StubHead:
 
 
 def _non_pp_loss(trainer, logits, labels):
-    """Drive the NON-pipeline seam (``compute_loss``), where the loss met bf16 logits."""
     inputs = {
         "input_ids": torch.zeros(logits.size(0), 4, dtype=torch.long),
         "attention_mask": torch.ones(logits.size(0), 4, dtype=torch.long),
@@ -198,12 +154,7 @@ def _non_pp_loss(trainer, logits, labels):
 
 
 def test_non_pp_weighted_loss_evaluates_in_fp32():
-    """The seam a bf16 evaluation would run on.
-
-    The PP adapter hands ``masked_sum`` fp32 (it floats the pooled logits itself), so only this
-    path could run a class-weighted CE in bf16 with the weights rounded to match — ~1% off the
-    exact value, every step.
-    """
+    """The PP adapter hands ``masked_sum`` fp32, so only this path could run a weighted CE in bf16, ~1% off."""
     logits, targets = _bf16_batch()
     trainer = _trainer(_weighted_ce())
 
@@ -217,8 +168,7 @@ def test_non_pp_weighted_loss_evaluates_in_fp32():
 
 
 def test_non_pp_multi_label_loss_evaluates_in_fp32():
-    """Same seam, sigmoid head: BCE takes its output dtype from the target, so a bf16 multi-hot
-    label would hold the loss in bf16 even with the logits upcast."""
+    """BCE takes its output dtype from the target, so a bf16 multi-hot label would hold the loss in bf16."""
     generator = torch.Generator().manual_seed(21)
     logits = (torch.randn(8, NUM_CLASSES, generator=generator) * 6.0).bfloat16()
     targets = (torch.rand(8, NUM_CLASSES, generator=generator) > 0.5).bfloat16()
@@ -234,11 +184,7 @@ def test_non_pp_multi_label_loss_evaluates_in_fp32():
 
 
 def test_class_weight_vector_is_never_downcast():
-    """The weights are moved, never rounded: the loss upcasts the LOGITS to meet them instead.
-
-    Downcasting would be permanent — the trainer keeps the moved loss, so the first bf16 step would
-    round the vector for the rest of the run.
-    """
+    """The trainer keeps the moved loss, so a downcast on the first bf16 step would last the rest of the run."""
     logits, targets = _bf16_batch()
     trainer = _trainer(_weighted_ce())
 
@@ -249,8 +195,6 @@ def test_class_weight_vector_is_never_downcast():
 
 
 def test_multi_label_bce_stays_fp32_against_a_bf16_target():
-    """``binary_cross_entropy_with_logits`` takes its OUTPUT dtype from the TARGET, so upcasting the
-    logits alone would leave a bf16 multi-hot target driving the whole loss back into bf16."""
     generator = torch.Generator().manual_seed(11)
     logits = (torch.randn(8, NUM_CLASSES, generator=generator) * 6.0).bfloat16()
     targets = (torch.rand(8, NUM_CLASSES, generator=generator) > 0.5).bfloat16()
@@ -298,7 +242,6 @@ def _variant_batch(multi_label: bool, seed: int = 5):
 
 @pytest.mark.parametrize("variant", sorted(_LOSS_DEFINITIONS))
 def test_each_loss_mean_is_its_torch_definition_in_fp32(variant):
-    """The loss's mean is exactly the torch loss it stands for, evaluated on fp32 inputs."""
     loss, definition = _LOSS_DEFINITIONS[variant]
     logits, targets = _variant_batch(loss.multi_label)
     fp32_targets = targets.float() if targets.is_floating_point() else targets
@@ -308,8 +251,7 @@ def test_each_loss_mean_is_its_torch_definition_in_fp32(variant):
 
 @pytest.mark.parametrize("variant", sorted(_LOSS_DEFINITIONS))
 def test_every_loss_variant_returns_fp32(variant):
-    """One dtype for every built loss — a variant reducing in bf16 would feed the PP runner a summand it
-    then divides by an fp32 normalizer."""
+    """A variant reducing in bf16 would feed the PP runner a summand it then divides by an fp32 normalizer."""
     loss, _ = _LOSS_DEFINITIONS[variant]
     logits, targets = _variant_batch(loss.multi_label)
     assert loss.masked_sum(logits, targets, torch.ones(8, dtype=torch.bool)).dtype is torch.float32
@@ -317,18 +259,12 @@ def test_every_loss_variant_returns_fp32(variant):
 
 @pytest.mark.parametrize("multi_label", [False, True])
 def test_the_default_config_builds_plain_ce_or_bce(multi_label):
-    """``loss_type: cross_entropy`` with no weights is the trainer's own unweighted objective — the
-    shape the seams above are exercised with — never a hand-off to the head's loss."""
     loss = _built_trainer(_head(torch.float32), is_multi_label=multi_label)._classification_loss
     assert loss == ClassificationLoss(multi_label=multi_label)
 
 
 def test_the_default_loss_is_fp32_on_a_bf16_head():
-    """The default single-label CE on a real bf16 head: fp32, where the head's own loss is bf16.
-
-    Transformers' ``ForSequenceClassificationLoss`` runs ``cross_entropy`` on the bf16 pooled logits
-    and returns bf16, so the default path must never route the labels through the head.
-    """
+    """``ForSequenceClassificationLoss`` returns bf16 on bf16 pooled logits, so labels must not go through the head."""
     model = _head(torch.bfloat16)
     inputs = _head_batch()
     trainer = _built_trainer(model)
@@ -349,8 +285,6 @@ def test_the_default_loss_is_fp32_on_a_bf16_head():
 
 @pytest.mark.parametrize("multi_label", [False, True])
 def test_the_default_loss_value_is_the_heads_own_on_an_fp32_head(multi_label):
-    """Behavior preservation: at fp32 the trainer's default objective IS transformers' head loss — its
-    single-label CE on class ids, its BCE on multi-hot targets — bit for bit."""
     model = _head(torch.float32)
     inputs = _head_batch(multi_label=multi_label)
     trainer = _built_trainer(model, is_multi_label=multi_label)
@@ -363,8 +297,6 @@ def test_the_default_loss_value_is_the_heads_own_on_an_fp32_head(multi_label):
 
 
 def test_prediction_step_returns_the_head_logits_and_the_labels():
-    """Evaluation hands ``compute_metrics`` the head's pooled logits untouched (storage dtype kept)
-    and the batch's labels; only the loss is the trainer's fp32 one."""
     model = _head(torch.bfloat16)
     inputs = _head_batch()
     trainer = _built_trainer(model)
@@ -381,8 +313,7 @@ def test_prediction_step_returns_the_head_logits_and_the_labels():
 
 
 def test_soft_label_targets_are_refused_on_both_paths():
-    """A single-label run handed ``[B, C]`` float targets would train soft-label cross-entropy, since
-    ``F.cross_entropy`` takes class probabilities there; the PP and non-PP seams refuse it alike."""
+    """``F.cross_entropy`` reads ``[B, C]`` float targets as class probabilities, which trains soft-label CE."""
     model = _head(torch.float32)
     trainer = _built_trainer(model)
     trainer._pp_pool_pad_id = _PAD_ID
@@ -396,25 +327,15 @@ def test_soft_label_targets_are_refused_on_both_paths():
 
 
 def test_a_single_logit_single_label_head_is_refused():
-    """``num_labels == 1`` is transformers' regression convention; softmax CE over one logit is
-    identically zero, so a single-label run would train on nothing. Multi-label keeps its one sigmoid."""
+    """``num_labels == 1`` is transformers' regression convention; softmax CE over one logit is identically zero."""
     with pytest.raises(ValueError, match="num_labels >= 2"):
         _built_trainer(_head(torch.float32, num_labels=1))
     assert _built_trainer(_head(torch.float32, num_labels=1), is_multi_label=True)._classification_loss.multi_label
 
 
-# --------------------------------------------------------------------------------------------
-# The pipeline micro-batch path: mask, never index
-# --------------------------------------------------------------------------------------------
-
-
 class _NoHostSyncTensor(torch.Tensor):
-    """A tensor that raises on any op reading a value back to the host.
-
-    Each of these is a stream synchronization on CUDA — ``torch.cuda.set_sync_debug_mode("error")``
-    catches them on a GPU, and this is that check's CPU-runnable equivalent. Boolean-mask indexing
-    counts: it lowers to ``nonzero``, whose output shape only the device knows.
-    """
+    """Raises on any host read-back: a CPU stand-in for ``torch.cuda.set_sync_debug_mode("error")``.
+    Boolean-mask indexing counts, since it lowers to ``nonzero``, whose output shape only the device knows."""
 
     _SYNCING = (
         torch.Tensor.item,
@@ -439,7 +360,6 @@ class _NoHostSyncTensor(torch.Tensor):
 
 
 def _pp_batch(seed=17, rows=6, seq=5, multi_label=False):
-    """(per-token logits, plane, class_targets, valid) with the PP eval path's inert rows present."""
     generator = torch.Generator().manual_seed(seed)
     valid = torch.tensor([True, False, True, True, False, True][:rows])
     values = torch.randint(0, NUM_CLASSES, (rows,), generator=generator)
@@ -449,20 +369,14 @@ def _pp_batch(seed=17, rows=6, seq=5, multi_label=False):
     return logits, plane, class_targets, valid
 
 
-# Masking leaves the inert rows in the reduction as exact zeros. They change no individual addition,
-# but they lengthen the vector, and torch's pairwise sum blocks on length — so the non-zero terms
-# associate differently and the result lands within a couple of fp32 ULP, not bit-exactly. Measured
-# worst case over 60 random batches x every loss variant: 2.1e-7.
+# Inert rows stay in the reduction as exact zeros. They lengthen the vector, and torch's pairwise sum blocks on length,
+# so the result lands within a couple of fp32 ULP. Measured worst case over 60 random batches x each loss: 2.1e-7.
 _REDUCTION_ORDER_TOLERANCE = 1e-6
 
 
 @pytest.mark.parametrize("multi_label", [False, True])
 def test_masked_sum_equals_indexing_the_surviving_rows_out(multi_label):
-    """Masking in value space must equal indexing the surviving rows out.
-
-    Bounded against BOTH sides: within reduction-order noise of the indexed answer, and far from the
-    unmasked sum — otherwise a tolerance this loose could hide a mask that never applied.
-    """
+    """Bounded on both sides: a tolerance this loose could otherwise hide a mask that never applied."""
     logits, plane, class_targets, valid = _pp_batch(multi_label=multi_label)
     loss = ClassificationLoss(multi_label=True) if multi_label else _weighted_ce()
 
@@ -484,8 +398,7 @@ def test_masked_sum_equals_indexing_the_surviving_rows_out(multi_label):
 
 @pytest.mark.parametrize("multi_label", [False, True])
 def test_masked_normalizer_equals_indexing_the_surviving_rows_out(multi_label):
-    """Numerator and denominator must agree on which rows exist, so the normalizer gets the same
-    treatment — a mismatch would rescale the loss by the inert-row fraction."""
+    """Numerator and denominator must agree on which rows exist, or the loss rescales by the inert-row fraction."""
     _, plane, class_targets, valid = _pp_batch(multi_label=multi_label)
     loss = ClassificationLoss(multi_label=True) if multi_label else _weighted_ce()
 
@@ -502,11 +415,7 @@ def test_masked_normalizer_equals_indexing_the_surviving_rows_out(multi_label):
 
 @pytest.mark.parametrize("multi_label", [False, True])
 def test_token_loss_runs_without_a_single_host_sync(multi_label):
-    """The whole micro-batch loss, under a tensor that raises on any read-back to the host.
-
-    ``bool(valid.any())`` and two boolean-mask gathers would be three stalls per
-    micro-batch — at 512 GPUs, three per micro-batch per rank on the pipeline's critical path.
-    """
+    """``bool(valid.any())`` and two boolean-mask gathers would be three stalls per micro-batch."""
     logits, plane, class_targets, valid = _pp_batch(multi_label=multi_label)
     trainer = _trainer(ClassificationLoss(multi_label=True) if multi_label else _weighted_ce())
 
@@ -516,11 +425,10 @@ def test_token_loss_runs_without_a_single_host_sync(multi_label):
 
     loss = trainer._pp_classification_token_loss(logits.as_subclass(_NoHostSyncTensor), target)
     assert torch.isfinite(loss.as_subclass(torch.Tensor)).all()
-    _ = valid  # the mask is derived inside the loss; the fixture's copy only documents the batch
+    _ = valid  # the loss derives the mask itself
 
 
 def test_normalizer_runs_without_a_host_sync():
-    """The step normalizer is off the micro-batch path but takes the same masked form."""
     _, plane, _, _ = _pp_batch()
     trainer = _trainer(_weighted_ce())
     normalizer = trainer._pp_classification_normalizer({"labels": plane.as_subclass(_NoHostSyncTensor)})
@@ -528,12 +436,7 @@ def test_normalizer_runs_without_a_host_sync():
 
 
 def test_all_inert_microbatch_is_zero_and_still_wired_to_the_graph():
-    """An all-inert micro-batch must yield a real zero that BACKWARDS.
-
-    The masked sum runs unconditionally — a ``bool(valid.any())`` early-out would host-sync every
-    micro-batch — so this is the case that has to survive it: a loss detached from the stage's
-    activations leaves the pipeline schedule waiting on a gradient that never arrives.
-    """
+    """A loss detached from the stage's activations leaves the pipeline waiting on a gradient that never arrives."""
     rows, seq = 4, 5
     plane = torch.full((rows, seq), LABEL_IGNORE_INDEX, dtype=torch.long)
     logits = torch.randn(rows, seq, NUM_CLASSES, requires_grad=True)
@@ -548,13 +451,8 @@ def test_all_inert_microbatch_is_zero_and_still_wired_to_the_graph():
 
 
 def test_inert_rows_cannot_leak_a_nan_from_a_saturated_logit():
-    """An inert row's logits are whatever the padder left, and a saturated one must not poison the
-    micro-batch — in the BACKWARD as much as the forward.
-
-    Masking only the loss is not enough: the objective's backward still runs over the row, where
-    ``softmax(inf)`` is NaN and the chain rule carries it through the masked zero. The row's logits
-    are therefore neutralized before the objective sees them.
-    """
+    """An inert row's logits are whatever the padder left, so they are neutralized before the objective.
+    Masking only the loss would still leave ``softmax(inf)`` NaN in the backward, carried through the masked zero."""
     rows, seq = 3, 4
     valid = torch.tensor([True, False, True])
     plane = _plane(rows, valid, torch.tensor([1, 0, 2]), seq=seq)
@@ -591,12 +489,7 @@ _WEIGHTS = CLASS_WEIGHTS.tolist()
     ],
 )
 def test_pp_and_non_pp_score_one_batch_identically(overrides, multi_label):
-    """The same batch through both seams: the non-PP head forward + mean, and the PP last stage's
-    per-token head outputs, pooled per micro-batch, summed, and divided by the batch normalizer.
-
-    Every built loss variant, on a real bf16 head whose ragged rows make the pooling position
-    load-bearing, split into two uneven micro-batches.
-    """
+    """Every built loss, on a bf16 head whose ragged rows make pooling position matter, in two uneven micro-batches."""
     model = _head(torch.bfloat16)
     batch = _head_batch(multi_label=multi_label)
     trainer = _built_trainer(model, is_multi_label=multi_label, **overrides)
@@ -628,8 +521,7 @@ def test_pp_and_non_pp_score_one_batch_identically(overrides, multi_label):
     ],
 )
 def test_an_eval_split_s_padding_rows_leave_the_loss(overrides, multi_label):
-    """The last 6 of 16 rows pad the eval split's final round: the eval loss is the 10 real rows'
-    own, as the same rows score alone, and a rank of padding alone scores 0."""
+    """The last 6 of 16 rows pad the final round: the loss is the 10 real rows', and a padding-only rank scores 0."""
     model = _head(torch.float32)
     batch = _head_batch(multi_label=multi_label)
     trainer = _built_trainer(model, is_multi_label=multi_label, **overrides)
@@ -647,15 +539,8 @@ def test_an_eval_split_s_padding_rows_leave_the_loss(overrides, multi_label):
     assert empty.item() == 0.0
 
 
-# --------------------------------------------------------------------------------------------
-# Class ids are not token ids
-# --------------------------------------------------------------------------------------------
-
-
 def test_compute_loss_never_runs_the_token_label_check(monkeypatch):
-    """The mixin's ``_warn_once_on_empty_labels`` reads ``labels`` as token ids and flags a batch whose labels
-    are all pad/eos. Class ids are not token ids: under Gemma's pad=0 / eos=1 every binary batch
-    "has no training signal", so the check must stay off this trainer's path."""
+    """Under Gemma's pad=0 / eos=1 every binary batch would read as all pad/eos and warn of no training signal."""
     warnings = []
     monkeypatch.setattr(token_metrics, "logger", types.SimpleNamespace(warning=warnings.append))
     trainer = _trainer(ClassificationLoss(multi_label=False))

@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""The on-policy GRPO trainers refuse the TRL options they cannot honor, before TRL's constructor.
-
-TRL 1.14 adds options the toolkit's trainers would silently drop: ``use_adaptive_entropy`` (its
-coefficient lives in a sidecar a sharded resume never restores), ``entropy_coef`` on the chunked sweep
-(whose entropy is detached, so the bonus has no gradient), and an ``IterableDataset`` for the
-DP-sharded loader (whose prompt-group sampler needs a length). The gate runs in the construction spine
-both trainers share, after the chunked-sweep switch is read and before TRL opens the rollout client.
-
-    python tests/cpu/grpo/test_on_policy_trl_option_refusals.py
-"""
+"""TRL options the on-policy trainers would drop are refused: ``use_adaptive_entropy`` (sidecar a sharded resume never
+restores), chunked ``entropy_coef`` (detached, no gradient), ``IterableDataset`` (the sampler needs a length)."""
 
 from types import SimpleNamespace
 
@@ -31,7 +23,6 @@ def _training_args(**fields):
 
 @pytest.fixture
 def begin(monkeypatch):
-    """The shared ``_begin_on_policy_init`` on a bare trainer, the distributed setup stubbed out."""
     monkeypatch.setattr(DistributedTrainerMixin, "_init_distributed_config", lambda self, kwargs, **_: kwargs)
 
     def run(ctor_args=(), *, config=None, chunked=False, custom_loader=False, **kwargs):

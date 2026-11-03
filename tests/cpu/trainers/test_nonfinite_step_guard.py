@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: an optimizer step whose global gradient norm is NaN or inf is never applied.
-
-``NonFiniteStepGuardMixin`` takes its verdict off the norm transformers computes right before ``optimizer.step()``
-and discards the step's gradients and loss instead of stepping. Every case runs on both of its paths: a torch
-optimizer, skipped on the host after a read of the norm, and AdamWBF16, skipped on the device under a flag whose norm
-the host reads a step late (at the next step's norm, a logging or saving step, or the end of training). Pinned on a
-real LR scheduler, on AdamWBF16's deferred clip scale, and end to end through ``Trainer.train()``: the guard depends
-on that loop's order (norm, step, scheduler, log), so a transformers bump that reorders it fails here.
-
-    python tests/cpu/trainers/test_nonfinite_step_guard.py
-"""
+"""An optimizer step whose global gradient norm is NaN or inf is never applied, on a host path and a device path.
+The guard depends on the train loop's order (norm, step, scheduler, log), so a bump that reorders it fails here."""
 
 import copy
 import math
@@ -40,8 +31,6 @@ PATHS = pytest.mark.parametrize("optimizer_cls", [torch.optim.AdamW, AdamWBF16],
 
 
 class _NoHostRead(torch.Tensor):
-    """A norm that refuses to be read back to the host."""
-
     def item(self):
         raise AssertionError("the gradient norm was read back to the host")
 
@@ -99,8 +88,7 @@ def test_a_nonfinite_step_leaves_weights_and_moments_untouched(bad, optimizer_cl
 
 
 def test_the_device_verdict_is_read_a_step_late_without_a_host_read_before_the_step():
-    """The device path neither reads the norm before its step nor waits for it: the next step's norm settles it,
-    rolling the optimizer's step counts back, while that step's own verdict stays unread."""
+    """The next step's norm settles it, rolling back the step counts; that step's own verdict stays unread."""
     me = guarded(optimizer_cls=AdamWBF16)
     guarded_step(me, 0.5)
     weights = _weights(me)
@@ -121,8 +109,7 @@ def test_the_device_verdict_is_read_a_step_late_without_a_host_read_before_the_s
 
 
 def test_a_finite_late_read_lets_go_of_the_optimizer_state():
-    """A finite verdict settles its step too: what the step recorded for a skip must not keep alive the optimizer
-    state an in-process resume replaces after the last step's read, a whole extra copy of the rank's state."""
+    """A settled step's record must not keep alive the state an in-process resume replaces, a whole extra copy."""
     me = guarded(optimizer_cls=AdamWBF16)
     guarded_step(me, 0.5)
     guarded_step(me, 0.5)
@@ -136,8 +123,7 @@ def test_a_finite_late_read_lets_go_of_the_optimizer_state():
 
 @pytest.mark.parametrize("flag", ["should_log", "should_evaluate", "should_save", None])
 def test_a_step_that_logs_evaluates_or_saves_reads_the_verdict_first(flag):
-    """A log reports the late verdict, and a save, or an evaluation that decides a ``save_strategy: best`` save,
-    writes an optimizer state that leaves the skipped step out; a step doing none of them leaves it unread."""
+    """A log reports the late verdict; a save, or an eval deciding a ``save_strategy: best`` save, omits the skip."""
     me = guarded(optimizer_cls=AdamWBF16)
     guarded_step(me, 0.5)
     guarded_step(me, float("nan"))
@@ -154,15 +140,13 @@ def test_a_step_that_logs_evaluates_or_saves_reads_the_verdict_first(flag):
 
 
 def test_the_host_path_reads_the_norm_before_the_step():
-    """Negative control for the test above: a torch optimizer's verdict is a host read of the norm."""
     me = guarded(optimizer_cls=torch.optim.AdamW)
     with pytest.raises(AssertionError, match="read back to the host"):
         me._get_grad_norm(me.model, grad_norm=torch.tensor(1.0).as_subclass(_NoHostRead))
 
 
 def test_the_skip_drops_a_deferred_clip_scale():
-    """AdamWBF16 multiplies the clip coefficient in at its next step: one deferred for discarded gradients
-    must not scale the next step's."""
+    """AdamWBF16 applies the clip scale at its next step; one deferred for discarded gradients must not scale it."""
     me = guarded(optimizer_cls=AdamWBF16)
     guarded_step(me, 0.5)
     weights = _weights(me)
@@ -227,8 +211,7 @@ def _scheduler_warnings(caught) -> list[str]:
 
 @PATHS
 def test_the_lr_scheduler_wraps_the_guarded_step_without_warning(optimizer_cls):
-    """torch's scheduler re-wraps ``optimizer.step`` through ``__func__`` and warns on a step it cannot
-    track; ``create_optimizer`` installs the guard before the scheduler exists."""
+    """torch's scheduler warns on a step it cannot track; ``create_optimizer`` installs the guard before it exists."""
     me = guarded(optimizer_cls=optimizer_cls)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -244,8 +227,7 @@ def test_the_lr_scheduler_wraps_the_guarded_step_without_warning(optimizer_cls):
 
 @PATHS
 def test_a_scheduler_built_before_the_guard_keeps_stepping_and_tracking(optimizer_cls):
-    """A caller's ``optimizers=(optimizer, scheduler)`` wraps ``step`` before ``create_optimizer`` installs the guard:
-    a skipped first step must still count as taken for the scheduler, and its wrapper's marker must survive."""
+    """A caller's scheduler wraps ``step`` first: a skipped first step still counts for it, and its marker survives."""
     me = guarded(optimizer_cls=optimizer_cls, install=False)
     scheduler = torch.optim.lr_scheduler.LambdaLR(me.optimizer, lambda step: 1.0 / (step + 1))
     me._install_nonfinite_step_skip()
@@ -266,8 +248,7 @@ def test_a_scheduler_built_before_the_guard_keeps_stepping_and_tracking(optimize
 
 @PATHS
 def test_a_loss_scaler_stepping_the_optimizer_owns_overflow_steps(optimizer_cls):
-    """Under fp16 accelerate's optimizer wrapper steps through the scaler, which skips an overflow step
-    itself and lowers its scale; the guard takes no verdict."""
+    """Under fp16 accelerate steps through the scaler, which skips overflow steps; the guard takes no verdict."""
     me = guarded(limit=0, optimizer_cls=optimizer_cls)
     wrapper = object.__new__(AcceleratedOptimizer)
     wrapper.optimizer, wrapper.scaler = me.optimizer, object()
@@ -299,8 +280,7 @@ def test_a_negative_limit_is_refused_at_parse_time():
 
 @PATHS
 def test_a_pending_skip_never_swallows_the_restore_step(optimizer_cls):
-    """The zero-LR step that materializes optimizer state during a restore always steps, and leaves the verdict to
-    the step it belongs to."""
+    """The zero-LR step that materializes state during a restore always steps, leaving the verdict to its own step."""
     me = guarded(optimizer_cls=optimizer_cls)
     guarded_step(me, 0.5)
     me._read_device_verdict()
@@ -365,8 +345,7 @@ class _Rows(torch.utils.data.Dataset):
 
 
 class _GuardedTrainer(GradientClippingMixin, NonFiniteStepGuardMixin, Trainer):
-    """The install ``DistributedTrainerMixin.create_optimizer`` performs, on a plain Trainer, behind the clipping
-    mixin in the order the spine composes them."""
+    """``DistributedTrainerMixin.create_optimizer``'s install, behind the clipping mixin as the spine composes them."""
 
     def create_optimizer(self, model=None):
         super().create_optimizer(model)
@@ -375,8 +354,7 @@ class _GuardedTrainer(GradientClippingMixin, NonFiniteStepGuardMixin, Trainer):
 
 
 class _PoisonOneStep(TrainerCallback):
-    """Poisons the loss of optimizer step ``step``'s last micro-batch, leaving any earlier one finite, and records
-    the weights around the step and after every step."""
+    """Poisons the loss of step ``step``'s last micro-batch, leaving earlier ones finite, and records the weights."""
 
     def __init__(self, model: _Tiny, step: int | None):
         self.model, self.step = model, step
@@ -412,7 +390,7 @@ def _trainer(
     limit=3,
     save_steps=None,
 ):
-    """``optimizer_cls`` AdamWBF16 takes the device path; torch's AdamW, transformers' own build, the host one."""
+    """AdamWBF16 takes the device path; torch's AdamW, transformers' own build, the host one."""
     args = TrainingArguments(
         output_dir=str(tmp_path),
         max_steps=total,
@@ -476,8 +454,7 @@ def test_trainer_skips_the_poisoned_step_and_trains_on(tmp_path, max_grad_norm, 
 
 @PATHS
 def test_an_unclipped_run_skips_a_poisoned_step_it_does_not_log(tmp_path, optimizer_cls):
-    """At ``max_grad_norm <= 0`` transformers asks for the norm on every step, logged or not; a norm skipped on
-    the steps that log nothing would let a poisoned one through unread."""
+    """transformers asks for the norm every step here; a norm skipped on unlogged steps would let poison through."""
     total = 6
     model = _Tiny()
     poison = _PoisonOneStep(model, 3)
@@ -495,8 +472,7 @@ def test_an_unclipped_run_skips_a_poisoned_step_it_does_not_log(tmp_path, optimi
 
 @PATHS
 def test_a_skipped_last_step_is_reported_before_training_ends(tmp_path, optimizer_cls):
-    """transformers adds the unlogged accumulator to the run's mean at the end of training, without a log; the
-    device path reads the last step's verdict there, so it is counted and kept out of ``train_loss``."""
+    """transformers adds the unlogged accumulator to the mean at the end; the device path reads the verdict there."""
     total = 6
     model = _Tiny()
     poison = _PoisonOneStep(model, total)
@@ -515,8 +491,7 @@ def test_a_skipped_last_step_is_reported_before_training_ends(tmp_path, optimize
 @PATHS
 @pytest.mark.parametrize("poison_step", [3, 6], ids=["mid_run", "last_step"])
 def test_the_limit_raises_before_any_later_step_is_applied(tmp_path, poison_step, optimizer_cls):
-    """At ``max_consecutive_nonfinite_steps=0`` the host path raises before the poisoned step; the device path at the
-    late read, before the next step's update (or as training ends), the weights still those of the step before."""
+    """The host path raises before the poisoned step; the device path at the late read, before the next update."""
     total = 6
     model = _Tiny()
     poison = _PoisonOneStep(model, poison_step)
@@ -534,9 +509,7 @@ def test_the_limit_raises_before_any_later_step_is_applied(tmp_path, poison_step
 
 @PATHS
 def test_a_save_after_a_skipped_step_resumes_as_the_run_went_on(tmp_path, optimizer_cls):
-    """A save right after a skipped step reads its verdict first: the checkpoint's optimizer state counts the applied
-    steps only, and a run resumed from it ends on the uninterrupted run's weights, bit for bit. Nothing else of the
-    guard is checkpointed, so the resumed run starts with no streak and nothing unread."""
+    """The checkpoint's optimizer state counts applied steps only, and nothing else of the guard is checkpointed."""
     poison_step, total = 3, 6
     model = _Tiny()
     poison = _PoisonOneStep(model, poison_step)
@@ -585,10 +558,8 @@ class _RaiseAfterStep(TrainerCallback):
 
 
 def test_a_resume_after_an_interrupted_run_settles_its_unread_verdict_first(tmp_path):
-    """A run that raised right after a device-skipped step leaves its verdict unread; the next ``train()`` on the
-    trainer settles it before loading the checkpoint, so the stale rollback never lands on the loaded state and the
-    resumed run ends on the uninterrupted run's weights, bit for bit. The stale skip belongs to the interrupted run, so
-    the resumed run's ``train_loss`` divides by its own applied steps alone."""
+    """The next ``train()`` settles the verdict before loading, so its rollback never lands on the loaded state.
+    The stale skip is the interrupted run's, so ``train_loss`` divides by the resumed run's applied steps alone."""
     poison_step, total = 3, 6
     torch.manual_seed(0)
     reference_model = _Tiny()
@@ -644,10 +615,8 @@ def test_a_resume_after_an_interrupted_run_settles_its_unread_verdict_first(tmp_
 def test_train_loss_and_every_window_average_the_applied_steps(
     tmp_path, poison, logging_strategy, logging_steps, nan_inf_filter, accumulation, optimizer_cls
 ):
-    """The run's mean and every logged window average the applied steps' losses over the applied steps alone,
-    whatever the window and whether the skipped step's loss was finite; a window with no applied step logs NaN,
-    under ``logging_nan_inf_filter`` too. Under gradient accumulation only the step's last micro-batch is poisoned,
-    and its finite earlier ones go with it."""
+    """A window with no applied step logs NaN, under ``logging_nan_inf_filter`` too.
+    Under accumulation only the last micro-batch is poisoned, and its finite earlier ones go with it."""
     poison_step, total = 3, 6
     torch.manual_seed(0)
     model = _Tiny(poison)
@@ -702,8 +671,7 @@ def test_a_run_none_of_whose_steps_was_applied_has_a_nan_train_loss(tmp_path, op
 
 @PATHS
 def test_a_second_run_divides_by_its_own_applied_steps(tmp_path, optimizer_cls):
-    """``train()`` counts a run's skipped steps afresh, its logging window's included, as transformers restarts its
-    loss accumulators: a first run ending on an unlogged window that holds a skip leaves nothing to the second."""
+    """``train()`` counts skips afresh as transformers restarts its loss sums; an earlier unlogged skip is dropped."""
     total, logging_steps = 6, 4
     model = _Tiny()
     tracker = _PoisonOneStep(model, logging_steps + 1)
@@ -736,15 +704,15 @@ def test_a_second_run_divides_by_its_own_applied_steps(tmp_path, optimizer_cls):
 
 
 def test_the_norm_only_pass_clips_nothing():
-    """transformers sends an infinite threshold for its unclipped norm; scaling every gradient by 1 is a wasted pass,
-    and by ``nan_to_num(inf / inf)`` a NaN norm's coefficient."""
+    """transformers sends an infinite threshold for its unclipped norm.
+    Scaling every gradient by 1 is a wasted pass, and by ``nan_to_num(inf / inf)`` a NaN norm's coefficient."""
     assert not is_clipping_enabled(math.inf)
     assert not is_clipping_enabled(0.0) and not is_clipping_enabled(None)
     assert is_clipping_enabled(1.0)
 
 
 class _PoisonFinalNorm(TrainerCallback):
-    """Multiplies the decoder's final norm output by NaN on optimizer step ``step``, recording the weights around it."""
+    """Multiplies the decoder's final norm output by NaN on step ``step``, recording the weights around it."""
 
     def __init__(self, model, step: int):
         self.model, self.step, self.armed = model, step, False
@@ -770,8 +738,7 @@ class _PoisonFinalNorm(TrainerCallback):
 def _sft_trainer(
     tmp_path, *, poison_step: int, optimizers_for=None, **trainer_kwargs
 ) -> tuple[DistributedSFTTrainer, _PoisonFinalNorm]:
-    """The real spine on CPU at world 1, unclipped, logging every fourth of eight steps; ``optimizers_for(model)``
-    builds the caller's ``optimizers`` pair."""
+    """The real spine on CPU at world 1, unclipped, logging every fourth of eight steps."""
     torch.manual_seed(0)
     vocab = len(OFFLINE_VOCAB)
     model = Qwen3ForCausalLM(

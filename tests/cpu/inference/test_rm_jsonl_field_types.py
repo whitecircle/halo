@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""The reward-model scripts read their JSONL files with every field kept as the value ``json`` parses.
-
-pandas' ``read_json`` rewrites values: by default a string answer ``"579"`` reaches the reward model as
-``579.0`` once another row lacks the field, an id ``"007"`` becomes ``7`` and a ``*_at`` column becomes
-timestamps; with its inference off an int answer beside a missing one still reads ``5.0`` and ``0.3``
-reads ``0.30000000000000004``. The prompts and the resume output go through one reader, so the ids a
-re-run skips are the ids the prompts carry.
-
-Run: python tests/cpu/inference/test_rm_jsonl_field_types.py
-"""
+"""The reward-model scripts read JSONL with every field kept as the value ``json`` parses. pandas' ``read_json``
+rewrites values: an answer ``"579"`` beside a missing one reads ``579.0``, an id ``"007"`` reads ``7``, and a
+``*_at`` column reads as timestamps."""
 
 import json
 import types
@@ -57,9 +50,8 @@ def test_string_fields_reach_the_reward_model_unchanged(tmp_path):
     ids=["int-beside-a-missing-answer", "float", "int-beside-a-null-answer"],
 )
 def test_numeric_answers_reach_the_reward_model_as_written(answers, shown, tmp_path):
-    """A numeric answer column is rendered into the prompt as the JSON wrote it: an int stays an int
-    beside a row lacking the field or holding null, and a float keeps its shortest spelling. A null or
-    absent answer adds no line."""
+    """A numeric answer renders as the JSON wrote it: an int stays an int beside a missing or null one, a float
+    keeps its shortest spelling, and a null or absent answer adds no line."""
     rows = [
         {"id": str(i), "prompt": _PROMPT, **({} if answer == "absent" else {"correct_answer": answer})}
         for i, answer in enumerate(answers)

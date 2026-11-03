@@ -12,21 +12,17 @@ from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter,
 
 
 class OfflineGRPOPipelineMixin:
-    """The offline objective as a pipeline loss and the pipeline reference sweep, over the host trainer's
-    ``_joined_rows``, ``_token_objective``, ``_live_min_log_prob`` and ``_record_sign_metrics``. Mixed in
-    ahead of the spine's pipeline mixin, whose ``_configure_pipeline_parallel`` builds the adapter once."""
+    """Over the host's ``_joined_rows``, ``_token_objective``, ``_live_min_log_prob`` and ``_record_sign_metrics``.
+    Mixed in ahead of the spine's pipeline mixin, whose ``_configure_pipeline_parallel`` builds the adapter once."""
 
     # Non-None only while the PP reference sweep drives the schedule: the last stage's loss stashes
     # its per-token log-probs here instead of computing the objective.
     _pp_ref_sweep: list[torch.Tensor] | None = None
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
-        """Offline GRPO's pipeline-loss contract. The objective is microbatch-local and every whole-batch
-        denominator reads batch metadata alone, so the microbatch numerators share the runner's one
-        per-step normalizer, rank-local as the non-PP quotient is (FSDP averages both over the DP group).
-        At ``kl_beta != 0`` the run-start reference log-probs ship as a third per-example side tensor. Seeds
-        the PP-only live clamp floor, which ``_pp_batch_transform`` refreshes every step.
-        """
+        """Every denominator reads batch metadata alone, so the microbatch numerators share the runner's one per-step
+        normalizer. At ``kl_beta != 0`` the reference log-probs ship as a third side tensor. Seeds the PP-only live
+        clamp floor."""
         self._pp_min_log_prob: float | None = self.min_log_prob
         extra_target_keys = ("advantage", "group_size")
         if self.beta != 0.0:
@@ -38,13 +34,11 @@ class OfflineGRPOPipelineMixin:
             extra_target_keys=extra_target_keys,
             # Row filler for partial eval batches: with 0, an inert row's 1/group_size is inf → NaN.
             pad_spec={"group_size": 1},
-            # The same whole-batch denominator as training, over the pre-pad batch's real rows.
             eval_normalizer=self._pp_normalizer,
         )
 
     def _pp_token_loss(self, logits: torch.Tensor, target: dict[str, torch.Tensor]) -> torch.Tensor:
-        """The offline-GRPO numerator over one microbatch, the objective ``compute_loss`` runs, against the
-        precomputed reference column; the runner divides by ``_pp_normalizer``. While
+        """The offline-GRPO numerator over one microbatch; the runner divides by ``_pp_normalizer``. While
         :meth:`_pp_score_reference_batch` drives the schedule it stashes the raw log-probs instead."""
         token_logps, mask = token_logprobs(logits, target["labels"])
         if self._pp_ref_sweep is not None:
@@ -60,13 +54,9 @@ class OfflineGRPOPipelineMixin:
         return offline_loss_numerator(per_token_loss, mask, target["group_size"], loss_type=self.loss_type)
 
     def _pp_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """The pipeline's fixed-shape batch: the joined rows with completion-token ``labels``, right-padded to
-        ``args.max_length`` (the P2P shapes freeze on the first step); refreshes the live ``min_log_prob``.
-
-        With a KL term the reference log-probs land on the last stage's shifted ``[rows, max_length - 1]``
-        grid: completion token ``j`` at input position ``P + j`` (``P`` the padded prompt width) is scored
-        one position earlier. Only the reference sweep calls this before the column exists.
-        """
+        """Right-pads to ``args.max_length`` (the P2P shapes freeze on the first step). With a KL term the reference
+        log-probs land on the last stage's shifted grid: completion token ``j`` at input position ``P + j`` is scored
+        one position earlier. Only the reference sweep calls this before the column exists."""
         input_ids, attention_mask, _ = self._joined_rows(batch)
         prompt_ids = batch["prompt_input_ids"]
         completion_ids, completion_mask = batch["completion_input_ids"], batch["completion_attention_mask"]
@@ -100,11 +90,8 @@ class OfflineGRPOPipelineMixin:
         return out
 
     def _pp_normalizer(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """The loss type's whole-batch denominator (:func:`offline_loss_normalizer`) over the pipeline batch.
-
-        The shifted completion-token counts equal the unshifted ones ``compute_loss`` reads (the
-        collator guarantees a non-empty prompt, so position 0 is never a completion token).
-        """
+        """Shifted completion-token counts equal the unshifted ones ``compute_loss`` reads: the collator guarantees a
+        non-empty prompt, so position 0 is never a completion token."""
         return offline_loss_normalizer(
             loss_token_counts_per_row(inputs["labels"]).float(),
             inputs["group_size"],
@@ -113,7 +100,6 @@ class OfflineGRPOPipelineMixin:
         )
 
     def _pp_score_reference_batch(self, batch) -> list[torch.Tensor]:
-        """Score one frozen-shape pipeline batch without forming the training objective."""
         frozen_rows = self.args.per_device_train_batch_size
         pads = self._pp_frozen_row_pads()
         real_rows = batch["prompt_input_ids"].size(0)
@@ -133,9 +119,8 @@ class OfflineGRPOPipelineMixin:
             self._pp_ref_sweep = None
 
     def _pp_reference_sweep_pass(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """One forward-only pass of the reference sweep over a frozen-shape batch, collective across the
-        chain and the stage's replicas: the last stage's loss stashes its per-token log-probs instead of
-        training on them (:meth:`_pp_token_loss`), and every rank receives them."""
+        """COLLECTIVE across the chain and the stage's replicas. One forward-only pass whose last-stage loss stashes
+        its per-token log-probs, which every rank receives."""
         self._pp_ref_sweep = []
         self._pp_runner.eval_loss(
             inputs["input_ids"],

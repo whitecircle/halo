@@ -1,33 +1,7 @@
 #!/usr/bin/env python
-"""``score_ep_grad_pairs`` fails each way an EP gradient can disagree with its reference.
-
-The EP gradient GPU suites (the per-family EP-vs-stock rows and the EP+ETP Inkling wrapper) gate their gradient
-checks on this helper, and they run only on the GPU tiers. Each failure mode it exists for is pinned here: a
-missing or misshapen EP gradient, a doubled or halved cross-rank divide, and a reoriented gradient. Under the
-per-layer negligible floor the TP family suite scores with, a reference under its layer's floor is held to
-absolute error, while a dropped TP reduce on the same parameter of another layer and a kind left wholly under the
-floor still fail. Under ``score_against_bf16_noise``, which the reentrant FSDP2 suite scores with, only a near-cancelled
-pair (its reference under a fraction of its layer's largest) whose distance from the fp32 reference stays within its
-parameter's measured bf16 noise is excused outside the bars, and never a routed one. A router or expert bank halved on
-one layer, whose noise against an fp32 reference that routes differently would cover it, a small vector halved on one
-layer, a doubled or dropped sync on an excused kind, a missing gradient and a parameter excused on every step still
-fail, as does DeepSeek-V4's head hc_base doubled on its GPU numbers, which the factor excuses wherever it leaves the
-bars and which lands inside them at a cancelled step: it fails at its best resolved step. A pair's bar margin is its
-closest bar as a factor, and on GLM-5 Next's GPU numbers the closest at a best resolved step is layer 3's attn_hc.scale,
-which doubled alone lands inside the bars there, while a doubled sync on its kind fails through the kind's other layers.
-``router_parameter_names`` reads each EP layer's own router, Zaya's router MLP included.
-
-``pair_step_grads``, which feeds that scoring, holds None and exact zeros as one gradient-less state (an EP rank keeps
-None for experts no token reached, the unsharded reference sums zeros), while a gradient only one side holds still
-fails, and ``scores_any`` tells a bank without a gradient on both sides at every step, which passes that match on
-nothing. ``routing_can_be_pinned`` takes the families whose EP layers hand routing replay their HF router's logits and
-refuses the rest. ``routing_pinned`` runs a tiny Qwen3-MoE and GPT-OSS under EP layers on given top-k picks: on its own
-picks nothing changes, a bf16 copy on an fp32 copy's picks keeps every pick within the near-tie bar and every expert's
-gradient on the fp32 one, each token's (k+1)-th best expert picked for its k-th falls outside the bar, a token picking
-its top-1 expert twice is counted though it falls short by nothing, and picks that do not tile the forwards raise.
-
-Run: python tests/cpu/conventions/test_ep_grad_scoring.py
-"""
+"""``score_ep_grad_pairs``, ``pair_step_grads`` and ``routing_pinned`` fail each way an EP gradient or a replayed
+route can disagree with its reference. Their GPU suites run only on the GPU tiers, so each failure mode is pinned
+here."""
 
 import contextlib
 import math
@@ -70,14 +44,12 @@ A_LOG = torch.randn(4, generator=torch.Generator().manual_seed(1))
 L0_A_LOG, L6_A_LOG = "model.layers.0.linear_attn.A_log", "model.layers.6.linear_attn.A_log"
 L0_PROJ, L6_PROJ = "model.layers.0.mlp.down_proj.weight", "model.layers.6.mlp.down_proj.weight"
 LAYERED = {L0_PROJ: REFERENCE.float(), L0_A_LOG: A_LOG * 1e-3, L6_PROJ: REFERENCE.float() / 2, L6_A_LOG: A_LOG * 1e-8}
-# DeepSeek-V4-shaped gradients over three steps at the tiny model's scales: per layer a routed expert bank (its
-# layer's largest), a router at 4e-2 of it, a 3-element hc scale and a 4-element GatedDeltaNet-like dt_bias; outside
-# the layers an lm_head and the head's 2- and 1-element hc vectors. The fp32 reference routes some tokens differently
-# from the bf16 one, so the routers and the banks sit 25% of their norm from it, while the policy, routing as the bf16
-# reference does, stays 2% from that reference. Layer 1's hc scale cancels to 2.6e-5 on step 1 and the head base to
-# 5e-6 on step 0, where bf16 rounding (2e-5 at most) leaves neither a direction; the one-element head scale rounds by
-# 12-44% of itself on every step, an error the policy shares; the dt_bias rounds by a quarter of itself, the policy
-# within 5% of the reference. Every other gradient stands 10x above its rounding.
+# DeepSeek-V4-shaped gradients over three steps at the tiny model's scales: per layer a routed expert bank (its layer's
+# largest), a router at 4e-2 of it, a 3-element hc scale and a 4-element dt_bias; outside the layers an lm_head and the
+# head's 2- and 1-element hc vectors. The fp32 reference routes some tokens differently from the bf16 one, so routers
+# and banks sit 25% of their norm from it, while the policy stays 2% from bf16. Layer 1's hc scale cancels to 2.6e-5 on
+# step 1 and the head base to 5e-6 on step 0, under bf16 rounding (2e-5 at most); the one-element head scale rounds by
+# 12-44% of itself, the dt_bias by a quarter. Every other gradient stands 10x above its rounding.
 L0_EXPERTS, L1_EXPERTS = "model.layers.0.mlp.experts.down_proj", "model.layers.1.mlp.experts.down_proj"
 L0_GATE, L1_GATE = "model.layers.0.mlp.gate.weight", "model.layers.1.mlp.gate.weight"
 HC0, HC1 = "model.layers.0.attn_hc.scale", "model.layers.1.attn_hc.scale"
@@ -85,8 +57,7 @@ DT0, DT1 = "model.layers.0.linear_attn.dt_bias", "model.layers.1.linear_attn.dt_
 HEAD, HC_BASE, HC_SCALE = "lm_head.weight", "model.hc_head.hc_base", "model.hc_head.hc_scale"
 HC_STEPS = 3
 CANCELLED = {(1, HC1), (0, HC_BASE)}
-# Each resolved gradient's shape and norm on every step. The largest per layer differ (outside the stack, the lm_head),
-# so a per-layer fraction differs from one of the step's largest.
+# The largest per layer differ, so a per-layer fraction differs from one of the step's largest.
 RESOLVED = {
     L0_EXPERTS: ((4, 8, 6), 1.0),
     L1_EXPERTS: ((4, 8, 6), 0.5),
@@ -188,7 +159,6 @@ def _score_layered(got: dict[str, torch.Tensor | None], references: dict[str, to
 
 
 def test_the_floor_is_the_fraction_of_the_largest_gradient_in_the_layer():
-    """Per layer: a layer whose every gradient runs small keeps its largest on the direction and norm scores."""
     _, _, floors = _score_layered({})
     fraction = TOL.grad_negligible_layer_fraction
     assert floors[L0_A_LOG] == floors[L0_PROJ] == pytest.approx(fraction * LAYERED[L0_PROJ].norm().item())
@@ -215,8 +185,8 @@ def test_a_negligible_reference_fails_an_error_past_its_floor():
 
 @pytest.mark.parametrize("scale", [0.5, 2.0], ids=["dropped_reduce", "doubled_reduce"])
 def test_a_mis_reduced_per_head_gradient_fails_on_its_resolvable_layer(scale):
-    """A TP sync that drops one rank's A_log contribution (its AVG then halves every layer's) or sums it twice: the
-    negligible layer cannot tell, the resolvable one fails on its norm ratio."""
+    """A TP sync that drops one rank's A_log or sums it twice: the negligible layer cannot tell, the resolvable one
+    fails on its norm ratio."""
     checks, metrics, _ = _score_layered({L0_A_LOG: LAYERED[L0_A_LOG] * scale, L6_A_LOG: LAYERED[L6_A_LOG] * scale})
     assert checks[f"{L6_A_LOG}_matches"] and not checks[f"{L0_A_LOG}_matches"], checks
     assert metrics[f"{L0_A_LOG}_norm_ratio"] == pytest.approx(scale)
@@ -260,7 +230,6 @@ def _scored(steps: list[dict]) -> list[dict]:
 
 
 def _scaled(name: str, scale: float, steps: tuple[int, ...] = tuple(range(HC_STEPS))) -> list[dict]:
-    """The steps with ``name``'s gradient scaled on ``steps``."""
     clean = _hc_steps()
     return _hc_steps({(step, name): scale * clean[step][name][0] for step in steps})
 
@@ -586,8 +555,8 @@ def _without_rank_experts(bank: torch.Tensor) -> torch.Tensor:
     ids=["none_vs_zero_slice", "zeros_vs_none", "none_vs_none"],
 )
 def test_none_and_zeros_are_one_gradient_less_state(policy, reference):
-    """A rank whose experts no token reached keeps None where the unsharded reference sums zeros on its slice, though
-    the other ranks' experts there carry gradient; the bank is left unscored and the norm still pairs."""
+    """A rank whose experts no token reached keeps None where the unsharded reference sums zeros; the bank is left
+    unscored and the norm still pairs."""
     paired = _paired(policy, reference)
     assert paired.gradless == paired.reference_gradless == [BANK]
     assert list(paired.pairs) == [NORM] and not paired.missing
@@ -595,8 +564,8 @@ def test_none_and_zeros_are_one_gradient_less_state(policy, reference):
 
 @pytest.mark.parametrize("policy", [None, torch.zeros(2, 8, 6)], ids=["none", "zeros"])
 def test_a_dropped_gradient_fails_the_match_and_scores_as_missing(policy):
-    """The reference holds the rank's experts' gradient: a policy without one fails the gradient-less match and pairs
-    as None, which scores as missing rather than raising on a zero norm."""
+    """A policy without the reference's gradient fails the match and pairs as None, which scores as missing and does
+    not raise on a zero norm."""
     paired = _paired(policy, FULL_BANK)
     assert paired.gradless == [BANK] and paired.reference_gradless == []
     assert paired.pairs[BANK][0] is None and torch.equal(paired.pairs[BANK][1], FULL_BANK[RANK_SLICES[BANK]])
@@ -605,7 +574,6 @@ def test_a_dropped_gradient_fails_the_match_and_scores_as_missing(policy):
 
 
 def test_a_gradient_the_reference_lacks_fails_the_match():
-    """The policy put gradient on experts the reference routed no token to: the reverse of a dropped one."""
     paired = _paired(FULL_BANK[RANK_SLICES[BANK]].clone(), _without_rank_experts(FULL_BANK))
     assert paired.gradless == [] and paired.reference_gradless == [BANK]
     assert BANK not in paired.pairs
@@ -624,8 +592,8 @@ def test_a_parameter_without_a_reference_is_missing():
 
 
 def test_a_bank_without_a_gradient_on_both_sides_at_every_step_scores_nothing():
-    """No token reaches the rank's experts on either side at any step: each step passes the gradient-less match, and
-    only ``scores_any`` tells that the rank's expert sync was compared on nothing. One step reaching them scores."""
+    """Each step passes the gradient-less match, so only ``scores_any`` tells that the rank's expert sync was
+    compared on nothing."""
     unreached = [_paired(None, _without_rank_experts(FULL_BANK)), _paired(torch.zeros(2, 8, 6), None)]
     assert all(paired.gradless == paired.reference_gradless for paired in unreached)
     assert not scores_any([paired.pairs for paired in unreached], [BANK])
@@ -648,7 +616,6 @@ def _rows_loss(model, rows: list[torch.Tensor]) -> torch.Tensor:
 
 
 def _picks(model, rows) -> list[torch.Tensor]:
-    """Each EP layer's own picks over the rows, as one mask."""
     with captured_picks(model) as captured, torch.no_grad():
         _rows_loss(model, rows)
     return [torch.cat(chunks) for chunks in captured]
@@ -712,8 +679,7 @@ def test_routing_can_be_pinned_reads_the_router_contract(family, pinnable):
 
 
 def test_one_layer_routing_past_replay_leaves_the_model_unpinnable():
-    """A Qwen3-MoE whose layer 1 takes its router's own choice without handing replay the logits: pinning would leave
-    that layer on its own picks, so the model is refused."""
+    """Pinning would leave layer 1 on its own picks, so the model is refused."""
     model = _ep_model("qwen3_moe")
     ids = random_token_batch(model.get_input_embeddings().num_embeddings, 1, ROW_TOKENS, "cpu")[0]
     assert routing_can_be_pinned(model, ids), "premise: every layer hands replay its router's logits"
@@ -788,7 +754,6 @@ def test_a_bf16_copy_on_fp32_picks_routes_near_ties_alike(ep_models):
 
 
 def _layer_logits(model, rows, index: int) -> torch.Tensor:
-    """EP layer ``index``'s router logits over the rows, in forward order."""
     logits = []
     router = ep_layers(model)[index]._live_router_module()
     handle = router.register_forward_hook(lambda module, args, output: logits.append(output[0].detach().float()))

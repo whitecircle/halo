@@ -1,26 +1,9 @@
 """Un-fuse stacked MoE expert weights into per-expert tensors for older serving stacks.
 
-transformers stores some MoE experts **fused** as contiguous GLU halves: one
-``…experts.gate_up_proj`` ``[E, 2I, H]`` (``cat([gate, up], dim=1)``, gate first) and one
-``…experts.down_proj`` ``[E, H, I]`` per layer. Stock ``from_pretrained`` and SGLang read this
-natively, but some engine model-loaders (vLLM's ``glm4_moe_lite``) expect the legacy per-expert
-layout ``…experts.{i}.{gate_proj,up_proj,down_proj}.weight``. This script rewrites a gathered
-checkpoint to the per-expert layout so those engines can load it. Weights are unchanged: only the key
-layout and the gate/up split, with no transpose and no re-quantization.
-
-The projection names are the checkpoint family's own, read from its spec
-(``MoEFamilySpec.expert_layout.per_expert_keys``: ``gate_proj``/``up_proj``/``down_proj`` or
-``w1``/``w3``/``w2`` depending on the family). A ``model_type`` whose spec declares no per-expert
-hub layout is refused, since every name emitted for it would be one nothing reads: a family serving
-from the fused halves, GptOss's interleaved ``[E, H, 2M]`` ``gate_up_proj`` (already the layout
-serving engines expect), or Inkling's interleaved TM ``w13_weight``. The refusal message names the
-supported ``model_type`` set.
-
-Usage:
-    python scripts/after_training/unfuse_moe_experts.py --input_dir <ckpt> --output_dir <dst> [--max_shard_size 5GB]
-
-A checkpoint with no fused expert keys is reported and copied through unchanged.
-"""
+Some engine loaders (vLLM's ``glm4_moe_lite``) expect ``…experts.{i}.{gate_proj,up_proj,down_proj}.weight`` over the
+fused ``gate_up_proj`` ``[E, 2I, H]`` + ``down_proj`` ``[E, H, I]``. Weights are unchanged, only keys and the gate/up
+split. Projection names come from ``MoEFamilySpec.expert_layout.per_expert_keys``; a ``model_type`` declaring no
+per-expert hub layout is refused. A checkpoint with no fused expert keys is copied through unchanged."""
 
 import argparse
 

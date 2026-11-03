@@ -1,16 +1,5 @@
-"""The FLA autotune pin (``pin_fla_autotune_first_fit``, ``tests/common/fla_autotune.py``): every fla kernel runs the
-first of its configs that launches, whatever the timings or the disk cache say, and a config the device cannot launch
-is skipped.
-
-FLA's delta-rule backward state launcher runs on CPU tensors over the kernel's GPU config list, with Triton's launch
-stubbed: the stub raises Triton's ``OutOfResources`` for the configs a test marks unlaunchable and records every other
-launch. ``_FP32_UNLAUNCHABLE`` are the two configs whose shared memory exceeds sm_90 and sm_10x's 232,448 bytes in
-fp32 at the tiny Qwen3.5-MoE head dims (the first needs 271,116), so the single-config pin raised there. These fail if
-the pin launches an unlaunchable config, lets the timings or a disk-cached pick choose, hides a kernel none of whose
-configs launch, misses an fla autotuner the process holds, or leaves the autotuners changed after teardown.
-
-Run: python tests/cpu/kernels/test_fla_autotune_pin.py
-"""
+"""The FLA autotune pin (``pin_fla_autotune_first_fit``, ``tests/common/fla_autotune.py``): every fla kernel runs
+the first config that launches, past those exceeding sm_90/sm_10x shared memory."""
 
 import gc
 from types import SimpleNamespace
@@ -28,7 +17,7 @@ from halo.kernels.fla_launch import triton_autotuner
 from tests.common import fla_autotune
 
 _KERNEL = "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64"
-# The kernel's configs on a device with Ampere-class shared memory or more; a CPU import builds a shorter list.
+# A CPU import builds a shorter list.
 _GPU_CONFIGS = [
     triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
     for num_warps in [2, 4]
@@ -37,7 +26,7 @@ _GPU_CONFIGS = [
 ]
 _FP32_UNLAUNCHABLE = (_GPU_CONFIGS[0], _GPU_CONFIGS[6])
 _REQUIRED, _LIMIT = 271116, 232448
-# The tiny Qwen3.5-MoE linear attention: heads (value heads, keys repeated to them), key and value head dims.
+# Heads (value heads, keys repeated to them), key and value head dims.
 _H, _K, _V = 4, 32, 32
 
 
@@ -46,7 +35,7 @@ def _tuner() -> Autotuner:
 
 
 def _launch_kernel() -> None:
-    """One backward state launch through FLA's own launcher, on a 64-token row."""
+    """On a 64-token row."""
     q, k, w = (torch.randn(1, 64, _H, _K) for _ in range(3))
     do, dv = (torch.randn(1, 64, _H, _V) for _ in range(2))
     chunk_delta_h.chunk_gated_delta_rule_bwd_dhu(q, k, w, do, dv, g=torch.randn(1, 64, _H), scale=_K**-0.5)
@@ -54,7 +43,7 @@ def _launch_kernel() -> None:
 
 @pytest.fixture
 def launches(monkeypatch):
-    """The kernel on its GPU configs with Triton's launch stubbed; ``unlaunchable`` raise, the rest are recorded."""
+    """``unlaunchable`` configs raise, the rest are recorded."""
     tuner = _tuner()
     for name in ("configs", "cache", "cache_results", "_do_bench"):
         monkeypatch.setattr(tuner, name, getattr(tuner, name))
@@ -74,7 +63,6 @@ def launches(monkeypatch):
 
 @pytest.fixture
 def pinned():
-    """The pin applied to every loaded fla autotuner, torn down after the test."""
     finalizers = []
     fla_autotune.pin_fla_autotune_first_fit(SimpleNamespace(on_teardown=finalizers.append))
     yield
@@ -83,7 +71,7 @@ def pinned():
 
 
 def _later_is_faster(launched):
-    """A benchmarker under which each config times faster than every config listed before it."""
+    """Each config times faster than every config listed before it."""
 
     def timed(kernel_call, quantiles):
         kernel_call()
@@ -93,7 +81,7 @@ def _later_is_faster(launched):
 
 
 def test_the_single_config_pin_raises_on_the_fp32_configs(launches):
-    """Non-vacuity: launching the first config alone, as the single-config pin did, raises the GPU row's error."""
+    """Non-vacuity: launching the first config alone raises the GPU row's error."""
     launches.unlaunchable = _FP32_UNLAUNCHABLE
     _tuner().configs = _GPU_CONFIGS[:1]
     with pytest.raises(OutOfResources, match=f"Required: {_REQUIRED}, Hardware limit: {_LIMIT}"):
@@ -113,7 +101,7 @@ def test_the_pin_keeps_the_first_config_where_it_launches(launches, pinned):
 
 
 def test_timings_choose_without_the_pin(launches):
-    """Control for the next test: the stub benchmarker is live and steers the stock autotuner to the last config."""
+    """Control: the stub benchmarker is live and steers the stock autotuner to the last config."""
     tuner = _tuner()
     tuner.cache_results, tuner._do_bench = False, _later_is_faster(launches.launched)
     _launch_kernel()
@@ -144,9 +132,7 @@ def test_a_kernel_with_no_launchable_config_still_raises(launches, pinned):
 
 
 def test_the_pin_reaches_every_fla_autotuner_the_process_holds(pinned):
-    """The pin finds kernels through fla's module namespaces; every fla autotuner alive, found through the garbage
-    collector instead, runs first-fit off the disk cache, the decay cumsums of the gated delta rule (scalar) and KDA
-    (vector) among them."""
+    """Found through the garbage collector, since the pin finds kernels through fla's module namespaces."""
     alive = {
         id(obj): obj
         for obj in gc.get_objects()

@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """TRL's attended-token counter counts a TP/ETP/CP batch once and logs as ``num_attended_tokens_seen``.
-
-TRL's SFT, DPO, KTO and reward trainers sum ``attention_mask`` over a world gather on every train micro-batch and
-divide by the TP width they read off accelerate's parallelism config. The toolkit's accelerator never carries one,
-so a TP pair would count its one batch twice; the trainer spine sets that divisor to the ranks sharing a batch,
-for every one of those trainers at once, and logs the counter under the name SFT's own counter carries. Driven
-through TRL's real reward ``compute_loss`` with a TP pair's gather, and the spine's real ``log``.
-
-Run: python tests/cpu/trainers/test_attended_tokens_metric.py
-"""
+TRL divides its world gather by a TP width the toolkit's accelerator never carries, so the spine sets that divisor."""
 
 import inspect
 import types
@@ -23,7 +15,6 @@ from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 
 
 def _reward_trainer(replication: int) -> DistributedRewardTrainer:
-    """A bare reward trainer after the spine's post-construction restore, as TRL's constructor left it."""
     trainer = object.__new__(DistributedRewardTrainer)
     trainer.parallelism_config = types.SimpleNamespace(non_dp_replication_factor=replication)
     trainer._tp_size = 1  # what TRL reads off an accelerator without a parallelism config
@@ -35,7 +26,7 @@ def _reward_trainer(replication: int) -> DistributedRewardTrainer:
     trainer.args = types.SimpleNamespace(center_rewards_coefficient=None)
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     trainer._total_train_tokens = 0
-    # Every rank of the TP group holds this batch: the world gather returns it once per rank.
+    # Every TP rank holds this batch, so the world gather returns it once per rank.
     trainer.accelerator = types.SimpleNamespace(
         gather_for_metrics=lambda tensor: torch.stack([tensor] * replication),
         gather=lambda tensor: torch.cat([tensor] * replication),
@@ -58,7 +49,7 @@ def test_a_batch_the_tp_group_shares_counts_once(replication):
 
 @pytest.mark.parametrize("trl_loss", [DPOTrainer._compute_loss, KTOTrainer._compute_loss, RewardTrainer.compute_loss])
 def test_every_trl_counter_divides_by_the_width_the_spine_sets(trl_loss):
-    """The seam is TRL's own divisor; a TRL release that counts another way must fail here, not over-count."""
+    """A TRL release that counts another way must fail here rather than over-count."""
     assert "// self._tp_size" in inspect.getsource(trl_loss)
 
 

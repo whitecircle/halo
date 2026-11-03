@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.numerics.max_or_nan`` and ``min_or_nan`` carry a NaN through to the value a bound is
-checked on.
-
-The GPU correctness suites track their worst cross-rank or cross-step difference with these helpers
-and run only on the GPU tiers. The builtin ``max`` and ``min`` keep a NaN only when it comes first, so
-a NaN anywhere else would vanish and the worst difference would read as the extreme finite one. These
-pins keep that outcome out of the helpers on the CPU tier.
-
-Run: python tests/cpu/conventions/test_max_or_nan.py
-"""
+"""``tests.common.numerics.max_or_nan`` and ``min_or_nan`` carry a NaN through to the value a bound is checked on.
+The builtins keep a NaN only when it comes first, so a NaN anywhere else would vanish."""
 
 import math
 

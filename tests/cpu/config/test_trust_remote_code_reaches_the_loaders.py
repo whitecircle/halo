@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""Every training script's parser carries ``trust_remote_code`` to the model arguments its loaders read.
-
-TRL moved the field off its ``ModelConfig`` onto its trainer configs, and several toolkit training configs
-are not TRL's, so the toolkit's ``ModelArguments`` declares it. A script parsing with a bare
-``ModelConfig`` fails every load at ``model_config.trust_remote_code``; one whose parser never routes the
-YAML key there loads a remote-code checkpoint without trusting it.
-
-    python tests/cpu/config/test_trust_remote_code_reaches_the_loaders.py
-"""
+"""Every training script's parser carries ``trust_remote_code`` to the model arguments its loaders read. TRL moved
+the field onto its trainer configs, so the toolkit's ``ModelArguments`` declares it; a bare ``ModelConfig`` fails
+every load."""
 
 from pathlib import Path
 

@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``configure_run_tokenizer`` marks a model whose embeddings it grew, and the mark reads through every wrapper.
-
-The rows a grow adds exist in no base checkpoint, so the adapter savers ask :func:`vocabulary_grown` whether the run
-grew the vocabulary rather than re-reading the base config, which PEFT skips offline. Pinned on a tiny Qwen3: tokens
-past the padded rows grow the embedding to the tokenizer's length and mark it, read through a toolkit wrapper (the CP
-model's protocol) and through PEFT around one; tokens that fit the padding, or none, leave it unmarked.
-
-    python tests/cpu/model_loading/test_grow_vocabulary.py
-"""
+"""``configure_run_tokenizer`` marks a model whose embeddings it grew, read through every wrapper.
+Adapter savers ask :func:`vocabulary_grown` since PEFT skips re-reading the base config offline."""
 
 import pytest
 import torch
@@ -20,7 +13,7 @@ from tests.common.tiny_models import TINY_DENSE_FAMILY, tiny_family_model, word_
 
 
 class _ToolkitWrapper(nn.Module):
-    """A wrapper under the toolkit unwrap protocol, as the CP model declares it."""
+    """Under the toolkit unwrap protocol, as the CP model declares it."""
 
     _toolkit_inner_model_attr = "model"
 
@@ -60,8 +53,7 @@ def test_no_grow_leaves_the_model_unmarked(added):
     ids=["past-padding", "within-padding", "none"],
 )
 def test_a_grow_says_so_once_with_its_adapter_save_consequence(caplog, added, grows):
-    """The grow makes every adapter save carry the embedding and head whole, so it is logged once, naming both
-    lengths; a tokenizer that fits the rows logs nothing."""
+    """Every adapter save then carries the embedding and head whole, so the log names both lengths."""
     with caplog.at_level("INFO", logger="halo.model_loading.tokenizer_setup"):
         model, tokenizer, rows = _configured(added)
     lines = [record.getMessage() for record in caplog.records if "grew" in record.getMessage()]

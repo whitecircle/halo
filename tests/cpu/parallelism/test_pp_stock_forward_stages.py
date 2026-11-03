@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The stock-forward pipeline families (``STOCK_FORWARD_PP``): two chained stages reproduce the unsplit backbone
-bitwise.
-
-Every stage runs the family's upstream forward, so a split is exact only while the decoder loop hands nothing but
-the hidden state from one layer to the next and reads list position only as ``config.layer_types[i]``, which
-``validate_partition`` holds to whole periods. Each stage chain is scored against the unsplit backbone through the
-last stage's own head transform, so a family's head spelling (Inkling's μP division) stays out of the split's
-verdict.
-
-    python tests/cpu/parallelism/test_pp_stock_forward_stages.py
-"""
+"""``STOCK_FORWARD_PP`` families: two chained stages reproduce the unsplit backbone bitwise. Exact only while the
+loop hands just the hidden state across layers and cuts on whole periods."""
 
 import functools
 
@@ -26,7 +17,6 @@ PP_SIZE = 2
 BATCH = 2
 # Longer than every tiny sliding window, so a sliding layer handed the full mask changes its output.
 SEQ = 96
-# One tiny family per STOCK_FORWARD_PP backbone, split by the default two-stage partition.
 CHAINED_FAMILIES = (
     "glm4_moe_lite",
     "gpt_oss",
@@ -39,8 +29,7 @@ CHAINED_FAMILIES = (
     "step3p7",
 )
 FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}
-# Two families with heterogeneous layer_types, each with a cut off its period that re-bases the loop's
-# config.layer_types[i] read.
+# Each with a cut off its period that re-bases the loop's config.layer_types[i] read.
 LAYER_TYPES_FAMILIES = {"laguna": [1, 7], "inkling_text": [1, 3]}
 
 
@@ -60,7 +49,6 @@ def _input_ids(model) -> torch.Tensor:
 
 
 def _chain_vs_unsplit(family: str, pp_split: list[int] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(logits through the stage chain, the unsplit backbone's hidden state through the last stage's head)``."""
     model = _model(family)
     input_ids = _input_ids(model)
     stages = [
@@ -82,8 +70,7 @@ def test_every_stock_forward_family_has_a_chained_case():
 
 @pytest.mark.parametrize("family", CHAINED_FAMILIES)
 def test_chained_stages_reproduce_the_unsplit_backbone_bitwise(family):
-    """The split reorders no arithmetic, so any drift means a cut severed state the loop carries across layers or
-    re-based a positional read."""
+    """The split reorders no arithmetic, so drift means a cut severed state or re-based a positional read."""
     logits, reference = _chain_vs_unsplit(family)
     assert logits.shape == reference.shape
     assert torch.equal(logits, reference), (logits - reference).abs().max().item()
@@ -97,8 +84,7 @@ def test_a_cut_off_the_layer_types_period_is_refused(family, off_period_split):
 
 @pytest.mark.parametrize(("family", "off_period_split"), sorted(LAYER_TYPES_FAMILIES.items()))
 def test_a_cut_off_the_layer_types_period_would_change_the_model(family, off_period_split, monkeypatch):
-    """Anti-vacuity for the gate above and for the bitwise check: past the gate, the off-period cut hands the later
-    stage's layers another layer's mask, and the chain no longer matches."""
+    """Anti-vacuity: past the gate, the off-period cut hands later layers another layer's mask."""
     monkeypatch.setattr(stage_module, "validate_partition", lambda *_args: None)
     logits, reference = _chain_vs_unsplit(family, off_period_split)
     assert not torch.equal(logits, reference)

@@ -1,5 +1,4 @@
-"""Model weight files: save-dtype casts, the gathered-state normalization, the stale-file sweeps and the merged
-index, the streaming shard writer, and the tied-embedding reconcile."""
+"""Model weight files: save-dtype casts, stale-file sweeps, merged index, streaming writer, tie reconcile."""
 
 from __future__ import annotations
 
@@ -62,10 +61,9 @@ def _caster_keeping(keep: Callable[[str], bool]) -> Callable[[str, torch.Tensor]
 
 
 def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
-    """``cast(name, tensor)`` for a save that holds the live model: the save dtype except for the norm
-    params, the router-balancing tensors and the fp32 pins (a key also matches with its PEFT adapter
-    segment stripped). ``keep_live_dtype`` (a training checkpoint) casts nothing, for an exact resume.
-    """
+    """``cast(name, tensor)`` for a live-model save: the save dtype except norm params, router balancing and fp32 pins
+    (a PEFT-stripped key matches too). ``keep_live_dtype`` (a training checkpoint) casts nothing, for an exact
+    resume."""
     if keep_live_dtype:
         return _as_live
     keep = norm_param_keys(model) | balancing_param_keys(model) | fp32_pinned_names(model, include_buffers=True)
@@ -73,22 +71,20 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
 
 
 def adapter_save_dtype_caster() -> Callable[[str, torch.Tensor], torch.Tensor]:
-    """``cast(name, tensor)`` for an exported adapter file: a balancing tensor riding a ``modules_to_save``
-    clone keeps its trained dtype, since a bf16-rounded bias flips near-tie top-k picks on serve."""
+    """``cast(name, tensor)`` for an exported adapter; a balancing tensor on a ``modules_to_save`` clone keeps its
+    trained dtype, since a bf16-rounded bias flips near-tie top-k picks on serve."""
     return _caster_keeping(lambda name: is_balancing_state_key(strip_peft_adapter_segment(name)))
 
 
 def normalize_gathered_state_dict(model: torch.nn.Module, state_dict: dict, *, keep_live_dtype: bool = False) -> dict:
-    """A gathered state dict in its on-disk form: save-dtype cast (its keep-sets use live key spellings),
-    then the hub expert layout."""
+    """A gathered state dict on disk: save-dtype cast (keep-sets use live key spellings), then the hub layout."""
     cast = save_dtype_caster(model, keep_live_dtype=keep_live_dtype)
     return revert_to_load_layout(model, {key: cast(key, tensor) for key, tensor in state_dict.items()})
 
 
 def remove_stale_checkpoint_files(output_dir: str, keep: set[str]) -> None:
-    """Delete every ``model*.safetensors`` and index in ``output_dir`` outside ``keep``, since
-    ``from_pretrained`` would load a leftover single file over the fresh index. A caller that only
-    sometimes owns the directory must gate the call."""
+    """Delete ``model*.safetensors`` and the index outside ``keep``, since ``from_pretrained`` would load a leftover
+    single file over a fresh index. A caller that only sometimes owns the directory must gate the call."""
     for stale in glob.glob(os.path.join(output_dir, SAFETENSORS_FAMILY_GLOB)) + glob.glob(
         os.path.join(output_dir, SAFETENSORS_INDEX_FILE)
     ):
@@ -97,9 +93,8 @@ def remove_stale_checkpoint_files(output_dir: str, keep: set[str]) -> None:
 
 
 def sweep_after_full_save(output_dir: str) -> None:
-    """Remove the weight files a completed ``save_pretrained``-style write did not produce, keeping what is
-    on disk after it (a consistent index and its shards, else a single file): a crashed save sweeps nothing.
-    """
+    """Remove the weight files a completed full save did not produce, keeping a consistent index and its shards, else a
+    single file; a crashed save sweeps nothing."""
     index_path = os.path.join(output_dir, SAFETENSORS_INDEX_FILE)
     single_path = os.path.join(output_dir, SAFETENSORS_WEIGHTS_FILE)
     keep: set[str] = set()
@@ -110,8 +105,7 @@ def sweep_after_full_save(output_dir: str) -> None:
             index = {}
         # A per-rank EP/TP index is not a full save's product, so its shard list is no keep-set.
         shards = set() if index_declares_ep_shards(index) else set(index.get("weight_map", {}).values())
-        # With both layouts present the newer is this write's; without the tie-break a single-file
-        # writer (reset_sinks) loses to stale shards.
+        # With both layouts the newer is this write's, or a single-file writer (reset_sinks) loses to stale shards.
         newer_than_single = not os.path.isfile(single_path) or os.path.getmtime(index_path) >= os.path.getmtime(
             single_path
         )
@@ -124,8 +118,7 @@ def sweep_after_full_save(output_dir: str) -> None:
 
 
 def write_merged_index(output_dir: str, weight_map: dict[str, str], metadata: Mapping[str, Any]) -> None:
-    """Sweep the model files ``weight_map`` does not claim, then write the safetensors index; ``metadata``
-    is its block verbatim, and must be a mapping."""
+    """Sweep the model files ``weight_map`` does not claim, then write the index with ``metadata`` verbatim."""
     if not isinstance(metadata, Mapping):
         raise TypeError(
             f"write_merged_index metadata must be a mapping written verbatim into the index's "
@@ -150,14 +143,13 @@ def _unique_key_by_suffix(state_dict: dict, suffix: str) -> str | None:
 
 
 def is_tie_reconcile_key(name: str) -> bool:
-    """Whether ``name`` is one of the pair :func:`reconcile_tie_word_embeddings` compares, which a
-    streamed save keeps aside as it passes."""
+    """Whether ``name`` is one of the pair :func:`reconcile_tie_word_embeddings` compares, kept by a streamed save."""
     return any(name == suffix or name.endswith(f".{suffix}") for suffix in _TIE_KEY_SUFFIXES)
 
 
 def reconcile_tie_word_embeddings(model, state_dict: dict) -> None:
-    """Clear ``tie_word_embeddings`` on every config level declaring it when the saved lm_head and embedding
-    diverged in training (FSDP2 shards the pair independently and FLCE trains lm_head directly)."""
+    """Clear ``tie_word_embeddings`` when the saved lm_head and embedding diverged (FSDP2 shards the pair independently
+    and FLCE trains lm_head directly)."""
     config = getattr(model, "config", None)
     if config is None or not ties_word_embeddings(config):
         return
@@ -175,8 +167,7 @@ def reconcile_tie_word_embeddings(model, state_dict: dict) -> None:
 
 
 def _write_part(part: dict[str, torch.Tensor], path: str) -> None:
-    """A background part write. The part is emptied before the write reports done, so a flush waiting on it
-    never holds it beside the next."""
+    """Empties the part before reporting done, so a flush waiting on it never holds it beside the next."""
     try:
         save_safetensors_file(part, path, metadata=SAFETENSORS_METADATA)
     finally:
@@ -189,8 +180,7 @@ def resolve_checkpoint_write_threads() -> int:
 
 
 def validate_checkpoint_write_threads(threads: int) -> int:
-    """``threads``, how many finished parts an entered :class:`StreamingShardWriter` writes in the background at
-    once (0 writes each part in line); a negative count raises ``ValueError``."""
+    """Parts a :class:`StreamingShardWriter` writes in the background (0 writes in line); a negative count raises."""
     if threads < 0:
         raise ValueError(
             f"HALO_CHECKPOINT_WRITE_THREADS={threads}: expected a thread count >= 0 (0 writes each checkpoint part "
@@ -200,17 +190,11 @@ def validate_checkpoint_write_threads(threads: int) -> int:
 
 
 class StreamingShardWriter:
-    """Accumulate tensors and flush them to numbered safetensors parts under one prefix, whenever the next
-    one would overflow ``max_shard_size``. ``enabled=False`` makes every method a no-op for non-writer
-    ranks, which still enter each collective gather.
-
-    Entered as a context manager, the writer hands each finished part to one of the
-    ``HALO_CHECKPOINT_WRITE_THREADS`` background threads and fills the next meanwhile (``save_file``
-    releases the GIL), so it holds up to that many parts more (:attr:`max_resident_bytes`). A failed
-    write raises its own exception from the next flush or close, once no other write is running; the
-    block's exit waits out every write, so none outlives the caller's failure, and logs each failed one
-    the caller never collected. Outside a block each part is written in line.
-    """
+    """Flush tensors to numbered safetensors parts whenever the next would overflow ``max_shard_size``;
+    ``enabled=False`` is a no-op for non-writer ranks, which still enter each collective gather. Entered as a context
+    manager, finished parts go to background threads (``save_file`` releases the GIL), holding that many parts more; a
+    failed write raises from the next flush or close, and the exit waits out every write and logs uncollected
+    failures."""
 
     def __init__(
         self, output_dir: str, max_shard_size: str, *, enabled: bool, filename_prefix: str = STREAM_PART_PREFIX
@@ -228,8 +212,8 @@ class StreamingShardWriter:
         # Files already on disk under their final names, which the index claims as they are.
         self._written_map: dict[str, str] = {}
         self._written_bytes = 0
-        # Read on every rank, the disabled ones and a pipeline stage's never-entered writer included, so a refused
-        # count raises before a save's first gather.
+        # Read on every rank, disabled ones and a PP stage's never-entered writer included, so a refused count raises
+        # before a save's first gather.
         self._configured_threads = validate_checkpoint_write_threads(resolve_checkpoint_write_threads())
         self._write_threads = 0
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
@@ -268,13 +252,11 @@ class StreamingShardWriter:
 
     @property
     def max_resident_bytes(self) -> int:
-        """Host bytes of staged parts the writer can hold at once: the part filling plus one per background
-        write (a single tensor over ``max_shard_size`` makes a larger part)."""
+        """Host bytes of staged parts held at once: the filling part plus one per background write."""
         return self.max_bytes * (1 + self._write_threads)
 
     def add(self, key: str, tensor: torch.Tensor) -> None:
-        """Stage one tensor, flushing first if it would overflow the pending part (HF's rule). A key stages
-        once, since the first may already sit in a flushed part."""
+        """Stage one tensor, flushing first on overflow (HF's rule). A key stages once, as the first may be flushed."""
         if not self.enabled:
             return
         if key in self._weight_map or key in self._pending or key in self._written_map:
@@ -292,8 +274,7 @@ class StreamingShardWriter:
         self._pending_bytes += nbytes
 
     def add_written_files(self, weight_map: Mapping[str, str], nbytes: int) -> None:
-        """Index ``weight_map``'s files, already in the output directory under their final names (an external
-        table's parts), as they are: never renamed, and never swept as leftovers."""
+        """Index files already in place under their final names (an external table's parts); never renamed or swept."""
         if not self.enabled:
             return
         claimed = set(weight_map) & (self._weight_map.keys() | self._pending.keys() | self._written_map.keys())
@@ -306,8 +287,7 @@ class StreamingShardWriter:
         self._written_bytes += nbytes
 
     def close(self) -> tuple[dict[str, str], int]:
-        """Flush the remainder and return ``(weight_map fragment, bytes written)`` for a multi-writer
-        save to merge; call it before the index exchange."""
+        """Flush the remainder and return ``(weight_map fragment, bytes written)``, before the index exchange."""
         if not self.enabled:
             return {}, 0
         self._flush()
@@ -315,9 +295,8 @@ class StreamingShardWriter:
         return {**self._weight_map, **self._written_map}, self._total_bytes + self._written_bytes
 
     def close_as_hf_checkpoint(self) -> int:
-        """Flush, rename the parts to HF's names once all are on disk, then index a sharded result (or one beside
-        written files) or sweep the leftovers beside a single ``model.safetensors``; return the bytes written.
-        Valid only when this writer owns every ``model*.safetensors`` in the directory: it deletes the rest."""
+        """Flush, rename the parts to HF's names once all are on disk, then index or sweep; returns the bytes written.
+        Valid only when this writer owns every ``model*.safetensors`` in the directory, since it deletes the rest."""
         if not self.enabled:
             return 0
         self._flush()
@@ -364,8 +343,7 @@ class StreamingShardWriter:
         self._pending_bytes = 0
 
     def _settle_writes(self, in_flight: int) -> None:
-        """Reap the finished background writes and wait until at most ``in_flight`` remain; a failed write
-        raises here once every other write has stopped, and again on each later call."""
+        """Wait until at most ``in_flight`` writes remain; a failed write raises once others stop, and again later."""
         while self._writes and (len(self._writes) > in_flight or self._writes[0].done()):
             error = self._writes.popleft().exception()
             self._write_error = self._write_error or error
@@ -376,15 +354,9 @@ class StreamingShardWriter:
 
 
 def merge_shard_index(gathered: list[tuple[dict[str, str], int] | None]) -> tuple[dict[str, str], int]:
-    """Fold the gathered fragments into one ``(weight_map, total_size)``, rejecting a collision.
-
-    The combine :func:`~halo.runtime.collectives.combine_across_ranks` runs on rank 0, which makes the
-    raise world-uniform. A key claimed by two different files would resolve to whichever fragment
-    merged last and count its bytes twice, producing a checkpoint that loads while holding the wrong
-    writer's tensor; both callers are key-disjoint by construction, so a second claim is a defect.
-
-    Bytes are counted once per file: on per-node storage each node's writer emits the same filenames.
-    """
+    """Fold the gathered fragments into one ``(weight_map, total_size)``, rejecting a key claimed by two files, which
+    would load holding the wrong writer's tensor. Runs on rank 0 inside ``combine_across_ranks``, so the raise is
+    world-uniform. Bytes count once per file, since on per-node storage each node's writer emits the same filenames."""
     weight_map: dict[str, str] = {}
     counted_files: set[str] = set()
     total_size = 0

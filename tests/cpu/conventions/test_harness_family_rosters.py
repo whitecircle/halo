@@ -1,13 +1,6 @@
-"""The checkpoint, EP and CP comparison harnesses compare only the families both trees' rosters hold, read through
-the one roster helper (``revisions.common_families``): a family one commit adds, drops or renames never reaches the
-``--families`` of a tree without it, whose parser refuses it as an invalid choice, and the evidence names it under
-``skipped`` even when no request named it.
-
-Each tree here is a stub of the harness module: its ``FAMILIES`` roster and a parser that refuses any other
-family, run through the harness's real producer launches.
-
-Run: python tests/cpu/conventions/test_harness_family_rosters.py
-"""
+"""The checkpoint, EP and CP comparison harnesses compare only the families both trees' rosters hold
+(``revisions.common_families``) and name the rest under ``skipped``. Each tree is a stub of the harness module,
+run through its real producer launches."""
 
 import logging
 from pathlib import Path
@@ -58,9 +51,8 @@ def _stub_trees(monkeypatch, harness, rosters: dict[str, list[str]]) -> dict:
 @pytest.mark.parametrize("request_from", ["checkout", "head"])
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_a_family_one_tree_lacks_never_reaches_its_families(harness, request_from, monkeypatch, caplog):
-    """The base drops the roster's last family and the head its first. Requested from the checkout's wider
-    roster, or from the head's own (the default when the checkout is the head, which never names the family the
-    head dropped), both families are skipped and named."""
+    """The base drops the roster's last family and the head its first; requested from either roster, both are
+    skipped and named."""
     roster = list(harness.FAMILIES)
     base_only, head_only = roster[0], roster[-1]
     rosters = {"base": roster[:-1], "head": roster[1:]}

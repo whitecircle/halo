@@ -20,8 +20,7 @@ from halo.models.config_access import text_config
 
 logger = logging.getLogger(__name__)
 
-# ``warn_once`` scope keyed by (reason, class name): an unhandled layout is a property of the family,
-# and this logger reaches every rank on a model carrying such a module in every layer.
+# Keyed by (reason, class name), since an unhandled layout is a family property and this logger reaches every rank.
 _warned_unfixed: set = set()
 
 # A fixer returns how many buffers it rebuilt, or ``None`` to hand the module to the next fixer.
@@ -29,12 +28,8 @@ _Fixer = Callable[[nn.Module, str], int | None]
 
 
 def default_rope_parameters(config, device=None, **kwargs) -> tuple[torch.Tensor, float]:
-    """``(inv_freq, attention_scaling)`` for plain unscaled RoPE, read ``rope_parameters``-first.
-
-    The flat ``rope_theta`` / ``partial_rotary_factor`` attributes survive only on remote-code configs
-    written for transformers 4, so one formula serves both spellings. ``kwargs`` absorbs the
-    ``layer_type`` the registry passes to per-layer-type rotaries.
-    """
+    """``(inv_freq, attention_scaling)`` for plain unscaled RoPE, read ``rope_parameters``-first since the flat
+    attributes survive only on transformers-4 remote-code configs. ``kwargs`` absorbs the registry's ``layer_type``."""
     config = text_config(config)
     rope_parameters = getattr(config, "rope_parameters", None) or {}
 
@@ -50,8 +45,8 @@ def default_rope_parameters(config, device=None, **kwargs) -> tuple[torch.Tensor
 
 
 def _materialized_device(tensor: torch.Tensor | None) -> torch.device:
-    """``tensor``'s device, or this rank's when it has none or still sits on meta: a buffer built on meta
-    turns the first forward's activations into meta tensors rather than raising."""
+    """``tensor``'s device, or this rank's when absent or on meta; a buffer built on meta turns the first forward's
+    activations into meta tensors rather than raising."""
     if tensor is None or tensor.device.type == "meta":
         return current_device()
     return tensor.device
@@ -60,13 +55,9 @@ def _materialized_device(tensor: torch.Tensor | None) -> torch.device:
 def _apply_recomputed_rope(
     module: nn.Module, prefix: str, inv_freq: torch.Tensor, scaling: float, *, mirror_twin: bool, create_scaling: bool
 ) -> None:
-    """Install a recomputed rotary table in fp32: ``{prefix}inv_freq``, its twin, the scaling.
-
-    The twin goes in by plain assignment, which torch routes through ``register_buffer`` with that
-    buffer's own persistence, while ``register_buffer`` itself rejects the twin a transformers-4
-    remote-code rotary keeps as a plain attribute. ``mirror_twin`` aliases the live table as those
-    rotaries do; ``create_scaling`` installs one the module never declared (per-layer-type only).
-    """
+    """Install a recomputed rotary table in fp32. The twin goes in by plain assignment, as ``register_buffer`` rejects
+    the twin a transformers-4 rotary keeps as a plain attribute. ``mirror_twin`` aliases the live table;
+    ``create_scaling`` installs a scaling the module never declared (per-layer-type only)."""
     name = f"{prefix}inv_freq"
     inv_freq = inv_freq.float().to(_materialized_device(getattr(module, name, None)))
     # Keep the declared persistence: a remote-code family may ship ``inv_freq`` in its checkpoints.
@@ -83,8 +74,7 @@ def _apply_recomputed_rope(
 
 
 def _unfixable(module: nn.Module, name: str, reason: str) -> int:
-    """Claim ``module`` without rebuilding its buffers, warned once per (class, reason): they keep
-    whatever the load produced."""
+    """Claim ``module`` without rebuilding its buffers, warned once per (class, reason)."""
     warn_once(
         logger,
         _warned_unfixed,
@@ -97,18 +87,14 @@ def _unfixable(module: nn.Module, name: str, reason: str) -> int:
 
 
 def _fix_layer_type_inv_freq(module: nn.Module, module_name: str, layer_type: str, rope_init_fn) -> bool:
-    """Recompute one per-layer-type rotary's ``<layer_type>_inv_freq`` triple. Returns whether it did.
-
-    A declared layer type with no buffer beside it is one this instance does not rotate (a null
-    ``rope_parameters`` entry, as in Laguna and Gemma 4): its own init fn would raise on that entry,
-    and building a table would invent state.
-    """
+    """Recompute one per-layer-type rotary's table; returns whether it did. A layer type with no buffer beside it does
+    not rotate (a null ``rope_parameters`` entry, as in Laguna and Gemma 4), and building a table would invent
+    state."""
     buf_name = f"{layer_type}_inv_freq"
     if getattr(module, buf_name, None) is None:
         return False
-    # Size the tables off the layer-type-resolved config view, as the module's own __init__ does:
-    # the raw config raises AmbiguousGlobalPerLayerAttributeError on Gemma4's sliding leg and sizes
-    # the global one off the wrong head_dim. A config without per-layer state rejects the view.
+    # The layer-type-resolved view, as the module's own __init__ uses: the raw config raises
+    # AmbiguousGlobalPerLayerAttributeError on Gemma4's sliding leg and sizes the global one off the wrong head_dim.
     config = module.config
     with contextlib.suppress(AttributeError, ValueError):
         config = config.per_layer_config[layer_type]
@@ -120,20 +106,18 @@ def _fix_layer_type_inv_freq(module: nn.Module, module_name: str, layer_type: st
 
 
 def _own_rope_init_fn(module: nn.Module, rope_type: str) -> Callable | None:
-    """The rotary's own ``compute_<rope_type>_rope_parameters`` (plain, vision axial, NTK-alpha), which the
-    modeling file defines for the types ``ROPE_INIT_FUNCTIONS`` does not register."""
+    """The rotary's own ``compute_<rope_type>_rope_parameters``, for types ``ROPE_INIT_FUNCTIONS`` lacks."""
     return getattr(module, f"compute_{rope_type}_rope_parameters", None)
 
 
 def _resolve_rope_init_fn(module: nn.Module, layer_type: str) -> Callable:
-    """One layer type's init fn: the rotary's own for its type, else ``ROPE_INIT_FUNCTIONS``."""
     rope_type = module.rope_type.get(layer_type, "default")
     return _own_rope_init_fn(module, rope_type) or ROPE_INIT_FUNCTIONS[rope_type]
 
 
 def _fix_per_layer_type_rope(module: nn.Module, name: str) -> int | None:
-    """Every rotated layer type of a rotary that keys inv_freq by layer type, claimed off its own
-    ``rope_init_fns`` mapping or its ``layer_types`` plus dict ``rope_type`` rather than by class name."""
+    """Every rotated layer type of a rotary keying inv_freq by layer type, claimed off ``rope_init_fns`` or
+    ``layer_types`` plus a dict ``rope_type``."""
     if hasattr(module, "rope_init_fns"):
         init_fns = module.rope_init_fns.items()
     elif hasattr(module, "layer_types") and isinstance(getattr(module, "rope_type", None), dict):
@@ -223,8 +207,7 @@ def _fix_alibi_slope(module: nn.Module, name: str) -> int | None:
 
 
 def _fix_embed_scale(module: nn.Module, name: str) -> int | None:
-    """A scaled word embedding's ``embed_scale`` buffer, which every Gemma-lineage class derives from
-    the ``scalar_embed_scale`` it keeps beside it."""
+    """A scaled embedding's ``embed_scale``, which Gemma-lineage classes derive from ``scalar_embed_scale``."""
     if not hasattr(module, "scalar_embed_scale") or "embed_scale" not in module._buffers:
         return None
     embed_scale = torch.tensor(module.scalar_embed_scale, device=_materialized_device(module.weight))
@@ -233,9 +216,8 @@ def _fix_embed_scale(module: nn.Module, name: str) -> int | None:
     return 1
 
 
-# One summary line per group, over a first-match chain: a per-layer-type rotary must claim its module
-# before the single-``inv_freq`` fallback warns it for the ``inv_freq`` it legitimately lacks. Groups
-# stay independent, since a module may need fixes from more than one family.
+# First-match chains: a per-layer-type rotary must claim its module before the single-``inv_freq`` fallback warns it.
+# Groups stay independent, since a module may need fixes from more than one family.
 _ROTARY_FIXERS: tuple[str, tuple[_Fixer, ...]] = (
     "rotary embedding inv_freq buffer(s) to float32",
     (_fix_per_layer_type_rope, _fix_single_inv_freq_rope),
@@ -262,6 +244,5 @@ def _walk_and_fix(model: nn.Module, fixers: Sequence[tuple[str, Sequence[_Fixer]
 
 
 def apply_buffer_repairs(model: nn.Module) -> None:
-    """Recompute, in one walk of ``model``, every buffer the fixer chains cover (RoPE tables in fp32, Bailing's
-    slopes, the Gemma ``embed_scale``), each group reported once."""
+    """Recompute, in one walk, every buffer the fixer chains cover, each group reported once."""
     _walk_and_fix(model, (_ROTARY_FIXERS, _NON_PERSISTENT_FIXERS))

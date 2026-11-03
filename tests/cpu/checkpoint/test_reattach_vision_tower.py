@@ -1,11 +1,5 @@
-"""reattach_vision_tower rebuilds the servable wrapper layout from a text-only export.
-
-End-to-end on a tiny real Qwen3.5-MoE composite: the trained text weights must land back under
-``model.language_model.*`` (values from the EXPORT, not the base), the base's vision tower must
-ride along, and the config must be the composite the serving engines register. A wrapper-layout
-input must be refused. These tests fail if the prefixing, the base-tensor carryover, or the
-config graft breaks.
-"""
+"""reattach_vision_tower rebuilds the servable wrapper layout from a text-only export, on a tiny real Qwen3.5-MoE
+composite."""
 
 import json
 import os
@@ -59,7 +53,7 @@ def artifacts(tmp_path_factory):
     Qwen3_5MoeForConditionalGeneration(composite).save_pretrained(base_dir)
 
     export = Qwen3_5MoeForCausalLM(composite.text_config)
-    # Marker: a value the base cannot contain, proving the output's text weights come from the export.
+    # A value the base cannot contain, proving the text weights come from the export.
     with torch.no_grad():
         export.model.embed_tokens.weight.fill_(3.5)
     export.save_pretrained(export_dir)
@@ -67,7 +61,6 @@ def artifacts(tmp_path_factory):
 
 
 def _weight_map(directory: str) -> dict[str, str]:
-    """key -> shard filename, for indexed and single-file checkpoints alike."""
     index = os.path.join(directory, "model.safetensors.index.json")
     if os.path.isfile(index):
         with open(index) as f:
@@ -105,7 +98,7 @@ def test_wrapper_layout_input_is_refused(artifacts, tmp_path):
 
 
 def _relabelled_export(export_dir: str, target: str, relabel) -> str:
-    """``export_dir``'s config over its tensors with every key passed through ``relabel``."""
+    """With every key passed through ``relabel``."""
     os.makedirs(target)
     tensors = load_file(os.path.join(export_dir, "model.safetensors"))
     save_file({relabel(key): value for key, value in tensors.items()}, os.path.join(target, "model.safetensors"))
@@ -125,10 +118,7 @@ def _relabelled_export(export_dir: str, target: str, relabel) -> str:
     ids=["wrapper_prefixed", "stray_module"],
 )
 def test_an_export_whose_keys_do_not_match_its_config_is_refused(artifacts, tmp_path, relabel, match):
-    """A text-only config over keys the text-only class does not spell — the wrapper layout a stock
-    ``save_pretrained`` of a text-only load writes, or a module the base's text tower lacks — would be
-    re-prefixed onto no slot of the wrapper class, and the served checkpoint would reload its text
-    tower randomly initialized under a reported success."""
+    """Re-prefixed onto no slot of the wrapper, the served checkpoint reloads its text tower randomly initialized."""
     base_dir, export_dir = artifacts
     relabelled = _relabelled_export(export_dir, str(tmp_path / "relabelled"), relabel)
     out = tmp_path / "out5"
@@ -138,10 +128,8 @@ def test_an_export_whose_keys_do_not_match_its_config_is_refused(artifacts, tmp_
 
 
 def test_a_base_storing_its_text_tower_under_another_prefix_is_refused(artifacts, tmp_path):
-    """The export supersedes the base's text tower by key prefix. A base keeping a vendor namespace
-    (renamed only inside ``from_pretrained``) has nothing under ``model.language_model.``, so every
-    one of its text tensors would be carried over beside the trained ones — two text towers colliding
-    on load — under a reported success. Refused before the output directory exists."""
+    """A base keeping a vendor namespace has nothing under ``model.language_model.``, so two text towers would
+    collide on load."""
     base_dir, export_dir = artifacts
     vendor_base = tmp_path / "vendor_base"
     vendor_base.mkdir()
@@ -159,9 +147,7 @@ def test_a_base_storing_its_text_tower_under_another_prefix_is_refused(artifacts
 
 
 def test_an_output_aimed_at_the_base_is_refused(artifacts):
-    """The base is streamed from while the writer's close sweeps every ``model*.safetensors`` it did
-    not write, so ``--output_dir`` equal to a local ``--model_id`` would replace the base checkpoint
-    with the wrapper artifact under a reported success."""
+    """The writer's close sweeps every ``model*.safetensors`` it did not write, replacing the base."""
     base_dir, export_dir = artifacts
     before = sorted(os.listdir(base_dir))
     with pytest.raises(ValueError, match="same path"):
@@ -170,8 +156,7 @@ def test_an_output_aimed_at_the_base_is_refused(artifacts):
 
 
 def test_a_base_of_another_family_is_refused(artifacts, tmp_path):
-    """The graft is a plain attribute assignment, so a Qwen3.5 text tower would slot into a GLM-5
-    wrapper's config without complaint — a checkpoint that loads and serves garbage."""
+    """The graft is a plain attribute assignment, so a mismatched tower loads and serves garbage."""
     _, export_dir = artifacts
     other_base = str(tmp_path / "glm5_base")
     Glm5NextForConditionalGeneration(

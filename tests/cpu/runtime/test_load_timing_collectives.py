@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""``_log_global_load_duration_seconds`` — the load-timing report costs exactly two all_reduces.
-
-Every parallelism mode's loader ends in this call, so whatever it does runs once per model load on
-every rank. It reduces the earliest start and the latest end and reports the span; reading the
-reduced value already blocks until every rank has contributed, so a barrier on top of it buys no
-ordering and only adds a world-wide collective — at 512 ranks that is the whole cost of the report.
-
-Proven on a real gloo group: the span is the cross-rank ``max(end) - min(start)`` (not this rank's
-own interval), and no barrier is issued.
-
-    python tests/cpu/runtime/test_load_timing_collectives.py
-"""
+"""``_log_global_load_duration_seconds`` costs exactly two all_reduces, on a real gloo group.
+Reading the reduced value already blocks, so a barrier only adds a world-wide collective."""
 
 import datetime
 import os
@@ -23,11 +13,10 @@ from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 
-# Bounds a stuck collective, so its gloo error lands in the verdict before the join deadline.
+# So its gloo error lands in the verdict before the join deadline.
 PG_TIMEOUT_SEC = 60
 
-# Deliberately skewed intervals: rank 0 starts first, rank 1 finishes last, and NEITHER rank's own
-# interval (10 s / 25 s) equals the global span (30 s) — a local-only report cannot pass.
+# Neither rank's own interval (10 s / 25 s) equals the global span (30 s), so a local report cannot pass.
 RANK_INTERVALS = {0: (100.0, 110.0), 1: (105.0, 130.0)}
 GLOBAL_SPAN_SEC = 30.0
 

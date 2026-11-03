@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""``tests.common.ports.free_port`` hands out ports nothing else on the host can take first.
-
-A port is released between the probe and its consumer's bind. Under pytest-xdist that window loses
-two races: a concurrent worker is handed the same port, or an outbound connection's kernel-picked
-local port lands on it, and the TCPStore binding it dies with ``EADDRINUSE``. These pins hold the two
-properties that close the window, the probe that skips a port something already holds, and the
-random start that keeps two sessions on one network apart.
-
-Run: python tests/cpu/conventions/test_port_allocation.py
-"""
+"""``tests.common.ports.free_port`` hands out ports nothing else on the host can take first. A port is released
+between the probe and its consumer's bind, where a concurrent worker or an outbound connection can take it and
+the TCPStore dies with ``EADDRINUSE``."""
 
 import os
 import socket

@@ -1,26 +1,6 @@
 #!/usr/bin/env python
-"""LoRA / QLoRA / native-expert-LoRA training on the Offline GRPO trainer (+ adapter checkpoint).
-
-One file, five adapter modes (selected by ``--mode``); each drives the production adapter path
-(``split_expert_lora_targets`` → ``load_distributed_model`` → ``configure_adapter_training``) into
-``OfflineGRPOTrainer`` and asserts, each of which FAILS when the wiring breaks:
-
-  - only adapters are trainable (frozen base, incl. the 4-bit QLoRA weights);
-  - training is finite and the adapters actually move (zero-init lora_B becomes non-zero);
-  - ``trainer.save_model`` writes a round-trippable adapter-only checkpoint.
-
-Modes / parallelism:
-    lora        — attention PEFT LoRA, dense Qwen3-0.6B, FSDP2 (no parallelism args)
-    qlora       — attention PEFT LoRA on a 4-bit base, dense Qwen3-0.6B, FSDP2
-    lora_ep     — attention PEFT LoRA, GptOss-20B MoE, EP=2
-    expert_lora — native grouped LoRA on the MoE expert FFNs, GptOss-20B, EP=2
-    lora_etp    — attention PEFT LoRA, GptOss-20B MoE, ep_size=1 + expert_tp_size=2 (pure ETP)
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_offline_grpo.py --mode lora
-    ... --mode qlora | --mode lora_ep | --mode expert_lora | --mode lora_etp
-"""
+"""LoRA, QLoRA and native expert LoRA on the Offline GRPO trainer through the production adapter path, with an adapter
+checkpoint."""
 
 import argparse
 import math
@@ -69,7 +49,7 @@ def run(ctx) -> dict:
         max_steps=MAX_STEPS,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=1,
-        learning_rate=1e-3,  # large so adapters move in a few steps
+        learning_rate=1e-3,  # Large so adapters move in a few steps.
         bf16=True,
         gradient_checkpointing=True,
         use_liger_kernel=False,
@@ -92,8 +72,7 @@ def run(ctx) -> dict:
         parallelism_config=parallelism_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
-    # Inspect the trainer-wrapped model: attention LoRA is applied by the trainer's
-    # get_peft_model (peft_config), so the adapters only exist after construction.
+    # The trainer's get_peft_model applies attention LoRA, so the adapters only exist after construction.
     wrapped = unwrap(trainer.model)
     ok, detail = assert_only_adapters_trainable(wrapped)
     checks["only_adapters_trainable"] = ok

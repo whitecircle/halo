@@ -1,25 +1,9 @@
 #!/usr/bin/env python
-"""Offline GRPO with a KL term (kl_beta > 0) through the real OfflineGRPOTrainer under pipeline parallelism.
+"""Offline GRPO with kl_beta > 0 under PP: the reference is scored at construction by a forward-only sweep and shipped
+as a column.
 
-No pipeline rank holds a full model, so the KL reference is scored once at construction by a
-forward-only sweep through the schedule and shipped per completion token as a dataset column. Every
-seam yields a silently wrong objective rather than a crash, so each is pinned against an unsplit
-fp32 copy of the init weights:
-
-  * the sweep itself — every row's column, on the training and evaluation datasets, equals the
-    unsplit model's per-token log-probs of that completion (DP-sharded sweep, gathered over the
-    stage group, with a partial final batch per shard that the sweep row-pads and trims);
-  * the placement — the reference extra target the step receives carries each row's column values
-    at exactly the shifted positions the loss mask scores, zeros elsewhere;
-  * the objective — with the column deliberately perturbed after the sweep (so the KL is nonzero at
-    step 1, where policy == reference would otherwise zero it), the step-1 logged loss and the
-    init-weights eval_loss equal the exact kl_beta objective, including the negative-advantage
-    min_log_prob clamp on policy and reference and the k3 cap; and differ from the kl_beta=0 one;
-  * construction accepts kl_beta > 0 and builds no resident reference model.
-
-Topology: 4 GPUs as 2 simulated nodes of 2, pp=2 x dp=2 (stage FSDP over 2 ranks).
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_offline_grpo_kl.py
+No pipeline rank holds a full model, and every seam yields a silently wrong objective, so each is pinned against an
+unsplit fp32 copy. The column is perturbed after the sweep, since policy == reference at step 1 would zero the KL.
 """
 
 import math
@@ -51,10 +35,9 @@ from tests.gpu.parallelism.pp.test_pp_offline_grpo import (
 
 KL_BETA = 0.2
 N_STEPS = 6
-# 26 rows: each dp shard of 13 is three full batches of 4 plus a partial final batch of one row.
+# Each dp shard of 13 is three full batches of 4 plus a partial final batch of one row.
 TRAIN_GROUP_SIZES = [2, 3, 4, 3, 2, 4, 3, 3, 2]
-# Per-token log-prob tolerance for the pipelined sweep vs the unsplit model: both fp32, the chain
-# reassociates the residual stream across the stage boundary and pads differently.
+# Both fp32; the chain reassociates the residual stream across the stage boundary and pads differently.
 SWEEP_ABS_TOL = 2e-3
 PERTURB_SEED = 7
 
@@ -73,10 +56,7 @@ def offline_grpo_kl_reference(
     min_log_prob,
     beta,
 ) -> float:
-    """The exact offline-GRPO objective with the k3 KL term on an unsplit model, fp32, independent of halo/.
-
-    ``ref_logps`` is on the shifted ``[B, S-1]`` grid (the extra target the step receives).
-    """
+    """``ref_logps`` is on the shifted ``[B, S-1]`` grid, the extra target the step receives."""
     with torch.no_grad():
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.float()
     shift_labels = labels[:, 1:]
@@ -103,7 +83,6 @@ def offline_grpo_kl_reference(
 
 
 def unsplit_completion_logps(model, device, prompt_ids: list[int], completion_ids: list[int]) -> torch.Tensor:
-    """Per-completion-token log-probs of one row under the unsplit model, unpadded, fp32."""
     ids = torch.tensor([prompt_ids + completion_ids], device=device)
     with torch.no_grad():
         logits = model(input_ids=ids).logits.float()[0]
@@ -117,7 +96,6 @@ def unsplit_completion_logps(model, device, prompt_ids: list[int], completion_id
 
 
 def sweep_matches_unsplit(dataset, reference_model, device) -> tuple[bool, float]:
-    """Every row's column == the unsplit model's completion log-probs (length and values)."""
     worst = 0.0
     for row in dataset:
         column = torch.tensor(row[REF_PER_TOKEN_LOGPS_COLUMN], dtype=torch.float32)
@@ -133,7 +111,7 @@ def sweep_matches_unsplit(dataset, reference_model, device) -> tuple[bool, float
 
 
 def perturb_column(dataset, seed: int):
-    """Replace the swept column with column + U(-1, 1) noise, rank-identically (seeded)."""
+    """Column + U(-1, 1) noise, rank-identically (seeded)."""
     generator = torch.Generator().manual_seed(seed)
     perturbed = [
         (torch.tensor(values, dtype=torch.float32) + torch.rand(len(values), generator=generator) * 2 - 1).tolist()
@@ -143,8 +121,7 @@ def perturb_column(dataset, seed: int):
 
 
 def run_trainer(config, args, dataset, tokenizer, eval_dataset):
-    """Build the PP trainer (the sweep runs inside construction), perturb both columns, eval, train; returns
-    the trainer, the swept datasets, the first step's batch, and the init-weights eval calls and metrics."""
+    """The sweep runs inside construction; perturb both columns, eval, train."""
     trainer, steps, evals = build_pp_trainer(
         OfflineGRPOTrainer,
         model=build_dense_model(tokenizer, vocab_size=VOCAB_SIZE),
@@ -173,7 +150,7 @@ def run(ctx):
     dp_size = config.data_parallel_size
     checks["fixture_has_a_partial_sweep_batch"] = (sum(TRAIN_GROUP_SIZES) // dp_size) % BATCH != 0
 
-    # The run-start reference cache lives under output_dir: one rank writes it, every rank maps it.
+    # One rank writes the run-start reference cache here, every rank maps it.
     output_dir = shared_output_dir(ctx)
     args = build_args(output_dir, max_steps=N_STEPS, kl_beta=KL_BETA, eval_strategy="steps", eval_steps=N_STEPS)
     trainer, swept, captured, eval_calls, init_eval_metrics = run_trainer(
@@ -188,15 +165,14 @@ def run(ctx):
         for ds, n in ((swept["train"], sum(TRAIN_GROUP_SIZES)), (swept["eval"], sum(EVAL_GROUP_SIZES)))
     )
 
-    # ── The sweep: every row of both datasets, against the unsplit init model ────────────────────
     reference_model = build_dense_model(tokenizer, vocab_size=VOCAB_SIZE).to(ctx.device).eval()
     ok, worst = sweep_matches_unsplit(swept["train"], reference_model, ctx.device)
     checks["train_sweep_matches_unsplit_model"], metrics["train_sweep_worst_abs"] = ok, worst
     ok, worst = sweep_matches_unsplit(swept["eval"], reference_model, ctx.device)
     checks["eval_sweep_matches_unsplit_model"], metrics["eval_sweep_worst_abs"] = ok, worst
 
-    # ── Placement: the step's reference grid carries each row's (perturbed) column at the scored
-    # positions and nothing elsewhere. Rows are pinned to the dataset through their label span.
+    # The reference grid carries each row's column at the scored positions and nothing elsewhere; rows pin by label
+    # span.
     by_completion = {tuple(ids): i for i, ids in enumerate(trainer.train_dataset["completion_input_ids"])}
     grid = captured[REF_PER_TOKEN_LOGPS_COLUMN]
     placed = grid.shape == (BATCH, args.max_length - 1)
@@ -213,7 +189,7 @@ def run(ctx):
         placed &= bool(torch.allclose(span, expected, atol=1e-6)) and bool(outside.eq(0).all())
     checks["reference_grid_placed_at_scored_positions"] = placed
 
-    # ── The objective at step 1 (policy == init; reference perturbed, so the KL is live) ─────────
+    # Policy == init; reference perturbed, so the KL is live.
     losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]
     checks["ran_all_steps"] = trainer.state.global_step == N_STEPS and len(losses) == N_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
@@ -241,7 +217,7 @@ def run(ctx):
     metrics["step1_reference_without_kl"] = without_kl
     checks["kl_term_enters_the_loss"] = abs(losses[0] - without_kl) > 1e-2
 
-    # ── Eval leg on init weights: HF's mean over the per-batch objectives (zero remainder) ───────
+    # Init weights: HF's mean over the per-batch objectives (zero remainder).
     step_losses = [reference(call, KL_BETA) for call in eval_calls]
     expected_eval = hf_eval_loss_reference(
         step_losses,
@@ -263,7 +239,7 @@ def run(ctx):
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
 
-    # ── bnpo / prob_weighted / no clamp: the KL rides every loss type's numerator ─────────────────
+    # The KL rides every loss type's numerator.
     bnpo_args = build_args(
         output_dir + "/bnpo",
         max_steps=2,

@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """An SFT micro-batch issues no metric collective and reads nothing back to the host.
-
-TRL's ``SFTTrainer.compute_loss`` gathers its token count, entropy and accuracy across the world and reads each
-back with ``.item()`` on every micro-batch, and HF's exact input-token count (``include_num_input_tokens_seen``,
-which the efficiency metrics turn on) gathers one more; at 512 ranks that is a collective and a host stall per
-metric per micro-batch. The trainer records the metrics on the device and folds them once per log, and adds the
-input tokens up on the host until a log or a save sums them. This drives the real trainer for a few steps on CPU
-and counts, outside the log calls, every accelerate gather or reduce and every ``.item()``/``.tolist()`` the toolkit
-or TRL issues.
-
-Run: python tests/cpu/trainers/test_sft_loss_host_syncs.py
-"""
+TRL gathers and ``.item()``s its metrics per micro-batch: at 512 ranks, a collective and a host stall per metric."""
 
 import sys
 from collections import Counter
@@ -32,7 +22,7 @@ GRAD_ACCUM = 2
 # Optimizer steps whose micro-batches are counted: past the first step's one-off checks, none a log step's flush.
 COUNTED_STEPS = range(2, 6)
 LOGGING_STEPS = 3
-# Packages whose host reads count: the trainer stack this test owns, not torch's or transformers' internals.
+# Host reads count in the trainer stack this test owns, not in torch's or transformers' internals.
 _COUNTED_PACKAGES = ("/halo/", "/trl/")
 
 

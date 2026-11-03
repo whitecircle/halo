@@ -1,29 +1,9 @@
 #!/usr/bin/env python
-"""A text-only run of a multimodal wrapper through the real DistributedSFTTrainer under pipeline parallelism.
+"""A text-only run of a multimodal wrapper through the real DistributedSFTTrainer under PP.
 
-The stage split keeps the text backbone and the task head; a composite wrapper's vision tower is a
-sibling of ``language_model`` and lands in no stage. For a text-only run that is exactly right —
-the tower is dead weight — provided (1) a run that does feed images is still refused, loudly, and
-(2) the export stays a complete wrapper-layout checkpoint: the untouched vision tensors are stashed
-at the split on the save rank and re-emitted by every PP save, so ``from_pretrained`` of the
-composite class reloads with no missing keys and serves with no reattach step.
-
-Pinned here on a tiny GLM-5 composite (``Glm5NextForConditionalGeneration`` — a family that ships
-no text-only CausalLM sibling, so the wrapper is the only class there is):
-
-  * the image-bearing refusal, on every rank, before any collective;
-  * construction admits the text-only run; no stage carries a vision parameter; the stash holds
-    exactly the vision tower (save rank) or nothing (every other rank);
-  * the step-1 loss equals the unsplit composite's causal-LM loss on the captured batch;
-  * training moves the text weights, losses are finite and rank-identical;
-  * the save reloads as the composite class with no missing keys, its vision tensors bitwise equal
-    to the init ones, its text tensors moved, and its eval loss reproducing the logged one.
-
-Topology: 4 GPUs as 2 simulated nodes of 2, pp=2 x dp=2 (stage FSDP over 2 ranks).
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_text_only_vlm.py [--family glm5_next|step3p7]
-(the same pins on the Step-3.7 composite, whose tower and projector sit under ``model.vision_model`` /
-``model.multi_modal_projector``)
+A composite's vision tower lands in no stage, fine for text-only if an image-bearing run is still refused and the
+export stays a complete wrapper checkpoint: the save rank stashes the vision tensors at the split and every PP save
+re-emits them.
 """
 
 import sys
@@ -67,8 +47,7 @@ SEQ_LEN = 64
 N_STEPS = 8
 BATCH = 4
 PP_SPLIT = [4, 4]
-# Eight layers so both layer kinds of each family's interleave land on both stages of the [4, 4]
-# split (GLM-5's KDA/DSA, Step-3.7's full/sliding attention).
+# Eight layers, so both layer kinds of each family's interleave land on both stages of the [4, 4] split.
 _FAMILIES = {
     "glm5_next": {
         "config_cls": Glm5NextConfig,
@@ -100,16 +79,15 @@ if "--family" in sys.argv:
 if FAMILY not in _FAMILIES:
     raise SystemExit(f"--family must be one of {sorted(_FAMILIES)}, got {FAMILY!r}")
 TEXT_CONFIG = _FAMILIES[FAMILY]["text"]
-# Step-1 loss vs the unsplit fp32 composite: the trainer runs bf16, the reference fp32.
+# The trainer runs bf16, the reference fp32.
 LOSS_REL_TOL = 2e-2
-# Reloaded eval vs the logged one: the run evaluates its fp32 masters under bf16 autocast, the artifact
-# holds them rounded to bf16, and the precision a bf16 reload is evaluated in alone moves the eval of
-# this tiny model by 3e-4 relative. A missing or misplaced tensor moves it by orders of magnitude more.
+# The run evaluates fp32 masters under bf16 autocast and the artifact holds them rounded to bf16, which moves this tiny
+# model's eval by 3e-4 relative. A missing or misplaced tensor moves it by orders more.
 EVAL_REL_TOL = 1e-3
 
 
 def build_composite(dtype=torch.float32):
-    """Identical weights on every rank — the split model and the unsplit reference must start equal."""
+    """Identical on every rank: the split model and the unsplit reference must start equal."""
     torch.manual_seed(1234)
     family = _FAMILIES[FAMILY]
     config = family["config_cls"](
@@ -146,7 +124,7 @@ def run(ctx):
     eval_dataset = build_sft_rows(vocab, n_rows=8, seed=23)
     checks, metrics = {}, {}
 
-    # ── An image-bearing run of the same wrapper stays refused, on every rank, before any collective.
+    # Refused on every rank, before any collective.
     expect_construction_error(
         DistributedSFTTrainer,
         "image_bearing_run_refused",
@@ -161,7 +139,6 @@ def run(ctx):
         moe_balancing="none",
     )
 
-    # ── The text-only run ─────────────────────────────────────────────────────────────────────────
     trainer, steps, _ = build_pp_trainer(
         DistributedSFTTrainer,
         model=build_composite(),
@@ -171,7 +148,7 @@ def run(ctx):
         processing_class=tokenizer,
         data_collator=default_data_collator,
         parallelism_config=config,
-        # The HF aux-loss path is severed by the split (a documented PP constraint on MoE families).
+        # The split severs the HF aux-loss path (a documented PP constraint on MoE families).
         moe_balancing="none",
     )
     stage = trainer.model
@@ -181,8 +158,8 @@ def run(ctx):
         root in name.split(".") for name, _ in stage.named_parameters() for root in tower_roots
     )
     stash = trainer._pp_wrapper_state
-    # The stash holds the tower at the artifact's save dtype, so the oracle is the init tensor
-    # rounded once to that dtype — a value drift (a stage touching the tower) still fails.
+    # Stashed at the artifact's save dtype, so the oracle is the init tensor rounded once; a stage touching the tower
+    # fails.
     checks["save_rank_stashes_exactly_the_vision_tower"] = (
         set(stash) == set(init_vision)
         and all(torch.equal(stash[k], init_vision[k].to(stash[k].dtype)) for k in init_vision)
@@ -198,8 +175,7 @@ def run(ctx):
     checks["loss_decreased"] = losses[-1] < losses[0] - 0.05
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
-    # Step 1 on init weights == the unsplit composite's token-mean CE over this replica's batch,
-    # normalized like the pipeline (this replica's summed CE over the DP-global count / dp).
+    # This replica's summed CE over the DP-global count / dp, normalized like the pipeline.
     captured = steps[0]
     reference_model = build_composite().to(ctx.device).eval()
     with torch.no_grad():
@@ -212,10 +188,9 @@ def run(ctx):
     eval_losses = [e["eval_loss"] for e in trainer.state.log_history if "eval_loss" in e]
     checks["eval_ran_finite"] = len(eval_losses) == 1 and bool(torch.isfinite(torch.tensor(eval_losses)).all())
 
-    # ── Save → the composite class reloads whole: nothing missing, vision untouched, text moved.
+    # The composite class reloads whole: nothing missing, vision untouched, text moved.
     save_dir = shared_output_dir(ctx)
-    # TRL copied the full-size tokenizer's special-token ids into the tiny config; restore ids inside
-    # the tiny vocab so from_pretrained reflects PP mechanics, not the test's size mismatch.
+    # TRL copied the full-size tokenizer's special-token ids into the tiny config; restore ids inside the tiny vocab.
     text_config = trainer.model.config.get_text_config()
     text_config.pad_token_id, text_config.eos_token_id = 0, 1
     trainer.model.config.pad_token_id, trainer.model.config.eos_token_id = 0, 1

@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: HF's mixed-mesh gradient norm must never replace the toolkit's clip.
-
-transformers sends gradients that mix DTensor and plain tensors (EP, TP-replicated params, EP+LoRA)
-to its own per-mesh norm, in both ``_clip_grad_norm`` and the unclipped ``_get_grad_norm``. Every
-toolkit clip replaces ``accelerator.clip_grad_norm_`` (the global norm over EP/TP/FSDP groups, the
-deferred EP sweep, the TP-replicated sync), so on those runs HF's branch would skip all of it. The
-grads are reported mixed here by patching HF's own detector, which is what a real EP run trips.
-
-    python tests/cpu/trainers/test_grad_clip_mixed_mesh.py
-"""
+"""HF's mixed-mesh gradient norm must never replace the toolkit's clip.
+It would skip the global norm over EP/TP/FSDP groups, the deferred EP sweep and the TP-replicated sync."""
 
 from types import SimpleNamespace
 
@@ -32,8 +24,6 @@ class _Accelerator:
 
 
 class _HFBase:
-    """HF's own clip and norm, which the mixin sits in front of in every distributed trainer."""
-
     _clip_grad_norm = Trainer._clip_grad_norm
     _get_grad_norm = Trainer._get_grad_norm
     _has_mixed_mesh_grads = Trainer._has_mixed_mesh_grads
@@ -77,7 +67,6 @@ def test_the_unclipped_norm_goes_through_the_patched_accelerator_clip(mixed_grad
 
 
 def test_premise_hf_alone_takes_its_own_branch_on_mixed_grads(mixed_grads):
-    """Anti-vacuity: without the mixin's answer the patched detector does divert HF's clip."""
     me = _trainer(_HFBase)
 
     me._clip_grad_norm(me.model)

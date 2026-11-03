@@ -1,9 +1,6 @@
-"""Repo pin: every module in halo/ and scripts/ logs through one stdlib logger form.
-
-The module logger is ``logger = logging.getLogger(__name__)``, or ``info_logger(__name__)`` where it needs
-its INFO pin. accelerate's adapter drops every level off global rank 0 and raises before its state exists,
-so a rank-0 line is guarded at its call with ``is_global_main_process()``, never by a logger keyword.
-"""
+"""Every module in halo/ and scripts/ logs through one stdlib logger form. accelerate's adapter drops every level
+off global rank 0 and raises before its state exists, so a rank-0 line is guarded at its call with
+``is_global_main_process()``."""
 
 import ast
 
@@ -73,7 +70,6 @@ def test_every_module_uses_the_stdlib_logger_form():
 
 
 def test_the_sweep_sees_the_module_loggers():
-    """Anti-vacuity: a collapsed sweep would pass the form check."""
     assert _MODULE_LOGGER_COUNT > 150, f"only {_MODULE_LOGGER_COUNT} module loggers found"
 
 

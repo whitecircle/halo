@@ -1,9 +1,6 @@
-"""The closed hub-conversion op vocabulary, and a checkpoint key plan translated into it for the lazy loaders.
-
-transformers' declarative conversion entries become ops the materializer applies after its ranged read;
-each acts on one declared dim, so the expert planner can keep its per-expert ranged reads. An entry using
-any other transformers op raises at translation rather than loading wrong tensors.
-"""
+"""The closed hub-conversion op vocabulary and a checkpoint key plan translated into it for the lazy loaders. Each op
+acts on one declared dim, so the expert planner keeps its ranged reads; an entry using any other op raises at
+translation."""
 
 from __future__ import annotations
 
@@ -24,11 +21,7 @@ from halo.model_loading.checkpoint_keys import CheckpointKeyPlan, ConversionGrou
 
 @dataclass(frozen=True)
 class Deinterleave:
-    """Undo an element-interleaved pair layout along ``dim`` into contiguous halves.
-
-    Must stay the exact inverse of transformers' ``Interleave`` op (reshape ``[.., D, ..]`` to
-    ``[.., D/2, 2, ..]``, transpose the pair axes, reshape back).
-    """
+    """Undo an element-interleaved pair layout along ``dim``; the exact inverse of transformers' ``Interleave``."""
 
     dim: int
 
@@ -52,11 +45,7 @@ class TakeChunk:
 
 @dataclass(frozen=True)
 class PermuteRope:
-    """Rows of a complex-RoPE (interleaved-pair) head layout, mapped to the split-halves layout.
-
-    Must stay equal to transformers' ``PermuteForRope`` (``n_heads`` read off the config at
-    translation), for a ``[rows, ...]`` weight or a ``[rows]`` bias alike. Always acts on dim 0.
-    """
+    """Complex-RoPE (interleaved-pair) rows to split-halves on dim 0, equal to transformers' ``PermuteForRope``."""
 
     n_heads: int
     inverse: bool = False
@@ -74,12 +63,9 @@ class PermuteRope:
 
 @dataclass(frozen=True)
 class Concat:
-    """Fan-in of a multi-source conversion entry: the lazy mirror of transformers' ``Concatenate``.
-
-    Leads the op pipeline of the entry's first source; ``siblings`` are its further disk keys in
-    declared order, each read through the plan's own ranged expert slice and concatenated along
-    ``dim``. The materializer resolves those reads; every other op is a per-tensor callable.
-    """
+    """Fan-in of a multi-source entry, mirroring transformers' ``Concatenate``: leads the first source's pipeline, with
+    ``siblings`` its further disk keys in declared order. The materializer resolves their reads; other ops are
+    callables."""
 
     dim: int
     siblings: tuple[str, ...]
@@ -101,8 +87,7 @@ def _op_kind(op) -> str:
 
 
 def _permute_rope(op: PermuteForRope, config, entry: WeightConverter) -> PermuteRope:
-    """The head count transformers' op reads at conversion: ``config[.subconfig_key]``'s
-    ``num_attention_heads``, with its own default of 1 where the config lacks the field."""
+    """The head count transformers' op reads: ``config[.subconfig_key]``'s ``num_attention_heads``, default 1."""
     if config is None or op.permute_layer_names is None:
         raise ValueError(
             f"PermuteForRope for {entry.source_patterns[0]!r} needs the model config for its head "
@@ -114,14 +99,9 @@ def _permute_rope(op: PermuteForRope, config, entry: WeightConverter) -> Permute
 
 
 def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tuple[_TensorOp, ...], ...], int | None]:
-    """One transformers ``WeightConverter`` → its op pipeline per target, in declared order, and a fan-in's
-    concatenation dim (``None`` for one source); or raise.
-
-    Supported pipelines: ``[Interleave]`` (one target), ``[Chunk]``, ``[Interleave, Chunk]``,
-    ``[Chunk, PermuteForRope]`` (one target per chunk, the permutation landing on the targets it
-    names), and ``[Concatenate]`` over several sources into one. Anything else needs machinery this
-    module does not have, and is refused rather than materialized incorrectly.
-    """
+    """A ``WeightConverter`` → its op pipeline per target and a fan-in's concat dim (``None`` for one source).
+    Supported: ``[Interleave]``, ``[Chunk]``, ``[Interleave, Chunk]``, ``[Chunk, PermuteForRope]``, and
+    ``[Concatenate]`` over several sources; anything else is refused rather than materialized incorrectly."""
     ops = tuple(entry.operations)
     targets = tuple(entry.target_patterns)
     multi_source = len(entry.source_patterns) > 1
@@ -188,13 +168,8 @@ def _group_targets(group: ConversionGroup, config) -> dict[str, ConvertTargets]:
 
 
 def lazy_key_mapping(plan: CheckpointKeyPlan, config) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
-    """Every disk key → the model key it feeds, off ``plan``, and every converted key's targets with ops.
-
-    An expert-bank merge's keys keep their renamed per-expert spelling, the ``ExpertFuser``'s input. A
-    converter producing a live name translates into the op vocabulary (``config`` supplies a
-    ``PermuteForRope`` head count): a fan-in's first declared source carries its group as a leading
-    :class:`Concat` naming the others in declared order, and a partial or doubled group raises.
-    """
+    """Every disk key → the model key it feeds, and every converted key's targets with ops. An expert-bank merge's keys
+    keep their per-expert spelling for the ``ExpertFuser``; a partial or doubled fan-in raises."""
     disk_to_model = dict(plan.renamed_by_key)
     converted: dict[str, ConvertTargets] = {}
     for group in plan.groups:

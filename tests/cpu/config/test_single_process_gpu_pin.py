@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""A single-process run trains on the one GPU it bound, never under ``nn.DataParallel``.
-
-HF's Trainer wraps the model in ``nn.DataParallel`` whenever ``args.n_gpu > 1``, which is what a
-plain ``python`` launch reports on a multi-GPU host. The token-normalized losses are not written for
-that wrapper (the logged loss and the gradients scale with the GPU count), so
-``init_training_script`` pins the training config to one GPU before a trainer is built from it.
-
-Run: pytest tests/cpu/config/test_single_process_gpu_pin.py
-"""
+"""A single-process run trains on the one GPU it bound. HF's Trainer wraps the model in ``nn.DataParallel`` when
+``args.n_gpu > 1``, and the token-normalized losses scale with the GPU count under that wrapper."""
 
 import ast
 import inspect

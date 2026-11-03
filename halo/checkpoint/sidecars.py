@@ -1,5 +1,4 @@
-"""The training-state sidecars an exported artifact carries: the training provenance a merge re-applies,
-and the router-balancing state at the precision it was trained in."""
+"""Training-state sidecars on an export: the provenance a merge re-applies, balancing at its trained precision."""
 
 import json
 import os
@@ -12,17 +11,12 @@ from halo.checkpoint.reading import checkpoint_shard_files, iter_checkpoint_tens
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 from halo.models.moe.balancing import apply_balancing_bias_sidecar, is_balancing_state_key
 
-# The provenance key recording the GptOss sink policy an adapter trained under.
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
 
 
 def write_training_provenance(model, output_dir: str) -> None:
-    """Record the training-time model state a merge cannot recover from the adapter artifacts.
-
-    A merge rebuilds the base from the hub, whose GptOss sinks are always live, while a ``reset_sinks``
-    run trained under neutralized ones. Only a stamped policy is recorded: no stamp means nothing to
-    record, never "neutralized".
-    """
+    """Record the sink policy a merge cannot recover: it rebuilds from the hub, whose GptOss sinks are always live,
+    while a ``reset_sinks`` run trained neutralized ones. No stamp means nothing to record, never neutralized."""
     provenance = {}
     policy = stamped_sinks_policy(model)
     if policy is not None:
@@ -34,8 +28,7 @@ def write_training_provenance(model, output_dir: str) -> None:
 
 
 def apply_training_provenance(model, adapter_dir: str) -> list[str]:
-    """Re-apply the training-time model state ``adapter_dir``'s provenance records; return the actions
-    taken, for the calling tool to report."""
+    """Re-apply what ``adapter_dir``'s provenance records; returns the actions taken, for the tool to report."""
     provenance_path = os.path.join(adapter_dir, TRAINING_PROVENANCE_FILE)
     if not os.path.isfile(provenance_path):
         return []
@@ -52,12 +45,9 @@ def apply_training_provenance(model, adapter_dir: str) -> list[str]:
 
 
 def _balancing_tensors_at_trained_precision(model, source_dir: str) -> dict[str, torch.Tensor]:
-    """The model's router-balancing tensors as they should be stored, where that differs from now.
-
-    Read back from the source's own shards (the load may have downcast them); a source without weights
-    gives the slot fp32 storage so the fp32 sidecar lands unrounded. Stored tensors match on the module
-    path, since a family's export may rename the slot and a router carries exactly one.
-    """
+    """The balancing tensors as they should be stored, where that differs from now: read from the source's shards (the
+    load may have downcast them), else fp32 so the sidecar lands unrounded. Matched by module path, since an export may
+    rename the slot and a router carries exactly one."""
     state = model.state_dict()
     balancing_keys = sorted(key for key in state if is_balancing_state_key(key))
     if not balancing_keys:
@@ -77,13 +67,9 @@ def _balancing_tensors_at_trained_precision(model, source_dir: str) -> dict[str,
 
 
 def apply_training_sidecars(model, source_dir: str) -> list[str]:
-    """Re-apply to ``model`` everything ``source_dir``'s sidecars record about its training; return the
-    actions taken.
-
-    The one sequence every tool assembling an export from a run's output follows: the provenance, then
-    the balancing state at its trained precision (a bf16 round trip loses the ~1e-3 sign steps), filled
-    from ``router_balancing_biases.pt`` where the source ships no weights of its own.
-    """
+    """Re-apply what ``source_dir``'s sidecars record; returns the actions taken. Every tool assembling an export
+    follows this order: provenance, then balancing state at trained precision (a bf16 round trip loses the ~1e-3 sign
+    steps), filled from ``router_balancing_biases.pt`` where the source ships no weights."""
     actions = apply_training_provenance(model, source_dir)
 
     restored = _balancing_tensors_at_trained_precision(model, source_dir)
@@ -114,8 +100,7 @@ def apply_training_sidecars(model, source_dir: str) -> list[str]:
 
 
 def copy_training_sidecars(source_dir: str, output_dir: str) -> None:
-    """Carry :data:`EXPORT_SIDECAR_FILES` from ``source_dir`` into ``output_dir``, for a write whose aux
-    copy does not read ``source_dir`` (an unmerged PEFT save, a merge copying its base's files)."""
+    """For a write whose aux copy skips ``source_dir`` (an unmerged PEFT save, a merge copying its base's files)."""
     for name in EXPORT_SIDECAR_FILES:
         source = os.path.join(source_dir, name)
         if os.path.isfile(source):

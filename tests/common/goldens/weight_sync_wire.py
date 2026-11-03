@@ -1,9 +1,6 @@
-"""Weight-sync wire golden: what rank 0's bootstrap of a vLLM weight-transfer group hands its rendezvous
-store and writes there, and the class its NCCL unique id pickles as. The vLLM image unpickles that id as
-its own class through a shim at the same module path (``Dockerfile.vllm``), so the path, qualname, fields,
-pickle bytes and store key are a contract with a separately built image: a commit that moves the class
-regenerates this golden and moves the shim with it.
-"""
+"""Weight-sync wire golden: what rank 0's vLLM group bootstrap hands its store, and the class its NCCL unique id
+pickles as. The vLLM image unpickles that id through a shim at the same module path: a contract with a separately built
+image, so a move regenerates this and moves the shim."""
 
 from __future__ import annotations
 
@@ -25,7 +22,7 @@ from halo.weight_sync.transport.rendezvous import RendezvousListener
 from tests.common.goldens import regen_main
 
 GOLDEN_PATH = Path(__file__).with_suffix(".json")
-# 128 bytes that are their own offsets, so the golden shows the id carried verbatim and in order.
+# Their own offsets, so the golden shows the id carried verbatim and in order.
 PINNED_ID_BYTES = bytes(range(128))
 # A vLLM server of one worker: the trainer's group has two ranks.
 WORLD_SIZE = 2
@@ -37,8 +34,8 @@ class _EngineNeverJoins(Exception):
 
 
 class _RecordingStore:
-    """The ``TCPStore`` rank 0 builds: records its arguments and every write, and owns the listener fd
-    it is handed, as the real store does."""
+    """The ``TCPStore`` rank 0 builds: records arguments and writes, and owns the listener fd, as the real store
+    does."""
 
     def __init__(self, *args, **kwargs):
         self.args, self.kwargs = args, kwargs
@@ -78,7 +75,7 @@ def _ctype_spelling(ctype) -> str:
 
 
 def _store_arguments(store: _RecordingStore, listener: RendezvousListener) -> dict:
-    """The store's keyword arguments, with the listener's port and fd written as what they are."""
+    """The store's kwargs, with the listener's port and fd written as what they are."""
     kwargs = dict(store.kwargs)
     if kwargs.get("port") == listener.port:
         kwargs["port"] = "<listener port>"
@@ -90,9 +87,8 @@ def _store_arguments(store: _RecordingStore, listener: RendezvousListener) -> di
 
 
 def bootstrap_record() -> dict:
-    """Rank 0's bootstrap of a two-rank group on a recording store and a faked libnccl: the store's
-    arguments, its writes up to the communicator init, and the init's arguments; plus the unique id
-    class's module, qualname and fields."""
+    """Rank 0's bootstrap on a recording store and faked libnccl, plus the unique id class's module, qualname and
+    fields."""
     library = _PinnedIdLibrary()
     listener = RendezvousListener(GROUP_HOST, 0)
     stores: list[_RecordingStore] = []
@@ -103,8 +99,8 @@ def bootstrap_record() -> dict:
 
     with (
         listener,
-        # The server's knob, which the communicator refuses in the trainer: a host export must not end
-        # the record early.
+        # The server's knob, which the communicator refuses in the trainer: a host export must not end the record
+        # early.
         patch.object(pynccl, "vllm_pynccl_disabled", lambda: False),
         patch.object(rendezvous, "TCPStore", recording_store),
         patch.object(pynccl, "NCCLLibrary", lambda: library),

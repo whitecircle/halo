@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""gpt-oss-20b under EP=2 also against its no-EP load: per-token logits, top-1 and every router gradient. The
-``full``-tier row of ``test_ep_modes_vs_reference.py``, a script of its own because a manifest entry has one tier.
-
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_vs_no_ep.py
-"""
+"""gpt-oss-20b at EP=2 against its no-EP load: the ``full``-tier row of ``test_ep_modes_vs_reference.py``, its own
+script because a manifest entry has one tier."""
 
 from functools import partial
 

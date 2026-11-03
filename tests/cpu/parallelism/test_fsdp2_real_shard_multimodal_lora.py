@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""A real ``fully_shard`` over the multimodal wrappers under LoRA: forward, backward and a step.
-
-The structural roster test derives each parameter's owning unit from recorded ``fully_shard`` calls;
-this one lets FSDP2 itself do the sharding. One rank is enough: every managed parameter becomes a
-DTensor that only its unit's pre-forward unshards, so ``embed_tokens`` owned by the wrong unit raises
-``aten.embedding.default got mixed torch.Tensor and DTensor`` on the first forward, exactly as a
-multi-GPU run does. Tied and untied embeddings, attention LoRA and ``modules_to_save`` copies (which
-untie a tied embedding), and an image batch through the Qwen-style towers, whose base parameters live
-in the composite's unit (their projections spell `qkv`/`proj`, so an attention target list adapts none
-of them).
-
-Run: pytest tests/cpu/parallelism/test_fsdp2_real_shard_multimodal_lora.py
-"""
+"""A real ``fully_shard`` over the multimodal wrappers under LoRA: forward, backward and a step. ``embed_tokens`` owned
+by the wrong unit raises ``aten.embedding.default got mixed torch.Tensor and DTensor`` on the first forward."""
 
 import pytest
 import torch
@@ -43,7 +32,7 @@ def _text_batch() -> dict[str, torch.Tensor]:
 
 
 def _image_batch(model) -> dict[str, torch.Tensor]:
-    """One image in the Qwen patch layout, its tokens spelled with ids inside the tiny vocab."""
+    """Token ids stay inside the tiny vocab."""
     config = model.config
     config.image_token_id, config.vision_start_token_id = _IMAGE_TOKEN, _VISION_START
     vision = config.vision_config

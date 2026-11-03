@@ -1,7 +1,5 @@
-"""World-level metrics folded from rank-local sums. TRL's ``log`` averages each process's own ``_metrics`` list
-and only the main process reports, so a value over one rank's rows would be logged as the batch's; each rank
-records its sums instead, and a flush derives every metric from the world totals in fixed-width all-reduces read
-back once, an object gather carrying only a key the ranks have not agreed on yet or a percentile's raw values."""
+"""World-level metrics folded from rank-local sums. TRL's ``log`` averages each process's own ``_metrics`` and only the
+main process reports, so a value over one rank's rows would be logged as the batch's."""
 
 import math
 from collections import defaultdict
@@ -74,7 +72,7 @@ def _fold(kind: str, states: Sequence[State]) -> State:
 
 
 def _home_device(values: Iterable[Count]) -> torch.device | None:
-    """Where ``values``' tensors lie: the first one off the CPU, else the CPU; None without a tensor."""
+    """The first tensor's device off the CPU, else the CPU; None without a tensor."""
     tensors = [value for value in values if torch.is_tensor(value)]
     if not tensors:
         return None
@@ -82,15 +80,13 @@ def _home_device(values: Iterable[Count]) -> torch.device | None:
 
 
 def _staged(numbers: list[float], device: torch.device) -> torch.Tensor:
-    """``numbers`` as a float64 vector on ``device``; to a GPU through pinned memory, asynchronously, since a
-    pageable host-to-device copy synchronizes the stream."""
+    """To a GPU through pinned memory, asynchronously, since a pageable host-to-device copy synchronizes the stream."""
     pinned = device.type == "cuda"
     return torch.tensor(numbers, dtype=torch.float64, pin_memory=pinned).to(device, non_blocking=pinned)
 
 
 def _column(values: Sequence[Count], device: torch.device) -> torch.Tensor:
-    """``values`` as one float64 vector on ``device`` with no host sync: each tensor cast where it lies, every
-    number in one :func:`_staged` copy."""
+    """``values`` as one float64 vector on ``device`` with no host sync."""
     numbers = [float(value) for value in values if not torch.is_tensor(value)]
     if len(numbers) == len(values):
         return _staged(numbers, device)
@@ -104,8 +100,8 @@ def _column(values: Sequence[Count], device: torch.device) -> torch.Tensor:
 
 
 def _compensated_sum(rows: torch.Tensor) -> torch.Tensor:
-    """Each column of ``rows`` summed top to bottom with Neumaier's compensation, bit for bit what Python's float
-    ``sum`` returns for the column as a list: its compensation is added only when nonzero and finite."""
+    """Each column summed with Neumaier's compensation, bit for bit what Python's float ``sum`` returns: its
+    compensation is added only when nonzero and finite."""
     total, compensation = torch.zeros_like(rows[0]), torch.zeros_like(rows[0])
     for row in rows:
         stepped = total + row
@@ -115,8 +111,7 @@ def _compensated_sum(rows: torch.Tensor) -> torch.Tensor:
 
 
 def _first_max(rows: torch.Tensor) -> torch.Tensor:
-    """Each column's maximum as Python's ``max`` takes it: a later value replaces the running one only when greater,
-    so the first of equal values, and a leading NaN, stay."""
+    """Each column's maximum as Python's ``max`` takes it, so the first of equal values, and a leading NaN, stay."""
     best = rows[0]
     for row in rows[1:]:
         best = torch.where(row > best, row, best)
@@ -124,9 +119,8 @@ def _first_max(rows: torch.Tensor) -> torch.Tensor:
 
 
 class _RankFold:
-    """This rank's records folded per state column in record order, as Python folds the column's values as a list:
-    a column of numbers on the host, one holding a tensor on that tensor's device, so no tensor is read back. A min
-    is held negated, as the MAX all-reduce carries it."""
+    """This rank's records folded per column in record order, as Python folds a list: numbers on the host, a tensor
+    column on its device, so no tensor is read back. A min is held negated, as the MAX all-reduce carries it."""
 
     def __init__(self, records: Records) -> None:
         self._folded: dict[tuple[str, int], Count] = {}
@@ -144,8 +138,8 @@ class _RankFold:
             self._fold_on_device(on_device)
 
     def columns(self, layout: Schema) -> tuple[list[Count], list[Count]]:
-        """``layout``'s summed and its max-folded state columns, in order: this rank's folded value, or what a rank
-        without the key adds (0, -inf)."""
+        """``layout``'s summed and max-folded columns: this rank's value, or what a rank without the key adds (0,
+        -inf)."""
         sums: list[Count] = []
         maxes: list[Count] = []
         for key, kind in layout:
@@ -158,8 +152,8 @@ class _RankFold:
         return sums, maxes
 
     def _fold_on_device(self, columns: list[tuple[tuple[str, int], Callable, list[Count]]]) -> None:
-        """Fold ``columns`` in one grid of their values, padded to the longest with what leaves a fold unchanged:
-        the summed columns first, then the max-folded ones, each min negated into a max."""
+        """Fold ``columns`` in one grid padded to the longest with what leaves a fold unchanged: summed first, then
+        max-folded, each min negated into a max."""
         ordered = sorted(columns, key=lambda column: (column[1] is not sum, column[1] is min))
         summed = sum(fold is sum for _, fold, _ in ordered)
         first_min = len(ordered) - sum(fold is min for _, fold, _ in ordered)
@@ -181,7 +175,7 @@ class _RankFold:
 
 
 def _gathered(payload: object, group: dist.ProcessGroup | None) -> list:
-    """COLLECTIVE over ``group`` (the world when None): every rank's ``payload``, in rank order."""
+    """COLLECTIVE over ``group`` (the world when None), in rank order."""
     if not is_multi_rank_run():
         return [payload]
     gathered: list = [None] * dist.get_world_size(group)
@@ -190,14 +184,12 @@ def _gathered(payload: object, group: dist.ProcessGroup | None) -> list:
 
 
 def _schema(records: Records) -> Schema:
-    """A rank's sorted ``(key, kind)`` pairs; empty when it recorded nothing."""
     return tuple(sorted((key, kind) for key, (kind, _) in records.items()))
 
 
 def _union_schema(schemas: Sequence[Schema], key_mismatch_error: MismatchErrorFactory | None) -> Schema:
-    """Every key any rank holds, at its one kind; raises ``ValueError`` on a key held as two kinds. With
-    ``key_mismatch_error`` the ranks holding records must hold the same keys, else it raises
-    ``key_mismatch_error({rank: sorted keys})``."""
+    """Every key any rank holds; raises ``ValueError`` on a key held as two kinds. With ``key_mismatch_error`` the
+    ranks holding records must hold the same keys."""
     if key_mismatch_error is not None:
         keys_by_rank = {rank: [key for key, _ in schema] for rank, schema in enumerate(schemas) if schema}
         if len({tuple(keys) for keys in keys_by_rank.values()}) > 1:
@@ -214,7 +206,7 @@ def _union_schema(schemas: Sequence[Schema], key_mismatch_error: MismatchErrorFa
 
 
 def _pooled_states(records: Records) -> dict[str, tuple[str, State]]:
-    """Each pooled-kind key's records concatenated as floats, every tensor among them read in one host sync."""
+    """Each pooled-kind key's records as floats, every tensor read in one host sync."""
     pooled = {key: entry for key, entry in records.items() if _pooled(entry[0])}
     tensors = [value for _, rows in pooled.values() for row in rows for value in row if torch.is_tensor(value)]
     read = iter(_column(tensors, _home_device(tensors)).tolist() if tensors else ())
@@ -227,8 +219,8 @@ def _pooled_states(records: Records) -> dict[str, tuple[str, State]]:
 def _all_reduce_columns(
     rank_fold: _RankFold, header: list[float], layout: Schema, group: dist.ProcessGroup | None
 ) -> tuple[list[float], list[float], list[float]]:
-    """COLLECTIVE over ``group``: ``header`` and ``layout``'s summed columns in one float64 SUM all-reduce, its
-    max-folded ones in one MAX all-reduce, read back in one host sync; empty lists with nothing to reduce."""
+    """COLLECTIVE over ``group``: ``header`` and the summed columns in one float64 SUM all-reduce, the max-folded ones
+    in one MAX all-reduce, read back in one host sync."""
     sums, maxes = rank_fold.columns(layout)
     if not (header or sums or maxes):
         return [], [], []
@@ -247,8 +239,7 @@ def _all_reduce_columns(
 def _decoded(
     layout: Schema, sums: list[float], maxes: list[float], holders: Sequence[float] | None = None
 ) -> dict[str, tuple[str, State]]:
-    """``layout``'s world states read off its reduced columns, in layout order; with ``holders``, each key's count
-    of ranks holding it, only the keys some rank holds."""
+    """``layout``'s world states off its reduced columns; with ``holders``, only the keys some rank holds."""
     summed, maxed = iter(sums), iter(maxes)
     world: dict[str, tuple[str, State]] = {}
     for index, (key, kind) in enumerate(layout):
@@ -267,8 +258,8 @@ def _reduce_over_layout(
     group: dist.ProcessGroup | None,
     key_mismatch_error: MismatchErrorFactory | None,
 ) -> dict[str, tuple[str, State]] | None:
-    """COLLECTIVE over ``group``: the world states over the agreed ``layout``, or None on every rank when a rank's
-    keys do not fit it or, with ``key_mismatch_error``, the ranks holding records hold different keys."""
+    """COLLECTIVE over ``group``. The world states over ``layout``, or None on every rank when a rank's keys do not fit
+    it or, with ``key_mismatch_error``, the ranks hold different keys."""
     held = {key for key, _ in schema}
     header = [float(not set(schema) <= set(layout)), float(bool(schema)), *(float(key in held) for key, _ in layout)]
     (misfits, recording, *holders), sums, maxes = _all_reduce_columns(rank_fold, header, layout, group)
@@ -284,8 +275,8 @@ def _reduce_over_gathered_schemas(
     group: dist.ProcessGroup | None,
     key_mismatch_error: MismatchErrorFactory | None,
 ) -> tuple[dict[str, tuple[str, State]], Schema]:
-    """COLLECTIVE over ``group``: the world states over the union of the ranks' keys, gathered with every rank's
-    pooled states, and that union; :func:`_union_schema` raises on every rank alike."""
+    """COLLECTIVE over ``group``. The world states over the union of the ranks' keys, and that union;
+    :func:`_union_schema` raises on every rank alike."""
     gathered = _gathered((schema, _pooled_states(records)), group)
     union = _union_schema([rank_schema for rank_schema, _ in gathered], key_mismatch_error)
     _, sums, maxes = _all_reduce_columns(rank_fold, [], union, group)
@@ -302,15 +293,9 @@ def _world_states(
     group: dist.ProcessGroup | None,
     key_mismatch_error: MismatchErrorFactory | None,
 ) -> tuple[dict[str, tuple[str, State]], Schema]:
-    """COLLECTIVE over ``group`` (the world when None): each key's state folded over the ranks, keys sorted, and the
-    layout the next flush reduces over.
-
-    ``layout`` is the ``(key, kind)`` set the ranks agreed on last. While every rank's keys fit it, one SUM
-    all-reduce carries each rank's verdict, the keys it holds and every summed column, one MAX all-reduce every max
-    and negated min (a rank without the key adding 0 or -inf), and one host read brings both back: no object
-    collective, and no width or host work growing with the world. A key outside it, a key mismatch or a percentile
-    takes one object gather of the ranks' keys instead, and the next flush reuses their union.
-    """
+    """COLLECTIVE over ``group``. While every rank's keys fit ``layout``, one SUM and one MAX all-reduce carry
+    everything, so no width or host work grows with the world. A key outside it, a mismatch or a percentile takes one
+    object gather."""
     rank_fold, schema = _RankFold(records), _schema(records)
     if is_multi_rank_run() and not any(_pooled(kind) for _, kind in layout):
         world = _reduce_over_layout(rank_fold, schema, layout, group, key_mismatch_error)
@@ -321,11 +306,8 @@ def _world_states(
 
 
 def world_sums(values: Sequence[Count]) -> list[float]:
-    """Each of ``values`` summed over the world, in one all-reduce of ``len(values)`` numbers read back once.
-
-    COLLECTIVE — every rank calls it with the same number of values, a rank with nothing to report
-    sending zeros. For a counter kept across steps, read where TRL's ``log`` would report one rank's.
-    """
+    """COLLECTIVE. One all-reduce read back once; every rank sends the same count, zeros with nothing to report. For a
+    counter kept across steps, read where TRL's ``log`` would report one rank's."""
     local = _column(values, _home_device(values) or collective_device())
     if is_multi_rank_run():
         local = local.to(collective_device())
@@ -334,21 +316,9 @@ def world_sums(values: Sequence[Count]) -> list[float]:
 
 
 class WorldMetrics:
-    """Rank-local metric records, folded across ranks by :meth:`flush`.
-
-    Recording issues no collective and no host sync, so a site behind a data-dependent gate is safe; records of a
-    key accumulate until the flush, which folds every rank's records per kind:
-
-    - ``fraction``: Σ numerator / Σ denominator, 0 at no denominator; ``mean``: Σ value·weight / Σ weight, a record
-      of no weight adding nothing (NaN included) and a key of no world weight not reported; ``sum``; ``maximum``;
-    - ``effective_sample_frac``: (Σw)² / (n Σw²) of the masked weights (1 when uniform, toward 1/n as one weight
-      dominates, 0 when all are zero); ``covariance``: E[xy] - E[x] E[y] of the masked pairs;
-    - ``moments``: ``<key>_{mean,std,min,max,range}`` of the masked values, std = sqrt(E[x²] - E[x]²), not reported
-      without a sample; ``percentile``: the nearest-rank percentile, the one kind that ships raw values.
-
-    A NaN reaching a ``maximum`` or a ``moments`` min or max may be dropped: neither Python's ``max`` within a rank
-    nor the backend's MAX across ranks propagates it reliably. A sum does, so the moments mean and std report it.
-    """
+    """Recording issues no collective and no host sync, so a site behind a data-dependent gate is safe. ``mean`` skips
+    a record of no weight, NaN included. A NaN reaching a max or min may be dropped, as neither Python's ``max`` nor
+    the backend's MAX propagates it reliably."""
 
     def __init__(self) -> None:
         self._records: Records = {}
@@ -413,13 +383,8 @@ class WorldMetrics:
         group: dist.ProcessGroup | None = None,
         key_mismatch_error: MismatchErrorFactory | None = None,
     ) -> dict[str, float]:
-        """COLLECTIVE over ``group`` (the world when None): every rank calls it at the same point, records or not.
-
-        Returns the world metrics, keys sorted, each also appended to ``target[key]`` when given (TRL's
-        ``_metrics[mode]``). The keys are the union of what any rank recorded; with ``key_mismatch_error`` every
-        rank holding records must name the same keys (a rank with none abstains), else every rank raises
-        ``key_mismatch_error({rank: sorted keys})``.
-        """
+        """COLLECTIVE over ``group`` (the world when None): every rank calls it, records or not. With
+        ``key_mismatch_error`` every rank holding records must name the same keys, else every rank raises it."""
         records, self._records = self._records, {}
         states, self._layouts[group] = _world_states(records, self._layouts.get(group, ()), group, key_mismatch_error)
         world: dict[str, float] = {}

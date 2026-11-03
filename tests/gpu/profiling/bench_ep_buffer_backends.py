@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""
-End-to-end step-throughput A/B of the two DeepEP transport backends: legacy Buffer (V1) vs
-ElasticBuffer (V2). The backends differ only in the MoE all-to-all (a minority of step FLOPs), so
-this confirms picking ``legacy`` for the no-token-ceiling property does not cost training throughput.
-
-Loads the SAME MoE model at EP=2 once per backend and times forward+backward (median over N iters,
-CUDA-synced) on a fixed input, reporting median ms/step, tokens/s, and the legacy/elastic ratio.
-
-Run with 2 GPUs (single node — legacy is intranode-only):
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/bench_ep_buffer_backends.py
-"""
+"""Step throughput of DeepEP's legacy Buffer vs ElasticBuffer at EP=2: they differ only in the MoE all-to-all, so
+``legacy`` should cost no throughput. Single node, since legacy is intranode-only."""
 
 import statistics
 import sys

@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""Tests for native EP expert-LoRA config plumbing: ExpertLoraSpec, the projection-coverage
-maps, and split_expert_lora_targets (which peels expert-FFN entries out of lora_target_modules).
-
-These are the pure-logic pieces that gate whether grouped-LoRA reaches the EP layers at all; the
-forward/grad-sync/save behaviour is covered by the GPU test (tests/gpu/trainers/lora/).
-
-Run: python tests/cpu/peft/test_expert_lora_targets.py
-"""
+"""Native EP expert-LoRA config: ExpertLoraSpec, the projection-coverage maps and split_expert_lora_targets.
+Forward, grad sync and save are covered by tests/gpu/trainers/lora/."""
 
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,7 +16,7 @@ from halo.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE, ExpertLor
 
 @dataclass
 class _MockModelConfig:
-    """Minimal stand-in for trl ModelConfig (only the fields split_expert_lora_targets reads)."""
+    """Only the fields split_expert_lora_targets reads."""
 
     use_peft: bool = True
     lora_r: int = 16
@@ -36,16 +30,12 @@ class _MockModelConfig:
 
 @contextmanager
 def _as_moe(is_moe: bool = True):
-    """split_expert_lora_targets loads the model's AutoConfig to gate the peel on MoE — stub both
-    the config load and the MoE check so these pure-logic tests need no real model."""
+    """Stub the AutoConfig load and the MoE check, so these tests need no real model."""
     with (
         patch.object(model_source.AutoConfig, "from_pretrained", return_value=object()),
         patch.object(model_info, "has_routed_experts", return_value=is_moe),
     ):
         yield
-
-
-# ExpertLoraSpec
 
 
 def test_spec_scaling_is_alpha_over_r():
@@ -74,11 +64,11 @@ def test_spec_subset_projection_only_adapts_matching_attrs():
     down_only = ExpertLoraSpec(r=8, alpha=16, projections=frozenset({"down"}))
     assert down_only.adapts("down_proj")
     assert not down_only.adapts("gate_proj")
-    # fused gate_up carries gate+up, so a 'down'-only spec must NOT touch it
+    # fused gate_up carries gate+up, so a 'down'-only spec must not touch it
     assert not down_only.adapts("gate_up_proj")
 
     gate_only = ExpertLoraSpec(r=8, alpha=16, projections=frozenset({"gate"}))
-    # fused gate_up carries the gate half → adapting gate means adapting the fused tensor
+    # fused gate_up carries the gate half, so adapting gate adapts the fused tensor
     assert gate_only.adapts("gate_up_proj")
     assert gate_only.adapts("gate_proj")
     assert not gate_only.adapts("up_proj")
@@ -89,22 +79,14 @@ def test_spec_is_frozen():
     spec = ExpertLoraSpec(r=8, alpha=16)
     raised = False
     try:
-        spec.r = 99  # frozen dataclass → should raise
+        spec.r = 99
     except Exception:
         raised = True
     assert raised, "ExpertLoraSpec should be immutable (frozen)"
 
 
-# Coverage-map consistency (guards drift between the two maps)
-
-
 def test_every_stored_weight_root_is_a_usable_target_name():
-    """The user-facing target vocabulary is DERIVED from the stored-attr coverage, not restated.
-
-    A family adding an expert-weight root gets a coverage entry (enforced by
-    test_expert_lora_projection_coverage) and must get the matching ``lora_target_modules`` name for
-    free — a second hand-maintained map would silently leave the new root unnameable.
-    """
+    """The target vocabulary derives from the coverage map; a second hand-kept map could leave a root unnameable."""
     for root, coverage in LORA_PROJECTION_COVERAGE.items():
         assert expert_target_projections(root) == coverage, f"{root} is not resolvable as a target name"
 
@@ -119,9 +101,6 @@ def test_container_targets_request_every_stored_projection():
 def test_non_expert_names_resolve_to_nothing():
     for name in ("q_proj", "all-linear", ".*gate_proj", "lm_head"):
         assert expert_target_projections(name) is None
-
-
-# split_expert_lora_targets
 
 
 def test_split_mixed_targets_peels_experts_keeps_attention():
@@ -140,7 +119,7 @@ def test_split_experts_alias_means_all_projections_and_strips_to_empty():
     with _as_moe():
         spec = split_expert_lora_targets(cfg)
     assert spec.projections == frozenset({"gate", "up", "down"})
-    assert cfg.lora_target_modules == []  # expert-only → no attention targets left
+    assert cfg.lora_target_modules == []
 
 
 def test_split_fused_gate_up_target_covers_gate_and_up():
@@ -151,8 +130,7 @@ def test_split_fused_gate_up_target_covers_gate_and_up():
 
 
 def test_split_dense_model_returns_none_and_keeps_expert_targets():
-    # On a DENSE model gate/up/down_proj are ordinary nn.Linear MLPs stock PEFT wraps — peeling them
-    # would silently drop the MLP adapters, so the gate must return None and leave targets intact.
+    # On a dense model gate/up/down_proj are ordinary MLPs stock PEFT wraps; peeling them would drop the MLP adapters.
     cfg = _MockModelConfig(lora_target_modules=["q_proj", "gate_proj", "up_proj", "down_proj"])
     with _as_moe(is_moe=False):
         assert split_expert_lora_targets(cfg) is None
@@ -170,13 +148,13 @@ def test_split_noop_when_peft_disabled():
     cfg = _MockModelConfig(use_peft=False, lora_target_modules=["gate_proj"])
     # Returns before any config load, so no MoE stub needed.
     assert split_expert_lora_targets(cfg) is None
-    assert cfg.lora_target_modules == ["gate_proj"]  # untouched
+    assert cfg.lora_target_modules == ["gate_proj"]
 
 
 def test_split_passthrough_for_regex_string_targets():
     cfg = _MockModelConfig(lora_target_modules=".*proj")
     assert split_expert_lora_targets(cfg) is None
-    assert cfg.lora_target_modules == ".*proj"  # a regex can't be safely split → left as-is
+    assert cfg.lora_target_modules == ".*proj"  # a regex can't be safely split
 
 
 def test_split_inherits_r_alpha_dropout_from_model_config():

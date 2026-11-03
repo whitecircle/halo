@@ -1,23 +1,7 @@
 #!/usr/bin/env python
-"""``assistant_message_template`` must actually occur in the chat template it is paired with — once
-per assistant turn.
-
-``train_on_completions_only`` finds the assistant span by searching the RENDERED conversation for
-the marker string. When the marker does not occur — a template swapped for another family's, a
-marker copied from a sibling model — the collator masks the whole row
-(``halo/data/collators/packing.py``: ``batch["labels"][i, :] = ignore_index``) and the run trains on
-nothing, reporting loss 0 instead of failing. A marker that occurs only ONCE on a multi-turn row is
-the same failure at 1/n scale: every earlier assistant turn is masked, silently. Both are invisible
-in a parse-only check: every one of these configs parses clean.
-
-Only pairings pinning a repo-owned ``jinja-templates/*.jinja`` are covered — a hub-bundled template
-is not on disk here. The scan reads the ``examples/`` YAML **and** the ```yaml fences of the doc and
-skill trees, so a doc recipe that pairs a marker with a template is held to the same contract as a shipped
-config. Rendering is real (the same Jinja environment transformers uses), so a marker the template
-assembles from parts is matched exactly as the collator would match it.
-
-Run: pytest tests/cpu/config/test_assistant_marker_matches_template.py
-"""
+"""``assistant_message_template`` must occur in its paired chat template once per assistant turn: a miss masks the
+row, so the run trains on nothing at loss 0, or on 1/n of a multi-turn row. Covers pairings pinning a repo-owned
+``jinja-templates/*.jinja``, in ``examples/`` and the docs' yaml fences."""
 
 import re
 
@@ -28,7 +12,6 @@ from transformers.utils.chat_template_utils import _compile_jinja_template
 
 from tests.common.repo import REPO_ROOT
 
-# Doc trees whose ```yaml fences are held to the same pairing contract as examples/.
 _DOC_TREES = ("human-docs", "agent-docs", "skills")
 _YAML_FENCE = re.compile(r"^```ya?ml\n(.*?)^```", re.M | re.S)
 
@@ -45,8 +28,8 @@ _MULTI_TURN = [
 # not one refusing the shape by design, and must fail rather than skip.
 _SINGLE_TURN_REFUSAL = "only supports single-turn data"
 
-# The pairing the gpt-oss multiturn template exists to make trainable: every assistant turn carries
-# the final-channel marker AND is terminated by <|return|>, the id the completion span ends on.
+# The pairing the gpt-oss multiturn template exists to make trainable: every assistant turn carries the final-channel
+# marker and ends on <|return|>, the id the completion span ends on.
 _GPT_OSS_TEMPLATE = "jinja-templates/gpt-oss/gpt-oss-multiturn.jinja"
 _GPT_OSS_MARKER = "<|start|>assistant<|channel|>final<|message|>"
 _GPT_OSS_TERMINATOR = "<|return|>"
@@ -77,7 +60,6 @@ def _page_fences(source: str, text: str) -> list[tuple[str, object]]:
 
 
 def _doc_fences() -> list[tuple[str, object]]:
-    """``(source, parsed)`` for every ```yaml fence of the doc trees."""
     return [
         fence
         for tree in _DOC_TREES
@@ -87,7 +69,6 @@ def _doc_fences() -> list[tuple[str, object]]:
 
 
 def _marker_configs() -> list[tuple[str, str, str]]:
-    """Every pairing in the tree: the ``examples/`` YAML plus the doc trees' ```yaml fences."""
     sources = [
         (str(config.relative_to(REPO_ROOT)), _yaml.load(config))
         for config in sorted((REPO_ROOT / "examples").rglob("*.yaml"))
@@ -110,13 +91,11 @@ def _case_id(source: str) -> str:
 
 
 def test_some_config_pins_a_repo_template():
-    """Guards the scan itself: an empty list would make every case below vacuously pass."""
     assert _MARKER_CONFIGS, "no example or doc recipe pins a jinja-templates/* chat_template — the scan is broken"
 
 
 def test_a_doc_fence_pairing_is_held_to_the_contract():
-    """The doc half of the scan finds a pairing in a page's ```yaml fence, so a doc recipe that pins a repo
-    template with a marker is checked like a shipped config (no doc page has to carry one)."""
+    """A doc recipe that pins a repo template with a marker is checked like a shipped config."""
     page = (
         "Intro.\n\n```yaml\n"
         f"chat_template: {_GPT_OSS_TEMPLATE}\nassistant_message_template: '{_GPT_OSS_MARKER}'\n"
@@ -156,9 +135,8 @@ def test_assistant_marker_occurs_in_its_rendered_template(source, template, mark
     ids=[_case_id(s) for s, _, _ in _MARKER_CONFIGS],
 )
 def test_every_assistant_turn_of_a_multi_turn_row_carries_the_marker(source, template, marker):
-    """A marker that matches only the LAST assistant turn masks every earlier one — the same silent
-    loss of signal as a non-matching marker, just partial. A template whose own guard refuses
-    multi-turn data is exempt: its render raises instead of pairing badly."""
+    """A marker matching only the last assistant turn masks every earlier one. A template whose own guard refuses
+    multi-turn data is exempt, since its render raises."""
     try:
         rendered = _render(template, _MULTI_TURN)
     except TemplateError as e:
@@ -173,9 +151,8 @@ def test_every_assistant_turn_of_a_multi_turn_row_carries_the_marker(source, tem
 
 
 def test_gpt_oss_multiturn_terminates_every_assistant_turn():
-    """Each marked span must close on <|return|>: the harmony template ends non-final turns with
-    <|end|>, which is not a terminator, so a span would run through the following user turn and train
-    on its text."""
+    """The harmony template ends non-final turns with <|end|>, which is no terminator, so a span would run through
+    the following user turn and train on its text."""
     rendered = _render(_GPT_OSS_TEMPLATE, _MULTI_TURN)
     spans = rendered.split(_GPT_OSS_MARKER)[1:]
     assert len(spans) == _TURNS, f"{_GPT_OSS_TEMPLATE} marked {len(spans)} of {_TURNS} turns: {rendered!r}"

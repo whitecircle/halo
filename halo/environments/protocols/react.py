@@ -1,7 +1,4 @@
-"""ReAct environment: Thought -> Action -> Observation, action parsed from text.
-
-Paper: https://arxiv.org/abs/2210.03629
-"""
+"""ReAct environment: Thought -> Action -> Observation, action parsed from text (https://arxiv.org/abs/2210.03629)."""
 
 import ast
 import contextlib
@@ -55,8 +52,6 @@ _ARGUMENT_RE = re.compile(r'(\w+)\s*=\s*(?:"([^"]*?)"|\'([^\']*?)\'|(\{[^}]*\})|
 
 @dataclass
 class _ReActStep:
-    """Parsed ReAct step from model output."""
-
     thought: str | None = None
     action: str | None = None
     action_args: dict[str, Any] | None = None
@@ -72,8 +67,8 @@ class _ReActStep:
 
 
 def _parse_function_args(args_str: str) -> dict[str, Any]:
-    """Parse function-style arguments (``arg1="val1", arg2=123``), as a Python call of literals first, so a
-    triple-quoted or escaped code argument arrives whole, else by pattern."""
+    """``arg1="val1", arg2=123``, as a Python call of literals first, so a triple-quoted or escaped code argument
+    arrives whole, else by pattern."""
     args = {}
     if not args_str:
         return args
@@ -100,15 +95,14 @@ def _parse_function_args(args_str: str) -> dict[str, Any]:
 
 
 def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
-    """Parse an action: ``tool_name(arg=...)``, JSON ``{"name":..., "arguments":...}``, ``tool_name: arg=...``, or bare name."""
+    """``tool_name(arg=...)``, JSON ``{"name":..., "arguments":...}``, ``tool_name: arg=...``, or bare name."""
     action_text = action_text.strip()
 
     if action_text.startswith("{"):
         try:
             data = json.loads(action_text)
-            # Model-authored JSON: a non-dict ``function`` or non-dict ``arguments`` must degrade to an
-            # unknown-tool / empty-args call the protocol penalizes, not an AttributeError/TypeError
-            # that escapes the parser and errors the whole episode.
+            # Model-authored JSON: a non-dict ``function`` or ``arguments`` must degrade to an unknown-tool or
+            # empty-args call the protocol penalizes, not an error that ends the episode.
             function = data.get("function")
             function = function if isinstance(function, dict) else {}
             name = data.get("name") or function.get("name")
@@ -131,7 +125,6 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
 
 
 def parse_react_output(text: str) -> _ReActStep:
-    """Parse ReAct output: a Thought followed by an Action (function-call/JSON/simple) or a Final Answer."""
     step = _ReActStep()
 
     thought_match = _THOUGHT_RE.search(text)
@@ -152,17 +145,14 @@ def parse_react_output(text: str) -> _ReActStep:
 
 
 class ReActEnvironment(EnvironmentBase):
-    """ReAct environment: Thought / Action / Observation turns, the action parsed out of the text, so no tool
-    schema reaches the server; the tools are named in the system prompt. ``require_thought`` penalizes acting
-    without a Thought."""
+    """Actions are parsed out of the text, so no tool schema reaches the server; the tools are named in the system
+    prompt. ``require_thought`` penalizes acting without a Thought."""
 
-    # The default check grades the Final Answer against ``context["answer"]``; an ``answer_validator``
-    # grades in its place and clears this per instance.
+    # The default check grades against ``context["answer"]``; an ``answer_validator`` clears this per instance.
     requires_answer = True
 
-    # Ask for the protocol's own next move (an Action or a Final Answer) and never for shorter
-    # reasoning: the texts are trained on wherever a recovery succeeds, so an instruction here becomes
-    # a global lesson learned far outside the situation it was written for.
+    # Never ask for shorter reasoning: these texts are trained on wherever a recovery succeeds, so an instruction here
+    # becomes a global lesson learned far outside the situation it was written for.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you produced an Action or a Final Answer, so nothing "
         "was recorded. Give your next Action now, or your Final Answer if you already have the "
@@ -202,11 +192,10 @@ Always think before acting, and provide a Final Answer when you're done."""
         tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
-        """Reward = per-step thought and tool deltas + the graded final answer. ``answer_validator`` replaces the
-        default check; ``tool_budgets`` caps calls per tool per episode (a call past its cap is refused unrun)."""
-        # An answer_validator grades the final answer itself, so only the default check makes the
-        # dataset's answer column load-bearing. An explicit requires_answer wins; ``None`` is unset,
-        # so a YAML ``requires_answer: null`` still lands on the class declaration.
+        """``answer_validator`` replaces the default check; ``tool_budgets`` caps calls per tool per episode (a call
+        past its cap is refused unrun)."""
+        # Only the default check makes the answer column load-bearing. ``None`` is unset, so a YAML
+        # ``requires_answer: null`` still lands on the class declaration.
         if kwargs.get("requires_answer") is None:
             kwargs["requires_answer"] = not callable(answer_validator)
         super().__init__(**kwargs)
@@ -233,7 +222,6 @@ Always think before acting, and provide a Final Answer when you're done."""
             self.system_prompt = self.DEFAULT_SYSTEM_PROMPT.format(tools_description=tools_desc)
 
     def _format_tools_description(self) -> str:
-        """Format tool descriptions for system prompt."""
         lines = []
         for tool in self.registry.list_tools():
             params = ", ".join(
@@ -243,7 +231,6 @@ Always think before acting, and provide a Final Answer when you're done."""
         return "\n".join(lines)
 
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
-        """Initialize episode with task prompt."""
         return self._init_trajectory(
             prompt,
             context,
@@ -252,10 +239,8 @@ Always think before acting, and provide a Final Answer when you're done."""
         )
 
     def _step_single(self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None) -> StepOutcome:
-        """Process model output in ReAct format (Thought: <reasoning>; Action: <tool_call> OR Final Answer: <answer>)."""
-        # A turn the engine cut short is a fragment whatever the parser would salvage from it — the
-        # base flags the message untrainable, so an Action executed or a Final Answer graded here would
-        # earn a reward on a turn the trainer never rewards. Same rule as the native protocol.
+        # A cut turn is a fragment and the base flags it untrainable, so an Action executed or a Final Answer graded
+        # here would earn a reward on a turn the trainer never rewards.
         ctx = context or {}
         last_turn = bool(ctx.get(LAST_TURN_KEY))
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
@@ -289,7 +274,7 @@ Always think before acting, and provide a Final Answer when you're done."""
         return StepOutcome(trajectory=trajectory, reward=reward, done=False, truncated=False, info={"no_action": True})
 
     def _act(self, trajectory: Trajectory, step: _ReActStep) -> tuple[float, dict[str, Any]]:
-        """Run the step's Action and record its observation: the call's reward delta and the step info."""
+        """Returns the call's reward delta and the step info."""
         info = {}
         tool = self.registry.get(step.action)
         success = False
@@ -297,8 +282,7 @@ Always think before acting, and provide a Final Answer when you're done."""
         if not tool:
             observation = self.registry.unknown_tool_message(step.action)
             info["tool_error"] = f"Unknown tool: {step.action}"
-            # The turn accomplished nothing: trained only on a negative advantage, never rewarded, as
-            # under the native protocol.
+            # Trained only on a negative advantage, never rewarded, as under the native protocol.
             trajectory.last_assistant_message().calls_rejected = True
         else:
             try:
@@ -315,11 +299,9 @@ Always think before acting, and provide a Final Answer when you're done."""
         return reward, info
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
-        """The ``Final Answer:`` that completed the episode, where one did."""
         return trajectory.info.get("final_answer") if trajectory.info.get(COMPLETED_KEY) else None
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
-        """Grade the final answer: 1 when it validates against the expected one, else 0."""
         if not trajectory.info.get(COMPLETED_KEY):
             return EpisodeGrade(0.0)
 
@@ -330,8 +312,7 @@ Always think before acting, and provide a Final Answer when you're done."""
         if final_answer is None:
             return EpisodeGrade(0.0)
 
-        # Consulted before the expected answer is read: the validator is the grader wherever one is
-        # configured, so an answer-less row is ITS verdict to give, not an automatic success.
+        # The validator is the grader wherever configured, so an answer-less row is its verdict to give.
         if callable(self.answer_validator):
             try:
                 validated = self.answer_validator(final_answer, expected)
@@ -346,16 +327,14 @@ Always think before acting, and provide a Final Answer when you're done."""
             # Presence, not value: a null ``answer`` cell is a data fault, an absent key an ungraded row.
             if ANSWER_KEY in ctx:
                 return self._null_answer_grade(trajectory)
-            # Nothing to grade against: reaching a Final Answer is the objective. ``requires_answer``
-            # keeps an answer-graded run off this path rather than paying it the full objective.
+            # Reaching a Final Answer is the objective. ``requires_answer`` keeps an answer-graded run off this path.
             return EpisodeGrade(1.0)
 
         return EpisodeGrade(1.0 if is_correct_answer(final_answer, expected) else 0.0)
 
 
 def _reject_preset_system_prompt(env_type: str, system_prompt: str | None) -> None:
-    """Refuse a configured ``system_prompt`` for a ReAct preset: the preset hardcodes the prompt that states the
-    Thought/Action/Final Answer format its parser reads, so the value would be dropped."""
+    """The preset hardcodes the prompt stating the format its parser reads, so a configured value would be dropped."""
     if system_prompt is not None:
         raise ValueError(
             f"environment_type {env_type!r} hardcodes its ReAct system prompt, so environment_kwargs.system_prompt "
@@ -365,7 +344,6 @@ def _reject_preset_system_prompt(env_type: str, system_prompt: str | None) -> No
 
 
 def build_react_math_environment(system_prompt: str | None = None, **kwargs) -> ReActEnvironment:
-    """Build a ReAct environment for math problems (calculator + Python REPL tools)."""
     _reject_preset_system_prompt("react_math", system_prompt)
     registry = NativeToolRegistry.combine(
         build_math_tools(),
@@ -395,8 +373,7 @@ Always show your reasoning in the Thought section."""
 def build_react_search_environment(
     search_backend: str | None = None, system_prompt: str | None = None, **kwargs
 ) -> ReActEnvironment:
-    """Build a ReAct environment for search/QA tasks (web search + basic tools). ``search_backend``
-    names the search backend (:func:`build_search_tools`; ``None`` auto-selects)."""
+    """``search_backend``: see :func:`build_search_tools`; ``None`` auto-selects."""
     _reject_preset_system_prompt("react_search", system_prompt)
     registry = build_search_tools(backend=search_backend)
 

@@ -1,20 +1,9 @@
 #!/usr/bin/env python
 """Reset a checkpoint's attention sinks to the dtype's most negative value, disabling the sink mechanism.
 
-This is the after-training tool for an existing checkpoint; a training run does not need it, since
-``reset_sinks: true`` (the default) applies the same reset to the freshly loaded model in every
-trainer, before the first step.
-
-Reads ``--model_id`` (a local checkpoint directory or a Hub repo id) and writes the reset
-checkpoint to ``--output_dir``, shard by shard: only the shards holding a sink are rewritten, the rest
-are linked across unchanged and the shard layout is kept. ``--dry_run`` reports what would change
-without writing; ``--in_place`` rewrites a local ``--model_id`` directory itself (no undo, so it must
-be asked for). No model code is loaded, so the tool takes no ``--trust_remote_code``.
-
-Usage:
-    python scripts/after_training/reset_sinks.py \\
-        --model_id checkpoints/my-model --output_dir checkpoints/my-model-nosinks
-"""
+For an existing checkpoint; a training run's ``reset_sinks: true`` (the default) applies the same reset. Rewrites only
+the shards holding a sink and links the rest; ``--in_place`` has no undo, so it must be asked for. No model code is
+loaded, so the tool takes no ``--trust_remote_code``."""
 
 import argparse
 

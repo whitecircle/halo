@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the pipeline CE — label-roll shift and chunked-checkpoint equivalence.
-
-``causal_lm_token_loss`` rolls labels instead of slicing logits and chunks the fp32 CE under a
-non-reentrant checkpoint. Both must be exact: values AND gradients must match the naive
-sliced/monolithic formulation, including across the chunk boundary.
-
-    python tests/cpu/parallelism/test_pp_losses.py
-"""
+"""The pipeline CE: label-roll shift and chunked-checkpoint equivalence, exact in values and gradients across the
+chunk boundary."""
 
 import collections
 
@@ -36,7 +30,7 @@ def _make(batch: int, seq: int, vocab: int = 37, seed: int = 3):
     g = torch.Generator().manual_seed(seed)
     logits = torch.randn(batch, seq, vocab, generator=g, requires_grad=True)
     labels = torch.randint(0, vocab, (batch, seq), generator=g)
-    labels[:, :3] = -100  # ignored prefix
+    labels[:, :3] = -100  # Ignored prefix.
     return logits, labels
 
 
@@ -49,9 +43,9 @@ def test_single_chunk_matches_naive(batch, seq):
 
 
 def test_multi_chunk_values_and_grads_match(monkeypatch):
-    # Several chunks with an uneven tail: the path a wrong chunk boundary breaks.
-    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 50 * 37)  # 50 rows at vocab 37
-    logits, labels = _make(4, 40)  # 160 tokens -> 4 chunks (50/50/50/10)
+    # The path a wrong chunk boundary breaks.
+    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 50 * 37)  # 50 rows at vocab 37.
+    logits, labels = _make(4, 40)  # 160 tokens -> 4 chunks (50/50/50/10).
     loss = causal_lm_token_loss(logits, labels)
     loss.backward()
 
@@ -66,7 +60,7 @@ def test_multi_chunk_values_and_grads_match(monkeypatch):
 
 
 def test_all_ignored_chunk_is_inert(monkeypatch):
-    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 8 * 37)  # 8 rows at vocab 37
+    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 8 * 37)  # 8 rows at vocab 37.
     logits, labels = _make(1, 32)
     labels[:] = -100
     loss = causal_lm_token_loss(logits, labels)
@@ -83,9 +77,7 @@ def _fused_loss(hidden, labels):
     return fused_causal_lm_token_loss(head, IDENTITY_HEAD_TRANSFORM, hidden, labels)
 
 
-# Every loss that chunks through ``checkpointed_chunks``, with its input's feature width and the inputs
-# it splits: the CE sums split the flattened plane once, the per-token log-probs each row. Each chunk
-# budget is counted in vocab columns.
+# CE sums split the flattened plane once, per-token log-probs each row. Each budget is counted in vocab columns.
 _ROWS = 3
 _CHUNKED_LOSSES = {
     "causal_lm_token_loss": (causal_lm_token_loss, _VOCAB, 1),
@@ -95,8 +87,6 @@ _CHUNKED_LOSSES = {
 
 
 def _chunked_run(name: str, chunk_rows: int, monkeypatch):
-    """Forward + backward of one chunked loss at ``chunk_rows``; returns the value, the input
-    gradient and the autograd graph's node-type counts."""
     loss_fn, features, _ = _CHUNKED_LOSSES[name]
     monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", chunk_rows * _VOCAB)
     torch.manual_seed(7)
@@ -111,16 +101,14 @@ def _chunked_run(name: str, chunk_rows: int, monkeypatch):
 
 @pytest.mark.parametrize("name", list(_CHUNKED_LOSSES))
 def test_chunked_losses_do_not_depend_on_the_chunk_count(name, monkeypatch):
-    """60 tokens in one chunk vs in seven uneven ones (9 rows each, a 6-row tail) for the CE sums, and
-    each row's positions in one chunk vs three for the per-token log-probs: every per-token quantity
-    is computed per row, so the input gradient is bitwise identical, and only the scalar reductions
-    over chunks reassociate (fp32 summation order)."""
+    """Every per-token quantity is per row, so the input gradient is bitwise identical; scalar reductions
+    reassociate (fp32 summation order)."""
     whole_value, whole_grad, _ = _chunked_run(name, 64, monkeypatch)
     chunked_value, chunked_grad, _ = _chunked_run(name, 9, monkeypatch)
 
     torch.testing.assert_close(chunked_value, whole_value, rtol=1e-6, atol=0)
     if name == "fused_causal_lm_token_loss":
-        # The hidden-state gradient is a per-chunk GEMM, whose blocking may follow the chunk's rows.
+        # A per-chunk GEMM, whose blocking may follow the chunk's rows.
         torch.testing.assert_close(chunked_grad, whole_grad, rtol=torch.finfo(torch.bfloat16).eps, atol=0)
     else:
         assert torch.equal(chunked_grad, whole_grad), f"max grad diff {(chunked_grad - whole_grad).abs().max()}"
@@ -128,10 +116,7 @@ def test_chunked_losses_do_not_depend_on_the_chunk_count(name, monkeypatch):
 
 @pytest.mark.parametrize("name", list(_CHUNKED_LOSSES))
 def test_the_chunks_share_one_split_backward(name, monkeypatch):
-    """Each chunk is a view from ONE ``split`` of its input (the flattened plane, or one row of it),
-    whose backward concatenates the chunk gradients once. A per-chunk slice instead runs one
-    SliceBackward per chunk, each allocating a zero-filled plane the size of the whole input — the
-    backward grows with the chunk count in time and in memory."""
+    """A per-chunk slice runs one SliceBackward per chunk, each allocating a zero plane the size of the input."""
     _, _, whole_nodes = _chunked_run(name, 64, monkeypatch)
     _, _, chunked_nodes = _chunked_run(name, 9, monkeypatch)
 
@@ -144,8 +129,7 @@ def test_the_chunks_share_one_split_backward(name, monkeypatch):
 
 
 def test_fp64_logits_keep_fp64_log_probs_and_cross_entropy():
-    """The upcast is to fp32 at least: an fp64 oracle (the CPU parity tests) must not be rounded to
-    fp32 inside the loss it checks, and a bf16 production plane pays exactly the fp32 it always did."""
+    """An fp64 oracle must not be rounded to fp32 inside the loss it checks."""
     torch.manual_seed(5)
     logits = torch.randn(2, 9, _VOCAB, dtype=torch.float64)
     labels = torch.randint(0, _VOCAB, (2, 9))

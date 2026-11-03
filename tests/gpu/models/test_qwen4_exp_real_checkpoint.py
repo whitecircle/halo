@@ -1,40 +1,10 @@
 #!/usr/bin/env python
-"""Qwen3.8-Flash-Next's release checkpoint cut to its first ``--layers`` decoder layers, under EP across 8 GPUs: what
-the tiny-model suites cannot show at the release's widths.
+"""Qwen3.8-Flash-Next's release cut to ``--layers`` decoder layers under EP on 8 GPUs: what tiny models can't show.
 
-``--mode layers``: the lazy EP load reads only those layers (each rank's peak host RSS below ``LOAD_RSS_GIB``) and
-attaches the n-gram table outside the module state; on a ``--seq``-token document the tiled QSA selects
-transformers' key blocks, a near-tie swapping at most one block pair on a few queries, and computes its attention
-within the bf16 bar; the EP loss on one batch is the unsharded (``ep_size = 1``) model's; and on an fp32 unsharded
-load each document of a packed row computes its logits alone, while the same row without the ``cu_seq_lens`` set
-carries every document after the first into the next (the packing check's negative arm). The packing runs in fp32:
-in bf16 the rounding of the matmul shape alone flips top-10-of-512 routing near-ties, and the flips compound over the
-layers until most positions of even a row's first document leave any logits bar. In fp32 a whole-document bar admits
-the few positions a near-tie still routes to another expert (``ROUTING_FLIP_MAX_FRACTION``); a leak moves most of
-them.
-
-``--mode export``: after ``--steps`` SGD steps on a batch every rank shares, the gathered save carries the hub's
-keys (the n-gram table's ``shard_*`` parts, no MTP head), ``split_ngram_parts`` and no run stamp, and a stock
-``from_pretrained`` of it on the CPU scores real text (the tree's own docs) at the trained model's mean NLL, and on
-the four-layer cut at its per-token log-probs up to the floor's quantiles. No per-position bound holds there: the
-CPU and the EP forward round apart, and at full depth the routing flips reach every position while the mean NLL
-agrees. At ``--steps 0`` every exported tensor is the release's own, byte for
-byte: with ``--layers 48 --export-dir DIR`` that is the identity export a served comparison against the release
-starts from. Rank 0's stock reload, its real-text score (~3.5 min per row on one CPU thread at full depth) and byte
-comparison of the whole release outlast the default NCCL watchdog its peers wait under: raise
-``DIST_NCCL_TIMEOUT_MINUTES`` for that row.
-
-``--mode resume``: full fine-tuning from a gathered save of the cut model checkpoints every 3 steps, and a trainer
-built from step 3's checkpoint trains to step 6 with its optimizer restored bit for bit, the unbroken run's losses
-replayed and its final weights reproduced; the final checkpoint serves through stock transformers
-(:func:`~tests.common.resume_export.run_resume_export`).
-
-The release is read from the local Hub cache (``HALO_TEST_QWEN4_EXP_MODEL``: a repo id or a local directory); the
-run skips without it.
-
-    torchrun --nproc_per_node=8 tests/gpu/models/test_qwen4_exp_real_checkpoint.py --mode layers --layers 4 --seq 4096
-    torchrun --nproc_per_node=8 tests/gpu/models/test_qwen4_exp_real_checkpoint.py --mode export
-    torchrun --nproc_per_node=8 tests/gpu/models/test_qwen4_exp_real_checkpoint.py --mode resume
+Packing runs in fp32: bf16 rounding flips top-10-of-512 routing near-ties, and the flips compound past any logits bar.
+Routing flips also reach every position of the export's CPU load at full depth, so only the mean NLL holds there. Rank
+0's reload (~3.5 min per row at full depth) outlasts the NCCL watchdog: raise ``DIST_NCCL_TIMEOUT_MINUTES``. Skips
+without the local release.
 """
 
 import argparse
@@ -78,35 +48,32 @@ MODEL = env_str("HALO_TEST_QWEN4_EXP_MODEL", QWEN3_8_FLASH_NEXT)
 SEED = 0
 # Peak host RSS of one rank's lazy EP load of the cut model: its experts' slices, not the release's 340 GB.
 LOAD_RSS_GIB = 40.0
-# The QSA parity document: wider than the 2,048-key budget, so most of its queries select.
+# Wider than the 2,048-key budget, so most of its queries select.
 QSA_DOCUMENT = 3000
-# Queries whose tiled selection may differ from transformers' (near-ties the two matmul shapes round apart), and
-# how far: one block pair swapped.
+# Queries whose tiled selection may differ from transformers' (near-ties the two matmul shapes round apart): one block
+# pair swapped.
 QSA_TIE_ROWS_MAX_FRACTION = 1e-2
 QSA_TIE_SWAPPED_BLOCKS = 1
-# The tiled attention against transformers' in bf16, as a fraction of the reference's largest magnitude.
+# Fraction of the reference's largest magnitude, in bf16.
 QSA_OUTPUT_REL_MAX = 2e-2
-# A packed document against itself alone in fp32, as a fraction of the alone logits' largest magnitude, and the
-# positions allowed past it: the tokens a near-tie still routes to another expert.
+# Fraction of the alone logits' largest magnitude in fp32, and the positions allowed past it: tokens a near-tie still
+# routes to another expert.
 ISOLATED_REL_MAX = 2e-2
 ROUTING_FLIP_MAX_FRACTION = 2e-2
-# EP's loss against the unsharded model's on one batch.
 EP_LOSS_ABS_MAX = 1e-2
 LOSS_TOKENS = 1024
 EXPORT_LR = 1e-3
-# Real-text rows the stock reload and the trained model both score, and how far their mean NLLs may part, in nats.
-# The same weights part by 0.0002 on the four-layer cut (the CPU forward in bf16 against fp32) and by 0.0066 at full
-# depth (the EP model against the served release), one 2048-token row alone by up to 0.014 there.
+# How far mean NLLs may part, in nats: the same weights part by 0.0002 on the four-layer cut (CPU bf16 vs fp32) and by
+# 0.0066 at full depth (EP vs the served release), one 2048-token row alone by up to 0.014 there.
 EXPORT_TEXT_ROWS = 4
 EXPORT_TEXT_LENGTH = 2048
 EXPORT_NLL_ABS_MAX = 2e-2
 LOGPROB_DIFF_QUANTILES = {"p50": 0.5, "p90": 0.9, "p99": 0.99}
-# Per-token |log-prob difference| bars by exported depth, where its floor is measured. A mean NLL hides a corrupted
-# layer whose errors cancel (one layer's expert bank reversed on the four-layer cut: gap +0.002, p50 0.17), the
-# per-token quantiles do not: on that cut the CPU forward in bf16 against fp32 parts by p50 0.010 / p90 0.034 (the
-# check's own pair, the EP model against the CPU reload, logs its quantiles), and reversing any one layer's experts
-# moves them to p50 >= 0.14 / p90 >= 0.47. Past the cut the routing flips widen the floor (p50 0.066 / p90 0.52 at
-# full depth), so a depth without an entry is held to the mean bar alone, with byte identity at --steps 0.
+# Per exported depth, where the floor is measured. A mean NLL hides a corrupted layer whose errors cancel (one layer's
+# expert bank reversed on the cut: gap +0.002, p50 0.17). On the cut the CPU forward in bf16 vs fp32 parts by p50 0.010
+# / p90 0.034, and reversing any one layer's experts moves them to p50 >= 0.14 / p90 >= 0.47. Routing flips widen the
+# floor past the cut (p50 0.066 / p90 0.52 at full depth), so other depths get the mean bar, with byte identity at
+# --steps 0.
 EXPORT_LOGPROB_DIFF_MAX = {4: {"p50": 0.05, "p90": 0.15}}
 RESUME_MAX_LENGTH = 512
 RESUME_LR = 1e-4
@@ -115,7 +82,6 @@ TOTAL_STEPS = 2 * SAVE_STEP
 
 
 def _release_directory() -> str | None:
-    """The release's local directory: ``MODEL`` itself, or its Hub snapshot in the local cache."""
     if os.path.isdir(MODEL):
         return MODEL
     try:
@@ -125,7 +91,6 @@ def _release_directory() -> str | None:
 
 
 def _depth_overrides(source: str, layers: int) -> dict | None:
-    """``model_config_overrides`` keeping the first ``layers`` decoder layers of ``source`` (none for all)."""
     config = text_config(AutoConfig.from_pretrained(source))
     if layers >= config.num_hidden_layers:
         return None
@@ -162,15 +127,13 @@ def _relative(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 
 def _beyond(actual: torch.Tensor, expected: torch.Tensor, bar: float) -> float:
-    """The fraction of ``[..., positions, vocab]`` logit rows whose largest difference exceeds ``bar`` of the
-    reference's largest magnitude."""
+    """Fraction of logit rows whose largest difference exceeds ``bar`` of the reference's largest magnitude."""
     difference = (actual.float() - expected.float()).abs().amax(-1)
     return (difference > bar * expected.float().abs().max()).float().mean().item()
 
 
 @torch.no_grad()
 def _qsa_checks(model, device) -> tuple[dict[str, bool], dict[str, float]]:
-    """The first sparse layer's tiled QSA against transformers' own, on one random document of real width."""
     config = model.config
     index = config.layer_types.index("indexed_attention")
     attention = model.model.layers[index].self_attn
@@ -213,9 +176,8 @@ def _logits(model, input_ids: torch.Tensor, **kwargs) -> torch.Tensor:
 
 
 def _packing_checks(model, seq: int, device) -> tuple[dict[str, bool], dict[str, float]]:
-    """Each document of a packed row, the middle one past the indexer budget, against itself alone; and the negative
-    arm, the same row without the ``cu_seq_lens`` set, whose GatedDeltaNet layers then carry each document into the
-    next."""
+    """Each document of a packed row against itself alone, and the negative arm: without the ``cu_seq_lens`` set the
+    GatedDeltaNet layers carry each document into the next."""
     lengths = [seq // 6, seq - 2 * (seq // 6), seq // 6]
     generator = torch.Generator().manual_seed(SEED + 1)
     ids = torch.randint(0, model.config.vocab_size, (1, seq), generator=generator).to(device)
@@ -239,7 +201,7 @@ def _packing_checks(model, seq: int, device) -> tuple[dict[str, bool], dict[str,
     )
     return {
         "packed_documents_compute_their_logits_alone": max(isolated) <= ROUTING_FLIP_MAX_FRACTION,
-        # The first document has nothing before it to leak from; every later one must show the crossing.
+        # The first document has nothing before it to leak from.
         "packed_row_without_cu_seq_lens_leaks_past_the_first_document": crossed[0] <= ROUTING_FLIP_MAX_FRACTION
         and min(crossed[1:]) > ROUTING_FLIP_MAX_FRACTION,
     }, {
@@ -297,8 +259,7 @@ def _hub_key(key: str, hub_keys: set[str]) -> str | None:
 
 
 def _identity_checks(export: str, source: str) -> dict[str, bool]:
-    """Whether every tensor of ``export`` is the release's own under its key, byte for byte. Streams one tensor at a
-    time."""
+    """Whether every tensor is the release's own under its key, byte for byte, streaming one at a time."""
     exported, released = (resolve_checkpoint_weights(path).weight_map for path in (export, source))
     hub_keys = set(released)
     unmatched, differing = [], []
@@ -318,8 +279,7 @@ def _identity_checks(export: str, source: str) -> dict[str, bool]:
 
 
 def _token_logprobs(model, rows: torch.Tensor) -> torch.Tensor:
-    """``[rows, length - 1]`` fp32 log-probabilities, on the CPU, that ``model`` gives each next token of ``rows`` (on
-    the model's device), one row per forward."""
+    """Fp32 log-probs per next token, on the CPU, one row per forward."""
     scores = []
     for row in rows:
         logits = _logits(model, row[None]).float()
@@ -330,9 +290,8 @@ def _token_logprobs(model, rows: torch.Tensor) -> torch.Tensor:
 def _artifact_checks(
     export: str, source: str, rows: torch.Tensor, trained: torch.Tensor
 ) -> tuple[dict[str, bool], dict[str, float]]:
-    """The gathered save as the hub layout serves it, and a stock CPU load of it scoring ``rows`` (real text) at the
-    trained model's mean NLL (``trained``: its per-token log-probabilities) and, at a depth with a measured floor,
-    token by token (:data:`EXPORT_LOGPROB_DIFF_MAX`). Rank 0."""
+    """Rank 0. The gathered save in the hub layout, and a stock CPU load of it scoring ``rows`` at the trained model's
+    mean NLL and, at a depth with a measured floor, token by token (:data:`EXPORT_LOGPROB_DIFF_MAX`)."""
     with open(os.path.join(export, SAFETENSORS_INDEX_FILE)) as handle:
         keys = set(json.load(handle)["weight_map"])
     with open(os.path.join(export, "config.json")) as handle:
@@ -379,7 +338,7 @@ def _artifact_checks(
 
 
 def _save_gathered(ctx, model, parallelism_config: ParallelismConfig, tokenizer, directory: str) -> None:
-    """COLLECTIVE. The gathered EP save of ``model`` and its tokenizer into ``directory``, as a run's save writes it."""
+    """COLLECTIVE. The gathered EP save and tokenizer, as a run's save writes them."""
     save = save_context(model, parallelism_config, tokenizer=tokenizer, has_ep_layers=True)
     save_tokenizer(save, directory)
     save_ep_gathered_checkpoint(save, directory)

@@ -1,10 +1,5 @@
-"""The modality probe must refuse an untrusted remote-code config, not route around it.
-
-``probe_checkpoint`` reads the checkpoint config under the run's own ``trust_remote_code``. A remote-code
-architecture under ``trust_remote_code: false`` is refused by transformers; swallowed as a hub
-failure it would pick an ``Auto*`` class off the name heuristic, and the model load would refuse the
-same config only after the datasets are loaded. A genuinely unreadable config still falls back.
-"""
+"""The modality probe refuses an untrusted remote-code config. Swallowed as a hub failure, it would pick an ``Auto*``
+class off the name heuristic, and the model load would refuse the same config only after the datasets are loaded."""
 
 import json
 

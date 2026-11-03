@@ -1,12 +1,5 @@
-"""Every checkpoint reader resolves "where do this directory's tensors live" the same way.
-
-The cascade (sharded index → single ``model.safetensors`` → legacy ``pytorch_model.bin``) has one
-implementation, ``resolve_checkpoint_weights``; the resume key readers, ``load_full_state_dict``,
-the lazy loaders' ``require_safetensors`` and the standalone tools' ``checkpoint_shard_files``
-are policy on top of it. These tests fail when one of them re-forks the walk — a divergent
-precedence (a stale single file shadowing the index), a lost leg, or an index read that starts
-opening shards.
-"""
+"""Every checkpoint reader resolves a directory's tensors through ``resolve_checkpoint_weights``: sharded index,
+then ``model.safetensors``, then ``pytorch_model.bin``."""
 
 import json
 import os
@@ -75,8 +68,7 @@ def test_readers_agree_on_a_single_file(tmp_path):
 
 
 def test_an_index_is_read_as_the_map_itself(tmp_path):
-    """The index answers a key query on its own — no shard is opened, so keys resolve even when the
-    shards are absent (the fast path a 100B+ resume gate depends on)."""
+    """No shard is opened, the fast path a 100B+ resume gate depends on."""
     with open(os.path.join(tmp_path, "model.safetensors.index.json"), "w") as f:
         json.dump({"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}, f)
     directory = str(tmp_path)
@@ -89,9 +81,7 @@ def test_an_index_is_read_as_the_map_itself(tmp_path):
 
 
 def test_the_index_wins_over_a_stale_single_file(tmp_path):
-    """Precedence is one decision: a leftover ``model.safetensors`` beside a fresh index must not
-    change what any reader reports, or a resume and an export would disagree on the same directory.
-    """
+    """Otherwise a resume and an export would disagree on the same directory."""
     _write_sharded(tmp_path, {"model-00001-of-00001.safetensors": {"fresh.weight": torch.ones(2)}})
     save_file({"stale.weight": torch.zeros(2)}, os.path.join(tmp_path, "model.safetensors"))
     directory = str(tmp_path)
@@ -110,7 +100,7 @@ def test_the_legacy_bin_is_the_last_leg_and_only_the_resume_readers_take_it(tmp_
     assert layout.shard_files == () and layout.legacy_bin == "pytorch_model.bin"
     assert resolve_checkpoint_weights(directory).key_set() == {"a.weight"}
     assert set(load_full_state_dict(directory)) == {"a.weight"}
-    # The lazy loaders and the standalone tools are safetensors-only: a .bin reads as absent.
+    # Lazy loaders and tools are safetensors-only: a .bin reads as absent.
     with pytest.raises(FileNotFoundError):
         _lazy_index(directory)
     with pytest.raises(FileNotFoundError):
@@ -119,12 +109,8 @@ def test_the_legacy_bin_is_the_last_leg_and_only_the_resume_readers_take_it(tmp_
 
 @pytest.mark.parametrize("filename", WHOLE_MODEL_WEIGHT_FILES)
 def test_every_whole_model_filename_answers_both_probes_the_same_way(tmp_path, filename):
-    """The stats-only probe and its safetensors-only mode are ONE list of filenames.
-
-    The lazy gate asks the narrower question (a legacy ``.bin`` is a whole-model checkpoint it cannot
-    read) but must ask it over the SAME list: over its own copy of the names, a new whole-model
-    filename lands in one probe alone and silently routes every lazy load down the eager fallback.
-    """
+    """Over its own copy of the names, a new filename lands in one probe and routes every lazy load down the eager
+    fallback."""
     (tmp_path / filename).write_bytes(b"")
     directory = str(tmp_path)
 

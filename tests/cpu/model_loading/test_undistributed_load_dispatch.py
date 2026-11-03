@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""The undistributed load path — one loader, and what decides whether it wraps the MoE experts.
-
-``_dispatch_model_loading`` falls through to ``_load_undistributed_model`` for every shape that
-distributes no experts: plain DDP/FSDP data parallelism. That path still applies the EP layers
-when the run wants them without distribution — grouped-GEMM expert compute, and the FSDP-managed
-ep1 expert shard (``fsdp_shard_ep1_experts``) that rides on the same wrappers — and must not apply
-them otherwise. Both halves are silent when wrong: wrapping a dense model patches zero MoE layers
-after the whole model is on the GPU, and skipping the EP layers on a MoE leaves the stock per-expert
-loop while the run pays the Liger force-off that assumes the EP layers are there.
-
-    python tests/cpu/model_loading/test_undistributed_load_dispatch.py
-"""
+"""The undistributed load path, and what decides whether it wraps MoE experts. Wrapping a dense model patches zero MoE
+layers after the whole load; skipping leaves the stock loop while the run pays the Liger force-off."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,13 +20,12 @@ _PC_MOD = "halo.distributed.parallelism_config"
 
 
 def _pc(**kwargs) -> ParallelismConfig:
-    """A single-node 8-GPU ``ParallelismConfig``, built off the real validators."""
     with patch(f"{_PC_MOD}.validate_nvlink_domain_against_fabric"):
         return make_parallelism_config(world_size=8, gpus_per_node=8, **kwargs)
 
 
 def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
-    """Run the dispatcher with the weight load stubbed; return the EP configs the EP layers got."""
+    """The weight load is stubbed; returns the EP configs the EP layers got."""
     wrapped: list = []
     loaded = nn.Linear(2, 2)
 
@@ -66,9 +55,7 @@ def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
 
 
 def test_a_moe_gets_the_expert_wrappers_without_any_expert_distribution():
-    """``ep_size == 1`` with the EP layers on: no rank owns a subset of experts, but the layers are
-    still swapped — that is what puts the experts under grouped GEMM and, with the shipped
-    ``fsdp_shard_ep1_experts``, under FSDP's own reduce-scatter."""
+    """This puts experts under grouped GEMM and, with ``fsdp_shard_ep1_experts``, FSDP's reduce-scatter."""
     pc = _pc(use_grouped_gemm=True)
     assert pc.ep_size == 1 and pc.needs_ep_layers and pc.fsdp_shard_ep1_experts, "premise"
 
@@ -79,14 +66,12 @@ def test_a_moe_gets_the_expert_wrappers_without_any_expert_distribution():
 
 
 def test_a_dense_model_is_never_wrapped_even_with_grouped_gemm_requested():
-    """``use_grouped_gemm`` is a default, not a declaration that the model has experts: a dense model
-    reaching ``apply_ep_layers`` patches zero MoE layers and raises."""
+    """``use_grouped_gemm`` is a default; a dense model reaching ``apply_ep_layers`` patches zero layers and raises."""
     assert _dispatch(_pc(use_grouped_gemm=True), "llama") == []
 
 
 def test_the_wrappers_are_off_when_the_run_turns_grouped_gemm_off():
-    """The knob is the whole gate at ``ep_size == 1`` — a MoE run that opted out keeps HF's own
-    expert loop."""
+    """The knob is the whole gate at ``ep_size == 1``."""
     pc = _pc(use_grouped_gemm=False)
     assert not pc.needs_ep_layers, "premise"
 

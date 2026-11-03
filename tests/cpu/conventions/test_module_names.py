@@ -1,5 +1,5 @@
-"""Module and package names say what they own: no module or package under ``halo/`` or ``tests/common/`` carries a
-grab-bag or mechanism word as a whole ``_``-separated token of its name (CLAUDE.md, Code style)."""
+"""No module or package under ``halo/`` or ``tests/common/`` carries a grab-bag or mechanism word as a whole
+``_``-separated token of its name (CLAUDE.md, Code style)."""
 
 from pathlib import Path
 

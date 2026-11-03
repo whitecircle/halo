@@ -1,19 +1,5 @@
-"""The initial model load must refuse a checkpoint that does not cover the live model.
-
-``from_pretrained`` re-initializes every key it cannot find and reports it through the transformers
-logger only — which ``configure_training_run`` silences on every non-logging rank. A truncated or
-wrong-architecture directory therefore trains half a model of random weights with no exception and no
-output. :mod:`halo.model_loading.checkpoint_coverage` turns that into a raise.
-
-Both directions are pinned here, because a gate that over-rejects is as bad as one that never fires:
-
-- a checkpoint missing backbone tensors must RAISE (``test_dropped_backbone_tensors_raise``,
-  ``test_dropped_embedding_raises``);
-- a sequence-classification head absent from a base checkpoint, a tied ``lm_head``, and a class's own
-  ``_keys_to_ignore_on_load_missing`` must still LOAD.
-
-    python tests/cpu/model_loading/test_checkpoint_coverage.py
-"""
+"""The initial load refuses a checkpoint that does not cover the live model. ``from_pretrained`` re-initializes missing
+keys and reports through a logger silenced on non-logging ranks, so half a model trains on random weights."""
 
 from __future__ import annotations
 
@@ -52,10 +38,9 @@ def _tiny_config(tie_word_embeddings: bool = False):
 
 
 def _write_checkpoint(path, *, tie_word_embeddings: bool = False, drop: str | None = None) -> str:
-    """A complete tiny causal-LM checkpoint, optionally missing every key containing ``drop``."""
     config = _tiny_config(tie_word_embeddings)
     model = AutoModelForCausalLM.from_config(config)
-    # save_pretrained, not a raw state_dict dump: it drops the tied shadow safetensors refuses to write.
+    # It drops the tied shadow safetensors refuses to write.
     model.save_pretrained(str(path), safe_serialization=True)
     weights = os.path.join(path, "model.safetensors")
     if drop is not None:
@@ -65,7 +50,7 @@ def _write_checkpoint(path, *, tie_word_embeddings: bool = False, drop: str | No
 
 
 def test_fixture_actually_drops_tensors(tmp_path):
-    """Anti-vacuity: the truncated fixture must really be missing backbone tensors."""
+    """Anti-vacuity: the truncated fixture really misses backbone tensors."""
     full = load_file(os.path.join(_write_checkpoint(tmp_path / "full"), "model.safetensors"))
     trunc = load_file(os.path.join(_write_checkpoint(tmp_path / "trunc", drop="layers.1."), "model.safetensors"))
     dropped = set(full) - set(trunc)
@@ -74,8 +59,7 @@ def test_fixture_actually_drops_tensors(tmp_path):
 
 
 def test_stock_from_pretrained_still_does_not_raise(tmp_path):
-    """The premise: transformers silently re-initializes. If this ever fails, the gate below became
-    belt-and-braces rather than the only thing standing between a truncated directory and noise."""
+    """The premise: transformers silently re-initializes."""
     path = _write_checkpoint(tmp_path / "trunc", drop="layers.1.")
     reloaded, info = AutoModelForCausalLM.from_pretrained(path, output_loading_info=True)
     assert info["missing_keys"], "transformers reported no missing keys for a truncated checkpoint"
@@ -83,21 +67,19 @@ def test_stock_from_pretrained_still_does_not_raise(tmp_path):
 
 
 def test_dropped_backbone_tensors_raise(tmp_path):
-    """A checkpoint missing a decoder layer must not load."""
     path = _write_checkpoint(tmp_path / "trunc", drop="layers.1.")
     with pytest.raises(RuntimeError, match="absent from the checkpoint"):
         from_pretrained_verified(AutoModelForCausalLM, path)
 
 
 def test_dropped_embedding_raises(tmp_path):
-    """The absence need not be a whole layer — one backbone tensor is enough."""
+    """One backbone tensor is enough."""
     path = _write_checkpoint(tmp_path / "trunc", drop="embed_tokens")
     with pytest.raises(RuntimeError, match="embed_tokens"):
         from_pretrained_verified(AutoModelForCausalLM, path)
 
 
 def test_complete_checkpoint_loads(tmp_path):
-    """Anti-over-rejection: a complete checkpoint is untouched by the gate."""
     path = _write_checkpoint(tmp_path / "full")
     model = from_pretrained_verified(AutoModelForCausalLM, path)
     assert isinstance(model, nn.Module)
@@ -105,26 +87,21 @@ def test_complete_checkpoint_loads(tmp_path):
 
 @pytest.mark.parametrize("tie_word_embeddings", [False, True])
 def test_sequence_classification_head_is_a_legitimate_absence(tmp_path, tie_word_embeddings):
-    """A ``score`` head has no tensor on a causal-LM base checkpoint — the reward / classification
-    entry points depend on that load succeeding."""
+    """The reward and classification entry points depend on this load succeeding."""
     path = _write_checkpoint(tmp_path / f"base{int(tie_word_embeddings)}", tie_word_embeddings=tie_word_embeddings)
     model = from_pretrained_verified(AutoModelForSequenceClassification, path, num_labels=2)
     assert model.score.weight.shape[0] == 2
 
 
 def test_head_consuming_caller_refuses_a_base_checkpoint(tmp_path):
-    """``excuse_task_head=False`` withdraws that excuse for a caller that only scores with the head.
-
-    Reward-model inference (``halo/entrypoints/reward_scoring.py``) would otherwise score every
-    row through a randomly initialized ``score`` and report plausible numbers.
-    """
+    """``halo/entrypoints/reward_scoring.py`` would otherwise score through a random ``score`` and report plausible
+    numbers."""
     path = _write_checkpoint(tmp_path / "base")
     with pytest.raises(RuntimeError, match="score.weight"):
         from_pretrained_verified(AutoModelForSequenceClassification, path, excuse_task_head=False, num_labels=1)
 
 
 def test_head_consuming_caller_still_loads_a_real_head(tmp_path):
-    """Anti-over-rejection: a checkpoint that does carry the head loads under the same strict flag."""
     base = _write_checkpoint(tmp_path / "base")
     trained = str(tmp_path / "rm")
     AutoModelForSequenceClassification.from_pretrained(base, num_labels=1).save_pretrained(trained)
@@ -134,7 +111,7 @@ def test_head_consuming_caller_still_loads_a_real_head(tmp_path):
 
 
 def test_tied_lm_head_is_a_legitimate_absence(tmp_path):
-    """Under ``tie_word_embeddings`` the checkpoint carries no ``lm_head.weight``; the tie supplies it."""
+    """The tie supplies ``lm_head.weight``."""
     path = _write_checkpoint(tmp_path / "tied", tie_word_embeddings=True)
     assert "lm_head.weight" not in load_file(os.path.join(path, "model.safetensors"))
     model = from_pretrained_verified(AutoModelForCausalLM, path)
@@ -142,19 +119,16 @@ def test_tied_lm_head_is_a_legitimate_absence(tmp_path):
 
 
 def test_an_untied_lm_head_is_excused_like_any_other_head():
-    """Documented limit of the outside-the-backbone rule: an untied ``lm_head`` is excused too.
-
-    Randomly initialized output embeddings are self-announcing (loss pins at ``ln(vocab)`` from step
-    one), and ``init_checkpoint_absent_modules`` deliberately draws this key for the lazy loaders —
-    gating it here would contradict that. Change this only together with that decision."""
+    """Self-announcing (loss pins at ``ln(vocab)``), and ``init_checkpoint_absent_modules`` draws this key for the
+    lazy loaders; change only with that decision."""
     model = AutoModelForCausalLM.from_config(_tiny_config(tie_word_embeddings=False))
     assert unexpected_missing_keys(model, ["lm_head.weight"]) == []
-    # The backbone next to it is NOT excused, so the rule is doing real work.
+    # The backbone next to it is not excused, so the rule does real work.
     assert unexpected_missing_keys(model, ["model.norm.weight"]) == ["model.norm.weight"]
 
 
 def test_class_declared_ignores_are_honoured():
-    """The escape hatch is the class's own declaration, not a list maintained here."""
+    """The escape hatch is the class's own declaration."""
 
     class _Head(nn.Module):
         base_model_prefix = "backbone"
@@ -176,10 +150,10 @@ def test_class_declared_ignores_are_honoured():
 
 
 def test_a_bare_backbone_excuses_nothing():
-    """``AutoModel`` (the embedding path) IS the backbone, so it has no "outside" to excuse."""
+    """``AutoModel`` is the backbone, so it has no outside to excuse."""
 
     class _Bare(nn.Module):
-        base_model_prefix = "model"  # declared, but there is no ``self.model``
+        base_model_prefix = "model"  # Declared, but there is no ``self.model``.
         _keys_to_ignore_on_load_missing = None
 
         def __init__(self):
@@ -199,8 +173,7 @@ def test_env_escape_hatch_downgrades_to_a_warning(monkeypatch):
 
 
 def test_error_names_the_absent_tensors(tmp_path):
-    """The report must be in the exception text: the transformers logger that would otherwise carry
-    it is silenced to ``error`` on every non-logging rank."""
+    """The logger that would carry the report is silenced on every non-logging rank."""
     path = _write_checkpoint(tmp_path / "trunc", drop="layers.1.mlp")
     with pytest.raises(RuntimeError) as excinfo:
         from_pretrained_verified(AutoModelForCausalLM, path)
@@ -210,15 +183,14 @@ def test_error_names_the_absent_tensors(tmp_path):
 
 
 def test_gate_runs_on_the_reference_and_teacher_model_path(tmp_path):
-    """``auto_load_model`` is the bypass used for DPO/KTO reference and distillation teacher models —
-    a silently random reference shifts every logratio."""
+    """A silently random reference shifts every logratio."""
     path = _write_checkpoint(tmp_path / "trunc", drop="layers.0.self_attn")
     with pytest.raises(RuntimeError, match="absent from the checkpoint"):
         auto_load_model(path, dtype=torch.float32)
 
 
 def _legacy_list_tie_class() -> type:
-    """A remote-style class shipping the v4 list-form ``_tied_weights_keys``, converted as a remote load converts it."""
+    """Converted as a remote load converts it."""
     module = types.ModuleType("legacy_list_tie_remote")
     module.LegacyListTie = type(
         "LegacyListTie", (Qwen3ForCausalLM,), {"__module__": module.__name__, "_tied_weights_keys": ["lm_head.weight"]}
@@ -228,7 +200,7 @@ def _legacy_list_tie_class() -> type:
 
 
 def test_a_tied_config_on_a_legacy_list_tie_is_refused(tmp_path):
-    """The list-form tie converts to ``{}``, which ties nothing; a tied config must not train the head untied."""
+    """The list-form tie converts to ``{}``, which ties nothing."""
     legacy = _legacy_list_tie_class()
     assert legacy._tied_weights_keys == {} and getattr(legacy, TIED_KEYS_WERE_LIST_ATTR)
     with pytest.raises(RuntimeError, match="declares tie_word_embeddings=True but shipped the legacy list-form"):
@@ -238,7 +210,6 @@ def test_a_tied_config_on_a_legacy_list_tie_is_refused(tmp_path):
 
 
 def test_importing_the_gate_makes_module_cache_copies_whole():
-    """Every tool loading through ``from_pretrained_verified`` gets transformers' module-cache copies made whole."""
     script = """
 import transformers.dynamic_module_utils as dynamic_module_utils
 import halo.model_loading.checkpoint_coverage

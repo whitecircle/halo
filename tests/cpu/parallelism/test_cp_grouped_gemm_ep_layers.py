@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Pure CP on a MoE still gets the ``ep_size == 1`` grouped-GEMM EP layers.
-
-``load_distributed_model`` hands the CP loader ``wraps_experts`` whenever ``needs_ep_layers`` holds
-AND the model is MoE, and the CP loader builds an ep_config for exactly those. Both conjuncts are
-load-bearing: without the EP layers a MoE under pure CP pays the Liger swiglu/geglu force-off (which
-``needs_ep_layers`` triggers on its own) while its experts keep the stock per-expert loop — the cost
-with none of the speedup; keyed on ``needs_ep_layers`` alone, a DENSE model under CP would be handed
-an ep_config it has no experts for. The EP layers this decides are observable as
-:class:`EPMoELayerBase` modules, which the CP save path (``stale_dense_mlp_keys``) and the 8-GPU
-Mistral4 CP node both assert on.
-
-Run: ``python tests/cpu/parallelism/test_cp_grouped_gemm_ep_layers.py`` (or ``pytest -m cpu``).
-"""
+"""Pure CP on a MoE still gets the ``ep_size == 1`` grouped-GEMM EP layers, and a dense model none. Without them a
+MoE pays the Liger force-off while keeping the stock per-expert loop."""
 
 from __future__ import annotations
 
@@ -37,8 +26,6 @@ class _Dispatched(Exception):
 
 
 def _dispatched_wraps_experts(*, use_grouped_gemm: bool, config) -> bool:
-    """What ``load_distributed_model`` hands the CP loader as ``wraps_experts``."""
-
     def stop(source, pc, model_class, from_pretrained_kwargs, *, preserve_checkpoint_precision, wraps_experts):
         raise _Dispatched(wraps_experts)
 
@@ -49,7 +36,7 @@ def _dispatched_wraps_experts(*, use_grouped_gemm: bool, config) -> bool:
         ),
         patch.object(loading.AutoConfig, "from_pretrained", lambda *args, **kwargs: config),
         patch.object(loading.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: SimpleNamespace()),
-        # The module-tree gate has its own test; it would refuse the eager label standing in for attention.
+        # Its own test covers it; it would refuse the eager label standing in for attention.
         patch.object(loading, "reject_unsupported_structure", lambda *args, **kwargs: None),
         patch.object(loading, "load_cp_model", stop),
         pytest.raises(_Dispatched) as dispatched,
@@ -61,7 +48,6 @@ def _dispatched_wraps_experts(*, use_grouped_gemm: bool, config) -> bool:
 
 
 def _rung_ep_config(*, wraps_experts: bool) -> object | None:
-    """The ``ep_config`` the CP loader loads the model with."""
     pc = SimpleNamespace(
         max_concurrent_loading=0,
         fp32_non_ep_params=False,
@@ -96,7 +82,7 @@ def test_moe_under_pure_cp_gets_the_grouped_gemm_ep_config():
 
 
 def test_dense_under_pure_cp_gets_no_ep_config():
-    """``needs_ep_layers`` defaults True on a dense model too (grouped GEMM) — experts decide."""
+    """``needs_ep_layers`` defaults True on a dense model too."""
     assert _dispatched_wraps_experts(use_grouped_gemm=True, config=Qwen3Config()) is False
     assert _rung_ep_config(wraps_experts=False) is None
 

@@ -1,6 +1,5 @@
-"""In-process restricted-builtins evaluation, the lightest sandbox tier: math expressions and Python snippets under
-restricted builtins, an AST escape guard and a wall-clock timeout — no OS isolation, no imports. Complete untrusted
-programs belong to the subprocess, bubblewrap and remote backends."""
+"""In-process restricted-builtins evaluation, the lightest sandbox tier: no OS isolation, no imports. Complete
+untrusted programs belong to the subprocess, bubblewrap and remote backends."""
 
 import ast
 import math
@@ -53,8 +52,7 @@ _MODPOW_MAX_COST = 1_000_000_000
 
 
 def _guarded_pow(base, exp, mod=None):
-    """``pow`` with size/cost bounds on the unpreemptible big-int paths (plain pow's result size,
-    modpow's bits(exp)·bits(mod) work)."""
+    """Bounds the unpreemptible big-int paths: plain pow's result size, modpow's bits(exp)·bits(mod) work."""
     is_bigint_pow = mod is None and isinstance(base, int) and isinstance(exp, int) and exp > 0 and abs(base) > 1
     if is_bigint_pow and abs(base).bit_length() * exp > _BIGINT_MAX_RESULT_BITS:
         raise ValueError("exponentiation result too large for the sandbox")
@@ -69,7 +67,7 @@ def _guarded_pow(base, exp, mod=None):
 
 
 def _guarded_lshift(value, shift):
-    """``<<`` with a result-size bound: ``x << n`` allocates ``bits(x) + n`` bits in one C call."""
+    """``x << n`` allocates ``bits(x) + n`` bits in one C call."""
     if (
         isinstance(value, int)
         and isinstance(shift, int)
@@ -81,9 +79,7 @@ def _guarded_lshift(value, shift):
 
 
 def _guarded_mul(left, right):
-    """``*`` with result-size bounds on the two unpreemptible-C-call shapes: big-int products
-    (bit_length probe) and sequence repetition (len × count probe, either operand order). Floats
-    and other pairs pass through without a check."""
+    """Bounds the two unpreemptible shapes: big-int products and sequence repetition, in either operand order."""
     if isinstance(left, int) and isinstance(right, int):
         if left.bit_length() + right.bit_length() > _BIGINT_MAX_RESULT_BITS:
             raise ValueError("multiplication result too large for the sandbox")
@@ -100,13 +96,12 @@ def _guarded_mul(left, right):
 
 
 def _guarded_range(*args):
-    """``range`` with a length cap: the C-iterator builtins (``sum``/``min``/``max``/``sorted``/
-    ``list``/``any``/``all``) drain a range inside one GIL-holding C loop, so an unbounded range
-    blocks the worker like a big-int op. The cap leaves realistic loops (10**6-scale) unaffected."""
+    """The C-iterator builtins (``sum``/``min``/``sorted``/``list``...) drain a range inside one GIL-holding C loop, so
+    an unbounded range blocks the worker like a big-int op."""
     result = range(*args)
     try:
         too_large = len(result) > _RANGE_MAX_LENGTH
-    except OverflowError:  # len() past sys.maxsize — categorically too large
+    except OverflowError:  # len() past sys.maxsize
         too_large = True
     if too_large:
         raise ValueError(f"range too large for the sandbox (max {_RANGE_MAX_LENGTH} elements)")
@@ -114,14 +109,13 @@ def _guarded_range(*args):
 
 
 def _guarded_factorial(n):
-    """``math.factorial`` with an argument bound (the C loop holds the GIL for its whole runtime)."""
+    """The C loop holds the GIL for its whole runtime."""
     if isinstance(n, int) and n > _FACTORIAL_MAX_N:
         raise ValueError(f"factorial argument too large for the sandbox (max {_FACTORIAL_MAX_N})")
     return math.factorial(n)
 
 
-# Operator -> its symbol, the name its uses are rewritten to call, and the guard bound to that name in
-# every sandbox namespace (``_sandbox_*``, a prefix user code may not name).
+# Operator -> symbol, rewritten call name (``_sandbox_*``, a prefix user code may not name), guard.
 _GUARDED_OPS: dict[type, tuple[str, str, Callable]] = {
     ast.Pow: ("**", "_sandbox_pow", _guarded_pow),
     ast.LShift: ("<<", "_sandbox_lshift", _guarded_lshift),
@@ -131,10 +125,7 @@ _OPERATOR_GUARDS: dict[str, Callable] = {name: guard for _, name, guard in _GUAR
 
 
 class _GuardedOpTransformer(ast.NodeTransformer):
-    """Rewrite the unpreemptible-big-int operators (``**``, ``<<``, ``*``) into guard calls.
-
-    Python offers no operator hook for int-int operators, so the bounds are applied at the AST level.
-    """
+    """Python offers no operator hook for int-int operators, so the bounds are applied at the AST level."""
 
     def visit_BinOp(self, node: ast.BinOp):
         self.generic_visit(node)
@@ -160,7 +151,6 @@ class _GuardedOpTransformer(ast.NodeTransformer):
 
 
 def _compile_sandboxed(code: str, mode: str):
-    """Parse, apply the operator-guard transform, and compile for ``eval``/``exec``."""
     tree = _GuardedOpTransformer().visit(ast.parse(code, mode=mode))
     return compile(ast.fix_missing_locations(tree), "<sandbox>", mode)
 
@@ -214,9 +204,8 @@ SAFE_PYTHON_BUILTINS = {
 
 
 def _run_with_timeout(fn: Callable[[], str], timeout: float) -> str:
-    """``fn()`` on a daemon thread joined with ``timeout``: abandoned at interpreter exit, a runaway loop cannot block
-    shutdown. ``fn`` renders its own exceptions; one escaping the thread reads as the produced-no-result error.
-    """
+    """``fn()`` on a daemon thread joined with ``timeout``, so a runaway loop cannot block shutdown. ``fn`` renders its
+    own exceptions; one escaping the thread reads as the produced-no-result error."""
     result: dict[str, str] = {}
 
     def _worker() -> None:
@@ -231,10 +220,8 @@ def _run_with_timeout(fn: Callable[[], str], timeout: float) -> str:
 
 
 def _validate_sandbox_ast(code: str) -> None:
-    """Refuse sandbox-escape constructs before execution with ``ValueError``: dunder attributes, names and subscripts,
-    frame/generator introspection, ``import`` and the introspection/IO builtins, since an overridden ``__builtins__``
-    does not stop ``().__class__.__bases__[0].__subclasses__()``. Defense in depth, not a hard boundary.
-    """
+    """Refuse escape constructs with ``ValueError``, since an overridden ``__builtins__`` does not stop
+    ``().__class__.__bases__[0].__subclasses__()``. Defense in depth, not a hard boundary."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
@@ -264,31 +251,24 @@ def _validate_sandbox_ast(code: str) -> None:
 
 
 def _error_observation(exc: Exception) -> str:
-    """The observation for an exception the code raised or the guard refused it with; a bare one (an
-    ``assert`` without a message) by its class name."""
+    """A bare exception (an ``assert`` without a message) reads by its class name."""
     return f"Error: {str(exc) or type(exc).__name__}"
 
 
 def _printed_output(printed: list[str]) -> str:
-    """What the captured ``print`` calls wrote, read the way the subprocess REPL reads a program's stdout
-    (:func:`~halo.environments.sandbox.repl.format_sandbox_repl_output`): trailing newlines dropped, and
-    nothing written reported as no output."""
+    """As the subprocess REPL reads stdout: trailing newlines dropped, nothing written reported as no output."""
     return "".join(printed).rstrip("\n") or REPL_NO_OUTPUT_MESSAGE
 
 
 def _run_python_sandboxed_inner(code: str) -> str:
-    """Run validated code under restricted builtins (the timeout is :func:`run_python_sandboxed`'s). Every exception it
-    raises renders as ``Error: ...``, an observation the model can act on, never a "produced no result" escape;
-    ``BaseException`` still propagates.
-    """
+    """Every exception renders as ``Error: ...``, an observation the model can act on; ``BaseException`` propagates."""
     printed: list[str] = []
 
     def capture_print(*args, sep=None, end=None, flush=False):
         printed.append((" " if sep is None else sep).join(str(a) for a in args) + ("\n" if end is None else end))
 
-    # One namespace, as a module runs: with separate globals and locals the code would run under class-body
-    # scoping, where a function sees neither the names defined beside it nor itself (no recursion). A bare
-    # ``print(...)`` takes the eval path, so the capture must be in scope there too.
+    # One namespace, as a module runs: under separate globals and locals (class-body scoping) a function sees neither
+    # the names beside it nor itself. A bare ``print(...)`` takes the eval path, so the capture must be in scope there.
     namespace = {"__builtins__": SAFE_PYTHON_BUILTINS, "print": capture_print, **_OPERATOR_GUARDS}
     injected = set(namespace)
 
@@ -297,7 +277,7 @@ def _run_python_sandboxed_inner(code: str) -> str:
         result = eval(_compile_sandboxed(code, "eval"), namespace)
         return _printed_output(printed) if printed else str(result)
     except SyntaxError:
-        # Not an expression — fall through to the statement (exec) path.
+        # Not an expression: fall through to the exec path.
         pass
     except Exception as e:
         return _error_observation(e)
@@ -313,9 +293,8 @@ def _run_python_sandboxed_inner(code: str) -> str:
 
 
 def calculate_sandboxed(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
-    """Evaluate a math expression under restricted builtins, the AST escape guard first (an empty ``__builtins__`` does
-    not block attribute access), bounded by ``timeout``: sync tool execution runs on a Ray actor's event loop.
-    """
+    """The AST guard runs first, since an empty ``__builtins__`` does not block attribute access; bounded by
+    ``timeout`` because sync tool execution runs on a Ray actor's event loop."""
     try:
         expr = expression.strip().replace("^", "**").replace("\u00d7", "*").replace("\u00f7", "/")
         _validate_sandbox_ast(expr)
@@ -323,8 +302,7 @@ def calculate_sandboxed(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOU
         return _error_observation(e)
 
     def _evaluate() -> str:
-        # A namespace of its own per call: a walrus binds into it, and on a shared table the binding
-        # (``pi := 3``) would carry into every later call in the process.
+        # Per call: on a shared table a walrus binding (``pi := 3``) would carry into every later call in the process.
         namespace = {"__builtins__": {}, **_OPERATOR_GUARDS, **SAFE_MATH_BUILTINS}
         try:
             return str(eval(_compile_sandboxed(expr, "eval"), namespace))
@@ -335,10 +313,7 @@ def calculate_sandboxed(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOU
 
 
 def run_python_sandboxed(code: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
-    """Execute Python in a restricted-builtins sandbox with an escape guard + wall-clock timeout.
-
-    Returns an ``Error: ...`` string on violation, exception, or timeout.
-    """
+    """Returns an ``Error: ...`` string on violation, exception, or timeout."""
     try:
         _validate_sandbox_ast(code)
     except ValueError as e:

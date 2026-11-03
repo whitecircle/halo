@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""What the fenced weight sync does besides pushing: credit the pause to in-flight episodes, and
-release the score-only clients' HTTP sessions at cleanup.
-
-    python tests/cpu/grpo/test_weight_sync_fenced_sync_bookkeeping.py
-"""
+"""What the fenced weight sync does besides pushing: credit the pause to in-flight episodes, and release the
+score-only clients' HTTP sessions at cleanup."""
 
 import time
 from types import SimpleNamespace

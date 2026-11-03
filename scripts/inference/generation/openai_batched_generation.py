@@ -1,28 +1,8 @@
-"""Batched generation for a dataset of prompts against an OpenAI-compatible API.
+"""Batched generation for a dataset of prompts against an OpenAI-compatible API, with checkpointing and S3 dataset I/O.
 
-Parallel requests with checkpointing (a resumed run reloads the partial dataset) and S3 dataset I/O.
-Supports follow-up prompts, per-row tool definitions, and system prompts.
-
-``--dataset`` and ``--output_path`` are full ``s3://`` URIs, used as given, or bare keys that
-``build_s3_uri`` places under ``--subfolder`` in ``HALO_S3_DEFAULT_BUCKET``.
-
-Usage:
-    python scripts/inference/generation/openai_batched_generation.py \\
-        --model my-model \\
-        --dataset s3://my-bucket/datasets/prompts \\
-        --output_path s3://my-bucket/datasets/responses
-
-Input dataset format (HuggingFace Dataset in S3):
-    Required: id_field, prompt_field (list of message dicts)
-    Optional: local_system_prompt_field, follow_up_prompt_field, tools_field
-
-Output dataset format:
-    Original columns (minus prompt/system/follow-up/tools fields) plus:
-    - conversation: full dialogue with system prompt, user messages, model responses
-    - generated_message_indices: indices of generated responses in conversation
-    - finish_reason: list of finish reasons (stop, tool_calls, length, etc.)
-    - prompt_tokens / completion_tokens: token usage
-"""
+``--dataset`` and ``--output_path`` are full ``s3://`` URIs or bare keys under ``--subfolder`` in
+``HALO_S3_DEFAULT_BUCKET``. Output keeps the original columns minus prompt/system/follow-up/tools, plus
+``conversation``, ``generated_message_indices``, ``finish_reason``, ``prompt_tokens`` and ``completion_tokens``."""
 
 import argparse
 
@@ -41,7 +21,6 @@ def parse_args():
 
     add_openai_endpoint_args(parser, model_help="Model name for API requests")
 
-    # Data configuration
     add_s3_dataset_args(parser)
     parser.add_argument(
         "--follow_up_prompt_field",

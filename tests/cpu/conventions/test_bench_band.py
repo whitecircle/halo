@@ -1,13 +1,4 @@
-"""The bench band passes a run inside its baselines and fails each way a run can fall out of them, and flags,
-without failing, a run whose mean step time strays from its median; ``record`` writes baselines only from
-repeats that hold together, and touches no other file in the store.
-
-Logs are written as ``make bench`` leaves them: every rank of a row prints one ``__HALO_BENCH__`` line per key,
-among the rows' other output. Two cases emit through the benchmarks' own emitters, so the band reads what they
-print, from one process and from ranks printing at once.
-
-Run: python tests/cpu/conventions/test_bench_band.py
-"""
+"""The bench band's verdicts and ``record``'s baseline rules, read from logs as ``make bench`` leaves them."""
 
 import datetime
 import json
@@ -165,7 +156,6 @@ def test_emitted_lines_read_back_as_one_measurement_per_key(tmp_path, monkeypatc
 
 
 def test_lines_of_ranks_printing_at_once_read_back_whole():
-    """torchrun's workers print unbuffered into one stream, and every rank prints its lines as training ends."""
     start_read, start_write = os.pipe()
     out_read, out_write = os.pipe()
     workers = [
@@ -412,10 +402,9 @@ def test_record_refuses_and_writes_nothing(tmp_path, tokens, peaks, commit, refu
     ],
 )
 def test_record_keeps_a_repeat_that_varies_as_runs_do(tmp_path, tokens, peaks, saves, save_peaks):
-    """A peak below the others widens the spread its ceiling is drawn from, so the ceiling still clears it; a
-    rate is refused only past :data:`bench_band.OUTLIER_FACTOR` times the others' spread (1040 against 1000 to
-    1010 lies 35.75 off their mean: past three times their spread of 10, within four times); and the save's host
-    metrics carry their own margins (6% on its time, 1% on its peak)."""
+    """1040 lies 35.75 off the mean of 1000 to 1010, past three times their spread of 10 and within four times
+    (:data:`bench_band.OUTLIER_FACTOR`). A low peak widens the spread its ceiling is drawn from, and the save's
+    host metrics carry their own margins (6% on time, 1% on peak)."""
     directory = tmp_path / "baselines"
     logs = _repeat_logs(tmp_path, tokens, peaks, saves, save_peaks)
 

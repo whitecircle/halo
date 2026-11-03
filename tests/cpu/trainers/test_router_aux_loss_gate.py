@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Test the gate on MoE balancing that rides an aux loss a trainer's objective never adds.
-
-``*ForCausalLM.forward`` folds ``router_aux_loss_coef * load_balancing_loss_func(...)`` into the
-loss only where it builds that loss from ``labels``. Preference / log-prob / distillation / pooled-
-head trainers forward without labels and assemble their own loss, so the aux term never enters the
-graph: routing collapses over training while the run still pays for ``output_router_logits``.
-``_disable_inert_router_logits`` raises on an EXPLICIT ``moe_balancing=aux_loss`` there and
-warns when ``auto`` resolved to it — the non-PP counterpart of pipeline_parallel.model_rules' rejection.
-
-Run: python tests/cpu/trainers/test_router_aux_loss_gate.py
-"""
+"""The gate on MoE balancing that rides an aux loss a trainer's objective never adds.
+Only a loss built from ``labels`` gets the term, so elsewhere routing collapses while the run pays for the logits."""
 
 import types
 
@@ -49,7 +40,7 @@ class _Trainer:
     """Stand-in for a trainer whose loss cannot carry the aux term (the spine default)."""
 
     ROUTER_AUX_LOSS_ADDED_BY = DistributedTrainerMixin.ROUTER_AUX_LOSS_ADDED_BY
-    # Borrowed, not reimplemented: a stub unwrap could pass while the real one is broken.
+    # The real unwrap: a stub could pass while the real one is broken.
     _top_level_model = DistributedTrainerMixin._top_level_model
 
     def __init__(self, moe_balancing="auto", config=None):
@@ -79,7 +70,7 @@ def _capture_warnings(trainer) -> list[str]:
 def test_only_labels_forwarding_trainers_declare_consumption():
     # SFT hands the model ``labels`` (HF adds the aux term); everything else builds its own loss.
     assert DistributedSFTTrainer.ROUTER_AUX_LOSS_ADDED_BY == "model_forward"
-    # DPO and KTO build their own loss yet TRL adds the aux term back — declared, not inferred.
+    # DPO and KTO build their own loss, but TRL adds the aux term back.
     assert DistributedKTOTrainer.ROUTER_AUX_LOSS_ADDED_BY == "trl_loss"
     assert DistributedDPOTrainer.ROUTER_AUX_LOSS_ADDED_BY == "trl_loss"
     for trainer_cls in (
@@ -87,7 +78,7 @@ def test_only_labels_forwarding_trainers_declare_consumption():
         DistributedRewardTrainer,
         OfflineGRPOTrainer,
         DistributedTeacherDistillationTrainer,
-        # Inherits DistributedSFTTrainer but forwards WITHOUT labels — must override back to False.
+        # Inherits DistributedSFTTrainer but forwards without labels, so it must override back to None.
         DistributedSelfDistillationTrainer,
     ):
         assert trainer_cls.ROUTER_AUX_LOSS_ADDED_BY is None, trainer_cls.__name__
@@ -122,9 +113,8 @@ def test_dense_model_is_not_flagged():
 
 
 def test_auto_resolved_aux_loss_turns_the_router_logits_back_off():
-    """Warning and then paying the tensor anyway is the worst of both: ``auto`` turns the flag on
-    upstream of this gate, so the gate takes it back — stamped, or MoEMetricsCallback (built for
-    the aux_loss mode) re-enables it at train begin."""
+    """``auto`` turns the flag on upstream of this gate, so the gate takes it back.
+    The stamp stops MoEMetricsCallback, built for the aux_loss mode, from re-enabling it at train begin."""
     cfg = _Cfg()
     warnings = _capture_warnings(_Trainer(moe_balancing="auto", config=cfg))
     assert cfg.output_router_logits is False
@@ -133,8 +123,7 @@ def test_auto_resolved_aux_loss_turns_the_router_logits_back_off():
 
 
 def test_router_logits_enabled_outside_auto_are_left_alone():
-    """Anti-vacuity + scope: under an explicit mode the flag is the user's documented metrics opt-in,
-    not the balancing strategy's doing, so it must survive the warning."""
+    """Under an explicit mode the flag is the user's documented metrics opt-in, so it must survive the warning."""
     cfg = _Cfg()
     warnings = _capture_warnings(_Trainer(moe_balancing="none", config=cfg))
     assert cfg.output_router_logits is True
@@ -143,7 +132,6 @@ def test_router_logits_enabled_outside_auto_are_left_alone():
 
 
 def test_consuming_trainer_keeps_router_logits_on():
-    """The trainers that DO add the aux term must keep the flag the aux loss rides on."""
     cfg = _Cfg()
     _validate(_ConsumingTrainer(moe_balancing="auto", config=cfg))
     assert cfg.output_router_logits is True

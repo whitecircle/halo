@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The processing class a training run loads for a multimodal checkpoint.
-
-An image run needs the checkpoint's processor and fails loud without one. A run without image data
-keeps the processor where the checkpoint ships one, since the export of the multimodal class is
-served through it, and otherwise takes the tokenizer (Step-3.7 Flash ships no native processor
-config). Whether the checkpoint ships one is a confirmed answer, never an unreachable Hub.
-
-Run: pytest tests/cpu/model_loading/test_run_processing_class.py
-"""
+"""The processing class a run loads for a multimodal checkpoint. A text run keeps a shipped processor since the export
+is served through it; Step-3.7 Flash ships none, so it takes the tokenizer."""
 
 from types import SimpleNamespace
 
@@ -50,12 +43,11 @@ def _hub_offline(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_weight_load(monkeypatch):
-    """The processing-class rule runs ahead of the weight load, which is stubbed out here."""
+    """The rule runs ahead of the weight load."""
     monkeypatch.setattr(model_setup, "load_model_and_tokenizer", lambda *args, **kwargs: ("model", None))
 
 
 def _step3p7_checkpoint(path, *, with_processor: bool) -> str:
-    """A tiny Step-3.7 composite config plus tokenizer, with or without the processor's own config."""
     Step3p7Config(text_config=TINY_STEP3P7_CONFIG, vision_config=TINY_STEP3P7_VISION_CONFIG).save_pretrained(path)
     tokenizer = word_level_tokenizer(_TOKENIZER_WORDS)
     tokenizer.save_pretrained(path)
@@ -77,7 +69,7 @@ def _load(model_name_or_path: str, *, vlm_run: bool, revision: str | None = None
 def test_a_text_run_on_a_checkpoint_without_a_processor_loads_its_tokenizer(tmp_path):
     path = _step3p7_checkpoint(tmp_path, with_processor=False)
     with pytest.raises(OSError, match="image processor"):
-        AutoProcessor.from_pretrained(path)  # premise: requiring the processor refuses the run
+        AutoProcessor.from_pretrained(path)  # Premise: requiring the processor refuses the run.
 
     _model, processing_class, tokenizer, is_vlm = _load(path, vlm_run=False)
 
@@ -94,8 +86,7 @@ def test_an_image_run_on_a_checkpoint_without_a_processor_is_refused(tmp_path):
 
 @pytest.mark.parametrize("vlm_run", [False, True], ids=["text-run", "image-run"])
 def test_a_shipped_processor_is_the_processing_class_of_every_run(tmp_path, vlm_run):
-    """A text run keeps it too: the export saves through it, and a served multimodal class builds
-    its processor from the saved config at startup."""
+    """A served multimodal class builds its processor from the saved config at startup."""
     path = _step3p7_checkpoint(tmp_path, with_processor=True)
 
     _model, processing_class, tokenizer, _ = _load(path, vlm_run=vlm_run)
@@ -123,8 +114,8 @@ def test_a_hub_404_reads_as_no_processor_config(monkeypatch):
 
 
 def test_an_unreachable_hub_is_not_read_as_no_processor_config(monkeypatch):
-    """Online, reading an unanswered probe as "none shipped" would silently drop a shipped processor
-    from every export of the run. Offline, the cache stands for the checkpoint."""
+    """Online, an unanswered probe read as none shipped would drop the processor from every export. Offline, the
+    cache stands for the checkpoint."""
     _hub_answers(monkeypatch, LocalEntryNotFoundError("unreachable, not cached"))
     monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
     with pytest.raises(LocalEntryNotFoundError):
@@ -135,15 +126,14 @@ def test_an_unreachable_hub_is_not_read_as_no_processor_config(monkeypatch):
 
 
 def test_a_video_processor_config_alone_counts_as_a_shipped_processor(tmp_path):
-    """The probe reads the processor files the merge tools copy, the video processor's included."""
+    """The probe reads the processor files the merge tools copy."""
     assert not model_setup._ships_processor_config(str(tmp_path), None, local_files_only=False)
     (tmp_path / "video_preprocessor_config.json").write_text("{}")
     assert model_setup._ships_processor_config(str(tmp_path), None, local_files_only=False)
 
 
 def test_a_follower_reads_a_cache_miss_as_no_processor_config(monkeypatch):
-    """A follower reads only the cache its scope's main rank filled, where a file the Hub lacks is a miss:
-    online too, the cache then stands for the checkpoint, and the follower asks the Hub nothing."""
+    """A follower reads only its main rank's cache, and asks the Hub nothing."""
     asked = []
 
     def download(repo_id, filename, **kwargs):
@@ -158,7 +148,7 @@ def test_a_follower_reads_a_cache_miss_as_no_processor_config(monkeypatch):
 
 
 def test_the_resolved_tokenizer_lands_on_whichever_class_the_run_loaded(tmp_path):
-    """Read off the object: a multimodal checkpoint's text run can hold a bare tokenizer."""
+    """A multimodal checkpoint's text run can hold a bare tokenizer."""
     loaded, resolved = word_level_tokenizer(_TOKENIZER_WORDS), word_level_tokenizer(_TOKENIZER_WORDS)
     assert install_resolved_tokenizer(loaded, resolved) is resolved
 
@@ -168,8 +158,7 @@ def test_the_resolved_tokenizer_lands_on_whichever_class_the_run_loaded(tmp_path
 
 
 def test_a_text_run_resolves_the_step3p7_hub_release_natively():
-    """The shipped recipe's own checkpoint, config files only: tokenizer, native config and native
-    composite class, built on the meta device."""
+    """The shipped recipe's own checkpoint, config files only, built on the meta device."""
     revision = PINNED_REVISIONS[STEP3P7_FLASH]
     config = load_cached_config(STEP3P7_FLASH, revision=revision)
     load_cached_tokenizer(STEP3P7_FLASH, revision=revision)

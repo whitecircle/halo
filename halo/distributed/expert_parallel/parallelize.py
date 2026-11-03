@@ -15,25 +15,19 @@ logger = logging.getLogger(__name__)
 
 
 def ep_claimed_blocks(model: nn.Module) -> list[tuple[str, nn.Module]]:
-    """``(path, block)`` for every MoE block :func:`apply_ep_layers` wraps, on a model not yet wrapped: the
-    modules whose parameters become EP parameters."""
+    """``(path, block)`` for every MoE block :func:`apply_ep_layers` wraps, on a model not yet wrapped."""
     return [(path, module) for path, module in model.named_modules() if type(module).__name__ in MOE_LAYER_MAP]
 
 
 def apply_ep_layers(model: nn.Module, ep_config: EPConfig, weights_already_sharded: bool = False) -> nn.Module:
-    """Replace every claimed MoE block of ``model`` with its family's EP layer, in place.
-
-    ``weights_already_sharded``: the expert tensors already hold this rank's expert range (the lazy loader), so
-    each layer adopts them instead of slicing the full tensors.
-    """
+    """Replace every claimed MoE block of ``model`` with its family's EP layer, in place. ``weights_already_sharded``:
+    the expert tensors already hold this rank's range (the lazy loader), so each layer adopts them."""
     expert_tp_info = f", expert_tp_size={ep_config.expert_tp_size}" if ep_config.expert_tp_size > 1 else ""
     logger.info(f"Patching model for EP with DeepEP (ep_size={ep_config.ep_size}{expert_tp_info})")
 
     def build(path: str, block: nn.Module, layer_cls: type[EPMoELayerBase]) -> nn.Module:
-        # recurse=True: only Gemma4 registers the expert tensors on the mapped class itself. Every
-        # other family maps the MoE block, whose experts hang off a child module, so a shallow scan
-        # would see nothing and pass on the quantized checkpoints this check exists to reject
-        # (gpt-oss MXFP4 included).
+        # recurse=True: only Gemma4 registers the expert tensors on the mapped class. Elsewhere they hang off a child
+        # module, so a shallow scan would pass the quantized checkpoints this rejects.
         non_float = [n for n, p in block.named_parameters(recurse=True) if not p.is_floating_point()]
         if non_float:
             raise ValueError(
@@ -42,9 +36,7 @@ def apply_ep_layers(model: nn.Module, ep_config: EPConfig, weights_already_shard
                 f"quantized model (e.g. MXFP4 gpt-oss). Load a BF16-dequantized checkpoint "
                 f"(e.g. 'unsloth/gpt-oss-20b-BF16' or a local BF16 export) instead."
             )
-        # Detect once, off the first matched block: ``finalize_expert_assignment`` sets
-        # ``num_experts`` or raises, so a set count means already finalized — the spelling both lazy
-        # loaders use.
+        # Detect once, off the first matched block; a set ``num_experts`` means already finalized.
         if ep_config.num_experts is None:
             ep_config.finalize_expert_assignment(layer_cls.detect_num_experts(block))
         if is_global_main_process():

@@ -1,8 +1,5 @@
-"""Streaming fp8 to bf16 conversion of a released checkpoint, and the per-release :class:`DequantRules`: the
-block-wise grid of GLM-5 (:func:`block_fp8_rules`) and the static per-matrix scales of Mistral 3/4
-(:func:`static_fp8_rules`). The source is walked shard by shard, so a multi-hundred-GB release converts in a
-bounded working set.
-"""
+"""Streaming fp8 to bf16 conversion of a released checkpoint, and the per-release :class:`DequantRules`: GLM-5's
+block-wise grid and Mistral 3/4's static per-matrix scales."""
 
 import logging
 import math
@@ -35,8 +32,7 @@ from halo.checkpoint.writing import StreamingShardWriter, cast_to_save_dtype
 
 logger = logging.getLogger(__name__)
 
-# The per-weight dequant scale, matched exactly: GLM-5 also stores hyper-connection tensors named
-# ``hc_attn_scale`` / ``hc_ffn_scale``, real weights that a looser "scale" match would drop.
+# Matched exactly: GLM-5 also stores real weights named ``hc_attn_scale`` / ``hc_ffn_scale`` a looser match would drop.
 _FP8_SCALE_SUFFIX = "_scale_inv"
 # Mistral's quant sidecars, matched exactly: the per-weight dequant scale and the static activation scales.
 _STATIC_SIDECAR_SUFFIXES = (_FP8_SCALE_SUFFIX, "_activation_scale", ".activation_scale")
@@ -44,8 +40,7 @@ _STATIC_SIDECAR_SUFFIXES = (_FP8_SCALE_SUFFIX, "_activation_scale", ".activation
 
 @dataclass(frozen=True)
 class DequantRules:
-    """One fp8 release's dequantization rules: scale spelling and layouts, the dequantization, and the
-    size of an unquantized tensor for the disk preflight."""
+    """One fp8 release's rules: scale spelling and layouts, the dequantization, an unquantized tensor's size."""
 
     scale_suffix: str
     is_sidecar: Callable[[str], bool]
@@ -55,8 +50,7 @@ class DequantRules:
 
 
 def _preflight_dequant_shards(source: str, output_dir: str, *, tool: str, rules: DequantRules) -> int:
-    """Header-only validation of every shard before anything is written, so a structural fault fails
-    here rather than hours in; returns the output byte count."""
+    """Validate every shard's headers before any write, so a fault fails here, not hours in; returns output bytes."""
     scale_suffix = rules.scale_suffix
     output_bytes = 0
     for shard, reader in iter_checkpoint_shards(source):
@@ -82,8 +76,7 @@ def _preflight_dequant_shards(source: str, output_dir: str, *, tool: str, rules:
 def _stream_dequantized_checkpoint(
     input_shards: list[str], output_dir: str, *, rules: DequantRules, max_shard_size: str
 ) -> int:
-    """Stream every weight of ``input_shards`` through ``rules.convert`` into a new HF-standard checkpoint;
-    returns the bytes written. Keys go in sorted order, so reruns lay the output out identically."""
+    """Stream every weight through ``rules.convert`` into a new HF checkpoint; sorted keys keep reruns identical."""
     os.makedirs(output_dir, exist_ok=False)
     with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:
         for index, shard_path in enumerate(input_shards, start=1):
@@ -103,8 +96,7 @@ def _stream_dequantized_checkpoint(
 
 
 def _copy_dequantized_assets(source: str, output_dir: str) -> None:
-    """Carry the non-weight files across and drop the ``quantization_config`` the bf16 weights no longer
-    answer to."""
+    """Carry the non-weight files across and drop the ``quantization_config`` the bf16 weights no longer answer to."""
     copy_checkpoint_aux_files(source, output_dir)
     config = read_checkpoint_config(output_dir)
     config.pop("quantization_config", None)
@@ -121,8 +113,7 @@ def run_dequant_conversion(
     revision: str | None = None,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
 ) -> None:
-    """Stream an fp8 release into its bf16 checkpoint; ``rules`` is called with the resolved source, so
-    rules read off its own config come from there."""
+    """Stream an fp8 release into its bf16 checkpoint; ``rules`` is called with the resolved source."""
     source = resolve_checkpoint_source(model_id, revision)
     destination = os.path.abspath(output_dir)
 
@@ -172,19 +163,15 @@ def dequantize_block_fp8(
             f"{name}: scale grid {tuple(scale_inv.shape)} does not match "
             f"ceil({rows}/{block_rows}) x ceil({cols}/{block_cols}) = {grid}"
         )
-    # Expand then crop, so a tail block short of the block size (a non-multiple dimension) still
-    # gets its own scale entry.
+    # Expand then crop, so a tail block short of the block size still gets its own scale entry.
     scales = scale_inv.float().repeat_interleave(block_rows, dim=0)[:rows]
     scales = scales.repeat_interleave(block_cols, dim=1)[:, :cols]
     return (weight.float() * scales).to(torch.bfloat16)
 
 
 def block_fp8_rules(source: str) -> DequantRules:
-    """This release's rules: block-wise fp8, with the grid the source's own config declares.
-
-    A 2-D fp8 weight's scale grid must be ``ceil(rows/block) x ceil(cols/block)``; everything else
-    passes through at its stored size.
-    """
+    """Block-wise fp8 with the grid the source's config declares; a 2-D weight's grid must be
+    ``ceil(rows/block) x ceil(cols/block)``."""
     block_shape = _read_block_shape(source)
     logger.info("FP8 block grid from %s/config.json: %dx%d", source, *block_shape)
 
@@ -235,11 +222,7 @@ def _convert_static_fp8(name: str, tensor: torch.Tensor, scale: torch.Tensor | N
 
 
 def static_fp8_rules(_source: str) -> DequantRules:
-    """This release's rules: per-matrix (or per-expert) static scales, no block grid.
-
-    The accepted scale layouts are :func:`_scale_layout_ok`'s; every unquantized float lands as bf16,
-    so the disk preflight sizes it that way, and every other tensor at its stored width.
-    """
+    """Per-matrix or per-expert static scales; unquantized floats land as bf16, so the preflight sizes them so."""
 
     def validate_scale(name: str, shape: tuple[int, ...], scale_shape: tuple[int, ...]) -> None:
         if not _scale_layout_ok(shape, scale_shape):

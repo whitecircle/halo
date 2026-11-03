@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The divergence registry, the gold-token gathers, the token means and the SDPG beta schedule
-(``halo/trainers/distillation/divergences.py``).
-
-Pure tensor math, so the assertions are closed-form values, symmetry and bound properties, the
-temperature convention and the reduction semantics. The fp32 evaluation and the ``-inf`` handling
-live in ``test_distillation_loss_precision.py`` and ``test_distillation_softened_log_probs.py``.
-
-Run: ``pytest tests/cpu/trainers/test_distillation_divergences.py``.
-"""
+"""Divergence registry, gold-token gathers, token means, SDPG beta schedule.
+fp32 is in ``test_distillation_loss_precision.py``, ``-inf`` in ``test_distillation_softened_log_probs.py``."""
 
 import inspect
 import math
@@ -39,11 +32,9 @@ LOGITS_A = torch.randn(BS, SEQ, VOCAB)
 LOGITS_B = torch.randn(BS, SEQ, VOCAB)
 KL_FAMILY = (reverse_kl_loss, forward_kl_loss, unnormalized_kl_loss)
 
-# Temperatures the gradient-magnitude sweep spans (an 8x range: without the T**2 factor a softened
-# divergence's gradient falls 64x across it).
+# An 8x range: without the T**2 factor a softened divergence's gradient falls 64x across it.
 _TEMPERATURES = (1.0, 2.0, 4.0, 8.0)
-# Small logits — the near-uniform-softmax regime Hinton's T**2 argument is derived in, and the
-# converged regime distillation actually ends in.
+# The near-uniform-softmax regime Hinton's T**2 argument is derived in, and where distillation converges.
 _SMALL_LOGIT_SIGMA = 0.02
 # Largest gradient-norm spread across _TEMPERATURES that still counts as invariant.
 _INVARIANCE_SPREAD = 1.01
@@ -65,7 +56,7 @@ def test_the_kl_family_stops_the_teacher_gradient(loss_fn):
 
 
 def test_forward_kl_closed_form_and_direction():
-    """``KL(teacher || student)``: the reversed argument order gives a different number."""
+    """``KL(teacher || student)``."""
     student = torch.tensor([[[2.0, 0.0]]])
     teacher = torch.tensor([[[0.0, 0.0]]])
     q, p = softmax(teacher[0, 0], dim=-1), softmax(student[0, 0], dim=-1)
@@ -107,7 +98,7 @@ def test_cosine_distance_values_and_scale_invariance():
 
 
 def test_jensen_shannon_is_symmetric_zero_at_identity_and_saturates_at_ln2():
-    """Saturates at ln 2; the reversed-argument form ``KL(M||P)+KL(M||Q)`` is unbounded and fails here."""
+    """The reversed-argument form ``KL(M||P)+KL(M||Q)`` is unbounded and fails here."""
     torch.testing.assert_close(
         jensen_shannon_divergence(LOGITS_A, LOGITS_B, 1.0).sum(-1),
         jensen_shannon_divergence(LOGITS_B, LOGITS_A, 1.0).sum(-1),
@@ -122,7 +113,6 @@ def _gold(logits, label, temperature=1.0):
 
 
 def _slim_reference(student, teacher, labels, temperature):
-    """SLIM spelled out per token: ``w * T**2 * sum_v q_T (log q_T - log p_T)``, ``w = 1 - exp(-q[y]/p[y])``."""
     expected = []
     for position, label in enumerate(labels[0].tolist()):
         s, t = student[0, position], teacher[0, position]
@@ -134,8 +124,7 @@ def _slim_reference(student, teacher, labels, temperature):
 
 @pytest.mark.parametrize("temperature", [1.0, 2.5])
 def test_slim_closed_form_on_a_tiny_vocabulary(temperature):
-    """The whole vocabulary's KL, not the gold column alone, weighted by teacher over student
-    confidence on the gold token at ``T = 1`` (an inverted ratio is a different number)."""
+    """The whole vocabulary's KL, weighted by teacher over student gold confidence at ``T = 1``."""
     student = torch.tensor([[[1.0, -0.5, 0.3], [0.2, 0.9, -1.1]]])
     teacher = torch.tensor([[[-0.4, 1.2, 0.1], [0.7, -0.3, 0.5]]])
     labels = torch.tensor([[2, 0]])
@@ -175,8 +164,7 @@ def test_hard_labels_coefficient_is_a_detached_weight():
 
 
 def test_masked_token_mean_weights_each_sample_by_its_own_token_mean():
-    """Distinct per-token values and a ragged mask, so an ignored mask or ignored weights lands on a
-    different number: means ``1.5`` and ``25``, weighted by ``[2, 0.5]`` → ``7.75``."""
+    """Means ``1.5`` and ``25`` weighted by ``[2, 0.5]`` give ``7.75``; an ignored mask or weights lands elsewhere."""
     loss = torch.tensor([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]])
     mask = torch.tensor([[1, 1, 0], [0, 1, 1]])
     assert masked_token_mean(loss, mask, torch.tensor([2.0, 0.5])).item() == pytest.approx(7.75)
@@ -188,7 +176,6 @@ def test_masked_token_mean_of_an_empty_mask_is_zero_not_nan():
 
 
 def _gradient_norms_across_temperature(loss_fn, seed=0):
-    """Student-gradient norm of ``loss_fn.sum()`` at each of :data:`_TEMPERATURES`."""
     generator = torch.Generator().manual_seed(seed)
     teacher = torch.randn(BS, SEQ, VOCAB * 2, generator=generator) * _SMALL_LOGIT_SIGMA
     base_student = teacher + torch.randn(teacher.shape, generator=generator) * _SMALL_LOGIT_SIGMA * 0.5
@@ -207,9 +194,7 @@ SOFTENED = sorted(name for name, fn in DIVERGENCES.items() if "temperature" in i
 
 @pytest.mark.parametrize("name", SOFTENED)
 def test_every_softened_divergence_holds_its_gradient_magnitude_across_temperature(name):
-    """The point of the ``T**2`` factor: softening divides the logits by ``T``, shrinking a divergence
-    and its gradient as ``1/T**2``; multiplying back holds the distillation term's pull — and its
-    weight against the hard-label term — fixed as the temperature moves."""
+    """Softening shrinks a divergence's gradient as ``1/T**2``; ``T**2`` holds its pull against the hard-label term."""
     norms = _gradient_norms_across_temperature(DIVERGENCES[name])
     spread = max(norms) / min(norms)
     assert spread < _INVARIANCE_SPREAD, (

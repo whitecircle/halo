@@ -1,5 +1,4 @@
-"""The DeepEP token dispatcher an EP MoE layer routes through, its dispatch/combine autograd functions and their
-checkpoint-recompute replay."""
+"""The DeepEP token dispatcher, its dispatch/combine autograd functions and their checkpoint-recompute replay."""
 
 from __future__ import annotations
 
@@ -26,21 +25,19 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# The dispatchers holding a claim, which teardown drops. Weak, so its contents follow each rank's garbage
-# collector: it never decides which buffers are freed or in what order.
+# Dispatchers holding a claim, which teardown drops. Weak, so it follows each rank's garbage collector and never
+# decides which buffers are freed or in what order.
 _live_dispatchers: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
 
 def _deterministic_dispatch() -> bool:
-    """Whether received tokens must land in a fixed order: torch's deterministic-algorithms mode is on,
-    which HF's ``Trainer.__init__`` turns on for ``full_determinism``."""
+    """HF's ``Trainer.__init__`` turns torch's deterministic mode on for ``full_determinism``."""
     return torch.are_deterministic_algorithms_enabled()
 
 
 def _release_uninitialized_memory_fill() -> None:
-    """Switch off ``torch.utils.deterministic.fill_uninitialized_memory`` under deterministic mode, for the
-    process: DeepEP asserts the two are not on together (the fill races its communication-stream allocations).
-    """
+    """Switch off ``fill_uninitialized_memory`` under deterministic mode, for the process: DeepEP asserts the two are
+    not on together (the fill races its communication-stream allocations)."""
     if torch.are_deterministic_algorithms_enabled() and torch.utils.deterministic.fill_uninitialized_memory:
         torch.utils.deterministic.fill_uninitialized_memory = False
         if is_global_main_process():
@@ -70,8 +67,7 @@ def _combine_backward(ctx, grad_combined_x: torch.Tensor) -> torch.Tensor:
 
 
 class DeepEPDispatchFunction(torch.autograd.Function):
-    """DeepEP dispatch; its backward is a combine. The handle and the host-side receive counts pass through
-    as non-tensor outputs."""
+    """DeepEP dispatch; its backward is a combine. The handle and receive counts pass through as non-tensor outputs."""
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, dispatcher):
@@ -153,11 +149,8 @@ class ReplayCombineFunction(torch.autograd.Function):
 
 
 class DeepEPDispatcher:
-    """One MoE layer's token dispatcher: its EP topology, and the transport backend it claims a buffer through.
-
-    At ``ep_size <= 1`` every expert is local (and DeepEP cannot run): dispatch and combine are the
-    identity and no backend is built.
-    """
+    """One MoE layer's token dispatcher. At ``ep_size <= 1`` every expert is local (and DeepEP cannot run), so dispatch
+    and combine are the identity and no backend is built."""
 
     def __init__(self, ep_config: EPConfig, num_experts: int, hidden_dim: int):
         self.ep_config = ep_config
@@ -169,11 +162,9 @@ class DeepEPDispatcher:
         self.spans_domains = ep_config.spans_domains
         self._noop = self.ep_size <= 1
         self._live = False
-        # Public: the autograd functions drive the backend's ops directly.
         self.backend: DeepEPBackend | None = None
 
         if self._noop:
-            # Main process only: every MoE layer builds its own dispatcher.
             if is_global_main_process():
                 logger.info(f"DeepEPDispatcher (noop): all experts local, ep_size={self.ep_size}")
             return
@@ -185,14 +176,10 @@ class DeepEPDispatcher:
         self.backend = build_ep_backend(self, ep_config.ep_buffer_backend)
 
     def dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, *, owner: nn.Module):
-        """Dispatch tokens to their experts' ranks → ``(recv_x, recv_topk_idx, recv_topk_weights, handle,
-        recv_counts)``, ``recv_counts`` the backend's host-side per-local-expert counts; the identity in no-op
-        mode, where the indices are local and there are no counts.
-
-        Inside a recompute scope the original pass caches its results under ``owner`` and the recompute replays
-        them: a second DeepEP dispatch invalidates the handle the original backward holds and silently corrupts
-        every gradient.
-        """
+        """Dispatch tokens to their experts' ranks →
+        ``(recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts)``; the identity in no-op mode. In a recompute
+        scope the original pass caches its results under ``owner`` and the recompute replays them, since a second
+        DeepEP dispatch invalidates the original backward's handle and corrupts every gradient."""
         if self._noop:
             return x, topk_idx, topk_weights, None, None
         scope = active_recompute_scope()
@@ -233,7 +220,7 @@ class DeepEPDispatcher:
         return recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts
 
     def _ensure_buffer(self, num_tokens: int, num_topk: int) -> None:
-        """COLLECTIVE over the EP group. Build or grow the buffer to hold ``num_tokens`` per rank."""
+        """COLLECTIVE over the EP group."""
         _release_uninitialized_memory_fill()
         self.backend.ensure(num_tokens, num_topk, deterministic=_deterministic_dispatch())
         if not self._live:
@@ -258,11 +245,8 @@ class DeepEPDispatcher:
         return combined
 
     def destroy(self, *, free_buffer: bool = True) -> None:
-        """Drop this layer's claim on its buffer (idempotent); a later dispatch claims one again.
-
-        With ``free_buffer``, COLLECTIVE over the EP group: the buffer is freed once no layer on any rank
-        of the group claims it, so call it only from a rank-synchronized point.
-        """
+        """Drop this layer's claim (idempotent). With ``free_buffer``, COLLECTIVE over the EP group: freed once no
+        layer on any rank claims it, so call only from a rank-synchronized point."""
         if not self._live:
             return
         self._live = False  # first, against re-entry
@@ -281,19 +265,15 @@ class DeepEPDispatcher:
 
 
 def destroy_all_dispatchers() -> None:
-    """COLLECTIVE over the world. Free every DeepEP buffer; call before ``dist.destroy_process_group()``, as
-    Gin frees through the group communicator (after it, ``cudaErrorIllegalAddress``).
-
-    The unconditional leading barrier aligns ranks after rank-asymmetric work (a gathered save, an eval)
-    under the process-group timeout rather than the device-side ``HALO_DEEPEP_GPU_TIMEOUT_SECONDS`` spin
-    of ``buffer.destroy()``; a pipeline stage without MoE layers enters it too. The live dispatchers only
-    drop their claims and every arena is then freed in build order: which dispatchers are live depends on
-    each rank's garbage collector, so a free on the last claim would spin ranks in different barriers.
-    """
+    """COLLECTIVE over the world. Free every DeepEP buffer; call before ``dist.destroy_process_group()``, as Gin frees
+    through the group communicator (after it, ``cudaErrorIllegalAddress``). The leading barrier aligns ranks after
+    rank-asymmetric work under the process-group timeout, instead of the device-side
+    ``HALO_DEEPEP_GPU_TIMEOUT_SECONDS`` spin of ``buffer.destroy()``; a MoE-less pipeline stage enters it too.
+    Dispatchers only drop claims and arenas free in build order, since live dispatchers depend on each rank's GC and a
+    free on the last claim would spin ranks in different barriers."""
     barrier()
     for dispatcher in list(_live_dispatchers.values()):
         dispatcher.destroy(free_buffer=False)
     free_all_ep_buffers()
-    # The capacity entries hold their EP groups; kept past teardown they would pin every communicator
-    # the job ever built.
+    # The capacity entries hold their EP groups, which would pin every communicator past teardown.
     capacity_scope.clear()

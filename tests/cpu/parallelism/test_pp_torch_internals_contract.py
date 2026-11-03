@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """The pipeline runner against real ``torch.distributed.pipelining``, on one CPU rank.
-
-The runner steers private FSDP2 state, schedule and stage members, probes them at construction, and
-calls the schedule's private split, init and microbatch-step paths directly. These tests build the
-real engine over a ``fully_shard`` stage root on a single-rank gloo group, as the trainer wraps it:
-construction must fail naming any member torch lacks, and a one-stage chain's step, loss-only eval and
-forward-only pass must match the unsplit model. A torch upgrade that renames a member or changes a
-private signature fails here, before a PP GPU run.
-
-Run: python tests/cpu/parallelism/test_pp_torch_internals_contract.py
-"""
+A torch upgrade renaming a private member or changing a signature fails here, before a PP GPU run."""
 
 import copy
 from types import SimpleNamespace
@@ -38,7 +29,7 @@ SCHEDULES = sorted(runner._SCHEDULES)
 
 
 class _TinyCausalLM(nn.Module):
-    # The one stage member the runner reads: a one-stage chain hands no token ids beside its activation.
+    # A one-stage chain hands no token ids beside its activation.
     token_ids_kwarg = None
 
     def __init__(self):
@@ -61,7 +52,6 @@ def single_rank_gloo(tmp_path):
 
 @pytest.fixture
 def models(single_rank_gloo):
-    """``(stage_root, reference)``: the stage root under ``fully_shard`` and an unsharded copy of it."""
     torch.manual_seed(0)
     stage_root = _TinyCausalLM()
     reference = copy.deepcopy(stage_root)
@@ -70,11 +60,8 @@ def models(single_rank_gloo):
 
 
 def _runner(stage_root: nn.Module, schedule: str, loss: object = None) -> runner.PipelineRunner:
-    """The engine for a one-stage chain.
-
-    A ``ParallelismConfig`` refuses a pipeline schedule at ``pp_size=1``, so a namespace carries the
-    five fields the runner reads.
-    """
+    """``ParallelismConfig`` refuses a pipeline schedule at ``pp_size=1``, so a namespace carries the five fields
+    read."""
     config = SimpleNamespace(pp_rank=0, pp_size=1, pp_schedule=schedule, is_first_pp_stage=True, is_last_pp_stage=True)
     return runner.PipelineRunner(
         stage_root, config, dist.group.WORLD, torch.device("cpu"), MICROBATCHES, TokenLoss() if loss is None else loss
@@ -82,7 +69,7 @@ def _runner(stage_root: nn.Module, schedule: str, loss: object = None) -> runner
 
 
 def _batch() -> tuple[torch.Tensor, torch.Tensor]:
-    """Rows with unequal target counts, so normalizing per microbatch would change the loss."""
+    """Unequal target counts, so normalizing per microbatch would change the loss."""
     input_ids = torch.randint(VOCAB, (ROWS, 7), generator=torch.Generator().manual_seed(1))
     labels = input_ids.clone()
     for row in range(ROWS):
@@ -97,7 +84,7 @@ def _reference_loss_and_grads(reference: nn.Module, input_ids: torch.Tensor, lab
 
 
 def _assert_grads_match(stage_root: nn.Module, expected_grads: dict[str, torch.Tensor]) -> None:
-    # An eval drive leaves the unsharded params registered; the reduced gradients sit on the shards.
+    # An eval drive leaves unsharded params registered; reduced gradients sit on the shards.
     reshard_fsdp2_modules(stage_root)
     for name, param in stage_root.named_parameters():
         assert param.grad is not None, f"{name} received no reduced gradient"
@@ -109,7 +96,7 @@ def test_the_runner_builds_the_configured_schedule_without_grad_scaling(schedule
     engine = _runner(models[0], schedule)
 
     assert type(engine.schedule) is schedule_cls
-    # The loss already divides by the step's token count; torch's scaling would divide again.
+    # The loss already divides by the step's token count.
     assert engine.schedule.scale_grads is False
 
 
@@ -131,8 +118,7 @@ def test_every_configurable_schedule_has_an_engine():
     "loss", [causal_lm_token_loss, TokenLoss, FusedHeadLoss, "fused"], ids=["bare-fn", "class", "fused-class", "name"]
 )
 def test_construction_refuses_a_loss_that_is_not_a_loss_value(loss, models):
-    """Only a TokenLoss or FusedHeadLoss instance says which form every stage runs; a bare token
-    loss function or a class would otherwise reach the schedule unexamined."""
+    """Only an instance says which form every stage runs."""
     with pytest.raises(TypeError, match=r"TokenLoss\(fn\)"):
         _runner(models[0], "1f1b", loss)
 
@@ -145,11 +131,7 @@ def test_construction_refuses_a_stage_root_outside_fully_shard(single_rank_gloo)
 @pytest.mark.parametrize("eval_first", [False, True], ids=["step_first", "eval_first"])
 @pytest.mark.parametrize("schedule", SCHEDULES)
 def test_a_one_stage_chain_matches_the_unsplit_model(schedule, eval_first, models):
-    """Step, loss-only eval and forward-only agree with the unsplit model in either order.
-
-    Eval first initializes the stage from a drive without backward and must leave the following step
-    training; step first must leave the eval drives scoring the same model.
-    """
+    """Eval first must leave the following step training; step first must leave eval scoring the same model."""
     stage_root, reference = models
     input_ids, labels = _batch()
     expected_loss, expected_grads = _reference_loss_and_grads(reference, input_ids, labels)
@@ -170,7 +152,7 @@ def test_a_one_stage_chain_matches_the_unsplit_model(schedule, eval_first, model
 
 @pytest.mark.parametrize("schedule", SCHEDULES)
 def test_dict_targets_reach_the_loss_with_their_own_rows(schedule, models):
-    """Per-example side tensors go through the schedule's own microbatch step beside their rows."""
+    """Per-example side tensors go through the schedule's own microbatch step."""
     stage_root, reference = models
     input_ids, labels = _batch()
     expected_loss, expected_grads = _reference_loss_and_grads(reference, input_ids, labels)

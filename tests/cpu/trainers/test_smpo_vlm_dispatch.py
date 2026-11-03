@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""SMPO text-vs-VLM dispatch: the DATA path follows the RUN, not the checkpoint.
-
-A text preference run on a natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6) is an ordinary
-text run — the script decides that with ``is_vlm_run`` and passes the verdict as ``is_vlm``, while
-``processing_class`` stays the processor (every saved checkpoint owes a ``processor_config.json``).
-That split is what these tests pin:
-
-* the TEXT branch must map with the resolved TOKENIZER — ``tokenize_preference_row`` calls
-  ``processing_class(text, add_special_tokens=False)`` (a processor reads the second slot as images)
-  and reads ``bos_token_id``/``eos_token_id``, which a ProcessorMixin does not carry;
-* the padding_free / CP / PP gates follow the run verdict — untripped for a text run, raised for a
-  VLM run;
-* ``is_vlm=True`` without a processor is refused at construction, not at the first collated batch;
-* a plain text run's dataset-map cache key is untouched (a moved fingerprint re-tokenizes every
-  existing run's data).
-"""
+"""SMPO text-vs-VLM dispatch: the data path follows the run, not the checkpoint.
+A text run on a multimodal checkpoint keeps the processor to save its config, but maps with the resolved tokenizer."""
 
 from functools import partial
 from types import SimpleNamespace
@@ -30,8 +16,7 @@ from halo.trainers.preference.preference_rules import reject_smpo_pp_options, re
 from halo.trainers.preference.smpo import resolve_vlm_mode
 from tests.cpu.trainers.test_smpo_vlm import EOS_ID, StubProcessor, StubTokenizer, make_features, make_trainer
 
-# Already chat-templated strings — the shape the script's text path (prepare_preference_datasets)
-# hands the trainer.
+# Already chat-templated strings, as the script's text path (prepare_preference_datasets) hands the trainer.
 TEXT_ROW = {
     "prompt": "[user] Which color [end]\n",
     "chosen": "[assistant] Red [end]\n",
@@ -40,8 +25,7 @@ TEXT_ROW = {
 
 
 class ProcessorStub(StubProcessor, ProcessorMixin):
-    """The VLM stub processor, also satisfying the ``isinstance(..., ProcessorMixin)`` contract the
-    trainer's guard checks (a real run always hands it a transformers processor)."""
+    """Also satisfies the ``isinstance(..., ProcessorMixin)`` check the trainer's guard runs."""
 
 
 def _capture_map(trainer, dataset, processing_class):
@@ -59,7 +43,6 @@ def _capture_map(trainer, dataset, processing_class):
 
 
 def test_text_run_on_multimodal_checkpoint_maps_with_the_tokenizer():
-    """The row fn gets the processor's inner tokenizer, not the processor."""
     processor = ProcessorStub(StubTokenizer())
     trainer = make_trainer(is_vlm=False)
 
@@ -70,7 +53,6 @@ def test_text_run_on_multimodal_checkpoint_maps_with_the_tokenizer():
 
 
 def test_vlm_run_maps_with_the_processor():
-    """The VLM branch maps raw rows with the processor and the VLM row fn."""
     processor = ProcessorStub(StubTokenizer())
     trainer = make_trainer(is_vlm=True)
     features = make_features()
@@ -82,7 +64,8 @@ def test_vlm_run_maps_with_the_processor():
 
 
 def test_text_run_on_multimodal_checkpoint_tokenizes_end_to_end():
-    """The real map produces text-path token ids — the processor would raise (or mis-tokenize)."""
+    """``tokenize_preference_row`` calls ``processing_class(text, add_special_tokens=False)``, and a processor reads
+    the second slot as images."""
     tokenizer = StubTokenizer()
     processor = ProcessorStub(tokenizer)
     trainer = make_trainer(is_vlm=False)
@@ -112,12 +95,7 @@ def test_text_run_on_multimodal_checkpoint_tokenizes_end_to_end():
     ],
 )
 def test_vlm_gates_follow_the_run_verdict(gate, attrs, parallelism_config, message):
-    """A VLM run raises; the same options are legal for a text run.
-
-    The text half is the point of the run verdict: gating on the checkpoint alone leaves these three
-    unreachable for text preference data on a multimodal checkpoint, which is what CP/padding_free/PP
-    recipes need.
-    """
+    """Gating on the checkpoint alone would leave these three unreachable for text data on a multimodal checkpoint."""
 
     def _run(is_vlm):
         args = {"padding_free": False, "lower_clip_percentile": None, "upper_clip_percentile": None, **attrs}
@@ -137,19 +115,13 @@ def test_is_vlm_true_requires_a_processor():
 
     assert resolve_vlm_mode(processor, True) is True
     assert resolve_vlm_mode(processor, False) is False
-    # Omitted → derived from the processing class, the contract for direct trainer users.
+    # Omitted, it derives from the processing class: the contract for direct trainer users.
     assert resolve_vlm_mode(processor, None) is True
     assert resolve_vlm_mode(tokenizer, None) is False
 
 
 def test_text_checkpoint_cache_key_unchanged():
-    """A plain text run keys its map cache off the tokenizer itself, so existing runs' data is not
-    re-tokenized.
-
-    ``processing_class`` is the tokenizer there, and it must reach ``fn_kwargs`` as that same object:
-    the fingerprint folds the object's type and identity fields, so any wrapper/copy would move the
-    key. The processor comparison shows the fingerprint really does move when the object changes.
-    """
+    """The fingerprint folds the object's type and identity fields, so a wrapper or copy would re-tokenize old data."""
     tokenizer = StubTokenizer()
     trainer = make_trainer(is_vlm=False)
 

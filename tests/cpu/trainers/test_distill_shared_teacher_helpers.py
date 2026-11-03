@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Self-distillation's construction gates, and the two primitives the distillation trainers share.
-
-1. ``DistributedSelfDistillationTrainer`` sets a weighted reference up, and only a weighted one.
-   Either term with nothing to compute it from (a weighted anchor without a reference, OPD on with a
-   collator that builds no teacher branch) raises at construction rather than dropping out of the
-   loss. The EP/TP report on the reference lives in tests/cpu/parallelism/test_reference_model_gate.py.
-2. ``privileged_teacher_pass`` and ``shifted_token_cross_entropy`` each serve two trainers; the
-   cross-entropy is pinned to an independent ``-log_softmax`` gather.
-
-Run: python tests/cpu/trainers/test_distill_shared_teacher_helpers.py
-"""
+"""Self-distillation's construction gates and the two primitives the distillation trainers share.
+The EP/TP report on the reference lives in tests/cpu/parallelism/test_reference_model_gate.py."""
 
 import types
 from unittest import mock
@@ -34,8 +25,6 @@ _TEACHER_BRANCH_COLLATOR = types.SimpleNamespace(builds_teacher_branch=True)
 def _build(
     setup_calls, ep_size=1, tp_size=1, reference_model=None, reference_kl_coef=1.0, sdpg_beta_base=0.0, collator=None
 ):
-    """Construct the trainer with only the HF/TRL machinery stubbed out, recording every reference setup."""
-
     def _init_cfg(self, kwargs, **_):
         self.parallelism_config = ParallelismConfig(world_size=8, gpus_per_node=8, ep_size=ep_size, tp_size=tp_size)
         return kwargs
@@ -74,7 +63,7 @@ def test_a_weighted_reference_is_set_up_on_every_axis(ep_size, tp_size):
 
 @pytest.mark.parametrize("reference_model", [None, nn.Linear(2, 2)], ids=["no-reference", "unused-reference"])
 def test_an_unweighted_anchor_is_never_gated(reference_model):
-    """``reference_kl_coef == 0`` never reads the reference, so the gate stays on the branch that does."""
+    """``reference_kl_coef == 0`` never reads the reference."""
     setup_calls = []
     _build(setup_calls, ep_size=8, reference_model=reference_model, reference_kl_coef=0.0)
     assert setup_calls == []
@@ -88,7 +77,7 @@ def test_a_weighted_anchor_without_a_reference_raises():
 
 @pytest.mark.parametrize("collator", [None, types.SimpleNamespace(builds_teacher_branch=False)], ids=["plain", "off"])
 def test_opd_on_needs_a_collator_that_builds_the_teacher_branch(collator):
-    """Refused at construction, on every rank alike: a batch without ``teacher_*`` keys would skip OPD."""
+    """A batch without ``teacher_*`` keys would skip OPD, so it is refused at construction on every rank."""
     with pytest.raises(ValueError, match="needs the privileged teacher branch"):
         _build([], reference_kl_coef=0.0, sdpg_beta_base=1.0, collator=collator)
 
@@ -128,7 +117,6 @@ def test_the_reference_shares_the_policy_vocab_check():
 
 
 def test_shifted_ce_is_the_negative_gold_log_prob_and_zero_where_ignored():
-    """Pinned to an independent ``-log_softmax`` gather, in fp32 from bf16 logits."""
     torch.manual_seed(0)
     logits = torch.randn(2, 4, 7).bfloat16()
     labels = torch.randint(0, 7, (2, 4))

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: Inkling's multi-document rows are refused unless the run accepts the short convolutions crossing them.
-
-Inkling's attention isolates a packed row's documents, but its four depthwise causal short convolutions per layer
-receive no segment marker (the modeling reads ``seq_idx``, its call sites forward no kwargs), so each document's
-first tokens read the previous document's last ones on every backend, invisible in the loss. The family spec names
-that mixer (``MoEFamilySpec.unmarked_sequence_mixer``), read through the multimodal wrapper too, so SFT's ``packing``
-and ``padding_free`` are refused as an unmarked linear-attention row is, and ``allow_cross_document_linear_attention``
-admits them with one warning.
-
-    python tests/cpu/models/test_inkling_packing_refusal.py
-"""
+"""Inkling's attention isolates a packed row's documents, but its depthwise causal short convolutions get no segment
+marker, so multi-document rows are refused unless ``allow_cross_document_linear_attention`` accepts the crossing."""
 
 import logging
 from unittest.mock import MagicMock
@@ -53,7 +44,7 @@ def _select(config, flag: str, *, allow: bool):
 @pytest.mark.parametrize("flag", ["packing", "padding_free"])
 @pytest.mark.parametrize("model_type", sorted(CONFIGS))
 def test_multi_document_rows_are_refused_naming_the_convolutions(model_type, flag):
-    """On every backend: a flash label is the one where nothing else refuses ``padding_free``."""
+    """A flash label, because nothing else refuses ``padding_free`` there."""
     config = CONFIGS[model_type]()
     config._attn_implementation = "flash_attention_2"
     assert config.model_type == model_type
@@ -81,8 +72,7 @@ def test_pipeline_packing_names_the_convolutions(model_type):
 
 
 def test_the_convolutions_carry_one_document_into_the_next_on_sdpa():
-    """The crossing the refusal stands for: with the attention isolated by the restarting positions, changing the
-    first document still moves the second one's hidden states."""
+    """The restarting positions isolate the attention, so the drift comes from the convolutions."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES["inkling_text"]).eval()
     model.config._attn_implementation = "sdpa"

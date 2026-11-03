@@ -1,48 +1,8 @@
 #!/usr/bin/env python
-"""
-MoE model SFT benchmark with Expert Parallelism (EP).
+"""MoE SFT benchmark under Expert Parallelism: MFU, S-MFU, achieved TFLOPS and tokens/sec.
 
-Measures Model FLOPS Utilization (MFU), Sparse MFU (S-MFU), achieved TFLOPS,
-and tokens/sec for MoE models using DistributedSFTTrainer with EfficiencyCallback
-and Expert Parallelism via DeepEP all-to-all routing.
-
-Usage:
-    # EP=2 with default model (gpt-oss-20b), seq_len=4096, 10 steps
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 4096 --steps 10
-
-    # Short sequence benchmark
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 2048 --steps 5
-
-    # Long sequence benchmark
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 16384 --steps 20 --warmup 3
-
-    # 8 GPUs with full EP
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --steps 10
-
-    # PP2 x EP4 on 8 GPUs (stage-wide dispatch group), activation checkpointing off
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 4 --pp 2 --pp_microbatches 8 \
-        --batch_size 16 --no_gc --seq 8192
-
-    # Custom model path
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --model_path /path/to/moe/model --seq 4096
-
-    # Disable Liger kernels
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 4096 --no_liger
-
-    # 8 GPUs at EP=8, then the gathered save's wall time and peak host memory
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --measure_save
-
-    # The same save at 0, 1 and 2 background write threads, checked byte-identical
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --measure_save --save_write_threads 0 1 2
+``--measure_save`` adds the gathered save's wall time and peak host memory; ``--save_write_threads 0 1 2`` also checks
+the arms byte-identical.
 """
 
 import argparse
@@ -93,17 +53,13 @@ EP_FORWARD_DELAY_MS = env_float("HALO_TEST_EP_FORWARD_DELAY_MS", 0.0)
 
 
 def _stall_before_forward(*_) -> None:
-    """The negative control's delay, on the GPU timeline: a host sleep alone hides behind queued kernels wherever
-    nothing in the forward waits on the host, as at EP1."""
+    """On the GPU timeline: a host sleep alone hides behind queued kernels wherever the forward never waits on the
+    host."""
     torch.cuda.synchronize()
     time.sleep(EP_FORWARD_DELAY_MS / 1000)
 
 
-# Main Benchmark
-
-
 def _liger_config_pairs(spec: str) -> dict[str, bool]:
-    """Parse ``key=true,key=false`` into the liger_kernel_config dict the loader takes."""
     config = {}
     for pair in spec.split(","):
         key, _, value = pair.partition("=")
@@ -284,11 +240,9 @@ def main() -> int:
     if args.save_write_threads and not args.measure_save:
         parser.error("--save_write_threads needs --measure_save")
 
-    # --- Distributed setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
 
-    # --- Resolve model config ---
     model_cfg = MODEL_CONFIGS[args.model]
     model_name = args.model_path or model_cfg["hf_name"]
     full_params = model_cfg["full_params"]
@@ -297,11 +251,8 @@ def main() -> int:
     revision = model_cfg.get("revision")
     ep_size = args.ep
 
-    # --- Resolve LoRA targeting ---
-    # lora_r>0 enables LoRA. Default targets attention only; --lora_experts targets only the MoE
-    # expert FFNs via native grouped EP-LoRA; --lora_all_linear targets both. Expert adapters are
-    # built inside each EP layer at construction (set on parallelism_config below, before load);
-    # attention adapters go through the standard PEFT path.
+    # lora_r>0 enables LoRA. Default targets attention only; --lora_experts targets only the expert FFNs via native
+    # grouped EP-LoRA; --lora_all_linear targets both. Expert adapters are built in each EP layer at construction.
     lora_r = args.lora_r
     lora_on = lora_r > 0
     want_experts = lora_on and (args.lora_experts or args.lora_all_linear)
@@ -329,26 +280,21 @@ def main() -> int:
         dist.destroy_process_group()
         return 1
 
-    # Isolate HF cache
     output_dir, cache_dir = setup_cache_dirs("bench_ep", rank)
 
     try:
-        # --- Ensure model is downloaded ---
         log("\n[1/5] Ensuring model is downloaded...")
         ensure_model_downloaded(model_name, rank, revision=revision)
 
-        # --- Load tokenizer ---
         log("\n[2/5] Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, revision=revision)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # --- Create dataset ---
         log(f"\n[3/5] Creating dummy dataset ({args.num_samples} samples, seq={args.seq})...")
         train_dataset = create_benchmark_dataset(tokenizer, args.seq, args.num_samples)
         log(f"  Dataset created: {len(train_dataset)} samples")
 
-        # --- Load model with EP ---
         log(f"\n[4/5] Loading model with EP={ep_size}...")
         log(f"  GPU memory before load: {gpu_mem_gb():.1f}GB")
 
@@ -372,7 +318,7 @@ def main() -> int:
             fsdp_reshard_after_forward=args.zero3,
             lowp=LowpSpec(precision=args.lowp_precision),
         )
-        # Native grouped EP-LoRA on the expert FFNs — each EP layer reads this at construction.
+        # Each EP layer reads this at construction.
         if want_experts:
             parallelism_config.expert_lora = ExpertLoraSpec(
                 r=lora_r,
@@ -404,8 +350,7 @@ def main() -> int:
         if args.liger_config:
             liger_kernel_config = {**(liger_kernel_config or {}), **args.liger_config}
 
-        # True fp32 training (--fp32): fp32 params + no autocast. FA4/FA3 are bf16/fp16-only,
-        # so fall back to SDPA (which supports fp32) unless the user pinned an attn impl.
+        # FA4/FA3 are bf16/fp16-only, so --fp32 falls back to SDPA unless the user pinned an attn impl.
         attn_impl = args.attn_implementation
         if args.fp32 and attn_impl is None:
             attn_impl = "sdpa"
@@ -434,10 +379,8 @@ def main() -> int:
             for _, layer in named_ep_layers(model):
                 layer._perf = time_phase
 
-        # --- Adapter run: freeze base, then restore the trainable adapters ---
-        # Expert adapters are plain grouped parameters built at load; PEFT (attention) is applied
-        # by the trainer below. Freeze everything, re-enable the native expert adapters here, and
-        # re-enable them once more after trainer init (get_peft_model re-freezes the base).
+        # Expert adapters are plain parameters built at load; the trainer applies PEFT below. get_peft_model re-freezes
+        # the base, so they are re-enabled again after trainer init.
         peft_config = None
         if want_attn:
             peft_config = LoraConfig(
@@ -462,19 +405,14 @@ def main() -> int:
             if want_experts:
                 _reenable_expert_lora(model)
 
-        # --- Setup EfficiencyCallback ---
-        # The callback reads every divisor off the run's ParallelismConfig: under CP the Trainer counts
-        # the full (pre-split) sequence, so the rank's own tokens divide by cp_size. Matches the
-        # production callback-wiring path.
+        # Under CP the Trainer counts the full sequence, so the rank's own tokens divide by cp_size.
         efficiency_cb = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,
             num_full_model_params=full_params,
         )
 
-        # Global batch arithmetic (printed so baseline-vs-PP comparisons can assert equal
-        # tokens/step): dp = world / (pp x max(tp, cp, etp)); EP is orthogonal to DP and a whole
-        # pipeline chain is one stream.
+        # dp = world / (pp x max(tp, cp, etp)); EP is orthogonal to DP and a whole pipeline chain is one stream.
         dp_size = parallelism_config.data_parallel_size
         global_seqs = dp_size * args.batch_size * args.grad_accum
         log(
@@ -482,7 +420,6 @@ def main() -> int:
             f"= {global_seqs} seqs/step ({global_seqs * args.seq:,} tokens/step)"
         )
 
-        # --- SFT Config ---
         sft_config = SFTConfig(
             output_dir=output_dir,
             max_steps=args.steps,
@@ -492,11 +429,9 @@ def main() -> int:
             optim=args.optim,
             bf16=not args.fp32,
             gradient_checkpointing=not args.no_gc,
-            # Pass the real flag and let the mixin defer it across TRL's __init__ then restore it
-            # (_init_distributed_config / _configure_distributed_modes), exactly as production does. With
-            # it off, TRL's entropy guard is off and compute_loss dereferences outputs.logits — None on
-            # every family whose Liger patch fuses the head into the loss (GLM-4 MoE Lite, Zaya default
-            # fused_linear_cross_entropy).
+            # The mixin defers this across TRL's __init__, as production does. With it off, TRL's entropy guard is off
+            # and compute_loss dereferences outputs.logits, None on every family whose Liger patch fuses the head into
+            # the loss.
             use_liger_kernel=not args.no_liger,
             logging_steps=1,
             save_strategy="no",
@@ -512,18 +447,15 @@ def main() -> int:
             include_num_input_tokens_seen=True,
         )
 
-        # FusedLinearCE: logits are None, need use_liger_kernel=True for TRL's
-        # entropy guard (skips logits access). The mixin defers the flag to prevent
-        # TRL from re-applying Liger to EP-wrapped modules.
+        # FusedLinearCE has no logits, so TRL's entropy guard needs use_liger_kernel=True; the mixin keeps TRL from
+        # re-applying Liger to EP-wrapped modules.
         if liger_kernel_config and liger_kernel_config.get("fused_linear_cross_entropy"):
             sft_config.use_liger_kernel = True
             sft_config.liger_kernel_config = liger_kernel_config
 
-        # --- Callbacks (+ optional torch.profiler for kernel-level bottleneck analysis) ---
         callbacks = [efficiency_cb]
         if args.profile:
-            # Skip warmup + 1, then record 3 steady-state steps. The active window must fit
-            # inside --steps; profiling needs steps >= warmup + 5.
+            # Skip warmup + 1, then record 3 steady-state steps; profiling needs steps >= warmup + 5.
             callbacks.append(
                 TorchProfilerCallback(
                     output_dir=args.profile_dir,
@@ -531,10 +463,8 @@ def main() -> int:
                     warmup=1,
                     active=3,
                     ranks="0",
-                    # CUDA-kernel-only trace: with_stack / profile_memory / record_shapes and the
-                    # CPU op activity each add heavy per-op instrumentation that starves an 8-rank
-                    # EP run (GPUs idle, first step crawls). Disabling them keeps the top-ops kernel
-                    # table (the bottleneck signal) while letting steps run at near-normal speed.
+                    # CUDA-kernel-only trace: with_stack / profile_memory / record_shapes and CPU activity starve an
+                    # 8-rank EP run (GPUs idle, first step crawls); the top-ops kernel table survives without them.
                     record_shapes=False,
                     profile_memory=False,
                     with_stack=False,
@@ -544,7 +474,6 @@ def main() -> int:
             )
             log(f"  Profiler ON → {args.profile_dir} (Chrome trace + *.top_ops.txt on rank 0)")
 
-        # --- Create trainer ---
         log("\n[5/5] Starting benchmark training...")
         trainer_kwargs = {
             "model": model,
@@ -554,20 +483,18 @@ def main() -> int:
             "data_collator": build_sft_collator(tokenizer, sft_config, model.config, parallelism_config),
             "parallelism_config": parallelism_config,
             "callbacks": callbacks,
-            # False forces the stock AdamW over the params as loaded; None keeps the bf16=True auto-AdamWBF16 default
+            # False forces the stock AdamW over the params as loaded; None keeps the bf16=True auto-AdamWBF16 default.
             "bf16_optimizer": False if args.fp32_optimizer else None,
         }
         if args.pp > 1:
-            # No balancing callback runs in this benchmark, but the default 'auto' resolves to the
-            # aux-loss strategy for several families and the PP split rejects that (a stage severs
-            # the HF aux-loss path). 'none' is compute-identical here.
+            # The default 'auto' resolves to aux-loss for several families and the PP split rejects that (a stage
+            # severs the HF aux-loss path). 'none' is compute-identical here, since no balancing callback runs.
             trainer_kwargs["moe_balancing"] = "none"
         if peft_config is not None:
             trainer_kwargs["peft_config"] = peft_config
         trainer = DistributedSFTTrainer(**trainer_kwargs)
 
-        # get_peft_model (attention PEFT) re-freezes the base, including the native expert adapters;
-        # restore them so the expert FFNs actually train.
+        # get_peft_model re-freezes the base, native expert adapters included.
         if want_experts:
             _reenable_expert_lora(trainer.model)
 
@@ -579,7 +506,6 @@ def main() -> int:
         barrier()
         train_result = trainer.train()
 
-        # --- Report ---
         log(f"\n{'=' * 70}")
         log(f"  BENCHMARK RESULTS (EP={ep_size}, {peft_str})")
         log(f"{'=' * 70}")

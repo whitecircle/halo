@@ -22,15 +22,13 @@ from halo.runtime.ranks import (
 
 logger = logging.getLogger(__name__)
 
-# Ceiling on the ranks per node admitted to weight materialization at once when
-# ``max_concurrent_loading`` is unset; an explicit setting is not capped by it.
+# Ranks per node loading at once when ``max_concurrent_loading`` is unset; an explicit value is not capped.
 MAX_CONCURRENT_LOADING_CAP = 4
 
 
 def resolve_load_concurrency(max_concurrent: int | None, local_world_size: int) -> int:
-    """Ranks per node admitted to weight materialization at once: an explicit value passes through
-    (``0`` = no throttle); ``None`` is half the node's width capped at :data:`MAX_CONCURRENT_LOADING_CAP`
-    (4 on an 8-GPU node, 2 on a 4-GPU tray, where a flat 4 would admit every rank)."""
+    """An explicit value passes through (``0`` = no throttle); ``None`` is half the node's width up to the cap (4 on an
+    8-GPU node, 2 on a 4-GPU tray, where a flat 4 would admit every rank)."""
     if max_concurrent is not None:
         return max_concurrent
     return min(MAX_CONCURRENT_LOADING_CAP, max(1, local_world_size // 2))
@@ -38,9 +36,8 @@ def resolve_load_concurrency(max_concurrent: int | None, local_world_size: int) 
 
 @contextmanager
 def sequential_load_within_node(max_concurrent: int | None = 1):
-    """Admit a node's local ranks in batches of ``max_concurrent`` (0 = all, 1 = sequential, ``None``
-    per :func:`resolve_load_concurrency`), so a large load does not OOM host RAM. Waits on the c10d
-    store, not an NCCL barrier a long load would time out."""
+    """Admit a node's local ranks in batches of ``max_concurrent`` (0 = all, ``None`` per
+    :func:`resolve_load_concurrency`) to spare host RAM. Waits on the c10d store; a long load outlasts NCCL."""
     if not has_process_group():
         yield
         return
@@ -57,8 +54,7 @@ def sequential_load_within_node(max_concurrent: int | None = 1):
 
     batch = local_rank // max_concurrent
     try:
-        # Inside the try: a timed-out wait must still mark this rank done, or every later batch on
-        # the node blocks for the full store timeout.
+        # In the try: a timed-out wait must still mark this rank done, or later batches wait out the store timeout.
         phase.wait([f"rank{r}_done" for r in range(batch * max_concurrent)])
         yield
     finally:
@@ -68,10 +64,8 @@ def sequential_load_within_node(max_concurrent: int | None = 1):
 
 @contextmanager
 def joined_node_load(what: str, max_concurrent: int | None):
-    """A weight load throttled per node (:func:`sequential_load_within_node`) whose exit joins the world
-    over the store, so serialized loads that outlast the NCCL watchdog meet there and a rank-local load
-    failure raises on every rank. Collective-equivalent: every rank enters it once per load.
-    """
+    """Per-node throttled load whose exit joins the world over the store, where loads outlasting the NCCL watchdog meet
+    and a rank-local failure raises on every rank. COLLECTIVE-equivalent: every rank enters once per load."""
     failure: BaseException | None = None
     try:
         with sequential_load_within_node(max_concurrent=max_concurrent):
@@ -82,10 +76,7 @@ def joined_node_load(what: str, max_concurrent: int | None):
 
 
 def _log_global_load_duration_seconds(*, tag: str, method: str, t_start_wall: float, t_end_wall: float) -> float:
-    """COLLECTIVE: log and return the global load span ``max(t_end) - min(t_start)`` across ranks.
-
-    Wall-clock times compare only across NTP-synced hosts.
-    """
+    """COLLECTIVE: log and return the span ``max(t_end) - min(t_start)`` across ranks (needs NTP-synced hosts)."""
     local_sec = t_end_wall - t_start_wall
     if not is_multi_rank_run():
         logger.info(
@@ -110,11 +101,8 @@ def _log_global_load_duration_seconds(*, tag: str, method: str, t_start_wall: fl
 
 
 def timed_global_load[T](tag: str, method: str, load_fn: Callable[[], T]) -> T:
-    """COLLECTIVE: run ``load_fn`` and log its global wall span, earliest start to latest end across ranks.
-
-    The log is no ``finally``: a collective entered while one rank unwinds an exception turns that
-    rank's traceback into a timeout on every other rank.
-    """
+    """COLLECTIVE: run ``load_fn`` and log its global wall span. The log is not in a ``finally``, since a collective
+    entered while one rank unwinds turns that rank's traceback into a timeout on every other rank."""
     t_start_wall = time.time()
     loaded = load_fn()
     _log_global_load_duration_seconds(tag=tag, method=method, t_start_wall=t_start_wall, t_end_wall=time.time())

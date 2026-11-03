@@ -1,6 +1,5 @@
-"""Sharding-agnostic model construction every entry point shares: the widest Auto* class for a config and
-the verified load through it, the per-family patches and the implementation a model is built with, and
-the run policies every loaded model takes."""
+"""Sharding-agnostic model construction: the widest Auto* class and its verified load, per-family patches, and the run
+policies every loaded model takes."""
 
 import logging
 
@@ -56,20 +55,9 @@ def _auto_map_class_name(auto_map: dict, key: str) -> str | None:
 
 
 def resolve_auto_model_class(model_config, *, text_only: bool = False):
-    """Pick the widest Auto* class: ``AutoModelForImageTextToText`` for multimodal (else the vision tower
-    is dropped), ``AutoModelForCausalLM`` for text-only.
-
-    ``text_only=True`` forces ``AutoModelForCausalLM`` for a multimodal config, i.e. the deliberate
-    text-only load of a VLM checkpoint: the CausalLM sibling drops the vision tower (and any MTP
-    tail). ``mistral4`` resolves to ``Mistral4ForCausalLM`` even via the
-    image-text-to-text mapping (there, ``mistral4`` is the text decoder; ``mistral3`` is the VLM).
-
-    Raises:
-        ValueError: ``text_only=True`` for a family with no text-only CausalLM sibling: no
-            ``AutoModelForCausalLM`` entry at all (glm5_next ships only the conditional-generation
-            wrapper), or an entry naming the multimodal class itself, native (gemma4) or in the
-            ``auto_map`` (step3p7). Accepting it would load the VLM as the text-only model.
-    """
+    """The widest Auto* class: ``AutoModelForImageTextToText`` for multimodal (else the vision tower drops), else
+    ``AutoModelForCausalLM``. ``text_only=True`` forces CausalLM, raising for a family with no text-only sibling
+    (glm5_next, gemma4, step3p7), which would load the VLM as the text-only model."""
     if text_only:
         model_type = getattr(model_config, "model_type", None)
         auto_map = getattr(model_config, "auto_map", None) or {}
@@ -117,13 +105,9 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
 def resolve_build_config(
     model_name_or_path: str, *, revision: str | None, trust_remote_code: bool
 ) -> PretrainedConfig:
-    """The config a build of ``model_name_or_path`` takes as ``config``, once the caller has applied
-    :func:`apply_family_patches` to it: read at ``revision`` after the remote-code shims, without the toolkit stamps a
-    checkpoint's ``config.json`` can carry.
-
-    A build that reads ``config.json`` itself loses the run-scoped stamps the patches set, so Qwen3.8-Flash-Next's
-    n-gram table builds as a trainable ``nn.Embedding`` instead of a host table.
-    """
+    """The config a build takes, after the caller's :func:`apply_family_patches`, without toolkit stamps. A build
+    reading ``config.json`` itself loses the patches' run-scoped stamps (Qwen3.8-Flash-Next's n-gram table turns
+    trainable)."""
     # Before the config fetch, which can already import a remote modeling file.
     apply_remote_code_compat_shims()
     config = AutoConfig.from_pretrained(model_name_or_path, revision=revision, trust_remote_code=trust_remote_code)
@@ -134,13 +118,8 @@ def resolve_build_config(
 def auto_load_model(
     model_name_or_path: str, *, trust_remote_code: bool = False, model_class=None, text_only: bool = False, **kwargs
 ):
-    """Load a model from a path, picking the widest Auto* class for its config unless one is pinned.
-
-    The unsharded load core: the compat shims, the config fetch, the class resolution and the
-    coverage-verified ``from_pretrained``. ``model_class`` pins the class; otherwise a ``config`` in ``kwargs``
-    (the one the build takes) resolves it, or the checkpoint's is fetched. ``text_only`` is
-    :func:`resolve_auto_model_class`'s.
-    """
+    """Load a model, picking the widest Auto* class for its config unless ``model_class`` pins one; a ``config`` in
+    ``kwargs`` resolves it, else the checkpoint's is fetched."""
     # Before the config fetch, which can already import a remote modeling file.
     apply_remote_code_compat_shims()
     if model_class is None:
@@ -155,19 +134,12 @@ def auto_load_model(
 
 
 def apply_family_patches(model_config, attn_implementation: str | None) -> str | None:
-    """Apply the family/backend-keyed patches every loaded model needs, trainable or frozen, and return
-    the implementation to build it with.
-
-    Keyed on each model's own config, so a frozen teacher or reference of another family gets its own
-    patches. The patches key on the resolved backend, the build on its variant
-    (:func:`resolve_flex_sliding_attn_implementation`), which still hands SDPA some calls, so a
-    wide-head model keeps the SDPA pin under it. ``attn_implementation`` None (a build that picks its own
-    backend) applies only the patches no backend keys and returns None.
-    """
+    """Apply the family/backend-keyed patches every loaded model needs, trainable or frozen, and return the
+    implementation to build with. ``None`` applies only the patches no backend keys. Flex-sliding still hands SDPA some
+    calls, so a wide-head model keeps the SDPA pin under it."""
     if attn_implementation == "sdpa" and has_head_dim_beyond_flash(model_config):
         patch_sdpa_for_wide_heads()
-    # Else every forward's mask construction reads back whether position_ids hold packed documents, for a packed
-    # mask flash never reads.
+    # Else each forward's mask construction reads whether position_ids hold packed documents, for a mask flash ignores.
     if is_flash_attn_implementation(attn_implementation):
         patch_transformers_packed_sequence_probe()
     # Else Mistral4's attention swallows position_ids before the flash interface, so the varlen
@@ -196,11 +168,7 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
 
 
 def sanitize_generation_config(model: PreTrainedModel) -> None:
-    """Ensure ``model.generation_config`` is valid for ``save_pretrained``.
-
-    Some models ship sampling params with ``do_sample=False``, which transformers rejects on save;
-    set ``do_sample=True`` to make the flags consistent.
-    """
+    """Set ``do_sample=True`` where a model ships sampling params without it, which transformers rejects on save."""
     generation_config = getattr(model, "generation_config", None)
     if generation_config is None:
         return
@@ -222,14 +190,9 @@ def sanitize_generation_config(model: PreTrainedModel) -> None:
 def apply_run_model_policies(
     model, model_config, *, sinks_policy: SinksPolicy, attn_implementation: str, sinks_pretrained: bool = True
 ) -> None:
-    """The sharding-agnostic run policies every loaded model takes, policy and frozen reference alike: the Hub
-    tags, a sane generation config, a prefix-LM decoder's causal default and the sinks policy.
-
-    ``sinks_pretrained=False`` (a from-scratch build) skips only the neutralized sinks policy: there are
-    no pretrained sinks to neutralize. The Hub tags go on ``model_tags`` for the card writers that read
-    nothing else (PEFT's adapter save, ``push_to_hub``). A sink-dropping backend over the live sinks the policy
-    leaves raises.
-    """
+    """The run policies every loaded model takes: Hub tags, generation config, prefix-LM causal default, sinks policy.
+    ``sinks_pretrained=False`` skips only a neutralized policy, with no pretrained sinks to neutralize. A sink-dropping
+    backend over live sinks raises."""
     model.add_model_tags(list(HUB_TAGS))
     sanitize_generation_config(model)
     apply_prefix_lm_causal_decoder(model, model_config)

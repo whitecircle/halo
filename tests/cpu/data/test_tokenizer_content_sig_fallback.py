@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""A tokenizer whose content cannot be hashed keys the dataset-map cache on ``name_or_path`` — visibly.
-
-``_tokenizer_content_sig`` hashes a tokenizer's content so a resume from a checkpoint path reuses the
-cache. When reading that content raises (a fast backend with a custom Python component, a slow
-tokenizer without ``get_vocab``), the key degrades to the path: every resume leg re-runs the map and a
-changed tokenizer at the same path reuses stale token ids. The degradation must warn once per type.
-
-Run: pytest tests/cpu/data/test_tokenizer_content_sig_fallback.py
-"""
+"""A tokenizer whose content cannot be hashed keys the dataset-map cache on ``name_or_path``, warning once per type:
+every resume leg re-runs the map and a changed tokenizer at the same path reuses stale ids."""
 
 import logging
 

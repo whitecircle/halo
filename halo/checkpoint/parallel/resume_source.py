@@ -1,5 +1,4 @@
-"""Which checkpoint a run resumes from (:func:`resolve_resume_checkpoint`), and which weights its model is
-built from (:func:`resolve_resume_weights_source`)."""
+"""Which checkpoint a run resumes from, and which weights its model is built from."""
 
 from __future__ import annotations
 
@@ -22,8 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class ResumeWeightsKind(StrEnum):
-    """What a resume checkpoint's weights are: merged weights resumed from their resume adapter (or marked
-    so with no adapter file), whole weights, an adapter, or none of these (an unmerged sharded save)."""
+    """A resume checkpoint's weights: merged (with or missing its resume adapter), whole, an adapter, or none."""
 
     MERGED_ADAPTER = "merged_adapter"
     MERGED_ADAPTER_MISSING = "merged_adapter_missing"
@@ -41,8 +39,8 @@ def _incomplete_reason(checkpoints: list[str]) -> str:
 
 
 def _world_step_directories(output_dir: str, requested: str | None) -> list[str]:
-    """COLLECTIVE. The step directory names any FS-aware save rank lists, newest first, merged on rank 0,
-    which also checks ``requested`` exists; a failure raises the same exception on every rank."""
+    """COLLECTIVE. Step directory names any FS-aware save rank lists, newest first, merged on rank 0, which also checks
+    ``requested`` exists; a failure raises the same exception on every rank."""
     local: list[str] | Exception = []
     if is_fs_save_rank() and os.path.isdir(output_dir):
         try:
@@ -54,8 +52,7 @@ def _world_step_directories(output_dir: str, requested: str | None) -> list[str]
         except OSError as e:
             local = e
 
-    # Returned, not raised: combine_across_ranks would re-box it as a RuntimeError, and every rank raises it
-    # under its own type below.
+    # Returned, since combine_across_ranks would re-box a raise as RuntimeError; every rank raises its own type.
     def merge(gathered: list[list[str] | Exception]) -> list[str] | Exception:
         failure = next((item for item in gathered if isinstance(item, Exception)), None)
         if failure is None and requested is not None and not os.path.isdir(requested):
@@ -91,16 +88,10 @@ def _move_into_holding(output_dir: str, checkpoints: list[str]) -> None:
 
 
 def resolve_resume_checkpoint(output_dir: str, requested: str | None = None) -> str | None:
-    """COLLECTIVE. The checkpoint a run resumes from, the same on every rank.
-
-    ``requested`` must be complete on every rank; ``None`` picks the newest step directory of
-    ``output_dir`` complete on every rank (``trainer_state.json``, published last, present on every
-    node), or ``None`` when there is none. Raises, moving nothing, when nothing complete is found.
-
-    Every incomplete step directory is then moved into :data:`INCOMPLETE_CHECKPOINTS_DIR_NAME`: one
-    numbered above this run's next saves would otherwise be the newest by step, the order rotation falls
-    back to, and rotation would keep it and delete the complete checkpoints.
-    """
+    """COLLECTIVE. The checkpoint to resume from, the same on every rank: ``requested`` if complete everywhere, else
+    the newest step directory complete everywhere; raises, moving nothing, when nothing complete is found. Incomplete
+    step directories move aside, since one numbered above this run's next saves would make rotation delete the complete
+    ones."""
     names = _world_step_directories(output_dir, requested)
     candidates = [os.path.join(output_dir, name) for name in names]
     complete = [complete_on_every_rank(path) for path in candidates]
@@ -132,12 +123,8 @@ def resolve_resume_checkpoint(output_dir: str, requested: str | None = None) -> 
 
 
 def classify_resume_weights(checkpoint: str) -> ResumeWeightsKind:
-    """What ``checkpoint``'s weights are, off its on-disk layout alone.
-
-    The merged class is read off the marker its save writes last, since its weights are as loadable as a
-    full fine-tune's. A sharded EP index outranks any whole-model file beside it: a directory carrying
-    both is a gathered save torn by a later sharded one.
-    """
+    """What ``checkpoint``'s weights are, off its on-disk layout. A sharded EP index outranks a whole-model file beside
+    it, since a directory carrying both is a gathered save torn by a later sharded one."""
     merged_adapter_dir = resume_adapter_dir(checkpoint)
     if merged_adapter_dir is not None:
         if has_adapter_weight_file(merged_adapter_dir):
@@ -151,19 +138,13 @@ def classify_resume_weights(checkpoint: str) -> ResumeWeightsKind:
 
 
 def resolve_resume_weights_source(checkpoint: str | None, model_config, parallelism_config) -> str:
-    """COLLECTIVE (rank 0's verdict). The ``model_name_or_path`` the policy loads weights from on resume.
-
-    The checkpoint itself under the EP layers, CP and TP, whose resumes read base weights only at
-    construction (under the default ``use_grouped_gemm``, every torchrun resume); the base for an adapter
-    or merged-with-resume-adapter checkpoint, whose adapter the resume restores onto it (a merged
-    checkpoint's own weights already hold the delta). A checkpoint neither loadable nor an adapter raises.
-    ``model_config`` is left unchanged, so reference/teacher models still resolve the base.
-    """
+    """COLLECTIVE (rank 0's verdict). The ``model_name_or_path`` to load on resume: the checkpoint under EP layers, CP
+    and TP, whose resumes read base weights only at construction; the base for an adapter or merged-with-resume-adapter
+    checkpoint. A checkpoint neither loadable nor an adapter raises."""
     base = model_config.model_name_or_path
     if checkpoint is None:
         return base
-    # TP is listed on its own rather than riding on ``needs_ep_layers`` (true only via
-    # ``use_grouped_gemm``), so turning that knob off still leaves TP resume working.
+    # TP is listed on its own since ``needs_ep_layers`` holds only via ``use_grouped_gemm``.
     if not (parallelism_config.needs_ep_layers or parallelism_config.is_cp_mode or parallelism_config.is_tp_mode):
         return base
 

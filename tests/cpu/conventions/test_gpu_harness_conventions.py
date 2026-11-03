@@ -1,31 +1,7 @@
 #!/usr/bin/env python
-"""Conventions a GPU test script must honour, pinned so a new script cannot quietly break them.
-
-Every manifest script runs under ``gpu_test_main`` unless its lifecycle is one the harness cannot
-express, named in ``_OWN_LIFECYCLE`` with the reason. Every row launches under its own node id, with only
-markers from ``ALL_MARKERS``: ``gpu``, one tier and the GPU-count tag of its own ``nproc``.
-
-The rest are about scratch: a GPU test allocates its dirs through the launcher and hands them back.
-
-``tests.common.distributed.setup_cache_dirs`` hands back two ``tempfile.mkdtemp`` dirs — an
-output dir and an HF datasets cache. Nothing reclaims them on its own, so a test that allocates
-and never frees leaks two directories per rank per run; across a full GPU suite run that is thousands
-of stale trees on the scratch volume, and the HF cache half is not small.
-
-Four spellings discharge the obligation, and the scan accepts any of them: a ``cleanup_dirs``
-call, a ``gpu_test_main`` call (the harness's ``finally`` calls ``cleanup_dirs`` for the body),
-``ctx.on_teardown(...)``, or a ``finally:`` that ``shutil.rmtree``s. Anything else is a leak.
-
-AST, not grep: the check is whether the call is really made, so a mention inside a docstring,
-a comment or a disabled code path must not satisfy it.
-
-The second half is the path itself. ``tests/gpu/conftest.py`` points ``TMPDIR`` at a per-run dir
-under pytest's basetemp and ``tests/common/distributed.py`` allocates through it, so a literal
-``/mnt/...`` in a test escapes basetemp, survives the run, and assumes a volume layout the rulebook
-does not guarantee on this host.
-
-Run: ``pytest -m cpu tests/cpu/conventions/test_gpu_harness_conventions.py``
-"""
+"""Conventions a GPU test script must honour: it runs under ``gpu_test_main``, every row launches under its own node
+id with only ``ALL_MARKERS`` marks, and it frees the scratch it allocates. The scans read the AST, so a mention
+in a docstring or comment does not count."""
 
 from __future__ import annotations
 
@@ -57,11 +33,8 @@ def _parse(path: Path) -> ast.AST:
 
 
 def _called_names(tree: ast.AST) -> set[str]:
-    """Every name invoked as a call in ``tree`` — ``f()`` and ``obj.f()`` alike.
-
-    The attribute form is folded in under its bare attribute so ``ctx.on_teardown(...)`` and
-    ``shutil.rmtree(...)`` are found without pinning the receiver, which tests spell differently.
-    """
+    """Every name invoked as a call in ``tree``; the attribute form is folded under its bare attribute, since tests
+    spell the receiver differently."""
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -74,7 +47,6 @@ def _called_names(tree: ast.AST) -> set[str]:
 
 
 def _allocator_linenos(tree: ast.AST) -> list[int]:
-    """Line of every ``setup_cache_dirs`` call, so an offender points at its own allocation."""
     return [
         node.lineno
         for node in ast.walk(tree)
@@ -83,11 +55,8 @@ def _allocator_linenos(tree: ast.AST) -> list[int]:
 
 
 def _has_finally_rmtree(tree: ast.AST) -> bool:
-    """Whether some ``try`` block's ``finally`` reclaims a tree.
-
-    Only ``finalbody`` counts: an ``rmtree`` on the success path alone leaks whenever the body
-    raises, which is exactly the run that leaves the dirs behind.
-    """
+    """Whether some ``finally`` reclaims a tree; an ``rmtree`` on the success path alone leaks whenever the body
+    raises."""
     return any(
         isinstance(node, ast.Try) and node.finalbody and any(_RMTREE in _called_names(stmt) for stmt in node.finalbody)
         for node in ast.walk(tree)
@@ -95,19 +64,19 @@ def _has_finally_rmtree(tree: ast.AST) -> bool:
 
 
 def _calls_the_harness(tree: ast.AST) -> bool:
-    """Whether ``tree`` calls ``gpu_test_main``, by its imported name or through its module
-    (``harness.gpu_test_main(...)``). The entry is a decorator factory, so every use is a call."""
+    """Whether ``tree`` calls ``gpu_test_main``, by name or through its module; the entry is a decorator factory, so
+    every use is a call."""
     return _HARNESS in _called_names(tree)
 
 
 def _reclaims_its_dirs(tree: ast.AST) -> bool:
-    """Whether ``tree`` discharges the cleanup obligation by any of the four accepted spellings."""
+    """Whether ``tree`` reclaims its dirs: a ``cleanup_dirs`` or ``gpu_test_main`` call, ``ctx.on_teardown(...)``,
+    or a ``finally`` that rmtrees."""
     called = _called_names(tree)
     return any(name in called for name in _RECLAIMERS) or _calls_the_harness(tree) or _has_finally_rmtree(tree)
 
 
 def _allocating_scripts() -> list[tuple[Path, ast.AST]]:
-    """Every GPU test script that calls ``setup_cache_dirs``, parsed."""
     found = []
     for script in sorted(_GPU_ROOT.rglob("test_*.py")):
         tree = _parse(script)
@@ -131,13 +100,8 @@ def test_every_gpu_test_that_allocates_cache_dirs_also_reclaims_them():
 
 
 def test_the_scan_is_not_vacuous(tmp_path):
-    """Guard the guard: the sweep must parse the suite and actually catch a leaker.
-
-    A count of allocating scripts is the wrong pin — every migration onto ``gpu_test_main`` legally
-    lowers it. What must hold is that the sweep reads the whole tree and that its detector still
-    fires: a script calling the allocator with no reclaim is an offender, and the same script with a
-    ``cleanup_dirs`` in a ``finally`` is not.
-    """
+    """A count of allocating scripts is the wrong pin, since every migration onto ``gpu_test_main`` lowers it. The
+    sweep must read the whole tree and its detector must fire."""
     assert len(list(_GPU_ROOT.rglob("test_*.py"))) > 100, "the sweep lost the tests/gpu tree"
 
     leaker = tmp_path / "test_leaker.py"
@@ -211,9 +175,8 @@ def _misfit(spec: TestSpec) -> bool:
 
 
 def test_every_row_launches_under_its_own_id_tier_and_width():
-    """Rows of one script share its node-id prefix, so two with the same args would collapse into one pytest
-    id; and a row's own ``nproc`` or tier must keep its markers selecting it, since ``-m "gpu and core"`` and
-    the ``Ngpu`` tags are how the tiers and the GPU budget are chosen."""
+    """Two rows with the same args would collapse into one pytest id, and a row's ``nproc`` or tier must keep its
+    markers selecting it."""
     launches = _launches()
     duplicated = sorted(node for node, count in Counter((rel, args) for rel, args, _ in launches).items() if count > 1)
     assert not duplicated, f"rows sharing a node id: {duplicated}"
@@ -226,8 +189,7 @@ def test_every_row_launches_under_its_own_id_tier_and_width():
 
 
 def test_a_row_launches_with_its_own_values_over_the_spec():
-    """A row's set fields replace the spec's and the rest carry over, so a wider row that keeps the spec's
-    markers is caught by the width check above."""
+    """A wider row that keeps the spec's markers is caught by the width check above."""
     spec = TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), args_matrix=("--a", Row("--b", nproc=4)), timeout=60)
     (a, a_spec), (b, b_spec) = spec.launches()
     assert (a, a_spec.nproc, a_spec.markers, a_spec.timeout) == ("--a", 2, ("gpu", "core", "2gpu"), 60)
@@ -236,8 +198,8 @@ def test_a_row_launches_with_its_own_values_over_the_spec():
 
 
 def test_a_module_qualified_harness_call_counts(tmp_path):
-    """``harness.gpu_test_main(...)`` is the same entry as the imported name, so neither pin may flag
-    it, while importing the harness module without calling the entry still runs no lifecycle."""
+    """``harness.gpu_test_main(...)`` is the same entry, while importing the harness module without calling it runs
+    no lifecycle."""
     qualified = tmp_path / "test_qualified.py"
     qualified.write_text(
         "from tests.common import harness\n\n\n"

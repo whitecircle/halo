@@ -1,8 +1,5 @@
-"""Fusing a per-expert checkpoint's local experts into the 3D expert tensors the model holds.
-
-A per-expert hub (Qwen3-MoE, GLM-4, LFM-2, Bailing) stores ``experts.N.gate_proj.weight [M, H]``; the shell
-holds ``experts.gate_up_proj [E, 2M, H]``. Only this rank's experts are read.
-"""
+"""Fusing a per-expert checkpoint's local experts into the model's 3D tensors: ``experts.N.gate_proj.weight [M, H]``
+into ``experts.gate_up_proj [E, 2M, H]``, reading only this rank's experts."""
 
 from __future__ import annotations
 
@@ -62,11 +59,8 @@ class ExpertFuser:
     def detect_tasks(
         self, weight_map: dict[str, str], disk_to_model: dict[str, str], model_keys: set[str]
     ) -> list[FusionTask]:
-        """The fusion tasks of this rank's per-expert keys.
-
-        The target is resolved through ``disk_to_model``, never re-derived from the disk key: a family whose
-        keys need the ``base_model_prefix`` or a hub rename would otherwise lose every expert to a silent skip.
-        """
+        """This rank's fusion tasks, the target resolved through ``disk_to_model``, since re-deriving it from the disk
+        key would lose a family needing ``base_model_prefix`` or a hub rename to a silent skip."""
         groups: dict[str, dict[str, dict[int, dict[str, tuple[str, str]]]]] = defaultdict(
             lambda: defaultdict(lambda: defaultdict(dict))
         )

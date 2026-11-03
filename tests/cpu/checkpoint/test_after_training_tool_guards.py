@@ -1,21 +1,5 @@
 #!/usr/bin/env python
-"""Guards on the after-training tools at the seams where they otherwise warn, default, or drop in
-silence.
-
-* ``merge_models.py`` printing "the merged checkpoint has none" about a missing tokenizer and
-  exiting 0 hands the next stage an artifact no ``from_pretrained`` consumer can build a tokenizer
-  for.
-* ``reset_sinks.py`` defaulting ``--output_dir`` to its input lets a mistyped command rewrite the
-  only copy of a checkpoint with no undo. In-place is a flag you ask for.
-* ``merge_peft_adapters.py`` copying the ADAPTER directory's aux files into the
-  merged checkpoint lands ``adapter_config.json`` beside full merged weights, and every
-  from_pretrained-based tool downstream then reads the result as an unmerged adapter — and
-  re-exports the bare base.
-* ``deduplicate_dataset.py`` silently ignoring an ``--additional_fields`` name the dataset does not
-  carry writes an output missing exactly the column the caller asked to keep.
-
-Run: pytest tests/cpu/checkpoint/test_after_training_tool_guards.py
-"""
+"""Guards on the after-training tools at the seams where they would otherwise warn, default, or drop in silence."""
 
 import json
 from pathlib import Path
@@ -26,8 +10,6 @@ from datasets import Dataset
 
 from halo.checkpoint.tools import adapter_merge, model_merge, sink_reset
 from halo.data import deduplication
-
-# --- merge_models: a tokenizer-less artifact is not a deliverable ---------------------------------
 
 
 def _source_without_tokenizer(tmp_path: Path) -> Path:
@@ -57,8 +39,7 @@ def test_a_merge_whose_source_ships_no_tokenizer_raises_and_names_the_flag(tmp_p
 
 
 def test_the_opt_out_accepts_a_tokenizer_less_artifact(tmp_path):
-    """The other side of the boundary — the guard must be escapable on purpose, or a legitimate
-    tokenizer-less export becomes a dead end."""
+    """A legitimate tokenizer-less export must not become a dead end."""
     out = tmp_path / "out"
     out.mkdir()
 
@@ -75,15 +56,11 @@ def test_the_opt_out_accepts_a_tokenizer_less_artifact(tmp_path):
 
 
 def test_merge_models_refuses_a_hub_tokenizer_source(tmp_path):
-    """Every merge source is a local directory, so --trust_remote_code's local default (on) holds for all
-    of them; a Hub id here would run a third-party repo's config code under that default."""
+    """A Hub id here would run a third-party repo's config code under the local default."""
     out = tmp_path / "out"
     with pytest.raises(ValueError, match="--tokenizer_source 'org/third-party' is not a local directory"):
         model_merge.merge_models(["/nope/a", "/nope/b"], str(out), method="linear", tokenizer_source="org/third-party")
     assert not out.exists(), "a refused merge left an output directory behind"
-
-
-# --- reset_sinks: in-place is asked for, never defaulted ------------------------------------------
 
 
 def test_reset_sinks_refuses_to_pick_an_output_directory_for_you(tmp_path):
@@ -99,8 +76,7 @@ def test_reset_sinks_refuses_to_pick_an_output_directory_for_you(tmp_path):
 
 
 def test_reset_sinks_refuses_an_output_dir_aimed_at_its_own_input(tmp_path):
-    """The same mistake through the other flag: --output_dir == --model_id IS the in-place run
-    the explicit flag exists to make deliberate."""
+    """--output_dir == --model_id is the in-place run the explicit flag exists to make deliberate."""
     checkpoint = tmp_path / "ckpt"
     checkpoint.mkdir()
 
@@ -118,8 +94,7 @@ def test_in_place_and_output_dir_together_are_contradictory(tmp_path):
 
 @pytest.mark.parametrize("source", ["org/model", "missing-checkpoint"], ids=["hub-repo-id", "missing-path"])
 def test_in_place_needs_a_local_directory(source, tmp_path, monkeypatch):
-    """--in_place rewrites its source, so only a local directory qualifies: a Hub repo id and a
-    mistyped path, slash or not, are refused before anything is fetched."""
+    """Refused before anything is fetched."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sink_reset, "resolve_checkpoint_source", lambda *a, **k: pytest.fail(f"--in_place fetched {source}")
@@ -130,22 +105,14 @@ def test_in_place_needs_a_local_directory(source, tmp_path, monkeypatch):
 
 
 def test_one_spelling_decides_what_a_sink_key_is():
-    """The scan, the reset and the verification all read this predicate; three literals could
-    verify tensors they never reset."""
+    """The scan, the reset and the verification all read this predicate; three literals could verify tensors they
+    never reset."""
     assert sink_reset.is_sink_key("model.layers.0.self_attn.sinks")
     assert not sink_reset.is_sink_key("model.layers.0.self_attn.q_proj.weight")
 
 
-# --- merge_peft_adapters: the merge takes the BASE's aux files -----------------------------------
-
-
 def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkeypatch):
-    """With the adapter directory as ``source_dir`` the save would copy ``adapter_config.json`` next
-    to full merged weights, and downstream tools would re-export the base.
-
-    Driven through the tool's own entry point, so it also pins that the tool reaches the shared merge
-    rather than growing a second copy of the sequence.
-    """
+    """The adapter's ``adapter_config.json`` next to merged weights makes downstream tools re-export the base."""
     adapter = tmp_path / "adapter"
     base = tmp_path / "base"
     for directory in (adapter, base):
@@ -165,7 +132,7 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
             captured["adapter_config_written_to"] = path
 
     class _Merged:
-        """The merged model, reduced to what the conversion actually touches."""
+        """What the conversion actually touches."""
 
         def merge_and_unload(self):
             return self
@@ -201,9 +168,6 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
     )
 
 
-# --- deduplicate_dataset: an unknown keep-column is a typo, not an opt-out ----------------------
-
-
 def test_an_unknown_additional_field_raises(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
 
@@ -219,7 +183,6 @@ def test_an_unknown_additional_field_raises(tmp_path):
 
 
 def test_known_additional_fields_still_narrow_the_output(tmp_path):
-    """Anti-vacuity: the guard must not refuse the working case it exists around."""
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
     output = tmp_path / "out.jsonl"
 

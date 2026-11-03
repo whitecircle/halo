@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""The docs link gate must check heading anchors the way GitHub generates them, and the code its pages cite.
-
-``scripts/docs/check_links.sh`` is the only gate on the doc trees' cross-references. A fragment it
-does not validate, or validates against a slug GitHub never produces, passes CI while the link lands
-at the top of the page. The expected slugs below are the ids GitHub's renderer emits for the same
-headings, including a ``{#id}`` attribute, which GitHub renders as heading text. A path or a package
-name in a page's code that no longer exists must fail the gate the same way.
-
-Run: python tests/cpu/conventions/test_docs_link_check.py
-"""
+"""The docs link gate checks heading anchors the way GitHub generates them, and the code its pages cite. The
+expected slugs are the ids GitHub's renderer emits for the same headings."""
 
 import subprocess
 

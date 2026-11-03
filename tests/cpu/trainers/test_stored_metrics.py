@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""StoredMetricsMixin: accumulation + log-time drain (floats and detached 0-dim tensors).
-
-The mixin buffers per-microbatch metrics and folds their row-weighted mean into ``logs`` once per
-``log`` call. Values may be plain floats or detached 0-dim tensors (the buffered-drain path that
-avoids a host sync per microbatch — teacher distillation stores tensors); both must produce
-identical logged values and the buffer must clear after the flush.
-
-On a multi-rank run the bucket is rank-local, so ``log`` reduces it over the world: every rank logs
-the world mean, never rank 0's own (a sampling bias, and a split ``should_save`` verdict when
-``metric_for_best_model`` names one of them), and ranks storing different key sets raise together
-instead of pairing one rank's sums with another's names.
-
-    python tests/cpu/trainers/test_stored_metrics.py
-"""
+"""StoredMetricsMixin buffers per-microbatch metrics and folds their row-weighted mean into ``logs`` once per ``log``.
+The bucket is rank-local, so ``log`` reduces it over the world; rank 0's own would be a sampling bias."""
 
 import datetime
 import json
@@ -56,8 +44,7 @@ def test_float_metrics_mean_flushed_and_cleared():
 
 
 def test_tensor_metrics_drain_identically_to_item():
-    # Detached 0-dim tensors (incl. bf16, as the losses come off a bf16 forward) must log the same
-    # value the eager `.item()` path produced.
+    # Detached 0-dim tensors, bf16 included, must log the value the eager `.item()` path produced.
     t = _Trainer()
     values = [torch.tensor(1.25, dtype=torch.bfloat16), torch.tensor(2.75, dtype=torch.bfloat16)]
     for v in values:
@@ -93,8 +80,7 @@ def test_train_eval_buffers_are_separate():
 
 
 def test_rows_weight_the_mean_and_an_empty_entry_adds_nothing():
-    """A value is a mean over ``rows`` real rows; a batch of eval padding alone passes ``rows=0``,
-    and its value (NaN, a mean over nothing) must not reach the logged number."""
+    """A batch of eval padding alone passes ``rows=0``, and its NaN (a mean over nothing) must not reach the log."""
     t = _Trainer()
     t.store_metrics({"m": 1.0}, rows=3)
     t.store_metrics({"m": torch.tensor(5.0)}, rows=torch.tensor(1))
@@ -195,8 +181,7 @@ def test_a_key_set_mismatch_raises_on_every_rank_instead_of_hanging(tmp_path):
 
 
 def _empty_rank_worker(rank: int, out: str, entries: dict[int, tuple[float, int]]) -> None:
-    """A rank absent from ``entries`` ran no eval batch (more ranks than batches with even_batches
-    off): it stores nothing and must learn the keys from a rank that did."""
+    """A rank absent from ``entries`` ran no eval batch (more ranks than batches with even_batches off)."""
     t = _Trainer()
     if rank in entries:
         value, rows = entries[rank]

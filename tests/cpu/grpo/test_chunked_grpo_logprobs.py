@@ -1,12 +1,4 @@
-"""CPU tests for the chunked GRPO log-probs: the head kernel (halo/kernels/head_logprobs.py) and its trainer side.
-
-The chunked path must compute the SAME per-token log-probs and entropy as the full-logits path TRL
-uses (``selective_log_softmax`` / ``entropy_from_logits`` over ``hidden @ lm_head.weight.T / temp``),
-without materializing the ``[B, T, vocab]`` logits. These tests assert that equivalence to tight
-tolerance and FAIL if the chunked math drifts from the reference.
-
-    python tests/cpu/grpo/test_chunked_grpo_logprobs.py
-"""
+"""Chunked GRPO log-probs match TRL's full-logits path without building the ``[B, T, vocab]`` logits."""
 
 import inspect
 from types import SimpleNamespace
@@ -32,7 +24,7 @@ from halo.trainers.grpo.logprob_scoring import (
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
-# Vocab spans multiple chunk tiles so the online-softmax accumulation across chunks is exercised.
+# Spans several chunk tiles to exercise the online-softmax accumulation across them.
 VOCAB = VOCAB_TILE * 2 + 137
 HIDDEN = 32
 B, T = 2, 16
@@ -85,7 +77,7 @@ def test_chunked_logps_backward_matches():
 
 
 def test_fused_entropy_matches_full_path():
-    # Both outputs are checked: a fused sweep can corrupt the diagnostic or the loss numerator alone.
+    # A fused sweep can corrupt the diagnostic or the loss numerator alone.
     torch.manual_seed(3)
     hidden = torch.randn(B, T, HIDDEN, dtype=torch.float32)
     weight = torch.randn(VOCAB, HIDDEN, dtype=torch.float32) * 0.05
@@ -97,14 +89,13 @@ def test_fused_entropy_matches_full_path():
             ref_logps = selective_log_softmax(_ref_logits(hidden, weight, b, temperature), ids)
             logps, entropy = chunked_head_logprobs(hidden, weight, ids, b, temperature, compute_entropy=True)
             assert entropy.shape == (B, T)
-            assert not entropy.requires_grad  # detached diagnostic
+            assert not entropy.requires_grad
             torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
             torch.testing.assert_close(logps, ref_logps, atol=1e-4, rtol=1e-4)
 
 
 def test_fused_backward_matches_plain_chunked():
-    # Both run the same dual-chunked recompute backward over the same saved tensors, so atol/rtol are
-    # 0; the plain entry only leaves the entropy accumulator out of the forward sweep.
+    # Same recompute backward over the same saved tensors, so atol/rtol are 0.
     torch.manual_seed(4)
     weight = torch.randn(VOCAB, HIDDEN, dtype=torch.float32) * 0.05
     ids = torch.randint(0, VOCAB, (B, T))
@@ -128,12 +119,8 @@ def test_materialize_passthrough_for_plain_tensors():
 
 
 class _DenseHarness(ChunkedGRPOLogprobsMixin):
-    """Minimal harness exposing ``_dense_last_hidden_state`` with a backbone whose hidden state is a
-    differentiable function of a single leaf param — so we can assert each row's backward reaches it.
-
-    ``_get_last_hidden_state`` faithfully emulates TRL's: forward → drop the final position (the causal
-    next-token shift) → keep the last ``logits_to_keep``. A single-token span therefore yields a
-    0-length hidden, exactly the shape a naive empty-row connection breaks on."""
+    """Backbone hidden is a function of one leaf param. Like TRL's it drops the final position, so a single-token
+    span yields a 0-length hidden, the shape a naive empty-row connection breaks on."""
 
     def __init__(self, hidden_size: int):
         self.param = torch.zeros(hidden_size, requires_grad=True)
@@ -141,21 +128,21 @@ class _DenseHarness(ChunkedGRPOLogprobsMixin):
     def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
         h = self.param.numel()
         seq_len = input_ids.size(1)
-        full = (self.param + 1.0).reshape(1, 1, h).expand(1, seq_len, h)  # (1, L, H), connected to param
-        full = full[:, :-1, :]  # drop final position (causal shift) — 1-token span → 0-length
+        full = (self.param + 1.0).reshape(1, 1, h).expand(1, seq_len, h)
+        full = full[:, :-1, :]
         return full[:, -logits_to_keep:, :]
 
 
 def _dense_batch():
-    # Row 1 is a dummy padding row: n_comp == 0, so its 1-token span collapses to a 0-length hidden.
+    # Row 1 is a dummy padding row whose 1-token span collapses to a 0-length hidden.
     input_ids = torch.tensor([[5, 6, 7], [5, 0, 0]])
     attention_mask = torch.tensor([[1, 1, 1], [1, 0, 0]])
-    return input_ids, attention_mask, 2  # logits_to_keep
+    return input_ids, attention_mask, 2
 
 
 def test_dense_empty_row_stays_connected_to_graph():
-    # A disconnected zeros row gets its backward pruned, so the FSDP/EP grad collectives vanish only on
-    # the rank that padded more dummy rows — a NCCL deadlock. The width covers the widened span.
+    # A disconnected zeros row gets its backward pruned, so the FSDP/EP grad collectives vanish only on the
+    # rank that padded more dummy rows and NCCL deadlocks. The width covers the widened span.
     harness = _DenseHarness(hidden_size=8)
     input_ids, attention_mask, ltk = _dense_batch()
 
@@ -164,7 +151,7 @@ def test_dense_empty_row_stays_connected_to_graph():
     assert widths == [2, 1]
 
     harness.param.grad = None
-    out.split(widths)[1].sum().backward()  # the dummy row alone must still reach the param
+    out.split(widths)[1].sum().backward()
     assert harness.param.grad is not None and harness.param.grad.abs().sum() > 0, (
         "empty (n_comp==0) row is disconnected from the model graph — its backward would be pruned, "
         "desyncing FSDP/EP collectives across ranks"
@@ -184,10 +171,8 @@ def test_dense_real_row_values_unchanged_by_fix():
 
 
 class _EmbeddingBackboneHarness(ChunkedGRPOLogprobsMixin):
-    """Backbone = a position-free embedding lookup (drop the final position, keep the last
-    ``logits_to_keep``), so a row trimmed to its real span and its padded twin must agree exactly on
-    every real completion position; the head is a plain Linear. Records each backbone call's input
-    shape and whether it ran mask-free."""
+    """Position-free embedding backbone, so a trimmed row and its padded twin agree exactly on every real completion
+    position. Records each backbone call's input shape and whether it ran mask-free."""
 
     temperature = 1.0
 
@@ -202,7 +187,6 @@ class _EmbeddingBackboneHarness(ChunkedGRPOLogprobsMixin):
         self.forward_calls: list[tuple[tuple[int, ...], bool]] = []
 
     def _head_transform(self, unwrapped_model) -> HeadTransform:
-        """A bare module has no family forward to verify; its head is the plain Linear."""
         return IDENTITY_HEAD_TRANSFORM
 
     def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
@@ -227,8 +211,7 @@ def test_rows_forward_densely_on_every_attention_path_at_batch_size_one():
 
 
 def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
-    # At batch size 1 the SDPA path forwards each row trimmed (mask-free) and sweeps only its real
-    # completion tokens; the padded path is the reference on every real position, pads stay zero.
+    # At batch size 1 the SDPA path forwards each row trimmed and mask-free.
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
     padded = _EmbeddingBackboneHarness("sdpa")
     logps_pad, ent_pad = padded._chunked_logps_impl(padded.model, input_ids, attention_mask, ltk, 2, True)
@@ -249,9 +232,7 @@ def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
 
 
 def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch):
-    """FA4 forwards a multi-row batch densely, one backbone call per row; the head then runs once over
-    every row's real completion tokens, not once per row (each call zero-fills a full fp32 ``[V, H]``
-    head gradient in backward), with each row's log-probs, entropies and gradients unchanged."""
+    """One head call per row would zero-fill a full fp32 ``[V, H]`` head gradient each time in backward."""
     sweeps = []
     real_sweep = logprob_scoring.chunked_head_logprobs
 
@@ -286,9 +267,7 @@ def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch)
 
 @pytest.mark.parametrize("attn_impl", ["sdpa", "flash_attention_4"], ids=["padded", "dense"])
 def test_an_armed_sweep_hands_back_the_heads_completion_logits(attn_impl):
-    """A host that reads the loss forward's logits (SDPG's OPD term) gets the head's ``(rows, ltk, V)``
-    output on every real completion position, from the same hidden states the sweep scored, carrying
-    their graph; unarmed, nothing is built."""
+    """SDPG's OPD term reads these logits; they come from the hidden states the sweep scored and carry their graph."""
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
     harness = _EmbeddingBackboneHarness(attn_impl)
     harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
@@ -305,7 +284,7 @@ def test_an_armed_sweep_hands_back_the_heads_completion_logits(attn_impl):
 
 
 def test_an_armed_full_logits_forward_hands_back_its_completion_logits():
-    """On the full-logits path the capture reads the model's own output, sliced as TRL slices it."""
+    """The capture reads the model's own output, sliced as TRL slices it."""
     input_ids, attention_mask, _, ltk = _ragged_batch()
     harness = _RealBackboneHarness("eager")
     with harness._capturing_completion_logits() as captured, harness._capturing_forward_logits(harness.model, ltk):
@@ -325,7 +304,7 @@ class _ModeResolutionHarness(ChunkedGRPOLogprobsMixin):
         self.model.train()
         self.args = SimpleNamespace(per_device_train_batch_size=1, per_device_eval_batch_size=4)
         self._use_chunked_grpo_logprobs = True
-        # is_main_process: TRL's @profiling_decorator on the overridden method reads it.
+        # TRL's @profiling_decorator on the overridden method reads is_main_process.
         self.accelerator = SimpleNamespace(unwrap_model=lambda module: module, is_main_process=False)
         self.resolved: list[int] = []
 
@@ -335,12 +314,8 @@ class _ModeResolutionHarness(ChunkedGRPOLogprobsMixin):
 
 
 def test_reference_logps_use_the_trainer_mode_not_the_frozen_model_flag():
-    """A frozen reference model sits in eval for the whole run (``frozen_models.py`` eval()s it, TRL
-    prepares it with evaluation_mode=True), so reading ITS training flag resolves the KL's reference
-    forward to the eval batch size while the policy uses the train one. At the shipped env-GRPO shape
-    (train 1, eval 4) that also lands the two on opposite sides of ``rows_forward_densely``: the policy
-    on trimmed dense rows, the reference on the padded batch — a KL between two computations.
-    """
+    """A frozen reference sits in eval all run. Reading its own flag gives it the eval batch size, and at the shipped
+    train 1, eval 4 the policy runs trimmed dense rows while the reference runs the padded batch."""
     harness = _ModeResolutionHarness()
     reference = torch.nn.Module()
     reference.eval()
@@ -371,21 +346,19 @@ _TRL_TEXT_PARAMS = frozenset(
         "compute_aux_loss",
     )
 )
-# The modality inputs of TRL's full-logits scorer: its parameters past the text ones.
 _TRL_MODALITY_PARAMS = tuple(
     name for name in inspect.signature(GRPOTrainer._full_logits_logps).parameters if name not in _TRL_TEXT_PARAMS
 )
 
 
 def _trl_loss_forward(harness, model, ids, mask, logits_to_keep, **overrides):
-    """The call TRL 1.14's ``_compute_loss`` makes on a text batch: entropy on, ``compute_aux_loss``
-    passed, every modality input ``None``."""
+    """The call TRL 1.14's ``_compute_loss`` makes on a text batch."""
     kwargs = {name: None for name in _TRL_MODALITY_PARAMS} | {"compute_entropy": True, "compute_aux_loss": False}
     return harness._get_per_token_logps_and_entropies(model, ids, mask, logits_to_keep, **(kwargs | overrides))
 
 
 def test_trls_text_loss_forward_takes_the_chunked_path_and_gets_three_values(monkeypatch):
-    """The modality gate reads TRL's scorer signature once, at class creation, not on every call."""
+    """The modality gate reads TRL's scorer signature once, at class creation."""
     harness = _ModeResolutionHarness()
     ids, mask = torch.zeros(2, 6, dtype=torch.long), torch.ones(2, 6, dtype=torch.long)
 
@@ -397,7 +370,7 @@ def test_trls_text_loss_forward_takes_the_chunked_path_and_gets_three_values(mon
 
 
 class _FullLogitsHarness(ChunkedGRPOLogprobsMixin, GRPOTrainer):
-    """Chunking off, over TRL's own dispatch: ``use_liger_kernel`` on, as TRL holds it for a Liger run."""
+    """Chunking off and ``use_liger_kernel`` on, as TRL holds it for a Liger run."""
 
     def __init__(self):
         self.model = torch.nn.Module()
@@ -437,12 +410,8 @@ def test_an_aux_loss_request_is_refused():
 
 
 class _RealBackboneHarness(ChunkedGRPOLogprobsMixin):
-    """A real causal LM behind the core's own ``_get_last_hidden_state``.
-
-    The embedding harness above is position-free, so it cannot see what the dense path does to
-    attention and RoPE: the trimmed row is forwarded mask-free at positions ``[0, len)`` while the
-    padded row runs at positions offset by its left padding.
-    """
+    """A real causal LM, which sees what the dense path does to attention and RoPE: the trimmed row runs mask-free at
+    positions ``[0, len)``, the padded row at positions offset by its left padding."""
 
     temperature = 1.0
 
@@ -490,10 +459,8 @@ def test_the_core_backbone_forward_reproduces_the_models_completion_logits():
 
 @pytest.mark.parametrize("attn_implementation", ["sdpa", "eager"])
 def test_dense_rows_match_the_padded_batch_on_a_real_attention_stack(attn_implementation):
-    # The dense arm trims each row and drops its mask, so the row's causal mask and RoPE positions
-    # both change. Only a real attention + RoPE stack can show that the log-probs are unaffected;
-    # an off-by-one span, a mask-free row that still carries padding, or a mis-tiled head sweep
-    # would all move them.
+    # Trimming a row and dropping its mask changes its causal mask and RoPE positions. An off-by-one span, a
+    # mask-free row that still carries padding or a mis-tiled head sweep would all move the log-probs.
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
     harness = _RealBackboneHarness(attn_implementation)
 
@@ -506,10 +473,8 @@ def test_dense_rows_match_the_padded_batch_on_a_real_attention_stack(attn_implem
 
 
 def test_backward_matches_autograd_for_every_input_across_tiles(monkeypatch):
-    # The recompute backward reconstructs each logits tile from the saved log_z, so every input's
-    # gradient — the head bias included, whose only chain to the loss is through this Function — has
-    # to carry the 1/temperature factor and land in the right vocab tile. An upstream gradient that
-    # varies per token catches a per-row scale that .sum() would hide.
+    # Every input's gradient, the head bias's included, must carry 1/temperature and land in the right vocab tile.
+    # An upstream gradient that varies per token catches a per-row scale that .sum() would hide.
     monkeypatch.setattr(head_logprobs, "SEQ_TILE", 5)
     monkeypatch.setattr(head_logprobs, "VOCAB_TILE", 7)
     vocab, b, t, hidden_size = 23, 3, 11, 6
@@ -569,10 +534,9 @@ def test_sweep_matches_full_path_across_sequence_and_vocab_tiles(monkeypatch):
 
 
 def test_softcapped_sweep_matches_the_capped_full_path(monkeypatch):
-    # A Gemma head caps its logits (``cap · tanh(logits / cap)``) before the softmax; a sweep that skips
-    # the cap scores a sharper distribution than the one the model samples from. Forward, entropy and
-    # every gradient are checked across tile boundaries at a cap small enough for random weights to
-    # saturate it, so an uncapped sweep is off by whole nats rather than rounding.
+    # A Gemma head caps its logits (``cap · tanh(logits / cap)``) before the softmax; skipping the cap scores a
+    # sharper distribution than the model samples from. The cap is small enough for random weights to saturate it,
+    # so an uncapped sweep is off by whole nats.
     monkeypatch.setattr(head_logprobs, "SEQ_TILE", 5)
     monkeypatch.setattr(head_logprobs, "VOCAB_TILE", 7)
     vocab, softcap, temperature = 23, 0.5, 0.8
@@ -603,10 +567,8 @@ def test_softcapped_sweep_matches_the_capped_full_path(monkeypatch):
 
 
 def test_every_head_transform_term_reaches_forward_entropy_and_gradients(monkeypatch):
-    # All four terms at once, across tile boundaries: the hidden scale ahead of the matmul, the vocab
-    # cut through the weight and bias rows (a cut the tiles do not align with), the logit scale ahead
-    # of the cap, and the cap. Each term moves the log-probs by whole nats at this scale, and the
-    # backward carries the scale and the cap's tanh derivative into every input's gradient.
+    # All four terms at once: hidden scale, vocab cut through the weight and bias rows (the tiles do not align with
+    # it), logit scale, cap. Each moves the log-probs by whole nats at this scale.
     monkeypatch.setattr(head_logprobs, "SEQ_TILE", 5)
     monkeypatch.setattr(head_logprobs, "VOCAB_TILE", 7)
     vocab, kept, temperature = 23, 19, 0.8
@@ -652,7 +614,7 @@ def test_every_head_transform_term_reaches_forward_entropy_and_gradients(monkeyp
 
 
 class _CappedHeadHarness(ChunkedGRPOLogprobsMixin):
-    """A tiny Gemma 2 behind the mixin: its head declares ``final_logit_softcapping``."""
+    """A tiny Gemma 2, whose head declares ``final_logit_softcapping``."""
 
     temperature = 1.0
 
@@ -678,9 +640,8 @@ class _CappedHeadHarness(ChunkedGRPOLogprobsMixin):
 
 
 def test_the_sweep_reads_the_heads_softcap_off_the_model_config():
-    # The reference is the model's own forward, whose head applies the cap; the mixin has to find the
-    # cap on the config by itself. A cap of 0.5 saturates random-init logits, so a sweep that ignores
-    # it disagrees with the model by more than a nat on most tokens.
+    # The model's own forward applies the cap; the mixin has to find it on the config by itself. A cap of 0.5
+    # saturates random-init logits, so a sweep that ignores it is off by more than a nat on most tokens.
     harness = _CappedHeadHarness(softcap=0.5)
     torch.manual_seed(1)
     input_ids = torch.randint(0, 64, (2, 12))

@@ -54,9 +54,9 @@ from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
 
 STEPS = 2
-# Tree against flat, relative. On this corpus the step-1 loss parts by 6.4e-4 and the step-1 grad norm by ~5e-3 (the
-# tree kernels' bf16 rounding on identical weights); after one update each arm also drifts against itself, flat by
-# 7e-3, so step 2's norm parts by up to 1.4e-2. A tree row read as one causal sequence misses step 1's loss by 1.37.
+# Step-1 loss parts by 6.4e-4 and grad norm by ~5e-3 (the tree kernels' bf16 rounding); after one update each arm
+# drifts against itself, flat by 7e-3, so step 2's norm parts by up to 1.4e-2. A tree row read as one causal sequence
+# misses step 1's loss by 1.37.
 TOLERANCE = 1e-2
 UPDATED_GRAD_NORM_TOLERANCE = 5e-2
 MAX_TREE_STORED_FRACTION = 0.5
@@ -190,8 +190,7 @@ def _document_row(document: str, pairs: list[tuple[Record, Record]], phrasing: i
 
 
 def _document_rows(rng: random.Random) -> list[list[dict]]:
-    """Five rows over one document: the first two open with the same question, the next two ask one question
-    answered in two phrasings, the last asks its own."""
+    """Five rows over one document: two share a question, two ask one question in two phrasings, the last its own."""
     records = _records(rng, DOCUMENT_RECORDS)
     document = "\n".join(record.sentence() for record in records)
     pairs = _pairs(rng, records, 5)
@@ -205,7 +204,6 @@ def _document_rows(rng: random.Random) -> list[list[dict]]:
 
 
 def _unshared_row(rng: random.Random, records_count: int, *, with_marker: bool) -> list[dict]:
-    """A row no other row shares: a document of its own under the marker, or notes without one."""
     records = _records(rng, records_count)
     if with_marker:
         return _document_row("\n".join(record.sentence() for record in records), _pairs(rng, records, 1))
@@ -231,7 +229,6 @@ def _conversations(seed: int, *, documents: int, unshared: int, unshared_records
 
 
 def _write_corpus(path: Path) -> int:
-    """The corpus as a pre-split local dataset at ``path``; returns its training conversations."""
     train = _conversations(SEED, documents=DOCUMENTS, unshared=UNSHARED_ROWS, unshared_records=UNSHARED_RECORDS)
     test = _conversations(SEED + 1, documents=0, unshared=TEST_ROWS, unshared_records=TEST_RECORDS)
     DatasetDict(
@@ -244,7 +241,6 @@ def _write_corpus(path: Path) -> int:
 
 
 def _config(*, tree: bool, dataset: Path, output_dir: Path, max_length: int, grad_accum: int) -> dict:
-    """One arm's run config: packed (bfd), completion-only full fine-tuning, the last step saved for its log."""
     values = {
         "model_name_or_path": QWEN3_0_6B,
         "attn_implementation": ATTENTION,
@@ -287,9 +283,7 @@ def _config(*, tree: bool, dataset: Path, output_dir: Path, max_length: int, gra
 
 
 def _packed_train_rows(values: dict, hf_config) -> int:
-    """The packed training rows a launch of ``values`` trains, from the SFT script's own data path on the CPU: its
-    parser, its dataset loader, its tokenizer window and its tokenize, tree and packing passes over ``hf_config``'s
-    model."""
+    """The packed training rows a launch would train, from the SFT script's own data path on the CPU."""
     parser = HaloArgumentParser((SFTScriptArguments, SFTConfig, ModelArguments, ParallelismArguments))
     args, sft_config, model_args, _ = parser.parse_dict({**values, "bf16": False, "use_cpu": True})
     splits, _ = load_datasets_auto(
@@ -340,7 +334,6 @@ def _relative(actual: float, expected: float) -> float:
 
 
 def _per_step(steps: list[dict], counter: str) -> list[float]:
-    """A cumulative counter's increment at each logged step."""
     totals = [float(entry[counter]) for entry in steps]
     return [total - previous for total, previous in zip(totals, [0.0, *totals[:-1]], strict=True)]
 

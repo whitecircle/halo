@@ -35,12 +35,8 @@ def load_planned_weights(
     fusion_tasks: list[FusionTask] | None = None,
     dropped_keys: Sequence[str] = (),
 ) -> bool:
-    """COLLECTIVE (the closing fence): stream ``plans`` into ``base.model``; returns whether any expert tensor
-    arrived as this rank's slice.
-
-    Every step defers a rank-local raise to the fence: fp32-master capture, the per-expert fusion (``fusion_tasks``,
-    else detected off ``base``), empty storage for ``dropped_keys``, a resume's master coverage, then ``report``.
-    """
+    """COLLECTIVE (the closing fence): stream ``plans`` into ``base.model``; returns whether any expert tensor arrived
+    as this rank's slice. Every step defers a rank-local raise to the fence."""
     model, dtype = base.model, base.dtype
     device = f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu"
     guard = DeferredRankFailure(what)

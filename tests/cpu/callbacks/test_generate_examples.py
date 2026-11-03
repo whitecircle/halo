@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-"""Tests for GenerateExamplesCallback. Run: python tests/cpu/callbacks/test_generate_examples.py"""
 
 import itertools
 import logging
@@ -54,7 +53,7 @@ class _GCLayer(torch.nn.Module):
 
 
 class _Generator(torch.nn.Module):
-    """A ``generate()``-capable model recording, per call, the prompt, greedy flag and GC flags it saw."""
+    """Records, per call, the prompt, greedy flag and GC flags it saw."""
 
     def __init__(self, *children: torch.nn.Module, fail: bool = False):
         super().__init__()
@@ -76,8 +75,6 @@ class _Generator(torch.nn.Module):
 
 
 class _DTensorGenerator(_Generator):
-    """A generator whose parameters are DTensors on a mesh named ``mesh_dim_names``."""
-
     def __init__(self, *children: torch.nn.Module, mesh_dim_names, fail: bool = False):
         super().__init__(*children, fail=fail)
         self.mesh_dim_names = mesh_dim_names
@@ -92,7 +89,6 @@ def _fsdp_stamped(model: torch.nn.Module) -> torch.nn.Module:
 
 
 def _peft_over(inner: torch.nn.Module) -> torch.nn.Module:
-    """PEFT's nesting: the wrapped model sits at ``base_model.model``."""
     peft = torch.nn.Module()
     peft.base_model = torch.nn.Module()
     peft.base_model.model = inner
@@ -108,7 +104,6 @@ def _callback(dataset: Dataset, num_examples: int) -> GenerateExamplesCallback:
 
 
 def _evaluate(model, *, world_size: int, rank: int = 0, num_examples: int = 2, num_rows: int = 4):
-    """Run ``on_evaluate`` as ``rank`` of ``world_size``; return its collectives, warnings and INFO lines."""
     callback = _callback(_generation_dataset(num_rows), num_examples)
     collectives: list[str] = []
 
@@ -265,7 +260,6 @@ _DISPATCH_GOLDEN = [
     ids=[case[0] for case in _DISPATCH_GOLDEN],
 )
 def test_dispatch_matches_golden(build, world_size, expected):
-    """Skip with the layout's message, generate collectively (greedy, errors raise) or split per rank."""
     assert _dispatch(build, world_size) == expected
 
 
@@ -286,11 +280,8 @@ def test_split_ranks_generate_every_world_size_th_sample():
 @pytest.mark.parametrize("flags", list(itertools.product([True, False], repeat=3)))
 @pytest.mark.parametrize("fail", [False, True])
 def test_gradient_checkpointing_is_off_during_generation_and_restored_exactly(flags, fail):
-    """Every module generates with GC off, and afterwards exactly the modules that had it on get it back.
-
-    Checked over every on/off pattern: switching it back on everywhere would change memory and step
-    time on layers a partially checkpointed model left off. A collective failure must restore too.
-    """
+    """Over every on/off pattern: switching GC back on everywhere would change memory and step time on layers a
+    partially checkpointed model left off. A collective failure must restore too."""
     generator = _fsdp_stamped(_Generator(*(_GCLayer(flag) for flag in flags), fail=fail))
     if fail:
         with pytest.raises(RuntimeError, match="boom"):
@@ -311,7 +302,6 @@ def test_sample_draw_is_seeded_and_clamped_to_the_dataset():
 
 
 def test_generate_single_strips_the_prompt_and_keeps_preference_replies():
-    """The completion is the decoded suffix past the prompt; chosen/rejected ride along when present."""
     example = {
         "input_ids": [1, 2, 3],
         "attention_mask": [1, 1, 1],
@@ -332,8 +322,7 @@ def test_build_record_carries_preference_replies_only_when_present():
 
 
 def test_pretty_print_dataframe_truncates_long_prompt(caplog):
-    """Long prompts are tail-truncated to the module's character budget with a leading ellipsis, so
-    the completion stays readable in the log table; the caller's frame is left untouched."""
+    """Tail-truncated with a leading ellipsis, so the completion stays readable in the log table."""
     long_prompt = "y" * (_MAX_PRINTED_PROMPT_CHARS + 1) + "x" * _MAX_PRINTED_PROMPT_CHARS
     df = pd.DataFrame([{"Prompt": long_prompt, "Completion": "c"}])
 
@@ -343,7 +332,7 @@ def test_pretty_print_dataframe_truncates_long_prompt(caplog):
     table = caplog.records[-1].getMessage()
     assert "..." + "x" * _MAX_PRINTED_PROMPT_CHARS in table, table
     assert "y" not in table, "the truncated head must not reach the table"
-    assert df.loc[0, "Prompt"] == long_prompt  # original untouched (works on a copy)
+    assert df.loc[0, "Prompt"] == long_prompt  # works on a copy
 
 
 if __name__ == "__main__":

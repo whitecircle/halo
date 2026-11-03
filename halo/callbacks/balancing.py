@@ -1,7 +1,4 @@
-"""Run-level MoE balancing: configure the run's ``moe_balancing`` mode (resolve it with
-:func:`~halo.models.moe.balancing.resolve_balancing_mode`, agree it across ranks, apply the config writes,
-the bias-state enable and the ``bias_update`` export contract) and step the bias every optimizer step.
-"""
+"""Run-level MoE balancing: resolve and agree the run's ``moe_balancing`` mode, apply it, and step the bias."""
 
 import logging
 
@@ -38,21 +35,16 @@ from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backen
 
 logger = logging.getLogger(__name__)
 
-# The transient side-buffer's bias adds to selection scores of uniform scale 1/num_experts: a sign step
-# above the warn fraction of uniform oscillates instead of converging; the suggested fraction is the
-# rate the warning quotes.
+# Of the uniform score scale 1/num_experts: a sign step above the warn fraction oscillates, the other is quoted.
 _TRANSIENT_STEP_WARN_FRACTION_OF_UNIFORM = 0.25
 _TRANSIENT_STEP_SUGGESTED_FRACTION_OF_UNIFORM = 0.1
-# Far enough below the routed slots' bias range that the discard slot never wins a top-k comparison it
-# would not have won unbiased.
+# Far below the routed slots' bias range, so the discard slot never wins a top-k comparison it would not win unbiased.
 _DISCARD_SLOT_BIAS = -1.0
 
 
 def _enforce_bias_export_contract(model, mode: BalancingMode, is_moe: bool) -> None:
-    """COLLECTIVE. Reject a bias-update mode whose spelling misstates where the trained bias lands:
-    ``bias_update`` on a router left on the transient side-buffer, ``bias_update_transient`` where every
-    router adopts a native slot. Collective because ``transient`` is read off this rank's stage only.
-    """
+    """COLLECTIVE, since ``transient`` is read off this rank's stage only. Reject ``bias_update`` on a router left on
+    the transient side-buffer, and ``bias_update_transient`` where every router adopts a native slot."""
     transient = sorted({type(m).__name__ for m in iter_balancing_routers(model) if is_transient_balancing_router(m)})
     if mode == "bias_update":
         native_types = sorted(mt for spec in MOE_FAMILY_SPECS if spec.balancing_slot for mt in spec.model_types)
@@ -73,9 +65,7 @@ def _enforce_bias_export_contract(model, mode: BalancingMode, is_moe: bool) -> N
         reject_across_ranks(reason, "moe_balancing=bias_update export contract", ValueError)
         return
     if mode == "bias_update_transient":
-        # Any rank's transient router makes the whole model's bias transient. Taken before the
-        # `is_moe` test, never on the right of it: rank_consensus is a world all-reduce, so a rank
-        # short-circuiting past it would leave every peer inside the collective.
+        # Before `is_moe`: rank_consensus is a world all-reduce, and a rank short-circuiting past it strands its peers.
         any_transient = rank_consensus(bool(transient)).any_ok
         if is_moe and not any_transient:
             raise ValueError(
@@ -94,7 +84,6 @@ def _enforce_bias_export_contract(model, mode: BalancingMode, is_moe: bool) -> N
 
 
 def _nothing_balanced_detail(hook_layers: list[str], is_moe: bool) -> str:
-    """Why a bias-update mode found nothing to balance, for the refusal."""
     if hook_layers:
         return (
             f"its EP MoE layers {hook_layers} do not support bias-update balancing "
@@ -107,9 +96,8 @@ def _nothing_balanced_detail(hook_layers: list[str], is_moe: bool) -> str:
 
 
 def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
-    """Zero the aux coefficient and router logits for the run, enable the bias on every accepting EP
-    layer (after EP patching, before FSDP wraps), then check that something balances and where the
-    bias exports."""
+    """Zero the aux coefficient and router logits, enable the bias on every accepting EP layer (after EP patching,
+    before FSDP wraps), then check that something balances and where the bias exports."""
     mark_router_logits_forced_off(cfg)
     coef = get_config_field(cfg, "router_aux_loss_coef", 0)
     if coef not in (0, 0.0, None):
@@ -134,8 +122,7 @@ def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
             enabled += bool(hook())
     if enabled:
         logger.info(f"Enabled bias-update balancing on {enabled} EP MoE layers.")
-    # The engines whose loader drops the family's exported key (vLLM's Laguna loader): training and the export
-    # are correct, so it is warned, not rejected.
+    # An engine's loader can drop the family's exported key (vLLM's Laguna); training and export are correct, so warn.
     model_types = set(config_model_types(cfg))
     dropped_by = sorted(
         client.ENGINE_RELEASE
@@ -163,11 +150,9 @@ def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
             f"that declares it accepts it. moe_balancing: none trains unbalanced, which for a large "
             f"expert count is a real cost, not a neutral default."
         )
-    # After the enable: adoption can fall back to the transient side-buffer at runtime (a DTensor
-    # slot, an upstream rename), so the contract reads the post-enable state.
+    # After the enable: adoption can fall back to the side-buffer at runtime (a DTensor slot, an upstream rename).
     _enforce_bias_export_contract(model, mode, is_moe=is_moe)
-    # A materialized config-gated slot (LFM-2 use_expert_bias) must flip its flag, or the export tells
-    # serving engines to skip the trained tensor.
+    # A materialized config-gated slot (LFM-2 use_expert_bias) must flip its flag, or engines skip the trained tensor.
     flags = {
         flag
         for module in model.modules()
@@ -184,9 +169,9 @@ def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
 
 
 def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
-    """Turn router logits on for the run and route the aux-loss router gradient through reentrant
-    checkpointing, unless the aux term is inert (policy-gradient loss), severed by EP layers or
-    unusable; each leave-off stamps the config so ``MoEMetricsCallback`` does not re-enable it."""
+    """Turn router logits on and route the aux gradient through reentrant checkpointing, unless the aux term is inert
+    (policy-gradient loss), severed by EP layers or unusable; each leave-off stamps the config so
+    ``MoEMetricsCallback`` does not re-enable it."""
     if policy_gradient_loss:
         mark_router_logits_forced_off(cfg)
         logger.warning(
@@ -199,7 +184,7 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
         )
         return
     if severs_aux_loss(model):
-        # Enabling output_router_logits would index the never-populated tuple: a crash, not balancing.
+        # Enabling output_router_logits would index the never-populated tuple and crash.
         mark_router_logits_forced_off(cfg)
         logger.warning(
             "moe_balancing=aux_loss has NO EFFECT for this model under EP: its EP layers "
@@ -223,8 +208,7 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
         )
         return
     if not honors_router_logits_flag(model):
-        # bias_update is a remedy only where something would accept the bias; without an
-        # acceptor it raises in turn, so name the knobs that create one instead.
+        # bias_update is a remedy only where something accepts the bias; else it raises too, so name what creates one.
         if accepts_bias_balancing(model) or has_balancing_routers(model):
             remedy = (
                 "Use moe_balancing=bias_update (aux-loss-free, works under EP and PP), or "
@@ -256,8 +240,7 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
             "materialize the router-logit plane and inflate its eval loss."
         )
         set_config_field_run_scoped(cfg, "output_router_logits", True)
-    # MoE gradient checkpointing is reentrant (outside pipeline parallelism), whose no_grad first
-    # pass would leave every checkpointed layer's aux term without a router gradient.
+    # MoE checkpointing is reentrant (outside PP); its no_grad pass leaves a layer's aux term with no router gradient.
     if not install_router_aux_gradient(model):
         logger.warning(
             f"moe_balancing=aux_loss: {type(model).__name__} declares no transformers "
@@ -267,12 +250,8 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
 
 
 def agree_balancing_mode(mode: BalancingMode) -> BalancingMode:
-    """COLLECTIVE. One balancing mode for the whole job, by :data:`BALANCING_MODE_PRECEDENCE`.
-
-    Under pipeline parallelism a stage without MoE layers resolves ``auto`` with no evidence, and a
-    split verdict sends stages down different branches of :func:`apply_balancing_mode`. Identity
-    outside distributed.
-    """
+    """COLLECTIVE. One mode for the job, by :data:`BALANCING_MODE_PRECEDENCE`: under PP a stage without MoE layers
+    resolves ``auto`` with no evidence, and a split verdict sends stages down different branches."""
     if get_global_world_size() <= 1:
         return mode
     modes: list[BalancingMode | None] = [None] * dist.get_world_size()
@@ -290,10 +269,8 @@ def agree_balancing_mode(mode: BalancingMode) -> BalancingMode:
 def apply_balancing_mode(
     model, mode: BalancingMode, *, policy_gradient_loss: bool = False, is_moe: bool = False, pp_size: int = 1
 ) -> None:
-    """COLLECTIVE. Apply a resolved balancing mode's side effects to ``model``; ``none`` leaves it as is.
-
-    ``policy_gradient_loss`` (GRPO) never adds the router aux loss, so ``aux_loss`` is inert there.
-    """
+    """COLLECTIVE. Apply a resolved mode's side effects; ``policy_gradient_loss`` (GRPO) never adds the aux loss, so
+    ``aux_loss`` is inert there."""
     if mode == "bias_update_transient" and pp_size > 1:
         raise ValueError(
             f"moe_balancing=bias_update_transient is untested under pipeline parallelism (pp_size={pp_size}): "
@@ -317,12 +294,8 @@ def configure_moe_balancing(
     policy_gradient_loss: bool = False,
     syncs_to_external_generator: bool = False,
 ) -> BalancingMode:
-    """COLLECTIVE. Resolve ``args.moe_balancing`` on ``model``, agree it across ranks and apply it;
-    returns the mode the run's callbacks are built for.
-
-    ``syncs_to_external_generator`` (on-policy weight-sync RL) downgrades both bias modes to ``none``:
-    the sync ships parameters only, so a trained bias would split trainer and generator routing.
-    """
+    """COLLECTIVE. Resolve, agree and apply ``args.moe_balancing``. ``syncs_to_external_generator`` downgrades both
+    bias modes to ``none``: the sync ships parameters only, so a trained bias would split routing."""
     routing = resolve_moe_routing(model)
     mode = agree_balancing_mode(resolve_balancing_mode(args.moe_balancing, model, routing.routes_between_experts))
     if syncs_to_external_generator and mode in BIAS_UPDATE_MODES:
@@ -346,7 +319,7 @@ def configure_moe_balancing(
 
 
 def _expert_load_counter(router) -> torch.Tensor:
-    """``router.expert_load_counter``, lazily created as fp32 zeros of the bias's width and device."""
+    """Lazily created as fp32 zeros of the bias's width and device."""
     counter = router.expert_load_counter
     if counter is None:
         biases = router.balancing_biases
@@ -356,14 +329,9 @@ def _expert_load_counter(router) -> torch.Tensor:
 
 
 class BalancingBiasCallback(MoELoadMetricsCallback):
-    """DeepSeek-V3 bias update after every optimizer step: ``b_i <- b_i + update_rate * sign(mean - count_i)``.
-
-    A router carries a ``balancing_biases`` buffer added to its detached top-k scores, so gradients
-    keep flowing through the unbiased gate, and an ``expert_load_counter`` this callback all-reduces,
-    steps on and zeros. The counter is a plain attribute, not a buffer, so neither ``state_dict()``
-    exports nor the PP lazy loader see it. ``exclude_last_slot`` pins the trailing discard slot to
-    :data:`_DISCARD_SLOT_BIAS`; only the ``moe/*`` summary is periodic, since it costs a host sync.
-    """
+    """DeepSeek-V3 bias update after every optimizer step: ``b_i <- b_i + update_rate * sign(mean - count_i)``. The
+    bias adds to detached top-k scores, so gradients flow through the unbiased gate. ``expert_load_counter`` is a plain
+    attribute, unseen by ``state_dict()`` and the PP lazy loader. The ``moe/*`` summary is a periodic host sync."""
 
     def __init__(self, update_rate: float = 1e-3, exclude_last_slot: bool = False, log_every_n_steps: int = 1):
         if update_rate <= 0:
@@ -386,8 +354,7 @@ class BalancingBiasCallback(MoELoadMetricsCallback):
         for router in routers:
             # Arms recording on routers whose bias exists regardless of balancing (Zaya's native buffer).
             router.balancing_active = True
-        # Transient routers only: a native slot sits in the family's own score space, where GPT-OSS
-        # logits call for a larger rate.
+        # Transient only: a native slot sits in the family's own score space, where GPT-OSS logits want a larger rate.
         transient_widths = {r.balancing_biases.numel() for r in routers if is_transient_balancing_router(r)}
         if transient_widths:
             num_experts = max(transient_widths) - (1 if self.exclude_last_slot else 0)
@@ -435,8 +402,7 @@ class BalancingBiasCallback(MoELoadMetricsCallback):
                 "The forward path is not reaching the balancing-enabled routers' load recording."
             )
 
-        # The summary ends in a host sync only on_log consumes, so it is derived on logged steps only (a
-        # rank-uniform gate); the all-reduce above stays unconditional because the update needs it.
+        # The summary ends in a host sync only on_log consumes, so it runs on logged steps only (a rank-uniform gate).
         if self._first_log or state.global_step % self.log_every_n_steps == 0:
             self._pending = compute_moe_load_metrics(counters, exclude_last_slot=self.exclude_last_slot)
 

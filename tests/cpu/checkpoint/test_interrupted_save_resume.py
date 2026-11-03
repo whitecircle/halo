@@ -1,27 +1,6 @@
 #!/usr/bin/env python
-"""A checkpoint save stopped partway must never be what resume detection picks, on any filesystem.
-
-``trainer_state.json`` is the file resume detection takes a checkpoint by, and the base Trainer
-writes it before the toolkit's sidecars and per-rank optimizer shards. The mixin's save therefore
-removes an earlier save's copy before writing anything (a resumed run re-saving a step rewrites that
-step's directory in place) and publishes the base save's copy only once every other file is on
-disk. Two ranks on a gloo group, as one shared output filesystem (one writer) and as two nodes with
-their own local disks (one writer each), pin, for a save stopped while it writes its weights (before
-the base save's trainer state) or its optimizer shards (after it):
-
-1. **A fresh step.** The stopped ``checkpoint-2`` holds no ``trainer_state.json`` on any node, and
-   ``resume_from_checkpoint: true`` resumes every rank from the complete ``checkpoint-1``.
-2. **A rewritten step.** ``checkpoint-2`` already held an abandoned run's complete save; stopped
-   midway, the rewrite leaves no trainer state vouching for the mix of old and new files, and
-   detection again resumes from ``checkpoint-1``.
-3. **An explicit path** to the stopped step is refused on every rank, naming it.
-4. **No trainer state to commit.** A save rank the base save wrote no trainer state for (a base save
-   that wrote none, or writers that are not the output filesystem's save ranks) fails the save on
-   every rank before rotation, which under ``save_total_limit: 1`` would otherwise remove
-   ``checkpoint-1`` for a ``checkpoint-2`` no resume takes.
-
-    python tests/cpu/checkpoint/test_interrupted_save_resume.py
-"""
+"""A save stopped partway is never what resume detection picks, on any filesystem. The mixin removes an earlier
+``trainer_state.json`` first and publishes the new one only when every other file is on disk."""
 
 import datetime
 import json
@@ -54,23 +33,17 @@ class _Preempted(RuntimeError):
 
 
 class _StateWriteThenStop(TrainerState):
-    """A trainer state whose write is the last thing the save does before it is stopped."""
-
     def save_to_json(self, json_path):
         super().save_to_json(json_path)
         raise _Preempted("stopped right after the trainer state was written (simulated preemption)")
 
 
 class _StateNeverWritten(TrainerState):
-    """A base save that leaves no trainer state behind."""
-
     def save_to_json(self, json_path):
         return None
 
 
 class _ShardSaveStopped:
-    """Stands in for ``OptimizerShardStore.save``, stopping the way a preemption would."""
-
     def __init__(self, writes_shards: bool):
         self.writes_shards = writes_shards
 
@@ -79,9 +52,7 @@ class _ShardSaveStopped:
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
-    """The mixin's save over HF's: the weights, the rank-0 optimizer view and the trainer state, written
-    by the ``should_save`` rank(s) — or stopped on every rank mid-weights, or on the writer(s) right
-    after the trainer state."""
+    """Stopped on every rank mid-weights, or on the writers right after the trainer state."""
 
     def __init__(self, run_dir, stop: str):
         self.run_dir = run_dir
@@ -148,7 +119,7 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
         stopped = os.path.join(run_dir, "checkpoint-2")
         outcome["trainer_state_in_stopped_step"] = os.path.exists(os.path.join(stopped, TRAINER_STATE))
 
-        # The explicit path first: an accepted resume moves the stopped step out of the namespace.
+        # An accepted resume moves the stopped step out of the namespace, so the explicit path goes first.
         explicit = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=stopped)
         try:
             resume_checkpoint_from_config(explicit, overwrite_output_dir=False)
@@ -157,7 +128,7 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
             outcome["explicit"] = str(e)
         auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True)
         outcome["auto_resume"] = os.path.basename(resume_checkpoint_from_config(auto, overwrite_output_dir=False))
-    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+    except Exception as e:  # The setup failing must still leave a verdict file.
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
         reset_shared_filesystem_consensus()
@@ -197,7 +168,7 @@ def test_a_stopped_save_is_passed_over_by_resume_detection(tmp_path, per_node, r
 
 
 def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> None:
-    """Save step 2 under ``save_total_limit: 1`` with no trainer state for some save rank to commit."""
+    """Under ``save_total_limit: 1`` rotation would otherwise remove ``checkpoint-1`` for a step no resume takes."""
     outcome = {}
     try:
         PartialState()
@@ -223,7 +194,7 @@ def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> N
         auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True)
         resumed = resume_checkpoint_from_config(auto, overwrite_output_dir=False)
         outcome["auto_resume"] = resumed and os.path.basename(resumed)
-    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+    except Exception as e:
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
         reset_shared_filesystem_consensus()

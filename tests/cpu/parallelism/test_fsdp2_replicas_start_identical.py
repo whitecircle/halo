@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""Every copy the FSDP2 data-parallel wrap leaves on more than one rank starts from the first copy, on four gloo
-ranks, for every family of the tiny rosters.
-
-FSDP2, unlike DDP, broadcasts no module state, and those copies only average their gradients, so a tensor the ranks
-drew from their own RNG streams would keep each rank's draw for the whole run while every loss stays finite. The base
-model is drawn from one shared seed, as a checkpoint load gives every rank the same weights; what follows is drawn
-from each rank's own stream (``ADAPTER_SEED + rank``), as it is whenever the streams have parted before the draw.
-
-HSDP (``dp_replicate=2`` x ``dp_shard=2``) through ``apply_fsdp2_for_dp``, dense and MoE: PEFT LoRA on the
-attention projections and one row of the frozen input embedding (the row a vocabulary resize adds) drawn per rank.
-After the wrap every shard is the first replica's, and one optimizer step later every shard and the logits of a
-shared batch are still identical across each ``dp_replicate`` group.
-
-Every MoE family on the grouped-GEMM EP layers at ``ep_size=1`` with ``fsdp_shard_ep1_experts=False``, wrapped by the
-trainer's own mode ladder: the experts, router and native expert LoRA adapters are FSDP-ignored whole copies, the
-adapters drawn per rank. Under HSDP and under 1-D full-shard each copy is DP rank 0's after the wrap. At
-``ep_size=2`` the experts are distributed, and the wrap leaves every rank's expert weights as that rank holds them.
-
-Run: python tests/cpu/parallelism/test_fsdp2_replicas_start_identical.py
-"""
+"""Every copy the FSDP2 data-parallel wrap leaves on several ranks starts from the first, on four gloo ranks. FSDP2
+broadcasts no module state, so a per-rank draw would persist at finite loss."""
 
 import datetime
 import functools
@@ -50,8 +32,8 @@ FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}
 BATCH_SEED = 200
 TOKENS = 12
 EXPERT_LORA = ExpertLoraSpec(r=EXPERT_LORA_RANK_MULTIPLE, alpha=2 * EXPERT_LORA_RANK_MULTIPLE)
-# The EP-layer shapes the trainer's mode ladder wraps, by name: HSDP over two simulated NVLink domains of two
-# ranks, 1-D full-shard over one domain of four, and two-way expert distribution in that domain.
+# HSDP over two simulated domains of two ranks, 1-D full-shard over one domain of four, two-way expert distribution
+# there.
 EP_SHAPES = {
     "ep1_hsdp": {"gpus_per_node": 2, "use_hsdp": True, "fsdp_shard_ep1_experts": False},
     "ep1": {"gpus_per_node": 4, "fsdp_shard_ep1_experts": False},
@@ -67,8 +49,7 @@ def _max_abs(tensors) -> float:
 
 
 def _replica_spread(model) -> tuple[int, float]:
-    """The parameters on the 2-D HSDP mesh and the largest ``|Δ|`` of any non-empty local shard across its
-    ``dp_replicate`` group. COLLECTIVE."""
+    """Parameters on the 2-D HSDP mesh and the largest ``|Δ|`` across the ``dp_replicate`` group. COLLECTIVE."""
     shards = [
         param.data
         for param in model.parameters()
@@ -86,7 +67,7 @@ def _replica_spread(model) -> tuple[int, float]:
 
 
 def _grad_spread(model) -> float:
-    """The largest ``|Δ|`` of any trainable non-empty shard's gradient across its ``dp_replicate`` group. COLLECTIVE."""
+    """The largest gradient ``|Δ|`` across the ``dp_replicate`` group. COLLECTIVE."""
     grads = [param.grad for param in model.parameters() if param.requires_grad and isinstance(param.grad, DTensor)]
     return max_or_nan(
         (
@@ -99,8 +80,7 @@ def _grad_spread(model) -> float:
 
 
 def _first_replica_tensor(drawn: list[torch.Tensor], mesh) -> torch.Tensor:
-    """The tensor the first replica's ranks hold together: each keeps the dim-0 chunk of its own draw at its shard
-    index (FSDP2's ``torch.chunk`` sharding, empty past the last chunk). ``drawn`` is indexed by global rank."""
+    """``drawn`` is indexed by global rank; each keeps the dim-0 chunk at its shard index (FSDP2's ``torch.chunk``)."""
     first = mesh.mesh[0].tolist()
     shards = len(first)
     chunks = [torch.chunk(drawn[rank], shards, dim=0) for rank in first]
@@ -108,7 +88,7 @@ def _first_replica_tensor(drawn: list[torch.Tensor], mesh) -> torch.Tensor:
 
 
 def _gather_world(tensor: torch.Tensor) -> list[torch.Tensor]:
-    """Every rank's copy of ``tensor``, indexed by global rank. COLLECTIVE."""
+    """Indexed by global rank. COLLECTIVE."""
     local = tensor.detach().contiguous()
     gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]
     dist.all_gather(gathered, local)
@@ -116,8 +96,7 @@ def _gather_world(tensor: torch.Tensor) -> list[torch.Tensor]:
 
 
 def _first_replica_gap(model, drawn: dict[str, list[torch.Tensor]]) -> float:
-    """The largest ``|Δ|`` between any parameter on the HSDP mesh and the first replica's copy of it, read from what
-    every rank held before the wrap. COLLECTIVE (one gather per parameter over its mesh)."""
+    """Against what every rank held before the wrap. COLLECTIVE (one gather per parameter over its mesh)."""
     gaps = []
     for name, param in model.named_parameters():
         if isinstance(param.data, DTensor):
@@ -126,9 +105,7 @@ def _first_replica_gap(model, drawn: dict[str, list[torch.Tensor]]) -> float:
 
 
 def _forward_spread(model, vocab: int) -> float:
-    """The largest ``|Δ|`` of the logits one shared batch, the drawn embedding row's token included, gives across
-    the ``dp_replicate`` group: what the replicas compute from the parameters FSDP2 gathers, not only the shards they
-    store. Read after a step, since a zero-init ``lora_B`` hides ``lora_A`` from the forward before one. COLLECTIVE."""
+    """Read after a step, since a zero-init ``lora_B`` hides ``lora_A`` from the forward before one. COLLECTIVE."""
     mesh = next(param.data.device_mesh for param in model.parameters() if isinstance(param.data, DTensor))
     ids = torch.randint(0, vocab, (1, TOKENS), generator=torch.Generator().manual_seed(BATCH_SEED))
     ids[0, -1] = vocab - 1
@@ -140,7 +117,6 @@ def _forward_spread(model, vocab: int) -> float:
 
 
 def _hsdp_lora_step(rank: int, family: str) -> dict:
-    """Build, adapt, wrap over the HSDP mesh, take one step on this rank's own batch, and record."""
     model = per_rank_lora_model(FAMILIES[family], rank)
     drawn = max_abs_diff_across(per_rank_draws(model))
     before_wrap = {name: _gather_world(param.data) for name, param in model.named_parameters()}
@@ -173,8 +149,7 @@ def _hsdp_lora_step(rank: int, family: str) -> dict:
 
 
 def _ep_shape_wrap(rank: int, family: str, fields: dict) -> dict:
-    """Build ``family`` on the EP layers of ``fields`` with per-rank native expert adapters, wrap it through the
-    trainer's mode ladder, and record what the wrap left in every EP-layer parameter."""
+    """Records what the wrap left in every EP-layer parameter."""
     torch.manual_seed(BASE_SEED)
     model = tiny_family_model(FAMILIES[family])
     config = make_parallelism_config(
@@ -252,8 +227,7 @@ def test_premise_the_wrap_runs_hsdp(hsdp):
 
 
 def test_hsdp_replicas_start_from_the_first_replicas_shards(hsdp):
-    """Adapters and the frozen embedding row alike: every shard on the HSDP mesh, not only the trainable ones, and
-    the first replica's copy, not another replica's."""
+    """Every shard on the mesh, not only the trainable ones."""
     assert all(record["at_wrap"] == 0.0 for record in hsdp), hsdp
     assert all(record["first_replica"] == 0.0 for record in hsdp), hsdp
 
@@ -277,7 +251,6 @@ def test_premise_ep1_expert_adapters_drawn_per_rank_outside_fsdp2(ep, shape):
 
 @pytest.mark.parametrize("shape", REPLICATED_EP_SHAPES)
 def test_ep1_whole_copies_start_from_dp_rank_0(ep, shape):
-    """The experts, router and native expert adapters the wrap leaves out: identical on every rank, rank 0's."""
     ranks = [record[shape] for record in ep]
     assert all(record["spread"] == 0.0 and record["rank0_gap"] == 0.0 for record in ranks), ranks
 

@@ -1,7 +1,5 @@
-"""A resubmission identical to a program this episode already graded, comments aside, is refused unrun as a
-tool error with the submission returned to its budget and the turn flagged like any refusal; a changed program
-grades; a grade the backend lost records no program; a repeat beside the accept in one turn takes the free
-post-accept reply; the offline re-grader takes no slot for the repeat."""
+"""A resubmission identical to a graded program, comments aside, is refused unrun as a tool error with the
+submission returned to its budget; a changed program grades, and a grade the backend lost records no program."""
 
 import json
 

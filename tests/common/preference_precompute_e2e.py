@@ -1,31 +1,6 @@
-"""The DPO / KTO ``precompute_ref_log_probs`` resume body the precompute-resume GPU suite runs.
-
-TRL computes the reference log-probs inside ``__init__`` over ``self.ref_model or self.model``, and a
-Path-B resume (EP, TP, ETP, and FSDP2 under the default ``use_grouped_gemm``) builds the policy from
-the checkpoint before the trainer exists. A sweep there scores the trained weights, so the reference
-equals the policy and every log-ratio is zero. Each checkpoint therefore carries the untrained
-columns (``reference_logps.pt``), per split, and a trainer handed the resume checkpoint at
-construction attaches them instead of sweeping. A LoRA resume builds the policy from the base, so
-there the sweep scores untrained weights and stays correct. The policy is a family's tiny model
-(:data:`~tests.common.tiny_models.TINY_MOE_FAMILIES`, or the dense
-:data:`~tests.common.tiny_models.TINY_DENSE_FAMILY`) on a layout of ``MODES`` at that layout's world size, and the
-train split rides with two named eval splits, which TRL precomputes under their ``eval_dataset`` keys. Phase 1 also
-reads the layout's data-parallel half off the trained policy (:func:`~tests.common.dp_layout.dp_layout_checks`).
-
-One checkpoint, four phases, the resume taken the production way (the policy source from
-``resolve_resume_weights_source``, the trainer told the checkpoint and whether the policy came from it):
-
-  1. **Continuous**: ``TOTAL_STEPS`` from the base, checkpointing at ``SAVE_AT_STEP``.
-  2. **Resume**: every split's reference columns equal phase 1's bit for bit, and the first resumed
-     step's loss equals the continuous run's at that step within ``TOL.replayed_resume_loss_abs``.
-  3. **Control**: the same resume with the trainer not told. Where the policy came from the
-     checkpoint its sweep scores the trained weights, and its columns must miss phase 1's by more
-     than ``CONTROL_MIN_LOGP_DELTA`` and its first-step loss by more than
-     ``TOL.control_min_loss_shift`` of the resume bound, which is what gives phase 2 its teeth. Where
-     it came from the base the sweep must reproduce phase 1's columns instead.
-  4. **Without the sidecar**: the checkpoint copied without ``reference_logps.pt`` refuses on every
-     rank where the policy came from it, and sweeps back phase 1's columns where it came from the base.
-"""
+"""The DPO / KTO ``precompute_ref_log_probs`` resume body. A Path-B resume builds the policy from the checkpoint first,
+so TRL's sweep would score trained weights and zero every log-ratio; checkpoints carry the untrained columns
+(``reference_logps.pt``) instead. A control not told the checkpoint must miss, and a missing sidecar must refuse."""
 
 import argparse
 import math
@@ -52,12 +27,7 @@ from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
 
-# Each layout's world size and ParallelismConfig fields: plain FSDP2 DP (dp2, the dense model's), plain per-rank
-# experts (ep2), FSDP-sharded DTensor experts over DP=2 (ep1), attention and MLP sharded over the TP mesh (tp2), the
-# expert FFN sharded (etp2), per-rank experts under attention TP (ep2tp2), per-rank experts each split two ways
-# (ep2etp2, an expert group of four); FULL_SHARD (dp2_zero3, ep1_zero3), whole FSDP-ignored ep1 experts
-# (ep1_unsharded), HSDP over two simulated NVLink domains of two (hsdp), two EP groups in one domain (ep2dp2) and
-# one per simulated domain (ep2x2dom), and TP with two DP replicas (tp2dp2).
+# Each layout's world size and ParallelismConfig fields.
 MODES = {
     "dp2": (2, {}),
     "ep2": (2, {"ep_size": 2}),
@@ -79,39 +49,32 @@ DENSE = "dense"
 KTO_LOSSES = ("kto", "apo_zero_unpaired")
 SEED = 42
 N_ROWS = 16
-# Named eval splits and their sizes; TRL precomputes each under its dict key.
+# TRL precomputes each under its dict key.
 EVAL_SPLITS = {"alpha": 6, "beta": 4}
 BATCH_SIZE = 2
 TOTAL_STEPS = 4
 SAVE_AT_STEP = 2
 MAX_LENGTH = 96
-# Large enough that two steps move the policy's log-probs well off the reference, so a resume that
-# re-derived the reference from the trained weights lands visibly elsewhere.
+# Large enough that two steps move log-probs well off the reference, so a re-derived reference lands visibly elsewhere.
 LEARNING_RATE = 2e-3
-# The control's sweep of the trained policy against the base run's reference columns. Phase 2 holds a restore to
-# them bit for bit, and a sweep of unchanged weights under full determinism reproduces them bit for bit (the LoRA
-# control), so the miss only has to come from the two trained steps: they move the smallest split's columns by
-# 0.49 (KTO, Qwen3.8-Flash-Next at etp2) to 0.86 nats (the same at ep1), and this sits well under that and orders of
-# magnitude over a sequence log-prob's fp32 rounding.
+# The control's sweep vs the base run's columns. Two trained steps move the smallest split's columns by 0.49 (KTO,
+# Qwen3.8-Flash-Next at etp2) to 0.86 nats (the same at ep1); this sits well under that and orders over a sequence
+# log-prob's fp32 rounding.
 CONTROL_MIN_LOGP_DELTA = 0.1
-# ``full_determinism`` cannot run on the ``sdpa_flex_sliding`` variant a CUDA load builds for ``sdpa`` on a family
-# with sliding-window layers: its FlexAttention graphs compile at load outside deterministic mode, and the trainer
-# refuses the pair. Plain SDPA, the remedy that refusal names, keeps every family on the one attention.
+# FlexAttention graphs compile at load outside deterministic mode, so the trainer refuses ``full_determinism`` on
+# ``sdpa_flex_sliding``. Plain SDPA keeps every family on the one attention.
 PLAIN_SDPA_ENV = {"HALO_FLEX_SLIDING": "0"}
 
 
 def world_size(mode: str) -> int:
-    """Ranks ``mode`` runs on."""
     return MODES[mode][0]
 
 
 def config_fields(mode: str) -> dict:
-    """The ``ParallelismConfig`` fields ``mode`` requests."""
     return MODES[mode][1]
 
 
 def precompute_resume_parser() -> argparse.ArgumentParser:
-    """The precompute-resume suite's CLI."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--trainer", choices=sorted(TRAINERS), default="dpo")
     parser.add_argument("--family", choices=sorted((DENSE, *TINY_MOE_FAMILIES)), required=True)
@@ -122,8 +85,8 @@ def precompute_resume_parser() -> argparse.ArgumentParser:
 
 
 def _build_rows(kind: str, n: int, start: int = 0) -> dict:
-    """Text rows with ragged completions, so rows (and a swapped reference) score differently;
-    ``start`` offsets the questions, so each split holds its own rows."""
+    """Text rows with ragged completions, so rows and a swapped reference score differently; ``start`` keeps each
+    split's rows its own."""
     ids = range(start, start + n)
     prompts = [f"Question {i}: what is {i} plus {i}?" for i in ids]
     answers = [" The answer is " + " ".join(str(2 * i + j) for j in range(1 + i % 5)) + "." for i in ids]
@@ -149,8 +112,7 @@ def _training_args(kind: str, output_dir: str, *, save_at: int | None, kto_loss:
         save_steps=save_at or 0,
         report_to=[],
         seed=SEED,
-        # Phase 2 replays phase 1 exactly: DeepEP dispatch and the per-expert loop's scatter both order
-        # their sums by atomics unless deterministic algorithms are on.
+        # Phase 2 replays phase 1 exactly: DeepEP dispatch and the per-expert scatter order sums by atomics otherwise.
         full_determinism=True,
         bf16=True,
         gradient_checkpointing=False,
@@ -163,7 +125,6 @@ def _training_args(kind: str, output_dir: str, *, save_at: int | None, kto_loss:
 
 
 def _reference_columns(trainer) -> dict[str, dict[str, torch.Tensor]]:
-    """Each split's attached reference columns, by split name then column."""
     splits = {"train": trainer.train_dataset, **trainer.eval_dataset}
     return {
         name: {key: column(dataset, key) for key in trainer._reference_columns()} for name, dataset in splits.items()
@@ -171,8 +132,7 @@ def _reference_columns(trainer) -> dict[str, dict[str, torch.Tensor]]:
 
 
 def _precomputed(trainer, columns: dict[str, dict[str, torch.Tensor]]) -> bool:
-    """Whether each split's :func:`_reference_columns` are what a sweep writes: one finite, negative
-    sequence log-prob per row."""
+    """Whether each split's columns are what a sweep writes: one finite, negative sequence log-prob per row."""
     splits = {"train": trainer.train_dataset, **trainer.eval_dataset}
     return all(
         bool(columns[name])
@@ -189,8 +149,8 @@ def _losses_by_step(trainer) -> dict[int, float]:
 
 
 def _split_deltas(actual: dict, reference: dict) -> dict[str, float]:
-    """Per split, the largest |difference| over its reference columns; a split missing from
-    ``actual`` counts as infinitely far."""
+    """Per split, the largest |difference| over its columns; a split missing from ``actual`` counts as infinitely
+    far."""
     return {
         name: max(float((actual[name][key] - values).abs().max()) for key, values in columns.items())
         if name in actual
@@ -209,12 +169,8 @@ def _columns_equal(actual: dict, reference: dict) -> bool:
 
 @patch.dict(os.environ, PLAIN_SDPA_ENV)
 def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bool, kto_loss: str) -> dict:
-    """The four phases above for one trainer, family and layout, on plain SDPA (:data:`PLAIN_SDPA_ENV`); returns
-    the harness result.
-
-    ``family`` is a :data:`TINY_MOE_FAMILIES` key or ``"dense"``; ``peft`` trains attention LoRA over
-    a frozen base, whose disabled adapters are the reference.
-    """
+    """The phases for one trainer, family and layout on plain SDPA; ``peft`` trains attention LoRA over a frozen base,
+    whose disabled adapters are the reference."""
     kind = trainer
     tiny = TINY_DENSE_FAMILY if family == DENSE else TINY_MOE_FAMILIES[family]
     checks: dict[str, bool] = {}
@@ -232,7 +188,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
         # A standalone rerun gets the same MASTER_PORT-keyed dir; phase 4 copies into a fixed path.
         shutil.rmtree(shared, ignore_errors=True)
         ctx.on_teardown(lambda: shutil.rmtree(shared, ignore_errors=True))
-        # Built once for every rank and phase, so each phase tokenizes the same rows.
+        # Built once for every rank and phase, so each tokenizes the same rows.
         Dataset.from_dict(_build_rows(kind, N_ROWS)).save_to_disk(dataset_dirs["train"])
         start = N_ROWS
         for name, n in EVAL_SPLITS.items():
@@ -244,8 +200,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     first_resumed_step = SAVE_AT_STEP + 1
 
     def make_trainer(weights_dir: str, output_dir: str, *, save_at=None, **resume_context):
-        """The trainer over a policy loaded from ``weights_dir`` the way the entry scripts load it, on
-        the ``train`` split and the named eval splits."""
+        """The trainer over a policy loaded from ``weights_dir`` the way the entry scripts load it."""
         if peft:
             model, tokenizer, peft_config = load_peft_model(
                 "lora",
@@ -253,7 +208,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
                 model_name=weights_dir,
                 attn_implementation="sdpa",
                 use_liger_kernel=False,
-                # Where the checkpoint index cannot name the attention projections (not spelled *_proj).
+                # Where the checkpoint index cannot name the attention projections.
                 lora_target_modules=list(tiny.attention_targets) or None,
             )
         else:
@@ -331,7 +286,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     finish_phase(built)
     ctx.barrier()
     control_deltas = _split_deltas(control_columns, base_columns)
-    # The smallest split's miss: every split, eval ones included, is re-swept off the policy.
+    # The smallest split's miss: every split is re-swept off the policy.
     metrics["control_reference_max_logp_delta"] = min(control_deltas.values())
     control_delta = abs(control.get(first_resumed_step, math.inf) - continuous[first_resumed_step])
     metrics["control_first_step_loss_delta"] = control_delta

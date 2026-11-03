@@ -1,5 +1,4 @@
-"""Generation and retry configuration for rollout collection, shared by the trainer config and the Ray rollout
-actors, and the tokenizer reads of its stop and reasoning-end ids. Free of Ray and rollout-engine imports:
+"""Generation and retry configuration for rollout collection. Free of Ray and rollout-engine imports:
 ``AsyncRolloutConfig`` builds one and the actors receive it pickled."""
 
 import logging
@@ -10,9 +9,7 @@ from halo.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 
 logger = logging.getLogger(__name__)
 
-# The rollout engines a run selects between: the type both config surfaces declare, and the spellings
-# every consumer branching on the engine without its weight-sync client (whose ``BACKEND_KEY`` carries
-# the same value) compares against.
+# The rollout engines a run selects between; a weight-sync client's ``BACKEND_KEY`` carries the same values.
 RolloutBackend = Literal["vllm", "sglang"]
 VLLM_BACKEND, SGLANG_BACKEND = get_args(RolloutBackend)
 
@@ -22,15 +19,11 @@ SAMPLER_FILTERS_OFF = {"top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
 # The sampler whose reported log-probs are the raw model distribution's: every filter off, temperature and top-p 1.
 IDENTITY_SAMPLER = {"temperature": 1.0, "top_p": 1.0, **SAMPLER_FILTERS_OFF}
 
-# Chat-template variable carrying an episode's per-turn thinking budget, the pair of the request's
-# top-level ``reasoning_effort``; both are per episode, never run-wide.
+# Chat-template variable carrying an episode's per-turn thinking budget; per episode, never run-wide.
 REASONING_BUDGET_TEMPLATE_VAR = "reasoning_budget"
-# Set true beside it when that budget is soft (the engine does not enforce it), so a template states it
-# as a target rather than a cut; absent for an enforced budget.
+# Set true beside it when the engine does not enforce the budget, so a template states it as a target, not a cut.
 REASONING_BUDGET_SOFT_TEMPLATE_VAR = "reasoning_budget_soft"
-# The chat-template reasoning-effort steers a config accepts: a level, or "random" (one drawn per episode).
 ReasoningEffortChoice = Literal["low", "medium", "high", "random"]
-# The setting that draws one level per episode, and the levels themselves, each a chat-template steer.
 RANDOM_REASONING_EFFORT = "random"
 VALID_REASONING_EFFORTS = tuple(level for level in get_args(ReasoningEffortChoice) if level != RANDOM_REASONING_EFFORT)
 # Example end strings of the families' reasoning parsers, for the knob's help and its refusal.
@@ -41,11 +34,8 @@ REASONING_END_TOKEN_EXAMPLES = (
 
 @dataclass
 class RolloutConfig:
-    """Generation and retry configuration for rollout collection.
-
-    Its defaults are the ones ``AsyncRolloutConfig``, the validated YAML surface, reads for the fields it
-    mirrors; the fields that config derives rather than mirrors default to their off state.
-    """
+    """Its defaults are the ones ``AsyncRolloutConfig``, the validated YAML surface, reads for the fields it mirrors;
+    fields that config derives default to their off state."""
 
     backend: RolloutBackend = VLLM_BACKEND
     """Rollout engine; SGLang drops unknown request keys, so the payload builder gates the vLLM-only fields on it."""
@@ -90,8 +80,7 @@ class RolloutConfig:
 
 
 def resolve_rollout_stop_token_ids(tokenizer, names: list[str]) -> list[int] | None:
-    """The ids ``rollout_stop_tokens`` names under ``tokenizer`` (``None`` when none is configured); every name
-    must resolve, since a dropped terminator runs the turn past the call it ends."""
+    """Every name must resolve, since a dropped terminator runs the turn past the call it ends."""
     if not names:
         return None
     unk = getattr(tokenizer, "unk_token_id", None)
@@ -107,8 +96,8 @@ def resolve_rollout_stop_token_ids(tokenizer, names: list[str]) -> list[int] | N
 
 
 def resolve_reasoning_end_ids(tokenizer, marker: str) -> tuple[int, ...]:
-    """``marker``'s ids encoded without special tokens, as vLLM forces its reasoning parser's end string; an
-    encoding holding none of the tokenizer's added tokens is a marker this model does not write, and raises."""
+    """Encoded without special tokens, as vLLM forces its parser's end string; an encoding holding none of the
+    tokenizer's added tokens is a marker this model does not write, and raises."""
     ids = tuple(tokenizer.encode(marker, add_special_tokens=False))
     if not set(ids) & set(tokenizer.added_tokens_decoder):
         raise ValueError(
@@ -122,9 +111,8 @@ def resolve_reasoning_end_ids(tokenizer, marker: str) -> tuple[int, ...]:
 def find_reasoning_end_ids(
     tokenizer, marker: str, *, also_lost: str = "", logger: logging.Logger | None = logger
 ) -> tuple[int, ...] | None:
-    """:func:`resolve_reasoning_end_ids`, or ``None`` for a marker this tokenizer does not write, warned through
-    ``logger`` unless it is ``None`` (a trainer passes its own on the main process only): a turn's reasoning then
-    goes uncounted, and ``also_lost`` names what else the run loses."""
+    """``None`` for a marker this tokenizer does not write, warned unless ``logger`` is ``None``; a turn's reasoning
+    then goes uncounted, and ``also_lost`` names what else the run loses."""
     try:
         return resolve_reasoning_end_ids(tokenizer, marker)
     except ValueError as e:
@@ -134,6 +122,5 @@ def find_reasoning_end_ids(
 
 
 def resolve_reasoning_end_token_id(reasoning_end_ids: tuple[int, ...] | None) -> int | None:
-    """The one id a turn's reasoning closes on, which the per-turn reasoning count ends at; ``None`` without the
-    ids and for a marker of several tokens (gpt-oss's final-channel opener), which no one id marks."""
+    """``None`` without the ids or for a marker of several tokens (gpt-oss's final-channel opener)."""
     return reasoning_end_ids[0] if reasoning_end_ids is not None and len(reasoning_end_ids) == 1 else None

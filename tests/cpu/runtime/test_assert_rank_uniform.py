@@ -1,12 +1,5 @@
-"""``assert_rank_uniform`` on a real 2-rank gloo group, and the digest its ranks gather.
-
-Agreeing ranks pass. A divergent value raises on every rank under ``strict``, and otherwise (the
-default) only warns; either names the probe's label. The digest must be dtype-agnostic: a
-``TypeError`` on one rank (``.numpy()`` on bf16/fp8) inside the ``all_gather_object`` would hang
-its peers.
-
-Run: python tests/cpu/runtime/test_assert_rank_uniform.py
-"""
+"""``assert_rank_uniform`` on a real 2-rank gloo group, and its digest. The digest is dtype-agnostic: a ``TypeError``
+on one rank (``.numpy()`` on bf16/fp8) inside the ``all_gather_object`` would hang peers."""
 
 import datetime
 import json
@@ -35,7 +28,6 @@ class _Recorder(logging.Handler):
 
 
 def _outcome(recorder: _Recorder, value, label: str, **kwargs) -> dict[str, object]:
-    """Whether one check raised, with its error text, and the warnings it logged."""
     recorder.messages.clear()
     try:
         assert_rank_uniform(value, group=dist.group.WORLD, label=label, **kwargs)
@@ -97,8 +89,8 @@ def test_equal_tensors_hash_equal_and_different_differ(dtype):
 
 def test_dtype_and_shape_distinguish():
     z = torch.zeros(4, dtype=torch.bfloat16)
-    assert _value_digest(z) != _value_digest(torch.zeros(4, dtype=torch.float16))  # same bytes, other dtype
-    assert _value_digest(z) != _value_digest(torch.zeros(2, 2, dtype=torch.bfloat16))  # same bytes, other shape
+    assert _value_digest(z) != _value_digest(torch.zeros(4, dtype=torch.float16))  # Same bytes, other dtype.
+    assert _value_digest(z) != _value_digest(torch.zeros(2, 2, dtype=torch.bfloat16))  # Same bytes, other shape.
 
 
 def test_zero_dim_and_empty_bf16():
@@ -115,11 +107,11 @@ def test_noncontiguous_matches_contiguous():
 
 def test_mixed_containers_hash_element_wise():
     t = torch.ones(3, dtype=torch.bfloat16)
-    # Non-tensor first element must not divert the container into the pickle branch.
+    # A non-tensor first element must not divert the container into the pickle branch.
     assert _value_digest([5, t]) == _value_digest([5, t.clone()])
     assert _value_digest([5, t]) != _value_digest([5, t * 2])
     assert _value_digest([5, t]) != _value_digest([6, t])
-    # Tensor-first mixed list (bf16) must not crash and must track the non-tensor tail.
+    # A tensor-first mixed list must not crash and must track the non-tensor tail.
     assert _value_digest([t, "x"]) == _value_digest([t.clone(), "x"])
     assert _value_digest([t, "x"]) != _value_digest([t, "y"])
     # Nesting is distinguished by the type/length prefix.

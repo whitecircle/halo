@@ -1,11 +1,4 @@
 #!/usr/bin/env python
-"""
-Tests for HaloArgumentParser YAML parsing, unknown-key rejection, toolkit defaults, and CLI
-override type casting.
-
-Run: python tests/cpu/config/test_yaml_parser.py
-"""
-
 import os
 import sys
 import tempfile
@@ -28,8 +21,6 @@ from halo.configs.reward import RewardScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import SFTScriptArguments
 from halo.entrypoints.script import parse_script_args
-
-# Simple target dataclasses for parsing
 
 
 @dataclass
@@ -54,11 +45,7 @@ class ExtraConfig:
     verbose: bool = True
 
 
-# Helpers
-
-
 def _write_yaml(content: str, suffix: str = ".yaml") -> str:
-    """Write YAML content to a temp file and return the path."""
     fd, path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "w") as f:
         f.write(content)
@@ -80,13 +67,7 @@ def _parse_yaml_launch(parser, yaml_body: str, *overrides: str):
         os.unlink(path)
 
 
-# parse_yaml_file: nothing is migrated, nothing is stripped
-
-
 def test_unknown_field_is_not_silently_stripped():
-    """Nothing is stripped and nothing is migrated: a key no config declares — a retired knob like
-    `use_unsloth`, or a spelling this repo retired — must fail loud rather than parse and do
-    nothing."""
     path = _write_yaml("name: unknown_test\nuse_unsloth: true\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -97,8 +78,7 @@ def test_unknown_field_is_not_silently_stripped():
 
 
 def test_retired_ecosystem_spelling_is_not_migrated():
-    """No rename table: TRL's own retired ``max_seq_length`` reaches the strict check and raises,
-    naming the field, instead of being quietly rewritten onto ``max_length`` forever."""
+    """No rename table: TRL's retired ``max_seq_length`` reaches the strict check and raises."""
     path = _write_yaml("max_seq_length: 2048\nname: retired\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -109,7 +89,6 @@ def test_retired_ecosystem_spelling_is_not_migrated():
 
 
 def test_plain_config_parses_unchanged():
-    """A YAML using only current spellings parses with nothing rewritten."""
     path = _write_yaml("name: clean\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -119,24 +98,15 @@ def test_plain_config_parses_unchanged():
         os.unlink(path)
 
 
-# Toolkit defaults: a value the YAML did not write, applied before the dataclasses are built
-
-
 def test_toolkit_defaults_applied():
-    """use_liger_kernel and bf16 default to True when not explicitly set."""
     result = _parse_yaml_launch(HaloArgumentParser((SimpleConfig,)), "name: defaults_test\n")
     assert result.use_liger_kernel is True, "use_liger_kernel should be True"
     assert result.bf16 is True, "bf16 should be True"
 
 
 def test_every_declared_toolkit_default_is_applied():
-    """Derived from the registry, so a default added later cannot ship unexercised.
-
-    Each entry is a knob the toolkit overrides upstream on — ``logging_nan_inf_filter: False``
-    exists because upstream's ``True`` reads a device scalar per micro-batch AND replaces a NaN with
-    the running average. A default that silently stops being applied restores the upstream behavior
-    with nothing said.
-    """
+    """Derived from the registry. ``logging_nan_inf_filter: False`` exists because upstream's ``True`` reads a
+    device scalar per micro-batch and replaces a NaN with the running average."""
     opposites = {
         name: (not value if isinstance(value, bool) else None) for name, (value, _) in _TOOLKIT_DEFAULTS.items()
     }
@@ -149,7 +119,6 @@ def test_every_declared_toolkit_default_is_applied():
 
 
 def test_toolkit_defaults_not_overridden():
-    """Explicitly set fields are not overridden by toolkit defaults."""
     result = _parse_yaml_launch(
         HaloArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nbf16: false\nname: explicit\n"
     )
@@ -158,7 +127,6 @@ def test_toolkit_defaults_not_overridden():
 
 
 def test_toolkit_defaults_partial_override():
-    """Only the toolkit defaults the user left unset are applied."""
     result = _parse_yaml_launch(HaloArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nname: partial\n")
     assert result.use_liger_kernel is False, "Explicitly set, should stay False"
     assert result.bf16 is True, "Not explicitly set, should become True"
@@ -172,9 +140,6 @@ def test_cli_override_counts_as_explicitly_set():
 
 
 def test_toolkit_default_reaches_every_declarer_like_a_yaml_value():
-    """A toolkit default is the value the YAML would carry, so it reaches every dataclass declaring
-    the field, as a YAML key does."""
-
     @dataclass
     class First:
         bf16: bool = False
@@ -188,8 +153,7 @@ def test_toolkit_default_reaches_every_declarer_like_a_yaml_value():
 
 
 def test_toolkit_defaults_skip_dataclasses_without_the_field():
-    """A default lands only where a dataclass declares the field: injected into a parser none of whose
-    dataclasses does, it would be refused as an unknown key."""
+    """Injected into a parser none of whose dataclasses declares the field, it would be refused as an unknown key."""
 
     @dataclass
     class NoFlags:
@@ -205,11 +169,7 @@ def test_toolkit_defaults_skip_dataclasses_without_the_field():
     assert _parse_yaml_launch(HaloArgumentParser((NoFlags,)), "{}\n").x == 1
 
 
-# load_values: CLI override type casting
-
-
 def test_cli_override_int():
-    """CLI args should cast int fields properly."""
     path = _write_yaml("name: cli_int\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -221,7 +181,6 @@ def test_cli_override_int():
 
 
 def test_cli_override_float():
-    """CLI args should cast float fields properly."""
     path = _write_yaml("name: cli_float\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -233,7 +192,6 @@ def test_cli_override_float():
 
 
 def test_cli_override_bool_true():
-    """CLI args should cast bool fields: 'true'/'True' -> True."""
     path = _write_yaml("name: cli_bool\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -244,7 +202,6 @@ def test_cli_override_bool_true():
 
 
 def test_cli_override_bool_false():
-    """CLI args should cast bool fields: anything else -> False."""
     path = _write_yaml("use_liger_kernel: true\nname: cli_bool_f\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -255,7 +212,6 @@ def test_cli_override_bool_false():
 
 
 def test_cli_override_list_str():
-    """CLI args should split comma-separated values into List[str]."""
     path = _write_yaml("batch_size: 16\n")
     try:
         parser = HaloArgumentParser((ExtraConfig,))
@@ -266,8 +222,6 @@ def test_cli_override_list_str():
 
 
 def test_cli_override_list_str_replaces_yaml_list():
-    """A list override must REPLACE the YAML list, not extend it — the run must see exactly the
-    values the CLI named."""
     path = _write_yaml("tags:\n- from yaml\n")
     try:
         parser = HaloArgumentParser((ExtraConfig,))
@@ -278,8 +232,6 @@ def test_cli_override_list_str_replaces_yaml_list():
 
 
 def test_cli_override_unknown_arg_raises():
-    """A CLI arg that matches no dataclass field fails loudly (a silently-dropped override would
-    run the job with the un-overridden value)."""
     path = _write_yaml("name: ignore_unknown\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -290,8 +242,8 @@ def test_cli_override_unknown_arg_raises():
 
 
 def test_cli_override_shared_field_sets_on_both_dataclasses():
-    """A field owned by two dataclasses (e.g. pad_token on SFTScriptArguments + SFTConfig) is set
-    on BOTH — the override must not raise 'duplicate' (token-sync relies on this)."""
+    """A field two dataclasses own (pad_token on SFTScriptArguments + SFTConfig) is set on both; token sync relies
+    on this."""
 
     @dataclass
     class DupA:
@@ -311,7 +263,6 @@ def test_cli_override_shared_field_sets_on_both_dataclasses():
 
 
 def test_cli_override_genuinely_repeated_flag_raises():
-    """The same flag passed twice on the CLI is a real duplicate and must raise (not last-wins)."""
     parser = HaloArgumentParser((SimpleConfig,))
     path = _write_yaml("max_length: 100\n")
     try:
@@ -324,7 +275,6 @@ def test_cli_override_genuinely_repeated_flag_raises():
 
 
 def test_cli_override_applies_after_yaml_value():
-    """A CLI override beats the YAML-loaded value for the same field."""
     path = _write_yaml("max_length: 100\nname: override_me\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -335,11 +285,8 @@ def test_cli_override_applies_after_yaml_value():
 
 
 def test_overlapping_fields_resolved():
-    """A field two dataclasses declare reaches BOTH, from the YAML and from a CLI override alike.
-
-    The training scripts rely on it: ``pad_token``/``eos_token`` sit on the script args and on TRL's
-    configs, and the tokenizer setup reads the script-args copy.
-    """
+    """``pad_token``/``eos_token`` sit on the script args and on TRL's configs, and the tokenizer setup reads the
+    script-args copy."""
 
     @dataclass
     class OverlapA:
@@ -351,7 +298,6 @@ def test_overlapping_fields_resolved():
         shared_field: int = 99
         only_b: str = "b"
 
-    # Should not raise — conflict_handler='resolve' allows duplicate fields
     parser = HaloArgumentParser((OverlapA, OverlapB))
 
     path = _write_yaml("shared_field: 42\nonly_a: hello\nonly_b: world\n")
@@ -367,11 +313,7 @@ def test_overlapping_fields_resolved():
         os.unlink(path)
 
 
-# parse_yaml_file: empty YAML
-
-
 def test_empty_yaml():
-    """Empty YAML file should produce dataclass with all defaults."""
     path = _write_yaml("")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -382,46 +324,37 @@ def test_empty_yaml():
         os.unlink(path)
 
 
-# expand_strftime_directives: strftime expansion in output_dir
-
-
 def _expanded(output_dir: str) -> str:
     return expand_strftime_directives(output_dir)
 
 
 def test_format_output_dir_with_strftime():
-    """output_dir containing strftime codes is expanded."""
     expected = datetime.now().strftime("output/run-%Y-%m-%d")
     assert _expanded("output/run-%Y-%m-%d") == expected
 
 
 def test_format_output_dir_no_strftime():
-    """output_dir without strftime codes remains unchanged."""
     assert _expanded("output/plain-run") == "output/plain-run"
 
 
 def test_format_output_dir_full_datetime():
-    """output_dir with a full datetime pattern expands completely."""
     expanded = _expanded("output/sft-%Y-%m-%dT%H-%M-%S")
     assert "%" not in expanded, f"Unexpanded codes in: {expanded}"
     assert expanded.startswith("output/sft-")
 
 
 def test_format_output_dir_percent_prose_survives():
-    """Non-directive percent sequences are prose and must survive byte-identical — a whole-string
-    strftime lets glibc expand `%-d` (no-padding day), turning `sft-100%-data` into `sft-10014ata`."""
+    """A whole-string strftime lets glibc expand ``%-d``, turning ``sft-100%-data`` into ``sft-10014ata``."""
     for raw in ("output/sft-100%-data", "output/50%_subset", "output/run-100%"):
         assert _expanded(raw) == raw, f"prose percent mangled: {raw!r} -> {_expanded(raw)!r}"
 
 
 def test_format_output_dir_mixed_prose_and_directives():
-    """Real directives expand while adjacent prose percents stay intact."""
     expected = "output/run-50%_subset-" + datetime.now().strftime("%Y%m%d")
     assert _expanded("output/run-50%_subset-%Y%m%d") == expected
 
 
 def test_format_output_dir_percent_escape():
-    """%% keeps its strftime escape meaning: a literal percent."""
     assert _expanded("output/100%%-data") == "output/100%-data"
 
 
@@ -435,11 +368,8 @@ def test_parse_script_args_expands_output_dir_alone(tmp_path):
     assert config.name == "run-%Y"
 
 
-# YAML 1.2 numeric parsing (ruamel.yaml)
-
-
 def test_scientific_notation_no_decimal_parsed_as_float():
-    """YAML 1.2 should parse '3e-5' as float (PyYAML 1.1 returns string)."""
+    """PyYAML 1.1 returns ``3e-5`` as a string."""
     path = _write_yaml("learning_rate: 3e-5\nname: sci\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -451,7 +381,6 @@ def test_scientific_notation_no_decimal_parsed_as_float():
 
 
 def test_scientific_notation_with_decimal_parsed_as_float():
-    """YAML 1.2 should also parse '1.5e-5' as float (regression check)."""
     path = _write_yaml("learning_rate: 1.5e-5\nname: sci_dec\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -463,7 +392,6 @@ def test_scientific_notation_with_decimal_parsed_as_float():
 
 
 def test_list_cli_override_replaces_yaml_list():
-    """A CLI list override must fully replace the YAML list, never merge with it."""
     path = _write_yaml("context_fields:\n- old_field\n")
     try:
         parser = HaloArgumentParser((EnvironmentalGRPOScriptArguments,))
@@ -475,11 +403,7 @@ def test_list_cli_override_replaces_yaml_list():
         os.unlink(path)
 
 
-# parse(): .yml suffix + explicit first-position CLI flag
-
-
 def test_parse_accepts_yml_suffix():
-    """A .yml config must go down the YAML branch, not be mistaken for argparse flags."""
     path = _write_yaml("max_length: 777\nname: yml\n", suffix=".yml")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -491,8 +415,7 @@ def test_parse_accepts_yml_suffix():
 
 
 def test_first_cli_flag_counts_as_explicit_without_yaml():
-    """In the pure-CLI launch form the first flag is sys.argv[1]; it must still block the
-    toolkit default from overwriting it (bf16 defaults to True when not explicitly set)."""
+    """In the pure-CLI form the first flag is sys.argv[1]; it must still block the toolkit default."""
     parser = HaloArgumentParser((SimpleConfig,))
     result = _parse_with_argv(parser, ["prog", "--bf16", "false", "--name", "cli"])
     assert result.name == "cli"
@@ -500,9 +423,8 @@ def test_first_cli_flag_counts_as_explicit_without_yaml():
 
 
 def test_dashed_cli_flag_counts_as_explicit():
-    """argparse accepts `--use-liger-kernel=false`, so the explicit-set scan must normalize the
-    dashed spelling to the underscore field name the toolkit-default check reads — recording it
-    dashed lets the default REVERSE the user's false back to True."""
+    """The explicit-set scan normalizes the dashed spelling; recording it dashed lets the default reverse the user's
+    false back to True."""
     parser = HaloArgumentParser((SimpleConfig,))
     result = _parse_with_argv(parser, ["prog", "--use-liger-kernel=false", "--name", "cli"])
     assert result.use_liger_kernel is False, "toolkit default reversed the dashed-spelled --use-liger-kernel=false"
@@ -519,9 +441,7 @@ def test_dashed_cli_flag_counts_as_explicit():
     ids=["sft", "self_distill", "dpo", "reward"],
 )
 def test_flags_only_launch_hands_shared_field_to_every_declarer(script_args_cls, trl_config_cls, tmp_path):
-    """A launch with no YAML, on a script whose tuple declares ``pad_token`` twice (its script args
-    and TRL's config), parses and gives the value to both — the tokenizer setup reads the
-    script-args copy, TRL its own."""
+    """The tokenizer setup reads the script-args copy, TRL its own."""
     parser = HaloArgumentParser((script_args_cls, trl_config_cls, ModelArguments, ParallelismArguments))
     argv = [
         "prog",
@@ -539,8 +459,7 @@ def test_flags_only_launch_hands_shared_field_to_every_declarer(script_args_cls,
 
 
 def test_flags_only_launch_leaves_unset_shared_field_at_each_default():
-    """Only the flags given are handed out, as a YAML hands out only its keys: a shared field left
-    off the command line keeps each declarer's own default, not the last declarer's for all."""
+    """Only the flags given are handed out, so a shared field left off keeps each declarer's own default."""
 
     @dataclass
     class OverlapA:
@@ -567,8 +486,6 @@ def test_flags_only_launch_rejects_an_unknown_flag(capsys):
 
 
 def test_dashed_cli_override_with_yaml():
-    """The YAML+override path normalizes dashed flags to the field spelling too — same convention
-    as argparse — instead of rejecting them as unknown."""
     path = _write_yaml("use_liger_kernel: true\nname: dash\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -579,7 +496,6 @@ def test_dashed_cli_override_with_yaml():
 
 
 def test_dashed_and_underscored_spellings_are_one_flag():
-    """The duplicate-flag guard must see through the spelling difference."""
     path = _write_yaml("name: dash_dup\n")
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -589,12 +505,9 @@ def test_dashed_and_underscored_spellings_are_one_flag():
         os.unlink(path)
 
 
-# mixed_precision follows the final fp16/bf16 flags
-
-
 def test_toolkit_bf16_default_syncs_mixed_precision():
-    """TrainingArguments.__post_init__ derives mixed_precision from bf16, so the toolkit default must
-    reach it, or the Accelerator autocasts 'no' while bf16 is True."""
+    """``__post_init__`` derives mixed_precision from bf16, so the toolkit default must reach it, or the Accelerator
+    autocasts 'no' while bf16 is True."""
     # use_cpu keeps TrainingArguments' bf16-support validation off GPU-less test machines.
     path = _write_yaml("output_dir: /tmp/h4_mp_default\nuse_cpu: true\n")
     try:
@@ -607,8 +520,7 @@ def test_toolkit_bf16_default_syncs_mixed_precision():
 
 
 def test_toolkit_bf16_default_yields_to_explicit_fp16():
-    """An explicit fp16 must win over the toolkit bf16 default — applying both would form the
-    fp16+bf16 pair TrainingArguments rejects (and an fp16 GradScaler over a bf16 autocast)."""
+    """Applying both would form the fp16+bf16 pair TrainingArguments rejects."""
     path = _write_yaml("output_dir: /tmp/h4_mp_fp16\nfp16: true\nuse_cpu: true\n")
     try:
         parser = HaloArgumentParser((TrainingArguments,))
@@ -621,9 +533,7 @@ def test_toolkit_bf16_default_yields_to_explicit_fp16():
 
 
 def test_cli_bf16_false_override_rederives_mixed_precision():
-    """--bf16=false after a bf16 YAML must reset mixed_precision to 'no' — otherwise the model
-    loads fp32 while the Accelerator still autocasts bf16."""
-    # use_cpu keeps TrainingArguments' bf16-support validation off GPU-less test machines.
+    """Otherwise the model loads fp32 while the Accelerator still autocasts bf16."""
     path = _write_yaml("output_dir: /tmp/h4_mp_cli\nbf16: true\nuse_cpu: true\n")
     try:
         parser = HaloArgumentParser((TrainingArguments,))
@@ -635,8 +545,6 @@ def test_cli_bf16_false_override_rederives_mixed_precision():
 
 
 def test_cli_fp16_override_conflicting_with_yaml_bf16_raises():
-    """--fp16=true on top of bf16: true must meet __post_init__'s at-most-one check and fail loud
-    instead of training with both flags set."""
     path = _write_yaml("output_dir: /tmp/h4_mp_conflict\nbf16: true\nuse_cpu: true\n")
     try:
         parser = HaloArgumentParser((TrainingArguments,))
@@ -644,9 +552,6 @@ def test_cli_fp16_override_conflicting_with_yaml_bf16_raises():
             _parse_with_argv(parser, ["prog", path, "--fp16=true"])
     finally:
         os.unlink(path)
-
-
-# Literal-annotated fields are validated at parse time
 
 
 @dataclass
@@ -659,8 +564,7 @@ class LiteralConfig:
 
 
 def test_literal_field_invalid_yaml_value_raises():
-    """parse_dict bypasses argparse choices; an invalid Literal value must fail at parse time,
-    not deep in training."""
+    """parse_dict bypasses argparse choices, so an invalid value must fail at parse time."""
     path = _write_yaml("mode: banana\n")
     try:
         parser = HaloArgumentParser((LiteralConfig,))
@@ -700,7 +604,7 @@ def test_optional_literal_field_validates_and_allows_none():
 
 
 def test_mixed_union_literal_is_not_validated():
-    """Literal['auto'] | str admits values outside the literal set — no confident validation."""
+    """Literal['auto'] | str admits values outside the literal set, so there is no confident validation."""
     path = _write_yaml("hybrid: custom-value\n")
     try:
         parser = HaloArgumentParser((LiteralConfig,))
@@ -725,8 +629,6 @@ def test_literal_cli_override_validates_and_casts():
 
 
 def test_real_config_literal_field_validated():
-    """Pin the real seam: OfflineGRPOConfig.advantage_method is Literal-annotated and must reject
-    a typo at parse time."""
     path = _write_yaml("output_dir: /tmp/h4_lit_real\nadvantage_method: banana\n")
     try:
         parser = HaloArgumentParser((OfflineGRPOConfig,))
@@ -736,9 +638,6 @@ def test_real_config_literal_field_validated():
         os.unlink(path)
 
 
-# YAML 1.1 bool spellings on bool-typed fields fail loud instead of parsing as truthy strings
-
-
 @dataclass
 class BoolUnionConfig:
     maybe: bool | None = None
@@ -746,8 +645,8 @@ class BoolUnionConfig:
 
 
 def test_yaml_11_bool_spelling_on_bool_field_raises():
-    """YAML 1.2 parses `no`/`off`/`yes`/`on` as STRINGS; on a bool field every non-empty string is
-    truthy, so `packing: no` would silently ENABLE packing. Must fail loud, naming field and fix."""
+    """YAML 1.2 parses ``no``/``off``/``yes``/``on`` as strings, and every non-empty string is truthy, so ``packing:
+    no`` would silently enable packing."""
     for spelling in ("no", "off", "yes", "on", "No", "OFF"):
         path = _write_yaml(f"use_liger_kernel: {spelling}\nname: y11\n")
         try:
@@ -759,7 +658,6 @@ def test_yaml_11_bool_spelling_on_bool_field_raises():
 
 
 def test_quoted_bool_string_raises():
-    """A quoted "false" is a string too — same silent inversion, same loud failure."""
     path = _write_yaml('bf16: "false"\nname: quoted\n')
     try:
         parser = HaloArgumentParser((SimpleConfig,))
@@ -770,8 +668,6 @@ def test_quoted_bool_string_raises():
 
 
 def test_real_config_bool_string_rejected():
-    """Pin the real seam: `gradient_checkpointing: no` on TrainingArguments must raise, not
-    silently enable gradient checkpointing."""
     path = _write_yaml("output_dir: /tmp/h4_bool_no\ngradient_checkpointing: no\n")
     try:
         parser = HaloArgumentParser((TrainingArguments,))
@@ -807,7 +703,6 @@ def test_optional_bool_keeps_real_booleans_and_null():
 
 
 def test_bool_union_with_string_member_admits_strings():
-    """bool | str legitimately carries strings — no rejection."""
     path = _write_yaml("mode: balanced\n")
     try:
         parser = HaloArgumentParser((BoolUnionConfig,))
@@ -815,9 +710,6 @@ def test_bool_union_with_string_member_admits_strings():
         assert result.mode == "balanced"
     finally:
         os.unlink(path)
-
-
-# Un-castable CLI overrides fail loud instead of passing a raw string on
 
 
 @dataclass
@@ -829,9 +721,8 @@ class UncastableConfig:
 
 
 def test_cli_override_container_union_rejected():
-    """A raw string VALUE in a str|list[str] field is later indexed/iterated as a list (char-wise);
-    there is no confident cast, so a value override must fail loud. The none-spellings are the one
-    exception: they clear an optional field instead."""
+    """A raw string in a str|list[str] field is later iterated char-wise, so a value override fails loud; the
+    none-spellings clear an optional field."""
     path = _write_yaml("name: uncast\n")
     try:
         parser = HaloArgumentParser((UncastableConfig,))
@@ -855,9 +746,8 @@ def test_cli_override_dict_field_rejected():
 
 @pytest.mark.parametrize("spelling", ["none", "None", "null"])
 def test_cli_override_report_to_none_silences_reporting(spelling):
-    """Pin the real seam: every none-spelling reaches transformers as its own "none", which
-    ``__post_init__`` turns into no integrations. None would come out as [None], which the Trainer
-    refuses; a value override still fails loud."""
+    """Every none-spelling reaches transformers as its own ``none``; None would come out as [None], which the
+    Trainer refuses."""
     path = _write_yaml("output_dir: /tmp/h4_report_to\nbf16: false\nreport_to: wandb\n")
     try:
         parser = HaloArgumentParser((TrainingArguments,))
@@ -887,8 +777,7 @@ class ListDictConfig:
 
 
 def test_cli_override_list_of_dict_rejected():
-    """A comma-split CLI string in a list[dict] field becomes list[str] and TypeErrors deep in its
-    consumer (Ray setup); the override must fail at parse time and point at YAML."""
+    """A comma-split string in a list[dict] field becomes list[str] and TypeErrors deep in its consumer (Ray setup)."""
     path = _write_yaml("name: listdict\n")
     try:
         parser = HaloArgumentParser((ListDictConfig,))
@@ -899,7 +788,6 @@ def test_cli_override_list_of_dict_rejected():
 
 
 def test_cli_override_rollout_server_configs_rejected():
-    """Pin the real seam: --rollout_server_configs=... must raise, not ship a list[str] into Ray."""
     path = _write_yaml("{}\n")
     try:
         parser = HaloArgumentParser((AsyncRolloutConfig,))
@@ -909,9 +797,6 @@ def test_cli_override_rollout_server_configs_rejected():
         os.unlink(path)
 
 
-# Optional[str] CLI overrides: None/null clear the field instead of setting the literal string
-
-
 @dataclass
 class OptionalStrConfig:
     note: str | None = "keep"
@@ -919,8 +804,7 @@ class OptionalStrConfig:
 
 
 def test_cli_none_clears_optional_str():
-    """--note=None / --note=null must set real None (symmetric with YAML's null), not the string
-    "None" a consumer then treats as a real value."""
+    """Symmetric with YAML's null; the string ``None`` would reach a consumer as a real value."""
     for spelling in ("None", "null"):
         path = _write_yaml("note: from-yaml\n")
         try:
@@ -932,7 +816,6 @@ def test_cli_none_clears_optional_str():
 
 
 def test_cli_none_on_plain_str_stays_literal():
-    """A non-Optional str field cannot hold None; the value stays the literal string."""
     path = _write_yaml("note: plain_str\n")
     try:
         parser = HaloArgumentParser((OptionalStrConfig,))
@@ -940,9 +823,6 @@ def test_cli_none_on_plain_str_stays_literal():
         assert result.label == "None"
     finally:
         os.unlink(path)
-
-
-# --help renders with percent signs in field help
 
 
 @dataclass
@@ -959,7 +839,7 @@ def test_help_renders_percent_in_field_help():
     """argparse expands help via ``help % params``; a bare percent in prose must not blow up --help."""
     parser = HaloArgumentParser((PercentHelpConfig,))
     text = parser.format_help()
-    # Assertions stay inside one help line — argparse hard-wraps the rendered text.
+    # Assertions stay inside one help line, since argparse hard-wraps the rendered text.
     assert "-19%/-37%" in text, f"percent prose must render literally, got:\n{text}"
     assert "Keeps 50% of rows" in text
     # Help already escaped the argparse way (upstream transformers/TRL style) still renders one `%`.
@@ -967,7 +847,6 @@ def test_help_renders_percent_in_field_help():
 
 
 def test_help_keeps_argparse_default_placeholder():
-    """Escaping percents must not break argparse's own ``%(default)s`` expansion."""
     parser = HaloArgumentParser((PercentHelpConfig,))
     text = parser.format_help()
     assert "(default: 0.5)" in text, f"default expansion must survive, got:\n{text}"
@@ -975,15 +854,11 @@ def test_help_keeps_argparse_default_placeholder():
 
 
 def test_help_renders_for_real_script_dataclasses():
-    """Pin the real seam: every training script parses ParallelismArguments, whose help carries a
-    bare percent — ``--help`` must render for the shipped dataclasses, not just synthetic ones."""
+    """ParallelismArguments' help carries a bare percent."""
     parser = HaloArgumentParser((ParallelismArguments, OfflineGRPOConfig))
     text = parser.format_help()
     assert "--fsdp_shard_ep1_experts" in text
     assert "--advantage_method" in text
-
-
-# CLI overrides are construction values: every __post_init__ derives from the final configuration
 
 
 @dataclass
@@ -1004,7 +879,6 @@ class _GuardedConfig:
 
 
 def test_cli_override_reaches_post_init_derived_state():
-    """State ``__post_init__`` derives from a field follows the CLI value, not the YAML one."""
     path = _write_yaml("base: 3\n")
     try:
         parser = HaloArgumentParser((_DerivedStateConfig,))
@@ -1015,8 +889,6 @@ def test_cli_override_reaches_post_init_derived_state():
 
 
 def test_cli_override_meets_every_post_init_guard():
-    """A guard in any ``__post_init__`` holds a CLI value to the bound a YAML value meets, with no
-    opt-in base class on the config."""
     path = _write_yaml("count: 2\n")
     parser = HaloArgumentParser((_GuardedConfig,))
     try:
@@ -1033,9 +905,8 @@ def test_cli_override_meets_every_post_init_guard():
 def test_cli_override_rederives_the_grpo_generation_geometry(
     override, steps_per_generation, generation_batch_size, tmp_path
 ):
-    """TRL's ``GRPOConfig.__post_init__`` derives ``steps_per_generation`` from
-    ``gradient_accumulation_steps`` and ``generation_batch_size`` from it and the per-device batch. Kept at
-    the YAML's 8, ``--gradient_accumulation_steps=1`` would still generate once every 8 steps."""
+    """TRL's ``GRPOConfig.__post_init__`` derives ``steps_per_generation`` from ``gradient_accumulation_steps``;
+    kept at the YAML's 8, ``--gradient_accumulation_steps=1`` would still generate once every 8 steps."""
     path = tmp_path / "grpo.yaml"
     path.write_text(
         f"output_dir: {tmp_path / 'out'}\nuse_cpu: true\nbf16: false\nnum_generations: 2\n"
@@ -1051,9 +922,8 @@ def test_cli_override_rederives_the_grpo_generation_geometry(
 
 
 def test_cli_fp16_override_reaches_the_toolkit_bf16_derivation(tmp_path):
-    """``SMPOConfig.__post_init__`` derives an unset ``bf16`` from ``fp16``. Derived from the
-    YAML alone it comes out true, and ``--fp16=true`` then forms the fp16+bf16 pair the run never asked
-    for."""
+    """``SMPOConfig.__post_init__`` derives an unset ``bf16`` from ``fp16``; derived from the YAML alone,
+    ``--fp16=true`` forms the fp16+bf16 pair."""
     path = tmp_path / "smpo.yaml"
     path.write_text(f"output_dir: {tmp_path / 'out'}\nuse_cpu: true\n")
     config = _parse_with_argv(HaloArgumentParser((SMPOConfig,)), ["prog", str(path), "--fp16=true"])
@@ -1061,8 +931,8 @@ def test_cli_fp16_override_reaches_the_toolkit_bf16_derivation(tmp_path):
 
 
 def test_output_dir_is_rank0s_expansion_broadcast_once(tmp_path):
-    """Every rank builds the configs from rank 0's expansion: a per-rank ``datetime.now()`` can straddle a
-    second, and each node would then tee ``run.log`` into its own directory."""
+    """A per-rank ``datetime.now()`` can straddle a second, and each node would tee ``run.log`` into its own
+    directory."""
     path = tmp_path / "out.yaml"
     path.write_text('output_dir: "run-%Y%m%d-%H%M%S"\n')
     broadcasts = []
@@ -1083,8 +953,7 @@ def test_output_dir_is_rank0s_expansion_broadcast_once(tmp_path):
 
 
 def test_parse_leaves_output_dir_verbatim(tmp_path):
-    """The parser is pure: the output_dir expansion is the script entry's, so a launcher-free caller
-    (the environment tools) reads the YAML's value as written."""
+    """The expansion is the script entry's, so a launcher-free caller reads the YAML's value as written."""
     path = tmp_path / "out.yaml"
     path.write_text('output_dir: "run-%Y"\n')
     config = _parse_with_argv(HaloArgumentParser((OutputDirConfig,)), ["prog", str(path)])

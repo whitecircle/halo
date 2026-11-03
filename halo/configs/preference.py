@@ -1,5 +1,3 @@
-"""DPO, KTO and SMPO script arguments and ``SMPOConfig``."""
-
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
@@ -46,13 +44,8 @@ class DPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
 
 @dataclass
 class KTOScriptArguments(CommonScriptArguments):
-    """Script arguments for KTO training.
-
-    KTO expects an *unpaired* dataset: each row is ``{prompt, completion, label}``
-    where ``label`` is a bool marking the completion desirable (True) or not (False).
-    Conversational ``prompt``/``completion`` (lists of role/content dicts) are
-    auto-templated by TRL's KTOTrainer via ``processing_class``.
-    """
+    """KTO expects an *unpaired* dataset: each row is ``{prompt, completion, label}``, ``label`` a bool marking the
+    completion desirable. TRL's KTOTrainer auto-templates conversational rows via ``processing_class``."""
 
     PROJECT_NAME: ClassVar[str] = "kto-tuning"
 
@@ -75,8 +68,6 @@ class KTOScriptArguments(CommonScriptArguments):
 
 @dataclass
 class SMPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
-    """Script-level arguments for SMPO training (not training hyperparameters)."""
-
     PROJECT_NAME: ClassVar[str] = "smpo-tuning"
 
 
@@ -88,8 +79,7 @@ class SMPOConfig(
     ValidatedConfig,
     TrainingArguments,
 ):
-    """Config for SMPOTrainer (SMPO): a reference-model-free, margin-based preference
-    method with optional SFT loss. Per-field docs are in each field's ``help`` metadata."""
+    """SMPO: a reference-model-free, margin-based preference method with optional SFT loss."""
 
     learning_rate: float = field(default=1e-6, metadata={"help": "Initial learning rate for AdamW optimizer."})
     logging_steps: float = field(default=10, metadata={"help": "Log every X steps."})
@@ -171,12 +161,9 @@ class SMPOConfig(
         super().__post_init__()
 
     def resolve_length_budget(self) -> tuple[int, int, int]:
-        """Split a resolved ``max_length`` into ``(max_length, max_prompt_length, max_completion_length)``.
-
-        An unset prompt share takes half, so it scales with a context-resolved ``max_length``; an unset completion
-        share takes the remainder. The shares must fit: SMPO truncates prompt and completion independently, so an
-        over-budget split would exceed ``max_length`` without either cut firing.
-        """
+        """Split a resolved ``max_length`` into ``(max_length, max_prompt_length, max_completion_length)``. An unset
+        prompt share takes half, an unset completion share the remainder. The shares must fit: SMPO truncates each
+        independently, so an over-budget split would exceed ``max_length`` without either cut firing."""
         max_length = self.max_length
         if max_length is None or max_length <= 0:
             raise ValueError(

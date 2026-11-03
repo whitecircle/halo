@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""DistributedSFTTrainer saves a mid-training checkpoint and resumes from it, in each 2-GPU parallelism mode.
-
-``--mode fsdp|fsdp_base|cp|tp`` trains Qwen3-0.6B and ``--mode ep`` gpt-oss-20b (``all``, the default, runs
-each). Every mode restores its optimizer bit-exact from the per-rank shards; the checks are
-:func:`~tests.common.checkpoint_io.run_two_phase_resume`'s, keyed ``<mode>_<check>``.
-"""
+"""DistributedSFTTrainer saves a mid-training checkpoint and resumes from it, with its optimizer bit-exact, in each
+2-GPU parallelism mode."""
 
 import argparse
 import os
@@ -27,22 +23,19 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.rank_log import log
 
-# Overridable so the same harness can validate resume across model families.
+# Overridable, so one harness validates resume across model families.
 DEFAULT_MODEL = env_str("HALO_TEST_RESUME_MODEL", QWEN3_0_6B)
-EP_MODEL = env_str("HALO_TEST_RESUME_EP_MODEL", GPT_OSS_20B)  # EP requires an MoE model
+EP_MODEL = env_str("HALO_TEST_RESUME_EP_MODEL", GPT_OSS_20B)  # EP requires an MoE model.
 SEED = 42
-# ZeRO-3 on the DP axis, default ZeRO-2. Only the fsdp modes and cp honour it: ParallelismConfig rejects
-# TP+DP+FULL_SHARD (no DTensor all-gather strategy for the backward re-gather), and EP too.
+# ZeRO-3 on the DP axis. Only the fsdp modes and cp honor it: ParallelismConfig rejects TP+DP+FULL_SHARD (no DTensor
+# all-gather strategy for the backward re-gather), and EP too.
 RESHARD = env_flag("HALO_TEST_RESUME_FSDP_RESHARD")
 
 
 @dataclass(frozen=True)
 class ResumeMode:
-    """One mode's ParallelismConfig kwargs and training sequence cap (CP needs one divisible by cp_size).
-
-    ``base_weights`` builds the resumed trainer on the base model, so the resume itself loads the checkpoint's
-    weights into the FSDP2 shards; otherwise the production rule builds it from the checkpoint.
-    """
+    """``base_weights`` builds the resumed trainer on the base model, so the resume loads weights into the FSDP2
+    shards; otherwise the production rule builds it from the checkpoint."""
 
     parallelism: dict
     max_length: int
@@ -60,8 +53,6 @@ MODES = {
 
 
 def load_model(parallelism_config: ParallelismConfig, model_path: str):
-    """Load the model from ``model_path``: CP/TP/EP through ``load_distributed_model`` (Ulysses, DTensor or
-    DeepEP), plain data parallelism as the plain transformers model."""
     if not parallelism_config.has_custom_parallelism:
         return AutoModelForCausalLM.from_pretrained(
             model_path, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="sdpa"
@@ -77,7 +68,6 @@ def load_model(parallelism_config: ParallelismConfig, model_path: str):
 
 
 def run_mode(ctx, mode: str) -> dict[str, bool]:
-    """Checkpoint save + resume for one mode; its checks are keyed ``<mode>_<check>``."""
     log(f"\n{'=' * 60}\n  Mode: {mode.upper()}\n{'=' * 60}")
     spec = MODES[mode]
     tokenizer = AutoTokenizer.from_pretrained(spec.model, trust_remote_code=True)
@@ -88,8 +78,8 @@ def run_mode(ctx, mode: str) -> dict[str, bool]:
 
     def build_trainer(checkpoint: str | None, **schedule) -> DistributedSFTTrainer:
         parallelism_config = ParallelismConfig(**spec.parallelism)
-        # Unless the mode asks for the base, the production rule rather than a test-local path: a base returned
-        # where the loader skips the weight reload would resume untrained weights, which the probe catches.
+        # A base returned where the loader skips the weight reload would resume untrained weights, which the probe
+        # catches.
         weights = (
             spec.model
             if spec.base_weights
@@ -122,8 +112,8 @@ def run_mode(ctx, mode: str) -> dict[str, bool]:
         ctx,
         build_trainer,
         output_dir=os.path.join(shared_output_dir(ctx), mode),
-        # Padded so CP can split it: each rank scores its own chunk, through the same split before the save
-        # and after the resume, so a weight-corrupting reload still shifts the value.
+        # Padded so CP can split it, through the same split before the save and after the resume, so a corrupting
+        # reload shifts the value.
         probe=fixed_text_batch(tokenizer, ctx.device, RESUME_PROBE_TEXT, pad=True),
         optimizer_state=True,
     )

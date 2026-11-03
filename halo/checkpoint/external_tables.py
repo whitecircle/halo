@@ -1,5 +1,5 @@
-"""External tables in a gathered checkpoint: each table's parts as table-only files under ``<module path>.<part
-key>``, written once from the attached views and linked whole from the last table-only copy afterwards."""
+"""External tables in a gathered checkpoint: table-only files under ``<module path>.<part key>``, written once from the
+attached views and linked whole afterwards."""
 
 from __future__ import annotations
 
@@ -15,21 +15,18 @@ from halo.models.external_tables import ExternalTable, TableFiles, named_externa
 logger = logging.getLogger(__name__)
 
 
-# The gathered save's table-file prefix: the shard pattern's own stem.
 GATHERED_TABLE_FILE_PREFIX = SAFETENSORS_SHARD_PATTERN.format(suffix="").removesuffix(".safetensors")
 
 
 def _table_filename(prefix: str, table_index: int, file_index: int, total_files: int) -> str:
-    """File ``file_index`` (1-based) of table ``table_index``'s parts under ``prefix``: inside the shard glob, so a
-    later save sweeps it once no index names it, and apart from every streamed part's name."""
+    """Inside the shard glob, so a later save sweeps it once no index names it, and apart from streamed part names."""
     return f"{prefix}-table{table_index:02d}-{file_index:05d}-of-{total_files:05d}.safetensors"
 
 
 def _write_parts(
     table: ExternalTable, keys: tuple[str, ...], table_index: int, writer: StreamingShardWriter, prefix: str
 ) -> dict[str, str]:
-    """Write the parts into table-only files of at most the writer's shard size, by the streaming writer's rule;
-    returns their weight map."""
+    """Write the parts into table-only files of at most the writer's shard size; returns their weight map."""
     groups: list[list[int]] = [[]]
     size = 0
     for index, part in enumerate(table.parts):
@@ -48,8 +45,7 @@ def _write_parts(
 
 
 def _link_parts(source: TableFiles, table_index: int, output_dir: str, prefix: str) -> dict[str, str]:
-    """Hard-link (copy across filesystems) the table-only files ``source`` names into ``output_dir``; returns their
-    weight map."""
+    """Hard-link (copy across filesystems) ``source``'s table-only files into ``output_dir``; returns their map."""
     names = list(dict.fromkeys(source.files))
     renamed = {
         name: _table_filename(prefix, table_index, index, len(names)) for index, name in enumerate(names, start=1)
@@ -78,17 +74,9 @@ def write_external_tables(
     checkpoint_name: Callable[[str], str] | None = None,
     file_prefix: str = GATHERED_TABLE_FILE_PREFIX,
 ) -> None:
-    """Put every external table of ``model`` into ``writer``'s directory and index, the save rank's part of a
-    gathered save or a pipeline stage writer's part of a PP save: linked from table-only files already holding the
-    keys, else written from the attached parts.
-
-    ``checkpoint_name`` maps a table's module path in ``model`` to its name in the checkpoint (a pipeline stage's
-    re-based layer index to the unsplit model's); ``file_prefix`` keeps one writer's table files apart from another's
-    in a directory several write into.
-
-    Raises:
-        RuntimeError: a table was never attached, so the checkpoint would lack it.
-    """
+    """Put every external table into ``writer``'s directory and index, linked from table-only files holding the keys,
+    else written from the attached parts. ``checkpoint_name`` maps a module path to its checkpoint name (a PP stage's
+    re-based layer index); ``file_prefix`` keeps writers sharing a directory apart. A table never attached raises."""
     if not writer.enabled:
         return
     name_of = checkpoint_name or str

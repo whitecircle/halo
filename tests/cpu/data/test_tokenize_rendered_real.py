@@ -1,21 +1,6 @@
 #!/usr/bin/env python3
-"""tokenize_rendered against REAL cached tokenizers: per-family first/last-token pins.
-
-Verifies the probed special-token contract on the actual model roster (training AND generation
-modes), using tokenizers already present in the local HF cache (``local_files_only=True``) — each
-test skips cleanly when its tokenizer isn't cached.
-
-Pinned contracts:
-- gemma-3: post-processor prepends BOS; rendered template also emits it → exactly one BOS.
-- gemma-4: template emits BOS, post-processor adds NOTHING → the rendered BOS must survive.
-- Qwen3 / GLM-4.7-Flash / gpt-oss: no specials added → verbatim template tokenization; gpt-oss's
-  nominal ``bos_token`` must never be injected.
-- Zaya: post-processor prepends BOS and appends ``<|im_end|>`` →
-  training rows keep the trailing terminator, generation prompts drop it.
-
-Usage:
-    python tests/cpu/data/test_tokenize_rendered_real.py
-"""
+"""``tokenize_rendered`` against real cached tokenizers: per-family first and last token pins in training and
+generation modes. Each test skips when its tokenizer is not cached."""
 
 import pytest
 
@@ -92,10 +77,8 @@ def test_zaya_training_keeps_terminator_generation_drops_it():
     assert specials.adds_leading_bos, "Zaya's post-processor prepends BOS"
     assert specials.trailing_special_ids == (tok.eos_token_id,), "Zaya's post-processor appends <|im_end|>"
 
-    # Training rows: single BOS, and the terminator appears exactly as the TEMPLATE emits it —
-    # Zaya's template already closes the final assistant turn with <|im_end|>\n, so the
-    # post-processor's appended copy is a duplicate and must be stripped (a kept copy ends the row
-    # [..., <|im_end|>, \n, <|im_end|>] — a doubled terminator).
+    # Training rows: single BOS. Zaya's template already closes the final turn with <|im_end|>, so the post-processor's
+    # appended copy is a duplicate and is stripped.
     train_text = _render(tok, MESSAGES, add_generation_prompt=False)
     train_ids = tokenize_rendered(tok, train_text)["input_ids"]
     assert train_ids[0] == tok.bos_token_id and train_ids.count(tok.bos_token_id) == 1
@@ -105,7 +88,7 @@ def test_zaya_training_keeps_terminator_generation_drops_it():
     )
     assert train_ids[-2] == tok.eos_token_id, "the template's final <|im_end|> (before its \\n) must survive"
 
-    # Generation prompts must NOT end with the appended terminator at the generation point.
+    # Generation prompts must not end with the appended terminator at the generation point.
     gen_text = _render(tok, GENERATION_MESSAGES, add_generation_prompt=True)
     gen_out = tokenize_rendered(tok, gen_text, for_generation=True)
     gen_ids = gen_out["input_ids"]
@@ -115,12 +98,9 @@ def test_zaya_training_keeps_terminator_generation_drops_it():
 
 
 def test_zaya_max_length_boundary_never_doubles_the_terminator():
-    """Boundary regression on the real Zaya tokenizer, through the production SFT map fn.
-
-    ``build_chat_row_processor`` drops rows longer than ``max_length``, so a surviving row is never cut
-    by more than the render's trailing whitespace — so a dedup guard keyed on length-vs-budget would
-    read those rows as "truncated" and let the appended ``<|im_end|>`` double the template's own.
-    """
+    """``build_chat_row_processor`` drops rows longer than ``max_length``, so a surviving row is never cut by more
+    than trailing whitespace; a dedup keyed on length-vs-budget would read it as truncated and double the
+    terminator."""
     tok = load_cached_tokenizer(ZAYA_8B, trust_remote_code=True)
     eos_id = tok.eos_token_id
     text = _render(tok, MESSAGES, add_generation_prompt=False)

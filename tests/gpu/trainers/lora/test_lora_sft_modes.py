@@ -1,16 +1,9 @@
 #!/usr/bin/env python
-"""LoRA SFT on one model under one two-rank parallel shape, through the production adapter path.
+"""LoRA SFT on one model under one two-rank parallel shape, through the production adapter path; rows of
+:func:`tests.common.lora_sft_modes.run_lora_sft`.
 
-The rows of :func:`tests.common.lora_sft_modes.run_lora_sft`: ``--model`` (gpt-oss-20b, Bailing Ring-mini,
-Qwen3-0.6B) under ``--mode`` (``ep``, ``ep_cp``, ``etp``, ``cp``, ``fsdp``, and ``dp_stock_experts`` for a MoE's
-QLoRA, whose base keeps its Params4bit and whose grouped-GEMM load is refused), with ``--qlora`` on a 4-bit base,
-``--attn`` on another attention kernel, ``--convergence`` for 25 steps judged by 5-step window means,
-``--save-reload`` to reload the saved adapters on a fresh unsharded base, and ``--resume`` to restore that save
-onto the run. The core tier runs the Bailing rows from ``test_lora_sft_bailing.py``; LoRA under TP and QLoRA
-under EP or TP are refused at construction and load, pinned on CPU.
-
-Usage:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --model gpt_oss_20b --mode ep
+``dp_stock_experts`` is a MoE's QLoRA, whose base keeps its Params4bit and whose grouped-GEMM load is refused. LoRA
+under TP and QLoRA under EP or TP are refused at construction, pinned on CPU.
 """
 
 import argparse

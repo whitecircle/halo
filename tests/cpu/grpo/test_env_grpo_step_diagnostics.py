@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The environmental GRPO step diagnostics, each pinned to its value on a hand-computed batch.
-
-They change no numerics, so a wrong one only misleads: a solve-group split that counts invalid
-episodes, an effective sample size that skips the masked weights, a covariance whose sign flips, a
-truncation alarm that never fires or fires every round. Each is folded across ranks from sums, so the
-world value is checked with peers standing in for the other ranks.
-
-    python tests/cpu/grpo/test_env_grpo_step_diagnostics.py
-"""
+"""The environmental GRPO step diagnostics, each pinned to its value on a hand-computed batch. They change no numerics,
+so a wrong one only misleads. Each folds across ranks from sums, so peers stand in for the other ranks."""
 
 import logging
 import math
@@ -116,9 +109,8 @@ def test_a_training_round_logs_no_success_at_k_and_an_env_without_a_verdict_logs
 
 
 def test_the_log_prob_advantage_covariance_reads_the_loss_tokens():
-    # Row 0 (advantage +1) is confident, row 1 (advantage -1) is not: the policy is sharpening where it is
-    # rewarded, a positive covariance. Loss tokens: -0.1, -0.3 at +1 and -2.0 at -1; the padded tail and
-    # the masked tool token are left out. E[xy] = (-0.4 + 2.0) / 3, E[x] = -0.8, E[y] = 1/3.
+    # Loss tokens: -0.1, -0.3 at advantage +1 and -2.0 at -1; the padded tail and masked tool token are left out.
+    # E[xy] = (-0.4 + 2.0) / 3, E[x] = -0.8, E[y] = 1/3.
     logps = torch.tensor([[-0.1, -0.3, -9.0], [-2.0, -5.0, 0.0]])
     loss_mask = torch.tensor([[True, True, False], [True, False, False]])
     host = _diagnostics_host()
@@ -138,7 +130,6 @@ def _is_host(clip_max: float):
 
 
 def _step(sampling):
-    """The stacked rows the correction reads: every row sampled, every completion token attended."""
     return types.SimpleNamespace(
         sampling_logps=sampling,
         has_sampling=torch.ones(sampling.size(0), dtype=torch.bool),
@@ -162,7 +153,7 @@ def test_extreme_ratios_are_those_past_the_truncation_point_either_way():
     logged = flushed_metrics(host)
 
     assert logged["sampling/is_ratio_extreme_frac"] == [pytest.approx(2 / 6)], "4 and 1/4 are past 3 and 1/3"
-    # The applied weights are the truncated ratios 1, 3, 1/4, 2, 1, 1.
+    # The truncated ratios.
     applied = [1.0, 3.0, 0.25, 2.0, 1.0, 1.0]
     ess = sum(applied) ** 2 / (len(applied) * sum(w * w for w in applied))
     assert logged["sampling/is_ess_frac"] == [pytest.approx(ess, rel=1e-5)]

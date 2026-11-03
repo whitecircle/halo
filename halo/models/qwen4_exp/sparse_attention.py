@@ -1,7 +1,5 @@
-"""Tiled Qwen sparse attention (QSA) for uncached ``qwen4_exp`` training rows, memory linear in the row length:
-the indexer scores each document's pooled key blocks per query tile, attention runs per tile, and the backward
-recomputes each tile, selecting the blocks transformers' dense indexer selects (agent-docs/models/qwen4_exp.md).
-Under a checkpoint's recompute scope the recompute attends the first pass's selection."""
+"""Tiled Qwen sparse attention (QSA) for uncached ``qwen4_exp`` training rows, memory linear in the row length,
+selecting the blocks transformers' dense indexer selects. A checkpoint's recompute attends the first pass's."""
 
 import math
 from dataclasses import dataclass
@@ -16,14 +14,11 @@ from halo.models.gradient_checkpointing import active_recompute_scope
 from halo.models.segment_markers import document_boundaries
 
 QUERY_TILE = 128
-# The RecomputeScope slot one indexer call keeps its selection in.
 _SELECTION_SLOT = "qsa_selection"
 
 
 @dataclass(frozen=True)
 class QSADocument:
-    """One document of one row: its tokens ``[start, stop)`` and its unpadded keys ``[key_start, key_stop)``."""
-
     row: int
     start: int
     stop: int
@@ -31,18 +26,18 @@ class QSADocument:
     key_stop: int
 
     def visible_keys(self, lo: int, hi: int, device: torch.device) -> torch.Tensor:
-        """Per query of ``[lo, hi)``, how many of the document's keys it sees: those up to itself."""
+        """Per query of ``[lo, hi)``, how many of the document's keys it sees, those up to itself."""
         return (torch.arange(lo, hi, device=device) - self.key_start + 1).clamp(0, self.key_stop - self.key_start)
 
     def tile_keys(self, hi: int) -> int:
-        """The keys the queries before ``hi`` see between them: the span every tile's K/V slice covers."""
+        """The span every tile's K/V slice covers."""
         return min(max(hi - self.key_start, 0), self.key_stop - self.key_start)
 
 
 @dataclass(frozen=True)
 class QSASelection:
-    """The key blocks each query attends: ``blocks[row, query]`` holds block indices counted from the query's
-    document's first key, ``-1`` in unused slots; the keys after the last complete block are always attended."""
+    """``blocks[row, query]`` holds block indices counted from the document's first key, ``-1`` in unused slots; the
+    keys after the last complete block are always attended."""
 
     documents: tuple[QSADocument, ...]
     blocks: torch.Tensor
@@ -52,8 +47,7 @@ class QSASelection:
 def qsa_documents(
     seq_idx: torch.Tensor | None, attention_mask: torch.Tensor | None, batch: int, length: int, device: torch.device
 ) -> tuple[QSADocument, ...]:
-    """The documents of a ``[batch, length]`` row set, in row-major order. ``attention_mask`` is a 2-D padding mask:
-    a document's unpadded tokens must be contiguous, as left or right padding leaves them."""
+    """In row-major order. A document's unpadded tokens must be contiguous, as left or right padding leaves them."""
     if attention_mask is not None and attention_mask.shape != (batch, length):
         raise ValueError(
             f"Tiled QSA takes a 2-D [batch, sequence] = {(batch, length)} padding mask, got "
@@ -84,23 +78,20 @@ def qsa_documents(
 
 
 def _block_scores(queries: torch.Tensor, pooled: torch.Tensor) -> torch.Tensor:
-    """``[..., blocks]`` indexer scores of ``[..., heads, dim]`` queries against ``[blocks, dim]`` pooled keys: the
-    head-summed ReLU of the fp32 dot products, in transformers' op order."""
+    """The head-summed ReLU of the fp32 dot products, in transformers' op order."""
     scores = torch.matmul(queries.float(), pooled.float().transpose(-1, -2)).transpose(-1, -2)
     return torch.relu(scores).sum(dim=-1) / math.sqrt(pooled.shape[-1])
 
 
 def _rescore_like_transformers(query: torch.Tensor, pooled: torch.Tensor, count: int, block_topk: int) -> torch.Tensor:
-    """One query's top blocks as transformers picks them, one ``[heads, dim]`` query against its ``count`` complete
-    blocks, so a tie at the cutoff resolves in its order."""
+    """One query against its ``count`` complete blocks, so a tie at the cutoff resolves in transformers' order."""
     return _block_scores(query, pooled[:count]).topk(min(block_topk, count), dim=0).indices
 
 
 def _select_tile(
     queries: torch.Tensor, pooled: torch.Tensor, complete: torch.Tensor, blocks: int, block_topk: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``[tile, block_topk]`` selected block ids of a tile's queries, ``-1`` unused, each query picking among its
-    ``complete`` blocks of the ``blocks`` the tile scores; and per query whether its k-th and next block tie."""
+    """``[tile, block_topk]`` selected block ids, ``-1`` unused, and per query whether its k-th and next block tie."""
     columns = torch.arange(block_topk, device=queries.device)
     every_block = torch.where(columns < complete.unsqueeze(-1), columns, -1)
     if blocks <= block_topk:
@@ -122,7 +113,6 @@ def _compute_selection(
     seq_idx: torch.Tensor | None,
     attention_mask: torch.Tensor | None,
 ) -> QSASelection:
-    """The selection ``Qwen4ExpTextQSAIndexer.forward`` makes on an uncached row, per document and query tile."""
     batch, length, _ = hidden_states.shape
     head_dim, ratio, block_topk = indexer.index_head_dim, indexer.compress_ratio, indexer.block_topk
     cos, sin = position_embeddings
@@ -149,7 +139,7 @@ def _compute_selection(
         pooled = qwen4_exp_modeling.apply_rotary_pos_emb(
             pooled.unsqueeze(1), cos=cos[doc.row, block_starts], sin=sin[doc.row, block_starts]
         ).squeeze(1)
-        # Tie flags of the whole document, read back once: a host read per tile would stall the device per tile.
+        # Read back once per document, as a host read per tile would stall the device per tile.
         tied = torch.zeros(doc.stop - doc.start, dtype=torch.bool, device=hidden_states.device)
         for lo in range(doc.start, doc.stop, QUERY_TILE):
             hi = min(lo + QUERY_TILE, doc.stop)
@@ -173,8 +163,8 @@ def select_qsa_keys(
     seq_idx: torch.Tensor | None = None,
     attention_mask: torch.Tensor | None = None,
 ) -> QSASelection:
-    """The key blocks each query of an uncached row attends. Inside a gradient-driven checkpoint the first pass
-    keeps its selection and the recompute reads it back, so the backward attends the keys the forward did."""
+    """Inside a gradient-driven checkpoint the first pass keeps its selection and the recompute reads it back, so the
+    backward attends the keys the forward did."""
     scope = active_recompute_scope()
     if scope is None or not scope.grad_enabled:
         return _compute_selection(indexer, hidden_states, position_embeddings, seq_idx, attention_mask)
@@ -191,8 +181,7 @@ def select_qsa_keys(
 
 
 def _tile_mask(blocks: torch.Tensor, visible: torch.Tensor, keys: int, ratio: int) -> torch.Tensor:
-    """``[tile, keys]`` bool: each query's selected blocks and the keys after its last complete block, up to the
-    keys it sees."""
+    """Each query's selected blocks and the keys after its last complete block, up to the keys it sees."""
     block_count = -(-keys // ratio)
     chosen = torch.zeros(blocks.shape[0], block_count + 1, dtype=torch.bool, device=blocks.device)
     chosen.scatter_(1, torch.where(blocks >= 0, blocks.long(), block_count), True)
@@ -205,8 +194,7 @@ def _tile_mask(blocks: torch.Tensor, visible: torch.Tensor, keys: int, ratio: in
 def _attend_tile(
     query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, mask: torch.Tensor, scale: float
 ) -> torch.Tensor:
-    """SDPA of ``[heads, tile, dim]`` queries over ``[kv_heads, keys, dim]`` K/V under a ``[tile, keys]`` mask, each
-    K/V head's query group folded into the query axis so K/V are never repeated."""
+    """Each K/V head's query group is folded into the query axis, so K/V are never repeated."""
     heads, tile, dim = query.shape
     kv_heads, keys, _ = key.shape
     groups = heads // kv_heads
@@ -221,7 +209,6 @@ def _attend_tile(
 
 
 def _tiles(selection: QSASelection, device: torch.device):
-    """Per query tile of every document with keys: ``(row, lo, hi, key_start, keys, visible)``."""
     for doc in selection.documents:
         for lo in range(doc.start, doc.stop, QUERY_TILE):
             hi = min(lo + QUERY_TILE, doc.stop)
@@ -231,7 +218,7 @@ def _tiles(selection: QSASelection, device: torch.device):
 
 
 class _TiledQSAttention(torch.autograd.Function):
-    """Attention over the selected keys, one query tile at a time; saves Q/K/V and the block ids only."""
+    """One query tile at a time; saves Q/K/V and the block ids only."""
 
     @staticmethod
     def forward(ctx, query, key, value, blocks, selection, scale):
@@ -288,9 +275,7 @@ class _TiledQSAttention(torch.autograd.Function):
 def tiled_qsa_attention(
     query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, selection: QSASelection, scale: float
 ) -> torch.Tensor:
-    """Attention of ``[batch, heads, length, dim]`` queries over ``[batch, kv_heads, length, dim]`` K/V restricted to
-    ``selection``; returns ``[batch, length, heads, dim]`` as transformers' attention interfaces do. A query with no
-    visible key reads zeros, as SDPA gives a fully masked row."""
+    """Returns ``[batch, length, heads, dim]``. A query with no visible key reads zeros, as SDPA gives a masked row."""
     if query.shape[1] % key.shape[1]:
         raise ValueError(f"{query.shape[1]} query heads do not group over {key.shape[1]} K/V heads")
     device_type = query.device.type
@@ -312,8 +297,7 @@ def qsa_attention_forward(
     seq_idx: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
-    """``Qwen4ExpTextAttention.forward`` for an uncached row: ``attention_mask`` is the 2-D padding mask or
-    ``None`` and ``seq_idx`` marks the documents; the indexer and the attention run tiled."""
+    """``attention_mask`` is the 2-D padding mask or ``None`` and ``seq_idx`` marks the documents."""
     if past_key_values is not None:
         raise ValueError("Tiled QSA serves uncached rows; a call with past_key_values takes the stock forward.")
     if module.training and module.attention_dropout:

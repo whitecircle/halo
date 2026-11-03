@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""The split identity the holders of one data replica compare digests values, not their ``repr``.
-
-``_split_identity`` samples evenly spaced rows of a split and digests them; ranks whose copies of the
-source differ then refuse to train. Proven on real ``datasets`` splits:
-
-1. the same rows digest alike however the copy is laid out — one Arrow chunk, several, a multi-file
-   save, an indices mapping — across string, binary, nested-list, struct and nullable columns;
-2. a change to any sampled value, a list split differently over the same flat values, or a null where
-   a copy holds an empty list, changes the digest;
-3. a binary column of large values (a preprocessed VLM split's ``pixel_values``) reaches the hash
-   one value at a time, never as one string spelling every sampled row;
-4. a media column stays out of the digest whether it decodes or not, nested or not: two nodes store
-   the same files under their own cache paths. A ``Json`` column, decodable but path-free, stays in.
-
-    python tests/cpu/data/test_split_identity.py
-"""
+"""``_split_identity`` digests the values of evenly spaced rows, so the same rows digest alike however the copy is
+laid out, any change to a sampled value moves it, a large binary column hashes one value at a time, and a media
+column stays out, since two nodes store the same files under their own cache paths."""
 
 import hashlib
 import types
@@ -75,7 +62,7 @@ def _split(rows: dict[str, list] | None = None) -> Dataset:
 
 
 def _edited(column: str, value) -> Dataset:
-    """The split with row 0 — always sampled — holding ``value`` in ``column``."""
+    """The split with row 0, always sampled, holding ``value`` in ``column``."""
     rows = _rows()
     rows[column][0] = value
     return _split(rows)

@@ -1,31 +1,6 @@
 """Reward-model rejection sampling: generate N hypotheses per prompt, score them, keep the extremes.
 
-Generates against an OpenAI-compatible API and scores with a local reward model. ``--output_format``
-picks the shape: ``preference`` (default; DPO/SMPO chosen/rejected pairs) or ``offline_grpo``
-(completions list + rewards).
-
-Usage:
-    # Preference format (DPO/SMPO)
-    python scripts/inference/reward_model/rejection_sample.py \\
-        --model my-model \\
-        --dataset data/prompts.jsonl \\
-        --rm_model_id path/to/reward-model
-
-    # Offline GRPO format
-    python scripts/inference/reward_model/rejection_sample.py \\
-        --model my-model \\
-        --dataset data/prompts.jsonl \\
-        --rm_model_id path/to/reward-model \\
-        --output_format offline_grpo
-
-Input JSONL format:
-    {"id": "...", "prompt": [{"role": "user", "content": "..."}], ...}
-
-Output formats:
-    preference:    {"id": "...", "prompt": [...], "chosen": [...], "rejected": [...],
-                    "chosen_score": 0.9, "rejected_score": 0.1, "all_scores": [...]}
-    offline_grpo:  {"prompt": [...], "completions": [[...], [...]], "rewards": [0.9, 0.7]}
-"""
+``--output_format`` picks ``preference`` (DPO/SMPO pairs) or ``offline_grpo`` (completions list + rewards)."""
 
 from halo.entrypoints.rejection_sampling import OUTPUT_FORMATS, run_rejection_sampling
 from halo.entrypoints.resumable_generation import run_async_cli

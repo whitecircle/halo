@@ -20,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class _RequestTools:
-    """The tool declarations of a batch: one list shared by every message, or one list per message."""
-
     raw: list[dict[str, object]] | list[list[dict[str, object]] | None] | None
     per_message: bool
 
@@ -35,9 +33,6 @@ class _RequestTools:
 
 @dataclass(slots=True)
 class _ResumeLoad:
-    """A resume store read back: one slot per request (``None`` where nothing replays), the replayed
-    indices and the count of lines skipped as unreadable or out of range."""
-
     results: list[OpenAIResponse | None]
     processed_indices: set[int]
     skipped_records: int = 0
@@ -60,12 +55,9 @@ def _is_per_message_tools(
 
 
 def _sequence_digest(items: list) -> str:
-    """Identity of a WHOLE request sequence (prompt rows or tool definitions) for the resume-store key.
-
-    Callers pass the post-resume pending subset, and two subsets sharing a long system prompt agree on
-    any prefix: a prefix key would replay one run's results onto the other's rows by index. Hashed
-    element by element, so a large dataset is never serialized whole.
-    """
+    """Identity of a whole request sequence for the resume-store key. Callers pass the post-resume pending subset, and
+    two subsets sharing a long system prompt agree on any prefix: a prefix key would replay one run's results onto the
+    other's rows by index. Hashed element by element, so a large dataset is never serialized whole."""
     digest = hashlib.sha256()
     for item in items:
         digest.update(repr(item).encode())
@@ -140,8 +132,7 @@ def resume_store_path(
     max_tokens: int,
     request_tools: _RequestTools,
 ) -> str:
-    """The resume-store path under ``$HALO_DATA_ROOT/inference/resume``, keyed by the request identity: a re-run
-    must find it after the process, and the container, that wrote it are gone."""
+    """Under ``$HALO_DATA_ROOT``: a re-run must find it after the process and container that wrote it are gone."""
     hash_content = {
         "model": model,
         "temperature": temperature,
@@ -217,13 +208,9 @@ async def parallel_openai_requests(
     resume: bool = True,
     tools: list[dict] | list[list[dict] | None] | None = None,
 ) -> list[OpenAIResponse | None]:
-    """One :func:`generate_openai_response` per entry of ``messages``, ``max_workers`` in flight. With
-    ``resume``, completed results are appended to the resume store every ``flush_interval`` completions
-    so a re-run resumes, and a failed request is left ``None`` and unstored, so it retries on the next run;
-    without it nothing is stored and ``flush_interval`` is unused.
-
-    ``tools`` is either a single list applied to every message, or one list per message.
-    """
+    """One request per entry, ``max_workers`` in flight. With ``resume``, results are appended to the store every
+    ``flush_interval`` completions; a failed request is left ``None`` and unstored, so it retries on the next run.
+    ``tools`` is a single list applied to every message, or one list per message."""
     request_tools = resolve_request_tools(tools, len(messages))
 
     results: list[OpenAIResponse | None] = [None] * len(messages)
@@ -266,8 +253,7 @@ async def parallel_openai_requests(
         logger.info("Loaded %d results from %s", len(processed), store_path)
 
     def flush_resume_store() -> None:
-        """Append the results that landed since the last flush; a lost append means those rows re-run
-        on resume — costly, not corrupting."""
+        """A lost append means those rows re-run on resume: costly, not corrupting."""
         records, pending_records[:] = list(pending_records), []
         try:
             append_resume_records(store_path, records)

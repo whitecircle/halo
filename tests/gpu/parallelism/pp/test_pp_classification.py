@@ -1,21 +1,8 @@
 #!/usr/bin/env python
-"""Pipeline parallelism through the real ClassificationTrainer (pooled sequence classification).
+"""PP through the real ClassificationTrainer: pooled weighted cross-entropy and multi-label BCE.
 
-Two scenarios cover the classification PP contract end to end:
-
-  * weighted cross-entropy (single-label): the class id rides inside the synthesized labels plane,
-    and the normalizer must be the sum of the target classes' weights — a plain count silently
-    rescales the objective. Step-1 loss is checked against the exact non-PP objective computed on
-    the captured batch by transformers' own pooled forward; evaluation (which under PP pools
-    [B, num_labels] logits via forward_only and broadcasts them down the chain) is checked for
-    both eval_loss and sklearn metrics against a full recomputation with the init weights.
-  * weighted BCE (multi-label): multi-hot float targets cannot ride the long labels plane, so they
-    ship as the ``class_targets`` extra; the normalizer is the element count B*C. Also drives a
-    direct partial-batch prediction_step (rows < frozen shape) to exercise the inert row padding.
-
-Topology: 4 GPUs as 2 simulated nodes of 2 (NVLink domain = 2), pp2 x dp2.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_classification.py
+The CE normalizer is the sum of the target classes' weights; a plain count silently rescales the objective. Multi-hot
+targets can't ride the long labels plane, so they ship as the ``class_targets`` extra with element count B*C.
 """
 
 import sys
@@ -45,7 +32,7 @@ from tests.common.rank_log import log
 PP_SIZE = 2
 SEQ_LEN = 48
 N_STEPS = 10
-BATCH = 4  # rows per rank; gradient_accumulation_steps=2 becomes 2 microbatches of 2 rows
+BATCH = 4  # Rows per rank; gradient_accumulation_steps=2 becomes 2 microbatches of 2 rows.
 MICROBATCHES = 2
 NUM_LABELS = 4
 CLASS_WEIGHTS = [0.5, 1.5, 1.0, 2.0]
@@ -53,7 +40,6 @@ LOSS_RTOL = 2e-4
 
 
 def random_rows(n_rows: int, vocab_size: int, g: torch.Generator) -> tuple[list, list]:
-    """Ragged pre-tokenized rows (variable lengths exercise the rightmost-non-pad pooling)."""
     ids, masks = [], []
     for _ in range(n_rows):
         length = int(torch.randint(6, SEQ_LEN, (1,), generator=g))
@@ -89,7 +75,7 @@ def base_args(output_dir: str, **overrides) -> ClassificationConfig:
             "max_steps": N_STEPS,
             "per_device_train_batch_size": BATCH,
             "per_device_eval_batch_size": BATCH,
-            "gradient_accumulation_steps": MICROBATCHES,  # becomes the pipeline's microbatch count
+            "gradient_accumulation_steps": MICROBATCHES,  # Becomes the pipeline's microbatch count.
             "learning_rate": 8e-3,
             "max_length": SEQ_LEN,
             **overrides,
@@ -98,7 +84,6 @@ def base_args(output_dir: str, **overrides) -> ClassificationConfig:
 
 
 def decode_plane(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """(positions, values) at the synthesized labels plane's single marker per row."""
     mask = plane != -100
     positions = mask.int().argmax(dim=-1)
     values = plane[torch.arange(plane.size(0), device=plane.device), positions]
@@ -106,8 +91,7 @@ def decode_plane(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def check_training(trainer, step1_reference: float, decrease: float, prefix: str) -> tuple[dict, dict]:
-    """COLLECTIVE (the rank-identical loss gather). The finished run's shape and loss curve, and its step-1
-    loss against the world-averaged exact objective ``step1_reference``; metrics named under ``prefix``."""
+    """COLLECTIVE (the rank-identical loss gather)."""
     losses = [entry["loss"] for entry in trainer.state.log_history if "loss" in entry]
     log(f"[{prefix}] step1={losses[0]:.6f} reference={step1_reference:.6f}")
     checks = {
@@ -133,8 +117,7 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     trainer, steps, _ = build_pp_trainer(
         ClassificationTrainer,
         model=build_seq_cls_model(NUM_LABELS),
-        # eval_strategy exercises the in-loop PP eval too (the construction-time PP eval gates run
-        # only when it is set); the exactness checks below use a manual evaluate() at init weights.
+        # The construction-time PP eval gates run only when set; exactness uses a manual evaluate() at init weights.
         args=base_args(
             output_dir, loss_type="cross_entropy", class_weights=CLASS_WEIGHTS, eval_strategy="steps", eval_steps=5
         ),
@@ -150,8 +133,7 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     checks, metrics = {}, {}
     checks["no_extra_targets_single_label"] = trainer._pp_adapter.extra_target_keys == ()
 
-    # ── Eval with init weights: eval_loss (mean over the two DP shards of the weighted-CE batch
-    # mean) and sklearn metrics from the pooled logits the PP prediction step broadcasts.
+    # eval_loss is the mean over the two DP shards of the weighted-CE batch mean.
     eval_metrics = trainer.evaluate()
     all_labels = torch.tensor(eval_dataset["labels"], device=ctx.device)
     pooled_full = pooled_reference_logits(reference, right_pad(eval_dataset["input_ids"], SEQ_LEN, ctx.device))
@@ -190,8 +172,7 @@ def scenario_weighted_ce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     )
     expected = world_mean(float(F.cross_entropy(pooled, targets, weight=weight)))
 
-    # eval_strategy="steps" ran two in-loop evals (steps 5 and 10) through the PP prediction step
-    # with compute_metrics active on trained weights — they must have produced finite losses.
+    # Two in-loop evals (steps 5 and 10) with compute_metrics active on trained weights.
     eval_losses = [entry["eval_loss"] for entry in trainer.state.log_history if "eval_loss" in entry]
     checks["midtrain_eval_ran_finite"] = len(eval_losses) == 2 and bool(
         torch.isfinite(torch.tensor(eval_losses)).all()
@@ -223,8 +204,7 @@ def scenario_multi_label_bce(ctx, tokenizer, output_dir) -> tuple[dict, dict]:
     checks, metrics = {}, {}
     checks["class_targets_declared"] = trainer._pp_adapter.extra_target_keys == ("class_targets",)
 
-    # ── Direct partial-batch prediction step (2 rows < frozen 4): exercises inert row padding,
-    # trimming, and the pooled-logits broadcast against transformers' own pooled forward.
+    # 2 rows < frozen 4: inert row padding, trimming and the pooled-logits broadcast against transformers' own forward.
     small = train_dataset[:2]
     small_batch = right_pad(small["input_ids"], SEQ_LEN, ctx.device)
     small_batch["labels"] = torch.tensor(small["labels"], dtype=torch.float32, device=ctx.device)

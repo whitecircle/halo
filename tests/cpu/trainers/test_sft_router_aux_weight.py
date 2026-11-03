@@ -1,13 +1,5 @@
-"""CPU tests: the SFT trainer weighs the router aux loss at its coefficient, once per optimizer step.
-
-HF's ``num_items_in_batch`` path multiplies a micro-batch loss by the process count and sums the
-accumulation window. The language-model term needs that — it is a token sum over the window's global
-count — but the aux term the model folds into the same loss is a per-micro-batch mean, and would weigh
-``processes x accumulation`` times its coefficient. Under a label smoother or a ``compute_loss_func``
-HF withholds the labels and the forward adds no aux term at all. Driven through the trainer's own
-``training_step`` and ``prediction_step``; the aux term's share of a loss is the difference from the
-same weights at ``router_aux_loss_coef=0``.
-"""
+"""The SFT trainer weighs the router aux loss at its coefficient, once per optimizer step.
+HF's ``num_items_in_batch`` path would weigh it ``processes x accumulation`` times; a label smoother would drop it."""
 
 import pytest
 import torch
@@ -94,8 +86,7 @@ def _step(trainer, micro_batches):
 @pytest.mark.parametrize("processes", [1, 2])
 @pytest.mark.parametrize("loss_path", LOSS_PATHS)
 def test_a_step_adds_the_aux_loss_once_at_its_coefficient(tmp_path, loss_path, processes, monkeypatch):
-    """A window of one row and a window of two copies of it are the same step: the aux term adds
-    ``coef x aux`` to either loss and ``coef x grad(aux)`` to the routers' gradient."""
+    """A window of one row and a window of two copies of it are the same step."""
     trainer = _trainer(tmp_path, processes, monkeypatch, **LOSS_PATHS[loss_path])
     no_aux = _trainer(tmp_path, processes, monkeypatch, coef=0.0, **LOSS_PATHS[loss_path])
     assert (trainer.label_smoother is not None) == (loss_path == "label_smoothing")
@@ -130,7 +121,6 @@ def test_an_eval_batch_adds_the_aux_loss_at_its_coefficient(tmp_path, processes,
 
 
 def test_without_the_rescale_the_aux_loss_weighs_processes_times_window(tmp_path, monkeypatch):
-    """Anti-vacuity: HF's path alone counts the term once per micro-batch, times the process count."""
     monkeypatch.setattr(DistributedSFTTrainer, "_weigh_router_aux_loss", lambda self, model, loss, *_: loss)
     trainer = _trainer(tmp_path, 2, monkeypatch)
     no_aux = _trainer(tmp_path, 2, monkeypatch, coef=0.0)

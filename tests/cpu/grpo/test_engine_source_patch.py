@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""``docker/engine_source_patch.py`` rewrites exactly what its table names and refuses anything else;
-the vLLM table's residual harmony-gate scan refuses a gate the table missed.
-
-    python tests/cpu/grpo/test_engine_source_patch.py
-"""
+"""``docker/engine_source_patch.py`` rewrites exactly what its table names and refuses anything else; the vLLM table's
+residual harmony-gate scan refuses a gate the table missed."""
 
 import importlib.util
 import pathlib

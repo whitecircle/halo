@@ -38,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 # Set while an episode's externally scored terms are owed (``settle_async`` clears it): its reward is partial.
 REWARD_PENDING_KEY = "reward_pending"
-# The external scorers' diagnostics (merged into the rollout metrics) and their failures, by term.
 _REWARD_METRICS_KEY = "reward_metrics"
 REWARD_ERRORS_KEY = "reward_errors"
 # The component of the accrued per-turn deltas, reserved: no shaping term or reward term may take its name.
@@ -47,9 +46,8 @@ _TURN_SHAPING_COMPONENT = "turn_shaping"
 
 @dataclass(frozen=True)
 class EpisodeGrade:
-    """What an environment says about a finished episode: ``objective``, its own grade of the task in
-    ``[0, 1]`` (priced by the reward's environment term), and ``shaping``, the environment's own
-    episode-level terms by bare name (``{"submission": 0.25}``), each added as ``reward/<name>``."""
+    """``objective`` is the environment's grade in ``[0, 1]``; ``shaping`` its episode-level terms by bare name
+    (``{"submission": 0.25}``), each added as ``reward/<name>``."""
 
     objective: float
     shaping: Mapping[str, float] = field(default_factory=dict)
@@ -69,14 +67,11 @@ class EpisodeGrade:
 
 
 class EpisodeScoringMixin:
-    """The reward of an environment's episodes: the environment's side priced when an episode finishes, the
-    external terms settled after it; the host's ``_grade_episode`` and ``get_tools_schema`` feed it."""
+    """The environment's side priced when an episode finishes, the external terms settled after it."""
 
-    # The episode-level shaping components (``reward/<name>``) a class adds, unioned over the MRO: a reward term
-    # may not take one's name, and an undeclared one fails the first settled episode.
+    # Unioned over the MRO: a reward term may not take one's name; an undeclared one fails the first settled episode.
     SHAPING_COMPONENTS: tuple[str, ...] = ()
-    # The episode facts a class establishes (:meth:`_episode_facts`), unioned over the MRO: what a judge check
-    # may name to stand exempt under (``unless``).
+    # Unioned over the MRO: what a judge check may name to stand exempt under (``unless``).
     EPISODE_FACTS: tuple[str, ...] = ()
     # The checks a veto judge listing ``checks: environment`` audits with; none refuses such a judge.
     JUDGE_CHECKS: tuple[Check, ...] = ()
@@ -117,33 +112,28 @@ class EpisodeScoringMixin:
 
     @property
     def reward_terms(self) -> tuple[RewardTerm, ...]:
-        """The episode reward's terms, as configured."""
         return self._rewards.terms
 
     @property
     def objective_term(self) -> EnvironmentTerm | None:
-        """The reward's term pricing this environment's own grade, or ``None`` when the reward prices none."""
+        """``None`` when the reward prices none."""
         return self._rewards.environment_term
 
     @classmethod
     def shaping_components(cls) -> frozenset[str]:
-        """The shaping component names this class may add: every ``SHAPING_COMPONENTS`` along the MRO."""
         return frozenset(name for klass in cls.__mro__ for name in getattr(klass, "SHAPING_COMPONENTS", ()))
 
     @classmethod
     def episode_facts(cls) -> frozenset[str]:
-        """The episode fact names this class establishes: every ``EPISODE_FACTS`` along the MRO."""
         return frozenset(name for klass in cls.__mro__ for name in getattr(klass, "EPISODE_FACTS", ()))
 
     def verify_backend(self) -> None:
-        """Probe every externally scored reward term once before training (global rank 0), so a misconfigured
-        backend fails the launch; an env with a backend of its own extends this and calls ``super()``."""
+        """Probe every external term once before training (global rank 0), so a bad backend fails the launch."""
         if self._rewards.external_terms:
             asyncio.run(self._rewards.verify())
 
     async def settle_async(self, episode_ids: list[int]) -> None:
-        """Score the external terms of the named finished episodes, every scorer concurrently over the batch, and
-        complete their rewards; an episode without a pending reward is a no-op."""
+        """Every scorer runs concurrently over the batch; an episode without a pending reward is a no-op."""
         pending = [trajectory for trajectory in self._episodes(episode_ids) if REWARD_PENDING_KEY in trajectory.info]
         if not pending:
             return
@@ -152,8 +142,8 @@ class EpisodeScoringMixin:
             self._apply_external_scores(trajectory, verdict)
 
     def settle(self, episode_ids: list[int]) -> None:
-        """:meth:`settle_async` for a caller with no running loop, on a loop of its own that releases the scorers'
-        clients with it, so no later call reuses a client bound to a closed loop."""
+        """For a caller with no running loop: a loop of its own releases the scorers' clients with it, so no later call
+        reuses a client bound to a closed loop."""
         if not any(REWARD_PENDING_KEY in trajectory.info for trajectory in self._episodes(episode_ids)):
             return
 
@@ -166,8 +156,6 @@ class EpisodeScoringMixin:
         asyncio.run(settle_and_release())
 
     def _reward_metrics(self, trajectory: Trajectory) -> dict[str, float]:
-        """The reward's share of the rollout metrics: its components, the external scorers' diagnostics, and
-        whether every external term scored."""
         metrics = {**trajectory.info.get(REWARD_COMPONENTS_KEY, {}), **trajectory.info.get(_REWARD_METRICS_KEY, {})}
         if (
             self._rewards.external_terms
@@ -178,8 +166,7 @@ class EpisodeScoringMixin:
         return metrics
 
     def _settle_grade(self, trajectory: Trajectory, context: dict[str, Any] | None) -> None:
-        """Price the environment's side of the reward into ``reward_components``: the accrued per-turn deltas, the
-        protocol's and the environment's shaping, and the grade through the environment term."""
+        """Price the environment's side of the reward into ``reward_components``."""
         grade = self._grade_episode(trajectory, context)
         if not isinstance(grade, EpisodeGrade):
             raise TypeError(
@@ -208,33 +195,29 @@ class EpisodeScoringMixin:
         trajectory.total_reward = sum(components.values())
 
     def _episode_shaping(self, trajectory: Trajectory) -> dict[str, float]:
-        """The protocol's episode-level shaping terms by bare name; the base has none."""
+        """The protocol's episode-level shaping terms by bare name."""
         return {}
 
     @staticmethod
     def _invalid_grade(trajectory: Trajectory, reason: str) -> EpisodeGrade:
-        """The grade of an episode whose grading reached no verdict: 0, marked invalid for ``reason`` so it leaves
-        the group baseline rather than biasing every sibling's advantage."""
+        """0, marked invalid so it leaves the group baseline rather than biasing every sibling's advantage."""
         trajectory.info[EPISODE_INVALID_KEY] = True
         trajectory.info[EPISODE_INVALID_REASON_KEY] = reason
         return EpisodeGrade(0.0)
 
     @classmethod
     def _null_answer_grade(cls, trajectory: Trajectory) -> EpisodeGrade:
-        """The grade of an answer-graded episode whose ``answer`` cell is null: invalid, since a completion payout
-        would hand the full objective to every sibling of its group."""
+        """Invalid, since a completion payout would hand the full objective to every sibling of its group."""
         logger.warning("Episode context carries a null %r; scoring it invalid, not a success", ANSWER_KEY)
         return cls._invalid_grade(trajectory, f"the row's {ANSWER_KEY!r} cell is null: nothing to grade")
 
     @staticmethod
     def _cut_short(trajectory: Trajectory) -> bool:
-        """An episode its driver lost or a sandbox fault ended: never sent to an external scorer, whose verdict
-        on the fragment would be paid for and taught."""
+        """Lost or ended by a sandbox fault: never sent to an external scorer, whose verdict on the fragment would be
+        paid for and taught."""
         return EPISODE_ERROR_KEY in trajectory.info or SANDBOX_FAULT_KEY in trajectory.info
 
     def _scoring_sample(self, trajectory: Trajectory) -> ScoringSample:
-        """What an external scorer reads of a finished episode: the prompt turns (before the first assistant turn),
-        the policy's turns, the final answer, the reference, the tools and the episode facts."""
         messages = [self._sample_message(message) for message in trajectory.messages]
         first = next((i for i, m in enumerate(trajectory.messages) if m.role == "assistant"), len(messages))
         return ScoringSample(
@@ -248,8 +231,6 @@ class EpisodeScoringMixin:
 
     @staticmethod
     def _sample_message(message: Message) -> dict[str, Any]:
-        """A message as a scorer reads it: the wire fields with the reasoning, the turn flags a judge sees named,
-        and apart from the calls that ran, the calls a cut turn never ran and the ids of the calls refused unrun."""
         rendered = message.to_dict(include_thinking=True)
         rendered.update({flag: True for flag in TURN_FLAG_NOTES if getattr(message, flag)})
         if message.cut_tool_calls:
@@ -259,13 +240,12 @@ class EpisodeScoringMixin:
         return rendered
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
-        """What the episode delivered (a text answer, a submitted program) for a scorer's ``final`` view; ``None``
-        in the base, which knows no answer channel, so no fragment is read as the answer."""
+        """``None`` in the base, which knows no answer channel, so no fragment is read as the answer."""
         return None
 
     def _scoring_reference(self, trajectory: Trajectory) -> Any:
-        """The reference a scorer may read beside the episode: the row's ``answer`` as the grader compares it
-        (overridden where the cell is a grading payload or is converted before grading)."""
+        """The row's ``answer`` as the grader compares it; overridden where the cell is a grading payload or is
+        converted before grading."""
         return (trajectory.info.get(CONTEXT_KEY) or {}).get(ANSWER_KEY)
 
     def _episode_facts(self, trajectory: Trajectory) -> frozenset[str]:
@@ -273,8 +253,6 @@ class EpisodeScoringMixin:
         return frozenset()
 
     def _apply_external_scores(self, trajectory: Trajectory, verdict: Mapping[str, ScoreResult]) -> None:
-        """Settle the external terms' verdicts into the components, record their diagnostics, and close the
-        episode's reward, dropping the pending mark and the grading payload."""
         settlement = self._rewards.settle(trajectory.info[REWARD_COMPONENTS_KEY], verdict)
         trajectory.info[REWARD_COMPONENTS_KEY] = settlement.components
         if settlement.metrics:
@@ -292,8 +270,8 @@ class EpisodeScoringMixin:
 
     @staticmethod
     def _drop_grading_payload(trajectory: Trajectory) -> None:
-        """Strip what a settled episode no longer needs but every later hop (Ray, the TP broadcast) would carry: the
-        private ``_``-prefixed stamps and the context's ``answer``. A driver's own stamps land after this."""
+        """Strip what every later hop (Ray, the TP broadcast) would carry: the private ``_``-prefixed stamps and the
+        context's ``answer``. A driver's own stamps land after this."""
         for key in [key for key in trajectory.info if key.startswith("_")]:
             del trajectory.info[key]
         context = trajectory.info.get(CONTEXT_KEY)

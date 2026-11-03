@@ -40,9 +40,8 @@ def _named_class(module: ModuleType, name: str, spec: LigerFamilySpec) -> type:
             f"Liger applier for {spec.model_types[0]}: {module.__name__} defines no class {name!r}. "
             f"The family's modeling module changed; update its LigerFamilySpec."
         )
-    # Upstream's applier has already run: a class it replaced is a role both claim, and subclassing
-    # the replacement would stack the two swaps. `_rebrand` keeps the toolkit's swaps on the
-    # family's own module.
+    # Upstream's applier has already run: a class it replaced is a role both claim, and subclassing the replacement
+    # would stack the swaps. `_rebrand` keeps the toolkit's swaps on the family's own module.
     if spec.delegates_to_upstream and cls.__module__ != module.__name__:
         raise ValueError(
             f"Liger applier for {spec.model_types[0]}: {module.__name__}.{name} is now "
@@ -76,13 +75,8 @@ def _norm_epsilon(module: nn.Module) -> float:
 
 
 def native_rms_norm_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-    """``x * rsqrt(mean(x²) + eps) * w`` through torch's fused kernel, under the module's casting mode.
-
-    The kernel normalizes in fp32 and casts once. In the gemma mode the weight multiply is inside it, in
-    fp32 (on fp32 copies where the weight's dtype differs, as the kernel takes one dtype); in the llama
-    mode the normalized activations are cast back first and the weight multiplies them in the activation
-    dtype. A norm built without a scale (``with_scale=False``) passes no weight.
-    """
+    """``x * rsqrt(mean(x²) + eps) * w`` through torch's fused kernel. Gemma mode multiplies the weight inside it in
+    fp32; llama mode casts the normalized activations back first and multiplies in the activation dtype."""
     weight = self.weight if getattr(self, "with_scale", True) else None
     shape, eps = (hidden_states.shape[-1],), _norm_epsilon(self)
     if self.native_rms_casting_mode == "llama":
@@ -94,8 +88,6 @@ def native_rms_norm_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
 
 def _native_rms_norm_class(original: type, *, casting_mode: str) -> type:
-    """``original`` with :func:`native_rms_norm_forward` under ``casting_mode``."""
-
     class _NativeRMSNorm(original):
         native_rms_casting_mode = casting_mode
         forward = native_rms_norm_forward
@@ -104,12 +96,9 @@ def _native_rms_norm_class(original: type, *, casting_mode: str) -> type:
 
 
 def _configure_liger_rms_norm(module: nn.Module, *, offset: float, casting_mode: str) -> None:
-    """Set the attributes ``LigerRMSNorm.forward`` reads, which select its variant, on one norm module.
-
-    ``in_place`` follows Liger's convention (the llama mode reuses the incoming gradient buffer), which is
-    correct only while no family adds a norm output straight into a residual: ``AddBackward`` hands both
-    inputs the same gradient object. Every family here is pre-norm.
-    """
+    """Set the attributes ``LigerRMSNorm.forward`` reads. ``in_place`` (the llama mode reuses the incoming gradient
+    buffer) is correct only while no norm output adds straight into a residual, as ``AddBackward`` hands both inputs
+    one gradient object; every family here is pre-norm."""
     module.variance_epsilon = _norm_epsilon(module)
     module.offset = offset
     module.casting_mode = casting_mode
@@ -118,8 +107,6 @@ def _configure_liger_rms_norm(module: nn.Module, *, offset: float, casting_mode:
 
 
 def _liger_rms_norm_class(original: type, *, offset: float, casting_mode: str) -> type:
-    """``original`` with Liger's fused RMSNorm forward and the parameters that select its variant."""
-
     class _LigerRMSNorm(original):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -131,15 +118,13 @@ def _liger_rms_norm_class(original: type, *, offset: float, casting_mode: str) -
 
 
 def _rms_norm_class(original: type, spec: LigerFamilySpec) -> type:
-    """``original`` with the spec's fused RMSNorm kernel under its casting mode."""
     if spec.rms_norm_kernel == "native":
         return _native_rms_norm_class(original, casting_mode=spec.rms_norm_casting_mode)
     return _liger_rms_norm_class(original, offset=spec.rms_norm_offset, casting_mode=spec.rms_norm_casting_mode)
 
 
 def _bridge_gated_norm(module: nn.Module) -> None:
-    """Give one gated-norm module the ``eps`` and ``bias`` spellings ``fla``'s forward reads, or raise; the
-    activation passes through unchanged, so the fused gate is the one the eager module declared."""
+    """Give a gated-norm module the ``eps`` and ``bias`` spellings ``fla``'s forward reads, or raise."""
     name = type(module).__name__
     eps = _norm_epsilon(module)
     activation = getattr(module, "activation", None)
@@ -148,8 +133,7 @@ def _bridge_gated_norm(module: nn.Module) -> None:
             f"{name} gates with {activation!r}, which fla's kernel does not implement — it would apply "
             f"no gate at all. Drop it from the family's gated_rms_norm spec."
         )
-    # fla applies a bias when one is present; these norms have none, and gaining one would change
-    # the function.
+    # fla applies a bias when present; these norms have none, and gaining one would change the function.
     if getattr(module, "bias", None) is not None:
         raise ValueError(f"{name} carries a bias the eager gated norm never applies")
     module.eps = eps
@@ -157,17 +141,13 @@ def _bridge_gated_norm(module: nn.Module) -> None:
 
 
 def fused_gated_rms_norm_forward(self, hidden_states: torch.Tensor, gate: torch.Tensor | None = None) -> torch.Tensor:
-    """``fla``'s fused gated RMSNorm under the family's own parameter names: its blocks call this
-    positionally, but a keyword caller must not have to use fla's ``x``/``g`` spelling."""
+    """``fla``'s fused gated RMSNorm under the family's parameter names, for a keyword caller."""
     return FusedRMSNormGated.forward(self, hidden_states, gate)
 
 
 def _fused_gated_rms_norm_class(original: type) -> type:
-    """``original`` with ``fla``'s fused gated RMSNorm forward (Liger has none).
-
-    It keeps the weight multiply in fp32 where the eager modules round first: a deliberate deviation
-    from the bit-for-bit rule, on the more accurate side.
-    """
+    """``original`` with ``fla``'s fused gated forward, which keeps the weight multiply in fp32 where the eager modules
+    round first: a deliberate deviation from the bit-for-bit rule, on the more accurate side."""
 
     class _FusedGatedRMSNorm(original):
         def __init__(self, *args, **kwargs):
@@ -180,7 +160,6 @@ def _fused_gated_rms_norm_class(original: type) -> type:
 
 
 def _glu_flag_on(flags: dict) -> bool:
-    """Whether the gated-MLP role is enabled under either of Liger's two spellings of its flag."""
     return any(flags.get(name) for name in GLU_FLAGS)
 
 
@@ -190,9 +169,8 @@ def _fused_glu_forward(self, x: torch.Tensor) -> torch.Tensor:
 
 
 def _fused_glu_mlp_class(original: type) -> type:
-    """``original`` with the activation-and-multiply replaced by the toolkit's fused GLU kernel, chosen by
-    probing the instance's own ``act_fn`` at construction: an activation the kernels do not compute falls
-    back to the family's own forward."""
+    """``original`` with the toolkit's fused GLU kernel, chosen by probing the instance's ``act_fn``; an activation the
+    kernels do not compute falls back to the family's own forward."""
 
     class _FusedGluMLP(original):
         def __init__(self, *args, **kwargs):
@@ -208,11 +186,7 @@ def _fused_glu_mlp_class(original: type) -> type:
 
 
 def apply_fused_modules(module: ModuleType, spec: LigerFamilySpec, flags: dict) -> list[str]:
-    """Swap every role the spec fills and the flags enable. Idempotent; returns the roles patched.
-
-    A flag the spec names no class for patches nothing, which covers the roles upstream's applier
-    already ran.
-    """
+    """Swap every role the spec fills and the flags enable; idempotent, returns the roles patched."""
     patched: list[str] = []
 
     if flags.get("rms_norm") and (spec.rms_norm or spec.gated_rms_norm):
@@ -254,10 +228,8 @@ def _bind_forward(module: nn.Module, forward: Callable) -> None:
 
 
 def apply_fused_modules_to_model(model, spec: LigerFamilySpec, flags: dict) -> None:
-    """Apply the same roles to an already-built model, matched by class name (which the swap preserves).
-
-    Every module binding survives ``torch.save``/``torch.load``; the fused-loss head's does not.
-    """
+    """Apply the same roles to a built model, matched by class name. Every module binding survives
+    ``torch.save``/``torch.load``; the fused-loss head's does not."""
     if flags.get("rms_norm"):
         for module in model.modules():
             name = type(module).__name__

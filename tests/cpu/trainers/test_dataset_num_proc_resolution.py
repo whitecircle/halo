@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Test that trainer-side ``dataset.map`` passes honour ``dataset_num_proc`` the toolkit way.
-
-An UNSET ``dataset_num_proc`` means "toolkit default" (``DATASET_NUM_PROC``), not "one
-worker": handing the raw ``None`` to ``coordinated_map`` overrides that default and runs
-the heaviest tokenize single-process. Every parallelism mode gets the same count — which only holds
-because the mapped callables are module-level functions that take their state through ``fn_kwargs``.
-A bound method would ship its ``self`` (the model, and under EP the DeepEP/NCCL process groups) to
-every worker; ``reject_self_capturing_fn`` rejects that at the map seam, and the tokenize functions
-are exercised here through a real multi-worker ``Dataset.map``.
-
-Run: python tests/cpu/trainers/test_dataset_num_proc_resolution.py
-"""
+"""Trainer-side ``dataset.map`` passes resolve an unset ``dataset_num_proc`` to ``DATASET_NUM_PROC``, not one worker.
+A bound method would ship the model and EP process groups to workers, so ``reject_self_capturing_fn`` refuses it."""
 
 import inspect
 import types
@@ -45,7 +35,7 @@ def test_explicit_value_wins():
 
 
 class _Unpicklable:
-    """Stands in for a trainer holding a ProcessGroup: dill cannot send it to a worker."""
+    """Stands in for a trainer holding a ProcessGroup."""
 
     def __reduce__(self):
         raise TypeError("cannot pickle 'ProcessGroup' object")
@@ -119,7 +109,7 @@ def test_smpo_tokenize_honours_explicit_value():
 
 
 def test_smpo_passes_a_self_free_callable_with_state_in_fn_kwargs():
-    # Tunables must ride fn_kwargs: the map cache key fingerprints those, never values off self.
+    # Tunables go in fn_kwargs: the map cache key fingerprints those, never values off self.
     for is_vlm in (False, True):
         captured = _run_smpo_prepare(_smpo_self(dataset_num_proc=4, is_vlm=is_vlm))
         assert not inspect.ismethod(captured["fn"]), f"is_vlm={is_vlm}: bound method reached the map"
@@ -131,7 +121,7 @@ def test_smpo_passes_a_self_free_callable_with_state_in_fn_kwargs():
 
 
 class PicklableTokenizer:
-    """Whitespace tokenizer with a BOS-emitting post-processor (module-level so workers can load it)."""
+    """Module-level so workers can load it."""
 
     bos_token_id = 1
     eos_token_id = 2

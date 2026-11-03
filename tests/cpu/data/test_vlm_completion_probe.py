@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the VLM collators' construction-time completion probe: completion-only masking that would train no
-token is refused where the collator is built, before the model load and the dataset map.
-
-Two setups train nothing: a marker the processor's chat template never renders, and assistant turns that end in no
-turn terminator, as under a Gemma template borrowed for PaliGemma, whose turns close with ``<end_of_turn>`` while the
-model's eos is ``<eos>``. The probe masks under the collator's own span policy, so the self-distillation collator,
-whose policy runs a terminator-less span to the row end, is not refused.
-
-Run: ``python tests/cpu/data/test_vlm_completion_probe.py`` (or ``pytest -m cpu``).
-"""
+"""The VLM collators' construction-time probe refuses completion-only masking that would train no token: a marker
+the chat template never renders, or turns ending in no terminator (a Gemma template on PaliGemma). The probe
+masks under the collator's own span policy, so self-distillation is not refused."""
 
 from __future__ import annotations
 
@@ -63,8 +56,8 @@ def test_turns_that_end_in_no_terminator_are_refused_at_construction():
 
 
 def test_naming_the_turn_end_token_as_eos_trains_the_answer():
-    """Anti-vacuity: the refusal is the terminator's doing. With ``eos_token`` set to the token the template closes a
-    turn with, the same collator builds and trains each answer through its ``<end_of_turn>``."""
+    """The refusal is the terminator's doing: with ``eos_token`` set to the token closing a turn, the collator
+    builds and trains each answer."""
     processor = _gemma_turn_processor()
     processor.tokenizer.eos_token = "<end_of_turn>"
     batch = _completion_collator(processor)([digit_row()])

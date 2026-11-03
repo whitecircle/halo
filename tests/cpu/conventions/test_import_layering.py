@@ -1,8 +1,6 @@
-"""The import layering of ``halo/``, read off the import graph: the sharding-agnostic trees reach no
-``halo.distributed``, ``torch.distributed`` or loader dispatch, no parallelism package imports the dispatch, the
-packages import their members acyclically, toolkit env knobs go through ``halo/env.py``, and every import follows the
-layer table ``_LAYERS``, which agent-docs/reference/architecture.md renders. ``TYPE_CHECKING`` imports and the
-package's bootstrap ``__init__`` are exempt; a function-local import counts like any other."""
+"""The import layering of ``halo/``, read off the import graph and the table ``_LAYERS`` that
+agent-docs/reference/architecture.md renders. ``TYPE_CHECKING`` imports and the package's bootstrap ``__init__``
+are exempt; a function-local import counts."""
 
 import ast
 import re
@@ -27,12 +25,10 @@ _DISPATCH_DIR = _PACKAGE_ROOT.joinpath(*_DISPATCH_PACKAGE.split("."))
 # The collective half of the checkpoint tree, which the agnostic sweep skips and the dispatch sweep covers.
 _CHECKPOINT_PARALLEL = "checkpoint.parallel"
 
-# The sharding-agnostic trees and what they may not reach.
 _AGNOSTIC_DIRS = ("checkpoint", "model_loading", "models")
 _FORBIDDEN_ROOTS = (f"{PACKAGE}.distributed", "torch.distributed", f"{PACKAGE}.{_DISPATCH_PACKAGE}")
 
-# EP_* stays out: EP_DISABLE_GIN / EP_SUPPRESS_NCCL_CHECK are DeepEP's own vars, read raw at
-# their owner by design (halo/env.py docstring).
+# EP_* stays out: EP_DISABLE_GIN and EP_SUPPRESS_NCCL_CHECK are DeepEP's own vars, read raw at their owner.
 _ENV_PREFIXES = ("HALO_", "DIST_", "VLLM_", "SGLANG_", "NVLINK_")
 _ENV_OWNER = _PACKAGE_ROOT / "env.py"
 
@@ -62,8 +58,8 @@ _TOOL_SAFE = frozenset(
 _TOOL_UNSAFE = frozenset({"runtime", "distributed", "weight_sync", "model_loading.parallel", "checkpoint.parallel"})
 # The one torch.distributed import a tool-safe module makes: the DTensor type a low-precision Linear checks for.
 _TOOL_SAFE_TORCH_DISTRIBUTED = {"kernels.lowp.linear": "torch.distributed.tensor"}
-# The runtime module a tool-safe unit may import: rank queries, which start no process group, collective or sync
-# (the guard on a rank-0-only log line). Its own first-party imports are pinned to _RANK_QUERIES_IMPORTS.
+# Rank queries start no process group, collective or sync, so a tool-safe unit may import them; their own imports are
+# pinned to _RANK_QUERIES_IMPORTS.
 _TOOL_SAFE_RANK_QUERIES = frozenset({"runtime.ranks"})
 _RANK_QUERIES_IMPORTS = frozenset({"log"})
 # Importing any module of the package runs its bootstrap, which imports torch; these units import nothing from it.
@@ -118,8 +114,6 @@ class _Import(NamedTuple):
 
 
 class _Break(NamedTuple):
-    """One break of the layer table."""
-
     rule: str
     importer: str  # dotted under the package root; a cycle's members
     imported: str  # dotted under the package root, or a third-party module; "" for a cycle
@@ -168,7 +162,6 @@ def _package_files(index: RepoIndex) -> list[Path]:
 
 
 def _package_imports(index: RepoIndex) -> list[_Import]:
-    """Every import the package's modules make."""
     return [found for path in _package_files(index) for found in _file_imports(index, path)]
 
 
@@ -241,7 +234,6 @@ def _member_graph(imports: Iterable[_Import], package: str, node=None) -> dict[s
 
 
 def _reachable(graph: Mapping[str, Iterable[str]], start: str) -> set[str]:
-    """The nodes one or more edges of ``graph`` lead to from ``start``."""
     reached: set[str] = set()
     pending = list(graph.get(start, ()))
     while pending:
@@ -260,7 +252,6 @@ def _cycles(graph: Mapping[str, Iterable[str]]) -> list[list[str]]:
 
 
 def _unit(module: str) -> str:
-    """The layer-table unit of ``module``."""
     top, _, rest = module.partition(".")
     member = rest.partition(".")[0]
     if top in ("checkpoint", "model_loading") and member == "parallel":
@@ -304,7 +295,6 @@ _BELOW_DISPATCH_FILES = [path for path in _package_files(_INDEX) if _lands_below
 
 
 def _edge_breaks(location: str, source: str, target: str) -> list[_Break]:
-    """The rules a first-party import from ``source`` to ``target`` breaks."""
     breaks = []
     source_unit, target_unit = _unit(source), _unit(target)
     if source_unit != target_unit and _LEVEL[target_unit] >= _LEVEL[source_unit]:
@@ -328,7 +318,6 @@ def _edge_breaks(location: str, source: str, target: str) -> list[_Break]:
 
 
 def _third_party_breaks(location: str, source: str, module: str, lazy: bool) -> list[_Break]:
-    """The rules an import of the third-party ``module`` from ``source`` breaks."""
     breaks = []
     if _is_within(module, "deep_ep"):
         if source != _DEEP_EP_IMPORTER:
@@ -348,7 +337,6 @@ def _third_party_breaks(location: str, source: str, module: str, lazy: bool) -> 
 
 
 def _layer_table_breaks(imports: Iterable[_Import]) -> list[_Break]:
-    """Every break of the layer table by ``imports``."""
     breaks = []
     graph: dict[str, set[str]] = defaultdict(set)
     for found in imports:
@@ -382,7 +370,6 @@ def _report(breaks: Iterable[_Break]) -> str:
 
 
 def test_the_sweep_sees_every_agnostic_tree():
-    """Anti-vacuity: an empty or shrunken sweep would pass every assertion below."""
     assert len(_AGNOSTIC_FILES) > 10, f"the sharding-agnostic sweep collapsed to {len(_AGNOSTIC_FILES)} files"
     assert _DISPATCH_DIR.is_dir(), f"halo/{_DISPATCH_PACKAGE.replace('.', '/')} moved; the sweep excludes it by path"
     for directory in _AGNOSTIC_DIRS:
@@ -407,8 +394,6 @@ def test_the_sharding_agnostic_layer_imports_no_distributed_module(path):
 
 
 def test_the_sweep_sees_the_dispatch_and_every_parallelism_package():
-    """Anti-vacuity: a moved dispatch package leaves nothing to import, and the packages it reaches into must
-    all be in the sweep."""
     assert _INDEX.module_source(f"{PACKAGE}.{_DISPATCH_PACKAGE}") is not None, f"no {_DISPATCH_PACKAGE} package"
     swept = {_parallelism_package(_module_name(_PACKAGE_ROOT, path)) for path in _BELOW_DISPATCH_FILES}
     assert {
@@ -433,7 +418,7 @@ def test_no_distributed_package_imports_the_loader_dispatch(path):
 
 
 def test_the_cycle_finder_finds_every_cycle():
-    """Anti-vacuity for the acyclicity rules: each cycle is reported, not only the first one found."""
+    """Each cycle is reported, not only the first one found."""
     graph = {"a": {"b"}, "b": {"c", "d"}, "c": {"a"}, "d": {"e"}, "e": {"d"}, "f": {"a"}}
 
     assert _cycles(graph) == [["a", "b", "c"], ["d", "e"]]
@@ -441,8 +426,6 @@ def test_the_cycle_finder_finds_every_cycle():
 
 
 def test_a_type_checking_import_adds_no_edge_and_a_runtime_one_does(tmp_path):
-    """Anti-vacuity for the exemption: an annotation-only import adds no edge, while a module-level import in
-    the same file, and one inside a function, still do."""
     write_sample_tree(
         tmp_path,
         {
@@ -511,8 +494,7 @@ def test_a_module_outside_every_row_has_no_place():
 
 
 def test_each_break_of_the_layer_table_is_reported(tmp_path):
-    """Anti-vacuity for the report: a sample package breaking each rule, beside imports each rule allows,
-    yields exactly those breaks."""
+    """A sample package breaking each rule, beside imports each rule allows, yields exactly those breaks."""
     write_sample_tree(
         tmp_path,
         {
@@ -605,8 +587,7 @@ def test_each_break_of_the_layer_table_is_reported(tmp_path):
 
 
 def test_every_module_has_a_place_in_the_table():
-    """Each module lands in a unit of the table and, inside an ordered package, in one of its rows; a module
-    the table cannot place would drop out of every rule."""
+    """A module the table cannot place would drop out of every rule."""
     unplaced = {
         module: why
         for path in _package_files(_INDEX)
@@ -616,7 +597,7 @@ def test_every_module_has_a_place_in_the_table():
 
 
 def test_the_layer_table_sweep_sees_every_unit():
-    """Anti-vacuity: a unit no module lands in is a misspelled row, and a collapsed import graph checks nothing."""
+    """A unit no module lands in is a misspelled row, and a collapsed import graph checks nothing."""
     placed = {_unit(_module_name(_PACKAGE_ROOT, path)) for path in _package_files(_INDEX)}
     assert not set(_LEVEL) - placed, f"no module lands in {sorted(set(_LEVEL) - placed)}"
     first_party = [found for found in _IMPORTS if found.importer and _in_package(found.module)]

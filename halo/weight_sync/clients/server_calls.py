@@ -5,8 +5,6 @@ import time
 
 
 class AsyncCall:
-    """Run a function in a background thread, join later."""
-
     def __init__(self, fn, name: str = "server call"):
         self.error: Exception | None = None
         self.result = None
@@ -24,7 +22,7 @@ class AsyncCall:
         return self._thread.is_alive()
 
     def wait(self, timeout: float):
-        """Join the call within ``timeout`` seconds, re-raising its error; a call still running raises TimeoutError."""
+        """Join within ``timeout`` seconds, re-raising the call's error; a call still running raises TimeoutError."""
         self._thread.join(timeout=timeout)
         if self._thread.is_alive():  # join() returns without signalling a timeout
             raise TimeoutError(f"{self.name} still blocked after {timeout:.0f}s — server wedged?")
@@ -39,8 +37,8 @@ class AsyncCall:
 
 
 def wait_for_calls(calls: list[AsyncCall], timeout: float) -> None:
-    """Block until every call returned, raising as soon as one fails. Polled, not joined in turn: the two
-    halves of a group formation complete only together, so a serial join parks once the other side failed."""
+    """Block until every call returned, raising as soon as one fails. Polled, as the halves of a group formation
+    complete only together and a serial join would park once the other side failed."""
     deadline = time.monotonic() + timeout
     while True:
         for call in calls:

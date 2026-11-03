@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """A frozen reference or teacher is built with the attention implementation its policy is, picked by one seam.
-
-``apply_family_patches`` keys the family patches on the resolved backend (``sdpa`` for Gemma 4, whose
-wide heads need the SDPA pin) and returns the implementation to build with (its variant, ``sdpa_flex_sliding``).
-The policy loader and the frozen reference/teacher loader both build and finalize the model with that return
-value, and a trainer handed its model as a path string with a pinned backend builds with it (unpinned, the seam still
-applies the patches no backend keys and the build picks its own). A frozen model built
-on plain ``sdpa`` would score every logprob of the objective's other half through a different attention than the
-policy it anchors, and a loader holding its own copy of the backend-to-variant step can drift into exactly that.
-
-    python tests/cpu/models/test_frozen_model_attention_variant.py
-"""
+On plain ``sdpa`` it would score the objective's other half through a different attention than its policy."""
 
 import ast
 import os
@@ -41,8 +31,7 @@ def _wide_gemma4_config() -> Gemma4TextConfig:
 
 @pytest.mark.parametrize(("opt_out", "built"), [(False, SDPA_FLEX_SLIDING), (True, "sdpa")])
 def test_the_seam_pins_the_backend_and_returns_the_build_implementation(opt_out, built):
-    """A wide-head model resolved to ``sdpa`` on a CUDA host gets the SDPA pin, keyed on the backend, and is built
-    with the flex-sliding variant; ``HALO_FLEX_SLIDING=0`` keeps the pin and builds plain ``sdpa``."""
+    """``HALO_FLEX_SLIDING=0`` keeps the pin and builds plain ``sdpa``."""
     pins = []
     env = {"HALO_FLEX_SLIDING": "0"} if opt_out else {}
     with (
@@ -55,8 +44,7 @@ def test_the_seam_pins_the_backend_and_returns_the_build_implementation(opt_out,
 
 
 def _recording_seam(seen):
-    """An ``apply_family_patches`` stand-in that records the backend it was handed and returns a variant of it, or
-    None for none, as the seam does."""
+    """Returns a variant of the backend, or None for none, as the seam does."""
 
     def seam(model_config, attn_implementation):
         seen["patched"] = attn_implementation
@@ -123,15 +111,12 @@ def _load_frozen(config, seam, seen) -> None:
 
 @pytest.mark.parametrize("load", [_load_policy, _load_frozen], ids=["policy", "frozen"])
 def test_each_loader_builds_with_what_the_seam_returns(load):
-    """Each loader hands the seam the resolved backend, then builds and finalizes with its return value."""
     seen = {}
     load(_wide_gemma4_config(), _recording_seam(seen), seen)
     assert seen == {"patched": "sdpa", "build": "sdpa_variant", "finalize": "sdpa_variant"}
 
 
 def _load_trainer_path(model_init_kwargs: dict, seen: dict) -> None:
-    """``resolve_trainer_model`` on a path string up to its build, the source agreed at :data:`AGREED_COMMIT`."""
-
     def build(*args, **kwargs):
         seen["build"] = kwargs.get("attn_implementation")
         raise _Built
@@ -155,9 +140,7 @@ def _load_trainer_path(model_init_kwargs: dict, seen: dict) -> None:
 
 
 def test_the_trainer_path_load_builds_with_what_the_seam_returns():
-    """A trainer handed its model as a path string (SMPO, offline GRPO, a teacher-distillation student) hands the
-    seam the backend its ``model_init_kwargs`` pin, read off the config at the agreed commit, and builds with the
-    return value; the caller's kwargs keep the backend it pinned."""
+    """SMPO, offline GRPO and a teacher-distillation student take this path; the caller's kwargs keep their pin."""
     seen = {}
     model_init_kwargs = {"attn_implementation": "sdpa"}
     _load_trainer_path(model_init_kwargs, seen)
@@ -166,17 +149,14 @@ def test_the_trainer_path_load_builds_with_what_the_seam_returns():
 
 
 def test_an_unpinned_trainer_path_load_still_takes_the_family_patches():
-    """Without a pinned backend transformers picks one at the build, and the seam still runs on this model's config
-    at the agreed commit for the patches no backend keys (Zaya's load recording and checkpointing refusal); the build
-    gets no implementation of its own."""
+    """The seam still runs for the patches no backend keys (Zaya's load recording and checkpointing refusal)."""
     seen = {}
     _load_trainer_path({}, seen)
     assert seen == {"config_revision": AGREED_COMMIT, "patched": None, "build": None}
 
 
 def test_no_loader_resolves_the_variant_itself():
-    """Only the seam calls the variant resolver: a loader binding it again holds a second copy of the
-    backend-to-variant step, free to drift from the seam."""
+    """A loader binding the resolver again holds a second copy of the step, free to drift from the seam."""
     binders = set()
     for path in (*REPO_ROOT.glob("halo/**/*.py"), *REPO_ROOT.glob("scripts/**/*.py")):
         for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):

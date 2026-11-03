@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""``MoEMetricsCallback`` must count the routing the model performed, not ``topk(router_logits)``.
-
-DeepSeek-style routers pick over ``score(logits) + e_score_correction_bias`` inside a group mask
-(``n_group`` / ``topk_group``), then publish the RAW pre-bias, pre-mask logits as ``router_logits``.
-Re-ranking those describes a load distribution the model never routed: a balancing bias flips
-near-ties onto a different expert, and group-limiting excludes experts holding the largest raw logit
-in the layer. Under those routers the ``moe/*`` metrics are the only signal a run has about expert
-collapse, so counting the wrong selection is a silent mis-report, not a rounding error.
-
-The vehicle is transformers' own ``Glm5NextTextTopkRouter`` — bias and group limit in one forward —
-so these tests track the family's real routing rather than a re-implementation of it. The families
-whose routers carry the same two mechanisms (GLM-4/5, Laguna, DeepSeek-V4, Inkling, Step-3.7,
-Bailing, LFM-2, GPT-OSS) all reach the callback through the same seam.
-
-Run::
-
-    python tests/cpu/callbacks/test_moe_metrics_router_selection.py
-"""
+"""``MoEMetricsCallback`` must count the routing the model performed, not ``topk(router_logits)``. DeepSeek-style
+routers pick over biased, group-masked scores but publish raw logits. The vehicle is ``Glm5NextTextTopkRouter``."""
 
 from __future__ import annotations
 
@@ -46,11 +30,7 @@ def _router_config(**overrides) -> Glm5NextTextConfig:
 
 
 class _RouterModel(nn.Module):
-    """A model whose one routing module is a real HF router, declared the way transformers declares it.
-
-    ``_can_record_outputs`` is what tells the toolkit (and transformers' own capture) which module
-    produces ``router_logits``; the callback discovers its routers through exactly that declaration.
-    """
+    """``_can_record_outputs`` declares which module produces ``router_logits``; the callback reads it."""
 
     def __init__(self, router: nn.Module, model_type: str = "glm5_next"):
         super().__init__()
@@ -60,11 +40,7 @@ class _RouterModel(nn.Module):
 
 
 def _one_hot_router(logits: list[float], bias: list[float] | None = None, **config_overrides):
-    """A router whose logits for the probe token are exactly ``logits``.
-
-    ``F.linear`` against a one-hot hidden state selects column 0 of the weight, so writing the desired
-    logits there makes the routing decision fully determined and readable in the assertions.
-    """
+    """``F.linear`` against a one-hot hidden state selects column 0 of the weight, so ``logits`` fix the routing."""
     config = _router_config(**config_overrides)
     router = Glm5NextTextTopkRouter(config)
     with torch.no_grad():
@@ -81,7 +57,6 @@ def _counts(indices: torch.Tensor) -> list[float]:
 
 
 def _collect(router: nn.Module, hidden: torch.Tensor) -> list[float]:
-    """Drive the callback over one router forward and return its per-expert counts."""
     model = _RouterModel(router)
     model.train()
     callback = MoEMetricsCallback(topk=TOP_K)
@@ -94,19 +69,16 @@ def _collect(router: nn.Module, hidden: torch.Tensor) -> list[float]:
     return counter.tolist()
 
 
-# The two mechanisms that move the selection away from topk(router_logits).
-
 # expert 1 and 2 are a near-tie one bias step apart; the bias hands the slot to expert 2.
 _TIE_LOGITS = [1.0, 0.99, 0.98, -5.0, -5.0, -5.0, -5.0, -5.0]
 _TIE_BIAS = [0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# expert 0 holds the largest raw logit, but its group loses the group score, so it routes NO tokens.
+# expert 0 holds the largest raw logit, but its group loses the group score, so it routes no tokens.
 _GROUP_LOGITS = [3.0, -5.0, -5.0, -5.0, 2.0, 1.9, 1.8, 1.7]
 _GROUP_OVERRIDES = {"n_group": 2, "topk_group": 1}
 
 
 def test_premise_bias_and_group_limit_really_move_the_selection():
-    """Guard the premise: if these fixtures ever stopped diverging, the tests below would prove nothing."""
     for logits, bias, overrides in (
         (_TIE_LOGITS, _TIE_BIAS, {}),
         (_GROUP_LOGITS, None, _GROUP_OVERRIDES),
@@ -121,7 +93,6 @@ def test_premise_bias_and_group_limit_really_move_the_selection():
 
 
 def test_balancing_bias_flipping_a_near_tie_is_reflected_in_the_load():
-    """The token the bias moved must be counted on the expert that ran it."""
     router, hidden = _one_hot_router(_TIE_LOGITS, _TIE_BIAS)
     _, _, topk_indices = router(hidden)
 
@@ -138,7 +109,6 @@ def test_balancing_bias_flipping_a_near_tie_is_reflected_in_the_load():
 
 
 def test_group_limited_routing_leaves_the_excluded_expert_dead():
-    """An expert masked out by group-limited routing receives no tokens and must read as dead."""
     router, hidden = _one_hot_router(_GROUP_LOGITS, None, **_GROUP_OVERRIDES)
     _, _, topk_indices = router(hidden)
 
@@ -155,7 +125,6 @@ def test_group_limited_routing_leaves_the_excluded_expert_dead():
 
 
 def test_counts_accumulate_across_microbatches():
-    """Counters span an optimizer step, so a second forward adds to the first."""
     router, hidden = _one_hot_router(_GROUP_LOGITS, None, **_GROUP_OVERRIDES)
     _, _, topk_indices = router(hidden)
 
@@ -171,7 +140,6 @@ def test_counts_accumulate_across_microbatches():
 
 
 def test_rewiring_does_not_stack_hooks():
-    """A second ``train()`` on the same callback must re-hook, not add a second hook per router."""
     router, hidden = _one_hot_router(_GROUP_LOGITS, None, **_GROUP_OVERRIDES)
     _, _, topk_indices = router(hidden)
 
@@ -188,7 +156,6 @@ def test_rewiring_does_not_stack_hooks():
 
 
 def test_eval_forwards_are_not_counted():
-    """The hot path pays nothing outside training, and eval routing must not pollute the step's load."""
     router, hidden = _one_hot_router(_GROUP_LOGITS, None, **_GROUP_OVERRIDES)
     model = _RouterModel(router)
     model.eval()
@@ -198,11 +165,7 @@ def test_eval_forwards_are_not_counted():
     assert callback._counters == [None], f"eval forward accumulated {callback._counters}"
 
 
-# Discovery, and the two readings that are NOT the router's index tensor.
-
-
 def test_routers_are_discovered_from_the_transformers_declaration():
-    """Every MoE layer of a real family model contributes exactly one hooked router, in layer order."""
     model = GptOssForCausalLM(GptOssConfig(**TINY_GPTOSS_CONFIG))
     routers = declared_routers(model)
 
@@ -214,14 +177,13 @@ def test_routers_are_discovered_from_the_transformers_declaration():
 
 
 class _LogitsOnlyRouter(nn.Module):
-    """A router publishing logits and nothing else — the only case the top-k fallback is for."""
+    """Publishes logits only, the one case the top-k fallback is for."""
 
     def forward(self, hidden_states):
         return (hidden_states @ torch.eye(NUM_EXPERTS),)
 
 
 def test_logits_only_router_falls_back_to_topk_and_says_so_once(monkeypatch):
-    """The fallback must stay reachable, and must name the model type it is approximating."""
     warnings: list[tuple] = []
     monkeypatch.setattr(moe_metrics.logger, "warning", lambda msg, *args, **kwargs: warnings.append((msg,) + args))
 
@@ -244,8 +206,8 @@ def test_logits_only_router_falls_back_to_topk_and_says_so_once(monkeypatch):
 
 
 class _DiscardSlotRouter(nn.Module):
-    """A router whose trailing logit column is a discard slot (Zaya): skipped tokens come back as an
-    expert id, so only the logits still carry the discard decision."""
+    """Its trailing logit column is a discard slot (Zaya): skipped tokens come back as an expert id, so only the logits
+    carry the discard decision."""
 
     _has_discard_expert_slot = True
 
@@ -255,7 +217,6 @@ class _DiscardSlotRouter(nn.Module):
 
 
 def test_discard_slot_router_is_read_from_its_logits():
-    """Its index tensor cannot express "discarded", so counting it would credit a real expert."""
     model = _RouterModel(_DiscardSlotRouter())
     model.train()
     callback = MoEMetricsCallback(topk=1)

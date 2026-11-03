@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Offline GRPO: train, evaluate, restore the original KL, resume, and export.
-
-Qwen3 runs pure CP; every MoE family Ulysses CP takes (``TinyFamily.ulysses_cp``) also runs pure CP, at ep1 on
-the grouped-GEMM EP layers, and EP2+CP2 with fp32 expert masters. ``--world 4`` adds DP replicas (CP x DP, or two
-EP groups, one per simulated NVLink domain with ``--gpus-per-node 2``), ``--zero3`` runs FSDP2 FULL_SHARD and
-``--unsharded-ep1-experts`` keeps ep1 experts whole and FSDP-ignored; the layout is read off the trained model.
-Every family uses a random tiny checkpoint and an offline tokenizer, with no Hub downloads.
-Run with: torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_offline_grpo_cp_resume.py --cp-size {1,2}
-"""
+"""Offline GRPO: train, evaluate, restore the original KL, resume and export, under CP and EP+CP on every MoE family
+Ulysses takes, on tiny offline checkpoints."""
 
 import argparse
 import math
@@ -66,7 +59,6 @@ SEED = 721
 STEPS = 3
 CHECKPOINT_STEP = 2
 KL_BETA = 0.05
-# The MoE families Ulysses CP takes, so every one runs both pure CP and EP+CP.
 MOE_FAMILIES = tuple(family for family, tiny in TINY_MOE_FAMILIES.items() if tiny.ulysses_cp)
 
 
@@ -95,7 +87,7 @@ def _has_second_moments(optimizer_state):
 
 
 def _expert_masters(model):
-    """Local FSDP-ignored expert masters, by wrapper ownership rather than checkpoint spelling."""
+    """By wrapper ownership rather than checkpoint spelling."""
     expert_ids = {
         id(parameter)
         for layer in model.modules()
@@ -136,7 +128,6 @@ def _save_tiny_model(path, family="qwen3"):
 
 
 def _build_trainer(ctx, source, output_dir, tokenizer, train, evaluation, *, fields, checkpoint=None, save=False):
-    """The run's trainer over the ``ParallelismConfig`` ``fields``, a fresh config per build."""
     parallelism = ParallelismConfig(**fields)
     cp_size = parallelism.cp_size
     args = offline_grpo_config(
@@ -167,9 +158,8 @@ def _build_trainer(ctx, source, output_dir, tokenizer, train, evaluation, *, fie
 
 
 def _eager_oracle(source, device="cpu"):
-    """Same sink-free policy as Ulysses, with independent full-row eager attention, through the family's own class,
-    finalized on ``device`` as every production load is: a remote-code family's rotary table is otherwise the
-    uninitialized memory transformers 5 leaves in its non-persistent buffers."""
+    """The sink-free policy with full-row eager attention, finalized as production loads are: a remote-code rotary
+    table is otherwise the uninitialized memory transformers 5 leaves in non-persistent buffers."""
     model, info = TINY.load_class.from_pretrained(
         source,
         dtype=torch.bfloat16,
@@ -202,7 +192,6 @@ def _reference_rows(dataset):
 
 
 def _unsharded_reference_error(source, dataset, swept_rows, device):
-    """Compare the initial sweep with a separate full-row causal-LM score."""
     model = _eager_oracle(source, device)
     errors = []
     with torch.inference_mode():
@@ -219,7 +208,7 @@ def _unsharded_reference_error(source, dataset, swept_rows, device):
 
 
 def _record_training_rows(trainer):
-    """Capture the logical rows used by each train step, excluding eval sweeps."""
+    """The logical rows of each train step, excluding eval sweeps."""
     rows = []
     original = trainer._compute_loss_inner
 
@@ -345,7 +334,7 @@ def cp_resume_parser():
 
 
 def _parse_fields(parser: argparse.ArgumentParser) -> tuple[argparse.Namespace, dict]:
-    """The CLI and the ``ParallelismConfig`` fields it asks for, refusing the shapes the config or the suite cannot run."""
+    """Refuses the shapes the config or the suite cannot run."""
     args = parser.parse_args()
     moe = args.family in MOE_FAMILIES
     if args.fp32_masters and (args.ep_size != 2 or not moe):
@@ -547,7 +536,7 @@ def run(ctx) -> dict:
 
 
 ARGS, FIELDS = _parse_fields(cp_resume_parser())
-# The family's checkpoint classes: its tiny-roster entry, or the dense Qwen3's.
+# Its tiny-roster entry, or the dense Qwen3's.
 TINY = TINY_MOE_FAMILIES.get(ARGS.family, TINY_DENSE_FAMILY)
 main = gpu_test_main(exact_world_size=ARGS.world, prefix="offline_grpo_cp_resume")(run)
 

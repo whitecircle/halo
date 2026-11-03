@@ -21,8 +21,7 @@ logger = logging.getLogger(__name__)
 
 def save_lr_scheduler(lr_scheduler, checkpoint_dir: str) -> None:
     """COLLECTIVE. Write ``scheduler.pt`` from the FS-aware save rank(s), for a save the base Trainer writes none in
-    (``save_only_model``, per-rank optimizer shards): the LR schedule must continue from the resumed step. No-op
-    without a scheduler."""
+    (``save_only_model``, per-rank optimizer shards). No-op without a scheduler."""
     if lr_scheduler is None:
         return
     with barrier_on_exit(f"Writing {SCHEDULER_STATE_FILE} to {checkpoint_dir}"):
@@ -34,11 +33,11 @@ def save_lr_scheduler(lr_scheduler, checkpoint_dir: str) -> None:
 
 
 def restore_lr_scheduler(lr_scheduler, optimizer, checkpoint: str) -> bool:
-    """COLLECTIVE. Restore ``lr_scheduler`` from ``scheduler.pt`` and push its LR into ``optimizer``; True when
-    restored. Runs on every resume path, the optimizer state's warm restarts included."""
+    """COLLECTIVE. Restore ``scheduler.pt`` and push its LR into ``optimizer``; True when restored. Runs on every
+    resume path, the optimizer state's warm restarts included."""
 
     def restore(path: str) -> None:
-        """Applied inside the joined read: a state dict the scheduler refuses fails the world like a torn file."""
+        """Applied inside the joined read, so a state dict the scheduler refuses fails the world like a torn file."""
         if lr_scheduler is None:
             return  # nothing to restore into; a present file is then not an error
         lr_scheduler.load_state_dict(torch.load(path, map_location="cpu", weights_only=False))
@@ -72,12 +71,9 @@ def restore_lr_scheduler(lr_scheduler, optimizer, checkpoint: str) -> bool:
 
 
 def save_balancing_biases(model, output_dir: str, *, is_pp_mode: bool) -> None:
-    """COLLECTIVE. Write the router balancing biases, replica-identical plain attributes the model checkpoint
-    lacks, from the FS-aware save rank(s); no-op without a balancing router.
-
-    Under PP the stages' biases are gathered to rank 0 under unsplit-model names and the merge broadcast
-    back (an all-gather would materialize one dict per rank on every rank).
-    """
+    """COLLECTIVE. Write the router balancing biases, replica-identical plain attributes the model checkpoint lacks,
+    from the FS-aware save rank(s). Under PP they gather to rank 0 under unsplit names and broadcast back, since an
+    all-gather would materialize one dict per rank on every rank."""
     biases = {
         name: getattr(module, BALANCING_BIASES_ATTR).detach().cpu()
         for name, module in model.named_modules()
@@ -85,8 +81,7 @@ def save_balancing_biases(model, output_dir: str, *, is_pp_mode: bool) -> None:
     }
     if is_pp_mode:
         biases = {model.global_parameter_name(name): bias for name, bias in biases.items()}
-        # FS-aware writer: a rank-0-only write leaves nodes 1..N without the file on a non-shared
-        # FS, so the merge has to reach every node's save rank.
+        # FS-aware writer, since a rank-0-only write leaves nodes 1..N without the file on a non-shared FS.
         merged = combine_across_ranks(
             biases,
             lambda gathered: {name: bias for stage in gathered for name, bias in stage.items()},
@@ -102,12 +97,8 @@ def save_balancing_biases(model, output_dir: str, *, is_pp_mode: bool) -> None:
 
 
 def restore_balancing_biases(model, checkpoint: str, *, is_pp_mode: bool) -> None:
-    """COLLECTIVE. Copy the biases :func:`save_balancing_biases` wrote back into the live routers.
-
-    A saved name the model lacks is skipped; a live router the file lacks, a file matching no live router
-    and an absent file under balancing routers each warn. A saved shape other than the live one raises on
-    every rank, since ``copy_`` would broadcast it.
-    """
+    """COLLECTIVE. Copy saved biases back into the live routers. A name the model lacks is skipped; a router the file
+    lacks, no match and an absent file warn; another shape raises on every rank, since ``copy_`` would broadcast it."""
     saved, path = consensus_read(
         os.path.join(checkpoint, ROUTER_BALANCING_BIASES_FILE),
         partial(torch.load, map_location="cpu", weights_only=True),
@@ -122,7 +113,7 @@ def restore_balancing_biases(model, checkpoint: str, *, is_pp_mode: bool) -> Non
                 f"model carries router balancing biases — they stay zero-init and balancing restarts "
                 f"from scratch (checkpoint predates the balancing-bias sidecar?).",
             )
-        return  # no balancing biases anywhere
+        return
     restored = 0
     missing: list[str] = []
     mismatched: list[str] = []
@@ -136,27 +127,23 @@ def restore_balancing_biases(model, checkpoint: str, *, is_pp_mode: bool) -> Non
             missing.append(key)
             continue
         value = saved[key]
-        # copy_ broadcasts, so a checkpoint from a different expert count would fill the live
-        # bias with a single saved entry instead of failing, affecting every routed token.
+        # copy_ broadcasts, so a different expert count would fill the bias with one saved entry instead of failing.
         if tuple(value.shape) != tuple(bias.shape):
             mismatched.append(f"{key}: saved {tuple(value.shape)} vs live {tuple(bias.shape)}")
             continue
         bias.copy_(value.to(bias.device, bias.dtype))
         restored += 1
-    # Consensus'd, not raised where it was found: under PP the drift is stage-local, and a
-    # rank-local raise here would leave the peers blocked in the next collective.
+    # Consensus'd, since under PP the drift is stage-local and a local raise would block peers in the next collective.
     if not rank_consensus(not mismatched).all_ok:
         raise RuntimeError(
             f"{ROUTER_BALANCING_BIASES_FILE} at {checkpoint} holds router balancing biases whose "
             f"shape does not match the live routers — a different expert count or router layout. "
             f"Mismatches on this rank: {mismatched[:5] or ['(reported by another rank)']}"
         )
-    # A collective, entered by every rank: under PP a stage may legitimately hold no router, so
-    # only a world-wide zero means the sidecar matched nothing.
+    # Under PP a stage may hold no router, so only a world-wide zero means the sidecar matched nothing.
     any_restored = rank_consensus(restored > 0).any_ok
     if saved and not any_restored and not missing:
-        # Every rank logs: the balancing route is resolved per model, and under PP only
-        # the router-holding stages could see it at all.
+        # Every rank logs, since under PP only the router-holding stages could see it.
         logger.warning(
             f"[rank {get_global_rank()}] {path} carries {len(saved)} trained router balancing bias(es) but no live "
             "router in the world accepts one, so they are DROPPED. This run's balancing mode resolved to none — "

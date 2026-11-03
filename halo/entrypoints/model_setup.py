@@ -1,6 +1,5 @@
-"""The run's policy model and processing class, for text and multimodal checkpoints, the window, padding and
-attention defaults every training script applies around that load, and a preference run's policy with its
-reference."""
+"""The run's policy model and processing class, the window, padding and attention defaults around that load, and a
+preference run's policy with its reference."""
 
 import logging
 import os
@@ -70,8 +69,8 @@ class PolicyLoad(NamedTuple):
 
 
 class TrainingRows(NamedTuple):
-    """What :func:`plan_training_rows` decides: the attention request the policy loads with when the YAML pins
-    none, and whether the training or evaluation rows reach FlashAttention's varlen call."""
+    """The attention request the policy loads with when the YAML pins none, and whether training or evaluation rows
+    reach FlashAttention's varlen call."""
 
     attn_default: str | None
     varlen_rows: bool
@@ -85,24 +84,18 @@ def default_padded_attn_implementation(
     checkpoint_config=None,
     companion_configs: Sequence = (),
 ) -> str | None:
-    """Attention implementation for a script that forwards right-padded batches, when the YAML pins none.
+    """Attention for a script that forwards right-padded batches, when the YAML pins none.
 
-    On Blackwell ``None``, the loader's own pick: FA4 where it applies, which outruns SDPA on these batches, and the
+    On Blackwell ``None``, the loader's pick: FA4 where it applies (it outruns SDPA on these batches), else the
     resolver's FA2 where FA4 does not train the attention (head_dim-256 Gemma 2/3, multi-head latent attention).
-    ``sdpa`` on every other GPU, and on Blackwell where a checkpoint this request loads rules that pick out: a
-    remote-code class the resolver cannot read (Bailing's refuses every flash label at build), or an attention
-    FA4's varlen kernels are not validated with (:func:`fa4_varlen_refusal`: Gemma 2's softcap, which then refuses
-    SDPA and lands on FA2), since a padded batch unpads to them, a forward-only companion's too.
-    ``checkpoint_config`` is the policy's config; omitted, it is fetched (COLLECTIVE). ``companion_configs`` are
-    those of the further models loaded on the same request (a distillation teacher). ``sinks_reset=False``
-    (on-policy gpt-oss, pretrained sinks live) drops the default, since only a sink-carrying impl is accepted there;
-    pass the run's own ``reset_sinks``.
-    ``context_parallel`` drops it too: Ulysses calls FlashAttention itself, so the loader's hardware-aware
-    pick names it.
+    ``sdpa`` on every other GPU, and on Blackwell where a loaded checkpoint rules that out: a remote-code class the
+    resolver cannot read (Bailing's refuses every flash label), or an attention FA4's varlen kernels are not validated
+    with (:func:`fa4_varlen_refusal`, Gemma 2's softcap), since a padded batch unpads to them. Where that attention is
+    the policy's own and an FA2 build imports, ``flash_attention_2`` replaces ``sdpa``.
 
-    Where the policy's own attention is the one FA4's varlen kernels are not validated with and an FA2 build
-    imports, the request names ``flash_attention_2`` in place of that ``sdpa``.
-    """
+    ``checkpoint_config`` omitted is fetched (COLLECTIVE); ``companion_configs`` are further models on the same request
+    (a distillation teacher). ``sinks_reset=False`` (on-policy gpt-oss, only sink-carrying impls pass) and
+    ``context_parallel`` (Ulysses calls FlashAttention itself) drop the default."""
     if model_config.attn_implementation:
         return model_config.attn_implementation
     if context_parallel or not sinks_reset:
@@ -135,28 +128,23 @@ def default_training_rows_attn_implementation(
     checkpoint_config=None,
     per_device_eval_batch_size: int = 0,
 ) -> str | None:
-    """Attention request for a script that knows the shape of its rows (SFT, self-distillation, embedding):
-    ``flash_attention_2`` where the load would resolve FA4 (the YAML's pin, or the GPU's own pick when it pins none, at
-    a half-precision ``dtype``) on rows that reach its varlen call (:func:`rows_reach_varlen_kernel`, evaluation
-    batches of ``per_device_eval_batch_size`` rows included) and a kernel limit applies, else the pin (``None``: the
-    loader's pick).
+    """Attention request for a script that knows its row shape (SFT, self-distillation, embedding):
+    ``flash_attention_2`` where the load would resolve FA4 on rows reaching its varlen call
+    (:func:`rows_reach_varlen_kernel`) and a kernel limit applies, else the pin (``None``: the loader's pick).
 
-    - FA4's varlen kernels are not validated with the checkpoint's attention (:func:`fa4_varlen_refusal`: Gemma 2's
-      softcap), FA4 unpinned; raises where no FA2 build imports. One unpadded row per batch, training and
-      evaluation, runs FA4's dense kernel, which takes the softcap. A pinned FA4 there is refused instead.
-    - The rows hold several documents (``packing``, ``padding_free``) on a decoder with GatedDeltaNet layers
-      (:func:`has_gated_delta_net_layers`: the Qwen3.5/3.6 recipes pack on FA2, Qwen3-Next shares their attention)
-      whose heads FA4 trains on its dedicated head_dim-256 backward (:func:`uses_fa4_dedicated_head_dim`), FA4
-      unpinned: FA4's gain on packed rows is below the 5% a default change needs.
-    - The rows hold several documents and the run asks for the deterministic backward that kernel is not validated
-      with (:func:`is_fa4_demoted_by_determinism`, ``full_determinism``), FA4 pinned or not: the loader would demote
-      FA4 to SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per query head. Padded rows
-      of one document keep that SDPA.
+    - FA4's varlen kernels are not validated with the checkpoint's attention (:func:`fa4_varlen_refusal`, Gemma 2's
+      softcap), FA4 unpinned; raises where no FA2 build imports. A pinned FA4 is refused instead. One unpadded row per
+      batch runs FA4's dense kernel, which takes the softcap.
+    - Multi-document rows (``packing``, ``padding_free``) on a GatedDeltaNet decoder
+      (:func:`has_gated_delta_net_layers`) whose heads FA4 trains on its dedicated head_dim-256 backward, FA4 unpinned:
+      FA4's gain on packed rows is below the 5% a default change needs.
+    - Multi-document rows under ``full_determinism``, whose backward that kernel is not validated with
+      (:func:`is_fa4_demoted_by_determinism`), pinned or not: the loader would demote FA4 to SDPA, which runs a packed
+      row as one dense ``[L, L]`` mask with K/V repeated per query head.
 
-    Neither multi-document rule applies to ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`: Qwen3.5/3.6,
-    text-only checkpoints included), whose varlen path faults FA2 there, nor without an FA2 build, where the loader's
-    pick stands. ``checkpoint_config`` omitted is fetched (COLLECTIVE), past the checks that need no config only.
-    """
+    Neither multi-document rule applies to ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`), whose
+    varlen path faults FA2, nor without an FA2 build. ``checkpoint_config`` omitted is fetched (COLLECTIVE), past the
+    checks that need no config only."""
     pinned = model_config.attn_implementation or None
     several_documents = packing or padding_free
     deterministic_fa4_pin = pinned == "flash_attention_4" and several_documents and flash_attention_deterministic()
@@ -190,7 +178,7 @@ def default_training_rows_attn_implementation(
         and uses_fa4_dedicated_head_dim(checkpoint_config)
         and has_gated_delta_net_layers(checkpoint_config)
     ):
-        # A default, not a fallback: info, where the two kernel limits around it warn.
+        # A default, so info; the two kernel limits around it warn.
         if is_global_main_process():
             logger.info(
                 f"Multi-document rows on a GatedDeltaNet decoder whose attention FlashAttention-4 trains on its "
@@ -218,11 +206,9 @@ def reject_fa4_varlen_request(
     checkpoint_config=None,
     init_from_scratch: bool = False,
 ) -> None:
-    """Refuse, before any weight loads, a ``flash_attention_4`` request the policy load keeps
-    (:func:`resolve_policy_attn_implementation` under ``dtype`` and ``sinks_policy``) on rows that reach its varlen
-    kernels (``varlen_rows``) when they refuse the checkpoint's attention (:func:`reject_fa4_varlen_training`). Only a
-    pinned request can be FA4 there: both attention defaults name another backend for such a checkpoint.
-    ``checkpoint_config`` omitted is fetched (COLLECTIVE) where the request could be refused."""
+    """Refuse, before any weight loads, a ``flash_attention_4`` request the policy load keeps on rows reaching varlen
+    kernels that refuse the checkpoint's attention. Only a pinned request can be FA4 there, since both defaults name
+    another backend. ``checkpoint_config`` omitted is fetched (COLLECTIVE) where the request could be refused."""
     if attn_request != "flash_attention_4" or not varlen_rows:
         return
     if checkpoint_config is None:
@@ -245,13 +231,10 @@ def plan_training_rows(
     checkpoint_config=None,
     init_from_scratch: bool = False,
 ) -> TrainingRows:
-    """For a script that shapes its own rows (``packing``, ``padding_free``, ``training_args``' batch sizes): the
-    request :func:`default_training_rows_attn_implementation` makes for them and whether they reach FlashAttention's
-    varlen call, evaluation batches included, refusing a pinned FA4 there before any weight loads
-    (:func:`reject_fa4_varlen_request`). COLLECTIVE where ``checkpoint_config`` is omitted and a check needs it.
-
-    Raises on a ``full_determinism`` config whose deterministic flash switch is still off: the request reads the
-    switch, as the loader does, and :func:`~halo.entrypoints.script.parse_script_args` sets it from the config."""
+    """For a script shaping its own rows: the request :func:`default_training_rows_attn_implementation` makes and
+    whether rows reach the varlen call, evaluation batches included, refusing a pinned FA4 there before any weight
+    loads. COLLECTIVE where ``checkpoint_config`` is omitted and a check needs it. Raises on a ``full_determinism``
+    config whose deterministic flash switch is off; :func:`~halo.entrypoints.script.parse_script_args` sets it."""
     if training_args.full_determinism and not flash_attention_deterministic():
         raise RuntimeError(
             f"full_determinism is set but {FLASH_ATTENTION_DETERMINISTIC_ENV} is not, so this row plan would pick the "
@@ -284,12 +267,9 @@ def plan_training_rows(
 
 
 def reject_multimodal_model_without_seq_cls_head(model_config: ModelArguments) -> None:
-    """Refuse a multimodal checkpoint with no sequence-classification head, before the model load.
-
-    ``AutoModelForSequenceClassification`` refuses such a family with "Unrecognized configuration
-    class", naming neither the modality nor an alternative, and only after the distributed init on every
-    rank; this names the families that work, from the registry the resolution reads.
-    """
+    """Refuse a multimodal checkpoint with no sequence-classification head before the load:
+    ``AutoModelForSequenceClassification`` names neither the modality nor an alternative, and only after the
+    distributed init on every rank."""
     config = fetch_checkpoint_config(model_config, tag="seq_cls_head_probe")
     # Exactly the containment test ``from_config`` resolves through, so this cannot disagree with it.
     if not is_vlm_model(model_config.model_name_or_path, config=config) or (
@@ -315,18 +295,14 @@ def load_model_and_tokenizer(
     model_config_overrides: dict | None = None,
     init_from_scratch: bool = False,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
-    """The run's policy and its tokenizer through ``load_distributed_model``, for a script that pins its own
-    head or takes no VLM, and for both branches of :func:`load_policy_model`.
+    """The run's policy and tokenizer through ``load_distributed_model``, for a script that pins its own head or takes
+    no VLM, and for both branches of :func:`load_policy_model`.
 
-    ``model_class`` is the ``Auto*`` class of a non-default head (``AutoModelForSequenceClassification``,
-    ``AutoModel``); ``model_config_overrides`` (``num_labels``) merge over the config's ``model_init_kwargs``,
-    which are cleared so TRL does not re-apply them. ``attn_default`` is the script's attention request
-    (:func:`default_padded_attn_implementation`, :func:`default_training_rows_attn_implementation`), which keeps the
-    YAML's pin unless a kernel limit moves it; without one the pin stands. The Liger flags are captured before the
-    load and replayed on the built model. A Path-B resume reads the weights from the checkpoint at its own precision and keeps
-    the run's base as ``_name_or_path``, the ``base_model`` TRL's model card names; where the weights were read
-    stays on the loader's ``LOADED_WEIGHTS_FROM_ATTR`` stamp.
-    """
+    ``model_class`` is the ``Auto*`` class of a non-default head; ``model_config_overrides`` merge over
+    ``model_init_kwargs``, which are cleared so TRL does not re-apply them. ``attn_default`` keeps the YAML's pin
+    unless a kernel limit moves it. Liger flags are captured before the load and replayed on the built model. A Path-B
+    resume reads weights from the checkpoint at its own precision and keeps the run's base as ``_name_or_path``, the
+    ``base_model`` TRL's model card names; where the weights were read stays on ``LOADED_WEIGHTS_FROM_ATTR``."""
     overrides = {**(getattr(training_config, "model_init_kwargs", None) or {}), **(model_config_overrides or {})}
     # Non-TRL configs (TeacherDistillationConfig, the plain HF classification/embedding ones) carry none.
     if hasattr(training_config, "model_init_kwargs"):
@@ -357,13 +333,9 @@ def load_model_and_tokenizer(
 
 
 def _ships_processor_config(model_path: str, revision: str | None, *, local_files_only: bool) -> bool:
-    """Whether the checkpoint carries a processor config, on a confirmed answer only.
-
-    A local directory answers by its files, the Hub by a 404 for this revision; offline, or under
-    ``local_files_only`` (a follower reading the cache its main rank filled), the cache stands for the
-    checkpoint. A Hub it cannot reach raises rather than reading as absent, which would drop the
-    processor from the run's exports.
-    """
+    """Whether the checkpoint carries a processor config, on a confirmed answer only. A local directory answers by its
+    files, the Hub by a 404; offline, or under ``local_files_only``, the cache stands in. An unreachable Hub raises,
+    since reading as absent would drop the processor from the run's exports."""
     if os.path.isdir(model_path):
         return any(os.path.isfile(os.path.join(model_path, name)) for name in PROCESSOR_FILES)
     for name in PROCESSOR_FILES:
@@ -379,13 +351,9 @@ def _ships_processor_config(model_path: str, revision: str | None, *, local_file
 
 
 def load_vlm_processor(model_config: ModelArguments, *, required: bool = True):
-    """The checkpoint's ``AutoProcessor`` at the model revision, loaded main-rank-first.
-
-    Hub ``main`` may carry other image geometry than the trained commit, and passing the processor as
-    the trainer's ``processing_class`` is what exports the ``processor_config.json`` serving engines
-    build from. ``required=False`` (a run without image data) returns ``None`` for a checkpoint that
-    ships no processor config (Step-3.7 Flash), a verdict agreed across ranks.
-    """
+    """The ``AutoProcessor`` at the model revision, main-rank-first: Hub ``main`` may carry other image geometry than
+    the trained commit, and passing it as ``processing_class`` exports the ``processor_config.json`` engines build
+    from. ``required=False`` returns ``None`` for a checkpoint shipping none (Step-3.7 Flash), agreed across ranks."""
     model_path = model_config.model_name_or_path
     revision = model_config.model_revision
     if not required:
@@ -417,13 +385,9 @@ def _load_vlm_model_and_processor(
     vlm_run: bool,
     attn_default: str | None,
 ) -> tuple[PreTrainedModel, Any, PreTrainedTokenizer]:
-    """A multimodal policy with ``(model, processing_class, tokenizer)``: the processing class is the
-    checkpoint's processor, required when ``vlm_run``, else the tokenizer for a checkpoint shipping none.
-
-    The processor and tokenizer load from ``model_name_or_path`` even when the weights come from a
-    resume checkpoint. The modality is not re-probed here: the probe enters the ``vlm_probe`` store
-    phase, and one entered on a branch some ranks skip leaves the rest waiting on a key nobody writes.
-    """
+    """A multimodal policy with ``(model, processing_class, tokenizer)``, both from ``model_name_or_path`` even on a
+    resume. The processor is required when ``vlm_run``. The modality is not re-probed: the ``vlm_probe`` store phase
+    entered on a branch some ranks skip leaves the rest waiting on a key nobody writes."""
     processor = load_vlm_processor(model_config, required=vlm_run)
     tokenizer = (
         processor.tokenizer
@@ -454,13 +418,9 @@ def load_policy_model(
     attn_default: str | None = None,
     init_from_scratch: bool = False,
 ) -> PolicyLoad:
-    """The run's policy in the class its checkpoint declares, with the processing class its data takes.
-
-    A multimodal checkpoint loads with its processor when ``vlm_run`` (the run feeds images), a text one
-    with its tokenizer; ``attn_default`` is the script's attention request (:func:`load_model_and_tokenizer`).
-    ``args.text_only_model`` loads a multimodal checkpoint through its text-only CausalLM sibling; it is a
-    rank-uniform YAML key, so every rank takes the same branch.
-    """
+    """The policy in the class its checkpoint declares, with its processor when ``vlm_run``, else its tokenizer.
+    ``args.text_only_model`` loads a multimodal checkpoint through its CausalLM sibling; a rank-uniform YAML key, so
+    every rank takes the same branch."""
     if (
         not args.text_only_model
         and probe_checkpoint(
@@ -482,20 +442,16 @@ def load_policy_model(
 
 
 def apply_tokenizer_window(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, window: int | None):
-    """Pin ``window`` (``None``: unbounded) on the tokenizer and apply the run's token setup; returns the
-    tokenizer resolved through ``args.tokenizer_backend``, which callers use in place of the one passed."""
+    """Pin ``window`` (``None``: unbounded) and apply the token setup; returns the tokenizer resolved through
+    ``args.tokenizer_backend``, which callers use in place of the one passed."""
     return configure_run_tokenizer(args, model, tokenizer, window, embeddings_sharded=is_input_embedding_tp_sharded)
 
 
 def apply_max_length(
     training_config, args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer
 ) -> PreTrainedTokenizer:
-    """Fix the run's sequence cap on ``training_config`` and pin it on the tokenizer
-    (:func:`apply_tokenizer_window`).
-
-    A null or non-positive ``max_length`` means the model's own limit: it resolves to the context window
-    and is written back, so collators, length filters and packers all read one number.
-    """
+    """Fix the run's sequence cap and pin it on the tokenizer. A null or non-positive ``max_length`` resolves to the
+    context window and is written back, so collators, length filters and packers read one number."""
     training_config.max_length = resolve_length_to_context(training_config.max_length, model, tokenizer)
     return apply_tokenizer_window(args, model, tokenizer, training_config.max_length)
 
@@ -509,13 +465,9 @@ def apply_prompt_completion_window(
     max_completion_length: int | None,
     completion_budget_required: bool = False,
 ) -> tuple[PreTrainedTokenizer, int | None]:
-    """Pin the GRPO family's window, the prompt plus the completion budget; returns ``(tokenizer, window)``.
-
-    Pinned only when *both* halves are bounded (:func:`is_bounded_length`): HF resolves every
-    ``truncation=True, max_length=None`` call against ``model_max_length``, so a partial sum would cap
-    the unbounded half. ``completion_budget_required`` marks the on-policy callers, whose completion
-    half is a generation budget with no unbounded setting.
-    """
+    """Pin the GRPO family's window; returns ``(tokenizer, window)``. Pinned only when *both* halves are bounded: HF
+    resolves ``truncation=True, max_length=None`` against ``model_max_length``, so a partial sum would cap the
+    unbounded half. ``completion_budget_required`` marks on-policy callers, whose completion half is always bounded."""
     if completion_budget_required and not is_bounded_length(max_completion_length):
         raise ValueError(
             f"max_completion_length={max_completion_length!r} is the online generation budget (TRL's "
@@ -529,13 +481,9 @@ def apply_prompt_completion_window(
 
 
 def install_resolved_tokenizer(processing_class, tokenizer: PreTrainedTokenizer):
-    """The trainer's ``processing_class`` carrying the resolved tokenizer and its chat template.
-
-    The window pins may hand back another object than the one loaded (the ``tokenizer_backend``
-    proxy), and a processor still holds the raw inner tokenizer and its own template. Read off the
-    loaded object, not the checkpoint's modality: a multimodal checkpoint shipping no processor loads
-    a tokenizer for a run without image data.
-    """
+    """The ``processing_class`` carrying the resolved tokenizer and its chat template: the window pins may hand back
+    another object (the ``tokenizer_backend`` proxy), and a processor still holds the raw inner tokenizer and its own
+    template. Read off the loaded object, since a multimodal checkpoint shipping no processor loads a tokenizer."""
     if isinstance(processing_class, PreTrainedTokenizerBase):
         return tokenizer
     processing_class.tokenizer = tokenizer
@@ -544,18 +492,14 @@ def install_resolved_tokenizer(processing_class, tokenizer: PreTrainedTokenizer)
 
 
 def apply_text_path_padding_side(tokenizer: PreTrainedTokenizer, vlm_run: bool) -> None:
-    """Pad a text-path run on the right, whatever side a multimodal checkpoint's processor keeps.
-
-    Gemma 4 and GLM-4.7-Flash keep left padding, which the packing collator rejects and the padding
-    collators read as an attended leading document. A VLM run keeps the processor's side, since its
-    collators pad through the processor.
-    """
+    """Pad a text-path run on the right: Gemma 4 and GLM-4.7-Flash keep left padding, which the packing collator
+    rejects and the padding collators read as an attended leading document. A VLM run keeps the processor's side, as
+    its collators pad through it."""
     if not vlm_run:
         tokenizer.padding_side = "right"
 
 
 def log_model_info(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> None:
-    """Log the tokenizer and the model config on the main process."""
     if is_global_main_process():
         logger.info(f"Tokenizer: {tokenizer}")
         logger.info(f"Model config: {model.config}")
@@ -575,12 +519,8 @@ class PreferenceModels(NamedTuple):
 def load_preference_models(
     context: ScriptContext, config, model_config: ModelArguments, args, *, vlm_run: bool, method: str
 ) -> PreferenceModels:
-    """Load a DPO/KTO run's policy and its reference under one attention binding, set up its adapter, pin
-    the window and install the tokenizer.
-
-    Both loads take the shared padded-workload request (:func:`default_padded_attn_implementation`): a logratio
-    whose halves came from different attention kernels is biased.
-    """
+    """Load a DPO/KTO run's policy and reference under one attention binding, set up its adapter, pin the window and
+    install the tokenizer. A logratio whose halves came from different attention kernels is biased."""
     attn_default = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
     policy = load_policy_model(context, config, model_config, args, vlm_run=vlm_run, attn_default=attn_default)
     peft_config = configure_adapter_training(args, policy.model, model_config, "CAUSAL_LM")

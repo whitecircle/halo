@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """TRL's DPO and KTO constructors never hash the reference under the toolkit's trainers.
-
-With ``precompute_ref_log_probs`` on, TRL's ``__init__`` runs ``hash_module(self.ref_model or
-self.model)``: a CPU copy of every tensor on every rank, and ``.numpy()`` on a TP-sharded DTensor,
-which raises. The hash keys only the cache of TRL's own sweep, which the DP-axis sweep replaces, so
-the toolkit trainers run TRL's construction with the name rebound to a no-op and restore it after.
-
-    python tests/cpu/trainers/test_precompute_reference_hash.py
-"""
+``hash_module`` copies every tensor to CPU on every rank and raises on a TP-sharded DTensor."""
 
 import sys
 

@@ -1,18 +1,8 @@
 #!/usr/bin/env python
 """FSDP2: an ``evaluate()`` before ``train()`` must not freeze training.
 
-A gathered FSDP2 module registers its transient unsharded params, and the toolkit's
-``reshard_after_forward=False`` leaves a pre-train eval in that state; HF builds the optimizer after
-it. Without the re-shard in ``DistributedTrainerMixin.create_optimizer`` the param groups hold orphans
-the next unshard discards: every step updates them, the shards never move, and the loss only drifts
-with the batches while grad norms stay finite. It fails when:
-  * the sharded params do not move after evaluate() -> train() (world MIN of the per-rank max |delta|)
-  * the loss does not decrease over the run
-  * the control arm (train() with no pre-train eval) fails either check — the measurement is broken
-  * the pre-train eval no longer leaves the model gathered — the scenario stopped being exercised
-
-Topology: 2 GPUs, plain FSDP2 (``ParallelismConfig()``), tiny Qwen3 over the Qwen3-0.6B vocabulary.
-Run: torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_fsdp2_pretrain_eval_then_train.py
+A pre-train eval leaves transient unsharded params registered, and HF builds the optimizer after it. Without the
+re-shard in ``create_optimizer`` the groups hold orphans: shards never move and the loss drifts with finite grad norms.
 """
 
 import torch
@@ -36,7 +26,7 @@ MIN_LOSS_DROP = 0.05
 
 
 def _shards(model) -> dict[str, torch.Tensor]:
-    """This rank's sharded parameter data — what the optimizer must be updating."""
+    """This rank's sharded parameter data, what the optimizer must be updating."""
     return {
         name: (param.to_local() if isinstance(param, DTensor) else param).detach().clone()
         for name, param in model.named_parameters()

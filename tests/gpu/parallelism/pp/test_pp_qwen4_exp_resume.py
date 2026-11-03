@@ -1,22 +1,8 @@
 #!/usr/bin/env python
-"""Qwen3.8-Flash-Next (``qwen4_exp``) pipeline checkpoint save, export and resume through the real
-DistributedSFTTrainer, pp2 x ep2 (``--mode ep2``, the default) or pp2 x etp2 (``--mode etp2``).
+"""Qwen3.8-Flash-Next PP checkpoint save, export and resume through the real trainer, at pp2 x ep2 or pp2 x etp2.
 
-The tiny model loads as a run loads it, its n-gram tables host tables attached from the checkpoint, with a
-per-layer-embedding (PLE) layer and so a table on each stage of the ``[3, 5]`` split. On top of the expert seams
-``test_pp_ep_resume.py`` holds for GPT-OSS:
-
-  * the save: each stage's writer puts its own table beside its parts, in files under the stage's part prefix and
-    keyed by the unsplit model's names, and the merged index names both;
-  * the export: stock ``from_pretrained`` on the checkpoint reloads with no missing, unexpected or mis-shaped key,
-    its tables bitwise the source's, and reproduces the pipeline's loss on its final weights;
-  * the resume: the stage-aware loader builds each rank's stage from the checkpoint, as the training scripts' resume
-    does, and attaches its table by the unsplit name from the files that stage wrote; the experts' optimizer moments
-    restore bitwise, and training continues to completion with finite losses.
-
-Topology: 4 GPUs as 2 simulated NVLink domains of 2, moe_balancing=none.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_qwen4_exp_resume.py [--mode etp2]
+Its n-gram tables are host tables: each stage's writer puts its own under the unsplit names beside its parts, and the
+stage-aware loader attaches it from those files.
 """
 
 import json
@@ -104,7 +90,7 @@ def run(ctx):
             max_length=SEQ_LEN,
             save_every=save_steps,
             bf16=True,
-            gradient_checkpointing=False,  # resume compares optimizer state, not the checkpoint path
+            gradient_checkpointing=False,  # Resume compares optimizer state, not the checkpoint path.
         )
         return DistributedSFTTrainer(
             model=model,
@@ -116,7 +102,7 @@ def run(ctx):
             moe_balancing="none",
         )
 
-    # ── train 4 steps, checkpoint at step 4 (EP gather + tables + optimizer shards) ──────────────
+    # Train 4 steps, checkpoint at step 4.
     base_model = apply_ep_layers(load_host_table_model(base_dir, dtype=torch.bfloat16), config.ep_config())
     trainer_a = build_trainer("runA", base_model, SAVE_STEP, save_steps=SAVE_STEP)
     ctx.on_teardown(trainer_a.cleanup_ep)
@@ -124,7 +110,7 @@ def run(ctx):
     ckpt = os.path.join(root, "runA", f"checkpoint-{SAVE_STEP}")
     dist.barrier()
     # TRL copies the full-size tokenizer's special-token ids into the tiny config, which the n-gram embedding would
-    # restart its history on at the reload: restore the tiny model's own.
+    # restart its history on at the reload.
     if rank == 0:
         for name in ("config.json", "generation_config.json"):
             path = os.path.join(ckpt, name)
@@ -145,7 +131,6 @@ def run(ctx):
         tables_ok &= bool(files) and on_disk and all(name.startswith(prefix) for name in files)
     checks["each_stage_wrote_its_table_under_its_prefix"] = tables_ok
 
-    # ── the export: stock from_pretrained reloads the tables and scores the final weights as the pipeline does ──
     probe_batch, probe_loss = probe_step(trainer_a, rows, BATCH)
     exported = False
     if rank == 0:
@@ -167,7 +152,6 @@ def run(ctx):
     dist.broadcast(flag, src=0)
     checks["export_reloads_unsplit_with_its_tables_and_reproduces_the_probe_loss"] = bool(flag.item())
 
-    # ── the production resume path: each stage built stage-aware from the checkpoint ──────────────
     resumed = _load_stage_lazy(
         ckpt,
         config.pp_rank,

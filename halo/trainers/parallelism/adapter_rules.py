@@ -12,8 +12,8 @@ from halo.models.unwrapping import find_peft_model
 
 
 def reject_peft_lora_in_ep_layers(model) -> None:
-    """Refuse PEFT-wrapped LoRA inside EP layers, whose rank-specific (post-dispatch) inputs break gradient sync;
-    only the native grouped adapters (``<attr>_lora_A`` / ``_lora_B`` leaves) are allowed there."""
+    """PEFT-wrapped LoRA inside EP layers sees rank-specific (post-dispatch) inputs, which break gradient sync; only
+    the native grouped adapters (``<attr>_lora_A`` / ``_lora_B`` leaves) are allowed there."""
     if not isinstance(model, PeftModel):
         return
     offending = []
@@ -40,11 +40,8 @@ def reject_peft_lora_in_ep_layers(model) -> None:
 
 
 def reject_expert_lora_peft_conflicts(model, expert_lora) -> None:
-    """Refuse a co-resident attention ``LoraConfig`` carrying settings the grouped expert adapters cannot match.
-
-    Checked against the live config, so a ``peft_config`` handed to the trainer directly (the AdaLoRA/(IA)3
-    route) lands on the same gate as the ``lora_target_modules`` peel.
-    """
+    """Checked against the live config, so a ``peft_config`` handed to the trainer directly lands on the same gate as
+    the ``lora_target_modules`` peel."""
     if expert_lora is None or not model_has_expert_lora(model):
         return
     peft_model = find_peft_model(model)
@@ -67,15 +64,9 @@ def reject_expert_lora_peft_conflicts(model, expert_lora) -> None:
 
 
 def reject_unsaved_grown_vocabulary(model, *, accelerate_manages_fsdp: bool) -> None:
-    """Refuse a PEFT adapter run that grew its vocabulary where its adapter saves would leave added rows out.
-
-    Those rows exist in no base checkpoint, so the adapter carries them for an exact resume and a complete merge.
-    Under accelerate-managed FSDP the base Trainer's save writes the adapter with PEFT's own embedding check, which
-    skips offline; and PEFT's selection, once a LoRA adapts one embedding layer, saves only adapted layers' base
-    weights and drops an untied plain partner. The last is read off the live selection a save makes
-    (:func:`~halo.checkpoint.parallel.adapters.saved_adapter_tensors`), by identity. An expert-only LoRA run has no
-    PEFT adapter: its resume grows the frozen rows again, and ``merge_expert_lora_on_save`` exports them whole.
-    """
+    """No base checkpoint holds the added rows. Accelerate-managed FSDP saves through PEFT's embedding check, which
+    skips offline, and PEFT's selection, once a LoRA adapts one embedding layer, drops an untied plain partner. An
+    expert-only LoRA run has no PEFT adapter: its resume regrows the rows."""
     if not vocabulary_grown(model):
         return
     peft_model = find_peft_model(model)
@@ -113,12 +104,9 @@ def reject_unrealized_expert_lora(model, expert_lora) -> None:
 
 
 def reject_lora_under_tp(model) -> None:
-    """Refuse every adapter under Tensor Parallelism, native EP expert adapters included.
-
-    PEFT's adapters are plain tensors outside the TP graph: the replicated matrix diverges and the sharded one is
-    corrupted by the TP grad sync. Adapters count whether PEFT wrapped the model or injected them in place, read
-    off the tuner layers; the native expert adapters are no tuner layer and every TP gate skips them by identity.
-    """
+    """PEFT's adapters are plain tensors outside the TP graph: the replicated matrix diverges and the sharded one is
+    corrupted by the TP grad sync. Native expert adapters are no tuner layer, and every TP gate skips them by
+    identity."""
     if model_has_expert_lora(model):
         raise ValueError(
             "Native EP expert LoRA is not supported with Tensor Parallelism (tensor_parallel_size > 1).\n"
@@ -151,9 +139,8 @@ def reject_lora_under_tp(model) -> None:
 def reject_unmergeable_expert_lora_save(
     model, *, merge_expert_lora_on_save: bool, accelerate_manages_fsdp: bool
 ) -> None:
-    """Refuse ``merge_expert_lora_on_save`` where the merged checkpoint cannot be produced: no native expert
-    adapters to fold, accelerate-managed FSDP v1's flat-param shards, or a PEFT layer the out-of-place fold cannot
-    reproduce (:func:`~halo.models.peft_adapters.lora_fold_targets`, the save's own fold map)."""
+    """Refuse ``merge_expert_lora_on_save`` with no native expert adapters to fold, on accelerate-managed FSDP v1's
+    flat-param shards, or with a PEFT layer the out-of-place fold cannot reproduce."""
     if not merge_expert_lora_on_save:
         return
     if not model_has_expert_lora(model):

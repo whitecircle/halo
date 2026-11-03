@@ -9,13 +9,8 @@ import torch
 
 
 class TensorMemo[T]:
-    """``derive(tensor)`` for the last tensor asked about, derived again once a call's tensor views other storage or
-    its version counter moved (an in-place write).
-
-    The memo keeps that tensor alive: freed, its storage could come back to a later tensor of other contents at the
-    same address, shape and version, which would then read the earlier derivation. An inference tensor, which keeps
-    no version counter, derives on every call.
-    """
+    """``derive(tensor)`` for the last tensor asked about. The memo keeps that tensor alive, as freed storage could
+    come back to a later tensor of other contents at the same address, shape and version."""
 
     def __init__(self, derive: Callable[[torch.Tensor], T]):
         self._derive = derive

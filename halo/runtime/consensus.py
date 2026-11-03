@@ -1,6 +1,4 @@
-"""Cross-rank verdicts, every one COLLECTIVE: raise a rank-local failure on every rank, agree on a value,
-count a per-rank observation or take its world MIN/MAX, and the c10d-store joins for waits that outlast the
-NCCL watchdog."""
+"""Cross-rank verdicts, all COLLECTIVE, and c10d-store joins for waits that outlast the NCCL watchdog."""
 
 import datetime
 import hashlib
@@ -24,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 # A digest below 2**62 negates without overflowing int64, so [d, -d] rides one MAX all-reduce.
 _AGREEMENT_DIGEST_BITS = 62
-# The [d, -d] pair of a rank whose object cannot be digested: 2**62 is above every real digest while
-# 0 is at or above every real -d, so max(d) != -max(-d) whoever else takes part.
+# The [d, -d] of a rank whose object cannot be digested: 2**62 is above every real digest and 0 at or above every
+# real -d, so max(d) != -max(-d) whoever else takes part.
 _UNDIGESTIBLE = (2**_AGREEMENT_DIGEST_BITS, 0)
 # Splits a store-join failure record "<rank><sep><reason>": a rank number never holds it, a reason may.
 _FAILURE_RECORD_SEP = "\n"
@@ -36,8 +34,7 @@ _T = TypeVar("_T")
 def raise_rank0_failure(
     step: Callable[[], Any], describe: Callable[[Exception], str], exc_type: type[Exception] = RuntimeError
 ) -> None:
-    """COLLECTIVE: run ``step`` on global rank 0 and raise its failure on every rank as ``exc_type``, with
-    the message ``describe`` makes of it (chained on rank 0)."""
+    """COLLECTIVE: run ``step`` on global rank 0 and raise its failure on every rank as ``exc_type``."""
     failure: str | None = None
     cause: Exception | None = None
     if is_global_main_process():
@@ -69,7 +66,6 @@ def gathered_failure_summary(reasons: list[str | None], what: str) -> str | None
 
 
 def _raise_gathered_reasons(reasons: list[str | None], what: str, exc_type: type[Exception]) -> None:
-    """Raise from a world-gathered reason list, naming the failing ranks and the first one's reason."""
     summary = gathered_failure_summary(reasons, what)
     if summary is not None:
         raise exc_type(summary)
@@ -85,8 +81,7 @@ def gather_rank_reasons(local_reason: str | None) -> list[str | None]:
 
 
 def rank_max(values: list[int], group: dist.ProcessGroup | None = None) -> list[int]:
-    """COLLECTIVE: each int64 value's MAX across ``group`` (default: the world) in one fixed-size all-reduce
-    on the backend's device; ``values`` unchanged without a peer."""
+    """COLLECTIVE: each int64 value's MAX across ``group`` (default: the world) in one fixed-size all-reduce."""
     if not is_multi_rank_run():
         return list(values)
     reduced = torch.tensor(values, dtype=torch.int64, device=collective_device(group))
@@ -95,16 +90,13 @@ def rank_max(values: list[int], group: dist.ProcessGroup | None = None) -> list[
 
 
 def rank_min(values: list[int], group: dist.ProcessGroup | None = None) -> list[int]:
-    """COLLECTIVE: each int64 value's MIN across ``group``: :func:`rank_max` of the negated values."""
+    """COLLECTIVE: each int64 value's MIN across ``group``."""
     return [-value for value in rank_max([-value for value in values], group)]
 
 
 def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exception] = RuntimeError) -> None:
-    """COLLECTIVE: raise ``exc_type`` on every rank when any rank reports a reason, naming the failing ranks.
-
-    A rank raising alone would leave its peers in the next collective with no diagnostic. After
-    unbounded single-rank work use :func:`store_reject_across_ranks`.
-    """
+    """COLLECTIVE: raise on every rank when any rank reports a reason, since a rank raising alone strands its peers in
+    the next collective. After unbounded single-rank work use :func:`store_reject_across_ranks`."""
     if not is_multi_rank_run():
         if local_reason:
             raise exc_type(local_reason)
@@ -115,8 +107,7 @@ def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exce
 
 
 def _raise_joined_failure(failure: BaseException | None, join: Callable[[str | None], None]) -> None:
-    """``join`` a recorded rank-local ``failure`` (its type and message as the reason); the failing rank re-raises
-    its own exception, chained under the uniform ``RuntimeError`` the join raised."""
+    """``join`` a recorded ``failure``; the failing rank re-raises it, chained under the join's error."""
     if failure is None:
         join(None)
         return
@@ -129,10 +120,8 @@ def _raise_joined_failure(failure: BaseException | None, join: Callable[[str | N
 
 @contextmanager
 def barrier_on_exit(what: str) -> Iterator[None]:
-    """COLLECTIVE: run a rank-gated write, then join its failure across ranks where a barrier would stand (one
-    all-reduce on every rank): a failure on any rank raises on every rank, the failing rank its own exception
-    and the others a ``RuntimeError`` naming the failing ranks. After unbounded single-rank work use
-    :func:`store_join_recorded_failure`."""
+    """COLLECTIVE: run a rank-gated write, then join its failure with one all-reduce where a barrier would stand, so it
+    raises on every rank. After unbounded single-rank work use :func:`store_join_recorded_failure`."""
     failure: BaseException | None = None
     try:
         yield
@@ -142,8 +131,7 @@ def barrier_on_exit(what: str) -> Iterator[None]:
 
 
 def divergent_settings(gathered: list[dict[str, object]]) -> dict[str, list[str]]:
-    """Setting names whose value differs across the per-rank mappings (a missing name included), with
-    each one's sorted spellings."""
+    """Setting names whose value differs across the per-rank mappings (a missing name included), with spellings."""
     if not gathered:
         return {}
     reference = gathered[0]
@@ -156,20 +144,15 @@ def divergent_settings(gathered: list[dict[str, object]]) -> dict[str, list[str]
 
 
 def _agreement_digest(obj: object) -> int:
-    """62-bit blake2b digest of ``obj``'s canonical repr (a mapping's items sorted). Never Python's
-    ``hash``, which is salted per process."""
+    """62-bit blake2b of ``obj``'s canonical repr. Never Python's ``hash``, which is salted per process."""
     canonical = sorted(obj.items()) if isinstance(obj, dict) else obj
     digest = hashlib.blake2b(repr(canonical).encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big") >> (64 - _AGREEMENT_DIGEST_BITS)
 
 
 def agree_across_ranks(obj: object, *, group: dist.ProcessGroup | None = None) -> bool:
-    """COLLECTIVE: whether every rank of ``group`` holds an equal ``obj``.
-
-    One :func:`rank_max` of ``[d, -d]`` over the canonical digest ``d``: the ranks agree iff
-    ``max(d) == -max(-d)``. An object that cannot be digested forces a mismatch rather than raising on
-    one rank inside the collective.
-    """
+    """COLLECTIVE: whether every rank of ``group`` holds an equal ``obj``, by one :func:`rank_max` of the digest pair
+    ``[d, -d]``: they agree iff ``max(d) == -max(-d)``. An object that cannot be digested forces a mismatch."""
     if not is_multi_rank_run():
         return True
     try:
@@ -182,12 +165,9 @@ def agree_across_ranks(obj: object, *, group: dist.ProcessGroup | None = None) -
 
 
 def reject_divergent_settings(values: dict[str, object], what: str, guidance: str) -> None:
-    """COLLECTIVE: raise ``ValueError`` on every rank when the ranks disagree on a resolved setting.
-
-    ``values`` are resolved, not raw strings: an absent variable and one set to its default agree. The
-    :func:`agree_across_ranks` digest is only a fast path (``30`` and ``30.0`` digest differently); a
-    mismatch gathers the values and :func:`divergent_settings` decides. ``guidance`` is appended.
-    """
+    """COLLECTIVE: raise ``ValueError`` on every rank when the ranks disagree on a setting. Pass resolved values, so an
+    absent variable and one set to its default agree. The digest is a fast path (``30`` and ``30.0`` differ); a
+    mismatch gathers the values and :func:`divergent_settings` decides."""
     if not is_multi_rank_run() or agree_across_ranks(values):
         return
     gathered: list[dict[str, object]] = [{} for _ in range(dist.get_world_size())]
@@ -202,15 +182,12 @@ def reject_divergent_settings(values: dict[str, object], what: str, guidance: st
 
 @dataclass(frozen=True)
 class RankConsensus:
-    """What :func:`rank_consensus` learns: whether every rank, and whether any rank, reported ok."""
-
     all_ok: bool
     any_ok: bool
 
 
 def rank_consensus(local_ok: bool, group: dist.ProcessGroup | None = None) -> RankConsensus:
-    """COLLECTIVE: whether every and whether any rank of ``group`` (default: the world) is ok, in one SUM
-    all-reduce. The caller decides what a partial result means."""
+    """COLLECTIVE: whether every and whether any rank of ``group`` is ok, in one SUM all-reduce."""
     if is_multi_rank_run():
         count = torch.tensor([1 if local_ok else 0], device=collective_device())
         dist.all_reduce(count, op=dist.ReduceOp.SUM, group=group)
@@ -220,11 +197,8 @@ def rank_consensus(local_ok: bool, group: dist.ProcessGroup | None = None) -> Ra
 
 
 class DeferredRankFailure:
-    """Defer rank-local failures to a closing collective, for local work interleaved with collectives.
-
-    Wrap each local step in :meth:`run` and close the region with :meth:`reject`. Once a step fails the
-    rest are skipped: the first reason is the diagnostic one.
-    """
+    """Defer rank-local failures to a closing collective, for local work interleaved with collectives. Once a step
+    fails the rest are skipped, since the first reason is the diagnostic one."""
 
     def __init__(self, what: str, exc_type: type[Exception] = RuntimeError) -> None:
         self.what = what
@@ -248,14 +222,13 @@ class DeferredRankFailure:
         reject_across_ranks(self.reason, self.what, exc_type=self.exc_type)
 
     def store_reject(self, tag: str) -> None:
-        """COLLECTIVE over the c10d store under ``tag`` (:func:`store_reject_across_ranks`): :meth:`reject` for a
-        region of unbounded file I/O, whose slowest writer the NCCL watchdog would abort its peers over."""
+        """COLLECTIVE over the c10d store: :meth:`reject` after unbounded file I/O, where the NCCL watchdog would abort
+        the slowest writer's peers."""
         store_reject_across_ranks(tag, self.reason, self.what, exc_type=self.exc_type)
 
 
 def rank0_verdict(probe: Callable[[], _T], what: str, exc_type: type[Exception] = RuntimeError) -> _T:
-    """COLLECTIVE: run ``probe`` on global rank 0 and return its result on every rank; a raise on rank 0
-    is joined after the broadcast, so every rank raises ``exc_type`` naming it."""
+    """COLLECTIVE: ``probe``'s result from global rank 0 on every rank; a raise on rank 0 raises on every rank."""
     guard = DeferredRankFailure(what, exc_type)
     local = guard.run(probe) if is_global_main_process() else None
     verdict = broadcast_from_rank0(local)
@@ -264,13 +237,9 @@ def rank0_verdict(probe: Callable[[], _T], what: str, exc_type: type[Exception] 
 
 
 class StorePhase:
-    """One self-cleaning use ("phase") of a c10d-store coordination tag.
-
-    Each participant's store-held entry counter numbers the phase and namespaces its keys; the last to
-    :meth:`finish` deletes them. Invariant: every participant of a scope enters a tag the same number of
-    times, in the same order (one tag per call site, never from a rank-dependent branch), or one waits
-    on a key nobody writes.
-    """
+    """One self-cleaning use of a c10d-store tag; each participant's entry counter numbers the phase and namespaces its
+    keys. Every participant of a scope must enter a tag the same number of times in the same order (one tag per call
+    site, never from a rank-dependent branch), or one waits on a key nobody writes."""
 
     def __init__(self, tag: str, scope: str, participant: int, num_participants: int, timeout: datetime.timedelta):
         if not 0 <= participant < num_participants:
@@ -303,8 +272,7 @@ class StorePhase:
         return self._store.add(self._key(name), amount)
 
     def get_all(self, names) -> list[str]:
-        """Values of keys set before a key this participant waited on, in ``names`` order, in one store
-        round trip (a key-per-participant loop is O(world²) requests); no request for no names."""
+        """Values of keys set before a key this participant waited on, in one round trip (per key: O(world²))."""
         keys = [self._key(name) for name in names]
         if not keys:
             return []
@@ -321,13 +289,9 @@ class StorePhase:
             raise self._timeout_error(str(keys)) from e
 
     def arrive_and_wait(self, failure: str | None = None) -> list[str]:
-        """Return the participants' ``failure`` records, in slot order, once every participant has arrived.
-
-        A failure takes a numbered slot before its participant arrives, so the slot count is final once all
-        have. The arrivals count on one key and the last one sets the single key the rest wait on: O(1) store
-        requests per participant, plus one read of the slots when any participant failed (a wait on a key
-        per participant costs each one O(participants)).
-        """
+        """Every participant's ``failure`` records, in slot order, once all have arrived. A failure takes its slot
+        before arriving, so the count is final by then. Arrivals count on one key and the last sets the key the rest
+        wait on: O(1) store requests per participant, where a key per participant costs each O(participants)."""
         self._arrived = True
         if failure:
             slot = self.add("failures")
@@ -345,9 +309,8 @@ class StorePhase:
         return [f"failed{slot}" for slot in range(1, self.add("failures", 0) + 1)]
 
     def finish(self, transient_names) -> None:
-        """Mark this participant done with the phase; the last one deletes the phase's keys, those of
-        :meth:`arrive_and_wait` included. The last one reads the failure count itself: every participant has
-        exited by then, so the count is final even when its own wait timed out."""
+        """Mark this participant done; the last one deletes the phase's keys. It reads the failure count itself, final
+        by then even when its own wait timed out."""
         if self.add("exited") == self._num:
             arrival_names = ("arrived", "all_arrived", "failures", *self._failure_slots()) if self._arrived else ()
             for name in (*transient_names, *arrival_names, "exited"):
@@ -370,14 +333,9 @@ def store_reject_across_ranks(
     exc_type: type[Exception] = RuntimeError,
     timeout: datetime.timedelta | None = None,
 ) -> None:
-    """COLLECTIVE over the c10d store (every rank calls it with the same tags in the same order):
-    :func:`reject_across_ranks` bounded by ``DIST_STORE_TIMEOUT_HOURS`` rather than the NCCL watchdog,
-    for a join after unbounded single-rank work (a fresh dataset map, a shard download).
-
-    A failing rank records its reason in a numbered slot before it arrives
-    (:meth:`StorePhase.arrive_and_wait`): a clean join costs each rank O(1) store requests, a failed one
-    also a read of the failing ranks' slots.
-    """
+    """COLLECTIVE over the c10d store (same tags, same order on every rank): :func:`reject_across_ranks` bounded by
+    ``DIST_STORE_TIMEOUT_HOURS`` instead of the NCCL watchdog, for a join after unbounded single-rank work (a dataset
+    map, a shard download)."""
     if not is_multi_rank_run():
         if local_reason:
             raise exc_type(local_reason)
@@ -396,14 +354,12 @@ def store_reject_across_ranks(
 
 
 def store_join_recorded_failure(tag: str, failure: BaseException | None, what: str) -> None:
-    """COLLECTIVE over the c10d store: join a recorded rank-local failure; the failing rank re-raises its
-    own exception (chained under the uniform one), every other rank a ``RuntimeError`` naming it."""
+    """COLLECTIVE over the c10d store: the failing rank re-raises its own exception, the others a ``RuntimeError``."""
     _raise_joined_failure(failure, lambda reason: store_reject_across_ranks(tag, reason, what))
 
 
 def agree_probe_across_ranks(local: bool, subject, probe: str) -> bool:
-    """COLLECTIVE: ``True`` if any rank's probe read ``True`` (an S3 probe errs only toward ``False``, one
-    image makes a corpus multimodal), warning on the ranks that read ``False``."""
+    """COLLECTIVE: ``True`` if any rank's probe read ``True`` (an S3 probe errs only toward ``False``)."""
     agreed = rank_consensus(local).any_ok
     if agreed and not local:
         logger.warning(
@@ -415,8 +371,8 @@ def agree_probe_across_ranks(local: bool, subject, probe: str) -> bool:
 
 
 def _value_digest(value: Any) -> str:
-    """SHA-256 hex digest: a tensor's shape, dtype and bytes (through a uint8 view, since bf16/fp8 have
-    no numpy dtype), a list or tuple element-wise, anything else its pickle."""
+    """SHA-256 hex digest of a tensor's shape, dtype and bytes (uint8 view, since bf16/fp8 have no numpy dtype), a
+    sequence element-wise, anything else its pickle."""
     hasher = hashlib.sha256()
     if isinstance(value, torch.Tensor):
         hasher.update(repr(value.shape).encode())
@@ -435,11 +391,8 @@ def _value_digest(value: Any) -> str:
 
 
 def assert_rank_uniform(value: Any, *, group: dist.ProcessGroup | None, label: str, strict: bool = False) -> None:
-    """COLLECTIVE (one :func:`agree_across_ranks` all-reduce, the digests gathered only to name a
-    divergence): warn, or raise under ``strict``, when ``value`` differs across the ranks of ``group``; a
-    no-op for ``group=None`` or one rank. Pass ``tuple(t.shape)`` to compare a shape, the usual first sign
-    of a TP/EP deadlock.
-    """
+    """COLLECTIVE: warn, or raise under ``strict``, when ``value`` differs across the ranks of ``group``; a no-op
+    without a group. Pass ``tuple(t.shape)`` to compare a shape, the usual first sign of a TP/EP deadlock."""
     if group is None:
         return
     world = dist.get_world_size(group=group)

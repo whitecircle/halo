@@ -1,9 +1,6 @@
-"""Configured FP32 parameter masters: which HF parameters train at fp32, and their checkpoint values kept
-or restored at fp32 before any parallel wrap.
-
-Selected off the EP layer registry, the accessors the EP layers adopt through, so every loader (eager, lazy
-EP, PP stage) keeps one checkpoint-backed set. A native dense TP master is rebuilt as its 1-D TP DTensor.
-"""
+"""Configured FP32 parameter masters: which HF parameters train at fp32, and their checkpoint values kept or restored
+before any parallel wrap. Selected off the EP layer registry, so every loader (eager, lazy EP, PP stage) keeps one
+set."""
 
 from __future__ import annotations
 
@@ -36,12 +33,9 @@ from halo.models.moe.config_fields import require_expert_count
 def fp32_master_param_keys(
     model: nn.Module, ep_config: EPConfig | None = None, *, keep_non_ep: bool
 ) -> frozenset[str]:
-    """HF parameter keys whose configured training storage is fp32: every non-EP parameter under
-    ``keep_non_ep``, and ``ep_config``'s routers and experts through the family's own accessors.
-
-    Shared experts stay at the run dtype, and FSDP-managed ep1 experts ignore ``fp32_experts`` as at wrapper
-    init. Selected by object identity, so tied aliases count and a persistent float buffer does not.
-    """
+    """HF parameter keys configured to train at fp32: non-EP parameters under ``keep_non_ep``, and ``ep_config``'s
+    routers and experts. Shared experts stay at the run dtype and FSDP-managed ep1 experts ignore ``fp32_experts``.
+    Selected by object identity, so tied aliases count and a persistent float buffer does not."""
     blocks = ep_claimed_blocks(model) if ep_config is not None else []
     ep_params = {id(param) for _path, block in blocks for param in block.parameters()}
     masters = {id(param) for param in model.parameters() if keep_non_ep and id(param) not in ep_params}
@@ -146,11 +140,8 @@ def restore_fp32_master_parameters(
     keep_non_ep: bool,
     strict: bool = False,
 ) -> None:
-    """Reread the configured masters at fp32 out of the checkpoint in ``local_dir`` (``ModelSource.local_dir``),
-    after an eager load and before any EP/CP/TP/FSDP2 wrap; ``strict`` (a resume) requires every one restored.
-
-    Rank-local: callers defer a failure until after their node-serialized loading region.
-    """
+    """Reread the configured masters at fp32 after an eager load, before any wrap; ``strict`` (a resume) requires every
+    one restored. Rank-local: callers defer a failure past their node-serialized region."""
     masters = fp32_master_param_keys(model, ep_config, keep_non_ep=keep_non_ep)
     if not masters:
         return

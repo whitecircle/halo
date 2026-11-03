@@ -1,23 +1,7 @@
 #!/usr/bin/env python
-"""Scripts with padded batches must request the padded-workload backend, under the sinks policy.
-
-Every GRPO batch is right-padded (prompts left-padded, completions right-padded — none of these
-scripts packs). A YAML that pins no ``attn_implementation`` reaches the loader with the padded
-default, the same request ``teacher_distill.py`` / ``classification.py`` / the reward scripts make:
-nothing on Blackwell, where the loader's FA4 outruns SDPA on these batches, except for a remote-code
-checkpoint whose class the resolver cannot read (Bailing's refuses every flash label at build) and a
-softcapped one, whose padded batches would reach FA4's varlen kernels (the softcap then lands the run on
-FA2); ``sdpa`` on every other GPU.
-
-It is a *request*, not a pin: with live sinks (``reset_sinks: false`` — the on-policy gpt-oss flow)
-the backend resolver refuses a sink-dropping impl, so forcing SDPA there would reject the run
-outright. The default must therefore be dropped exactly in that case — which is the whole reason
-the exemption lives in ``default_padded_attn_implementation`` rather than in a ternary each script
-copies: four copies is four chances for one of them to keep requesting SDPA, and the run that
-notices is an on-policy gpt-oss run failing at model load.
-
-Run: python tests/cpu/config/test_grpo_padded_attn_default.py  (or pytest)
-"""
+"""Scripts with padded batches request the padded-workload backend: nothing on Blackwell (FA4 outruns SDPA) except a
+remote-code or softcapped checkpoint, ``sdpa`` elsewhere. With live sinks the resolver refuses a sink-dropping
+impl, so ``default_padded_attn_implementation`` drops the default."""
 
 import ast
 import contextlib
@@ -39,7 +23,6 @@ from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 
-# The three GRPO entry points; each pads its batches and loads through load_model_and_tokenizer.
 _GRPO_SCRIPTS = ["grpo/offline.py", "grpo/environmental.py", "grpo/online.py"]
 
 _HELPER = "default_padded_attn_implementation"
@@ -76,12 +59,9 @@ def _blackwell(checkpoint_config):
 def _requested_attn(
     rel_path: str, yaml_body: str, tmp_path: Path, parallelism_config=None, checkpoint_config=None
 ) -> str | None:
-    """The attention implementation the script's model load would actually resolve under, on a Blackwell host
-    whose checkpoint has ``checkpoint_config`` when one is given.
-
-    ``load_model_and_tokenizer`` falls back to ``model_config.attn_implementation`` when the script passes
-    none, so the effective request — not the kwarg alone — is what the run behaves on.
-    """
+    """The attention implementation the model load would resolve under, on a Blackwell host whose checkpoint has
+    ``checkpoint_config`` when given. ``load_model_and_tokenizer`` falls back to
+    ``model_config.attn_implementation``, so the effective request is what counts."""
     module = _load_script_module(rel_path)
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -117,7 +97,7 @@ def _requested_attn(
             stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(splits, False)))
         if checkpoint_config is not None:
             stack.enter_context(_blackwell(checkpoint_config))
-        # The log tee redirects the process's stdout/stderr fds — keep it out of the test process.
+        # The log tee redirects the process's stdout/stderr fds, so keep it out of the test process.
         stack.enter_context(mock.patch("halo.entrypoints.script.install_log_tee"))
         stack.enter_context(mock.patch.object(sys, "argv", ["prog", str(config)]))
         stack.enter_context(pytest.raises(_StopAtModelLoad))
@@ -127,8 +107,7 @@ def _requested_attn(
 
 @pytest.mark.parametrize("script", _GRPO_SCRIPTS)
 def test_unpinned_config_requests_the_padded_workload_backend(script, tmp_path):
-    """An unpinned YAML must not reach the loader with nothing: padded GRPO batches would land on
-    FA4's varlen path."""
+    """Padded GRPO batches would land on FA4's varlen path."""
     assert _requested_attn(script, "", tmp_path) == "sdpa"
 
 
@@ -153,10 +132,9 @@ _SOFTCAPPED = Gemma2Config(hidden_size=4608, num_attention_heads=32, num_key_val
 def test_blackwell_leaves_the_kernel_to_the_loader_unless_the_checkpoint_rules_it_out(
     script, checkpoint_config, expected, tmp_path
 ):
-    """On Blackwell an unpinned padded run takes the loader's pick, a head_dim-256 checkpoint's included (Gemma 1
-    has neither a softcap nor a window, so FA4's dedicated kernel trains it). A remote-code checkpoint keeps SDPA,
-    since the resolver cannot read its flags and Bailing's refuses a flash label only at the model build; a
-    softcapped one, whose padded batches would reach FA4's varlen kernels, requests FA2, which trains its softcap."""
+    """Gemma 1 has neither a softcap nor a window, so FA4's dedicated kernel trains it. A remote-code checkpoint
+    keeps SDPA, since Bailing's refuses a flash label only at the build; a softcapped one requests FA2, which
+    trains its softcap."""
     assert _requested_attn(script, "", tmp_path, checkpoint_config=checkpoint_config) == expected
 
 
@@ -167,8 +145,8 @@ def test_pinned_attention_wins_over_the_padded_default(script, tmp_path):
 
 @pytest.mark.parametrize("script", _GRPO_SCRIPTS)
 def test_live_sinks_drop_the_padded_default(script, tmp_path):
-    """reset_sinks: false keeps the pretrained sinks live, and the resolver then accepts only a
-    sink-carrying impl — requesting SDPA would turn an on-policy gpt-oss run into a hard rejection."""
+    """The resolver accepts only a sink-carrying impl here, so requesting SDPA would turn an on-policy gpt-oss run
+    into a hard rejection."""
     assert _requested_attn(script, "reset_sinks: false\n", tmp_path) is None
 
 
@@ -177,7 +155,6 @@ def test_live_sinks_drop_the_padded_default(script, tmp_path):
 _CP_PARALLELISM = types.SimpleNamespace(is_cp_mode=True)
 
 
-# The CP-capable scripts that request the padded default.
 _CP_SCRIPTS = ["grpo/offline.py", "preference/smpo.py"]
 
 
@@ -197,9 +174,6 @@ def test_smpo_off_cp_keeps_the_padded_default(tmp_path):
     assert _requested_attn("preference/smpo.py", "", tmp_path) == "sdpa"
 
 
-# --- the consolidated seam -------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("pinned", "sinks_reset", "context_parallel", "expected"),
     [
@@ -213,8 +187,8 @@ def test_smpo_off_cp_keeps_the_padded_default(tmp_path):
     ],
 )
 def test_the_seam_owns_the_padded_default_exemptions(pinned, sinks_reset, context_parallel, expected):
-    """The whole decision in one place: pin wins; unpinned takes the padded default only while the
-    sinks are being reset and the run is not context-parallel."""
+    """A pin wins; unpinned takes the padded default only while the sinks are being reset and the run is not
+    context-parallel."""
     model_config = types.SimpleNamespace(attn_implementation=pinned)
     with mock.patch.object(selection, "is_blackwell_gpu", lambda: False):
         assert (
@@ -269,7 +243,6 @@ def test_the_blackwell_seam_decides_on_every_config_it_loads(policy_config, comp
 
 
 def test_the_blackwell_seam_reads_the_config_it_is_handed():
-    """A handed policy config is read in place of a fetch."""
     model_config = types.SimpleNamespace(attn_implementation=None)
     with _blackwell(Qwen3Config()) as fetch:
         assert (
@@ -297,14 +270,13 @@ _HELPER_CALL_SITES = sorted(
 
 
 def test_the_call_site_sweep_is_not_empty():
-    """Guard the derivation: an empty sweep would pass the assertion below vacuously."""
     assert len(_HELPER_CALL_SITES) >= 8, _HELPER_CALL_SITES
 
 
 @pytest.mark.parametrize("script", _HELPER_CALL_SITES, ids=lambda p: p.stem)
 def test_every_call_site_wires_the_exemption_to_the_runs_own_flag(script):
-    """A literal here is a claim about the MODEL ("these batches are never sink-carrying") made at a
-    site that cannot know it: the flag is per run. Every caller must pass the run's reset_sinks."""
+    """A literal here is a claim about the model at a site that cannot know it; every caller passes the run's
+    reset_sinks."""
     for call in _helper_calls(script):
         wired = [kw.value for kw in call.keywords if kw.arg == "sinks_reset"]
         assert wired, f"{script.name} calls {_HELPER} without sinks_reset"

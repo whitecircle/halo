@@ -1,26 +1,6 @@
-"""The ``full_determinism`` backward-replay body the EP determinism GPU suite runs.
-
-DeepEP's default dispatch claims each receive slot with an atomic, so the order an expert's tokens
-arrive in changes from one dispatch to the next, and with it the summation order of that expert's
-weight gradient. Attention, router, norm and embedding gradients stay bit-identical while every expert
-weight drifts in its last bits, and two runs diverge within a few steps. Under deterministic-algorithms
-mode the dispatcher builds its buffer in DeepEP's deterministic mode, and switches off the
-uninitialized-memory fill that DeepEP refuses to run beside (left on, the first dispatch asserts).
-
-The body turns determinism on exactly as HF's ``Trainer`` does for ``full_determinism``
-(``enable_full_determinism``, after the load), then runs the same forward and backward on the same
-per-rank batch ``REPEATS`` times on a family's tiny model and requires the loss and every gradient to
-match the first pass bit for bit. ``MODES`` are the two-rank layouts, each a distinct dispatch, routing
-or expert-compute shape:
-
-  ep2          — DeepEP V2 dispatch, grouped GEMM, atomic-free fused permute.
-  ep2_top1     — the same path at top-1 routing, below ``top_k == ep_size`` (families whose config
-                 spells the top-k ``num_experts_per_tok``).
-  ep2_loop     — the per-expert loop (``use_grouped_gemm: false``).
-  ep2_legacy   — the DeepEP V1 buffer (``ep_buffer_backend: legacy``).
-  ep1          — experts replicated on every rank, no dispatch.
-  etp2         — pure expert-TP: expert FFNs sharded, token-space all-reduce, no dispatch.
-"""
+"""The ``full_determinism`` backward-replay body the EP determinism GPU suite runs: every gradient must match bit for
+bit across repeats. DeepEP's default atomic receive order changes each expert's gradient summation, so expert weights
+drift and two runs diverge in a few steps."""
 
 import argparse
 
@@ -52,7 +32,6 @@ MODES = {
 
 
 def determinism_parser() -> argparse.ArgumentParser:
-    """The determinism suite's CLI."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
     parser.add_argument("--mode", choices=sorted(MODES), default="ep2")
@@ -68,8 +47,8 @@ def _backward_pass(model, ids, labels) -> tuple[torch.Tensor, dict[str, torch.Te
 
 
 def _mismatched(reference: dict[str, torch.Tensor], repeat: dict[str, torch.Tensor], names: set[str]) -> set[str]:
-    """Names in ``names`` whose gradient one pass has and the other lacks, or that differ in any bit. A
-    gradient both passes lack (an expert no token reached) matches."""
+    """Names whose gradient one pass lacks or that differ in any bit; a gradient both passes lack (an expert no token
+    reached) matches."""
     return {
         name
         for name in names
@@ -79,8 +58,7 @@ def _mismatched(reference: dict[str, torch.Tensor], repeat: dict[str, torch.Tens
 
 
 def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
-    """``REPEATS`` forward/backward passes of ``family``'s tiny model under ``mode``; returns the harness
-    result."""
+    """``REPEATS`` forward/backward passes under ``mode``; returns the harness result."""
     parallelism, overrides = MODES[mode]
     GradientState()._set_sync_gradients(True)
     torch.manual_seed(SEED)
@@ -99,8 +77,8 @@ def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
     reference_loss, reference = _backward_pass(model, ids, labels)
     other_names = set(reference) - expert_names
     checks = {
-        # Vacuous unless this rank's experts received tokens and trained. Not every expert: a random-init
-        # router can starve one (Zaya's tiny model sends nothing to rank 1 in its last layers).
+        # Vacuous unless this rank's experts trained. Not every expert: a random-init router can starve one (Zaya's
+        # tiny model).
         "expert_grads_present": any(name in reference and bool(reference[name].any()) for name in expert_names),
     }
     # Checked directly as well: at this size the atomic receive order can repeat by chance.

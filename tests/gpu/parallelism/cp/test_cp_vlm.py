@@ -1,23 +1,5 @@
 #!/usr/bin/env python
-"""
-VLM Context Parallelism Patching Test.
-
-Validates that Context Parallelism (CP) patching works for a Vision-Language Model's text tower,
-specifically Qwen3-VL-2B (dense Qwen3-VL has no TP plan, and the loader refuses it under TP).
-
-Sub-tests, both on one text-only batch shared by every rank:
-1. Model loading: Load VLM, verify architecture (has language model + vision encoder), and take the
-   unpatched forward loss as the baseline
-2. CP patching: Apply CP patching; the CP loss must match the baseline
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/cp/test_cp_vlm.py
-
-Requirements:
-    - 2x GPUs with >=16GB memory each
-    - Model: Qwen/Qwen3-VL-2B-Instruct (auto-downloaded)
-"""
+"""CP patching on Qwen3-VL-2B's text tower matches the unpatched loss, on a shared text-only batch."""
 
 import math
 
@@ -41,18 +23,13 @@ SEED = 42
 
 
 def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
-    """Count total and trainable parameters."""
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
 
 
 def create_text_only_input(device: str) -> dict[str, torch.Tensor]:
-    """The one text-only batch (no images) every sub-test runs, identical on every rank.
-
-    Uses random token IDs in a safe range to avoid special tokens. Broadcast from rank 0, so the CP
-    loss compares against the baseline on the same tokens.
-    """
+    """Broadcast from rank 0, so the CP loss compares against the baseline on the same tokens."""
     torch.manual_seed(SEED)
     input_ids = torch.randint(100, 30000, (1, MAX_SEQ_LENGTH), device=device)
     dist.broadcast(input_ids, src=0)
@@ -64,7 +41,6 @@ def create_text_only_input(device: str) -> dict[str, torch.Tensor]:
 
 
 def find_attention_layers(model: torch.nn.Module) -> list[tuple[str, str]]:
-    """Find all attention layers in the model and return (path, class_name) pairs."""
     attn_layers = []
     for name, module in model.named_modules():
         cls_name = type(module).__name__
@@ -74,7 +50,6 @@ def find_attention_layers(model: torch.nn.Module) -> list[tuple[str, str]]:
 
 
 def find_vision_components(model: torch.nn.Module) -> dict[str, bool]:
-    """Detect vision encoder and language model components in a VLM."""
     components = {
         "has_visual": False,
         "has_language_model": False,
@@ -83,8 +58,7 @@ def find_vision_components(model: torch.nn.Module) -> dict[str, bool]:
         "language_model_class": None,
     }
 
-    # transformers >=5 nests the vision tower and text backbone one level below the top-level
-    # wrapper, so walk recursively and take the top-most (fewest-dotted) match.
+    # transformers >=5 nests the vision tower and text backbone below the wrapper, so take the top-most match.
     def _topmost(predicate) -> str | None:
         matches = [(name, type(m).__name__) for name, m in model.named_modules() if name and predicate(name.lower())]
         if not matches:
@@ -93,7 +67,6 @@ def find_vision_components(model: torch.nn.Module) -> dict[str, bool]:
 
     components["visual_class"] = _topmost(lambda n: "visual" in n or "vision" in n)
     components["has_visual"] = components["visual_class"] is not None
-    # Prefer an explicit language_model submodule; fall back to a non-vision backbone module.
     components["language_model_class"] = _topmost(lambda n: "language_model" in n) or _topmost(
         lambda n: "model" in n and "visual" not in n and "vision" not in n
     )
@@ -104,11 +77,6 @@ def find_vision_components(model: torch.nn.Module) -> dict[str, bool]:
 
 
 def test_model_loading(inputs: dict[str, torch.Tensor], local_rank: int) -> tuple[dict[str, bool], float]:
-    """
-    Test 1: Load VLM model, verify architecture, and return the unpatched forward loss.
-
-    Verifies the model has both a vision encoder and a language model backbone.
-    """
     checks = {}
 
     log("\n" + "=" * 70)
@@ -177,12 +145,6 @@ def test_model_loading(inputs: dict[str, torch.Tensor], local_rank: int) -> tupl
 
 
 def test_cp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_loss: float) -> dict[str, bool]:
-    """
-    Test 2: Apply CP patching; the CP forward loss must match the unpatched baseline.
-
-    Loads the VLM model, patches it for context parallelism (Ulysses attention),
-    and runs the shared batch through it.
-    """
     checks = {}
 
     log("\n" + "=" * 70)
@@ -207,7 +169,7 @@ def test_cp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_
         CP_SIZE,
         stage_world_size=dist.get_world_size(),
         stage_base_rank=0,
-        nvlink_domain_size=dist.get_world_size(),  # Single-node test
+        nvlink_domain_size=dist.get_world_size(),  # Single-node test.
     )
     log(f"    cp_rank={cp_config.cp_rank}, cp_group_idx={cp_config.cp_group_idx}")
 
@@ -222,7 +184,7 @@ def test_cp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_
     log("\n  Running CP forward pass (text-only)...")
     cp_model.eval()
 
-    # Full-length input: the wrapper shards the sequence, so it must divide cp_size.
+    # The wrapper shards the sequence, so it must divide cp_size.
     assert MAX_SEQ_LENGTH % CP_SIZE == 0, f"seq_length {MAX_SEQ_LENGTH} must be divisible by cp_size {CP_SIZE}"
 
     with torch.no_grad():
@@ -231,7 +193,7 @@ def test_cp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_
     checks["cp_forward"] = math.isfinite(loss_value)
     log_all(f"  CP forward loss: {loss_value:.6f} {'PASS' if checks['cp_forward'] else 'FAIL'}")
 
-    # Same weights, same batch, no step taken: CP's global normalization equals the baseline mean.
+    # Same weights, batch and no step: CP's global normalization equals the baseline mean.
     cp_loss_avg = world_mean(loss_value)
     cp_diff = abs(cp_loss_avg - baseline_loss)
     checks["cp_loss_matches_baseline"] = cp_diff < TOL.parallel_vs_baseline_loss_abs

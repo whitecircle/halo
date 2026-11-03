@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""Laguna's hub checkpoint spells two modules differently from the live module tree.
-
-``transformers`` declares the difference as two ``WeightRenaming`` entries and applies them inside
-``from_pretrained`` only, while the toolkit's own key paths carry it in both directions:
-
-- the EP **gather** writes the live module names, so without the rewrite a gathered/merged checkpoint
-  and the online-GRPO weight sync ship ``mlp.shared_experts.*`` and
-  ``mlp.gate.e_score_correction_bias``. vLLM keys on hub names and silently skips unknown ones, so
-  serving loses the router correction bias. ``MoEFamilySpec.export_key_renames`` drives that rewrite,
-  and ``test_declaration_matches_transformers`` keeps it equal to transformers' entries;
-- the EP **lazy loader** reads safetensors directly, planning its keys on transformers' mapping, so the
-  hub's ``mlp.shared_expert.*`` must land on the live module rather than load as random weights (the
-  shipped ``examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml`` is that shape).
-
-    python tests/cpu/parallelism/test_laguna_export_key_renames.py
-"""
+"""Laguna's hub checkpoint spells two modules differently from the live tree. vLLM silently skips unknown names, so
+an unrewritten gather loses the router correction bias at serving."""
 
 from __future__ import annotations
 
@@ -30,7 +16,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.models.moe.family_specs import MoEFamilySpec
 
-LAGUNA_MOE_LAYER = 1  # layer 0 is dense (first_k_dense_replace)
+LAGUNA_MOE_LAYER = 1  # Layer 0 is dense (first_k_dense_replace).
 
 
 def _tiny_laguna():
@@ -55,11 +41,7 @@ def _tiny_laguna():
 
 
 class _StubLagunaLayer(EPMoELayerBase):
-    """A gatherable layer carrying Laguna's own rename declaration and its replicated module names.
-
-    Built off the base rather than off ``EPLagunaMoELayer`` because that class's ``__init__`` needs
-    live EP process groups; the renames under test are read off the class attribute either way.
-    """
+    """``EPLagunaMoELayer.__init__`` needs live EP groups; the renames are read off the class attribute either way."""
 
     FAMILY = MoEFamilySpec(model_types=(), export_key_renames=EPLagunaMoELayer.FAMILY.export_key_renames)
 
@@ -82,8 +64,7 @@ class _StubLagunaLayer(EPMoELayerBase):
 
 
 def test_declaration_matches_transformers():
-    """The class declaration is a mirror of transformers' ``laguna`` renamings — drift here silently
-    reopens both gaps."""
+    """Drift here silently reopens both gaps."""
     declared = {hub: module for module, hub in EPLagunaMoELayer.FAMILY.export_key_renames}
     upstream = {
         entry.source_patterns[0].split("mlp.", 1)[-1]: entry.target_patterns[0].split("mlp.", 1)[-1]
@@ -95,7 +76,7 @@ def test_declaration_matches_transformers():
 
 
 def test_the_two_spellings_really_differ():
-    """Anti-vacuity: the live module tree must actually use the names the gather has to rewrite."""
+    """Anti-vacuity: the live tree must use the names the gather rewrites."""
     keys = set(_tiny_laguna().state_dict())
     prefix = f"model.layers.{LAGUNA_MOE_LAYER}.mlp"
     assert f"{prefix}.gate.e_score_correction_bias" in keys
@@ -104,19 +85,16 @@ def test_the_two_spellings_really_differ():
 
 
 def test_gather_emits_hub_spelling():
-    """The export side: vLLM and ``from_pretrained`` both key on the hub names."""
     gathered = set(_StubLagunaLayer().gather_layer_state_dict("model.layers.1.mlp", retain=True))
     assert "model.layers.1.mlp.experts.e_score_correction_bias" in gathered, gathered
     assert "model.layers.1.mlp.shared_expert.weight" in gathered, gathered
     assert "model.layers.1.mlp.gate.e_score_correction_bias" not in gathered
     assert "model.layers.1.mlp.shared_experts.weight" not in gathered
-    # The expert tensors themselves are unaffected — the renames are not a blanket rewrite.
+    # The renames are no blanket rewrite.
     assert "model.layers.1.mlp.experts.gate_up_proj" in gathered
 
 
 def test_a_family_without_renames_is_untouched():
-    """Anti-over-rejection: every other family's gather keys must be byte-identical to before."""
-
     class _Plain(_StubLagunaLayer):
         FAMILY = MoEFamilySpec(model_types=())
 
@@ -126,8 +104,7 @@ def test_a_family_without_renames_is_untouched():
 
 
 def test_lazy_loader_maps_hub_keys_onto_the_live_module():
-    """The load side: an unmapped key is silently skipped by the planner, so the module it belongs to
-    is randomly initialized rather than loaded."""
+    """The planner silently skips an unmapped key, leaving the module randomly initialized."""
     model = _tiny_laguna()
     prefix = f"model.layers.{LAGUNA_MOE_LAYER}.mlp"
     hub_keys = [
@@ -143,7 +120,6 @@ def test_lazy_loader_maps_hub_keys_onto_the_live_module():
         assert mapping[hub_key] in live, f"{hub_key} -> {mapping[hub_key]} matches no live tensor"
     assert mapping[f"{prefix}.experts.e_score_correction_bias"] == f"{prefix}.gate.e_score_correction_bias"
     assert mapping[f"{prefix}.shared_expert.gate_proj.weight"] == f"{prefix}.shared_experts.gate_proj.weight"
-    # An already-live key is not renamed.
     assert mapping[f"{prefix}.gate.weight"] == f"{prefix}.gate.weight"
 
 

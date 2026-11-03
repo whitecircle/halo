@@ -1,20 +1,7 @@
 #!/usr/bin/env python
 """``tests.common.gloo.run_gloo_ranks`` keeps the rendezvous store up until every rank has exited, and spawns each
-rank with the ``OMP_NUM_THREADS`` torchrun would, which accelerate's ``PartialState`` then leaves in place.
-
-A rank may leave while a peer still has store traffic to send: the main rank of
-``fs_aware_main_first`` never waits for its waiters, so it can exit while a waiter is still leaving
-the phase. A store that goes down with the exiting rank fails the peer on a reset connection, which a
-loaded host turns into an intermittent failure of any test whose ranks finish unevenly. Here rank 0
-exits first by construction, and rank 1 uses the store only after.
-
-torchrun exports ``OMP_NUM_THREADS=1`` to a multi-process node's ranks unless the launch sets its own. Without it
-accelerate's ``PartialState`` resizes a gloo rank's intra-op pool to the node's physical cores over its local ranks,
-and on a loaded xdist host two identical forwards in one rank can then disagree. The worker imports nothing that sets
-a thread count, so the pool it reads before ``PartialState`` is the one its launch env sized.
-
-Run: python tests/cpu/conventions/test_gloo_harness.py
-"""
+rank with the ``OMP_NUM_THREADS`` torchrun would. A store dying with an early-exiting rank resets its peer's
+connection, and a pool ``PartialState`` resized lets two forwards disagree on a loaded xdist host."""
 
 import fcntl
 import json
@@ -53,8 +40,7 @@ def test_the_store_outlives_the_first_rank_to_exit(tmp_path):
 
 
 def _thread_counts(rank: int, tmp_dir: str) -> None:
-    """The rank's intra-op thread count before and after accelerate's process state, and the OMP_NUM_THREADS it
-    sees."""
+    """The intra-op thread count before and after accelerate's process state, and the OMP_NUM_THREADS the rank sees."""
     before = torch.get_num_threads()
     PartialState()
     record = {"before": before, "after": torch.get_num_threads(), "omp": os.environ.get("OMP_NUM_THREADS")}

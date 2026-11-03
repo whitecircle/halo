@@ -1,6 +1,5 @@
-"""Every test the hosted ``conventions`` job runs, and each file pytest runs for it, reaches only the standard
-library, pytest and first-party files that do the same. That job (``.github/workflows/lint.yml``) installs
-pytest alone, so any other import passes in the image and fails only there."""
+"""Every test the hosted ``conventions`` job runs reaches only the standard library, pytest and first-party files
+that do the same. ``.github/workflows/lint.yml`` installs pytest alone, so any other import fails only there."""
 
 import ast
 import functools
@@ -25,10 +24,8 @@ from tests.common.sample_tree import spelled, write_sample_tree
 from tests.gpu.manifest import LAUNCHER_ENTRYPOINTS
 
 _WORKFLOW = REPO_ROOT / ".github/workflows/lint.yml"
-# The conventions job's block: from its key to the next job's, or the end of the file.
 _JOB = re.compile(r"^  conventions:\n(.*?)(?=^  \S|\Z)", re.MULTILINE | re.DOTALL)
 _TEST_FILE = re.compile(r"\btests/[\w/]+\.py\b")
-# Besides the interpreter, the job's one install.
 _INSTALLED = frozenset({"pytest"})
 # What a listed test's probe script has pytest collect, which no import in the test's source names. The
 # walk refuses any other probe, since it cannot read what one imports.
@@ -42,7 +39,6 @@ uv_lock = load_script_module(".github/scripts/locked_version.py")
 
 
 def _hosted_tests() -> list[str]:
-    """The test files the workflow's ``conventions`` job runs."""
     job = _JOB.search(_WORKFLOW.read_text(encoding="utf-8"))
     return sorted(set(_TEST_FILE.findall(job.group(1)))) if job else []
 
@@ -60,7 +56,6 @@ def _calls(file: Path) -> list[ast.Call]:
 
 
 def _loads(file: Path) -> list[LoadedModule]:
-    """What ``file``'s ``load_script_module`` and ``import_module`` calls load."""
     constants = string_constants(_tree(file))
     return [loaded for call in _calls(file) if (loaded := loaded_module(call, constants))]
 
@@ -91,7 +86,6 @@ def _imported_modules(index: RepoIndex, file: Path) -> set[str]:
 
 
 def _loaded_by_path(index: RepoIndex, file: Path) -> list[Path]:
-    """The repo files ``file`` runs through ``load_script_module``."""
     return [index.root / loaded.path for loaded in _loads(file) if loaded.path is not None]
 
 
@@ -100,9 +94,7 @@ def _runs_a_probe(file: Path) -> bool:
 
 
 def _foreign_imports(index: RepoIndex, test: Path, probe_collects: Mapping[str, Sequence[str]]) -> list[str]:
-    """Each import outside the standard library and pytest that running ``test`` under pytest reaches, as
-    ``a -> b imports m``: through the package inits and conftests pytest runs for it, the first-party files
-    it imports or loads by path, and the files its probe script has pytest collect."""
+    """Each import outside the standard library and pytest that running ``test`` reaches, as ``a -> b imports m``."""
     findings, seen = set(), set()
     pending = [(test,), *((test, file) for file in _pytest_runs(index, test))]
     while pending:
@@ -132,7 +124,7 @@ def _foreign_imports(index: RepoIndex, test: Path, probe_collects: Mapping[str, 
 
 
 def test_the_job_runs_the_convention_tests_and_this_one():
-    """Anti-vacuity: a workflow edit that drops the list, or this check from it, would pass everything below."""
+    """A workflow edit that drops the list, or this check from it, would pass everything below."""
     assert str(Path(__file__).resolve().relative_to(REPO_ROOT)) in _HOSTED, _HOSTED
     assert len(_HOSTED) > 1, f"the conventions job lists only {_HOSTED}"
     missing = [path for path in _HOSTED if not (REPO_ROOT / path).is_file()]

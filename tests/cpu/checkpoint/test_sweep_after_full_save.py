@@ -1,27 +1,6 @@
 #!/usr/bin/env python
-"""``sweep_after_full_save``: a COMPLETED save owns the output directory, a crashed one owns nothing.
-
-Every conversion tool re-saves into a directory that may already hold a previous run's weights, and
-``save_pretrained`` only deletes the shards its own ``-00001-of-00002`` numbering regex matches — a
-leftover single ``model.safetensors`` or a stale index outlives the save. ``from_pretrained`` then
-prefers that single file over the index just written, and the toolkit's index-first readers follow a
-stale index to shards that are gone: either way the artifact served is not the one that was saved.
-
-The sweep therefore runs AFTER the save and derives its keep-set from what is on disk NOW. That
-ordering is the whole safety property: a save that died mid-write leaves neither a consistent index
-nor a ``model.safetensors``, the keep-set comes out empty, and the sweep must then delete NOTHING —
-sweeping before the save (or on an empty keep-set) would let a failed conversion destroy whatever
-good checkpoint the output directory previously held.
-
-When BOTH layouts are on disk and both are self-consistent, one of them is a previous run's
-leftover and only the modification time says which. A writer that clears numbered shards itself
-(``save_pretrained``) can leave a stale single file; a writer that clears nothing (``reset_sinks``'
-safetensors branch) leaves a stale index AND its shards beside the one file it just wrote. Both
-directions are pinned below: guessing wrong deletes the checkpoint that was just written and serves
-the previous run's weights out of a directory the tool reported as saved.
-
-    python tests/cpu/checkpoint/test_sweep_after_full_save.py
-"""
+"""``sweep_after_full_save``: a completed save owns the output directory, a crashed one owns nothing. When both
+layouts are self-consistent, only the modification time says which is the leftover."""
 
 import json
 import os
@@ -36,11 +15,8 @@ SINGLE = "model.safetensors"
 
 
 def _plant(directory, *names, index: dict | None = None, age: float = 0.0) -> None:
-    """Materialise a directory state: ``names`` as files, ``index`` as the weight map of an index.
-
-    ``age`` back-dates everything written by this call, so a test can state which write is the
-    previous run's instead of relying on the resolution of two writes microseconds apart.
-    """
+    """``age`` back-dates the write, so a test can state which is the previous run's without relying on two writes
+    microseconds apart."""
     os.makedirs(directory, exist_ok=True)
     written = list(names)
     for name in names:
@@ -61,10 +37,9 @@ def _files(directory) -> set[str]:
 
 
 def test_a_sharded_save_sweeps_the_previous_runs_single_file(tmp_path):
-    """The dangerous leftover: ``from_pretrained`` prefers ``model.safetensors`` over the index, so a
-    surviving single file means the OLD weights win the lookup over the shards just written."""
+    """``from_pretrained`` prefers ``model.safetensors`` over the index, so the old weights would win."""
     out = tmp_path / "out"
-    _plant(out, SINGLE, age=10)  # the previous run
+    _plant(out, SINGLE, age=10)  # The previous run.
     _plant(
         out,
         "model-00001-of-00002.safetensors",
@@ -78,20 +53,15 @@ def test_a_sharded_save_sweeps_the_previous_runs_single_file(tmp_path):
 
 
 def test_a_single_file_save_outlives_a_previous_runs_complete_shard_set(tmp_path):
-    """The opposite direction, and the one a writer that clears nothing actually hits.
-
-    ``reset_sinks``' safetensors branch copies the source directory in and writes ONE file, deleting
-    nothing — so a complete previous sharded save is still there, index and shards intact, and both
-    layouts describe a full checkpoint. Keeping the index because it is a consistent one deletes the
-    file this save just wrote, and every later read resolves the previous run's shards instead.
-    """
+    """``reset_sinks``' safetensors branch writes one file and deletes nothing; keeping the consistent index deletes
+    the file just written."""
     out = tmp_path / "out"
     _plant(
         out,
         "model-00001-of-00002.safetensors",
         "model-00002-of-00002.safetensors",
         index={"a.weight": "model-00001-of-00002.safetensors", "b.weight": "model-00002-of-00002.safetensors"},
-        age=10,  # the previous run
+        age=10,  # The previous run.
     )
     _plant(out, SINGLE)
 
@@ -101,8 +71,7 @@ def test_a_single_file_save_outlives_a_previous_runs_complete_shard_set(tmp_path
 
 
 def test_a_single_file_save_sweeps_the_previous_runs_index(tmp_path):
-    """Mirror case: the shards the stale index names are gone (``save_pretrained`` deletes numbered
-    shards it did not write), so the index alone would send every index-first reader to nowhere."""
+    """The index alone would send every index-first reader to nowhere."""
     out = tmp_path / "out"
     _plant(out, SINGLE, index={"a.weight": "model-00001-of-00002.safetensors"})
 
@@ -112,8 +81,7 @@ def test_a_single_file_save_sweeps_the_previous_runs_index(tmp_path):
 
 
 def test_a_crashed_save_sweeps_nothing(tmp_path):
-    """No index and no single file: the save never completed, so the directory's previous contents
-    are the only checkpoint there is. Deleting them here is unrecoverable."""
+    """The directory's previous contents are the only checkpoint there is."""
     out = tmp_path / "out"
     _plant(out, "model-00001-of-00003.safetensors", "model-00002-of-00003.safetensors")
     before = _files(out)
@@ -124,8 +92,7 @@ def test_a_crashed_save_sweeps_nothing(tmp_path):
 
 
 def test_an_index_whose_shards_are_missing_is_not_a_completed_save(tmp_path):
-    """A torn index is not evidence of a completed write. Trusting it would keep the (missing) shards
-    it names and delete the partial ones actually on disk — a directory with no weights at all."""
+    """Trusting it would keep the missing shards and delete the partial ones, leaving no weights at all."""
     out = tmp_path / "out"
     _plant(
         out,
@@ -140,8 +107,7 @@ def test_an_index_whose_shards_are_missing_is_not_a_completed_save(tmp_path):
 
 
 def test_an_index_with_an_empty_weight_map_is_not_a_completed_save(tmp_path):
-    """``all()`` over an empty shard set is vacuously true — an empty weight map must not read as a
-    consistent index, or a torn write would sweep every real shard beside it."""
+    """``all()`` over an empty shard set is vacuously true."""
     out = tmp_path / "out"
     _plant(out, "model-00001-of-00002.safetensors", index={})
     before = _files(out)
@@ -152,8 +118,7 @@ def test_an_index_with_an_empty_weight_map_is_not_a_completed_save(tmp_path):
 
 
 def test_non_weight_files_are_never_swept(tmp_path):
-    """The sweep runs over a live checkpoint directory: config/tokenizer/resume sidecars and a
-    co-located PEFT adapter are not this save's business, and an adapter deleted here is gone."""
+    """A co-located PEFT adapter deleted here is gone."""
     out = tmp_path / "out"
     _plant(
         out,

@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: an HF-native TP load shards over the toolkit's TP group, not a mesh transformers builds.
-
-transformers ignores a ``device_mesh`` passed to ``from_pretrained`` and builds its own world-wide mesh,
-so on a (dp, tp) layout every projection would come back sharded world-ways, on the wrong ranks, and
-the toolkit's FSDP2 wrap over its dp mesh would run on those shards. Four gloo ranks load a tiny Qwen3
-at tp=2, dp=2 through the loader's mesh hook and check each shard's size and mesh.
-
-    python tests/cpu/parallelism/test_tp_load_mesh.py
-"""
+"""An HF-native TP load shards over the toolkit's TP group, on four gloo ranks at tp=2, dp=2. transformers ignores a
+passed ``device_mesh`` and builds its own world-wide mesh, shards the FSDP2 wrap would then run on."""
 
 import pytest
 import torch
@@ -66,7 +59,7 @@ def test_the_load_shards_over_the_toolkit_tp_group(checkpoint):
 
 
 def test_premise_transformers_alone_shards_over_a_mesh_of_its_own(checkpoint):
-    """Anti-vacuity: without the hook, a passed tp mesh is ignored and the load shards world-ways."""
+    """Anti-vacuity: without the hook, the load shards world-ways."""
     run_gloo_ranks(_transformers_mesh_worker, WORLD, checkpoint)
 
 

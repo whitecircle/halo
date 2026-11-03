@@ -1,41 +1,10 @@
 #!/usr/bin/env python
-"""On real DeepEP dispatch, the receive counts each backend hands the expert compute are the received ids'
-own per-expert counts, and the expert compute they size is sync-free and bit-identical to its device-sized
-reference.
+"""On real DeepEP dispatch, each backend's receive counts match the received ids and size a sync-free, bit-exact
+compute.
 
-The grouped sort is a counting sort sized by the sum of the dispatch's host-side counts (V2
-``EPHandle.num_recv_tokens_per_expert_list``, V1's fourth dispatch output; ``halo/kernels/moe_route_sort.py``),
-and the per-expert loop selects each expert's slots with a ``nonzero_static`` of that expert's count; a count
-that is off by one sizes the sort's outputs a slot wrong, or drops slots or pads with one that gathers the
-wrong row. The CPU suite
-(``tests/cpu/parallelism/test_ep_receive_counts.py``) can only fake DeepEP, so this pins the contract on the
-installed extension: every tiny family's model at ``ep_size = world / expert_tp_size``, one forward and
-backward per rank on a batch of its own, with every ``_compute_experts`` call audited on the path that layer
-runs. Without ``--family`` the sweep runs every tiny family whose expert count that ``ep_size`` divides and names the
-rest; a family named with ``--family`` that it does not divide fails its split check instead of reaching the EP
-build:
-
-  * the counts are a tuple of ``experts_per_rank`` ints equal to the bincount of the received local ids;
-  * the grouped sort, or the whole per-expert loop, run on that call's receive raises on no host sync
-    (``set_sync_debug_mode("error")``) and equals the ``nonzero`` sort's six outputs, or the ``torch.where``
-    loop's output, bit for bit;
-  * every call ran the path the row expects (``--expect-path``);
-  * on the grouped path, the counting sort on DeepEP's own receive compiles no binary past the layer's warm-up,
-    which builds the kernels on synthetic ids and weights of the dtypes DeepEP hands back, and the binary count
-    sees those warm-up compiles;
-  * somewhere in the run the receive carried ``-1`` padding (top-1 families carry none: a received token's
-    one expert is local).
-
-An EP group spanning NVLink domains (two nodes, ``ep_size = world``) runs DeepEP's hybrid dispatch kernel, which
-reports the counts on its own code path.
-
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_receive_counts.py --backend elastic
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_receive_counts.py --backend legacy
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_receive_counts.py --backend elastic \
-        --no-grouped-gemm --expect-path loop
-    torchrun --nproc_per_node=4 tests/gpu/parallelism/ep/test_ep_receive_counts.py --backend elastic \
-        --family gpt_oss --expert-tp-size 2
-    torchrun --nproc_per_node=8 tests/gpu/parallelism/ep/test_ep_receive_counts.py --backend elastic --ep-size 8
+A count off by one sizes the sort a slot wrong, or drops slots or pads with one gathering the wrong row. Top-1 families
+carry no ``-1`` padding. An EP group spanning NVLink domains runs DeepEP's hybrid dispatch kernel, which reports counts
+on its own code path.
 """
 
 import argparse
@@ -67,8 +36,7 @@ _COMPUTE = EPMoELayerBase._compute_experts
 
 
 def audit(layer, tokens, experts, weights, output_dtype, recv_counts) -> dict:
-    """One ``_compute_experts`` call's verdicts on the path ``layer`` runs. Never raises: a rank that raised here
-    would leave its peers in the next dispatch."""
+    """Never raises: a rank that raised here would leave its peers in the next dispatch."""
     path = "grouped" if layer._use_grouped_mm else "loop"
     record = {
         "path": path,
@@ -124,15 +92,13 @@ def audited_compute(records: list[dict]):
 
 
 def expert_count(family: str) -> int:
-    """The routed experts per MoE layer of ``family``'s tiny model, read off a meta-device build."""
     with torch.device("meta"):
         return resolve_expert_count(tiny_family_model(TINY_MOE_FAMILIES[family]).config)
 
 
 def run_family(ctx, family: str, ep_size: int) -> tuple[dict[str, bool], bool]:
-    """COLLECTIVE. ``family``'s checks under the row's backend and expert compute, and whether any receive
-    carried padding. A family whose experts ``ep_size`` does not divide fails its split check on every rank alike,
-    before any EP build."""
+    """COLLECTIVE. A family whose experts ``ep_size`` does not divide fails its split check on every rank alike, before
+    any EP build."""
     experts = expert_count(family)
     split = {f"{family}_experts_split_over_ep{ep_size}": experts % ep_size == 0}
     if not all(split.values()):

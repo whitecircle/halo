@@ -1,5 +1,5 @@
-"""The rollout-driver contract: the one episode loop (:func:`play_episode`) the Ray actor and the eval runner
-both play, the turn generation and retry policy it runs, and the row an episode hands the trainer."""
+"""The rollout-driver contract: the one episode loop (:func:`play_episode`) the Ray actor and the eval runner both
+play, its turn generation and retries, and the row an episode hands the trainer."""
 
 import asyncio
 import contextvars
@@ -22,15 +22,14 @@ from halo.rewards.samples import CUT_TOOL_CALLS_KEY
 
 logger = logging.getLogger(__name__)
 
-# What an engine's client error says, lowercased, when the conversation outgrew the served context (vLLM, SGLang,
-# and the OpenAI API's error code).
+# What an engine's client error says, lowercased, when the conversation outgrew the context (vLLM, SGLang, OpenAI).
 _CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
 
 
 @dataclass
 class RolloutResult:
-    """One collected episode as the rollout drivers hand it to the trainer; every field is pickled through Ray and
-    the TP broadcast per episode, so each needs a consumer (checked by ``test_ray_actors.py``)."""
+    """Every field is pickled through Ray and the TP broadcast per episode, so each needs a consumer (checked by
+    ``test_ray_actors.py``)."""
 
     prompt: str
     trajectory: Trajectory | None = None
@@ -46,14 +45,13 @@ class RolloutResult:
 
     @property
     def counts_toward_baseline(self) -> bool:
-        """Whether the episode counts toward the GRPO group baseline: not when the rollout errored or the
-        environment marked its reward as carrying no signal, which would bias every sibling's advantage."""
+        """Not when the rollout errored or the environment marked its reward as carrying no signal, which would bias
+        every sibling's advantage."""
         return not self.error and not (self.trajectory is not None and self.trajectory.episode_invalid)
 
     @classmethod
     def errored(cls, prompt: str, reason: str, **fields: Any) -> "RolloutResult":
-        """The row of an episode its driver lost: no reward, outside the group baseline (``error``), its
-        trajectory carrying only the cause."""
+        """A lost episode's row: no reward, outside the group baseline, its trajectory carrying only the cause."""
         return cls(
             prompt=prompt, trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: reason}), error=reason, **fields
         )
@@ -61,8 +59,7 @@ class RolloutResult:
 
 @dataclass(frozen=True)
 class TurnGeneration:
-    """One assistant turn's generation from the rollout engine; the capture fields (sampled ids, their logprobs,
-    MoE routing, the engine's prompt ids) are ``None`` unless the ``RolloutConfig`` requested and the server sent them."""
+    """The capture fields are ``None`` unless the ``RolloutConfig`` requested and the server sent them."""
 
     text: str
     tool_calls: list
@@ -78,26 +75,24 @@ class TurnGeneration:
 
 
 def describe_exception(exc: BaseException) -> str:
-    """``Type: message``, keeping the type when the message is empty (a stalled engine's ``TimeoutError``)."""
+    """Keeps the type when the message is empty (a stalled engine's ``TimeoutError``)."""
     text = str(exc)
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def is_engine_fault(status: int, body: str) -> bool:
-    """A client-error status the engine returned for its own fault, which a fresh request clears: vLLM answers
-    400 when a NaN log-prob keeps it from serialising its own response to a valid request."""
+    """A client-error status for the engine's own fault, which a fresh request clears: vLLM answers 400 when a NaN
+    log-prob keeps it from serialising its own response."""
     return 400 <= status < 500 and "not JSON compliant" in body
 
 
 def is_terminal_client_status(status: int, body: str) -> bool:
-    """A client error the request itself caused (the conversation outgrew the served context, a
-    malformed request): retrying the same request cannot succeed."""
+    """The request itself caused it (it outgrew the served context, or is malformed), so retrying cannot succeed."""
     return 400 <= status < 500 and status not in TRANSIENT_CLIENT_ERROR_CODES and not is_engine_fault(status, body)
 
 
 def is_context_overflow(status: int, body: str) -> bool:
-    """A terminal client error reporting that the conversation outgrew the served context
-    (:data:`_CONTEXT_OVERFLOW_MARKERS`), the one terminal client error an episode's own length causes."""
+    """The one terminal client error an episode's own length causes."""
     lowered = body.lower()
     return is_terminal_client_status(status, body) and any(marker in lowered for marker in _CONTEXT_OVERFLOW_MARKERS)
 
@@ -111,9 +106,8 @@ async def generate_turn(
     log_prefix: str,
     on_failure: Callable[[BaseException], None] | None = None,
 ) -> TurnGeneration:
-    """One turn under the retry policy every driver shares: a failed ``retry_on`` request is retried with backoff
-    up to ``config.max_retries`` times unless ``giveup`` names it terminal, an engine abort re-issued as often;
-    ``on_failure`` sees every failed request."""
+    """Failed ``retry_on`` requests retry with backoff up to ``config.max_retries`` times unless ``giveup`` names them
+    terminal; an engine abort is re-issued as often. ``on_failure`` sees every failed request."""
 
     def _failed(details: dict) -> None:
         if on_failure is not None:
@@ -158,9 +152,8 @@ async def generate_turn(
 
 
 def sampled_reasoning_tokens(token_ids: list[int] | None, reasoning_end_token_id: int | None) -> int | None:
-    """The reasoning tokens in a turn's sampled ids: up to and including the reasoning-end token, or every id when
-    the turn was cut before its reasoning closed; ``None`` without the ids or the end token's id. On a turn vLLM
-    force-closed this is the budget it enforced, one past where the prompt ends on a bare ``<think>``."""
+    """Up to and including the reasoning-end token, or every id when the turn was cut before its reasoning closed. On a
+    turn vLLM force-closed this is the budget it enforced, one past where the prompt ends on a bare ``<think>``."""
     if token_ids is None or reasoning_end_token_id is None:
         return None
     try:
@@ -177,15 +170,13 @@ def step_context_from_generation(
     reasoning_end_token_id: int | None = None,
     last_turn: bool = False,
 ) -> dict[str, Any]:
-    """The per-turn context an ``env.step`` receives, stamped from one turn's generation: ``finish_reason``, the
-    calls, the reasoning, the captures where id-aligned, the reasoning cap with the reasoning sampled under it,
-    and ``last_turn`` when the output budget affords no further turn."""
+    """The context an ``env.step`` receives, stamped from one turn's generation; ``last_turn`` when the output budget
+    affords no further turn."""
     step_ctx = dict(context) if context else {}
     step_ctx["finish_reason"] = gen.finish_reason
     if last_turn:
         step_ctx[LAST_TURN_KEY] = True
-    # A cut turn's calls never run: a token-cap cut carries them apart, for the recovery's in-call nudge and the
-    # judge; an abort names no cause to pass on.
+    # A cut turn's calls never run: a token-cap cut carries them apart, for the in-call nudge and the judge.
     if gen.tool_calls:
         if gen.finish_reason not in ENGINE_CUT_FINISH_REASONS:
             step_ctx["tool_calls"] = gen.tool_calls
@@ -193,8 +184,7 @@ def step_context_from_generation(
             step_ctx[CUT_TOOL_CALLS_KEY] = gen.tool_calls
     if gen.reasoning:
         step_ctx["reasoning"] = gen.reasoning
-    # ``is None``, not truthiness: an empty capture is a zero-token turn the engine did return ids
-    # for, and it must reach the trainer as one rather than as a capture failure.
+    # ``is None``: an empty capture is a zero-token turn, and must reach the trainer as one, not a capture failure.
     captured = gen.token_ids is not None
     if captured:
         step_ctx["token_ids"] = gen.token_ids
@@ -225,7 +215,6 @@ class EpisodeDispatcher:
         self._context = None if self._is_async else contextvars.copy_context()
 
     async def _offload(self, fn, *args):
-        """Run a sync env call in a worker thread, inside this episode's copied context."""
         return await asyncio.get_running_loop().run_in_executor(None, partial(self._context.run, fn, *args))
 
     async def reset(
@@ -245,7 +234,6 @@ class EpisodeDispatcher:
         return await self._settled(episode_ids, steps)
 
     async def finalize_truncated(self, episode_ids: list[int]) -> list[EnvStep]:
-        """Close still-open episodes as truncated, keeping the reward they already earned."""
         if self._is_async:
             steps = self.env.finalize_truncated(episode_ids)
         else:
@@ -262,8 +250,7 @@ class EpisodeDispatcher:
 
 @dataclass(frozen=True)
 class _PlayedEpisode:
-    """One episode as :func:`play_episode` played it: its closed trajectory, every turn generation it stepped,
-    the tokens they sampled, and the generation failure that ended it early, where one did."""
+    """``lost_turn`` is the generation failure that ended it early, where one did."""
 
     trajectory: Trajectory | None
     turns: list[TurnGeneration]
@@ -282,10 +269,9 @@ async def play_episode(
     log_prefix: str,
     keep_lost_episode: bool = False,
 ) -> _PlayedEpisode:
-    """Play one episode, the loop every driver shares: reset, request (``request_turn``, the driver's transport and
-    retries) and step each turn under ``effort``'s caps, close it truncated where still open, stamp the effort,
-    and release it on every path. A lost turn raises, unless ``keep_lost_episode``: then the episode closes on
-    what it earned, stamped :data:`EPISODE_ERROR_KEY`, the failure returned."""
+    """The loop every driver shares: reset, request and step each turn under ``effort``'s caps, close it truncated
+    where still open, stamp the effort, and release it on every path. A lost turn raises, unless ``keep_lost_episode``:
+    then the episode closes on what it earned, stamped :data:`EPISODE_ERROR_KEY`, the failure returned."""
     episode = EpisodeDispatcher(env)
     episode_ids, steps = await episode.reset([prompt], [context])
     eid, step = episode_ids[0], steps[0]
@@ -294,8 +280,7 @@ async def play_episode(
     lost: Exception | None = None
     try:
         for _ in range(env.max_turns):
-            # The engine caps this turn: the level's reasoning cap and the turn total, both narrowed to what the
-            # output budget has left; none once it holds no turn.
+            # Both caps narrowed to what the output budget has left; none once it holds no turn.
             caps = effort.turn_caps(generated)
             if step.done or caps is None:
                 break
@@ -318,8 +303,7 @@ async def play_episode(
             step = (await episode.step([eid], [gen.text], [step_ctx]))[0]
         trajectory = env.get_trajectories([eid])[0]
         if trajectory is not None and not trajectory.done:
-            # Closed by explicit truncation, never a synthetic empty turn, which would mark it ``completed`` and pay
-            # completion-graded envs; what it earned still counts, priced like a max_turns overflow unless lost.
+            # Truncated explicitly: a synthetic empty turn would mark it ``completed`` and pay completion-graded envs.
             if lost is not None:
                 trajectory.info[EPISODE_ERROR_KEY] = describe_exception(lost)
             trajectory = (await episode.finalize_truncated([eid]))[0].trajectory

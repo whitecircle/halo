@@ -1,14 +1,6 @@
-"""A sharded split short of the data-parallel degree: an empty eval slice loads, an empty train slice raises
-on every rank.
-
-Each data-parallel rank holds its own slice of a sharded dataset. An eval split with fewer shards than
-ranks leaves some ranks no rows; that is legitimate at load (the trainer's pre-sharded eval
-equalization refuses it world-uniformly once evaluation runs), so the starved rank must load an empty
-split with its peers instead of raising while they go on to their next collective. A starved train slice
-is refused, and by every rank at once: a rank raising alone leaves its peers blocked in the eval verdict.
-
-    python tests/cpu/data/test_sharded_split_emptiness.py
-"""
+"""A sharded split short of the DP degree: an empty eval slice loads, since the trainer's equalization refuses it
+once evaluation runs, and an empty train slice raises on every rank at once, since a rank raising alone blocks
+its peers in the eval verdict."""
 
 import datetime
 import json

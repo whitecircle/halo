@@ -1,26 +1,6 @@
 #!/usr/bin/env python
-"""Hand-sliced TP shards (GptOss sinks) must reach the engine gathered, exactly once, after the stream.
-
-Under tensor parallelism every param the plan owns is a DTensor, which the sync materializes full one
-at a time. The sinks are not: they carry no plan entry, are sliced by hand across the TP group, and
-are recorded by ``register_hand_sliced``. That leaves the sync two ways to be silently
-wrong, both of which serve a corrupt policy with no error at sync time:
-
-* stream them like any other param — the engine gets TP-rank 0's *slice* under the full-tensor name,
-  so the served model attends with a quarter of its sinks (or the load is rejected on arrival, after
-  the engine is paused and partly written);
-* skip them and forget the drain — nothing is ever pushed for those slots, and the engine keeps
-  generating with the pretrained sinks while the trainer moves on. Permanently off-policy, which is
-  exactly the failure ``reject_unsyncable_model`` refuses the FA2 sink reset over.
-
-So ``_send_dense_weights`` skips them by suffix in the streaming loop and re-sends them gathered from
-``iter_hand_sliced_full``. This pins that wiring: the sinks arrive once, at full shape,
-after everything streamed. The gather itself moves its tensors to CUDA before the collective, so the
-group half is the GPU tier's (``parallelism/tp``); what stands in for it here is a fake TP drain, and
-the sync's own halves — the skip and the drain — are what is under test.
-
-    python tests/cpu/grpo/test_weight_sync_tp_sink_drain.py
-"""
+"""Hand-sliced TP shards (GptOss sinks) must reach the engine gathered, exactly once, after the stream. Streamed, the
+engine gets one rank's slice under the full name; skipped with no drain, it keeps the pretrained sinks."""
 
 from __future__ import annotations
 
@@ -48,8 +28,7 @@ class _Attention(nn.Module):
 
 
 class _TPModel(nn.Module):
-    """A TP-parallelized policy as ``parallelize_attention`` leaves it: the hand-sliced params
-    registered on the model with their shard dim."""
+    """A policy as ``parallelize_attention`` leaves it: hand-sliced params registered with their shard dim."""
 
     def __init__(self, register_sinks: bool = True):
         super().__init__()
@@ -65,8 +44,7 @@ class _TPModel(nn.Module):
 
 
 class _RecordingSender:
-    """Records every forward in order, duplicates included — sending a param twice is a failure mode
-    here, so it must be observable rather than asserted away."""
+    """Records every forward in order, duplicates included, since sending a param twice is a failure mode here."""
 
     def __init__(self):
         self.sent: list[tuple[str, torch.Tensor]] = []
@@ -79,8 +57,7 @@ class _RecordingSender:
 
 
 def _fake_tp_drain(model: nn.Module):
-    """Stand-in for ``iter_hand_sliced_full``: the TP group's all-gather of each recorded
-    hand-sliced param, with the peer rank's slice faked in. Same contract — collective, in
+    """Stand-in for ``iter_hand_sliced_full`` with the peer's slice faked in. Same contract: collective, in
     ``named_parameters`` order, yielding full tensors."""
     for name, param in model.named_parameters():
         for suffix, shard_dim in hand_sliced_dims(model).items():
@@ -123,8 +100,8 @@ def test_the_forwarded_sinks_are_the_full_tensor_not_this_ranks_slice(monkeypatc
 
 
 def test_unregistered_sinks_still_stream(monkeypatch):
-    """Anti-over-rejection: without TP nothing is hand-sliced, so the same param must stream normally
-    — a skip keyed on the suffix instead of the registration would drop it from every dense run."""
+    """Without TP nothing is hand-sliced; a skip keyed on the suffix instead of the registration would drop the param
+    from every dense run."""
     model = _TPModel(register_sinks=False)
 
     sent = _sync(model, monkeypatch).sent

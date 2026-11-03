@@ -1,6 +1,5 @@
-"""The offline preparation tool's run around the bake: its own arguments and worker count, the tokenizer or processor
-and the input it bakes, the bake into a staging directory, and the publish to a local path, S3 or the Hub. Behind
-``scripts/before_training/prepare_dataset.py``."""
+"""The offline preparation tool's run around the bake, behind ``scripts/before_training/prepare_dataset.py``:
+arguments, input, staging and the publish to a local path, S3 or the Hub."""
 
 import contextlib
 import hashlib
@@ -31,8 +30,7 @@ from halo.models.segment_markers import reject_compressed_kv_rows
 
 logger = logging.getLogger(__name__)
 
-# Fixed so --test_size cuts the same split on every re-run: the assignment is baked into the
-# published artifact, and a re-preparation that reshuffled it would no longer match.
+# Fixed so --test_size cuts the same split on every re-run: the assignment is baked into the published artifact.
 _SPLIT_SEED = 42
 
 # CPUs the bake's default worker count leaves to the tool's own process and the host.
@@ -58,16 +56,14 @@ class PrepareDatasetArguments:
 
 
 def bake_num_proc() -> int:
-    """The bake's default worker count: ``HALO_DATASET_NUM_PROC``, else every CPU the process may use but
-    :data:`_BAKE_RESERVED_CPUS`. The tool runs alone on its host, so the training default's share and cap would idle
-    most of a large one."""
+    """``HALO_DATASET_NUM_PROC``, else every CPU but :data:`_BAKE_RESERVED_CPUS`: the tool runs alone on its host, so
+    the training default's share and cap would idle most of a large one."""
     override = dataset_num_proc_override()
     return override if override is not None else max(1, available_cpu_count() - _BAKE_RESERVED_CPUS)
 
 
 def apply_tokenizer_overrides(tokenizer, config: PreprocessingConfig) -> None:
-    """Apply the config's recorded pad/eos/bos/chat-template overrides, then guarantee a pad token; the tokenizer
-    and processor paths share it, so an artifact carries the same special tokens either way."""
+    """Apply recorded pad/eos/bos/chat-template overrides, then guarantee a pad token; tokenizer or processor."""
     if config.pad_token:
         tokenizer.pad_token = config.pad_token
     if config.eos_token:
@@ -112,7 +108,7 @@ def load_vlm_processor(config: PreprocessingConfig):
 
 
 def load_input_dataset(args: PrepareDatasetArguments) -> DatasetDict:
-    """The input as a DatasetDict with a ``train`` split, its test split cut by ``test_size`` when set."""
+    """A DatasetDict with a ``train`` split, its test split cut by ``test_size`` when set."""
     logger.info(f"Loading dataset from {args.input}")
 
     dataset = load_dataset_from_source(args.input)
@@ -125,15 +121,13 @@ def load_input_dataset(args: PrepareDatasetArguments) -> DatasetDict:
             logger.info("No test split, using entire dataset as train")
             dataset = DatasetDict({"train": dataset})
     elif "train" not in dataset:
-        # Only the train and test splits are baked, so a split set without train would publish an
-        # artifact holding no rows.
+        # Only train and test are baked, so a split set without train would publish an artifact holding no rows.
         raise ValueError(
             f"{args.input} has no 'train' split ({sorted(dataset)}). Point --input at the split to "
             "prepare: an '@<split>' suffix on a Hub ID, or the split's own directory of a saved DatasetDict."
         )
     elif args.test_size:
-        # A local file, a save_to_disk dir or a split-less Hub id loads as a DatasetDict, the most
-        # common input form. Splitting only the bare-Dataset case would drop --test_size.
+        # The most common input form loads as a DatasetDict; splitting only a bare Dataset would drop --test_size.
         held_out = [name for name in EVAL_SPLIT_NAMES if name in dataset]
         if held_out:
             raise ValueError(
@@ -152,8 +146,8 @@ def load_input_dataset(args: PrepareDatasetArguments) -> DatasetDict:
 
 
 def require_declared_columns(dataset: DatasetDict, config: PreprocessingConfig, source: str) -> None:
-    """Refuse a column knob of this mode naming no column of the splits the artifact bakes, before a map worker
-    dies on it with a bare ``KeyError`` or a tools or images column is silently left out."""
+    """Refuse a column knob naming no column of the baked splits, before a map worker dies on a bare ``KeyError`` or a
+    tools or images column is silently left out."""
     rendered = "text_field" if config.mode == "text" else "conversation_field"
     for knob in (rendered, "tools_field", "images_field"):
         column = getattr(config, knob)
@@ -162,14 +156,12 @@ def require_declared_columns(dataset: DatasetDict, config: PreprocessingConfig, 
 
 
 def save_to_s3(output_dir: str, s3_uri: str, overwrite: bool = False):
-    """Upload preprocessed dataset to S3."""
     logger.info(f"Uploading to S3: {s3_uri}")
 
     bucket, key = parse_s3_uri(s3_uri)
     client = S3Client(bucket=bucket)
 
-    # push_folder already handles the exists / delete / raise sequence; translate its error into the
-    # CLI's --overwrite hint.
+    # push_folder handles exists/delete/raise; translate its error into the CLI's --overwrite hint.
     try:
         client.push_folder(output_dir, key, subfolder=None, overwrite=overwrite, show_progress=True)
     except FileExistsError as e:
@@ -178,9 +170,8 @@ def save_to_s3(output_dir: str, s3_uri: str, overwrite: bool = False):
 
 
 def stage_local_output(dest: str, overwrite: bool = False) -> str:
-    """The sibling of ``dest`` a local output bakes into, cleared of an earlier run's: on the destination's
-    filesystem, so the publish is a rename rather than a second write. An existing ``dest`` without ``overwrite``
-    raises here, before the bake."""
+    """The sibling of ``dest`` a local output bakes into, on its filesystem so the publish is a rename. An existing
+    ``dest`` without ``overwrite`` raises here, before the bake."""
     if os.path.exists(dest) and not overwrite:
         raise FileExistsError(f"Output path already exists: {dest}. Use --overwrite to replace.")
     return clear_staging_path(dest)
@@ -243,8 +234,7 @@ def save_to_hf_hub(
 
 
 def bake_scratch_path(destination: str) -> str:
-    """The datasets-cache directory a bake to ``destination`` holds its intermediate maps in, cleared of what a killed
-    bake to it left: named after the destination, so a rerun reaps those full corpus copies before it bakes."""
+    """The directory a bake holds intermediate maps in, named after the destination so a rerun reaps a killed one's."""
     path = os.path.join(ensure_cache_dir(), f"prepare-dataset-{hashlib.md5(destination.encode()).hexdigest()}")
     shutil.rmtree(path, ignore_errors=True)
     return path
@@ -253,9 +243,8 @@ def bake_scratch_path(destination: str) -> str:
 def bake(
     dataset: DatasetDict, tokenizer_or_processor, config: PreprocessingConfig, output_dir: str, destination: str
 ) -> None:
-    """Preprocess ``dataset`` into ``output_dir`` for ``destination``. Every intermediate map writes a scratch
-    directory of the datasets cache (:func:`bake_scratch_path`), removed afterwards, since no later run re-reads
-    them."""
+    """Every intermediate map writes a scratch directory (:func:`bake_scratch_path`), removed afterwards, since no
+    later run re-reads them."""
     logger.info(f"Processing dataset into {output_dir}")
     with scratch_dataset_maps(bake_scratch_path(destination)):
         metadata = preprocess_dataset(
@@ -277,12 +266,11 @@ def bake(
 
 
 def run_dataset_preparation(args: PrepareDatasetArguments, config: PreprocessingConfig) -> None:
-    """Bake ``args.input`` under ``config`` and publish it to ``args.output``: refused under a multi-process launch,
-    a dry run stops after the summary, and a local output is baked beside its destination and swapped in."""
+    """Refused under a multi-process launch; a dry run stops after the summary; a local output is baked beside its
+    destination and swapped in."""
     state = PartialState()
     if state.num_processes > 1:
-        # The tokenization passes coordinate across ranks, but the publish does not: every rank would
-        # push the same artifact to one S3 key, local directory or Hub repo.
+        # The publish does not coordinate: every rank would push one artifact to one S3 key, directory or Hub repo.
         sys.exit(
             f"prepare_dataset.py is a single-process tool but was launched with {state.num_processes} "
             "processes. Launch it with plain python, not torchrun/accelerate."

@@ -1,26 +1,9 @@
 #!/usr/bin/env python
-"""``compute_metrics`` under pipeline parallelism must score what an unsplit model scores.
+"""``compute_metrics`` under PP scores what an unsplit model scores.
 
-A loss-only PP eval is silently metric-less: with ``return_outputs=False`` the prediction step
-returns ``(loss, None, None)`` and HF's eval loop — which guards on ``logits is not None`` — skips
-``compute_metrics`` without a word. This test pins the path that carries predictions instead: one
-forward-only pass yields the last stage's merged output, the adapter's ``predictions_fn`` and the
-user's ``preprocess_logits_for_metrics`` reduce it on that stage, and the reduced tensor is
-broadcast down the chain.
-
-What each check would catch:
-
-  * predictions never arriving (the silent skip) — ``eval_accuracy`` would be absent entirely
-  * a wrong reduction, a mis-trimmed pad row, or a broadcast that corrupts the values — the metric
-    would not match a reference computed here from the same weights on one GPU with no pipeline
-  * a dtype-blind broadcast: ``preprocess_logits_for_metrics`` returns int64 argmax indices, which a
-    fixed fp32 receive buffer garbles silently — the metadata hop is what sizes and types it
-  * ranks disagreeing — every rank of the chain must report the identical metric
-
-The reference is derived independently: an unsplit copy of the same initial weights, forwarded on
-rank 0, argmaxed and scored with plain tensor ops — never through the pipeline code under test.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_eval_metrics.py
+A loss-only PP eval returns ``(loss, None, None)`` and HF's loop skips ``compute_metrics`` without a word.
+``preprocess_logits_for_metrics`` returns int64 argmax indices, which a fixed fp32 receive buffer garbles silently, so
+the metadata hop sizes and types them.
 """
 
 import sys
@@ -45,7 +28,6 @@ BATCH = 4
 
 
 def token_accuracy(predictions, labels) -> float:
-    """Token accuracy over non-ignored next-token targets, from argmax indices."""
     predictions = torch.as_tensor(predictions)
     labels = torch.as_tensor(labels)
     preds, targets = predictions[:, :-1], labels[:, 1:]
@@ -54,20 +36,17 @@ def token_accuracy(predictions, labels) -> float:
 
 
 def next_token_accuracy(eval_pred) -> dict:
-    """HF's ``compute_metrics`` contract: one ``EvalPrediction`` in, a metric dict out."""
     predictions, labels = torch.as_tensor(eval_pred.predictions), torch.as_tensor(eval_pred.label_ids)
     print(f"[compute_metrics] predictions={tuple(predictions.shape)} labels={tuple(labels.shape)}", flush=True)
     return {"accuracy": token_accuracy(predictions, labels)}
 
 
 def argmax_only(logits, labels):
-    """Reduce the [B, S, V] plane to [B, S] int64 before it crosses the chain."""
     del labels
     return logits.argmax(dim=-1)
 
 
 def reference_accuracy(eval_dataset) -> float:
-    """Same metric from an unsplit model on one GPU — no pipeline anywhere in this path."""
     model = build_dense_model().cuda().eval()
     input_ids = torch.tensor(eval_dataset["input_ids"], device="cuda")
     attention_mask = torch.tensor(eval_dataset["attention_mask"], device="cuda")
@@ -90,9 +69,9 @@ def run(ctx):
         ctx.output_dir,
         max_steps=1,
         per_device_train_batch_size=BATCH,
-        learning_rate=0.0,  # frozen weights: the metric must match the reference at init
+        learning_rate=0.0,  # Frozen weights: the metric must match the reference at init.
         max_length=SEQ_LEN,
-        eval_strategy="no",  # evaluate() is called explicitly below, at the init weights
+        eval_strategy="no",  # Called explicitly below, at the init weights.
         per_device_eval_batch_size=BATCH,
     )
 
@@ -109,13 +88,10 @@ def run(ctx):
     )
 
     checks, metrics = {}, {}
-    # No construction-time gate may reject these under PP, and the callables must survive onto the
-    # trainer rather than being swallowed by the distributed kwargs seam.
+    # The callables must survive onto the trainer rather than being swallowed by the distributed kwargs seam.
     checks["compute_metrics_accepted_under_pp"] = trainer.compute_metrics is not None
-    # Hoisted onto the last stage's reduction rather than left for HF's evaluation loop: run there
-    # it would only shrink the broadcast after the raw plane already crossed the chain, and running
-    # in both places would argmax an argmax. Cleared on the trainer is the hoist, not a drop — the
-    # adapter now carries it, and the accuracy pinned below proves it ran exactly once.
+    # Hoisted onto the last stage: run in HF's loop it would only shrink the broadcast after the raw plane crossed the
+    # chain, and in both places would argmax an argmax. The accuracy pinned below proves it ran exactly once.
     checks["preprocess_logits_for_metrics_hoisted_onto_the_last_stage"] = (
         trainer._pp_adapter.predictions_fn is not None and trainer.preprocess_logits_for_metrics is None
     )
@@ -123,8 +99,7 @@ def run(ctx):
     eval_metrics = trainer.evaluate()
     reference = reference_accuracy(eval_dataset)
 
-    # The metric must exist — its absence is precisely the silent skip, and an assertion on the
-    # value alone would raise KeyError instead of reporting a failed check.
+    # Its absence is the silent skip, and an assertion on the value alone would raise KeyError over a failed check.
     checks["accuracy_reported"] = "eval_accuracy" in eval_metrics
     measured = eval_metrics.get("eval_accuracy")
     log(
@@ -133,18 +108,17 @@ def run(ctx):
     )
     checks["accuracy_matches_unsplit_reference"] = measured is not None and abs(measured - reference) < 1e-6
 
-    # Anti-vacuity: a metric that is 0.0 or 1.0 would match a broken reference just as well.
+    # Anti-vacuity: 0.0 or 1.0 would match a broken reference just as well.
     checks["accuracy_is_nondegenerate"] = measured is not None and 0.0 < measured < 1.0
 
-    # Every rank of the chain must report the same value (the broadcast, not a per-stage artifact).
+    # Every rank of the chain must report the same value.
     gathered = [None] * ctx.world_size
     dist.all_gather_object(gathered, measured)
     checks["accuracy_identical_across_ranks"] = all(
         value is not None and abs(value - gathered[0]) < 1e-9 for value in gathered
     )
 
-    # Loss-only eval must keep working alongside it (the cheap path is still the default when
-    # prediction_loss_only is set) and must agree with the metrics path's loss.
+    # Loss-only eval is still the default under prediction_loss_only and must agree with the metrics path's loss.
     loss_only = trainer.evaluate(metric_key_prefix="lo")
     checks["loss_matches_between_paths"] = abs(loss_only["lo_loss"] - eval_metrics["eval_loss"]) < 1e-6
 

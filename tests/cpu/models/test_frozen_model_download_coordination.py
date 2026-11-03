@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""The frozen/teacher model's FIRST hub contact is the coordinated source resolution.
-
-``load_frozen_auxiliary_model`` is the one loader whose repo nothing pre-populates (the policy path
-resolves its own source before any per-rank read). Its ``AutoConfig.from_pretrained`` — enough to
-pull config.json and import a remote modeling file — must not run before
-``resolve_model_source``: on a cold cache every rank of every node then hits the hub at once, and
-per-node caches would each answer with whatever commit they hold. Both the config and the weight
-fetch must then read at the revision the resolution agreed, so a teacher scored on one node is the
-same teacher as on every other.
-
-    python tests/cpu/models/test_frozen_model_download_coordination.py
-"""
+"""The frozen/teacher model's first hub contact is the coordinated source resolution.
+On a cold cache every rank would hit the hub at once, and per-node caches could each answer with a different commit."""
 
 from unittest.mock import MagicMock, patch
 

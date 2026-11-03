@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""The CP wrapper hands the chunk's ``attention_mask`` to the wrapped forward only where something besides attention
-reads it.
-
-Ulysses attention never reads the mask, while transformers' flash mask construction reads it back to the host
-(``flash_attention_mask``'s ``.all()``), one device sync per forward for nothing. The router aux loss is the one
-reader of the CP roster outside attention: it keeps padding out of its token statistics, so a forward computing it
-(``output_router_logits``) keeps the mask. On two gloo ranks every roster family, its MoE families with the aux term
-on, trains to the bitwise loss, aux term and gradients of the wrapper that always hands the mask over, on a batch
-whose padding falls in one rank's chunk; dropping the mask from an aux-loss family moves its aux term there.
-Every family whose forward computes the aux term runs with it on, every other one without.
-
-Run: python tests/cpu/parallelism/test_cp_attention_mask_reach.py
-"""
+"""The CP wrapper hands ``attention_mask`` to the forward only where the router aux loss reads it, since flash mask
+construction reads it back to the host, a device sync per forward."""
 
 from pathlib import Path
 from unittest.mock import patch
@@ -39,12 +28,10 @@ from tests.common.equivalence.cp_equivalence import (
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import single_process_ep_config
 
-# Loud enough that padding counted into the router statistics moves the aux term past fp32 rounding.
+# Loud enough that padding in the router statistics moves the aux term past fp32 rounding.
 MOE_AUX_OVERRIDES = {"output_router_logits": True, "router_aux_loss_coef": 0.1}
-# The roster families whose forward returns ``aux_loss`` under ``output_router_logits``, run with it on; every other
-# family runs without it.
 AUX_LOSS_FAMILIES = ("gpt_oss", "qwen3_5_moe_text", "qwen3_moe")
-# The last row's trailing pads, all inside the final rank's chunk.
+# All inside the final rank's chunk.
 PADS = SEQ // CP_SIZE // 2
 
 
@@ -65,8 +52,7 @@ def _wrapped(name: str, cp_config) -> UlyssesModel:
 
 
 def _step(name: str, cp_config) -> dict:
-    """One training step's loss, aux term and gradients, the mask the wrapped forward received, and whether each
-    flash mask construction (which reads a given mask back to the host) was given one."""
+    """Also records the mask received and whether each flash mask construction was given one."""
     wrapper = _wrapped(name, cp_config)
     received, flash_masks = [], []
     wrapper.model.register_forward_pre_hook(
@@ -134,8 +120,7 @@ def test_the_mask_reaches_only_an_aux_loss_forward(recorded, name):
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_flash_mask_construction_reads_a_mask_only_for_an_aux_loss_forward(recorded, name):
-    """The host read itself: transformers' flash mask construction is handed a mask only where the aux loss keeps
-    it. A family whose remote code builds its masks itself never reaches the construction."""
+    """A family whose remote code builds its masks itself never reaches the construction."""
     for runs in recorded:
         current, reference = runs[name]["current"]["flash_masks"], runs[name]["always_masked"]["flash_masks"]
         assert len(current) == len(reference)

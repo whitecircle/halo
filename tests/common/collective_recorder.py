@@ -1,23 +1,6 @@
-"""A recording ``torch.distributed`` for one simulated rank of a CPU-only job.
-
-:func:`recording_rank` runs its body as global rank ``rank`` of a ``world_size``-rank job on
-``gpus_per_node``-GPU nodes: the environment holds the launcher's variables for that rank and none of
-the host's, torch's fake backend is the default process group, CUDA reads as absent and the c10d
-store is an in-memory one. The process-group builds, collectives and device meshes the body issues,
-and its c10d-store operations, are appended to the yielded :class:`CollectiveTrace`, one line an
-event, in call order. A ``torch.distributed`` function is replaced by identity, under every name a
-loaded module holds it by, so a call through ``distributed_c10d`` or DTensor's collective helpers is
-caught as well as one through ``torch.distributed``. A collective or functional collective with no
-model here raises instead of running unrecorded.
-
-The simulated ranks run the same code on one filesystem, so a peer's value is taken to be this
-rank's own: a tensor broadcast leaves the tensor as it is, a gather fills every slot with this rank's
-value, a sum is this rank's input times the group size and a min, max or average the input itself, a
-scatter keeps this rank's slot of the list (a rank the list is not sent from keeps its input), and a
-store wait on a key a peer writes returns at once. An object broadcast from global rank 0 is where one
-rank decides for all, so a rank given rank 0's trace of the same body receives the payloads rank 0
-recorded, in order.
-"""
+"""A recording ``torch.distributed`` for one simulated rank of a CPU-only job, on torch's fake backend. Functions are
+replaced by identity under every name a loaded module holds them by; an unmodeled collective raises. A peer's value is
+taken to be this rank's own, except object broadcasts from rank 0, replayed from rank 0's trace."""
 
 from __future__ import annotations
 
@@ -39,8 +22,7 @@ from torch.distributed import distributed_c10d as c10d
 from tests.common.distributed import fake_process_group, reset_shared_filesystem_consensus
 
 _WORLD = "world"
-# The ``torch.distributed`` queries and process-group lifecycle calls, which issue no collective. A
-# recording leaves them as they are and models or refuses every other function the package exports.
+# Queries and lifecycle calls, which issue no collective. A recording models or refuses every other exported function.
 _NON_COLLECTIVES = frozenset(
     {
         "destroy_process_group",
@@ -67,7 +49,7 @@ _NON_COLLECTIVES = frozenset(
         "supports_complex",
     }
 )
-# Environment variables a launcher or the toolkit sets; a recording sees only the ones it sets itself.
+# A recording sees only the ones it sets itself.
 _LAUNCH_VARIABLE_PREFIXES = ("ACCELERATE_", "DIST_", "HALO_", "NVLINK_", "SLURM_", "TORCHELASTIC_")
 _LAUNCH_VARIABLES = frozenset(
     {
@@ -83,7 +65,7 @@ _LAUNCH_VARIABLES = frozenset(
         "WORLD_SIZE",
     }
 )
-# The reductions a rank's own input stands in for: every rank holds the same value.
+# Every rank holds the same value, so a rank's own input stands in.
 _IDENTITY_REDUCTIONS = (dist.ReduceOp.MIN, dist.ReduceOp.MAX, dist.ReduceOp.AVG)
 
 
@@ -106,10 +88,7 @@ class CollectiveTrace:
 
     @contextlib.contextmanager
     def pause(self) -> Iterator[None]:
-        """Leave out what the body issues: the internals of a stand-in that is itself one event.
-
-        A modeled call runs unrecorded, and a refused one runs on the fake backend.
-        """
+        """Leave out what the body issues: the internals of a stand-in that is itself one event."""
         self._paused += 1
         try:
             yield
@@ -118,8 +97,8 @@ class CollectiveTrace:
 
 
 class _RecordingStore:
-    """The job's c10d store as one rank sees it alone: its own writes land, a key only a peer writes
-    reads as empty, and a wait never blocks."""
+    """The job's c10d store as one rank sees it alone: own writes land, a peer's key reads as empty, and a wait never
+    blocks."""
 
     def __init__(self, trace: CollectiveTrace) -> None:
         self._trace = trace
@@ -153,7 +132,7 @@ class _RecordingStore:
 
 
 def _brace_keys(keys: list[str]) -> str:
-    """``keys`` with the directory they share written once, as ``dir/{a,b}``."""
+    """``keys`` with their shared directory written once, as ``dir/{a,b}``."""
     directories = {key.rpartition("/")[0] for key in keys}
     if len(keys) < 2 or len(directories) > 1:
         return " ".join(keys)
@@ -184,10 +163,8 @@ def _blocking(name: str, async_op: bool) -> None:
 
 
 class _ModeledCalls:
-    """The stand-ins for the ``torch.distributed`` calls the recorder models, recording into ``trace``.
-
-    ``rank0`` is global rank 0's trace of the same body, whose object broadcasts this rank receives.
-    """
+    """Stand-ins for the calls the recorder models; ``rank0`` is global rank 0's trace, whose object broadcasts this
+    rank receives."""
 
     def __init__(self, trace: CollectiveTrace, rank0: CollectiveTrace | None) -> None:
         self._trace = trace
@@ -196,7 +173,6 @@ class _ModeledCalls:
         self._real_init_device_mesh = device_mesh.init_device_mesh
 
     def replacements(self) -> dict[Callable, Callable]:
-        """Each modeled function mapped to its stand-in."""
         modeled = {
             c10d.new_group: self.new_group,
             c10d.all_reduce: self.all_reduce,
@@ -216,7 +192,6 @@ class _ModeledCalls:
             return self._real_new_group(ranks, *args, **kwargs)
 
     def init_device_mesh(self, device_type, mesh_shape, **kwargs):
-        """One event, then the mesh built over the fake process group on the CPU."""
         self._trace.record("init_device_mesh", device_type, tuple(mesh_shape), kwargs.get("mesh_dim_names"))
         with self._trace.pause():
             return self._real_init_device_mesh("cpu", mesh_shape, **kwargs)
@@ -283,8 +258,8 @@ class _ModeledCalls:
 
 
 def collectives_except(allowed: Collection[Callable]) -> dict[str, Callable]:
-    """Every ``torch.distributed`` function outside :data:`_NON_COLLECTIVES` and ``allowed``, and every
-    functional collective, by qualified name."""
+    """Every ``torch.distributed`` function outside :data:`_NON_COLLECTIVES` and ``allowed``, and every functional
+    collective."""
     distributed = {
         f"torch.distributed.{name}": function
         for name in c10d.__all__
@@ -303,11 +278,8 @@ def collectives_except(allowed: Collection[Callable]) -> dict[str, Callable]:
 
 @contextlib.contextmanager
 def rebind_everywhere(replacements: Mapping[object, object]) -> Iterator[None]:
-    """Rebind, for the body, every module attribute that is one of ``replacements``' keys to its value.
-
-    By identity, so each name a loaded module holds the object by is rebound: its defining module's,
-    a package's re-export and every ``from ... import`` of it.
-    """
+    """Rebind, for the body, every module attribute that is one of ``replacements``' keys, by identity, re-exports
+    included."""
     by_identity = {id(real): replacement for real, replacement in replacements.items()}
     with contextlib.ExitStack() as stack:
         for module in list(sys.modules.values()):
@@ -322,8 +294,8 @@ def rebind_everywhere(replacements: Mapping[object, object]) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _launch_environment(rank: int, world_size: int, gpus_per_node: int, env: Mapping[str, str] | None):
-    """``os.environ`` as a torchrun launch sets it for ``rank``, plus ``env``, with every launcher and
-    toolkit variable of the host removed. The whole environment is restored on exit."""
+    """``os.environ`` as torchrun sets it for ``rank`` plus ``env``, the host's launcher and toolkit variables removed;
+    restored on exit."""
     with patch.dict(os.environ):
         host = [name for name in os.environ if name in _LAUNCH_VARIABLES or name.startswith(_LAUNCH_VARIABLE_PREFIXES)]
         for name in host:
@@ -346,13 +318,8 @@ def recording_rank(
     env: Mapping[str, str] | None = None,
     rank0: CollectiveTrace | None = None,
 ) -> Iterator[CollectiveTrace]:
-    """Run the body as ``rank`` of the simulated job, recording what it issues.
-
-    ``env`` is what the body's environment holds beyond the launcher's variables (a filesystem
-    declaration, say). ``rank0`` is global rank 0's trace of the same body, whose object broadcasts
-    this rank receives. The shared-filesystem consensus starts and ends unresolved, as in a fresh
-    process.
-    """
+    """Run the body as ``rank`` of the simulated job, recording what it issues; the filesystem consensus starts and
+    ends unresolved."""
     trace = CollectiveTrace()
     store = _RecordingStore(trace)
     with contextlib.ExitStack() as stack:

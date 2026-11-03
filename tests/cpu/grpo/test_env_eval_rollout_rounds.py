@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Env-GRPO's eval loader draws a rollout round of ``eval_rollout_batch_size`` rows per rank.
-
-An eval batch is rolled out synchronously, so its wall time is its slowest episode. The round size
-reaches both loader paths through the mixin's ``_eval_loader_batch_size`` hook, ``per_device_eval_batch_size``
-(the loss forward's chunk) is what the config set once the loader is built, and the round's geometry
-is refused at construction where it would only fail after a full round of rollouts.
-
-    python tests/cpu/grpo/test_env_eval_rollout_rounds.py
-"""
+"""Env-GRPO's eval loader draws a rollout round of ``eval_rollout_batch_size`` rows per rank. The round's geometry is
+refused at construction where it would only fail after a full round of rollouts."""
 
 import types
 from unittest import mock
@@ -24,9 +17,6 @@ SENTINEL = object()
 
 
 class _Args:
-    """The eval readings a real ``TrainingArguments`` exposes: an evaluating run's strategy and its two
-    eval-batch sizes."""
-
     def __init__(self, per_device: int = 4, drop_last: bool = False):
         self.eval_strategy = "steps"
         self.eval_on_start = False
@@ -115,16 +105,14 @@ def test_round_must_hold_whole_eval_groups_and_a_full_tail():
 
 
 def test_the_default_round_must_hold_whole_groups_per_rank():
-    """With no ``eval_rollout_batch_size`` the round IS ``per_device_eval_batch_size``, so that is the
-    geometry the gate reads. TRL validates only the GLOBAL eval batch, so nothing else catches it."""
+    """The round is ``per_device_eval_batch_size``; TRL validates only the global eval batch, so nothing else would."""
     with pytest.raises(ValueError, match=r"per_device_eval_batch_size \(6\) must be divisible"):
         _validate(_trainer(None, per_device=6, num_generations_eval=4))
     _validate(_trainer(None, per_device=8, num_generations_eval=4))
 
 
 def test_an_explicit_round_is_the_geometry_that_is_checked():
-    """With ``eval_rollout_batch_size`` set, the loader draws that many rows per rank and the eval batch
-    is only the loss forward's chunk, so it is the round that must hold whole groups."""
+    """The eval batch is then only the loss forward's chunk, so the round is what must hold whole groups."""
     _validate(_trainer(8, per_device=6, num_generations_eval=4))
     with pytest.raises(ValueError, match=r"eval_rollout_batch_size \(6\)"):
         _validate(_trainer(6, per_device=8, num_generations_eval=4))

@@ -1,11 +1,6 @@
-"""Packed pipeline microbatches on transformers' flash dispatch: a tiny family's stages handed the varlen set by the
-stage seam, against the same stages left to derive it in every attention layer and against the unsplit model.
-
-The family sweep (:func:`family_findings`) runs on the CPU reference kernels of
-:mod:`tests.common.packed_flash_varlen`, which rebind process-global state, so it runs in a fresh interpreter per
-family (:func:`main`) and reports through one ``FINDINGS:`` line. :func:`run_schedule_arm` drives the real schedule
-over a stage group, on those kernels over gloo or on a device's own flash kernels.
-"""
+"""Packed pipeline microbatches on transformers' flash dispatch: stages handed the varlen set vs left to derive it vs
+the unsplit model. The sweep rebinds process-global state, so it runs in a fresh interpreter per family (:func:`main`)
+and reports through one ``FINDINGS:`` line."""
 
 import contextlib
 import copy
@@ -43,13 +38,12 @@ from tests.common.pp_equivalence import build_runner_stage, gather_stage_grads
 from tests.common.tiny_models import TINY_PP_SPLIT_OVERRIDES, tiny_family_model
 
 PP_SIZE = 2
-# The pipeline's fixed row width: past the tiny GptOss sliding window, so its windowed layers take the window.
+# Past the tiny GptOss sliding window, so its windowed layers take the window.
 MAX_LENGTH = 96
-# Packed rows as document lengths, one row per microbatch: one row its documents fill, ending on its longest, and
-# every other row leaving a pad tail; the one-document row's tail outgrows its document, and two documents outgrow
-# the sliding window. The filled row comes second, so every replica's first two microbatches hold it.
+# Document lengths, one row per microbatch: a filled row second so every replica's first two microbatches hold it, the
+# rest leaving pad tails; a one-document row's tail outgrows its document, and two documents outgrow the window.
 PP_ROW_DOCUMENTS = ((9, 14), (20, MAX_LENGTH - 20), (3, 20, 8), (12,), (70, 17))
-# A row its one document fills: no restart, so transformers runs it on the dense kernel.
+# No restart, so transformers runs it on the dense kernel.
 FULL_ROW_DOCUMENTS = ((MAX_LENGTH,),)
 VOCAB_FLOOR = 4
 VOCAB_CEIL = 1000
@@ -57,9 +51,8 @@ VOCAB_CEIL = 1000
 
 @functools.cache
 def seam_sweep_skip(name: str) -> str | None:
-    """Why packing family ``name`` has no seam to sweep against the derivation, or ``None``: pipeline parallelism does
-    not register its backbone, its GatedDeltaNet mixers read the markers the seam hands them, or it never resolves to
-    flash."""
+    """Why ``name`` has no seam to sweep, or None: PP does not register its backbone, its mixers read the markers, or
+    it never resolves to flash."""
     model = tiny_family_model(PACKING_FAMILIES[name])
     spec = resolve_pp_spec(backbone_with_layers(model))
     if not spec.validated or spec.refusal is not None:
@@ -72,7 +65,7 @@ def seam_sweep_skip(name: str) -> str | None:
 
 
 def packed_rows(documents: tuple[tuple[int, ...], ...], seed: int = SEED) -> list[dict]:
-    """One packed dataset row per entry of ``documents``, as TRL's ``pack_dataset`` emits it."""
+    """One packed row per entry of ``documents``, as TRL's ``pack_dataset`` emits it."""
     generator = torch.Generator().manual_seed(seed)
     return [
         {
@@ -84,8 +77,7 @@ def packed_rows(documents: tuple[tuple[int, ...], ...], seed: int = SEED) -> lis
 
 
 def pp_packed_batch(model_config, rows: list[dict]) -> dict[str, torch.Tensor]:
-    """``rows`` through the collator a pipeline run trains on: the factory's packing collator keeping its rows, padded
-    to :data:`MAX_LENGTH` by the pipeline's fixed-shape wrapper."""
+    """``rows`` through the collator a pipeline trains on, padded to :data:`MAX_LENGTH` by the fixed-shape wrapper."""
     collator = select_data_collator(
         padding_tokenizer(),
         train_on_completions_only=False,
@@ -100,12 +92,11 @@ def pp_packed_batch(model_config, rows: list[dict]) -> dict[str, torch.Tensor]:
 
 
 def zero_pad_tails(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """``batch`` with each pad tail's positions set to 0, the constant fill that makes every pad its own segment."""
+    """Each pad tail's positions set to 0, the constant fill making every pad its own segment."""
     return {**batch, "position_ids": batch["position_ids"].masked_fill(batch["input_ids"] == PAD_ID, 0)}
 
 
 def sweep_layouts(model_config) -> dict[str, dict[str, torch.Tensor]]:
-    """The packed batches the sweep splits into one-row microbatches, by layout."""
     ramp = pp_packed_batch(model_config, packed_rows(PP_ROW_DOCUMENTS))
     return {
         "ramp_tail": ramp,
@@ -116,15 +107,15 @@ def sweep_layouts(model_config) -> dict[str, dict[str, torch.Tensor]]:
 
 @contextlib.contextmanager
 def seam_withheld() -> Iterator[None]:
-    """The stage forward as it ran before the seam: no varlen set handed to the backbone."""
+    """The stage forward with no varlen set handed to the backbone."""
     with mock.patch.object(stage_module, "packed_row_segment_kwargs", lambda position_ids, markers: {}):
         yield
 
 
 @dataclass
 class Forward:
-    """One no-grad forward on the reference kernels: its output, each kernel call, the derivation counts and the host
-    reads made inside attention."""
+    """One no-grad forward on the reference kernels: output, kernel calls, derivation counts and host reads inside
+    attention."""
 
     logits: torch.Tensor
     calls: list[tuple]
@@ -182,8 +173,8 @@ def _compare(where: str, seam: Forward, derived: Forward, unsplit: Forward, widt
 
 
 def family_findings(name: str) -> list[str]:
-    """What breaks when ``name``'s pipeline stages are handed their packed microbatches' varlen set, then a ``reach:``
-    entry counting the attention calls that read it. For a family :func:`seam_sweep_skip` lets through."""
+    """What breaks when ``name``'s stages get their varlen set, plus a ``reach:`` entry. For a family
+    :func:`seam_sweep_skip` lets through."""
     torch.manual_seed(SEED)
     model = tiny_family_model(PACKING_FAMILIES[name], overrides=TINY_PP_SPLIT_OVERRIDES.get(name)).eval()
     config = model.config
@@ -211,8 +202,7 @@ def main(name: str) -> None:
 
 @dataclass(frozen=True)
 class ScheduleCase:
-    """One schedule drive of a packed batch: the family, the schedule, the microbatch count (one packed row each),
-    activation checkpointing and the fused last-stage loss."""
+    """One schedule drive of a packed batch: family, schedule, microbatch count, GC and the fused last-stage loss."""
 
     family: str = "dense:qwen3"
     schedule: str = "1f1b"
@@ -223,8 +213,8 @@ class ScheduleCase:
 
 @dataclass
 class ScheduleArm:
-    """A drive's step loss (last stage), step-1 gradients by unsplit name, eval loss and forward-only output, with the
-    derivation counts and the host reads inside attention across all three passes."""
+    """A drive's step loss, step-1 gradients, eval loss and forward-only output, with derivation counts and host
+    reads."""
 
     loss: torch.Tensor | None
     grads: dict[str, torch.Tensor]
@@ -236,7 +226,7 @@ class ScheduleArm:
 
 
 def dp_rows(case: ScheduleCase, dp_rank: int) -> list[dict]:
-    """This data-parallel replica's packed rows, one per microbatch, distinct across replicas."""
+    """This DP replica's packed rows, one per microbatch, distinct across replicas."""
     documents = [PP_ROW_DOCUMENTS[(dp_rank + i) % len(PP_ROW_DOCUMENTS)] for i in range(case.n_microbatches)]
     return packed_rows(tuple(documents), seed=SEED + dp_rank)
 
@@ -253,9 +243,8 @@ def run_schedule_arm(
     reference_kernels: bool = True,
     step_scope: Callable[[], contextlib.AbstractContextManager] = contextlib.nullcontext,
 ) -> ScheduleArm:
-    """COLLECTIVE over the chain and the stage group: one training step (inside ``step_scope``), one eval-loss drive
-    and one forward-only drive of this replica's packed batch through the real runner, on an FSDP2 stage built from a
-    fixed seed; on the reference kernels, or on the ones transformers loads for ``attn_implementation``."""
+    """COLLECTIVE over the chain and stage group: one training step, one eval-loss drive and one forward-only drive
+    through the real runner."""
     torch.manual_seed(SEED)
     model = tiny_family_model(PACKING_FAMILIES[case.family])
     use_flash(model.config, attn_implementation)
@@ -293,8 +282,8 @@ def _arm_tensors(arm: ScheduleArm) -> dict[str, torch.Tensor | None]:
 
 
 def arm_differences(a: ScheduleArm, b: ScheduleArm) -> dict[str, float]:
-    """Each tensor two drives disagree on in any bit (step loss, eval loss, forward-only output, a gradient by name),
-    with its largest absolute difference; a tensor only one drive holds counts as infinitely far."""
+    """Each tensor two drives disagree on in any bit, with its largest difference; a tensor only one holds is
+    infinitely far."""
     ours, theirs = _arm_tensors(a), _arm_tensors(b)
     differences = {}
     for name in ours.keys() | theirs.keys():
@@ -309,8 +298,7 @@ def arm_differences(a: ScheduleArm, b: ScheduleArm) -> dict[str, float]:
 
 
 def seam_findings(seam: ScheduleArm, derived: ScheduleArm) -> list[str]:
-    """What the seam left derived in an attention layer (forward or recompute) or read back inside attention, and
-    whether the drive without it derived anything at all."""
+    """What the seam left derived or read back inside attention, and whether the drive without it derived anything."""
     findings = []
     if not seam.grads:
         findings.append("anti-vacuity: the drive produced no gradient")

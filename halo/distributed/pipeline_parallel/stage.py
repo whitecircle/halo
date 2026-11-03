@@ -1,9 +1,5 @@
-"""The pipeline stage module: one contiguous slice of a model with bare-tensor I/O.
-
-A stage is the real model mutated in place: its decoder-layer list is sliced, the post-layers modules
-are neutralized off the last stage, and non-first stages run on ``inputs_embeds`` so HF's own
-``embed_tokens`` guard skips the embedding; each family's masks, rotary and MoE handling are inherited.
-"""
+"""A pipeline stage: the real model mutated in place, its layer list sliced and post-layers modules neutralized off the
+last stage. Non-first stages run on ``inputs_embeds`` so HF's own ``embed_tokens`` guard skips the embedding."""
 
 from __future__ import annotations
 
@@ -48,17 +44,12 @@ PP_STAGE_PARTITION_ATTR = "_pp_stage_partition"
 
 
 def _join(*parts: str) -> str:
-    """Dotted-join the non-empty parts (the backbone prefix is empty when the model IS the backbone)."""
     return ".".join(part for part in parts if part)
 
 
 def rebase_layer_index(name: str, src_root: str, dst_root: str, delta: int) -> str | None:
-    """Move a layer path from ``src_root`` to ``dst_root``, shifting its index by ``delta``.
-
-    Both directions of the stage naming map and the stage-aware loader's key filter go through this,
-    so a slice and its inverse cannot drift apart. ``None`` when ``name`` is not a layer path under
-    ``src_root``.
-    """
+    """Move a layer path from ``src_root`` to ``dst_root``, shifting its index by ``delta``; ``None`` off a layer path.
+    Both naming directions and the loader's key filter use this, so a slice and its inverse cannot drift."""
     parts = split_layer_path(name, src_root)
     if parts is None:
         return None
@@ -68,15 +59,8 @@ def rebase_layer_index(name: str, src_root: str, dst_root: str, delta: int) -> s
 
 @dataclass(frozen=True)
 class StageLayout:
-    """Where a model's pipeline-relevant modules sit, as dotted paths in its own unsplit naming.
-
-    Attributes:
-        backbone_prefix: the backbone's path; empty when the model is the backbone.
-        layer_attr: the backbone attribute holding the decoder-layer list.
-        head_attr: the model attribute holding the task head.
-        post_layer_paths: the final norm, then the family's tail modules; neutralized off the last stage.
-        embedding_path: the input embedding (with any norm it carries); dropped off stage 0.
-    """
+    """Where a model's pipeline-relevant modules sit, as dotted paths in its unsplit naming. ``post_layer_paths``
+    (final norm, tail modules) are neutralized off the last stage; ``embedding_path`` is dropped off stage 0."""
 
     backbone_prefix: str
     layer_attr: str
@@ -86,8 +70,6 @@ class StageLayout:
 
     @classmethod
     def of(cls, model: nn.Module) -> StageLayout:
-        """``model``'s layout, probed through its family's
-        :class:`~halo.distributed.pipeline_parallel.families.PPFamilySpec`."""
         backbone = backbone_with_layers(model)
         spec = resolve_pp_spec(backbone)
         prefix = module_path(model, backbone)
@@ -115,13 +97,11 @@ class StageLayout:
         return f"{_join(self.backbone_prefix, self.layer_attr)}."
 
     def dropped_prefixes(self, is_first: bool, is_last: bool) -> tuple[str, ...]:
-        """The module paths a stage at this position drops or neutralizes at the build."""
         dropped_inputs = () if is_first else (self.embedding_path,)
         return dropped_inputs if is_last else (*dropped_inputs, *self.post_layer_paths, self.head_attr)
 
 
 def reject_reentrant_checkpointing(gradient_checkpointing_kwargs: dict | None) -> None:
-    """Refuse ``use_reentrant=True`` activation checkpointing under pipeline parallelism."""
     if (gradient_checkpointing_kwargs or {}).get("use_reentrant", False):
         raise ValueError(
             "use_reentrant=True gradient checkpointing is not supported under pipeline parallelism: "
@@ -132,19 +112,11 @@ def reject_reentrant_checkpointing(gradient_checkpointing_kwargs: dict | None) -
 
 
 class PipelineStageModule(nn.Module):
-    """A contiguous slice of a model, exposing the tensor-in/tensor-out contract PP needs.
-
-    Forward takes the pipeline activation positionally (``input_ids`` on stage 0, the previous
-    stage's hidden states elsewhere) and per-example side inputs as kwargs: on a non-first stage of a family
-    whose layers re-read the token ids (:attr:`token_ids_kwarg`), those too. The module reports its
-    stage-local names everywhere and whoever serializes applies :meth:`global_parameter_name`: HF
-    derives the weight-decay set from ``named_children`` and ``load_state_dict``/DCP resolve keys
-    against the real module tree.
-
-    ``source`` is the model the stage is cut from, read before the cut: the checkpoint writers take
-    its config (``architectures`` restamped to the live class), generation config, remote-code class
-    and checkpoint namespace off the stage, which transformers can no longer resolve on a slice.
-    """
+    """A contiguous slice of a model with a tensor-in/tensor-out forward: the pipeline activation positionally
+    (``input_ids`` on stage 0, hidden states elsewhere), side inputs as kwargs. It reports stage-local names and
+    serializers apply :meth:`global_parameter_name`, since HF derives weight decay from ``named_children`` and
+    ``load_state_dict``/DCP resolve keys against the real tree. ``source`` is read before the cut: writers take its
+    config, generation config, remote-code class and namespace off the stage, which transformers cannot resolve."""
 
     # Undeclared on a source without one: save_model_config skips a model that carries no config.
     config: PretrainedConfig
@@ -193,8 +165,7 @@ class PipelineStageModule(nn.Module):
         register_forward_generation_hook(self)
 
     def can_generate(self) -> bool:
-        """Whether the reassembled checkpoint is generative; ``save_model_config`` writes
-        ``generation_config.json`` only for a model that says so. Mirrors ``PreTrainedModel``."""
+        """``save_model_config`` writes ``generation_config.json`` only for a model that says so."""
         return self.generation_config is not None
 
     def add_model_tags(self, tags) -> None:
@@ -209,13 +180,9 @@ class PipelineStageModule(nn.Module):
     def gradient_checkpointing_enable(
         self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
     ) -> None:
-        """Enable non-reentrant activation checkpointing on this stage's decoder layers.
-
-        Mirrors ``PreTrainedModel.gradient_checkpointing_enable`` minus ``enable_input_require_grads``
-        (a non-first stage has no input embedding, and its recv buffer already requires grad) and minus
-        ``offload`` (host-staged activations are not validated against the schedule's interleaved
-        forwards and backwards). ``every_n_layers`` counts from this stage's first local layer.
-        """
+        """Enable non-reentrant activation checkpointing on this stage's layers. Mirrors ``PreTrainedModel`` minus
+        ``enable_input_require_grads`` (a non-first stage has no input embedding, and its recv buffer requires grad)
+        and ``offload`` (host-staged activations are unvalidated against the schedule's interleaving)."""
         if offload:
             raise ValueError(
                 "Activation offload (gradient_checkpointing_kwargs offload=True) is not supported under "
@@ -233,18 +200,15 @@ class PipelineStageModule(nn.Module):
         )
 
     def gradient_checkpointing_disable(self) -> None:
-        """Disable activation checkpointing (mirrors ``PreTrainedModel``)."""
         if getattr(self.model, "supports_gradient_checkpointing", False):
             self.model._set_gradient_checkpointing(enable=False)
 
     @property
     def is_gradient_checkpointing(self) -> bool:
-        """Whether any module on this stage currently checkpoints (mirrors ``PreTrainedModel``)."""
         return any(getattr(m, "gradient_checkpointing", False) for m in self.model.modules())
 
     @property
     def layer_range(self) -> tuple[int, int]:
-        """This stage's ``[lo, hi)`` slice of the unsplit model's decoder layers."""
         return self._layer_offset, self._layer_offset + len(getattr(self.model, self.layout.layer_attr))
 
     def global_parameter_name(self, local_name: str) -> str:
@@ -260,11 +224,8 @@ class PipelineStageModule(nn.Module):
         return local_name
 
     def local_parameter_name(self, global_name: str) -> str:
-        """Inverse of :meth:`global_parameter_name`: an unsplit-model FQN → this stage's local path.
-
-        Only meaningful for names this stage holds; a layer outside its range comes back with a
-        negative or out-of-range index, which resolves to no live module.
-        """
+        """Inverse of :meth:`global_parameter_name`. Only meaningful for names this stage holds; a layer outside its
+        range gets a negative or out-of-range index."""
         layout = self.layout
         rebased = rebase_layer_index(
             global_name, layout.layer_root, f"model.{layout.layer_attr}.", -self._layer_offset
@@ -282,16 +243,9 @@ class PipelineStageModule(nn.Module):
         return global_name
 
     def checkpoint_name_map(self) -> dict[str, str]:
-        """Global (unsplit-model) name → local ``state_dict`` key, for the tensors this stage serializes.
-
-        The PP save and the PP resume both walk this filter+map, so a key cannot be written under one
-        policy and read back under another. EP MoE entries are excluded: they hold this rank's
-        internal shard layout and are re-emitted in HF layout by the family gather.
-
-        Raises:
-            RuntimeError: a local name whose global name does not map back to it, which would
-                collapse two stage tensors into one checkpoint entry.
-        """
+        """Global name → local ``state_dict`` key for the tensors this stage serializes, which the PP save and resume
+        both walk. EP MoE entries are excluded: they hold this rank's shard layout and are re-emitted by the family
+        gather. Raises on a non-invertible name, which would collapse two tensors into one entry."""
         ep_prefixes = tuple(f"{name}." for name, _ in named_ep_layers(self))
         name_map: dict[str, str] = {}
         for local in self.state_dict():
@@ -310,15 +264,9 @@ class PipelineStageModule(nn.Module):
     def _segment_kwargs(
         self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None, position_ids: torch.Tensor | None
     ) -> dict[str, torch.Tensor | int]:
-        """A packed microbatch's segment markers, built once per microbatch from one host read of its row.
-
-        The schedule microbatches only batch-dim tensors, so the markers the packing collator builds for a flattened
-        row cannot ride in with the batch. The family's own mixers read theirs
-        (:func:`~halo.models.segment_markers.segment_markers_for`: ``seq_idx``, the varlen set), and a flash run reads
-        the varlen set, which every attention layer would otherwise derive from ``position_ids`` (a packed-row check,
-        a ``nonzero`` and a max length, each a host sync) again in the recompute. Empty off an unmasked one-row
-        microbatch with ``position_ids``, and on a row that is one document.
-        """
+        """A packed microbatch's segment markers, built once from one host read of its row. The schedule microbatches
+        only batch-dim tensors, so the collator's flattened-row markers cannot ride in, and each attention layer would
+        otherwise derive the varlen set from ``position_ids`` (a host sync each) again in the recompute."""
         config = getattr(self, "config", None)
         if attention_mask is not None or position_ids is None or hidden_states.shape[0] != 1:
             return {}
@@ -337,12 +285,8 @@ class PipelineStageModule(nn.Module):
         labels: torch.Tensor | None = None,
         token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """This stage's activation, or on the last stage its logits or its summed loss.
-
-        ``labels`` reaches every stage (the schedule microbatches kwargs for all of them) and is read
-        only by a last stage running :attr:`fused_loss_fn`; ``token_ids`` reaches the non-first stages of a family
-        with a :attr:`token_ids_kwarg`, and only those.
-        """
+        """This stage's activation, or on the last stage its logits or summed loss. ``labels`` reaches every stage (the
+        schedule microbatches kwargs for all) and only a fused last stage reads it."""
         if (token_ids is None) != (self.token_ids_kwarg is None):
             expected = f"as {self.token_ids_kwarg!r}" if self.token_ids_kwarg is not None else "never"
             raise RuntimeError(
@@ -381,11 +325,8 @@ class PipelineStageModule(nn.Module):
 
 
 def slice_backbone_to_stage(model: nn.Module, lo: int, hi: int) -> None:
-    """Replace the backbone's decoder-layer list with this stage's ``[lo, hi)`` slice, in place.
-
-    The single slicing seam the stage-aware loader (on its meta shell) and :func:`build_pipeline_stage`
-    share, so neither can re-base the layer indices differently from the other.
-    """
+    """Replace the backbone's decoder-layer list with ``[lo, hi)``, in place. The one slicing seam of the stage-aware
+    loader and :func:`build_pipeline_stage`, so neither re-bases differently."""
     backbone = backbone_with_layers(model)
     layer_attr = decoder_layers_attr(backbone)
     setattr(backbone, layer_attr, nn.ModuleList(list(getattr(backbone, layer_attr))[lo:hi]))
@@ -403,17 +344,8 @@ def build_pipeline_stage(
     moe_balancing: str = "auto",
     pp_split: list[int] | None = None,
 ) -> PipelineStageModule:
-    """Convert ``model`` into this rank's pipeline stage, in place; use the returned module afterwards.
-
-    The backbone's layer list is sliced to this stage's range and the modules the stage does not hold
-    are dropped. A model the stage-aware loader already sliced (its partition stamped on
-    ``PP_STAGE_PARTITION_ATTR``) keeps that split. ``moe_balancing`` is the run's knob, checked
-    against the aux-loss path a stage severs.
-
-    Raises:
-        ValueError: the model cannot be split (:func:`.reject_unsupported_pp_model`,
-            :func:`.validate_partition`).
-    """
+    """Convert ``model`` into this rank's pipeline stage, in place; use the returned module afterwards. A model the
+    stage-aware loader already sliced keeps that split. ``moe_balancing`` is checked against the aux-loss path."""
     partition = getattr(model, PP_STAGE_PARTITION_ATTR, None)
     pre_sliced = partition is not None
     reject_unsupported_pp_model(model, moe_balancing, pre_sliced=pre_sliced)

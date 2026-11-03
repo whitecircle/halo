@@ -1,9 +1,5 @@
-"""``write_eval_outputs`` runs once every episode has been paid for, so the ``--output`` dump must
-not be the step that loses the run: a missing parent directory is created, and the values the
-trajectory JSONL writer serializes are accepted here too.
-
-    python tests/cpu/environments/test_eval_outputs.py
-"""
+"""``write_eval_outputs`` runs once every episode has been paid for, so the ``--output`` dump must not lose the run:
+a missing parent is created, and values the trajectory JSONL writer serializes are accepted."""
 
 import argparse
 import json

@@ -1,12 +1,4 @@
 #!/usr/bin/env python
-"""
-Tests for dataset processing fingerprinting utilities:
-function_cache_id(), kwargs_fingerprint(), resolve_json_value(),
-tools_field threading, and cache-key invalidation.
-
-Run: python tests/cpu/data/test_processing_utils.py
-"""
-
 import functools
 import json
 
@@ -19,8 +11,6 @@ from halo.data.pipeline.preferences import render_preference_row
 from halo.data.pipeline.text_rows import build_chat_row_processor, prepare_generative_row, render_row_conversation
 from halo.data.pipeline.vlm_rows import build_vlm_row_processor
 
-# function_cache_id tests
-
 
 def _helper_func_a(x):
     return x + 1
@@ -31,38 +21,30 @@ def _helper_func_b(x):
 
 
 def test_function_id_deterministic():
-    """Same function should always produce the same identifier."""
     id1 = function_cache_id(_helper_func_a)
     id2 = function_cache_id(_helper_func_a)
     assert id1 == id2, f"Expected same ID, got '{id1}' and '{id2}'"
 
 
 def test_function_id_different_functions():
-    """Different functions should produce different identifiers."""
     id_a = function_cache_id(_helper_func_a)
     id_b = function_cache_id(_helper_func_b)
     assert id_a != id_b, f"Expected different IDs, both got '{id_a}'"
 
 
 def test_function_id_contains_name():
-    """Identifier should contain the function name."""
     fid = function_cache_id(_helper_func_a)
     assert "_helper_func_a" in fid, f"Expected '_helper_func_a' in '{fid}'"
 
 
 def test_function_id_with_lambda():
-    """Lambda identifiers carry the '<lambda>' name and a code hash."""
-    # A raw lambda's __name__ is "<lambda>" (a `def`, by contrast, is named after its identifier).
     fid = function_cache_id(lambda x: x + 10)
     assert isinstance(fid, str)
-    # Source-hash path yields "<name>_<hash>"; the lambda's __name__ is "<lambda>".
     assert fid.startswith("<lambda>_"), f"Expected '<lambda>_...' prefix, got '{fid}'"
-    assert len(fid) > len("<lambda>_")  # a non-empty hash is appended
+    assert len(fid) > len("<lambda>_")
 
 
 def test_function_id_nested_function():
-    """Nested (local) function should produce a valid identifier."""
-
     def inner_func(y):
         return y**2
 
@@ -72,12 +54,8 @@ def test_function_id_nested_function():
 
 
 def test_function_id_partial_distinguishes_bound_tokenizer():
-    """functools.partial binding different tokenizers must produce different identifiers.
-
-    A partial exposes no source/__code__ and no __closure__, so an identifier that reads only those
-    collapses to the constant "functools.unknown": two partials over the same dataset binding
-    different models' tokenizers then share one cache file and reuse the wrong token IDs.
-    """
+    """A partial exposes no source, __code__ or __closure__, so an identifier reading only those collapses to
+    ``functools.unknown`` and partials over different tokenizers share one cache file."""
     p_a = functools.partial(prepare_generative_row, tokenizer=_StubTokenizer("modelA", 201088), max_length=4096)
     p_b = functools.partial(prepare_generative_row, tokenizer=_StubTokenizer("modelB", 262155), max_length=4096)
     id_a = function_cache_id(p_a)
@@ -87,7 +65,6 @@ def test_function_id_partial_distinguishes_bound_tokenizer():
 
 
 def test_function_id_partial_distinguishes_bound_scalar():
-    """functools.partial binding a different max_length must change the identifier."""
     tok = _StubTokenizer("modelA", 201088)
     p_short = functools.partial(prepare_generative_row, tokenizer=tok, max_length=4096)
     p_long = functools.partial(prepare_generative_row, tokenizer=tok, max_length=36000)
@@ -95,29 +72,19 @@ def test_function_id_partial_distinguishes_bound_scalar():
 
 
 def test_function_id_partial_deterministic():
-    """Same wrapped func + same bound values => same identifier (cross-rank cache stability)."""
-
     def mk():
         return functools.partial(prepare_generative_row, tokenizer=_StubTokenizer("modelA", 201088), max_length=4096)
 
     assert function_cache_id(mk()) == function_cache_id(mk())
 
 
-# kwargs_fingerprint tests
-
-
 def test_kwargs_fingerprint_empty():
-    """Empty kwargs should return empty string."""
     result = kwargs_fingerprint({})
     assert result == "", f"Expected '', got '{result}'"
 
 
 def test_kwargs_fingerprint_distinguishes_name_or_path():
-    """Two tokenizers with different name_or_path must NOT collide on the same fingerprint.
-
-    This is the load-bearing behavior: the cache key must change when the tokenizer changes,
-    otherwise one model's cached token IDs are reused for another (OOB embedding gather).
-    """
+    """Otherwise one model's cached token IDs are reused for another (OOB embedding gather)."""
 
     class _Tok:
         def __init__(self, nop):
@@ -129,8 +96,6 @@ def test_kwargs_fingerprint_distinguishes_name_or_path():
 
 
 def test_kwargs_fingerprint_distinguishes_vocab_size():
-    """Configs differing only in vocab_size must produce different fingerprints."""
-
     class _Cfg:
         def __init__(self, vs):
             self.vocab_size = vs
@@ -141,12 +106,8 @@ def test_kwargs_fingerprint_distinguishes_vocab_size():
 
 
 def test_kwargs_fingerprint_distinguishes_chat_template():
-    """Tokenizers identical except for chat_template must NOT collide on the fn_kwargs/partial path.
-
-    A --chat_template/--force_chat_template override mutates tokenizer.chat_template in place
-    without changing name_or_path/vocab_size, so the tokenizer-identity key must fold the template
-    in — otherwise a partial-bound tokenizer reuses another template's cached tokens.
-    """
+    """A --chat_template override mutates tokenizer.chat_template in place without changing name_or_path or
+    vocab_size, so the identity key must fold the template in."""
 
     class _Tok:
         def __init__(self, template):
@@ -162,16 +123,11 @@ def test_kwargs_fingerprint_distinguishes_chat_template():
 
 
 def test_kwargs_fingerprint_distinguishes_primitive_values():
-    """Different primitive values for the same key change the fingerprint."""
     assert kwargs_fingerprint({"max_length": 1024}) != kwargs_fingerprint({"max_length": 4096})
 
 
 def test_kwargs_fingerprint_opaque_object_uses_type_name():
-    """An object with neither name_or_path nor vocab_size nor primitive falls back to its type name.
-
-    Two distinct instances of the same opaque type therefore share a fingerprint (only the type
-    name is captured), while a different type changes it.
-    """
+    """Two instances of one opaque type share a fingerprint, since only the type name is captured."""
 
     class _OpaqueA:
         pass
@@ -187,44 +143,30 @@ def test_kwargs_fingerprint_opaque_object_uses_type_name():
 
 
 def test_kwargs_fingerprint_sorted_keys():
-    """Key order should not affect fingerprint (keys are sorted internally)."""
     fp1 = kwargs_fingerprint({"a": 1, "b": 2, "c": 3})
     fp2 = kwargs_fingerprint({"c": 3, "a": 1, "b": 2})
     assert fp1 == fp2, f"Different key orders should produce same fingerprint: '{fp1}' vs '{fp2}'"
 
 
-# resolve_json_value tests
-
-
 def test_resolve_json_value_passthrough_list():
-    """Already-parsed list values should be returned as-is."""
     value = [{"role": "user", "content": "hi"}]
     assert resolve_json_value(value) is value
 
 
 def test_resolve_json_value_passes_through_invalid_string():
-    """A non-JSON string is returned unchanged (the documented fallback): a mis-specified
-    conversation_field then surfaces as a clear chat-template error downstream instead of an opaque
-    JSONDecodeError deep inside a multiprocess map worker. Valid JSON still parses."""
+    """A mis-specified conversation_field then surfaces as a clear chat-template error, not a JSONDecodeError inside
+    a map worker."""
     assert resolve_json_value("{not valid json") == "{not valid json"
     assert resolve_json_value("plain text") == "plain text"
     assert resolve_json_value("") == ""
-    # Valid JSON strings still decode to Python objects...
     assert resolve_json_value('{"role": "user"}') == {"role": "user"}
     assert resolve_json_value("[1, 2]") == [1, 2]
-    # ...and non-string values pass through unchanged.
     assert resolve_json_value([{"role": "user"}]) == [{"role": "user"}]
 
 
-# tools_field threading tests (render_row_conversation + processor)
-
-
 class _RecordingTokenizer:
-    """Minimal tokenizer stub that records apply_chat_template kwargs.
-
-    The recorded calls let us assert that ``tools`` is forwarded only when the
-    dataset row carries a non-empty value at ``tools_field``.
-    """
+    """Records apply_chat_template kwargs, so a test can assert ``tools`` is forwarded only when the row carries a
+    value."""
 
     bos_token = None
     pad_token = "<pad>"
@@ -234,16 +176,12 @@ class _RecordingTokenizer:
 
     def apply_chat_template(self, messages, tokenize=False, **kwargs):
         self.calls.append({"messages": messages, "tokenize": tokenize, **kwargs})
-        # Return a deterministic string that depends on tools so callers can
-        # observe propagation if they care.
         tools = kwargs.get("tools")
         suffix = f"|tools={len(tools)}" if tools else "|no-tools"
-        # Per-message suffix keeps the render prefix-consistent (template(prompt) is a prefix of
-        # template(prompt + completion)) — the invariant the preference helper enforces.
+        # A per-message suffix keeps the render prefix-consistent, the invariant the preference helper enforces.
         return "".join(m["content"] + suffix for m in messages)
 
     def __call__(self, text, **kwargs):
-        # Trivial whitespace tokenizer for length checks.
         ids = list(range(len(text.split())))
         return {"input_ids": ids, "attention_mask": [1] * len(ids)}
 
@@ -278,7 +216,6 @@ def test_apply_chat_template_parses_json_tools():
 
 
 def test_apply_chat_template_parses_json_messages():
-    """Conversation column stored as JSON string should be decoded transparently."""
     tokenizer = _RecordingTokenizer()
     row = {
         "messages": json.dumps([{"role": "user", "content": "hi"}]),
@@ -288,7 +225,6 @@ def test_apply_chat_template_parses_json_messages():
 
 
 def test_build_chat_row_processor_threads_tools():
-    """build_chat_row_processor must propagate tools_field into the closure."""
     tokenizer = _RecordingTokenizer()
     tools = [{"type": "function", "function": {"name": "calc"}}]
     processor = build_chat_row_processor(
@@ -307,7 +243,6 @@ def test_build_chat_row_processor_threads_tools():
 
 
 def test_preference_helper_threads_tools():
-    """render_preference_row forwards tools to all 3 fields."""
     tokenizer = _RecordingTokenizer()
     tools = [{"type": "function", "function": {"name": "calc"}}]
     row = {
@@ -317,13 +252,11 @@ def test_preference_helper_threads_tools():
         "tools": tools,
     }
     render_preference_row(row, tokenizer, tools_field="tools")
-    # Three apply_chat_template calls (prompt/chosen/rejected) — all must carry tools.
     tools_calls = [c for c in tokenizer.calls if c.get("tools") == tools]
     assert len(tools_calls) == 3, f"Expected 3 calls with tools, got {len(tools_calls)} of {len(tokenizer.calls)}"
 
 
 def test_preference_helper_omits_tools_when_field_unset():
-    """No tools_field arg => no tools kwarg sent."""
     tokenizer = _RecordingTokenizer()
     row = {
         "prompt": [{"role": "user", "content": "q"}],
@@ -335,7 +268,6 @@ def test_preference_helper_omits_tools_when_field_unset():
 
 
 def test_preference_helper_parses_json_tools():
-    """JSON-string tools column must be decoded before forwarding."""
     tokenizer = _RecordingTokenizer()
     tools = [{"type": "function", "function": {"name": "calc"}}]
     row = {
@@ -353,7 +285,6 @@ def test_preference_helper_parses_json_tools():
 
 
 def test_prepare_generative_row_threads_tools():
-    """prepare_generative_row must forward tools_field through to the tokenizer."""
     tokenizer = _RecordingTokenizer()
     tools = [{"type": "function", "function": {"name": "calc"}}]
     row = {
@@ -364,23 +295,17 @@ def test_prepare_generative_row_threads_tools():
     assert tokenizer.calls and tokenizer.calls[-1].get("tools") == tools
 
 
-# VLM processor tests (no real tokenizer/collator — exercise the row shape)
-
-
 def _stub_process_vlm(conversation, system_prompt=None, model_supports_system_role=True):
-    """Stub VLM conversation processor: passthrough conversation, no images."""
     return list(conversation), []
 
 
 @pytest.fixture
 def _passthrough_vlm_conversation(monkeypatch):
-    """Swap the module-global image extractor for a passthrough, so these row-shape tests do not
-    need real PIL payloads."""
+    """Swap the image extractor for a passthrough, so these row-shape tests need no real PIL payloads."""
     monkeypatch.setattr(vlm_rows, "extract_conversation_images", _stub_process_vlm)
 
 
 def test_vlm_processor_emits_tools_json_when_field_set(_passthrough_vlm_conversation):
-    """tools list at row[tools_field] should land as a JSON string on the example."""
     tools = [{"type": "function", "function": {"name": "calc"}}]
     processor = build_vlm_row_processor(conversation_field="messages", tools_field="tools")
     row = {
@@ -393,7 +318,6 @@ def test_vlm_processor_emits_tools_json_when_field_set(_passthrough_vlm_conversa
 
 
 def test_vlm_processor_passes_through_json_string_tools(_passthrough_vlm_conversation):
-    """Pre-serialized JSON tool strings should be stored as-is, not double-encoded."""
     tools_str = json.dumps([{"type": "function", "function": {"name": "calc"}}])
     processor = build_vlm_row_processor(conversation_field="messages", tools_field="tools")
     row = {
@@ -401,13 +325,13 @@ def test_vlm_processor_passes_through_json_string_tools(_passthrough_vlm_convers
         "tools": tools_str,
     }
     example = processor(row)
-    # Stored verbatim — round-trip yields the original list, not a string of a string.
+    # Stored verbatim, so a round trip yields the original list and not a string of a string.
     assert example["tools_json"] == tools_str
     assert isinstance(json.loads(example["tools_json"]), list)
 
 
 def test_vlm_processor_omits_tools_json_when_field_unset(_passthrough_vlm_conversation):
-    """tools_json must always be present (schema stable) and None when no tools."""
+    """tools_json is always present (schema stable) and None when no tools."""
     processor = build_vlm_row_processor(conversation_field="messages")
     row = {"messages": [{"role": "user", "content": "hi"}]}
     example = processor(row)
@@ -416,14 +340,10 @@ def test_vlm_processor_omits_tools_json_when_field_unset(_passthrough_vlm_conver
 
 
 def test_vlm_processor_handles_missing_tools_column(_passthrough_vlm_conversation):
-    """Setting tools_field on rows that lack the column should not raise."""
     processor = build_vlm_row_processor(conversation_field="messages", tools_field="tools")
     row = {"messages": [{"role": "user", "content": "hi"}]}
     example = processor(row)
     assert example["tools_json"] is None
-
-
-# Cache key invalidation tests
 
 
 class _StubDataset:
@@ -436,8 +356,6 @@ class _StubDataset:
 
 
 def test_cache_key_extras_change_filename():
-    """Toggling cache_key_extras must change the cache file name."""
-
     def fn(row):
         return row
 
@@ -462,8 +380,6 @@ def test_cache_key_extras_change_filename():
 
 
 def test_cache_key_extras_stable_for_same_inputs():
-    """Same extras must produce the same cache file name (deterministic)."""
-
     def fn(row):
         return row
 
@@ -475,8 +391,6 @@ def test_cache_key_extras_stable_for_same_inputs():
 
 
 def test_cache_key_extras_none_matches_empty_dict():
-    """Passing None or {} for cache_key_extras must collapse to the same key."""
-
     def fn(row):
         return row
 
@@ -487,8 +401,6 @@ def test_cache_key_extras_none_matches_empty_dict():
 
 
 class _StubTokenizer:
-    """Minimal tokenizer stand-in for closure-fingerprint tests."""
-
     def __init__(self, name_or_path, vocab_size):
         self.name_or_path = name_or_path
         self.vocab_size = vocab_size
@@ -505,13 +417,8 @@ class _StubTokenizer:
 
 
 def test_closure_tokenizer_changes_cache_filename():
-    """Processors closing over different tokenizers must NOT share a cache file.
-
-    The processor captures the tokenizer as a closure free variable (invisible
-    to the source hash and fn_kwargs), so without the closure fingerprint a
-    262k-vocab tokenizer's cached token IDs are silently reused for a
-    201k-vocab model, gathering out of bounds at the first step.
-    """
+    """The processor captures the tokenizer as a free variable, invisible to the source hash and fn_kwargs, so a
+    262k-vocab tokenizer's IDs would be reused for a 201k-vocab model and gather out of bounds at the first step."""
     ds = _StubDataset()
     proc_a = build_chat_row_processor(
         tokenizer=_StubTokenizer("modelA", 201088),
@@ -531,7 +438,6 @@ def test_closure_tokenizer_changes_cache_filename():
 
 
 def test_closure_max_length_changes_cache_filename():
-    """Same tokenizer but a different max_length must change the cache file."""
     ds = _StubDataset()
     tok = _StubTokenizer("modelA", 201088)
     proc_short = build_chat_row_processor(
@@ -552,12 +458,8 @@ def test_closure_max_length_changes_cache_filename():
 
 
 def test_closure_chat_template_changes_cache_filename():
-    """Same tokenizer identity but a different chat_template must change the cache file.
-
-    Regression: --chat_template/--force_chat_template overrides tokenizer.chat_template in place;
-    the closure fingerprint keys the tokenizer by identity, so without folding in the template two
-    runs over the same dataset+model differing only in the template would silently share a cache file.
-    """
+    """An override replaces tokenizer.chat_template in place and the closure fingerprint keys the tokenizer by
+    identity, so the template must be folded in."""
     ds = _StubDataset()
     tok_a = _StubTokenizer("modelA", 201088)
     tok_a.chat_template = "{{ messages }}"
@@ -575,7 +477,6 @@ def test_closure_chat_template_changes_cache_filename():
 
 
 def test_closure_fingerprint_deterministic():
-    """Identical tokenizer + config must yield the same cache file (cross-rank)."""
     ds = _StubDataset()
 
     def mk():

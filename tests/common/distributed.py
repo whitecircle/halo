@@ -1,9 +1,4 @@
-"""Distributed setup/teardown for torchrun-based tests.
-
-Covers process-group init, the deterministic DeepEP dispatch an exact replay needs, scratch/cache dir
-allocation under the launcher's ``TMPDIR``, rank-0-then-barrier model download, world-wide scalar
-reductions, the cross-rank tensor-identity probe and teardown.
-"""
+"""Distributed setup and teardown for torchrun-based tests."""
 
 import contextlib
 import math
@@ -30,13 +25,9 @@ from tests.common.scratch import SCRATCH_DIR_TAG
 
 
 class FakeStore:
-    """In-memory stand-in for the c10d key-value store, for single-process store-coordination tests.
-
-    A wait on an absent key raises instead of blocking, so a test that would deadlock against the
-    real store fails immediately and names the key. ``set_keys`` records writes in order, and
-    ``get_keys`` / ``multi_get_keys`` record reads so a test can pin how many round-trips a join
-    costs (the real store serves them one request at a time, from one server).
-    """
+    """In-memory c10d store for single-process coordination tests; a wait on an absent key raises instead of blocking.
+    ``set_keys`` and ``get_keys`` / ``multi_get_keys`` record calls, so a test can pin how many round-trips a join
+    costs."""
 
     def __init__(self):
         self.kv: dict[str, str | int] = {}
@@ -45,7 +36,7 @@ class FakeStore:
         self.multi_get_keys: list[list[str]] = []
 
     def wait(self, keys, timeout=None):
-        del timeout  # the real store blocks; absence is the interesting case here
+        del timeout  # The real store blocks; absence is the interesting case here.
         for key in keys:
             if key not in self.kv:
                 raise TimeoutError(f"would block on {key}")
@@ -72,18 +63,16 @@ class FakeStore:
 
 
 def reset_shared_filesystem_consensus() -> None:
-    """Drop the process's agreed shared-filesystem flags, so they read the environment again as in a fresh
-    process: a run's scope is fixed once, a test varies it."""
+    """Drop the process's agreed shared-filesystem flags so they re-read the environment: a run fixes its scope once, a
+    test varies it."""
     filesystem._shared_filesystem_consensus = None
 
 
 @contextlib.contextmanager
 def fake_process_group(rank: int, world_size: int):
-    """torch's fake process group as the default group, impersonating ``rank`` of ``world_size``.
-
-    Its collectives complete at once and move no data. A leftover process group from an earlier test
-    in the same worker is torn down first, since the fake backend needs the default group slot.
-    """
+    """torch's fake process group as the default group, impersonating ``rank``; collectives complete at once and move
+    no data. A leftover group from an earlier test is torn down first, since the fake backend needs the default
+    slot."""
     if dist.is_initialized():
         dist.destroy_process_group()
     dist.init_process_group("fake", store=TorchFakeStore(), rank=rank, world_size=world_size)
@@ -95,94 +84,60 @@ def fake_process_group(rank: int, world_size: int):
 
 @contextlib.contextmanager
 def fake_process_group_mesh(rank: int, world_size: int):
-    """A 1-D CPU device mesh over torch's fake process group, impersonating ``rank``.
-
-    ``distribute_tensor(..., src_data_rank=None)``, what transformers' TP ``shard_param`` runs,
-    slices the local shard with no collective, so a single CPU process can obtain any rank's shard
-    from the real sharding machinery by re-entering with a different ``rank``.
-    """
+    """A 1-D CPU device mesh over torch's fake group; ``distribute_tensor(..., src_data_rank=None)`` then slices any
+    rank's shard with no collective."""
     with fake_process_group(rank, world_size):
         yield init_device_mesh("cpu", (world_size,))
 
 
 def init_distributed() -> tuple[int, int, int]:
-    """COLLECTIVE: the production process-group init (``halo.runtime.process_group.init_distributed``: the NCCL
-    watchdog ``DIST_NCCL_TIMEOUT_MINUTES`` sets on the world group and every later subgroup, the device bind and
-    the shared-filesystem consensus); returns ``(rank, world_size, local_rank)``.
-
-    The FA4 kernel cache is anchored first, as production anchors it in ``configure_training_run``: a GPU test
-    that loads through ``from_pretrained`` directly would otherwise leave the CuTe DSL with the cache enabled
-    but no directory, and re-JIT every kernel on every run, past any suite timeout.
-    """
+    """COLLECTIVE: production process-group init; returns ``(rank, world_size, local_rank)``. Anchors the FA4 kernel
+    cache first: a test loading via ``from_pretrained`` would otherwise re-JIT every kernel every run, past any suite
+    timeout."""
     ensure_fa4_kernel_cache_env()
     process_group.init_distributed()
     return get_global_rank(), get_global_world_size(), get_local_rank()
 
 
 def pin_deterministic_ep_dispatch() -> None:
-    """Build every DeepEP ``ElasticBuffer`` of this process in deterministic mode, which places each
-    received token by source rank and token index rather than by atomic claim order.
-
-    The default dispatch hands out receive slots with atomics, so the order an expert's tokens arrive
-    in changes from run to run, and with it the rounding of every expert weight gradient summed over
-    them. The dispatcher builds deterministic buffers under torch's deterministic algorithms
-    (``full_determinism``); a test that replays a run exactly (a resume against the uninterrupted run)
-    without that mode answers the dispatcher's question for it here.
-    """
+    """Build every DeepEP ``ElasticBuffer`` in deterministic mode, placing received tokens by source rank and index.
+    Atomic claim order changes run to run, and with it the rounding of expert weight gradients; an exact replay cannot
+    have that."""
     ep_dispatcher._deterministic_dispatch = lambda: True
 
 
 def setup_cache_dirs(prefix: str, rank: int) -> tuple[str, str]:
-    """Create isolated output and HF cache directories.
-
-    Returns (output_dir, cache_dir). Sets HF_DATASETS_CACHE env var. Both names start with
-    :data:`SCRATCH_DIR_TAG`, the one spelling ``tests/conftest.py`` sweeps when a crash leaks them.
-    """
+    """Create isolated output and HF cache dirs; returns (output_dir, cache_dir). Names start with
+    :data:`SCRATCH_DIR_TAG` for conftest's crash sweep."""
     cache_dir = tempfile.mkdtemp(prefix=f"{SCRATCH_DIR_TAG}{prefix}_cache_r{rank}_")
     os.environ["HF_DATASETS_CACHE"] = cache_dir
-    # datasets froze the env at import (datasets.config latches at module load), so the env write
-    # alone doesn't isolate direct load_dataset callers — update the live config too (mirrors
-    # halo/entrypoints/run_setup.py).
+    # datasets latches the env at import, so the env write alone does not isolate direct load_dataset callers.
     datasets.config.HF_DATASETS_CACHE = Path(cache_dir)
     output_dir = tempfile.mkdtemp(prefix=f"{SCRATCH_DIR_TAG}{prefix}_out_")
     return output_dir, cache_dir
 
 
 def shared_scratch_dir(name: str) -> str:
-    """A scratch dir under the launcher's per-run ``TMPDIR``, identical on every rank.
-
-    Rank 0 builds a tiny synthetic checkpoint here and the peers read it back, so the path has to be
-    a pure function of the environment; ``mkdtemp`` would hand each rank a different dir.
-    ``MASTER_PORT`` (uniform across a job's ranks, distinct across concurrent jobs) separates two runs
-    sharing one ``TMPDIR``, and ``tests/gpu/conftest.py`` points ``TMPDIR`` at pytest's basetemp so
-    the dir is reclaimed with the run rather than accumulating on the scratch volume.
-    """
+    """A scratch dir under the launcher's ``TMPDIR``, identical on every rank; a pure function of the environment.
+    ``MASTER_PORT`` separates concurrent runs sharing one ``TMPDIR``."""
     path = os.path.join(tempfile.gettempdir(), f"{name}_{os.environ.get('MASTER_PORT', 'standalone')}")
     os.makedirs(path, exist_ok=True)
     return path
 
 
 def shared_output_dir(ctx) -> str:
-    """Rank 0's output dir, on every rank.
-
-    The EP/FSDP2 saver writes one directory; a per-rank ``mkdtemp`` would leave every peer with no
-    checkpoint to resume from, leaving the restore untested.
-    """
+    """Rank 0's output dir, on every rank; a per-rank dir would leave every peer with no checkpoint to resume from."""
     return broadcast_from_rank0(ctx.output_dir if ctx.rank == 0 else None)
 
 
 def cleanup_dirs(*dirs: str):
-    """Remove temp directories."""
     for d in dirs:
         if d and os.path.exists(d):
             shutil.rmtree(d, ignore_errors=True)
 
 
 def ensure_model_downloaded(model_name: str, rank: int, revision: str | None = None):
-    """Download model config/tokenizer on rank 0, then barrier.
-
-    Prevents race conditions when multiple ranks try to download simultaneously.
-    """
+    """Download model config and tokenizer on rank 0, then barrier."""
     if rank == 0:
         AutoConfig.from_pretrained(model_name, trust_remote_code=True, revision=revision)
         AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, revision=revision)
@@ -190,53 +145,36 @@ def ensure_model_downloaded(model_name: str, rank: int, revision: str | None = N
 
 
 def world_mean(value: float, device=None) -> float:
-    """DP-average a per-rank scalar, matching what HF logs for a loss (mean of per-replica batch means).
-
-    Collective: every rank must call it with its own value.
-    """
+    """DP-average a per-rank scalar, matching what HF logs for a loss. Collective."""
     local = torch.tensor(float(value), device=device or torch.device("cuda", torch.cuda.current_device()))
     dist.all_reduce(local, op=dist.ReduceOp.AVG)
     return float(local)
 
 
 def world_any(flag: bool, device=None) -> bool:
-    """True if ``flag`` holds on any rank. Collective.
-
-    For preconditions on a quantity compared world-wide (a DP-averaged loss): the property has to
-    hold somewhere in the world for the comparison to be meaningful, not on every shard.
-    """
+    """True if ``flag`` holds on any rank, for a precondition on a quantity compared world-wide. Collective."""
     local = torch.tensor(float(bool(flag)), device=device or torch.device("cuda", torch.cuda.current_device()))
     dist.all_reduce(local, op=dist.ReduceOp.MAX)
     return bool(local.item())
 
 
 def world_all(flag: bool, device=None) -> bool:
-    """True if ``flag`` holds on every rank. Collective.
-
-    For a property each rank checks on its own shard (a rank-local bit-identity read): one rank
-    failing it fails the world.
-    """
+    """True if ``flag`` holds on every rank, for a property each rank checks on its own shard. Collective."""
     local = torch.tensor(float(bool(flag)), device=device or torch.device("cuda", torch.cuda.current_device()))
     dist.all_reduce(local, op=dist.ReduceOp.MIN)
     return bool(local.item())
 
 
 def world_min(value: float, device=None) -> float:
-    """The smallest ``value`` across all ranks. Collective.
-
-    For a precondition that has to hold on every shard (unlike :func:`world_any`): the worst rank's
-    value decides whether a comparison is sound.
-    """
+    """The smallest ``value`` across all ranks, for a precondition that must hold on every shard. Collective."""
     local = torch.tensor(float(value), device=device or torch.device("cuda", torch.cuda.current_device()))
     dist.all_reduce(local, op=dist.ReduceOp.MIN)
     return float(local)
 
 
 def world_spread(value: float, device=None) -> float:
-    """``max - min`` of ``value`` across all ranks, or ``inf`` when any rank's value is non-finite. Collective.
-
-    A NaN on one rank would otherwise compare false against every bound and read as agreement.
-    """
+    """``max - min`` of ``value`` across ranks; ``inf`` when any is non-finite, since NaN would read as agreement.
+    Collective."""
     local = torch.tensor(
         [float(value)], dtype=torch.float64, device=device or torch.device("cuda", torch.cuda.current_device())
     )
@@ -249,13 +187,9 @@ def world_spread(value: float, device=None) -> float:
 
 
 def group_max_abs_diff(tensor: torch.Tensor, group: dist.ProcessGroup | None = None) -> float:
-    """Largest elementwise ``|Δ|`` of ``tensor`` between any rank of ``group`` and its first rank.
-
-    ``0.0`` means bit-identical across the group, the replica-identity verdict. A NaN on any rank
-    returns NaN, which fails every bound: the reduction stays in torch, whose ``max`` propagates NaN
-    where Python's drops it. An empty tensor, the FSDP2 shard of a size-1 dimension, reads ``0.0``.
-    Collective over ``group`` (default: the world).
-    """
+    """Largest elementwise ``|Δ|`` between any rank of ``group`` and its first rank. Collective over ``group``
+    (default: the world). ``0.0`` means bit-identical. NaN on any rank returns NaN, so the reduction stays in torch,
+    whose ``max`` propagates it. An empty FSDP2 shard reads ``0.0``."""
     local = tensor.detach().contiguous()
     gathered = [torch.empty_like(local) for _ in range(dist.get_world_size(group))]
     dist.all_gather(gathered, local, group=group)
@@ -265,19 +199,14 @@ def group_max_abs_diff(tensor: torch.Tensor, group: dist.ProcessGroup | None = N
 
 
 def max_abs_diff_across(tensors: Iterable[torch.Tensor], group: dist.ProcessGroup | None = None) -> float:
-    """The largest :func:`group_max_abs_diff` of any of ``tensors`` across ``group``: ``0.0`` when every one is
-    bit-identical, NaN when ``tensors`` is empty or any difference is NaN. Collective over ``group`` (default: the
-    world), one gather per tensor, so every rank passes its tensors in the same order."""
+    """The largest :func:`group_max_abs_diff` of ``tensors``; NaN when empty or any difference is NaN. Collective, one
+    gather per tensor in the same order."""
     return max_or_nan((group_max_abs_diff(tensor, group) for tensor in tensors), default=math.nan)
 
 
 def snapshot_full_weights(model) -> dict[str, torch.Tensor]:
-    """CPU copy of ``model``'s state dict as full tensors, all-gathering FSDP2/TP DTensor shards.
-
-    Lets a test rebuild an independent copy of the exact weights a trainer held at a chosen step, so
-    an objective reference runs on those weights rather than on a re-initialised approximation of
-    them. Collective when any parameter is a DTensor — every rank must call it at the same point.
-    """
+    """CPU copy of ``model``'s state dict as full tensors, so a reference runs on the exact weights. Collective with
+    any DTensor."""
     snapshot = {}
     for name, tensor in model.state_dict().items():
         full = tensor.full_tensor() if hasattr(tensor, "full_tensor") else tensor
@@ -286,15 +215,9 @@ def snapshot_full_weights(model) -> dict[str, torch.Tensor]:
 
 
 def _dp_step_losses(step_losses: list[float], dp_rank: int, dp_size: int) -> list[list[float]]:
-    """Per step, each data-parallel replica's loss in DP-rank order: the chunks a metric gather keeps.
-
-    The eval gather is scoped to the DP replicas, so a pipeline chain's stages (and a TP group's
-    siblings) contribute their shared batch once. They hold the same value, so which holder supplies
-    a replica's entry does not change the result; an absent replica does, and raises.
-
-    Collective: every rank all-gathers its own vector, so all ranks must call with the same number of
-    steps (accelerate's ``even_batches`` guarantees it).
-    """
+    """Per step, each DP replica's loss in DP-rank order: the chunks a metric gather keeps. Stages and TP siblings hold
+    the same value, so which one supplies a replica does not matter; an absent replica raises. Collective, same step
+    count on all ranks."""
     device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else "cpu"
     local = torch.tensor(
         [float(dp_rank), *(float(value) for value in step_losses)], dtype=torch.float64, device=device
@@ -314,18 +237,9 @@ def _dp_step_losses(step_losses: list[float], dp_rank: int, dp_size: int) -> lis
 def hf_eval_loss_reference(
     step_losses: list[float], batch_size: int, remainder: int, *, dp_rank: int, dp_size: int
 ) -> float:
-    """Reproduce HF ``evaluation_loop``'s eval_loss from per-rank per-step reference losses.
-
-    HF repeats each step's scalar loss ``eval_batch_size`` times and gathers; the toolkit scopes that
-    gather to the DP replicas (``_install_dp_metric_gather``), so the vector is one chunk per DP rank
-    in DP-rank order rather than one per global rank, and the same batch is not counted once per
-    pipeline stage. At the dataloader's final step accelerate's ``gather_for_metrics`` truncates that
-    vector to ``remainder`` entries (``len(eval_dataset) % (eval_batch_size * dp_size)``, the tail
-    trim; 0 = no trim). The final metric is the mean over every kept entry.
-
-    Collective: every rank must call with its own ``step_losses``. Cross-check any result against
-    :func:`eval_loss_over_examples`, which derives the same number without modelling the gather.
-    """
+    """Reproduce HF ``evaluation_loop``'s eval_loss from per-rank per-step reference losses. Collective. The vector is
+    one chunk per DP rank, and ``gather_for_metrics`` truncates the final step to ``remainder`` entries (0 = no trim).
+    Cross-check against :func:`eval_loss_over_examples`."""
     kept: list[float] = []
     per_step = _dp_step_losses(step_losses, dp_rank, dp_size)
     for step, replicas in enumerate(per_step):
@@ -339,16 +253,9 @@ def hf_eval_loss_reference(
 def eval_loss_over_examples(
     step_losses: list[float], batch_size: int, dataset_rows: int, *, dp_rank: int, dp_size: int
 ) -> float:
-    """The eval_loss an example-by-example walk of the eval dataset gives: an independent oracle.
-
-    Derived from what the metric means rather than from how the gather is built: every eval example
-    contributes its own batch's loss once, so the metric is the mean over ``dataset_rows`` entries in
-    the order the loader produced them (per step, DP rank 0's batch, then rank 1's, ...). Nothing here
-    models the dedup or accelerate's trim, so it disagrees with :func:`hf_eval_loss_reference` if
-    either is wrong, including a gather that repeats each replica once per pipeline stage: on a
-    partial final batch it keeps a prefix of the duplicates, a different set of examples rather than
-    a re-weighted one.
-    """
+    """The eval_loss an example-by-example walk gives: an independent oracle that models neither the dedup nor
+    accelerate's trim. It disagrees with :func:`hf_eval_loss_reference` if either is wrong, including a gather
+    repeating each replica per pipeline stage."""
     entries = [
         value
         for replicas in _dp_step_losses(step_losses, dp_rank, dp_size)
@@ -361,7 +268,6 @@ def eval_loss_over_examples(
 
 
 def teardown_distributed():
-    """Clean up distributed process group."""
     if dist.is_initialized():
         # Free DeepEP ElasticBuffers before the group (see destroy_all_dispatchers for why order matters).
         ep_dispatcher.destroy_all_dispatchers()

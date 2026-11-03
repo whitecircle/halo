@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CI pin for torch's private ``default_pg_nccl_timeout`` seam.
-
-``_apply_default_pg_timeout`` rebinds ``torch.distributed.distributed_c10d.default_pg_nccl_timeout``
-so every subsequent ``new_group`` / ``init_device_mesh`` subgroup (which takes no timeout kwarg)
-inherits ``DIST_NCCL_TIMEOUT_MINUTES`` instead of PyTorch's 10-minute default. The symbol is a
-private torch internal, and assigning a name torch no longer defines would merely create an unused
-module global — every EP/CP/TP mesh subgroup back on 10 minutes, tripping the watchdog on long
-cross-node collectives (e.g. a gathered save), with nothing said. Hence both pins below: the symbol
-must exist on this torch, and its absence must RAISE rather than pass.
-
-    python tests/cpu/runtime/test_default_pg_timeout_pin.py
-"""
+"""Pin for torch's private ``default_pg_nccl_timeout``, rebound for subgroups that take no timeout kwarg. Assigning
+a removed name would silently leave them on 10 minutes, tripping the watchdog."""
 
 import datetime
 
@@ -25,7 +15,6 @@ from tests.common.distributed import init_distributed as harness_init_distribute
 
 
 def test_torch_still_exposes_the_new_group_timeout_default():
-    """The name ``new_group(timeout=None)`` resolves its default from must exist on this torch."""
     assert hasattr(c10d, "default_pg_nccl_timeout"), (
         "torch.distributed.distributed_c10d.default_pg_nccl_timeout is gone on this PyTorch build — "
         "_apply_default_pg_timeout can no longer pin the subgroup default, and every DeviceMesh "
@@ -35,7 +24,6 @@ def test_torch_still_exposes_the_new_group_timeout_default():
 
 
 def test_apply_default_pg_timeout_rebinds_the_module_default(monkeypatch):
-    """The rebind must actually land: DIST_NCCL_TIMEOUT_MINUTES → the module-level default."""
     monkeypatch.setenv("DIST_NCCL_TIMEOUT_MINUTES", "123")
     original = c10d.default_pg_nccl_timeout
     try:
@@ -46,20 +34,14 @@ def test_apply_default_pg_timeout_rebinds_the_module_default(monkeypatch):
 
 
 def test_a_renamed_symbol_raises_instead_of_pinning_nothing(monkeypatch):
-    """The failure mode this file exists for: a silent no-op on a future torch.
-
-    ``setattr`` on a missing name succeeds, so only a read-before-write can tell a rename from a
-    successful pin. Deleting the symbol must therefore end the run, naming the consequence.
-    """
+    """``setattr`` on a missing name succeeds, so only a read-before-write tells a rename from a pin."""
     monkeypatch.delattr(c10d, "default_pg_nccl_timeout")
     with pytest.raises(RuntimeError, match="default_pg_nccl_timeout is absent"):
         _apply_default_pg_timeout(datetime.timedelta(minutes=45))
 
 
 def test_a_gpu_row_brings_its_group_up_with_the_production_watchdog(monkeypatch):
-    """The GPU harness inits through production, so a row waits ``DIST_NCCL_TIMEOUT_MINUTES`` on its world and
-    mesh groups, not PyTorch's 10 minutes: a large gathered save or a cross-node row would otherwise abort where
-    production waits. Driven as rank 1 of 2 with the group construction recorded, on a CPU host."""
+    """A large gathered save or cross-node row would otherwise abort where production waits."""
     built = []
     monkeypatch.setattr(dist, "init_process_group", lambda **kwargs: built.append(kwargs))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)

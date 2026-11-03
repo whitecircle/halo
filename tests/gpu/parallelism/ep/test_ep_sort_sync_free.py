@@ -1,43 +1,10 @@
 #!/usr/bin/env python
-"""The grouped-GEMM token sort must not synchronize the host.
+"""The grouped-GEMM token sort syncs no host and, after warm-up, launches no kernel CUDA still has to load.
 
-A host sync per MoE layer per forward drains the launch queue and stops the CPU running ahead of the
-GPU; at 60 MoE layers that is 60 stalls per forward. The offending ops are the ones whose OUTPUT SHAPE
-is data-dependent (``bincount``, ``unique_consecutive(return_counts=True)``, ``nonzero``) — CUDA can
-only size their output by reading the device back.
-
-``torch.cuda.set_sync_debug_mode("error")`` turns any such read into an exception, so this asserts the
-property directly rather than trusting a claim no check enforces.
-
-Scope: the whole sort, a counting sort in three Triton launches (``halo/kernels/moe_route_sort.py``) sized by the
-dispatch's host-side receive counts at ``ep_size > 1`` and by every slot at ``ep_size == 1``; and the per-expert
-loop (``use_grouped_gemm: false``, GptOss under expert TP) at ``ep_size > 1``, which sizes each expert's slot
-read off its count. Each must also equal its device-sized reference (the ``nonzero`` sort; the ``torch.where``
-loop, under deterministic algorithms) bit for bit, and that reference must trip the same detector, so a
-sync-free pass is not a detector that sees nothing. The counting sort also runs every case of
-``tests/common/route_sort_reference.py`` (top_k 1 to 10, 1 to 512 local experts, idle experts, rows with no local
-slot, a zero-token rank, no counts at ``ep_size`` 1) against the torch construction, gate-weight gradient included,
-compiles no binary past its warm-up and takes no pinned host block. In a fresh process, its forward and backward and
-the grouped compute's gathers after the layer warm-up, over receives of one local slot to many, launch no kernel CUDA
-still has to load (lazy loading loads a kernel on its first launch), and a control first launch shows the profiler
-reports such a load.
-
-Likewise, in a fresh process per case and order, a real layer's expert compute after its warm-up, forward and
-backward over receives of one row per local expert to past the grouped GEMM's tile switch, in ascending and in
-descending order, for each operand layout the expert FFN hands it (GptOss's de-interleaved pair with biases at
-``ep_size`` 2, Qwen3's halves under pure expert TP, Qwen3.5's fused pair at ``ep_size`` 1, expert LoRA's adapters):
-loads no grouped-GEMM kernel, and no kernel past its first receive outside GptOss's expert-bias backward. A kernel
-whose variant follows the receive size loads past the first receive in one order or the other, and a rank first
-needing it in a later step holds up its peers' next collective; one the first receive loads in both orders is a
-step-1 load, logged. The expert-bias backward is the known limit, its loads logged too: a one-hot GEMM whose kernel
-cuBLAS picks by the receive's length, which the warm-up runs at its own receive sizes only. The region ran the GEMMs
-of both tiles, read off the CUTLASS kernels' names. Two controls: with the GEMM warm-up stubbed out, every CUTLASS
-grouped-GEMM kernel the region runs is reported loaded under its own name; with the warm-up at one row per expert
-only, the region loads large-tile kernels, and only those.
-
-Run with 1 GPU:
-    torchrun --nproc_per_node=1 \
-        tests/gpu/parallelism/ep/test_ep_sort_sync_free.py
+A host sync per MoE layer drains the launch queue, 60 stalls per forward at 60 layers; ``bincount`` and ``nonzero`` are
+the offenders. Each device-sized reference must trip the same detector. A rank first loading a kernel in a later step
+holds up its peers' next collective. The expert-bias backward is the known limit: cuBLAS picks its kernel by the
+receive's length.
 """
 
 import contextlib
@@ -86,11 +53,10 @@ EXPERTS_PER_RANK = 8
 TOP_K = 4
 NUM_TOKENS = 512
 HIDDEN = 256
-# The family whose real EP layer the loop check runs; any family's loop reads its slots the same way.
+# Any family's loop reads its slots the same way.
 LOOP_FAMILY = "qwen3_moe"
-# (top_k, local experts) of the lazy-load check: gpt-oss at ep4 under expert TP 2, Qwen3.5 at ep8, and top_k 1.
+# (top_k, local experts): gpt-oss at ep4 under expert TP 2, Qwen3.5 at ep8, and top_k 1.
 LAZY_LOAD_SHAPES = ((4, 8), (8, 32), (1, 3))
-# gpt-oss's hidden size; the expert compute reads it off DeepEP's padded receive.
 LAZY_LOAD_HIDDEN = 2880
 _LAZY_LOAD_MARKER = "LAZY_LOADS:"
 _LAZY_LOAD_PROBE = """
@@ -98,35 +64,30 @@ import torch
 from tests.gpu.parallelism.ep.test_ep_sort_sync_free import lazy_load_findings
 print({marker!r} + "|".join(lazy_load_findings(torch.device("cuda", {index}))))
 """
-# (family, layout, variant) of the grouped-GEMM lazy-load check (``tests/common/grouped_gemm_layers.py``), each in a
-# fresh process, so none relies on a kernel another case loaded.
+# (family, layout, variant) from ``tests/common/grouped_gemm_layers.py``, each in a fresh process, so none relies on a
+# kernel another case loaded.
 GEMM_LAZY_LOAD_CASES = (
     ("gpt_oss", "ep2", "defaults"),
     ("qwen3_moe", "etp2", "defaults"),
     ("qwen3_5_moe", "ep1", "defaults"),
     ("qwen3_5_moe", "ep2", "expert_lora"),
 )
-# The orders the sweep runs its receives in, each in its own process: a kernel whose variant follows the receive size
-# loads past the first receive in at least one of them.
+# A kernel whose variant follows the receive size loads past the first receive in at least one of these.
 SWEEP_ORDERS = ("ascending", "descending")
-# The profiler range of each receive's compute: its label, then its index in the sweep.
 RECEIVE_RANGE = "receive "
-# The autograd node of GptOss's expert-bias gradient, the one-hot GEMM ``onehot(eids)ᵀ @ grad_out``, in the profiler.
+# The one-hot GEMM ``onehot(eids)ᵀ @ grad_out`` of GptOss's expert-bias gradient, in the profiler.
 EXPERT_BIAS_BACKWARD = "MoEExpertBiasGatherBackward"
-# In the profiler's names of torch's CUTLASS grouped-GEMM kernels: their problem shape and pointer-array schedule; and
-# the name of the kernel that prepares their arguments.
+# In the profiler's names of torch's CUTLASS grouped-GEMM kernels.
 CUTLASS_GROUPED_GEMM_MARKERS = ("GroupProblemShape", "PtrArray")
 GROUPED_GEMM_PREPARE_KERNEL = "prepare_grouped_gemm_data"
-# A CUTLASS grouped GEMM's tile in its name (``Schedule`` in ``aten/src/ATen/native/cuda/GroupMM.cu``; the cluster is
-# 2x1x1 at both): on SM10x the large tile runs the 2-SM UMMA atom (``SM100_MMA_F16BF16_2x1SM_SS``) and the small one
-# the 1-SM atom, on SM90 the large tile is the cooperative schedule and the small one ping-pong.
+# A CUTLASS grouped GEMM's tile in its name (``Schedule`` in ``aten/src/ATen/native/cuda/GroupMM.cu``): on SM10x the
+# large tile runs the 2-SM UMMA atom (``SM100_MMA_F16BF16_2x1SM_SS``) and the small one the 1-SM atom, on SM90 the
+# large tile is the cooperative schedule and the small one ping-pong.
 LARGE_TILE_MARKERS = ("2x1SM", "Cooperative")
 SMALL_TILE_MARKERS = ("SM100_MMA", "Pingpong")
-# The CUTLASS grouped-GEMM kernels a sweep across the tile switch runs at least: the forward and the input gradient at
-# both tiles, the weight gradient at its one.
+# A sweep across the tile switch runs at least the forward and input gradient at both tiles, the weight gradient at
+# one.
 SWEPT_GROUPED_GEMM_KERNELS = 5
-# Each control's probe setup and the findings function that reads its region: the GEMM warm-up stubbed out, or run at
-# one row per expert only.
 GEMM_CONTROLS = {
     "no_gemm_warm_up": (
         "compute.EPExpertComputeMixin._warm_expert_gemm = lambda *args: None",
@@ -154,14 +115,12 @@ def make_inputs(ep_size, device):
     if ep_size > 1:
         # DeepEP marks slots routed to another rank with -1.
         experts = torch.where(torch.rand_like(experts, dtype=torch.float) < 0.5, experts, -1)
-    # The dispatch's gate weights carry the router's gradient.
     weights = torch.rand(NUM_TOKENS, TOP_K, device=device, dtype=torch.float32, requires_grad=True)
     return tokens, experts, weights
 
 
 @contextlib.contextmanager
 def deterministic_algorithms():
-    """Torch's deterministic-algorithms mode, restored to the caller's setting on exit."""
     enabled = torch.are_deterministic_algorithms_enabled()
     warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     torch.use_deterministic_algorithms(True)
@@ -187,8 +146,7 @@ def run(ctx):
     checks: dict[str, bool] = {}
     device = ctx.device
 
-    # ep_size == 1: no DeepEP padding to compact, so nothing in the sort may read the device back
-    # (a sync raises out of run_sort and fails the run).
+    # ep_size == 1: no DeepEP padding to compact, so a sync raises out of run_sort and fails the run.
     got, (stub, tokens, experts, weights) = run_sort(1, device)
     sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, _ = got
     mismatched = grouped_sort_mismatches(got, nonzero_grouped_sort(stub, tokens, experts, weights))
@@ -197,18 +155,17 @@ def run(ctx):
     checks["ep1_runs_the_counting_sort"] = type(sorted_weights.grad_fn).__name__ == "_CountingSortBackward"
     checks["ep1_sort_equals_torch_construction_bitwise"] = not mismatched
 
-    # The counts must still be right — a sync-free histogram that miscounts is worse than a sync.
+    # A sync-free histogram that miscounts is worse than a sync.
     reference = torch.zeros(EXPERTS_PER_RANK, device=device, dtype=torch.long)
     unique, counts = torch.unique_consecutive(sorted_expert_ids, return_counts=True)
     reference[unique.long()] = counts.long()
     expected_offs = torch.cumsum(reference, 0).to(torch.int32)
     checks["ep1_offsets_match_reference"] = torch.equal(offs, expected_offs)
-    # Every (token, slot) pair must land in some expert at ep1.
     checks["ep1_every_slot_lands_in_an_expert"] = int(offs[-1]) == NUM_TOKENS * TOP_K
     checks["ep1_sorted_index_covers_every_slot"] = sorted_token_idx.numel() == NUM_TOKENS * TOP_K
     checks["ep1_sorted_weights_cover_every_slot"] = sorted_weights.numel() == NUM_TOKENS * TOP_K
 
-    # ep_size > 1: the receive counts size the compaction, so this sort raises on any read-back too.
+    # ep_size > 1: the receive counts size the compaction.
     got, (stub, tokens, experts, weights) = run_sort(4, device)
     mismatched = grouped_sort_mismatches(got, nonzero_grouped_sort(stub, tokens, experts, weights))
     log(f"[ep4] sort ran sync-free: {got[2].numel()} of {experts.numel()} slots local; mismatched={mismatched}")
@@ -216,7 +173,6 @@ def run(ctx):
     checks["ep4_sort_equals_nonzero_sort_bitwise"] = not mismatched
     checks["ep4_runs_the_counting_sort"] = type(got[3].grad_fn).__name__ == "_CountingSortBackward"
 
-    # The detector sees the device-sized nonzero sort.
     checks["ep4_nonzero_sort_trips_the_detector"] = trips_the_detector(
         lambda: nonzero_grouped_sort(stub, tokens, experts, weights)
     )
@@ -241,10 +197,9 @@ def trips_the_detector(fn) -> bool:
 
 
 def check_counting_sort(device) -> dict[str, bool]:
-    """Each reference case through :func:`sort_routing_by_expert` after the layer warm-up for its ``top_k`` and local
-    expert count: sync-free, bit-identical to the torch construction (gate-weight gradient included), served by
-    the warmed binaries and handed no pinned host block. The receive and the reference are built outside the
-    detector, whose host copies sync."""
+    """Each reference case after its layer warm-up: sync-free, bit-identical to the torch construction, served by the
+    warmed binaries, no pinned host block. The receive and reference are built outside the detector, whose host copies
+    sync."""
     checks = {}
     warm_up_counted = False
     pinned = 0
@@ -282,11 +237,9 @@ def check_counting_sort(device) -> dict[str, bool]:
 
 
 def profiled_launches(fn) -> tuple[list[tuple[str, int | None, bool]], set[str]]:
-    """The kernel of each launch in ``fn`` that CUDA loaded first, with the index of the :data:`RECEIVE_RANGE` profiler
-    range the load fell in (None outside every one) and whether it fell inside :data:`EXPERT_BIAS_BACKWARD`, and the
-    name of every kernel ``fn`` ran. A load is a ``Lazy Function Loading`` event of the profiler's trace, named by the
-    launch call it falls inside (most ATen launches load there) or else by the next launch (CUTLASS loads in its
-    attribute setup, Triton when it loads its binary, both before their launch); ``?`` where neither exists."""
+    """Each kernel CUDA loaded first in ``fn``, and every kernel ``fn`` ran. A load is a ``Lazy Function Loading``
+    event, named by the launch it falls inside (most ATen launches) or the next launch (CUTLASS and Triton load before
+    theirs), or ``?``."""
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
         fn()
         torch.cuda.synchronize()
@@ -319,17 +272,13 @@ def profiled_launches(fn) -> tuple[list[tuple[str, int | None, bool]], set[str]]
 
 
 def profiled_lazy_loads(fn) -> list[str]:
-    """The lazily loaded kernels of :func:`profiled_launches`."""
     return [name for name, *_ in profiled_launches(fn)[0]]
 
 
 def lazy_load_findings(device) -> list[str]:
-    """In a process that has launched no kernel yet: at each of :data:`LAZY_LOAD_SHAPES`, the layer warm-up's sort and
-    permute kernels, then over :func:`swept_receives` (one local slot to many, with counts and, as at ``ep_size`` 1,
-    without) the sort, forward and backward, and the grouped compute's gathers (the permute's of bf16 tokens off a
-    padded receive's view, the expert-bias gather's at bf16 and fp32), profiled. Each kernel CUDA loads in that region
-    is a finding, and so is a control first launch (index_select over fp64, which nothing else runs) whose load the
-    profiler does not report: the check would be blind."""
+    """In a process that has launched no kernel yet: warm up, then profile the sort, forward, backward and gathers over
+    :func:`swept_receives`. Each kernel loaded is a finding, as is a control first launch (index_select over fp64,
+    which nothing else runs) whose load the profiler does not report."""
     torch.cuda.set_device(device)
     rows = torch.zeros((1, 4), dtype=torch.float64, device=device)
     index = torch.zeros(1, dtype=torch.long, device=device)
@@ -366,7 +315,7 @@ def lazy_load_findings(device) -> list[str]:
 
 
 def check_lazy_loads() -> dict[str, bool]:
-    """:func:`lazy_load_findings` in a fresh interpreter, since this one has launched every kernel the sort runs."""
+    """In a fresh interpreter, since this one has launched every kernel the sort runs."""
     probe = _LAZY_LOAD_PROBE.format(marker=_LAZY_LOAD_MARKER, index=torch.cuda.current_device())
     findings = probe_findings(probe, _LAZY_LOAD_MARKER)
     log(f"[lazy loads] {findings}")
@@ -385,9 +334,7 @@ def is_grouped_gemm_kernel(name: str) -> bool:
 
 
 def grouped_gemm_tile(name: str) -> str | None:
-    """The tile, ``large`` or ``small``, of the CUTLASS grouped-GEMM kernel ``name`` by :data:`LARGE_TILE_MARKERS` and
-    :data:`SMALL_TILE_MARKERS` (the large tile's 2-SM atom is an ``SM100_MMA`` too, so it is read first); None where
-    the name carries neither."""
+    """``large``, ``small`` or None. The large tile's 2-SM atom is an ``SM100_MMA`` too, so large is read first."""
     if any(marker in name for marker in LARGE_TILE_MARKERS):
         return "large"
     if any(marker in name for marker in SMALL_TILE_MARKERS):
@@ -396,11 +343,9 @@ def grouped_gemm_tile(name: str) -> str | None:
 
 
 def profiled_gemm_region(device, case: int, order: str) -> tuple[str, list[tuple[str, int | None, bool]], set[str]]:
-    """In a process that has launched no kernel yet: the layer warm-up of ``GEMM_LAZY_LOAD_CASES[case]``, then its
-    expert compute, forward and backward, over receives of :data:`SWEPT_ROWS_PER_EXPERT` local slots per local expert
-    in ``order`` (``ascending`` or ``descending``), each receive in its own :data:`RECEIVE_RANGE` profiler range. The
-    case's label, the kernels CUDA loaded in that region, each with the receive it loaded in and whether it loaded in
-    the expert-bias backward, and the CUTLASS grouped-GEMM kernels the region ran."""
+    """In a process that has launched no kernel yet: warm up one case, then run its expert compute forward and backward
+    over :data:`SWEPT_ROWS_PER_EXPERT` in ``order``, each receive in its own :data:`RECEIVE_RANGE` range. Returns the
+    label, the kernels loaded with their receive and expert-bias flag, and the CUTLASS grouped-GEMM kernels run."""
     torch.cuda.set_device(device)
     family, layout, variant = GEMM_LAZY_LOAD_CASES[case]
     layer = gemm_layer(family, layout, variant, device=device)
@@ -420,11 +365,8 @@ def profiled_gemm_region(device, case: int, order: str) -> tuple[str, list[tuple
 
 
 def grouped_gemm_lazy_load_findings(device, case: int, order: str) -> list[str]:
-    """:func:`profiled_gemm_region` of ``case`` in ``order``. A grouped-GEMM kernel CUDA loads in the region is a
-    ``grouped GEMM`` finding; any other kernel is an ``expert-bias GEMM`` one where it loads inside
-    :data:`EXPERT_BIAS_BACKWARD`, a ``receive size`` one where it loads past the first receive (its variant follows the
-    receive) and a ``first receive`` one where that receive loads it (a step-1 load). A region that ran fewer than
-    :data:`SWEPT_GROUPED_GEMM_KERNELS` CUTLASS grouped-GEMM kernels, or not both tiles by name, is a ``sweep``
+    """A grouped-GEMM kernel loaded is a ``grouped GEMM`` finding; another is ``expert-bias GEMM``, ``receive size``
+    past the first receive, or ``first receive``. Too few kernels run, or not both tiles by name, is a ``sweep``
     finding."""
     label, loads, ran = profiled_gemm_region(device, case, order)
     findings = []
@@ -448,9 +390,9 @@ def grouped_gemm_lazy_load_findings(device, case: int, order: str) -> list[str]:
 
 
 def grouped_gemm_control_findings(device, case: int, order: str) -> list[str]:
-    """:func:`profiled_gemm_region` of ``case`` with the GEMM warm-up stubbed out (by the caller), so every CUTLASS
-    grouped-GEMM kernel the region runs is cold: each one no load is named after is a finding, and so is a region that
-    ran none. CUTLASS loads its kernel before launching it, so this checks the naming of such a load."""
+    """GEMM warm-up stubbed out by the caller, so every CUTLASS grouped-GEMM kernel run is cold: each one no load is
+    named after is a finding, as is a region that ran none. CUTLASS loads before launching, so this checks such a
+    load's naming."""
     label, loads, ran = profiled_gemm_region(device, case, order)
     if not ran:
         return [f"sweep: {label}: the region ran no CUTLASS grouped-GEMM kernel"]
@@ -459,9 +401,8 @@ def grouped_gemm_control_findings(device, case: int, order: str) -> list[str]:
 
 
 def grouped_gemm_tile_control_findings(device, case: int, order: str) -> list[str]:
-    """:func:`profiled_gemm_region` of ``case`` with the GEMM warm-up at one row per expert only (by the caller), whose
-    tiles are all small: each CUTLASS grouped-GEMM kernel loaded in the region that :func:`grouped_gemm_tile` does not
-    read as large is a finding, and so is a region that loaded none."""
+    """GEMM warm-up at one row per expert by the caller, whose tiles are all small: each kernel loaded that
+    :func:`grouped_gemm_tile` does not read as large is a finding, as is a region that loaded none."""
     label, loads, _ = profiled_gemm_region(device, case, order)
     cutlass = [name for name, *_ in loads if is_cutlass_grouped_gemm(name)]
     if not cutlass:
@@ -474,8 +415,8 @@ def grouped_gemm_tile_control_findings(device, case: int, order: str) -> list[st
 
 
 def grouped_gemm_probe(case: int, order: str, *, control: str | None = None) -> list[str]:
-    """:func:`grouped_gemm_lazy_load_findings` of ``case`` in ``order``, or under a :data:`GEMM_CONTROLS` ``control``
-    its findings function, in a fresh interpreter."""
+    """:func:`grouped_gemm_lazy_load_findings`, or a :data:`GEMM_CONTROLS` control's findings, in a fresh
+    interpreter."""
     setup, findings = GEMM_CONTROLS[control] if control else ("", "grouped_gemm_lazy_load_findings")
     probe = _GEMM_LAZY_LOAD_PROBE.format(
         setup=setup,
@@ -489,10 +430,9 @@ def grouped_gemm_probe(case: int, order: str, *, control: str | None = None) -> 
 
 
 def check_grouped_gemm_lazy_loads() -> dict[str, bool]:
-    """:func:`grouped_gemm_probe` of every case in every order, and both controls on the first. The ``first receive``
-    findings are logged, not checked: whatever its size, the first receive loads them, so every rank loads them in its
-    first step. So are the ``expert-bias GEMM`` ones, the known limit: cuBLAS picks that GEMM's kernel by the receive's
-    length."""
+    """Every case in every order, and both controls on the first. ``first receive`` findings are logged, not checked,
+    since every rank loads them in its first step whatever the size; so are ``expert-bias GEMM`` ones, the known
+    limit."""
     findings = [
         finding
         for case in range(len(GEMM_LAZY_LOAD_CASES))
@@ -522,13 +462,9 @@ def check_grouped_gemm_lazy_loads() -> dict[str, bool]:
 
 
 def check_loop(device) -> dict[str, bool]:
-    """A real EP layer's per-expert loop, marked ``ep_size=2``: sync-free off the counts, bit-identical to the
-    ``torch.where`` loop, which trips the detector.
-
-    Each token routes to distinct experts, as a router's top-k picks them. The sync check runs in the default mode;
-    the bitwise comparison runs under deterministic algorithms, outside which CUDA's ``index_add_`` adds by atomics in
-    a run-dependent order, so it compares the slot reads and not that order. The reference must reproduce itself
-    there first."""
+    """A real EP layer's per-expert loop at ``ep_size=2``: sync-free, bit-identical to the ``torch.where`` loop.
+    Bitwise only under deterministic algorithms, since CUDA's ``index_add_`` otherwise adds by atomics in a
+    run-dependent order."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES[LOOP_FAMILY]).to(device, torch.bfloat16)
     apply_ep_layers(model, single_process_ep_config(use_grouped_gemm=False))

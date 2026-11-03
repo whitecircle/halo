@@ -1,9 +1,6 @@
-"""Liger appliers built from :class:`LigerFamilySpec` roles, and the deferred patch of remote modeling modules.
-
-A built applier offers only the roles its spec fills, which the dispatch reads for per-family defaults.
-Each role is patched by subclassing the family's own class, which keeps the class name downstream lookups
-key on and avoids the constructor variance that blocks Liger's own class swaps.
-"""
+"""Liger appliers built from :class:`LigerFamilySpec` roles, and the deferred patch of remote modeling modules. Each
+role subclasses the family's own class, keeping the class name lookups key on and avoiding the constructor variance
+that blocks Liger's own swaps."""
 
 from __future__ import annotations
 
@@ -29,11 +26,8 @@ _armed: list[tuple[tuple[str, ...], Callable[[ModuleType], object]]] = []
 
 
 def _upstream_applier(spec: LigerFamilySpec) -> Callable:
-    """The upstream Liger applier a delegating spec extends, read off Liger's own registry.
-
-    Every alias of a family maps to one function there; two would mean the spec groups model types
-    upstream treats as separate families, and one of them would be patched with the other's applier.
-    """
+    """The upstream Liger applier a delegating spec extends. Two distinct appliers mean the spec groups separate
+    upstream families, one of which would be patched with the other's applier."""
     appliers = {model_type: MODEL_TYPE_TO_APPLY_LIGER_FN.get(model_type) for model_type in spec.model_types}
     missing = sorted(model_type for model_type, applier in appliers.items() if applier is None)
     if missing:
@@ -51,10 +45,8 @@ def _upstream_applier(spec: LigerFamilySpec) -> Callable:
 
 
 class LigerApplier:
-    """The callable the dispatch resolves for one family, its signature built from the spec.
-
-    ``upstream`` is set for a delegating spec: its applier runs first, then the spec's own roles on top.
-    """
+    """The callable the dispatch resolves for one family, its signature built from the spec; ``upstream`` is a
+    delegating spec's applier, run first."""
 
     def __init__(self, spec: LigerFamilySpec):
         self.spec = spec
@@ -78,12 +70,9 @@ class LigerApplier:
         return self.upstream is not None and flag in self.defaults and flag not in self.withheld
 
     def _declared_parameters(self):
-        """One parameter per role that will run; a role nothing fills is not offered.
-
-        Under delegation the names and defaults are upstream's — a withheld flag included, since the
-        toolkit serves that role under the same name; the toolkit applies only its own loss convention
-        (CE on, FLCE off, the reverse of Liger's, because CE keeps the logits metrics readable).
-        """
+        """One parameter per role that will run. Under delegation the names and defaults are upstream's, bar the
+        toolkit's loss convention (CE on, FLCE off, the reverse of Liger's, because CE keeps the logits metrics
+        readable)."""
         spec = self.spec
         loss_defaults = {"cross_entropy": not spec.flce_default, "fused_linear_cross_entropy": spec.flce_default}
         if self.upstream is not None:
@@ -121,8 +110,7 @@ class LigerApplier:
 
         patched: list[str] = []
         if self.upstream is not None:
-            # Upstream keeps every role it declares except the withheld ones; the scoped CE patch below
-            # serves the loss.
+            # Upstream keeps every declared role except the withheld ones; the scoped CE patch below serves the loss.
             upstream_flags = {**flags, **dict.fromkeys(self.withheld, False)}
             self.upstream(model=model, **upstream_flags)
             on = sorted(name for name, enabled in upstream_flags.items() if enabled)
@@ -164,11 +152,7 @@ def _declared_classes(module: ModuleType, class_names: tuple[str, ...]) -> set[s
 
 
 def _fire(module: ModuleType) -> None:
-    """Run every armed patch whose classes this module defines.
-
-    A module carrying only some of a spec's classes is a revision that renamed one: it warns rather than
-    raises, since an unrelated repo may share one class name.
-    """
+    """Run every armed patch whose classes this module defines; a partial match warns, as repos share class names."""
     for class_names, patch in _armed:
         present = _declared_classes(module, class_names)
         if present == set(class_names):
@@ -184,11 +168,8 @@ def _fire(module: ModuleType) -> None:
 
 
 def patch_remote_modules(class_names: tuple[str, ...], patch: Callable[[ModuleType], object]) -> None:
-    """Apply ``patch`` to the remote modeling module defining ``class_names``, now or when it loads.
-
-    One entry per ``class_names``: re-applying Liger replaces the armed patch, so the latest
-    application's flags fire. Already-loaded modules are patched immediately.
-    """
+    """Apply ``patch`` to the remote module defining ``class_names``, now or when it loads. Re-applying Liger replaces
+    the armed patch, so the latest application's flags fire."""
     entry = (class_names, patch)
     index = next((i for i, (names, _) in enumerate(_armed) if names == class_names), None)
     if index is None:

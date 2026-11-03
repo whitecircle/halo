@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""Text-only Inkling under PP: stage-aware loading of the TM-layout checkpoint, bitwise vs full-load.
-
-The hub checkpoint keeps Thinking Machines' namespace; the stage loader reads it through the
-family's conversion entry (``conversion_selection.py``). This gate builds a 4-layer text-only artifact
-(TM-layout weights + `InklingTextConfig` ``config.json``, ``layer_types`` period 2 so the pp2
-boundary lands on a whole pattern period) and asserts, for both stages of a virtual ``pp_size=2``
-pipeline walked by both ranks:
-
-    load_ep_model_lazy(whole model) + build_pipeline_stage
-        == load_pp_stage_model + build_pipeline_stage      (bitwise, per parameter)
-
-with EP=2 inside the stage, so the converted + de-interleaved expert slice composes with the PP
-layer filter and re-base. The full-model side of this equality is itself pinned bitwise against
-``from_pretrained`` by ``tests/gpu/parallelism/ep/test_lazy_load_inkling.py``.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/pp/test_pp_inkling_text_only.py
-"""
+"""Text-only Inkling under PP: stage-aware loading of the TM-layout checkpoint is bitwise equal to the full load, with
+EP=2 inside the stage."""
 
 import json
 import os
@@ -45,17 +28,15 @@ from tests.common.rank_log import log
 
 PP_SIZE = 2
 DTYPE = torch.bfloat16
-# 4 layers, sliding pattern [s, f, s, f] (period 2): the pp2 boundary at layer 2 is a whole
-# pattern period, which validate_partition requires for Inkling's enumerate-indexed masks.
+# Period 2: the pp2 boundary at layer 2 is a whole pattern period, which validate_partition requires for Inkling's
+# enumerate-indexed masks.
 TEXT_CONFIG = {**TINY_INKLING_CONFIG, "num_hidden_layers": 4, "local_layer_ids": [0, 2]}
-# The default vision config builds ~600k-wide projection layers (the upstream scale planner
-# fits real patch sizes) — the composite save needs this tiny tower, whose TM-namespace keys
-# then double as the tower-drop coverage for the text-only load.
+# The default vision config builds ~600k-wide projection layers; this tower's TM-namespace keys also cover the
+# tower-drop on the text-only load.
 TINY_VISION = {"temporal_patch_size": 2, "patch_size": 4, "n_layers": 4, "hidden_size": 32, "text_hidden_size": 256}
 
 
 def _write_checkpoint(ctx) -> str:
-    """Rank 0 writes the TM-layout text-only artifact (composite save + text-only config.json)."""
     path = os.path.join(tempfile.gettempdir(), "pp_inkling_text_only_ckpt")
     if ctx.rank == 0:
         torch.manual_seed(1234)
@@ -80,8 +61,7 @@ def run(ctx):
     torch.cuda.set_device(device)
     ckpt = _write_checkpoint(ctx)
 
-    # One EP group spanning the world: the two ranks are one stage's ranks, and the virtual
-    # pipeline is walked by both of them.
+    # One EP group spanning the world: the two ranks are one stage's, and both walk the virtual pipeline.
     ep_config = EPConfig(
         ep_size=2,
         stage_world_size=ctx.world_size,
@@ -129,7 +109,7 @@ def run(ctx):
         shared = sorted(set(ref_tensors) & set(new_tensors))
         mismatched = [name for name in shared if not torch.equal(ref_tensors[name], new_tensors[name])]
         total_compared += len(shared)
-        # Vacuity guard: an empty comparison is the signature of a broken name map, not a pass.
+        # An empty comparison signals a broken name map.
         checks[f"stage{pp_rank}_bitwise_identical"] = bool(shared) and not mismatched
         checks[f"stage{pp_rank}_covers_its_layers"] = sum(1 for n in shared if ".layers." in n) >= (
             new_range[1] - new_range[0]

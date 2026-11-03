@@ -1,9 +1,5 @@
-"""Pipeline-parallel trainer integration: the split, the schedule-driven step, clipping and eval.
-
-The schedule replaces the inherited HF step and drives every microbatch's forward and backward, so
-the trainer never calls ``accelerator.backward`` and runs with ``gradient_accumulation_steps=1``: the
-user's accumulation becomes the microbatch count. Composes with FSDP2 and EP inside each stage.
-"""
+"""Pipeline-parallel trainer integration. The schedule drives every microbatch's forward and backward, so the trainer
+runs with ``gradient_accumulation_steps=1``; the user's accumulation becomes the microbatch count."""
 
 from __future__ import annotations
 
@@ -61,8 +57,7 @@ logger = logging.getLogger(__name__)
 
 
 def wrapper_state_outside_stages(model) -> dict[str, torch.Tensor]:
-    """The tensors of ``model`` that no pipeline stage holds (a composite wrapper's vision tower and
-    projector), by their unsplit names; empty for a plain causal LM."""
+    """Tensors no pipeline stage holds (a composite wrapper's vision tower and projector), by their unsplit names."""
     layout = StageLayout.of(model)
     # An empty backbone prefix means the model is the backbone: every tensor belongs to a stage.
     if not layout.backbone_prefix:
@@ -72,11 +67,8 @@ def wrapper_state_outside_stages(model) -> dict[str, torch.Tensor]:
 
 
 def stash_wrapper_state(model) -> dict[str, torch.Tensor]:
-    """Host copies of :func:`wrapper_state_outside_stages`, at the artifact's save dtype.
-
-    Cast through the caster built on the whole wrapper: its keep-sets (norms, fp32 pins) are
-    tree-derived, and the stage held at save time no longer has the tower's modules.
-    """
+    """Host copies at the artifact's save dtype, cast through the caster built on the whole wrapper: its keep-sets are
+    tree-derived, and the stage held at save time no longer has the tower's modules."""
     cast = save_dtype_caster(model)
     return {
         name: cast(name, tensor.detach()).to("cpu", copy=True)
@@ -100,12 +92,12 @@ class PipelineTrainerMixin:
     _pp_metric_keys: tuple[str, ...] = ()
 
     def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Hook: reject this trainer's own PP-incompatible options, under PP only, before the split; ctor
-        parameters are read out of ``kwargs``, the remaining positionals out of ``ctor_args``."""
+        """Hook: reject this trainer's own PP-incompatible options before the split; ctor parameters are in ``kwargs``,
+        the remaining positionals in ``ctor_args``."""
 
     def _split_pipeline_stage(self, kwargs: dict, training_args, ctor_args: tuple = ()) -> dict:
-        """Split the model into this rank's stage before ``super().__init__`` sees it, after the
-        refusals that must precede any wrapping. No-op at ``pp_size == 1``."""
+        """Split the model into this rank's stage before ``super().__init__`` sees it, after the refusals that must
+        precede any wrapping."""
         config: ParallelismConfig = self.parallelism_config
         if not config.is_pp_mode:
             return kwargs
@@ -120,8 +112,7 @@ class PipelineTrainerMixin:
         # nothing; passing the config keeps the probe off the hub.
         if is_vlm_model(getattr(model.config, "_name_or_path", "") or "", config=model.config):
             reject_pp_vlm(kwargs.get("train_dataset"), kwargs.get("eval_dataset"), kwargs.get("data_collator"))
-            # Held on the rank that writes the shared files, for every checkpoint to re-emit under the
-            # wrapper layout.
+            # Held on the rank that writes the shared files, for every checkpoint to re-emit under the wrapper layout.
             self._pp_wrapper_state = stash_wrapper_state(model) if is_fs_save_rank() else {}
             if is_global_main_process():
                 logger.info(
@@ -156,18 +147,13 @@ class PipelineTrainerMixin:
         return kwargs
 
     def _configure_pipeline_parallel(self):
-        """Post-``__init__`` PP setup: the fixed-shape collator, the signature-column pin, the stage-scoped
-        (EP-aware) FSDP2 wrap, the runner and its clip.
-
-        ``_pp_loss_adapter`` is called once, here, before anything reads the adapter, so a trainer's
-        adapter builder may seed the per-step state its loss closes over.
-        """
+        """Post-``__init__`` PP setup. ``_pp_loss_adapter`` is called once, here, before anything reads the adapter, so
+        its builder may seed the per-step state its loss closes over."""
         config: ParallelismConfig = self.parallelism_config
         stage: PipelineStageModule = self.model
         self._pp_adapter = adapter = self._pp_loss_adapter()
-        # Wrap first: the collator declares which dataset columns it needs, and the pin must union them
-        # in. Pinning first would prune a packing collator's `seq_lengths`, collapsing every packed row
-        # into a single attended document instead of failing.
+        # Wrap first: the pin must union in the columns the collator declares. Pinning first would prune a packing
+        # collator's `seq_lengths`, collapsing every packed row into one attended document instead of failing.
         self._pp_wrap_collator()
         self._pin_pp_signature_columns(adapter)
         self._pp_chain_group = build_pipeline_group(config)
@@ -207,8 +193,8 @@ class PipelineTrainerMixin:
             )
 
     def _pp_wrap_collator(self):
-        """Wrap the trainer's final collator for fixed shapes, after ``super().__init__`` so every
-        collator source is covered. Idempotent."""
+        """Wrap the final collator for fixed shapes, after ``super().__init__`` so every collator source is covered.
+        Idempotent."""
         collator = self.data_collator
         if isinstance(collator, FixedShapeCollator):
             return
@@ -228,9 +214,8 @@ class PipelineTrainerMixin:
         )
 
     def _pin_pp_signature_columns(self, adapter: PipelineLossAdapter) -> None:
-        """Pin HF's signature columns to what the runner and the collator read: HF prunes dataset columns
-        against the forward signature, and a stage's forward takes hidden_states, so input_ids and labels
-        would be dropped. An adapter that keeps the trainer's own columns leaves HF's derivation."""
+        """HF prunes dataset columns against the forward signature, and a stage's forward takes hidden_states, so
+        input_ids and labels would be dropped."""
         if adapter.pin_runner_columns:
             collator_columns = getattr(self.data_collator, "required_dataset_columns", ())
             self._signature_columns = list(
@@ -246,13 +231,11 @@ class PipelineTrainerMixin:
             self._set_signature_columns_if_needed()
 
     def _wrap_pp_stage(self, stage: PipelineStageModule, ep_layers: list) -> None:
-        """COLLECTIVE: build the stage group, refuse a PP+EP stage without EP layers, and FSDP2-wrap the
-        stage over the stage group, EP-aware when it carries EP layers (their capacity-generation hook the
-        stage already registered on itself)."""
+        """COLLECTIVE. Build the stage group, refuse a PP+EP stage without EP layers, and FSDP2-wrap over the stage
+        group."""
         config = self.parallelism_config
-        # Deliberately unconditional: build_stage_group issues pp_size collective dist.new_group calls
-        # while `ep_layers` is rank-dependent (a hybrid MoE with leading dense layers can give one stage
-        # none). Gating it deadlocks inside new_group, before any raise prints.
+        # Unconditional: build_stage_group issues pp_size collective dist.new_group calls while `ep_layers` is
+        # rank-dependent. Gating it deadlocks inside new_group, before any raise prints.
         self._pp_stage_group = build_stage_group(config)
         reject_uncovered_pp_ep_layers(config, ep_layers)
         if ep_layers:
@@ -271,12 +254,8 @@ class PipelineTrainerMixin:
             )
 
     def _pp_hoist_metrics_reduction(self, adapter: PipelineLossAdapter) -> PipelineLossAdapter:
-        """Move the user's ``preprocess_logits_for_metrics`` onto the last stage, or refuse the metric.
-
-        Unreduced, the raw ``[rows, max_length, vocab]`` output would cross the chain and be allocated
-        on every stage; HF applies the reduction too late to shrink that hop, so it runs here instead
-        and is cleared from HF. It sees the frozen batch, so it must be row-independent.
-        """
+        """Unreduced, the raw ``[rows, max_length, vocab]`` output would cross the chain, and HF applies the reduction
+        too late to shrink that hop. It sees the frozen batch, so it must be row-independent."""
         if self.compute_metrics is None or adapter.predictions_fn is not None:
             return adapter
         reduction = self.preprocess_logits_for_metrics
@@ -299,8 +278,8 @@ class PipelineTrainerMixin:
         )
 
     def _pp_pin_metric_keys(self) -> None:
-        """COLLECTIVE over the chain: pin the adapter's per-step metric names and check every rank
-        agrees, since the per-step share broadcasts values only."""
+        """COLLECTIVE over the chain. Pin the per-step metric names and check every rank agrees, since the per-step
+        share broadcasts values only."""
         adapter = self._pp_adapter
         if adapter.metrics_fn is None:
             return
@@ -322,14 +301,11 @@ class PipelineTrainerMixin:
 
     @property
     def _pp_last_stage_rank(self) -> int:
-        """Global rank of this chain's last stage: the source of every chain broadcast."""
+        """The source of every chain broadcast."""
         return self.parallelism_config.pp_chain_ranks()[-1]
 
     def _pp_training_step(self, inputs) -> torch.Tensor:
-        """One optimizer step's microbatches through the pipeline, the loss broadcast for logging.
-
-        The schedule already ran every backward, so HF gets a detached loss with gradients in place.
-        """
+        """The schedule already ran every backward, so HF gets a detached loss with gradients in place."""
         self.model.train()
         inputs = self._prepare_inputs(inputs)
 
@@ -355,19 +331,16 @@ class PipelineTrainerMixin:
         return self._pp_broadcast_loss_from_last_stage(loss)
 
     def _pp_default_normalizer(self, inputs) -> torch.Tensor:
-        """COLLECTIVE over the stage group: the DP-global loss-token count / dp, the causal-LM normalizer.
-
-        FSDP averages gradients over the replicas, so per-replica losses normalized by G/dp make the
-        averaged gradient the global token mean. HF's ``num_items_in_batch`` cannot supply it: a
-        stage's forward takes no loss kwargs.
-        """
+        """COLLECTIVE over the stage group. FSDP averages gradients over replicas, so per-replica losses over the
+        DP-global token count / dp make the averaged gradient the global token mean; a stage's forward takes no HF loss
+        kwargs."""
         count = loss_token_counts_per_row(inputs["labels"]).sum().to(dtype=torch.float32)
         dist.all_reduce(count, group=self._pp_stage_group)
         return (count / self.parallelism_config.stage_world_size).clamp(min=1.0)
 
     def _pp_share_step_metrics(self, train_eval: str, rows: int = 1) -> None:
-        """COLLECTIVE over the chain: broadcast the last stage's per-step metrics (only it runs the
-        loss) as one fp32 vector and record them on every rank, weighed by ``rows``."""
+        """COLLECTIVE over the chain. Broadcast the last stage's per-step metrics (only it runs the loss) and record
+        them on every rank, weighed by ``rows``."""
         if not self._pp_metric_keys:
             return
         local = self._pp_adapter.metrics_fn()
@@ -389,16 +362,11 @@ class PipelineTrainerMixin:
         )
 
     def _pp_broadcast_loss_from_last_stage(self, tensor) -> torch.Tensor:
-        """The last stage's scalar loss, broadcast down the chain so every rank logs the same value."""
         return broadcast_scalar_from_last_stage(tensor, self._pp_last_stage_rank, self._pp_chain_group)
 
     def _pp_prediction_step(self, inputs, prediction_loss_only: bool, ignore_keys=None):
-        """COLLECTIVE over the chain: one evaluation step through the pipeline schedule.
-
-        Without ``compute_metrics`` the schedule runs its own microbatched loss; with it, one forward-only
-        pass yields the last stage's output, from which the loss and the predictions derive. The examples
-        padding an eval split's final round come back as inert filler rows the loss and metrics never read.
-        """
+        """COLLECTIVE over the chain. With ``compute_metrics``, one forward-only pass yields the last stage's output;
+        without it the schedule runs its own microbatched loss. Final-round padding comes back as inert filler rows."""
         del ignore_keys
         adapter = self._pp_adapter
         inputs = self._prepare_inputs(inputs)
@@ -445,16 +413,15 @@ class PipelineTrainerMixin:
         loss = self._pp_broadcast_loss_from_last_stage(loss)
         predictions = self._pp_broadcast_output_from_last_stage(predictions)
         labels = inputs["labels"] if adapter.eval_labels_fn is None else adapter.eval_labels_fn(inputs)
-        # Trim filler rows in the eval output's own row unit, which a predictions_fn may change (a
-        # preference adapter emits one row per pair), and trim both together, or gather_for_metrics
-        # desyncs across replicas.
+        # Trim filler rows in the eval output's own row unit, which a predictions_fn may change, and trim both
+        # together, or gather_for_metrics desyncs across replicas.
         labels = labels[: labels.size(0) * rows // frozen_rows]
         predictions = predictions[: predictions.size(0) * rows // frozen_rows]
         return loss, predictions, labels
 
     def _pp_eval_count(self, inputs: dict, real_examples: int) -> torch.Tensor | float:
-        """The eval loss denominator, taken before the row padding so a pair/row-count normalizer sees
-        the real examples alone; a step of padding alone divides by 1."""
+        """Taken before the row padding so a pair/row-count normalizer sees the real examples alone; a step of padding
+        alone divides by 1."""
         if not real_examples:
             return 1.0
         if self._pp_adapter.eval_normalizer is not None:
@@ -463,9 +430,8 @@ class PipelineTrainerMixin:
         return loss_token_counts_per_row(inputs["labels"]).sum().to(dtype=torch.float32).clamp(min=1.0)
 
     def _pp_frozen_row_pads(self) -> dict[str, int]:
-        """Fill values for the inert rows :meth:`_pp_pad_rows_to_frozen` appends: the collator's pads,
-        but ``attention_mask`` fills with ones (a fully-masked row NaNs the softmax) and every extra
-        target with 0."""
+        """Fill values for inert rows: the collator's pads, but ``attention_mask`` fills with ones (a fully-masked row
+        NaNs the softmax) and every extra target with 0."""
         pads = dict(self.data_collator.pad_values)
         pads["attention_mask"] = 1
         for key in self._pp_adapter.extra_target_keys:
@@ -473,8 +439,7 @@ class PipelineTrainerMixin:
         return pads
 
     def _pp_pad_rows_to_frozen(self, inputs: dict, frozen_rows: int, pad_values) -> dict:
-        """Row-pad a partial eval batch to the pipeline's frozen row count with inert filler rows,
-        padding only the keys in ``pad_values``."""
+        """Row-pad a partial eval batch with inert filler rows, only on the keys in ``pad_values``."""
         rows = inputs["input_ids"].size(0)
         if rows > frozen_rows:
             raise ValueError(f"Eval batch of {rows} rows exceeds the pipeline's frozen batch size {frozen_rows}.")
@@ -498,17 +463,14 @@ class PipelineTrainerMixin:
         return out
 
     def _pp_broadcast_output_from_last_stage(self, tensor: torch.Tensor | None) -> torch.Tensor:
-        """The last stage's prediction tensor, broadcast down the chain (shape carried with it)."""
         return broadcast_tensor_from_last_stage(tensor, self._pp_last_stage_rank, self._pp_chain_group)
 
     def _pp_broadcast_log_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
-        """COLLECTIVE over the chain: the last stage's log-step metric dict, for metrics whose names
-        depend on the data (one object hop per log step)."""
+        """COLLECTIVE over the chain, for metrics whose names depend on the data (one object hop per log step)."""
         shared = [metrics]
         dist.broadcast_object_list(shared, src=self._pp_last_stage_rank, group=self._pp_chain_group)
         return shared[0]
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
-        """This trainer's pipeline-loss contract: the causal-LM one (summed shifted CE, token-count normalizer)
-        SFT needs; a PP-enabled trainer with another objective overrides it."""
+        """The causal-LM contract SFT needs; a PP-enabled trainer with another objective overrides it."""
         return PipelineLossAdapter(token_loss_fn=causal_lm_token_loss)

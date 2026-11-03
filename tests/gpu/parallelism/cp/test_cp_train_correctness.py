@@ -1,34 +1,8 @@
 #!/usr/bin/env python
-"""
-Context Parallelism training correctness test for Qwen3.
+"""CP training equals non-CP on Qwen3-0.6B: loss, gradients, and a multi-step trajectory.
 
-Validates that CP training produces *equivalent* results to non-CP training by
-comparing, step-by-step on the same Qwen3-0.6B model and data:
-
-Phase 1 — Forward pass loss equivalence
-Phase 2 — Gradient equivalence after forward+backward (core correctness proof)
-Phase 3 — Multi-step training trajectory and final weight convergence
-
-Non-CP baseline runs each rank independently on the full sequence (no gradient
-sync needed since each rank has identical model + data). CP mode uses the
-UlyssesModel which splits sequences and coordinates via all-to-all.
-
-After CP backward, gradients are all-reduced (AVG) to simulate FSDP NO_SHARD
-averaging. The CP loss scaling (cp_size * local_sum / global_tokens) ensures
-that after this averaging, gradients match the non-CP baseline:
-
-    avg_cp_grad = (1/cp_size) * sum_r(cp_size * d(local_sum_r)/d(p) / global_tokens)
-                = d(global_sum_CE) / d(p) / global_tokens
-                = d(mean_CE_full_seq) / d(p)   ← matches non-CP baseline
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/cp/test_cp_train_correctness.py
-
-Requirements:
-    - 2x GPUs
-    - flash-attn installed (Ulysses requires Flash Attention 2 or 3)
-    - Model: Qwen/Qwen3-0.6B (auto-downloaded)
+Gradients are all-reduced (AVG) to simulate FSDP NO_SHARD, and the CP loss scaling makes that match the baseline:
+avg_cp_grad = (1/cp_size) * sum_r(cp_size * d(local_sum_r)/d(p) / global_tokens) = d(mean_CE_full_seq) / d(p)
 """
 
 import math
@@ -48,23 +22,16 @@ from tests.common.numerics import cos_sim, max_or_nan
 from tests.common.rank_log import log, log_all
 from tests.common.tolerances import TOL
 
-# Configuration
-
 MODEL_NAME = QWEN3_0_6B
-SEQ_LEN = 128  # Must be divisible by cp_size=2
+SEQ_LEN = 128  # Must be divisible by cp_size=2.
 SEED = 42
 NUM_TRAIN_STEPS = 5
 LEARNING_RATE = 1e-4
 
-# Tolerances — calibrated for bf16 + Ulysses all-to-all precision
-WEIGHT_COS_MIN = 0.9999  # Final weight cosine similarity after training
-
-
-# Helpers
+WEIGHT_COS_MIN = 0.9999  # calibrated for bf16 + Ulysses all-to-all precision
 
 
 def load_model(device: str):
-    """Load a fresh Qwen3-0.6B model."""
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         dtype=torch.bfloat16,
@@ -76,7 +43,6 @@ def load_model(device: str):
 
 
 def create_input(vocab_size: int, device: str, seed: int = SEED):
-    """Create deterministic input_ids and labels, broadcast-synchronized."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     input_ids = torch.randint(100, min(30000, vocab_size), (1, SEQ_LEN), device=device)
@@ -86,15 +52,7 @@ def create_input(vocab_size: int, device: str, seed: int = SEED):
     return input_ids, labels
 
 
-# Phase 1 + 2: Loss and Gradient Equivalence (combined to minimize loads)
-
-
 def test_loss_and_gradient_equivalence(device, cp_size):
-    """
-    Test forward pass loss AND gradient equivalence in a single pass.
-
-    Returns (phase1_passed, phase2_passed, details_dict).
-    """
     log(f"\n{'=' * 70}")
     log("  Phase 1+2: Loss and Gradient Equivalence")
     log(f"{'=' * 70}")
@@ -102,7 +60,6 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     input_ids, labels = create_input(tokenizer.vocab_size, device)
 
-    # ── Non-CP baseline: forward + backward ─────────────────────────────
     log("\n  [A] Non-CP forward + backward...")
     model_base = load_model(device)
     model_base.train()
@@ -122,12 +79,10 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     del model_base, out_base
     cleanup_memory()
 
-    # ── CP: forward + backward ──────────────────────────────────────────
     log("\n  [B] CP forward + backward...")
     model_cp = load_model(device)
 
-    # No except-and-skip: a refusal on a supported CP family is the regression this file exists to
-    # catch, and returning (True, True, {}) would delete the train-step comparison while exiting 0.
+    # No except-and-skip: a refusal on a supported CP family is the regression here, and returning would exit 0.
     reject_unsupported_ulysses_model(model_cp, cp_size=cp_size)
 
     cp_config = CPConfig(
@@ -141,7 +96,7 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     cp_loss_val = out_cp.loss.item()
     out_cp.loss.backward()
 
-    # Simulate FSDP NO_SHARD: average gradients across CP ranks
+    # Simulate FSDP NO_SHARD.
     for p in model_cp.parameters():
         if p.grad is not None:
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
@@ -156,7 +111,6 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     del model_cp, out_cp
     cleanup_memory()
 
-    # ── Phase 1: Compare losses ─────────────────────────────────────────
     log("\n  --- Phase 1: Loss Equivalence ---")
 
     # Each rank's cp_size * local_sum / global_tokens averages to the full-sequence mean.
@@ -172,14 +126,13 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     log(f"      Difference:       {loss_diff:.6f} (tol: {TOL.parallel_vs_baseline_loss_abs})")
     log(f"      Phase 1 result:   {'PASS' if loss_passed else 'FAIL'}")
 
-    # ── Phase 2: Compare gradients ──────────────────────────────────────
     log("\n  --- Phase 2: Gradient Equivalence ---")
 
     common_params = sorted(set(base_grads.keys()) & set(cp_grads.keys()))
     log(f"      Common parameters: {len(common_params)}")
 
-    # A parameter the CP backward leaves without a gradient drops out of the intersection, so the
-    # key sets must match exactly or the comparison below never sees it.
+    # A parameter the CP backward leaves without a gradient would drop out of an intersection, so the key sets must
+    # match.
     grad_keys_match = base_grads.keys() == cp_grads.keys()
     if not grad_keys_match:
         log(f"      ERROR: grads only in baseline: {sorted(base_grads.keys() - cp_grads.keys())[:5]}")
@@ -204,7 +157,6 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     avg_cosine = sum(cosine_sims) / len(cosine_sims) if cosine_sims else 0.0
     min_cosine = min(cosine_sims) if cosine_sims else 0.0
 
-    # Gradient norm ratio
     norm_ratio = cp_grad_norm / base_grad_norm if base_grad_norm > 1e-12 else float("inf")
     norm_close = abs(norm_ratio - 1.0) < TOL.cp_grad_norm_rtol
 
@@ -232,31 +184,18 @@ def test_loss_and_gradient_equivalence(device, cp_size):
     return loss_passed, grad_passed, details
 
 
-# Phase 3: Multi-Step Training Equivalence
-
-
 def test_training_equivalence(device, cp_size):
-    """
-    Train for N steps with and without CP, compare loss trajectories and
-    final weight similarity.
-
-    Both modes use the same model initialization, same data per step, and
-    same optimizer config. CP gradients are averaged after backward to
-    simulate FSDP NO_SHARD, making the optimizer updates equivalent.
-    """
     log(f"\n{'=' * 70}")
     log(f"  Phase 3: Multi-Step Training Equivalence ({NUM_TRAIN_STEPS} steps)")
     log(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
-    # Pre-generate all batches (deterministic, broadcast-synced)
     batches = []
     for step in range(NUM_TRAIN_STEPS):
         inp, lab = create_input(tokenizer.vocab_size, device, seed=SEED + step)
         batches.append((inp, lab))
 
-    # ── Non-CP training ─────────────────────────────────────────────────
     log(f"\n  [A] Non-CP training (lr={LEARNING_RATE})...")
     model_base = load_model(device)
     model_base.train()
@@ -276,7 +215,6 @@ def test_training_equivalence(device, cp_size):
     del model_base, optimizer_base
     cleanup_memory()
 
-    # ── CP training ─────────────────────────────────────────────────────
     log(f"\n  [B] CP training (lr={LEARNING_RATE})...")
     model_cp = load_model(device)
     cp_config = CPConfig(
@@ -292,7 +230,7 @@ def test_training_equivalence(device, cp_size):
         out = model_cp(input_ids=inp, labels=lab)
         out.loss.backward()
 
-        # Simulate FSDP NO_SHARD: average gradients across CP ranks
+        # Simulate FSDP NO_SHARD.
         for p in model_cp.parameters():
             if p.grad is not None:
                 dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
@@ -309,11 +247,9 @@ def test_training_equivalence(device, cp_size):
 
     log(f"      CP losses (avg): {[f'{l:.4f}' for l in cp_avg_losses]}")
 
-    # ── Compare ─────────────────────────────────────────────────────────
     log("\n  --- Comparing ---")
     checks = {}
 
-    # Check 1: Per-step loss closeness
     step_diffs = [abs(b - c) for b, c in zip(base_losses, cp_avg_losses, strict=False)]
     max_step_diff = max_or_nan(step_diffs)
     loss_close = max_step_diff < TOL.parallel_vs_baseline_train_loss_abs
@@ -322,18 +258,16 @@ def test_training_equivalence(device, cp_size):
     log(f"      Max step diff:  {max_step_diff:.6f} (tol: {TOL.parallel_vs_baseline_train_loss_abs})")
     log(f"      Loss trajectory: {'PASS' if loss_close else 'FAIL'}")
 
-    # Check 2: Loss trend correlation
     base_t = torch.tensor(base_losses, dtype=torch.float)
     cp_t = torch.tensor(cp_avg_losses, dtype=torch.float)
-    # A constant trajectory has no trend to correlate; five optimizer steps that leave the loss
-    # flat mean the updates were never applied, so it fails.
+    # Five optimizer steps that leave the loss flat mean the updates were never applied, so a constant trajectory
+    # fails.
     degenerate = not (base_t.std() > 0 and cp_t.std() > 0)
     corr = float("nan") if degenerate else torch.corrcoef(torch.stack([base_t, cp_t]))[0, 1].item()
     corr_ok = not degenerate and corr > 0.90
     checks["loss_correlation"] = corr_ok
     log(f"      Loss correlation: {corr:.4f} ({'PASS' if corr_ok else 'FAIL'})")
 
-    # Check 3: Final weight similarity (cosine per param, then aggregate)
     common_params = sorted(set(base_weights.keys()) & set(cp_weights.keys()))
     weight_cosines = []
     for name in common_params:
@@ -341,7 +275,7 @@ def test_training_equivalence(device, cp_size):
         wc = cp_weights[name]
         if wb.shape == wc.shape:
             weight_cosines.append(cos_sim(wb, wc, label=name))
-    # Every parameter compared: a missing name or a shape mismatch is a failure, not a skip.
+    # A missing name or a shape mismatch is a failure.
     weights_covered = base_weights.keys() == cp_weights.keys() and len(weight_cosines) == len(common_params)
 
     if weight_cosines:
@@ -357,7 +291,6 @@ def test_training_equivalence(device, cp_size):
         checks["weights_close"] = False
         log("      ERROR: No weights to compare!")
 
-    # Check 4: All losses finite
     all_finite = all(math.isfinite(l) for l in base_losses + cp_avg_losses)
     checks["all_finite"] = all_finite
     log(f"      All losses finite:   {'PASS' if all_finite else 'FAIL'}")
@@ -373,12 +306,8 @@ def test_training_equivalence(device, cp_size):
     }
 
 
-# Main
-
-
 @gpu_test_main(min_world_size=2, prefix="cp_train_correctness", partial_state=False)
 def run(ctx):
-    """Run all CP training correctness phases."""
     device = f"cuda:{ctx.local_rank}"
     cp_size = ctx.world_size
 

@@ -12,12 +12,11 @@ from halo.data.conversation import (
     reject_image_content,
 )
 
-# Probe results cached per tokenizer instance (weak: a dropped tokenizer must not be kept alive).
+# Weak: a dropped tokenizer must not be kept alive.
 _tokenizer_specials_cache: "weakref.WeakKeyDictionary[Any, _TokenizerSpecials]" = weakref.WeakKeyDictionary()
 
 
 def _strip_leading_bos(text: str, tokenizer: PreTrainedTokenizer) -> str:
-    """``text`` without a leading BOS, for a tokenizer that re-adds it."""
     if tokenizer.bos_token and text.startswith(tokenizer.bos_token):
         return text[len(tokenizer.bos_token) :]
     return text
@@ -25,8 +24,8 @@ def _strip_leading_bos(text: str, tokenizer: PreTrainedTokenizer) -> str:
 
 @dataclass(frozen=True)
 class _TokenizerSpecials:
-    """What a tokenizer's ``add_special_tokens=True`` post-processor adds around plain text;
-    ``trailing_special_text`` decodes ``trailing_special_ids`` (empty when nothing is appended)."""
+    """What ``add_special_tokens=True`` adds around plain text; ``trailing_special_text`` decodes
+    ``trailing_special_ids``."""
 
     adds_leading_bos: bool
     trailing_special_ids: tuple[int, ...]
@@ -34,12 +33,9 @@ class _TokenizerSpecials:
 
 
 def probe_tokenizer_specials(tokenizer: PreTrainedTokenizer) -> _TokenizerSpecials:
-    """What ``add_special_tokens=True`` actually adds, probed once per tokenizer instance on the empty string: a
-    leading ``bos_token_id`` means the post-processor owns BOS, and the rest is the appended suffix.
-
-    ``tokenizer.bos_token`` alone misleads: gpt-oss/Bailing name a BOS their post-processor never emits, and
-    Zaya's appends ``<|im_end|>`` instead of prepending one.
-    """
+    """Probed once per tokenizer on the empty string: a leading ``bos_token_id`` means the post-processor owns BOS, the
+    rest is the suffix. ``tokenizer.bos_token`` alone misleads: gpt-oss/Bailing name a BOS their post-processor never
+    emits, and Zaya's appends ``<|im_end|>`` instead of prepending one."""
     cached = _tokenizer_specials_cache.get(tokenizer)
     if cached is not None:
         return cached
@@ -57,8 +53,8 @@ def probe_tokenizer_specials(tokenizer: PreTrainedTokenizer) -> _TokenizerSpecia
 
 
 def lacks_emitted_bos(ids: list[int], tokenizer: PreTrainedTokenizer) -> bool:
-    """Whether ``ids`` lack the leading BOS this tokenizer's post-processor emits (:func:`probe_tokenizer_specials`):
-    prepending a nominal BOS it never emits would train on a token the policy never sees."""
+    """Whether ``ids`` lack the BOS the post-processor emits; prepending a nominal BOS it never emits would train on a
+    token the policy never sees."""
     bos_id = tokenizer.bos_token_id
     return (
         bos_id is not None and probe_tokenizer_specials(tokenizer).adds_leading_bos and (not ids or ids[0] != bos_id)
@@ -66,12 +62,11 @@ def lacks_emitted_bos(ids: list[int], tokenizer: PreTrainedTokenizer) -> bool:
 
 
 def _render_terminator_survived(encoded: Any, tokenizer: PreTrainedTokenizer, specials: _TokenizerSpecials) -> bool:
-    """Whether the render's own turn terminator survives just before the tokenizer-appended copy, at most
-    whitespace apart, which makes that copy a duplicate. Length cannot decide it: a render that exactly fills
-    ``max_length`` measures the same as a cut one."""
+    """Whether the render's own terminator sits just before the appended copy, at most whitespace apart, which makes
+    that copy a duplicate. Length cannot decide it: a render filling ``max_length`` measures the same as a cut one."""
     ids = encoded["input_ids"]
     n = len(specials.trailing_special_ids)
-    end = len(ids) - n  # position just before the tokenizer-appended copy
+    end = len(ids) - n
     while end >= n:
         if tuple(ids[end - n : end]) == specials.trailing_special_ids:
             return True
@@ -82,12 +77,12 @@ def _render_terminator_survived(encoded: Any, tokenizer: PreTrainedTokenizer, sp
 
 
 def _strip_trailing_special_ids(encoded: Any, trailing_special_ids: tuple[int, ...]) -> None:
-    """Trim the appended trailing specials from every list column as long as ``input_ids``, in place."""
+    """In place, on every list column as long as ``input_ids``."""
     ids = encoded["input_ids"]
     n_trailing = len(trailing_special_ids)
     orig_len = len(ids)
     if orig_len < n_trailing or tuple(ids[-n_trailing:]) != trailing_special_ids:
-        return  # truncation already cut the suffix; nothing to strip
+        return  # truncation already cut the suffix
     keep = orig_len - n_trailing
     for key in list(encoded.keys()):
         value = encoded[key]
@@ -107,10 +102,9 @@ def render_conversation(
     interleaved_thinking: bool = False,
     tools_field: str | None = None,
 ) -> str:
-    """Chat-template one text conversation; ``row`` supplies the per-row template kwargs (tools, interleaved
-    thinking), and ``conversation`` comes separately because the SDPG collator builds its own. BOS stays as
-    rendered: :func:`tokenize_rendered` owns the specials, and gemma-4's template emits a BOS its post-processor
-    does not add."""
+    """Chat-template one text conversation; ``conversation`` comes apart from ``row`` because the SDPG collator builds
+    its own. BOS stays as rendered: :func:`tokenize_rendered` owns the specials, and gemma-4's template emits a BOS its
+    post-processor does not add."""
     reject_image_content(conversation, f"conversation_field '{conversation_field}'")
     conversation = fold_system_into_conversation(conversation, system_prompt, model_supports_system_role)
     return tokenizer.apply_chat_template(
@@ -128,9 +122,8 @@ def render_generation_prompt(
     max_prompt_length: int | None = None,
     **template_kwargs,
 ) -> str | None:
-    """Chat-template ``messages`` as a GRPO generation prompt, or ``None`` past ``max_prompt_length``: cutting a
-    prompt would remove the question the verifier grades. The rendered BOS is stripped only where the
-    post-processor prepends its own (:func:`tokenize_rendered`)."""
+    """A GRPO generation prompt, or ``None`` past ``max_prompt_length``: cutting it would remove the question the
+    verifier grades. The rendered BOS is stripped only where the post-processor prepends its own."""
     reject_image_content(messages, "generation prompt")
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **template_kwargs)
     if probe_tokenizer_specials(tokenizer).adds_leading_bos:
@@ -144,13 +137,10 @@ def render_generation_prompt(
 
 
 def tokenize_rendered(tokenizer: PreTrainedTokenizer, text: str, *, for_generation: bool = False, **tokenizer_kwargs):
-    """Tokenize rendered chat-template text so each special appears once, owned by whoever emits it
-    (:func:`probe_tokenizer_specials`): a post-processor that prepends BOS gets the text with its rendered BOS
+    """Tokenize so each special appears once: a post-processor prepending BOS gets the text with its rendered BOS
     stripped, any other keeps the text verbatim and adds specials only when it appends a suffix (Zaya's EOS).
-
-    ``for_generation`` strips the appended suffix so a prompt never ends on a terminator; a training row drops it
-    only as a duplicate of a render terminator that survived truncation (:func:`_render_terminator_survived`).
-    """
+    ``for_generation`` strips the appended suffix so a prompt never ends on a terminator; a training row drops it only
+    as a duplicate of a render terminator that survived truncation."""
     specials = probe_tokenizer_specials(tokenizer)
     if specials.adds_leading_bos:
         encoded = tokenizer(_strip_leading_bos(text, tokenizer), add_special_tokens=True, **tokenizer_kwargs)

@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 # Untrainable turns (``Message.untrainable``) that became no negative-only row, over all of them.
 UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY = "sampling/untrainable_turns_rowless_frac"
-# ``warn_once`` key of the re-render fallback for a rollout that returned no sampled ids.
 SAMPLED_IDS_MISSING_WARNING = "sampled_ids_missing"
 
 
@@ -46,16 +45,14 @@ class TurnRow(NamedTuple):
 
 
 def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> list[TurnRow]:
-    """A whole re-tokenized trajectory as one training row, also the fallback of the per-turn split."""
     return [TurnRow(*tokenized, None, None)]
 
 
 def rollout_template_kwargs(
     rollout_kwargs: dict, reasoning_effort: str | None, reasoning_budget: int | None = None, budget_soft: bool = False
 ) -> dict:
-    """The chat-template kwargs a rollout's requests carry: the run's template variables plus the episode's
-    ``reasoning_effort`` and per-turn thinking budget (flagged soft where the engine did not enforce it), so a
-    trainer-side render reproduces the engine's."""
+    """The run's template variables plus the episode's ``reasoning_effort`` and per-turn budget (flagged soft where the
+    engine did not enforce it), so a trainer-side render reproduces the engine's."""
     kwargs = dict(rollout_kwargs)
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
@@ -67,19 +64,17 @@ def rollout_template_kwargs(
 
 
 class TrajectoryTokenizeMixin:
-    """Chat-template rendering and trajectory tokenization for the environmental GRPO trainer; a fatal row
-    failure is recorded on the ``_batch_errors`` fence, never raised on one rank."""
+    """A fatal row failure is recorded on the ``_batch_errors`` fence, never raised on one rank."""
 
     @cached_property
     def _rollout_env(self):
-        """A throwaway instance of the run's environment, which the trainer's renders read the engine's
-        context off (tool schema, carried reasoning)."""
+        """A throwaway instance, which the trainer's renders read the engine's context off (tool schema, carried
+        reasoning)."""
         return build_environment(self._environment_spec, self._env_config_dict)
 
     def _context_limit(self) -> int:
-        """The context window bounding every training row: the tokenizer's, where the training script pins the
-        served window, else the model config's (:func:`resolve_model_context_window`, which raises rather than
-        fall back to a size that would disable the overflow check)."""
+        """The tokenizer's window where the training script pins it, else the model config's, which raises rather than
+        fall back to a size that would disable the overflow check."""
         limit = self._tokenizer.model_max_length
         if is_bounded_length(limit) and limit < UNSET_MODEL_MAX_LENGTH:
             return int(limit)
@@ -88,8 +83,8 @@ class TrajectoryTokenizeMixin:
     def _warn_if_no_reasoning_captured(
         self, rollout_results: list[RolloutResult], *, price_on: bool, floor_on: bool
     ) -> None:
-        """Warn once per run on a step whose assistant turns carry no reasoning while a knob reads it, the sign of
-        a server without a reasoning parser; a step with no assistant turn is no evidence."""
+        """Warn once on a step whose assistant turns carry no reasoning while a knob reads it, the sign of a server
+        without a reasoning parser; a step with no assistant turn is no evidence."""
         turns = [m for r in rollout_results if r.trajectory for m in r.trajectory.messages if m.role == "assistant"]
         if not turns or any(m.thinking for m in turns):
             return
@@ -115,12 +110,9 @@ class TrajectoryTokenizeMixin:
 
     @cached_property
     def _carry_reasoning(self) -> bool:
-        """Whether the rollout sent prior-turn reasoning to the engine, so a context re-render includes it."""
         return self._rollout_env.carry_reasoning
 
     def _tokenize_step_rows(self, rollout_results: list[RolloutResult]) -> list[list[TurnRow]]:
-        """Each rollout's training rows for this step, split per assistant turn under ``train_on_sampled_tokens``,
-        and the step's ``sampling/rows_over_cap_frac`` and :data:`UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY`."""
         self._rows_over_cap = 0
         per_trajectory = [
             self._tokenize_trajectory_turns(result)
@@ -146,11 +138,9 @@ class TrajectoryTokenizeMixin:
         return per_trajectory
 
     def _tokenize_trajectory_turns(self, result: RolloutResult) -> list[TurnRow]:
-        """One :class:`TurnRow` per assistant turn over the engine's prompt and sampled ids, falling back to the
-        re-tokenized row when sampled ids are missing and to one masked row when no turn yields a row. Per turn,
-        not concatenated: a template may drop prior-turn CoT, so a spliced later turn would be scored under a
-        context it never saw.
-        """
+        """Falls back to the re-tokenized row when ids are missing and to one masked row when no turn yields a row. Per
+        turn since a template may drop prior-turn CoT, and a spliced later turn would be scored under a context it
+        never saw."""
         traj = result.trajectory
         if not traj or not any(m.role == "assistant" for m in traj.messages):
             return single_trajectory_row(self._tokenize_trajectory(result))
@@ -189,7 +179,7 @@ class TrajectoryTokenizeMixin:
                     prompt_ids = self._render_messages_to_ids(
                         engine_view(messages[:idx], self._carry_reasoning), True, template_kwargs
                     )
-                except Exception as e:  # never a per-rank raise; the episode is dropped, the run goes on
+                except Exception as e:
                     if m.untrainable:  # its row only ever adds a penalty; losing it costs no other turn
                         continue
                     self._invalidate_untrainable_episode(
@@ -210,9 +200,8 @@ class TrajectoryTokenizeMixin:
         return rows or single_trajectory_row(self._masked_trajectory_tensors())
 
     def _sampled_turn_row(self, message, prompt_ids: list[int]) -> TurnRow:
-        """An assistant turn's row over the engine's sampled ids: all of them trained, their sampling log-probs
-        where the engine returned one per id, and the turn's engine routing under ``routing_replay='rollout'``
-        (a malformed payload recorded rather than raised, so the raise stays rank-uniform)."""
+        """All ids trained, with sampling log-probs where the engine returned one per id and routing under
+        ``routing_replay='rollout'`` (a malformed payload recorded, so the raise stays rank-uniform)."""
         completion = list(message.token_ids)
         logprobs = message.token_logprobs
         turn_routing = None
@@ -236,10 +225,8 @@ class TrajectoryTokenizeMixin:
         )
 
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """``(prompt, completion, loss mask)`` of one render of the whole trajectory, its assistant spans located
-        inside it (:func:`locate_assistant_spans`). The mask is 0 on env-injected tokens and on untrainable
-        turns, whose re-render is not what the engine emitted (a cut turn comes back closed by template tokens).
-        """
+        """The mask is 0 on env-injected tokens and untrainable turns, whose re-render is not what the engine emitted
+        (a cut turn comes back closed by template tokens)."""
         messages = result.trajectory.messages if result.trajectory else []
         first_assistant_idx = next((i for i, m in enumerate(messages) if m.role == "assistant"), None)
         if first_assistant_idx is None:
@@ -251,13 +238,10 @@ class TrajectoryTokenizeMixin:
 
         try:
             spans = locate_assistant_spans(_render, messages, first_assistant_idx)
-            # One span per assistant message, in message order (:meth:`_SpanLocator.resolve`).
             turn_spans = list(zip((m for m in messages if m.role == "assistant"), spans.turn_spans, strict=True))
         except (TemplateSpanError, ValueError) as e:
-            # Never raised per rank (a raise ahead of the batch collectives would break their order),
-            # and not fatal either: independently rendered per-turn prefixes would splice in tokens the
-            # serving template never emits, so the episode is dropped rather than trained on a guessed
-            # render.
+            # Never raised per rank, and not fatal: independently rendered per-turn prefixes would splice in tokens the
+            # serving template never emits, so the episode is dropped rather than trained on a guessed render.
             self._invalidate_untrainable_episode(
                 result,
                 f"cannot locate the trained turn spans of {self._tokenizer.name_or_path} inside its own "
@@ -286,7 +270,6 @@ class TrajectoryTokenizeMixin:
         )
 
     def _template_kwargs(self, trajectory) -> dict:
-        """The chat-template kwargs ``trajectory``'s requests carried (:func:`rollout_template_kwargs`)."""
         return rollout_template_kwargs(
             self.async_config.rollout_chat_template_kwargs,
             trajectory.reasoning_effort,
@@ -301,8 +284,7 @@ class TrajectoryTokenizeMixin:
         template_kwargs: dict,
         include_thinking: bool = True,
     ) -> list[int]:
-        """``msgs`` rendered through the serving chat template and tokenized; ``include_thinking=False`` emits no
-        reasoning, the probe for a template that hides prior-turn CoT."""
+        """``include_thinking=False`` emits no reasoning, the probe for a template that hides prior-turn CoT."""
         text = self.processing_class.apply_chat_template(
             [m.to_dict(include_thinking=include_thinking) for m in msgs],
             tools=self._tools_schema,
@@ -319,8 +301,8 @@ class TrajectoryTokenizeMixin:
         return self._rollout_env.get_tools_schema()
 
     def _admit_row(self, row: str, prompt_len: int, completion_label: str, completion_len: int, suspect: str) -> bool:
-        """Whether a training row fits the row cap (``max_train_row_tokens``), counting one it leaves out. A row
-        past the context window is first recorded on the fence, never truncated: the overflow is a config error."""
+        """Counts a row ``max_train_row_tokens`` leaves out. A row past the context window is first recorded on the
+        fence, never truncated: the overflow is a config error."""
         limit = self._context_limit()
         row_len = prompt_len + completion_len
         if row_len > limit:
@@ -338,16 +320,16 @@ class TrajectoryTokenizeMixin:
         return True
 
     def _invalidate_untrainable_episode(self, result: RolloutResult, reason: str) -> None:
-        """Mark an episode the chat template cannot re-render invalid, so it leaves the group baseline instead of
-        failing the run; a systematic cause still surfaces through the all-invalid step halt."""
+        """It leaves the group baseline instead of failing the run; a systematic cause still surfaces through the
+        all-invalid step halt."""
         logger.warning("Dropping an episode the chat template cannot re-render for training: %s", reason)
         if result.trajectory is not None:
             result.trajectory.info[EPISODE_INVALID_KEY] = True
             result.trajectory.info[EPISODE_INVALID_REASON_KEY] = reason
 
     def _masked_trajectory_tensors(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """One fully masked row (one attended prompt token, zero loss weight) for a trajectory with nothing to
-        train, which a weighted row would reinforce at its advantage."""
+        """One attended prompt token, zero loss weight, for a trajectory with nothing to train, which a weighted row
+        would reinforce at its advantage."""
         completion_token = self.eos_token_id if self.eos_token_id is not None else self.pad_token_id
         return (
             torch.tensor([self.pad_token_id], dtype=torch.long),

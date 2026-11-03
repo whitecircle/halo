@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""SMPO's margin losses: one per configurable ``loss_type``, each its own formula.
-
-python tests/cpu/trainers/test_smpo_objective.py
-"""
+"""SMPO's margin losses: one per configurable ``loss_type``, each its own formula."""
 
 import typing
 

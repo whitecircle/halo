@@ -1,5 +1,5 @@
-"""Pipeline-parallel checkpoints: one complete-tensor shard per stage under the hub's names plus a merged
-index, and the resume that loads only this stage's tensors back."""
+"""Pipeline-parallel checkpoints: one complete-tensor shard per stage under hub names plus a merged index, and the
+resume that loads only this stage's tensors."""
 
 from __future__ import annotations
 
@@ -39,13 +39,8 @@ logger = logging.getLogger(__name__)
 
 
 def reject_unhandled_pp_axes(config, phase: str) -> None:
-    """Refuse a PP checkpoint ``phase`` ("save"/"resume") combined with an axis it cannot express.
-
-    The PP shard writer/reader un-shards exactly one thing: FSDP2's dp DTensors. TP shards the
-    planned projections along a second mesh dimension and CP renames every projection one level
-    deeper, so either needs a second inverse; ``SUPPORTED_AXIS_SETS`` rejects both at config time, and
-    this keeps the shortcut honest if that allowlist ever widens.
-    """
+    """Refuse a PP checkpoint ``phase`` with an axis it cannot express; only FSDP2's dp DTensors get un-sharded.
+    ``SUPPORTED_AXIS_SETS`` rejects TP and CP at config time, and this holds if that allowlist widens."""
     unhandled = [name for name, size in (("tp", config.tp_size), ("cp", config.cp_size)) if size > 1]
     if unhandled:
         raise NotImplementedError(
@@ -58,13 +53,9 @@ def reject_unhandled_pp_axes(config, phase: str) -> None:
 
 
 def is_pp_shard_writer(config, shared_fs: bool) -> bool:
-    """Whether this rank writes its pipeline stage's checkpoint shard.
-
-    Shared FS: one rank per stage (all shards land in one directory). Per-node storage: one rank per
-    stage per node — the node's first rank and the first rank of each stage that starts on the node —
-    so each node's directory holds the shard of every stage it runs and resumes on its own. A node of
-    the launch can run several stages where ``gpus_per_node`` is set below the launcher's node size.
-    """
+    """Shared FS: one rank per stage. Per-node storage: the node's first rank and each stage's first rank on it, so
+    each node's directory holds the shard of every stage it runs and resumes on its own (``gpus_per_node`` below the
+    launcher's node size can put several stages on one node)."""
     if shared_fs:
         return config.stage_local_rank == 0
     return is_local_main_process() or config.stage_local_rank == 0
@@ -73,10 +64,8 @@ def is_pp_shard_writer(config, shared_fs: bool) -> bool:
 def _write_hub_group(
     writer: StreamingShardWriter, stage: nn.Module, tensors: Iterable[tuple[str, torch.Tensor]]
 ) -> None:
-    """Write one conversion-closed group of the stage's tensors, named in the unsplit model, under the
-    hub's names: the save-side revert of the conversions the stage snapshotted, as the EP-gathered save
-    applies it. ``tensors`` is consumed here, so a cast it carries runs inside the caller's guard.
-    """
+    """Write one conversion-closed group under hub names, reverting the stage's snapshotted conversions. ``tensors`` is
+    consumed here, so a cast it carries runs inside the caller's guard."""
     conversions = list(stage.checkpoint_namespace.export_conversions)
     for key, tensor in revert_conversions(stage, dict(tensors), conversions).items():
         writer.add(key, tensor)
@@ -85,13 +74,9 @@ def _write_hub_group(
 def _write_stage_tensors(
     ctx: CheckpointContext, output_dir: str, guard: DeferredRankFailure, *, is_writer: bool
 ) -> tuple[dict[str, str], int]:
-    """COLLECTIVE: stream this stage's tensors, then its external tables, into its shard; ``(weight-map fragment,
-    bytes written)``.
-
-    Every stage rank enters the DTensor and EP gathers; only the writer retains and writes. Closing
-    writes the last part, which must precede the index exchange: that exchange is the sync
-    guaranteeing the index never names a file that is not on disk yet.
-    """
+    """COLLECTIVE: stream this stage's tensors and external tables into its shard; ``(weight-map fragment, bytes)``.
+    Every stage rank enters the gathers, only the writer retains. Closing writes the last part, which must precede the
+    index exchange, the sync guaranteeing the index never names a file not yet on disk."""
     config, stage = ctx.parallelism_config, ctx.model
     writer = StreamingShardWriter(
         output_dir,
@@ -116,8 +101,7 @@ def _write_stage_tensors(
         hub = ((stage.global_parameter_name(key), cast(key, tensor)) for key, tensor in ep_weights.items())
         guard.run(partial(_write_hub_group, writer, stage, hub))
         del ep_weights
-    # The stage's external tables under their unsplit names, in files its own part prefix keeps apart from another
-    # stage's; the writer indexes them with its parts.
+    # A stage's part prefix keeps its table files apart from another stage's; the writer indexes them with its parts.
     guard.run(
         partial(
             write_external_tables,
@@ -133,38 +117,28 @@ def _write_stage_tensors(
 def _write_wrapper_state(
     ctx: CheckpointContext, output_dir: str, guard: DeferredRankFailure
 ) -> tuple[dict[str, str], int]:
-    """Write the tensors no stage holds (a multimodal wrapper's vision tower) under their own part name.
-
-    Untouched by training and already at the artifact's save dtype, they are re-emitted from the save
-    rank so the checkpoint reloads and serves as the wrapper class and a resume finds every tensor it
-    plans for. Per-node storage has one save rank per node, so every node's directory carries them.
-    """
+    """Write the tensors no stage holds (a multimodal vision tower), already at the save dtype, so the checkpoint
+    reloads as the wrapper class. Per-node storage has one save rank per node, so every node's directory carries
+    them."""
     writer = StreamingShardWriter(output_dir, ctx.max_shard_size, enabled=True, filename_prefix=PP_WRAPPER_PART_PREFIX)
     guard.run(partial(_write_hub_group, writer, ctx.model, ctx.pp_wrapper_state.items()))
     return guard.run(writer.close) or ({}, 0)
 
 
 def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: one safetensors shard per stage under the hub's names, plus a merged index.
-
-    ``ctx.model`` is this rank's ``PipelineStageModule``, whose ``global_parameter_name`` maps
-    stage-local names back to the unsplit model's, so the merged checkpoint loads through plain
-    ``from_pretrained``. The writers (:func:`is_pp_shard_writer`) write their stage's shard, and the
-    index and config follow a world-wide exchange of the per-stage key maps. The index carries standard
-    HF metadata only, no repo "format" marker: that marker means per-rank partial tensors (ep_sharded).
-    """
+    """COLLECTIVE: one safetensors shard per stage under hub names plus a merged index, loadable by plain
+    ``from_pretrained``. The index has HF metadata only, since the repo ``format`` marker means per-rank partial
+    tensors."""
     config = ctx.parallelism_config
     stage = ctx.model
     reject_unhandled_pp_axes(config, "save")
-    # An evaluation right before the save leaves the stage's FSDP2 modules holding their transient
-    # unsharded params, and ``state_dict()`` would then hand the walk plain tensors instead of the dp
-    # DTensors it gathers.
+    # An evaluation right before the save leaves transient unsharded params, and ``state_dict()`` would then hand the
+    # walk plain tensors instead of the dp DTensors it gathers.
     reshard_fsdp2_modules(stage)
     shared_fs = is_output_shared_filesystem()
     is_writer = is_pp_shard_writer(config, shared_fs)
 
-    # The writer's disk writes are interleaved with the gathers below, so one must not raise here:
-    # it would strand every other stage rank in the next collective until the watchdog fires.
+    # Writes interleave with the gathers below, so a raise would strand the other stage ranks until the watchdog fires.
     guard = DeferredRankFailure(f"PP checkpoint write to {output_dir}")
     stage_weight_map, shard_bytes = _write_stage_tensors(ctx, output_dir, guard, is_writer=is_writer)
     if ctx.is_save_rank and ctx.pp_wrapper_state:
@@ -182,8 +156,7 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
 
     with barrier_on_exit(f"Writing the PP checkpoint index to {output_dir}"):
         if ctx.is_save_rank:
-            # Every stage's parts are on disk and ``weight_map`` is the merged map, so the sweep inside
-            # deletes exactly what no stage claimed.
+            # Every stage's parts are on disk, so the sweep inside deletes exactly what no stage claimed.
             write_merged_index(output_dir, weight_map, {"total_size": total_size})
             save_model_config(stage, output_dir)
             logger.info(f"Saved PP model to {output_dir} ({len(weight_map)} keys, {config.pp_size} stage shards)")
@@ -204,15 +177,9 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
 def restore_pp_stage_weights(
     ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_model: bool = False
 ) -> None:
-    """COLLECTIVE. Load a PP checkpoint's tensors into this rank's pipeline stage.
-
-    Skipped when ``load_distributed_model`` built every rank's stage from this checkpoint (it read the
-    same values, FP32 masters at FP32), unless for a best-model load. The hub-namespaced keys map onto
-    the unsplit model's names (:class:`ModuleLayoutView`) and back to the stage's local ones, and only
-    this rank's are read; the copies (``distribute_tensor``) stay inside the stage's own DP mesh. The
-    weights are keyed globally, so they resume onto another ``pp_size``; the stage-local optimizer
-    shards do not.
-    """
+    """COLLECTIVE. Load this rank's tensors into its stage; skipped when ``load_distributed_model`` built every stage
+    from this checkpoint, unless for a best-model load. Keyed globally, so weights resume onto another ``pp_size``; the
+    stage-local optimizer shards do not."""
     stage = unwrap_toolkit_wrappers(model)
     reject_unhandled_pp_axes(ctx.parallelism_config, "resume")
     reject_ep_sharded_resume(checkpoint)

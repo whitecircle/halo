@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``bounded_event_sync`` is what stands between a wedged peer and a parked trainer.
-
-Both clients drain their broadcasts through it, and it sits on the critical path once per chunk:
-its deadline must fire and abort the transport (the group has no watchdog the trainer can rely on, and
-a kernel left spinning hangs every later device sync), a wait that fails outright must abort it too,
-its poll cadence is a per-chunk tax, and the env knob sets the drain deadline once, at import. The
-vLLM communicator's warm-up and the packed producer's drain must each abort their own communicator.
-
-    python tests/cpu/weight_sync/test_bounded_waits.py
-"""
+"""``bounded_event_sync`` stands between a wedged peer and a parked trainer. Its deadline must fire and abort the
+transport: the group has no watchdog, and a kernel left spinning hangs every later device sync."""
 
 import contextlib
 import time
@@ -36,8 +28,6 @@ class _Event:
 
 
 class _PendingEvent:
-    """An event recorded behind a collective whose peer never answers."""
-
     def record(self, stream=None) -> None:
         pass
 
@@ -46,7 +36,7 @@ class _PendingEvent:
 
 
 class _FaultedEvent:
-    """An event whose ``failing_call`` surfaces a sticky CUDA error left by other work on the device."""
+    """``failing_call`` surfaces a sticky CUDA error left by other work on the device."""
 
     def __init__(self, failing_call: str):
         self._failing_call = failing_call
@@ -79,8 +69,6 @@ class _Communicator:
 
 
 class _WarmUpNeverCompletesLibrary:
-    """libnccl whose communicator forms but whose warm-up all-reduce never completes; records each abort."""
-
     def __init__(self):
         self.aborted: list[int] = []
 
@@ -117,8 +105,7 @@ def test_a_never_ready_event_aborts_and_raises_at_the_deadline_instead_of_parkin
 
 @pytest.mark.parametrize("failing_call", ["record", "query"])
 def test_a_wait_that_fails_outright_aborts_once_before_its_error_propagates(monkeypatch, failing_call):
-    """A sticky CUDA error leaves the transport as unusable as a deadline does: unaborted, the vLLM
-    communicator would not be refused by name and the SGLang group would be destroyed as if healthy."""
+    """Unaborted, the vLLM communicator would not be refused by name and the SGLang group would look healthy."""
     aborted: list[bool] = []
     monkeypatch.setattr(torch.cuda, "Event", lambda: _FaultedEvent(failing_call))
     with pytest.raises(torch.AcceleratorError, match="illegal memory access"):
@@ -129,8 +116,7 @@ def test_a_wait_that_fails_outright_aborts_once_before_its_error_propagates(monk
 
 
 def test_the_poll_cadence_is_kept_at_a_millisecond():
-    """A 1 GiB chunk crosses EFA in ~11 ms and the wait runs once per chunk, so a coarse poll
-    (50 ms) is a multiple of the transfer itself on every chunk."""
+    """A 1 GiB chunk crosses EFA in ~11 ms and the wait runs once per chunk, so a 50 ms poll exceeds the transfer."""
     started = time.monotonic()
     bounded_waits.bounded_event_sync(_Event(0.002), timeout_s=1.0, what="test broadcast", abort=_never_called)
     assert time.monotonic() - started < 0.04, "an event ready after 2 ms took a coarse poll interval to notice"
@@ -138,9 +124,8 @@ def test_the_poll_cadence_is_kept_at_a_millisecond():
 
 @pytest.mark.parametrize(("value", "expected"), [(None, 600.0), ("2.5", 2.5), ("0", 600.0), ("soon", 600.0)])
 def test_the_drain_deadline_is_read_once_from_the_env(monkeypatch, value, expected):
-    """``HALO_NCCL_SYNC_TIMEOUT_SECONDS`` sets the drain deadline at import; a malformed or non-positive
-    value falls back rather than raising mid-RL-step. Read in a fresh interpreter, since the module
-    latches it."""
+    """A malformed or non-positive value falls back rather than raising mid-RL-step. Read in a fresh interpreter, since
+    the module latches it."""
     if value is None:
         monkeypatch.delenv("HALO_NCCL_SYNC_TIMEOUT_SECONDS", raising=False)
     else:
@@ -154,8 +139,7 @@ def test_the_drain_deadline_is_read_once_from_the_env(monkeypatch, value, expect
 
 
 def test_a_warm_up_that_passes_its_deadline_aborts_the_communicator(monkeypatch):
-    """The warm-up all-reduce is the new communicator's first collective; a peer that never joins it
-    leaves the kernel spinning, and every later device sync hangs behind it unless the abort ends it."""
+    """A peer that never joins leaves the kernel spinning, and every later device sync hangs behind it."""
     library = _WarmUpNeverCompletesLibrary()
     monkeypatch.setattr(pynccl, "NCCLLibrary", lambda: library)
     monkeypatch.setattr(pynccl, "vllm_pynccl_disabled", lambda: False)
@@ -171,8 +155,7 @@ def test_a_warm_up_that_passes_its_deadline_aborts_the_communicator(monkeypatch)
 
 
 def test_a_packed_drain_that_passes_its_deadline_aborts_the_communicator(monkeypatch):
-    """The producer waits out a pack stream before reusing its buffer; a peer that stopped receiving
-    leaves the broadcast queued there spinning, and only the communicator's abort ends it."""
+    """A peer that stopped receiving leaves the broadcast queued on the pack stream, and only the abort ends it."""
     communicator = _Communicator()
     monkeypatch.setattr(packed_broadcast, "CHUNK_SYNC_TIMEOUT_S", 0.0)
     monkeypatch.setattr(torch.cuda, "Event", _PendingEvent)

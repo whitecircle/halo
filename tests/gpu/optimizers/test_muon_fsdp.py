@@ -1,26 +1,7 @@
 #!/usr/bin/env python
-"""
-Test: Muon optimizer with FSDP2 (multi-GPU torchrun).
+"""Muon under FSDP2: its Triton kernels can't take DTensors, so ``to_local()`` hands them the local shard.
 
-Muon's fused Triton kernels cannot take DTensor params directly, which is
-what FSDP2 gives them.
-
-When FSDP2 wraps parameters, p.data and p.grad become DTensors. The to_local()
-helper extracts the underlying local tensor shard before passing to Triton,
-making Muon compatible with FSDP2.
-
-Test Phases:
-1. FSDP2 multi-GPU with FFN model (2D + 1D params): loss descends
-2. FSDP2 multi-GPU with NoBias model (2D params only): loss descends
-3. FSDP2 weight decay: parameter norms shrink
-4. to_local DTensor unwrapping verification
-
-Each phase is recorded as its own check. Every assertion is either rank-symmetric or follows its
-phase's last collective, so a failed phase leaves the ranks aligned for the next.
-
-Run with 2 GPUs:
-    CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 \
-        tests/gpu/optimizers/test_muon_fsdp.py
+Every assertion is rank-symmetric or follows its phase's last collective, so a failed phase leaves the ranks aligned.
 """
 
 import gc
@@ -36,8 +17,6 @@ from halo.optimizers.muon import build_muon_optimizer
 from halo.runtime.dtensor import to_local
 from tests.common.harness import gpu_test_main, record_check
 
-# ── Configuration ────────────────────────────────────────────────────────────
-
 HIDDEN = 256
 BATCH = 4
 SEQ = 32
@@ -45,12 +24,7 @@ NUM_STEPS = 30
 LR = 2e-3
 
 
-# ── Models ───────────────────────────────────────────────────────────────────
-
-
 class FFNModel(nn.Module):
-    """Small FFN with both 2D (Linear.weight) and 1D (bias, LayerNorm) params."""
-
     def __init__(self, hidden=HIDDEN, layers=3):
         super().__init__()
         blocks = []
@@ -64,8 +38,6 @@ class FFNModel(nn.Module):
 
 
 class NoBiasModel(nn.Module):
-    """Model with only 2D params (no bias, no layernorm)."""
-
     def __init__(self, hidden=HIDDEN, layers=3):
         super().__init__()
         blocks = []
@@ -79,7 +51,6 @@ class NoBiasModel(nn.Module):
 
 
 def train_steps(model, optimizer, num_steps, hidden=HIDDEN):
-    """Run training steps, return list of loss values."""
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     torch.manual_seed(42)
@@ -96,11 +67,7 @@ def train_steps(model, optimizer, num_steps, hidden=HIDDEN):
     return losses
 
 
-# ── Tests ────────────────────────────────────────────────────────────────────
-
-
 def test_muon_fsdp_ffn():
-    """Muon + FSDP2 with FFN model (2D weights + 1D bias/norm params)."""
     rank = dist.get_rank()
     print(f"[Rank {rank}] TEST 1: Muon + FSDP2 (FFN with bias + layernorm)")
 
@@ -112,7 +79,6 @@ def test_muon_fsdp_ffn():
             fully_shard(module)
     fully_shard(model)
 
-    # Verify DTensor wrapping
     has_dtensor = any(isinstance(p, DTensor) for p in model.parameters())
     if rank == 0:
         print(f"  Parameters wrapped as DTensors: {has_dtensor}")
@@ -135,7 +101,6 @@ def test_muon_fsdp_ffn():
 
 
 def test_muon_fsdp_nobias():
-    """Muon + FSDP2 with model that has only 2D params (no scalar optimizer)."""
     rank = dist.get_rank()
     print(f"[Rank {rank}] TEST 2: Muon + FSDP2 (no-bias model, Muon only)")
 
@@ -165,7 +130,6 @@ def test_muon_fsdp_nobias():
 
 
 def test_muon_fsdp_weight_decay():
-    """Weight decay should shrink parameter norms with FSDP2."""
     rank = dist.get_rank()
     print(f"[Rank {rank}] TEST 3: Muon + FSDP2 weight decay")
 
@@ -206,7 +170,6 @@ def test_muon_fsdp_weight_decay():
 
 
 def test_dtensor_unwrapping():
-    """Verify to_local correctly unwraps DTensor params and grads."""
     rank = dist.get_rank()
     print(f"[Rank {rank}] TEST 4: to_local DTensor unwrapping")
 
@@ -249,9 +212,6 @@ def test_dtensor_unwrapping():
     del model
     gc.collect()
     torch.cuda.empty_cache()
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 
 @gpu_test_main(min_world_size=2, prefix="muon_fsdp", partial_state=False)

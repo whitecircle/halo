@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""Tests that the embedding config's pipeline knobs reach a hub-loaded SentenceTransformer.
-
-``pooling_mode`` / ``normalize_embeddings`` / ``max_length`` build the Pooling and Normalize modules
-only when the parallel loader's pipeline wraps a bare backbone. Every other pipeline comes from the
-checkpoint, on sentence-transformers' own load as on the parallel loader's rebuild, so the same knobs
-must be re-applied there or they parse and do nothing — a bare causal LM training mean pooling while
-the YAML says ``lasttoken``. These tests fail if that alignment drops.
-
-Run: pytest tests/cpu/config/test_embedding_pipeline_alignment.py
-"""
+"""The embedding config's pipeline knobs reach a hub-loaded SentenceTransformer. A pipeline from the checkpoint
+needs them re-applied, or they parse and do nothing: a bare causal LM training mean pooling while the YAML says
+``lasttoken``."""
 
 import pytest
 from sentence_transformers import SentenceTransformer
@@ -75,8 +68,8 @@ def test_pipeline_without_pooling_raises_instead_of_dropping_the_knob():
 
 
 def test_dataset_num_proc_is_not_a_field():
-    """Declared, it would never be read (the ST path runs no dataset map) and a YAML setting it would
-    look honored. Off the dataclass, the parser rejects the key instead."""
+    """Declared, it would never be read, since the ST path runs no dataset map. Off the dataclass, the parser
+    rejects the key."""
     assert "dataset_num_proc" not in EmbeddingConfig.__dataclass_fields__
 
 

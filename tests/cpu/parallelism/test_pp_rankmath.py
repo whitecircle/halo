@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""Pipeline-parallelism rank math and config-time rejections.
-
-PP is the OUTERMOST parallelism dimension: the world splits into ``pp_size`` contiguous rank blocks
-of ``stage_world_size``, and every other mode (EP/CP/TP/ETP/FSDP) runs unchanged *inside* one block.
-These tests pin the properties that make that decomposition correct — a regression in any of them is
-a silent wrong-gradient or hang bug, not a crash:
-
-* P1 — ``pp_size=1`` is bit-identical to the pre-PP behaviour (no-op guarantee).
-* P2 — stage assignment and the pipeline chain (P2P peers) over a whole world.
-* P3 — every rank of one chain shares a DP coordinate, so the chain consumes ONE batch (stage 0
-  reads input_ids, the last stage reads labels). If this breaks, stages train on different data.
-* P4 — EP groups and expert-replica sets never straddle a stage boundary. The same ep_rank in a
-  different stage owns DIFFERENT layers, so averaging across stages corrupts gradients.
-* P5 — the config-time rejections (indivisible world, bad pp args) and the PP+EP shapes that must
-  still be accepted. Node alignment, PP+HSDP and PP+ZeRO-3 live in test_pp_data_parallel_composition.
-
-Run: python tests/cpu/parallelism/test_pp_rankmath.py
-"""
+"""Pipeline-parallelism rank math and config-time rejections; regressions here are silent wrong gradients or hangs.
+Node alignment, PP+HSDP and PP+ZeRO-3 live in test_pp_data_parallel_composition."""
 
 import pytest
 
@@ -24,15 +8,11 @@ from tests.common.parallelism import built_ep_config, create_config
 
 
 def _two_node_stage(rank, **kwargs):
-    """world=8 as 2 simulated nodes of 4 (NVLink domain = 4), PP across the node boundary."""
+    """world=8 as 2 simulated nodes of 4, PP across the node boundary."""
     return create_config(world_size=8, gpus_per_node=4, nvlink_domain_size=4, rank=rank, **kwargs)
 
 
-# P1 — pp_size=1 is a no-op
-
-
 def test_p1_pp1_is_noop():
-    """At pp_size=1 the stage coordinates collapse so every pre-PP formula is unchanged."""
     for rank in range(8):
         c = create_config(rank=rank, ep_size=8)
         assert c.stage_world_size == c.world_size == 8, f"rank{rank}: stage_world must equal world"
@@ -44,7 +24,6 @@ def test_p1_pp1_is_noop():
 
 
 def test_p1_pp1_preserves_dp_and_ep_layout():
-    """pp_size=1 must leave data_parallel_size and EP group membership exactly as before."""
     c = create_config(rank=3, ep_size=8)
     assert c.data_parallel_size == 8
     ep = built_ep_config(c)
@@ -56,11 +35,7 @@ def test_p1_pp1_preserves_dp_and_ep_layout():
     assert tp.get_data_parallel_rank() == 1, "rank 3 with tp_size=2 -> DP rank 3//2"
 
 
-# P2 — stage assignment and pipeline chains
-
-
 def test_p2_stage_assignment_partitions_the_world():
-    """Stages are contiguous, equal, non-overlapping rank blocks covering the world exactly once."""
     seen = {}
     for rank in range(8):
         c = _two_node_stage(rank, pp_size=2)
@@ -74,15 +49,13 @@ def test_p2_stage_assignment_partitions_the_world():
 
 
 def test_p2_chain_members_are_one_stage_apart():
-    """A chain holds the same intra-stage position in every stage — the P2P peers."""
     for rank in range(8):
         c = _two_node_stage(rank, pp_size=2)
         chain = c.pp_chain_ranks()
         assert chain == [rank % 4, rank % 4 + 4], f"rank{rank} chain"
         assert len(chain) == c.pp_size
         assert rank in chain
-        # Consecutive chain members sit in different NVLink domains — PP is the axis that crosses
-        # RDMA while everything else stays domain-local.
+        # PP is the axis that crosses RDMA while everything else stays domain-local.
         assert all(b - a == c.stage_world_size for a, b in zip(chain, chain[1:], strict=False))
 
 
@@ -93,7 +66,6 @@ def test_p2_first_and_last_stage_flags():
 
 
 def test_p2_four_stages():
-    """pp_size=4 over 8 ranks with a 2-GPU domain: 4 stages of 2."""
     for rank in range(8):
         c = create_config(world_size=8, gpus_per_node=2, nvlink_domain_size=2, rank=rank, pp_size=4)
         assert c.stage_world_size == 2
@@ -102,12 +74,8 @@ def test_p2_four_stages():
     assert c.data_parallel_size == 2, "8 ranks / pp 4 = 2 distinct batches"
 
 
-# P3 — one chain consumes one batch
-
-
 def test_p3_chain_shares_a_dp_rank():
-    """THE dataloader contract: every rank of a chain returns the same DP rank, and distinct chains
-    return distinct DP ranks covering 0..data_parallel_size-1."""
+    """The dataloader contract: a chain consumes one batch, or stages train on different data."""
     by_chain = {}
     for rank in range(8):
         c = _two_node_stage(rank, pp_size=2)
@@ -120,9 +88,7 @@ def test_p3_chain_shares_a_dp_rank():
 
 
 def test_p3_pp_pairs_with_no_other_sharding_axis():
-    """PP composes with the expert axes only (EP, or pure ETP). TP/CP alongside PP — and all three
-    expert-sharding axes at once — are refused by the capability matrix, each naming its own
-    mechanism rather than a generic 'unsupported'."""
+    """Refused by the capability matrix, each naming its own mechanism."""
     for kwargs, combo in (
         ({"tp_size": 2}, "PP + TP"),
         ({"cp_size": 2}, "PP + CP"),
@@ -134,11 +100,7 @@ def test_p3_pp_pairs_with_no_other_sharding_axis():
         assert combo in str(excinfo.value), (kwargs, str(excinfo.value))
 
 
-# P4 — intra-stage groups never straddle a stage boundary
-
-
 def test_p4_ep_groups_stay_inside_one_stage():
-    """Node-local EP inside each stage: every EP group's ranks share one pp_rank."""
     for rank in range(8):
         c = _two_node_stage(rank, pp_size=2, ep_size=4)
         ep_ranks = built_ep_config(c)._my_ep_group_ranks
@@ -148,7 +110,7 @@ def test_p4_ep_groups_stay_inside_one_stage():
 
 
 def test_p4_expert_replicas_confined_to_the_stage():
-    """With 2 EP groups per stage, expert replicas span the stage's groups but never cross stages."""
+    """The same ep_rank in another stage owns different layers, so averaging across stages corrupts gradients."""
     for rank in range(8):
         c = _two_node_stage(rank, pp_size=2, ep_size=2)
         assert c.num_ep_groups == 2, "4 ranks per stage / ep_group_size 2"
@@ -159,16 +121,12 @@ def test_p4_expert_replicas_confined_to_the_stage():
 
 
 def test_p4_ep_group_partition_is_exact():
-    """Union of all EP groups = the world, each rank in exactly one group (no overlap, no orphan)."""
     covered = []
     for rank in range(8):
         covered.append(tuple(built_ep_config(_two_node_stage(rank, pp_size=2, ep_size=2))._my_ep_group_ranks))
     groups = set(covered)
     flat = [r for g in groups for r in g]
     assert sorted(flat) == list(range(8)), f"EP groups do not tile the world exactly: {sorted(flat)}"
-
-
-# P5 — config-time rejections
 
 
 def test_p5_rejects_pp_not_dividing_world():
@@ -186,8 +144,7 @@ def test_p5_rejects_bad_pp_size_and_schedule():
 
 
 def test_p5_accepts_pp_with_ep_inside_a_stage():
-    """The supported shapes must NOT be rejected — a validator that rejects everything also passes
-    the rejection tests above."""
+    """A validator rejecting everything would also pass the tests above."""
     for kwargs in ({"ep_size": 4}, {"ep_size": 2}, {}):
         c = _two_node_stage(0, pp_size=2, **kwargs)
         assert c.is_pp_mode and c.pp_size == 2, f"{kwargs} should be accepted with PP"

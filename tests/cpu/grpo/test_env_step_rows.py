@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""The environmental GRPO step's padded batch masks, built without a host read per row.
-
-``completion_mask`` (attention-valid) covers a row's whole completion when any of its tokens is trained and none
-of it when the row is fully masked, ``tool_mask`` is the loss mask; deciding that per row with ``.any()`` on device
-tensors synchronized the host once per row per round.
-
-Run: pytest tests/cpu/grpo/test_env_step_rows.py
-"""
+"""The environmental GRPO step's padded batch masks, built without a host read per row. A per-row ``.any()`` on device
+tensors would synchronize the host once per row per round."""
 
 import types
 

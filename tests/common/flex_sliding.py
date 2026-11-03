@@ -1,11 +1,6 @@
-"""``sdpa_flex_sliding`` test helpers: the rows a warm-up check trains on, how many attention layers each runs on
-FlexAttention, and what a CPU run of the implementation needs: the registered function serving a CPU call as it
-serves a CUDA one, and FlexAttention's device check lifted.
-
-The implementation serves every masked causal call: on a packed row each layer gets the document mask, so full
-layers run FlexAttention beside the sliding ones, while on a single document transformers hands a full layer SDPA's
-``is_causal`` with no mask and only the sliding layers, whose window binds past its length, run it.
-"""
+"""``sdpa_flex_sliding`` test helpers: warm-up rows, FlexAttention layer counts, and what a CPU run needs. On a packed
+row every layer gets the document mask, so full layers run FlexAttention too; on one document only windowed sliding
+layers do."""
 
 import torch
 
@@ -19,13 +14,12 @@ FLEX_ROWS = (([300, 150, 40], True), ([600], True), ([400], False))
 
 
 def no_device_check(*tensors) -> None:
-    """FlexAttention's device check (``_validate_device``), lifted: it refuses a CPU backward, which the kernel's
-    eager math runs. One object for every patch, since Dynamo guards on it."""
+    """FlexAttention's ``_validate_device`` lifted, since it refuses a CPU backward. One object for every patch, as
+    Dynamo guards on it."""
 
 
 def flex_layers(model: torch.nn.Module, lengths: list[int]) -> int:
-    """The attention modules of ``model`` a row of ``lengths`` documents runs on FlexAttention: each one it serves
-    on a packed row, only the windowed ones on a single document."""
+    """The attention modules a row of ``lengths`` documents runs on FlexAttention."""
     served = flex_attention_calls(model)
     calls = [call for call in map(attention_call, model.modules()) if call in served]
     assert all(sum(lengths) > (call.window or 0) for call in calls), "premise: the row is past every window"
@@ -33,8 +27,7 @@ def flex_layers(model: torch.nn.Module, lengths: list[int]) -> int:
 
 
 def train_row(model: torch.nn.Module, lengths: list[int], *, train: bool = True) -> None:
-    """A forward over one row of ``lengths`` packed documents on ``model``'s device, and its backward when
-    ``train``."""
+    """A forward over one row of ``lengths`` packed documents, and its backward when ``train``."""
     device = next(model.parameters()).device
     generator = torch.Generator().manual_seed(sum(lengths))
     vocab = model.config.get_text_config().vocab_size
@@ -48,8 +41,8 @@ def train_row(model: torch.nn.Module, lengths: list[int], *, train: bool = True)
 
 
 def flex_sliding_on_cpu(module, query, key, value, attention_mask, **kwargs):
-    """The registered function as it serves a CUDA call, the only call it takes; the kernel it reaches receives
-    :class:`~tests.common.fake_cuda.CudaLike` inputs."""
+    """The registered function as it serves a CUDA call; its kernel receives :class:`~tests.common.fake_cuda.CudaLike`
+    inputs."""
     out, weights = sdpa_flex_sliding.flex_sliding_attention(
         module, *(t.as_subclass(CudaLike) for t in (query, key, value)), attention_mask, **kwargs
     )

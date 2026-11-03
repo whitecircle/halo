@@ -1,13 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the shared class-claim registry derivation.
-
-``build_class_claim_map`` is the ONE subclass-tree walk behind the EP MoE-layer map, the CP
-attention map and the head-transform spec map; the EP ``model_type`` roster walks the same tree off each class's
-own ``FAMILY``. These tests pin its contract (own declaration only, deep tree, loud on a duplicate claim), the
-noun each real registry names a clash with, and that the EP registry still routes every wired family.
-
-Run: ``python tests/cpu/parallelism/test_subclass_registry.py`` (or ``pytest -m cpu``).
-"""
+"""``build_class_claim_map``, the one subclass-tree walk behind the EP, CP and head-transform registries."""
 
 from __future__ import annotations
 
@@ -26,10 +18,10 @@ def test_walks_the_whole_subclass_tree_and_ignores_inherited_names():
     class Intermediate(Base):
         HF_MODULE_NAMES = ("Mid",)
 
-    class Leaf(Intermediate):  # inherits ("Mid",) but declares its own
+    class Leaf(Intermediate):  # Inherits ("Mid",) but declares its own.
         HF_MODULE_NAMES = ("Leaf",)
 
-    class InheritsOnly(Intermediate):  # no own declaration → must NOT re-claim "Mid"
+    class InheritsOnly(Intermediate):  # No own declaration, so it must not re-claim "Mid".
         pass
 
     mapping = build_class_claim_map(Base, "test")
@@ -57,8 +49,6 @@ def test_duplicate_claim_raises_with_the_kind_and_both_class_names():
 
 
 def test_the_builder_reads_whatever_attribute_it_is_given():
-    """A second key kind: same walk, same own-declaration rule."""
-
     class Base:
         pass
 
@@ -70,7 +60,7 @@ def test_the_builder_reads_whatever_attribute_it_is_given():
 
     assert build_class_claim_map(Base, "key", attr="CLAIMED_KEYS") == {"alpha": Claims, "beta": Claims}
     assert InheritsOnly not in build_class_claim_map(Base, "key", attr="CLAIMED_KEYS").values()
-    # A class declaring nothing under that attribute claims nothing (no crash, no empty-key entry).
+    # No crash, no empty-key entry.
     assert build_class_claim_map(Base, "HF MoE class name") == {}
 
 
@@ -83,8 +73,7 @@ def test_the_builder_reads_whatever_attribute_it_is_given():
     ids=["ep", "head-transform"],
 )
 def test_each_real_registry_names_its_clash(monkeypatch, build, noun):
-    """A second class claiming a key already taken fails the real registry with the noun of what clashed: an
-    impostor family class re-declaring a taken spec included."""
+    """An impostor family class re-declaring a taken spec included."""
     key, owner = next(iter(build().items()))
     impostor = type("Impostor", (), {"HF_MODULE_NAMES": (key,), "FAMILY": getattr(owner, "FAMILY", None)})
 
@@ -100,15 +89,14 @@ def test_each_real_registry_names_its_clash(monkeypatch, build, noun):
 
 
 def test_ep_layer_classes_is_the_shared_walk_not_a_second_copy():
-    """``ep_layer_classes()`` is the EP-side NAME for the shared walk, order included, not a re-implementation of
-    it: the config lookups built on it must see exactly the tree the registry walks."""
+    """The config lookups built on it must see exactly the tree the registry walks."""
     assert ep_layer_classes() == iter_subclasses(EPMoELayerBase)
 
 
 def test_ep_registry_is_derived_and_covers_the_wired_families():
     assert build_class_claim_map(EPMoELayerBase, "HF MoE class name") == MOE_LAYER_MAP
 
-    # Every EP MoE family wired today must resolve; a dropped HF_MODULE_NAMES silently disables EP.
+    # A dropped HF_MODULE_NAMES silently disables EP.
     expected_moe = {
         "GptOssMLP",
         "Cohere2MoeSparseMoeBlock",

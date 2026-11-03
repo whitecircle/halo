@@ -1,31 +1,9 @@
 #!/usr/bin/env python
-"""A garbage-collected MoE layer must not free its DeepEP buffer.
+"""A garbage-collected MoE layer must not free its DeepEP buffer, since ``buffer.destroy()`` is collective.
 
-Freeing a DeepEP buffer is a **collective**: ``buffer.destroy()`` spins on the device-side NVLink
-barrier for ``HALO_DEEPEP_GPU_TIMEOUT_SECONDS`` (100 s). A Python finalizer, by contrast, runs whenever
-this rank's garbage collector happens to fire, and no other rank agrees on that moment — so a
-finalizer that frees puts one rank alone in a barrier its peers have not reached. After a gathered
-save the writer rank can be far more than 100 s behind, and the job dies with ``DeepEP NVLink
-barrier timeout`` followed by ``cudaErrorLaunchFailure``, which reads as a DeepEP fault rather than
-as the teardown race it is.
-
-So a dropped dispatcher only relinquishes its claim, and the buffer is freed by
-:func:`free_unclaimed_ep_buffers` at an explicit, barriered teardown. This pins both halves:
-
-  1. Dropping the last reference to a dispatching layer and forcing a full GC leaves the buffer
-     ALIVE and the claim at zero — the finalizer ran and freed nothing.
-  2. The explicit sweep then frees exactly that buffer, so nothing leaks for the rest of the process.
-
-Half 1 alone would pass if the buffer were simply never freed; half 2 alone would pass if the
-finalizer had freed it first. Restoring a collective free to ``__del__`` fails half 1; dropping the
-sweep fails half 2.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_ep_buffer_gc_safety.py
-
-Requirements:
-    - 2x GPUs, single node, DeepEP installed. Builds no model: a bare dispatcher is enough.
+A finalizer that freed it would fire on one rank's GC and spin on the NVLink barrier for 100 s. After a gathered save
+the writer can lag past that, and the job dies with ``DeepEP NVLink barrier timeout``, which reads as a DeepEP fault.
+:func:`free_unclaimed_ep_buffers` frees at a barriered teardown instead.
 """
 
 import gc
@@ -42,8 +20,7 @@ HIDDEN = 1024
 NUM_TOPK = 4
 TOKENS_PER_RANK = 128
 EXPERTS_PER_RANK = 8
-# Two layers on one EP group, so "the buffer survived" cannot be confused with "this layer kept its
-# own": both share one arena, and dropping the first must leave the second's transport intact.
+# Two layers sharing one arena: dropping the first must leave the second's transport intact.
 NUM_LAYERS = 2
 
 
@@ -52,11 +29,8 @@ def live_arenas() -> list:
 
 
 def build_dispatchers(ep_config, num_experts: int) -> list:
-    """``NUM_LAYERS`` sized dispatchers on one EP group (sizing the transport is collective).
-
-    A function rather than a loop in ``main`` so the loop variable dies with this frame: a stray
-    reference to the last dispatcher would keep one claim alive and quietly weaken the GC check.
-    """
+    """COLLECTIVE (sizing the transport). A function so the loop variable dies with this frame: a stray reference would
+    keep a claim alive and weaken the GC check."""
     built = []
     for _ in range(NUM_LAYERS):
         dispatcher = DeepEPDispatcher(ep_config, num_experts, HIDDEN)
@@ -77,9 +51,7 @@ def run(ctx) -> dict:
 
     checks = {}
 
-    # ---- 1. the finalizer must relinquish, never free ---------------------
-    # Ranks are deliberately NOT aligned around this: that is the whole point — a collective here
-    # would be entered by one rank at a GC-chosen moment.
+    # Ranks are deliberately unaligned here: a collective would be entered by one rank at a GC-chosen moment.
     dispatchers.clear()
     gc.collect()
 
@@ -91,7 +63,6 @@ def run(ctx) -> dict:
         f"{arena.buffer is not None}, claims={arena._users}, registered arenas={len(live_arenas())}"
     )
 
-    # ---- 2. the explicit, barriered sweep must free it --------------------
     barrier()
     freed = free_unclaimed_ep_buffers()
     checks["sweep_freed_the_buffer"] = freed == 1

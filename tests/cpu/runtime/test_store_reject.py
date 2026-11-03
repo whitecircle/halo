@@ -1,26 +1,6 @@
 #!/usr/bin/env python
-"""``store_reject_across_ranks`` — the failure-carrying join over the c10d store, not a collective.
-
-The coordinated dataset ops join their two phases with this: the writer rank's map is unbounded
-single-rank work (a fresh-cache tokenization of a large corpus), and a join spelled
-``all_gather_object`` parks the peers INSIDE the process group for that whole duration — a map
-longer than ``DIST_NCCL_TIMEOUT_MINUTES`` then kills the run with a watchdog abort blaming the
-collective, not the map. The store transport keeps the ``reject_across_ranks`` contract (uniform raise, real cause,
-caller's ``exc_type``) while bounding the wait by ``DIST_STORE_TIMEOUT_HOURS``.
-
-Proven on real gloo groups: (1) a clean join passes on both ranks; (2) one rank's reason raises on
-EVERY rank, naming the failing rank and cause; (3) **a rank may arrive later than the process-group
-timeout** and the early rank still completes — the property the transport exists for, which
-``all_gather_object`` cannot provide. Thread participants, each on its own client of one real store
-server, prove the verdict across repeated phases of one tag with no, one and many failing ranks, that the
-phases leave no key behind (also when the last participant out had timed out), and that a clean join
-costs each participant a constant number of key operations at any world size: every checkpoint save joins
-twice, and the one store server serves each key a participant waits on or reads. FakeStore paths pin the
-verdict logic, the order a failing rank records and arrives in, the empty-reason contract and the timeout
-diagnostic single-process.
-
-    python tests/cpu/runtime/test_store_reject.py
-"""
+"""``store_reject_across_ranks``: the failure-carrying join over the c10d store. A join in ``all_gather_object`` parks
+peers in the process group through an unbounded map, killed by the watchdog blaming the collective."""
 
 import datetime
 import os
@@ -39,25 +19,21 @@ from tests.common.ports import free_port
 
 WORLD_SIZE = 2
 
-# The late rank must be allowed to outlive the process-group timeout: that is the whole point of
-# joining on the store. Kept far apart so a slow CI box cannot blur the two, and the PG timeout
-# itself wide enough that spawn + torch-import skew between the ranks on a loaded host cannot trip
-# the rendezvous before the join is even reached.
+# The late rank outlives the process-group timeout, far enough apart that a slow CI box cannot blur the two.
 PG_TIMEOUT_SEC = 5
 LATE_JOIN_SEC = 8
 
-# Every store wait is explicitly bounded: under the 4 h production default a regression would surface
-# only as a rank killed at the join deadline, not as the wait's own error.
+# Bounded: under the 4 h default a regression would surface only as a rank killed at the join deadline.
 WAIT_TIMEOUT = datetime.timedelta(seconds=30)
 
 STORE_HOST = "127.0.0.1"
 # The prefix init_process_group puts the default store under.
 DEFAULT_PG_PREFIX = "default_pg"
-# Bounds a thread participant end to end; only a participant stuck past its own bounded waits reaches it.
+# Only a participant stuck past its own bounded waits reaches this.
 THREAD_JOIN_TIMEOUT_S = 120.0
 THREAD_WORLD_SIZE = 32
 WHAT = "unit-test join"
-# The phases one tag runs in turn: no failure, one, many (more than the message previews), all, none again.
+# No failure, one, many (more than the message previews), all, none again.
 FAILING_RANKS_PER_PHASE = (
     frozenset(),
     frozenset({5}),
@@ -65,11 +41,10 @@ FAILING_RANKS_PER_PHASE = (
     frozenset(range(THREAD_WORLD_SIZE)),
     frozenset(),
 )
-# The most key operations one participant makes in a clean join, whatever the world: its entry, arrival,
-# wait, failure-count read and exit, the last arrival's set, and the last exit's count read and delete of
-# the four keys.
+# Entry, arrival, wait, failure-count read, exit, the last arrival's set, and the last exit's count read and delete of
+# four keys.
 CLEAN_JOIN_KEY_OPS = 11
-# The bound of the participant the cleanup test makes give up waiting; the test orders the rest by events.
+# The test orders the rest by events.
 GIVE_UP_WAIT = datetime.timedelta(seconds=1)
 
 
@@ -85,13 +60,12 @@ def _worker(rank: int, tmp_dir: str, failing_rank: int) -> None:
 
 
 def _late_rank_worker(rank: int, tmp_dir: str) -> None:
-    """Rank 0 arrives at the join LATE_JOIN_SEC late, past the PG timeout; both must still pass."""
     try:
         if rank == 0:
             time.sleep(LATE_JOIN_SEC)
         store_reject_across_ranks("late", None, "late-join", timeout=datetime.timedelta(seconds=60))
         result = "PASS"
-    except Exception as e:  # the failure mode under test is exactly "a join that raises"
+    except Exception as e:  # The failure mode under test is a join that raises.
         result = f"FAIL: {type(e).__name__}: {str(e).splitlines()[0][:160]}"
     with open(os.path.join(tmp_dir, f"late_{rank}.txt"), "w") as fh:
         fh.write(result)
@@ -114,11 +88,7 @@ def test_one_ranks_reason_raises_on_every_rank_with_the_cause(tmp_path):
 
 
 def test_late_rank_may_outlive_the_process_group_timeout(tmp_path):
-    """A rank arriving later than the PG timeout must NOT fail the early rank.
-
-    Fails when the join is a collective: gloo aborts the early rank's recv at PG_TIMEOUT_SEC — the
-    30-min NCCL-watchdog kill of a real fresh-cache map, scaled down.
-    """
+    """As a collective, gloo aborts the early rank at PG_TIMEOUT_SEC, the 30-min NCCL-watchdog kill scaled down."""
     run_gloo_ranks(_late_rank_worker, WORLD_SIZE, str(tmp_path), pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC))
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"late_{rank}.txt") as fh:
@@ -127,8 +97,7 @@ def test_late_rank_may_outlive_the_process_group_timeout(tmp_path):
 
 
 class _OpLog:
-    """A store that logs each request in order with the keys it names: a wait or read naming W keys costs the
-    one store server W key operations, which a request count would hide."""
+    """A wait or read naming W keys costs the store server W key operations, which a request count would hide."""
 
     def __init__(self, store):
         self._store = store
@@ -160,9 +129,7 @@ class _OpLog:
 
 
 class _OrderedStore:
-    """A participant's store ordered against a peer's by events: an increment of a key ending in a ``hold``
-    suffix first waits for that suffix's event, a wait that times out sets ``timed_out``, and an exit sets
-    ``exited``."""
+    """An increment of a key ending in a ``hold`` suffix first waits for that suffix's event."""
 
     def __init__(self, store, hold: dict[str, threading.Event], timed_out: threading.Event, exited: threading.Event):
         self._store = store
@@ -196,11 +163,8 @@ def _run_thread_world(
     body: Callable[[int], object],
     wrap: Callable[[int, dist.Store], object] = lambda rank, store: store,
 ) -> tuple[list[object], list[object], dist.TCPStore]:
-    """Run ``body(rank)`` for ``world`` ranks as threads, each on its own client connection to one real store
-    server under the default group's prefix, as each process of a job holds one to the launcher's store.
-
-    Returns each rank's result and store (``wrap(rank, prefix store)``), and the server.
-    """
+    """Each rank is a thread on its own client connection, as each process of a job holds one to the launcher's
+    store."""
     server = dist.TCPStore(STORE_HOST, free_port(), is_master=True, timeout=WAIT_TIMEOUT, wait_for_workers=False)
     current = threading.local()
     monkeypatch.setattr(consensus, "is_multi_rank_run", lambda: True)
@@ -216,7 +180,7 @@ def _run_thread_world(
             current.rank = rank
             current.store = stores[rank] = wrap(rank, dist.PrefixStore(DEFAULT_PG_PREFIX, client))
             results[rank] = body(rank)
-        except BaseException as exc:  # re-raised on the test's thread below
+        except BaseException as exc:  # Re-raised on the test's thread below.
             results[rank] = exc
 
     threads = [threading.Thread(target=participant, args=(rank,), daemon=True) for rank in range(world)]
@@ -239,7 +203,6 @@ def _phase_reason(rank: int, phase: int) -> str:
 
 
 def _join_every_phase(rank: int) -> list[str | None]:
-    """This rank's verdict in each phase of one tag: the raised message, or None for a clean join."""
     verdicts = []
     for phase, failing in enumerate(FAILING_RANKS_PER_PHASE):
         reason = _phase_reason(rank, phase) if rank in failing else None
@@ -252,9 +215,8 @@ def _join_every_phase(rank: int) -> list[str | None]:
 
 
 def test_every_rank_raises_the_gathered_message_in_every_phase_of_a_tag(monkeypatch):
-    """No, one, many and all failing ranks, in turn under one tag: every rank raises exactly the message
-    the world's reasons gather to, which names the lowest failing ranks and the lowest one's reason
-    whichever rank recorded first, and the phases leave behind only the per-participant entry counters."""
+    """Names the lowest failing ranks whichever recorded first, leaving behind only the per-participant entry
+    counters."""
     verdicts, _, server = _run_thread_world(monkeypatch, THREAD_WORLD_SIZE, _join_every_phase)
 
     for phase, failing in enumerate(FAILING_RANKS_PER_PHASE):
@@ -269,9 +231,8 @@ def test_every_rank_raises_the_gathered_message_in_every_phase_of_a_tag(monkeypa
 
 
 def test_a_last_exit_whose_wait_timed_out_still_deletes_the_failure_slots(monkeypatch):
-    """Rank 0 gives up waiting just before failing rank 1 arrives, and exits after rank 1. The last exit then
-    never read a failure count of its own and must still delete rank 1's slot with the phase's other keys,
-    or every such abort leaves it on the store for the rest of the job."""
+    """The last exit never read a failure count of its own, and must still delete rank 1's slot or it stays on the
+    store for the job."""
     rank0_timed_out, rank1_exited = threading.Event(), threading.Event()
     orders = {
         0: ({"/exited": rank1_exited}, rank0_timed_out, threading.Event()),
@@ -301,8 +262,8 @@ def test_a_last_exit_whose_wait_timed_out_still_deletes_the_failure_slots(monkey
 
 @pytest.mark.parametrize("world", [8, 64])
 def test_a_clean_join_costs_each_participant_constant_key_operations(monkeypatch, world):
-    """Fails on a join where every participant writes its own key and waits on and reads every peer's: each
-    one then names O(world) keys, O(world²) for the one store server (seconds per join at 1024 ranks)."""
+    """A join where every participant reads every peer's key is O(world²) for the one store server (seconds per join
+    at 1024 ranks)."""
 
     def clean_join(rank: int) -> None:
         store_reject_across_ranks("clean", None, WHAT, timeout=WAIT_TIMEOUT)
@@ -315,7 +276,6 @@ def test_a_clean_join_costs_each_participant_constant_key_operations(monkeypatch
 
 @pytest.fixture()
 def fake_world(monkeypatch):
-    """One rank of a 2-rank world against a shared in-memory store, peer keys pre-seedable."""
     store = FakeStore()
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
@@ -332,7 +292,6 @@ def _phase_prefix(tag: str) -> str:
 
 
 def _seed_peer_arrival(store: FakeStore, tag: str, reason: str | None = None) -> None:
-    """Rank 1 has arrived at rank 0's next phase of ``tag``, having recorded ``reason`` in the first slot."""
     prefix = _phase_prefix(tag)
     if reason:
         store.kv[f"{prefix}/failures"] = 1
@@ -347,16 +306,14 @@ def test_verdict_names_the_failing_rank_and_honors_exc_type(fake_world):
 
 
 def test_an_empty_reason_is_no_failure(fake_world):
-    """The same falsy contract reject_across_ranks has: an empty reason records nothing and passes."""
     _seed_peer_arrival(fake_world, "et")
     store_reject_across_ranks("et", "", "unit join", timeout=WAIT_TIMEOUT)
     assert fake_world.kv[f"{_phase_prefix('et')}/failures"] == 0
 
 
 def test_a_failing_rank_records_its_slot_before_it_arrives(fake_world, monkeypatch):
-    """The slot count is final once every rank has arrived only because each failing rank takes and writes
-    its slot first: one that arrived first could complete the arrivals before its slot exists, and a peer
-    they release would read a count without its failure and pass a failed join."""
+    """A rank that arrived first could complete the arrivals before its slot exists, and a released peer would pass
+    a failed join."""
     log = _OpLog(fake_world)
     monkeypatch.setattr(consensus.c10d, "_get_default_store", lambda: log)
     _seed_peer_arrival(fake_world, "order")
@@ -379,7 +336,6 @@ def test_own_reason_raises_even_when_peers_are_clean(fake_world):
 
 
 def test_the_first_reason_is_the_lowest_failing_rank_s_not_the_first_recorded(fake_world):
-    """Rank 1 took the first slot; the message still leads with rank 0, as a rank-indexed gather does."""
     _seed_peer_arrival(fake_world, "lo", "OSError: disk full")
     with pytest.raises(RuntimeError) as raised:
         store_reject_across_ranks("lo", "KeyError: 'prompt'", "unit join", timeout=WAIT_TIMEOUT)
@@ -400,8 +356,7 @@ def test_a_clean_join_reads_no_reason_and_a_failed_one_reads_them_in_one_round_t
 
 
 def test_a_timed_out_join_reports_how_many_arrived(fake_world):
-    """The diagnostic counts the arrivals rather than listing a key per rank, so it stays one line at any
-    world size and still says whether a peer is late or the ranks diverged."""
+    """Counts arrivals rather than listing a key per rank, so it stays one line at any world size."""
     with pytest.raises(RuntimeError, match=r"'reject/tt/world'.*all 2 participants to arrive \(1 did\)"):
         store_reject_across_ranks("tt", None, "unit join", timeout=WAIT_TIMEOUT)
 

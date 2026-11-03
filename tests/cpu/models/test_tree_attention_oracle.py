@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: a tree forward is the per-example forward, through the oracle and through the flash seam.
-
-Three layers of the same claim, on a tiny model of every family tree attention admits (GPT-OSS with
-live sinks and a sliding window short enough to cross node boundaries; Qwen3 dense and MoE; Qwen3.5
-dense and MoE, whose GatedDeltaNet layers carry a convolution context and a recurrent state):
-
-* under the dense keep-masks of :func:`~tests.common.trees.tree_attention_masks` (eager attention)
-  every example has the logits and gradients it has when run alone; a stateful family's
-  linear-attention layers read their part of the plan there too;
-* the kernel plans, run through the real transformers flash path and the registry view with a
-  reference implementation standing in for the CUDA kernel, give the same in both forms;
-* the custom autograd pieces of the seam are exact: the ancestor merge and the query/key
-  normalization against finite differences, the key gather against a plain fp32 scatter;
-* under gradient checkpointing, reentrant or not, a tree row trains to the logits and gradients it
-  trains to without: the recompute reads the plan as the first pass did.
-
-The CUDA kernels themselves are pinned by ``tests/gpu/kernels/test_fa4_tree_attention.py``.
-
-Run: python tests/cpu/models/test_tree_attention_oracle.py  (or pytest)
-"""
+"""A tree forward equals the per-example forward, through the oracle and through the flash seam, on every family tree
+attention admits. ``tests/gpu/kernels/test_fa4_tree_attention.py`` pins the CUDA kernels."""
 
 import pytest
 import torch
@@ -61,8 +43,8 @@ from tests.common.trees import (
 
 WINDOW = 6
 VOCAB = 1024
-# A tiny model per admitted model type. GPT-OSS gets a window that crosses node boundaries; the
-# Qwen3.5 pair one period of its layer pattern (three GatedDeltaNet layers, one attention layer).
+# GPT-OSS gets a window that crosses node boundaries; the Qwen3.5 pair one period of its layer pattern (three
+# GatedDeltaNet layers, one attention layer).
 FAMILIES = {
     "gpt_oss": (TINY_MOE_FAMILIES["gpt_oss"], {"sliding_window": WINDOW, "num_hidden_layers": 4}),
     "qwen3": (TINY_DENSE_FAMILY, {"num_hidden_layers": 3}),
@@ -73,15 +55,13 @@ FAMILIES = {
 
 
 def test_every_admitted_family_is_swept():
-    """Families whose softmax layers read the plan at the flash seam; the key-selecting ones are swept
-    by test_tree_sparse_attention.py."""
+    """The key-selecting families are swept by test_tree_sparse_attention.py."""
     assert set(FAMILIES) == {name for name, family in TREE_FAMILIES.items() if family.sparse is None}
 
 
 def _paths() -> tuple[list[list[int]], list[list[int]]]:
-    """A three-level tree with branches shorter and longer than the window, each ending in an answer. The
-    two-level branch opens on token 0, so it sorts first under the trunk and the depth-by-depth order of the
-    row's tokens is not their row order."""
+    """Branches shorter and longer than the window. The two-level branch opens on token 0, so it sorts first under the
+    trunk and the depth-by-depth order of the row's tokens is not their row order."""
     generator = torch.Generator().manual_seed(0)
 
     def tokens(n: int) -> list[int]:
@@ -104,8 +84,7 @@ def tree():
     paths, labels = _paths()
     columns = tree_columns(paths, [[label != LABEL_IGNORE_INDEX for label in path_labels] for path_labels in labels])
     assert int(columns[DEPTH_COLUMN].max()) == 2
-    # A depth order that is its own inverse (the identity included) would hide a recurrence that skips or
-    # misapplies the permutation back to row order.
+    # A depth order that is its own inverse would hide a recurrence that skips or misapplies the permutation back.
     order = _stateful_plan(columns)["depth_order"]
     assert not torch.equal(order[order], torch.arange(len(order)))
     return paths, labels, columns
@@ -126,7 +105,6 @@ def _window(model) -> int | None:
 
 
 def _oracle_masks(model, columns) -> dict[str, torch.Tensor] | torch.Tensor:
-    """The dense tree masks in the shape the family's forward takes: one per layer type, or one."""
     full, sliding = tree_attention_masks(columns[POSITION_COLUMN], columns[DEPTH_COLUMN], _window(model))
     if sliding is None:
         return additive_mask(full)
@@ -151,10 +129,8 @@ def _plan(model, columns, form: str) -> dict:
 
 
 def _install_reference_flash_kernel(monkeypatch, calls: list[dict]) -> None:
-    """transformers' FA4 path with the reference varlen kernel standing in for the CUDA one.
-
-    The path's kwargs processor is built on importing ``flash_attn.cute``, which an image may ship
-    unimportable (FA2's source tree does on Hopper)."""
+    """The path's kwargs processor is built on importing ``flash_attn.cute``, which an image may ship unimportable
+    (FA2's source tree does on Hopper)."""
     pytest.importorskip("flash_attn.cute")
     flash_utils.lazy_import_flash_attention("flash_attention_4")
     monkeypatch.setattr(flash_utils, "_flash_varlen_fn", reference_varlen(calls))
@@ -162,7 +138,6 @@ def _install_reference_flash_kernel(monkeypatch, calls: list[dict]) -> None:
 
 
 def _install(model, monkeypatch, form: str) -> TreeFamily:
-    """Tree attention on ``model``'s family for one test; every module attribute it replaces is restored."""
     family = TREE_FAMILIES[model.config.model_type]
     replaced = ["ALL_ATTENTION_FUNCTIONS"]
     if family.stateful is not None:
@@ -218,9 +193,8 @@ def test_the_dense_tree_masks_reproduce_every_example_alone(model, tree, alone, 
     )
     assert drift < 1e-5 * scale
 
-    # Without the masks the row is one causal sequence; with the masks alone a stateful family's
-    # convolution and recurrence still run across it; with the window in row order a branch loses
-    # its trunk. Each must move the logits, or the checks above compare nothing.
+    # Without the masks the row is one causal sequence; with the masks alone a stateful family's convolution and
+    # recurrence still run across it; with the window in row order a branch loses its trunk. Each must move the logits.
     assert (_tree_forward(model, columns, **mixers) - tree_logits).abs().max() > 1e-2
     if family.stateful:
         masked_only = _tree_forward(model, columns, attention_mask=_oracle_masks(model, columns))
@@ -258,8 +232,7 @@ def test_the_kernel_plans_reproduce_every_example_alone_through_the_flash_path(m
     assert all(isinstance(length, int) for call in calls for length in call["max_seqlen"])
     full = [call for call in calls if call["window"][0] is None]
     if form == "split":
-        # Per layer: the stock packed call (with the family's sink), then the sink-less rectangular
-        # ancestor pass.
+        # Per layer: the stock packed call (with the family's sink), then the sink-less rectangular ancestor pass.
         assert [(call["causal"], call["sink"], call["queries"]) for call in full[:2]] == [
             (True, has_sinks, tokens),
             (False, False, tokens - int(table.lengths[table.parents == -1].sum())),
@@ -272,8 +245,6 @@ def test_the_kernel_plans_reproduce_every_example_alone_through_the_flash_path(m
 
 
 def test_a_gather_over_the_call_budget_gives_the_one_call_logits_and_gradients(model, tree, monkeypatch):
-    """Under a budget smaller than the row's gathered keys every gather layer attends in several calls,
-    none over the budget, with the logits of the single call and its gradients."""
     _, _, columns = tree
     calls: list[dict] = []
     _install_reference_flash_kernel(monkeypatch, calls)
@@ -307,8 +278,8 @@ def test_a_gather_over_the_call_budget_gives_the_one_call_logits_and_gradients(m
 def test_a_tree_row_trains_identically_under_gradient_checkpointing(
     model_type, form, use_reentrant, tree, monkeypatch
 ):
-    """A checkpointed decoder layer runs its forward again in the backward, so the flash view and a stateful family's
-    convolution and scan are handed the plan a second time and must read it as the first pass did."""
+    """A checkpointed layer runs its forward again in the backward, so the flash view and a stateful family's
+    convolution and scan must read the plan as the first pass did."""
     _, _, columns = tree
     tiny_family, overrides = FAMILIES[model_type]
     torch.manual_seed(0)
@@ -328,8 +299,7 @@ def test_a_tree_row_trains_identically_under_gradient_checkpointing(
 
 
 def test_a_lora_wrapped_model_reads_the_tree_under_the_adapter(tree, monkeypatch):
-    """A PeftModel calls the model it wraps through its own forward and nests the attention layers
-    one wrapper down: the plan has to arrive there and the layers have to be found there."""
+    """A PeftModel calls the model it wraps through its own forward and nests the attention layers one wrapper down."""
     _, _, columns = tree
     tiny_family, overrides = FAMILIES["qwen3_moe"]
     torch.manual_seed(0)
@@ -402,9 +372,7 @@ def test_a_tree_row_normalizes_query_and_key_once_not_once_per_depth(tree, monke
 
 
 def test_every_depth_reads_a_view_of_one_permuted_copy_of_each_input(tree):
-    """Each input of the scan is permuted into depth order once and every depth reads a view of that copy, so
-    the backward is one inverse permutation per input. A gather per depth instead zero-fills, scatters and
-    sums a full-size gradient per depth for every input."""
+    """A gather per depth instead zero-fills, scatters and sums a full-size gradient per depth for every input."""
     _, _, columns = tree
     plan = _stateful_plan(columns)
     seen = []
@@ -426,8 +394,7 @@ def test_every_depth_reads_a_view_of_one_permuted_copy_of_each_input(tree):
 
 
 def _per_depth_gathers(scan, plan, query, key, value, g, beta) -> torch.Tensor:
-    """The tree recurrence with every depth gathering its own tokens of every input, as a reference: the form
-    the depth-order permutation replaces."""
+    """The form the depth-order permutation replaces, kept as a reference."""
     outputs, state, start = [], None, 0
     levels = plan["levels"]
     for depth, level in enumerate(levels):
@@ -449,9 +416,8 @@ def _per_depth_gathers(scan, plan, query, key, value, g, beta) -> torch.Tensor:
 # GatedDeltaNet decays per head, KDA per channel.
 @pytest.mark.parametrize(("model_type", "per_channel_decay"), [("qwen3_5_text", False), ("glm5_next_text", True)])
 def test_the_depth_order_permutation_gives_the_per_depth_gathers_values(tree, model_type, per_channel_decay, dtype):
-    """The same scan calls on the same values, through the family's own delta-rule scan (its CPU fallback here):
-    the output equals the per-depth gathers' bit for bit, and every input's gradient exactly. Gradients compare
-    as values: a gather's zero-filled scatter turns a -0.0 into +0.0, which the permutation keeps."""
+    """Through the family's own delta-rule scan (its CPU fallback here). Gradients compare as values: a gather's
+    zero-filled scatter turns a -0.0 into +0.0, which the permutation keeps."""
     _, _, columns = tree
     family = TREE_FAMILIES[model_type]
     scan = getattr(family.module, family.stateful.recurrence)
@@ -480,9 +446,8 @@ def test_the_depth_order_permutation_gives_the_per_depth_gathers_values(tree, mo
 
 
 def test_the_recurrence_hands_the_scan_each_depths_bounds_from_the_host(tree):
-    """fla builds its chunk indices from ``cu_seqlens_cpu`` when given it instead of reading the device bounds
-    back, a host sync per depth per layer. On a plan whose tensors sit on the meta device any device read
-    raises, so the bounds the scan receives come from the plan's host copy."""
+    """fla reads ``cu_seqlens_cpu`` when given it instead of reading the device bounds back, a host sync per depth per
+    layer. On a meta-device plan any device read raises."""
     _, _, columns = tree
     plan = _stateful_plan(columns)
     calls = []
@@ -503,9 +468,8 @@ def test_the_recurrence_hands_the_scan_each_depths_bounds_from_the_host(tree):
 
 
 def test_a_one_level_plan_hands_every_layer_the_same_bounds_objects():
-    """fla caches the chunk indices of its last call, keyed on the identity of the bounds it was given. A plan of
-    plain documents has one level, so every layer's scan must receive the same device and host bounds objects to
-    reuse them; a fresh host tensor per call would rebuild the indices in every layer."""
+    """fla caches the chunk indices of its last call, keyed on the identity of the bounds; a fresh host tensor per call
+    would rebuild the indices in every layer."""
     positions = torch.cat([torch.arange(length) for length in (7, 12, 5)])
     table = build_node_table(positions, torch.zeros_like(positions))
     plan = build_tree_attention_plan(table, sliding_window=None, full_form="gather", conv_kernel=4)
@@ -573,8 +537,8 @@ def test_the_gather_form_installs_on_fa4s_head_dim_256_kernel(family, monkeypatc
 
 
 def test_attention_layers_from_another_module_are_refused(monkeypatch):
-    """A remote-code class of an admitted model type resolves its interface in its own module: the
-    view would sit unused on the stock one and every plan would be dropped without a word."""
+    """A remote-code class resolves its interface in its own module, so the view would sit unused on the stock one and
+    every plan would be dropped without a word."""
     model = tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"])
     monkeypatch.setattr(model.config, "_attn_implementation", "flash_attention_4")
     attention = model.model.layers[0].self_attn

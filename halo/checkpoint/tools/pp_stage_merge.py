@@ -1,8 +1,6 @@
-"""Merge the per-node directories of one pipeline-parallel save into one ``from_pretrained``-loadable checkpoint.
-
-On a non-shared output filesystem (``DIST_OUTPUT_SHARED_FILESYSTEM=0``) each node's directory holds the index, the
-stage parts it wrote (``model-ppNNNNN-of-NNNNN-*``), the ``model-wrapper-*`` parts and its own ranks' resume state.
-"""
+"""Merge the per-node directories of one pipeline-parallel save into one ``from_pretrained``-loadable checkpoint. On a
+non-shared output filesystem each node's directory holds the index, its stage parts, the wrapper parts and its ranks'
+resume state."""
 
 import logging
 import os
@@ -24,18 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
-    """Write ``output_dir`` from the per-node directories ``input_dirs`` of one pipeline-parallel save; the result
-    resumes exactly on the save's topology. Every input must carry the same index. Each part it names is copied
-    from the first input holding it, and the rank-uniform files (config, tokenizer, remote code, trainer state,
-    scheduler, export sidecars) from the first input; every input's per-rank resume files and one optimizer meta
-    are hard-linked where the output shares their filesystem and copied with their mode otherwise; the index
-    lands last. Every input check runs before the first write. A linked file outlives its input's deletion, and a
-    training save into either directory replaces it there rather than writing through the link.
-
-    Raises:
-        ValueError: an input that is the output, inputs whose indexes differ, a part no input holds or
-            held at different sizes, a refused resume state, or an output that still names an absent shard.
-    """
+    """Write ``output_dir`` from one PP save's per-node directories; the result resumes exactly on the save's topology.
+    Every input must carry the same index and every check runs before the first write. Parts copy from their first
+    holder, per-rank resume files hard-link where the filesystem allows, and the index lands last."""
     for input_dir in input_dirs:
         reject_in_place_conversion(input_dir, output_dir)
     index = read_checkpoint_index(input_dirs[0])

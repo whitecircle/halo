@@ -1,9 +1,5 @@
-"""Group-relative advantages for GRPO: baseline, scaling, and the degenerate-group mask.
-
-Pure functions over a rank-local reward tensor (``RepeatSampler`` keeps a prompt's completions on one
-rank); only ``scale_rewards="batch"`` and the non-finite check agree across ranks. Offline GRPO's stored
-groups take theirs at tokenization, one group at a time (:func:`compute_group_advantages`).
-"""
+"""Group-relative advantages for GRPO. Pure functions over a rank-local reward tensor (``RepeatSampler`` keeps a
+prompt's completions on one rank); only ``scale_rewards="batch"`` and the non-finite check agree across ranks."""
 
 from collections.abc import Callable
 
@@ -16,9 +12,8 @@ from halo.runtime.consensus import rank_consensus
 
 # Matches TRL, so env-, online- and offline-GRPO agree on near-degenerate groups.
 STD_EPS = 1e-4
-# Reward spread below this counts as all completions scoring alike. Not shared with offline GRPO's
-# drop_degenerate_groups, whose rank-based advantage methods zero only exact ties: a near-tie within
-# this spread still trains there with full-scale advantages.
+# Reward spread below this counts as all alike. Not shared with offline GRPO's drop_degenerate_groups, whose rank-based
+# advantage methods zero only exact ties.
 _DEGENERATE_SPREAD = 1e-6
 
 
@@ -56,7 +51,6 @@ def _robust(rewards: np.ndarray) -> np.ndarray:
     return np.zeros_like(rewards) if iqr == 0 else (rewards - np.median(rewards)) / iqr
 
 
-# Each OfflineGRPOConfig.advantage_method spelling to the map it names.
 GROUP_ADVANTAGE_METHODS: dict[str, Callable[[np.ndarray], np.ndarray]] = {
     "z_norm": _z_norm,
     "minmax": _minmax,
@@ -71,9 +65,8 @@ def compute_group_advantages(
     method: str,
     best_completion_emphasis: float | str,
 ) -> list[float]:
-    """Advantages from one stored group's rewards via ``method`` (a :data:`GROUP_ADVANTAGE_METHODS` key,
-    refused otherwise by the offline trainer's constructor), with optional best-completion emphasis,
-    clipped to [-10, 10]."""
+    """Optional best-completion emphasis, clipped to [-10, 10]; the offline trainer's constructor refuses an unknown
+    ``method``."""
     # float64 explicitly: integral rewards (0/1 verifiable) would keep an int64 dtype through the
     # `np.zeros_like` degenerate-group branches, and the in-place emphasis multiply below then raises
     # UFuncTypeError inside datasets.map.
@@ -90,10 +83,8 @@ def compute_group_advantages(
 
     if len(rewards_array) > 1:
         if best_completion_emphasis == "auto":
-            # Scale emphasis with std: 3.0 at std=0 → 5.0 at std→∞. Population std (numpy's default),
-            # unlike the z_norm divisor: this heuristic has no torch counterpart to match, and it
-            # multiplies the best row under every method, so aligning it would also move the advantages
-            # of the rank/minmax methods.
+            # 3.0 at std=0 → 5.0 at std→∞. Population std, unlike the z_norm divisor: this heuristic has no torch
+            # counterpart, and aligning it would move the advantages of the rank/minmax methods.
             reward_std = np.std(rewards_array)
             emphasis_factor = 3.0 + 2.0 * reward_std / (1.0 + reward_std)
         else:
@@ -117,19 +108,15 @@ def _grouped(rewards: torch.Tensor, num_generations: int) -> torch.Tensor:
 
 
 def scales_rewards(scale_rewards: str | bool | None) -> bool:
-    """Whether ``scale_rewards`` (``"group"`` / ``"batch"`` / ``"none"``, or a bool) divides the advantages
-    by a std. ``"none"`` is TRUTHY, so the off values are matched explicitly."""
+    """``"none"`` is TRUTHY, so the off values are matched explicitly."""
     return scale_rewards not in (None, False, "none")
 
 
 def valid_group_stats(
     rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Each group's reward mean and unbiased std over its valid members, both ``[groups, 1]``.
-
-    A group with no valid member takes its plain mean; one with fewer than two has std 0, the spread
-    a group-scaled advantage of 0 divides by.
-    """
+    """Mean and unbiased std over valid members, both ``[groups, 1]``. A group with no valid member takes its plain
+    mean; one with fewer than two has std 0."""
     grouped = _grouped(rewards, num_generations)
     valid = _grouped(valid_mask.to(grouped.dtype), num_generations)
     valid_count = valid.sum(dim=1, keepdim=True)
@@ -165,14 +152,8 @@ def group_relative_advantages(
     already_gathered: bool = False,
     std_floor: float = 0.0,
 ) -> torch.Tensor:
-    """GRPO advantage: reward minus its group mean, optionally rescaled.
-
-    ``valid_mask`` (True = real completion) keeps infra-failed placeholder rows out of the baseline and the
-    std; a group with no valid member takes its plain mean. ``scale_rewards`` (:func:`scales_rewards`)
-    divides by the per-group std (``"group"``, which degenerate groups drive toward 0) or the global-batch
-    std (``"batch"``). The divisor is ``max(std, std_floor)``, so a near-degenerate group's shaping noise is
-    not inflated to full-scale advantages.
-    """
+    """Reward minus its group mean, optionally rescaled. The divisor is ``max(std, std_floor)``, so a near-degenerate
+    group's shaping noise is not inflated to full-scale advantages."""
     grouped = _grouped(rewards, num_generations)
     if valid_mask is not None:
         group_mean, valid_std = valid_group_stats(rewards, num_generations, valid_mask)
@@ -202,16 +183,9 @@ def group_relative_advantages(
 def degenerate_group_mask(
     rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """Per-trajectory mask (True = drop) of groups whose completions all scored the same reward.
-
-    A zero-spread group contributes no policy gradient yet its tokens inflate the DAPO loss normalizer,
-    diluting the groups that carry signal; dropping them restores the effective batch size (DAPO
-    dynamic sampling without the resampling half).
-
-    ``valid_mask`` (True = real completion) restricts degeneracy to valid members, so an infra-failed
-    placeholder's differing reward cannot let an all-alike group escape detection. A group with fewer
-    than two valid members carries no intra-group comparison signal and counts as degenerate.
-    """
+    """Mask (True = drop) of zero-spread groups, whose tokens inflate the DAPO normalizer with no policy gradient.
+    ``valid_mask`` keeps a placeholder's reward from hiding an all-alike group; fewer than two valid members is
+    degenerate."""
     grouped = _grouped(rewards, num_generations)
     if valid_mask is None:
         spread = grouped.max(dim=1).values - grouped.min(dim=1).values

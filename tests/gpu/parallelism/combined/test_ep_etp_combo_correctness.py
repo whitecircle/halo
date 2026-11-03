@@ -1,25 +1,9 @@
 #!/usr/bin/env python
-"""EP+ETP COMBO (ep_size>1 AND expert_tp_size>1) training deadlock regression.
+"""EP+ETP training deadlock regression, past step 3 through the real trainer (FSDP2 + gradient checkpointing).
 
-Exercises the combination where the EP group splits into ``expert_tp_size`` DeepEP dispatch
-groups coupled by the strided expert-TP all-reduce. That coupling deadlocks if the expert-TP
-all-reduce sits BETWEEN DeepEP dispatch and combine: under FSDP2's multi-stream / multi-layer
-execution it times out DeepEP's intranode combine barrier across the coupled dispatch groups
-("CUDA error: unspecified launch failure", typically ~step 3). The reduction therefore runs in TOKEN
-space, outside the dispatch->combine span (EPMoELayerBase._dispatch_compute_combine).
-
-The deadlock needs several steps to surface, so this runs >3 steps through the REAL trainer
-(FSDP2 + gradient checkpointing) — a single forward/backward does not trigger it. It checks that the
-model's expert bank is split EP-way with each expert FFN sharded ETP-way, and that every step completes
-and logs a finite loss and grad norm; the EP+ETP math against a reference is
-covered by ``test_combined_ref_correctness.py --mode ep_etp`` and
-``test_ep_family_vs_reference.py --family inkling_text --expert-tp-size 2``.
-
-Config: ep_size=2, expert_tp_size=2 (ep_group_size=4) on GptOss-20B → 4 GPUs.
-
-Run:
-    torchrun --nproc_per_node=4 \
-        tests/gpu/parallelism/combined/test_ep_etp_combo_correctness.py
+An expert-TP all-reduce between DeepEP dispatch and combine times out the combine barrier ("CUDA error: unspecified
+launch failure", around step 3), so it runs in token space. A single forward/backward doesn't trigger it. The math is
+``test_combined_ref_correctness.py --mode ep_etp``'s.
 """
 
 import torch
@@ -42,7 +26,7 @@ EP_SIZE = 2
 EXPERT_TP_SIZE = 2
 NUM_TRAIN_SAMPLES = 32
 MAX_SEQ_LENGTH = 2048
-NUM_TRAIN_STEPS = 6  # > 3 so the EP+ETP combine deadlock, which surfaces around step 3, would show
+NUM_TRAIN_STEPS = 6  # Past 3, so the combine deadlock, which surfaces around step 3, would show.
 BATCH_SIZE = 1
 SEED = 42
 
@@ -89,7 +73,7 @@ def run(ctx):
         gradient_accumulation_steps=1,
         learning_rate=2e-5,
         bf16=True,
-        gradient_checkpointing=True,  # required: GC + FSDP2 is the deadlock condition
+        gradient_checkpointing=True,  # Required: GC + FSDP2 is the deadlock condition.
         use_liger_kernel=False,
         logging_steps=1,
         save_strategy="no",
@@ -112,11 +96,10 @@ def run(ctx):
     log(f"_fsdp_wrapped={getattr(trainer, '_fsdp_wrapped', '?')} (FSDP2 must be active for the deadlock path)")
 
     log(f"\n--- Training {NUM_TRAIN_STEPS} steps (deadlock would surface ~step 3) ---")
-    train_result = trainer.train()  # a reduction inside dispatch->combine deadlocks here
+    train_result = trainer.train()  # A reduction inside dispatch->combine deadlocks here.
 
-    # SFT on this tiny set drops the loss several-fold within the run, far past batch-to-batch noise.
+    # SFT on this tiny set drops the loss several-fold, far past batch noise.
     checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True, loss_decreased=True)
-    # logging_steps=1: every completed step logs a loss and a grad norm.
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["every_step_logged"] = len(step_losses(trainer)) == len(grad_norms) == NUM_TRAIN_STEPS
     return {"checks": checks}

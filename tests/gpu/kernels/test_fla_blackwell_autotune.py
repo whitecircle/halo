@@ -1,19 +1,8 @@
 #!/usr/bin/env python
-"""FLA's GatedDeltaNet op, after the toolkit's post-load restriction, is exact and repeatable on packed rows on
-Blackwell.
+"""FLA's GatedDeltaNet op, after the post-load restriction, is exact and repeatable on packed rows on Blackwell.
 
-On sm_10x under Triton 3.6 the state kernel ``chunk_gated_delta_rule_fwd_kernel_h_blockdim64`` gives run-to-run
-different, at some positions wrong, outputs on ``cu_seqlens`` rows with its ``num_warps=4`` configs, and the stock
-autotuner picks them at Qwen3.5/3.6 shapes; ``finalize_loaded_model`` keeps it on ``num_warps=2``
-(``halo.kernels.fla_launch``). This runs the restriction through that seam with an empty autotune cache, then one
-packed row at Qwen3.5/3.6-35B-A3B's linear-attention width repeatedly, forward and backward, and checks every repeat
-bitwise against the first and against FLA's fp32 naive recurrence per document.
-
-The control forces one ``num_warps=4`` config at the same shape and must vary across repeats or miss the reference:
-that keeps the shape inside the defect, so the restricted check is not passing below it. Once the control stops
-missing, FLA or Triton has fixed the kernel and the restriction can go.
-
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_fla_blackwell_autotune.py
+On sm_10x under Triton 3.6 ``chunk_gated_delta_rule_fwd_kernel_h_blockdim64`` varies run to run with ``num_warps=4``,
+which the stock autotuner picks at Qwen3.5/3.6 shapes. Once the forced control stops missing, the restriction can go.
 """
 
 import os
@@ -32,7 +21,7 @@ from tests.common.numerics import cos_sim, max_abs_rel_err
 from tests.common.rank_log import log
 
 SEED = 1234
-# Qwen3.5/3.6-35B-A3B's GatedDeltaNet after the q/k repeat: 32 heads, key and value width 128.
+# Qwen3.5/3.6-35B-A3B's GatedDeltaNet after the q/k repeat.
 HEADS, HEAD_DIM = 32, 128
 # One packed row of four documents, the layout the padding-free collators emit.
 CU_SEQLENS = (0, 896, 2048, 3584, 4096)
@@ -64,12 +53,11 @@ def _inputs(device) -> dict[str, torch.Tensor]:
 
 
 def _fresh(leaves, dtype=None) -> dict[str, torch.Tensor]:
-    """Independent grad-carrying leaves for one call, so no call reads or accumulates into another's tensors."""
+    """Independent grad-carrying leaves, so no call reads or accumulates into another's tensors."""
     return {name: leaves[name].detach().to(dtype or leaves[name].dtype).clone().requires_grad_() for name in OP_INPUTS}
 
 
 def _run(leaves) -> dict[str, torch.Tensor]:
-    """The op's output and its input gradients for one call."""
     inputs = _fresh(leaves)
     cu_seqlens = torch.tensor(CU_SEQLENS, device=leaves["q"].device, dtype=torch.long)
     o, _ = chunk_gated_delta_rule(
@@ -101,7 +89,7 @@ def _reference(leaves) -> dict[str, torch.Tensor]:
 
 
 def _repeat_and_score(leaves, reference, repeats: int) -> tuple[bool, float, float]:
-    """(every repeat bitwise equal to the first, worst o max-rel error, worst gradient cosine) over ``repeats``."""
+    """(every repeat bitwise equal to the first, worst o max-rel error, worst gradient cosine)."""
     first = _run(leaves)
     stable, worst_rel, worst_cos = True, 0.0, 1.0
     for repeat in range(repeats):
@@ -148,7 +136,7 @@ def _check_control(leaves, reference) -> None:
 @gpu_test_main(exact_world_size=1, partial_state=False, prefix="test_fla_blackwell_autotune")
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
-    # An empty cache, as on a node's first run: the autotuner has to choose. Triton reads it at first launch.
+    # An empty cache, as on a node's first run. Triton reads it at first launch.
     os.environ["TRITON_CACHE_DIR"] = os.path.join(ctx.cache_dir, "triton")
     torch.cuda.set_device(ctx.device)
     leaves = _inputs(ctx.device)

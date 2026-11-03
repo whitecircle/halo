@@ -17,27 +17,21 @@ from halo.models.attention.selection import FLASH_ATTENTION_DETERMINISTIC_ENV, f
 from halo.runtime.consensus import reject_divergent_settings
 from halo.runtime.ranks import has_process_group
 
-# The settings are fixed at import or later written identically on every rank (``full_determinism`` sets
-# FLASH_ATTENTION_DETERMINISTIC), so one join per process is enough.
+# Fixed at import or written identically on every rank (``full_determinism``), so one join per process is enough.
 _env_uniformity_verified = False
 
 
 def rank_uniform_settings() -> dict[str, object]:
-    """The settings every rank of a collective path must agree on, as resolved values.
-
-    Resolved rather than raw: :mod:`halo.env` reads an absent variable and one set to its default
-    identically, so raw strings would reject a launcher that exports a default on the head node only.
-    ``EP_DISABLE_GIN`` is DeepEP's own and read there as a raw string; unset, the elastic backend
-    derives it from topology identically on every rank of a group. ``FLASH_ATTENTION_DETERMINISTIC`` is
-    transformers' own, resolved by its rule (:func:`flash_attention_deterministic`).
-    """
+    """Settings every rank of a collective path must agree on, as resolved values, so a launcher exporting a default on
+    the head node only still passes. ``EP_DISABLE_GIN`` is DeepEP's raw string; unset, the elastic backend derives it
+    from topology identically on every rank of a group."""
     return {
         "HALO_EP_CAPACITY_DEDUP": EP_CAPACITY_DEDUP,
         "HALO_DEEPEP_GPU_TIMEOUT_SECONDS": DEEPEP_GPU_TIMEOUT_S,
         "HALO_DEEPEP_NUM_SMS": DEEPEP_NUM_SMS,
         "HALO_DEEPEP_NUM_QPS": DEEPEP_NUM_QPS,
         "HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK": GIN_MAX_TOKENS_PER_RANK,
-        # In the unit the operator sets, so a divergence message names a value they can grep for.
+        # In the operator's unit, so a divergence message names a value they can grep for.
         "HALO_GRAD_BUCKET_MB": GRAD_BUCKET_MB,
         "HALO_CHECKPOINT_WRITE_THREADS": resolve_checkpoint_write_threads(),
         "DIST_NCCL_TIMEOUT_MINUTES": nccl_timeout() // timedelta(minutes=1),
@@ -49,13 +43,9 @@ def rank_uniform_settings() -> dict[str, object]:
 
 
 def agree_rank_uniform_env() -> None:
-    """COLLECTIVE over the world. Raise when ranks disagree on a setting in :func:`rank_uniform_settings`, and on
-    every rank when the agreed ``HALO_CHECKPOINT_WRITE_THREADS`` is negative.
-
-    A divergence is a hang, not a slow run: a rank with ``HALO_EP_CAPACITY_DEDUP`` off runs the
-    capacity all-reduce on every MoE layer while its peers run it once. Runs at most once per process,
-    and latches only once a process group exists: before ``init_process_group`` the join compares nothing.
-    """
+    """COLLECTIVE over the world, once per process: raise when ranks disagree on a setting, since a divergence hangs
+    (with ``HALO_EP_CAPACITY_DEDUP`` off a rank runs the capacity all-reduce on every MoE layer, its peers once).
+    Latches only once a process group exists. Also refuses a negative ``HALO_CHECKPOINT_WRITE_THREADS``."""
     global _env_uniformity_verified
     if _env_uniformity_verified:
         return

@@ -1,9 +1,6 @@
-"""The TRL DPO/KTO integration both preference trainers share: construction, fp32 log-probs, reference sweep.
-
-TRL's reference cache keys off rank-sharded parameter hashes and a rank-0 Arrow file, both wrong under EP/TP or
-per-node storage, so the sweep runs on the DP axis and every rank attaches the gathered columns in memory. Outside
-its chunked (``use_liger_kernel``) path TRL sums bf16 per-token log-probs; here they come from the fp32 kernel.
-"""
+"""The TRL DPO/KTO integration both preference trainers share. TRL's reference cache keys off rank-sharded parameter
+hashes and a rank-0 Arrow file, both wrong under EP/TP or per-node storage, so the sweep runs on the DP axis and every
+rank attaches the columns in memory."""
 
 from __future__ import annotations
 
@@ -43,8 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 def _fp32_logprobs_and_entropy(logits, index, entropy_requires_grad=True, temperature=1.0, row_mask=None):
-    """TRL's ``selective_log_softmax_and_entropy`` with its log-probs from :func:`selective_logprobs`;
-    the entropy is TRL's own."""
+    """TRL's ``selective_log_softmax_and_entropy`` with its log-probs from :func:`selective_logprobs`."""
     if temperature != 1.0:
         logits = logits / temperature
     logps = selective_logprobs(logits, index, row_mask=row_mask)
@@ -88,7 +84,6 @@ def _fp32_logprobs(trl_method: Callable) -> Iterator[None]:
 
 
 def _trl_trainer_class(cls: type) -> type | None:
-    """The TRL trainer class whose ``__init__`` ``cls`` runs, or ``None`` for a class without one."""
     return next(
         (base for base in cls.__mro__ if base.__module__.startswith("trl.") and "__init__" in vars(base)), None
     )
@@ -100,19 +95,15 @@ def _attach_reference_columns(dataset: Dataset, columns: Mapping[str, torch.Tens
 
 
 class TRLPreferenceMixin(ReferenceLogpsMixin):
-    """TRL's DPO/KTO trainer under the toolkit: shared construction, fp32 log-probs and the reference sweep.
-
-    Listed first in the bases: ahead of ``DistributedTrainerMixin`` so its checkpoint hook wins, and ahead
-    of the TRL base so the fp32 rebinds wrap TRL's loss and reference pass. A subclass declares
-    ``REFERENCE_COLUMNS``, ``LIGER_DISABLE_REASON`` and ``_reference_settings``.
-    """
+    """Listed first in the bases: ahead of ``DistributedTrainerMixin`` so its checkpoint hook wins, ahead of the TRL
+    base so the fp32 rebinds wrap TRL's loss and reference pass. A subclass declares ``REFERENCE_COLUMNS``,
+    ``LIGER_DISABLE_REASON`` and ``_reference_settings``."""
 
     # Recorded in every saved reference split, so one summed at another precision is not reused on resume.
     LOGPROB_PRECISION: ClassVar[str] = "float32"
     # The columns TRL's reference sweep writes, in its output order; present in a dataset, the sweep is skipped.
     REFERENCE_COLUMNS: ClassVar[tuple[str, ...]]
     LIGER_DISABLE_REASON: ClassVar[str]
-    # The TRL base's positional slots, derived from its installed signature.
     CTOR_POSITIONS: ClassVar[dict[str, int]]
     # TRL's loss adds the router aux term itself and neither trainer overrides it.
     ROUTER_AUX_LOSS_ADDED_BY = "trl_loss"
@@ -151,11 +142,8 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
 
     @contextmanager
     def _trl_reference_hash_skipped(self) -> Iterator[None]:
-        """Run the TRL base's construction with its reference hash rebound to a no-op.
-
-        With ``precompute_ref_log_probs`` on, TRL hashes the whole reference in ``__init__`` — a CPU copy of
-        every tensor on every rank, and a raise on a DTensor (TP) — only to key the sweep this mixin replaces.
-        """
+        """With ``precompute_ref_log_probs`` on, TRL hashes the whole reference in ``__init__``, a CPU copy of every
+        tensor on every rank and a raise on a DTensor (TP), only to key the sweep this mixin replaces."""
         trl_module = _trl_trainer_class(type(self)).__module__
         namespace = vars(sys.modules[trl_module])
         hash_fn = hash_module.__name__
@@ -172,7 +160,6 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
             namespace[hash_fn] = hash_module
 
     def _reference_columns(self) -> tuple[str, ...]:
-        """The reference columns this run's sweep writes."""
         return self.REFERENCE_COLUMNS
 
     def _precompute_ref_logps(self, dataset, name, batch_size):

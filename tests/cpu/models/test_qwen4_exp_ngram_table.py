@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Qwen3.8-Flash-Next's n-gram table held in host memory (``HostNGramTable``), as every run's load builds it.
-
-The family patches stamp the run's config, under which ``Qwen4ExpTextNGramEmbedding`` holds an external table in
-place of its ``nn.Embedding``: no parameter, buffer or state-dict entry, so neither the meta shell, the lazy
-planner, the optimizer nor FSDP2 sees it, and ``finalize_loaded_model`` attaches it as views of the checkpoint's
-shard tensors, from the snapshot its loader agreed on for a Hub source. Its lookups equal the stock embedding's bit
-for bit; an unstamped build in the same process stays stock; a model whose config names no local checkpoint holding
-the table, and a random-weight policy build (before it builds), are refused.
-
-    python tests/cpu/models/test_qwen4_exp_ngram_table.py
-"""
+"""Qwen3.8-Flash-Next's n-gram table in host memory (``HostNGramTable``), attached as views of the checkpoint's shard
+tensors. No parameter, buffer or state-dict entry holds it, and its lookups equal the stock embedding's bit for bit."""
 
 from __future__ import annotations
 
@@ -76,8 +67,7 @@ def _stock(directory: str) -> torch.nn.Module:
 
 
 def test_the_stock_build_trains_the_table_and_concatenates_it(checkpoint, monkeypatch):
-    """Premise for every test here: without the stamp the table is a trainable parameter, built by transformers'
-    concatenation of the shard keys."""
+    """Premise for every test here."""
     calls = []
     original = Concatenate.convert
     monkeypatch.setattr(Concatenate, "convert", lambda self, *a, **k: calls.append(self) or original(self, *a, **k))
@@ -101,8 +91,7 @@ def test_a_stamped_meta_shell_holds_no_table_and_runs_no_concatenation(checkpoin
 
 
 def test_the_lazy_planner_plans_everything_but_the_table(tmp_path, caplog):
-    """On a 128-part layout, the lazy key mapping plans every other checkpoint key and none of the table's, and
-    warns about no key the model declares it ignores; a key nothing claims is still warned."""
+    """A key the model declares it ignores draws no warning; a key nothing claims still does."""
     directory = str(tmp_path / "tiny")
     build_tiny_qwen4_exp_checkpoint(directory, overrides={"split_ngram_parts": 128})
     weight_map = dict(resolve_checkpoint_weights(directory).weight_map)
@@ -147,7 +136,7 @@ def test_the_host_lookup_equals_the_stock_rows_and_logits(checkpoint):
     with torch.no_grad():
         expected = stock(input_ids=ids, use_cache=False).logits
         assert torch.equal(model(input_ids=ids, use_cache=False).logits, expected)
-        # A cached prefill then a one-token step: the n-gram history rides the cache as upstream's does.
+        # The n-gram history rides the cache as upstream's does.
         stock_cache = stock(input_ids=ids[:, :-1], use_cache=True).past_key_values
         host_cache = model(input_ids=ids[:, :-1], use_cache=True).past_key_values
         step = ids[:, -1:]
@@ -204,8 +193,7 @@ def test_no_fsdp2_unit_holds_the_table(checkpoint):
 
 
 def test_an_unstamped_build_in_the_same_process_stays_stock(checkpoint):
-    """The patches are process-wide; a build without the stamp, finalized as every loader does, keeps the stock
-    embedding and gains no stamp."""
+    """The patches are process-wide."""
     load_host_table_model(checkpoint)
     stock = _stock(checkpoint)
     finalize_loaded_model(stock)
@@ -233,8 +221,7 @@ def test_a_stamped_model_without_a_table_source_is_refused(checkpoint, tmp_path)
 
 
 def test_an_eager_hub_load_attaches_the_table_from_the_snapshot_its_loader_agreed_on(checkpoint, monkeypatch):
-    """An eager load reads a Hub source at the commit every rank agreed on, from this rank's snapshot of it, while the
-    built config records only the Hub id, which alone is refused (above): the loader names the snapshot."""
+    """The built config records only the Hub id, which alone is refused (above), so the loader names the snapshot."""
 
     def from_pretrained_verified(model_class, name, **kwargs):
         assert (name, kwargs.pop("revision")) == (HUB_ID, AGREED_COMMIT)
@@ -265,9 +252,7 @@ class _Built(Exception):
 
 
 def test_a_random_init_policy_load_is_refused_before_the_build(checkpoint, monkeypatch):
-    """``init_from_scratch`` would build from the checkpoint's config, whose ``_name_or_path`` survives
-    ``from_config``, so the attach would pair the pretrained table with random weights: the policy load refuses the
-    pair once the family patches stamped the config, before any model is built."""
+    """``_name_or_path`` survives ``from_config``, so the attach would pair a pretrained table with random weights."""
     model = AutoModelForCausalLM.from_config(stamped_config(checkpoint))
     finalize_loaded_model(model)
     assert ngram_table(model).is_attached, "premise: the attach alone pairs the table with the random weights"
@@ -331,7 +316,7 @@ def test_a_lookup_without_a_table_or_past_its_rows_is_refused(checkpoint):
     ],
 )
 def test_attach_refuses_parts_unlike_the_table(tmp_path, parts, keys, error):
-    """Out of order, short of rows, of another width or dtype, or fewer than its parts: each is refused."""
+    """Out of order, short of rows, of another width or dtype, or fewer than its parts."""
     save_file(parts, tmp_path / "model.safetensors")
     table = HostNGramTable(rows=16, dim=4, part_count=2, compute_dtype=torch.float32)
     with pytest.raises(ValueError, match=error):
@@ -397,7 +382,7 @@ def test_an_upstream_signature_change_fails_the_patch(monkeypatch):
 
 
 def test_the_lazy_ep_load_attaches_the_table_and_matches_from_pretrained(checkpoint, monkeypatch, caplog):
-    """The lazy load plans no table key and warns about none: the patched class declares them ignored."""
+    """The patched class declares the table keys ignored, so the lazy load warns about none."""
     monkeypatch.setattr(ep_lazy_loader, "apply_ep_layers", lambda model, *a, **k: model)
     reference = _stock(checkpoint)
     with caplog.at_level(logging.WARNING):
@@ -420,8 +405,7 @@ def test_the_lazy_ep_load_attaches_the_table_and_matches_from_pretrained(checkpo
 
 
 def test_the_lazy_ep_load_attaches_the_table_from_the_directory_it_read(checkpoint, monkeypatch):
-    """The table comes from the directory the weights were read from, not from the name the built config records: a
-    shell recording the Hub id (as a config-only build does) would otherwise have its table refused."""
+    """A shell recording the Hub id (as a config-only build does) would otherwise have its table refused."""
 
     def ep_layers_recording_the_hub_id(model, *args, **kwargs):
         model.config._name_or_path = "Qwen/Qwen3.8-Flash-Next"

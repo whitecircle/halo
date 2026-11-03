@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """The toolkit's eval metric gather must survive more than one evaluation loop.
-
-``_install_dp_metric_gather`` runs once, at construction, and points ``gather_function`` at the
-toolkit gather — DP-scoped where TP/CP/ETP/PP siblings return the same rows (a world gather repeats
-every replica once per sibling), and cutting the final round's padding by the loader's geometry
-everywhere (accelerate's own trim miscounts it). ``Trainer.evaluation_loop`` resets
-``gather_function`` back to ``accelerator.gather_for_metrics`` on its way out, so without a per-loop
-re-arm only the FIRST evaluate() of a run uses it and every later one silently reports duplicated
-or mis-trimmed metrics.
-
-    python tests/cpu/trainers/test_dp_metric_gather_rearm.py
-"""
+The HF loop resets ``gather_function``; without a re-arm later evaluates report duplicated or mis-trimmed metrics."""
 
 import inspect
 import re
@@ -25,8 +15,6 @@ WORLD, KEEP = 4, [0, 2]
 
 
 class _HFEvaluationLoop:
-    """``Trainer.evaluation_loop``'s contract with ``gather_function``: use it, then reset it."""
-
     def evaluation_loop(self, *args, **kwargs):
         self.gathers_used.append(self.gather_function)
         self.gather_function = self.accelerator.gather_for_metrics
@@ -34,8 +22,6 @@ class _HFEvaluationLoop:
 
 
 class _Trainer(DistributedTrainerMixin, _HFEvaluationLoop):
-    """The real composed mixin over a fake base — its ``evaluation_loop`` is what is under test."""
-
     def __init__(self, *, scoped: bool):
         self.accelerator = types.SimpleNamespace(gather_for_metrics=lambda data, **kwargs: data)
         self.gather_function = self.accelerator.gather_for_metrics
@@ -46,7 +32,6 @@ class _Trainer(DistributedTrainerMixin, _HFEvaluationLoop):
 
 
 def test_upstream_still_resets_the_gather_function():
-    """The premise: transformers hands ``gather_function`` back to accelerate at the end of the loop."""
     source = inspect.getsource(Trainer.evaluation_loop)
     assert re.search(r"self\.gather_function\s*=\s*self\.accelerator\.gather_for_metrics", source)
 
@@ -61,9 +46,7 @@ def test_every_evaluation_loop_gathers_over_the_dp_replicas():
 
 
 def test_a_world_scoped_trainer_is_re_armed_too():
-    """No scope means a world gather, but the final round's padding still has to be cut by the
-    loader's geometry: back on accelerate's trim, a one-process or RepeatSampler loader is
-    mis-trimmed from the second evaluate() on."""
+    """On accelerate's trim, a one-process or RepeatSampler loader is mis-trimmed from the second evaluate() on."""
     trainer = _Trainer(scoped=False)
 
     trainer.evaluation_loop()
@@ -73,8 +56,7 @@ def test_a_world_scoped_trainer_is_re_armed_too():
 
 
 class _PerSplitEvaluate(_HFEvaluationLoop):
-    """``Trainer.evaluate``'s shape for a dict ``eval_dataset``: it re-enters ``self.evaluate`` once
-    per split, so the mixin's escape hatch nests inside itself."""
+    """``Trainer.evaluate`` re-enters itself per split of a dict ``eval_dataset``, nesting the mixin's escape hatch."""
 
     def evaluate(self, *args, **kwargs):
         if self.splits:
@@ -86,8 +68,6 @@ class _PerSplitEvaluate(_HFEvaluationLoop):
 
 
 class _NestingTrainer(DistributedTrainerMixin, _PerSplitEvaluate):
-    """Two eval splits, the first of them ragged — the shape that nests one hatch inside another."""
-
     def __init__(self, hatch_verdicts):
         self.accelerator = types.SimpleNamespace(gather_for_metrics=lambda data, **kwargs: data)
         self.gather_function = self.accelerator.gather_for_metrics
@@ -105,14 +85,11 @@ class _NestingTrainer(DistributedTrainerMixin, _PerSplitEvaluate):
 
 
 def test_the_escape_hatch_survives_the_per_split_recursion(monkeypatch):
-    """``Trainer.evaluate`` re-enters itself once per split of a dict ``eval_dataset``, so a split's
-    exit must not lift the OUTER hatch: the next split's loop would then re-arm the DP-scoped gather
-    while the outer hatch's identity padding is still installed, on ranks whose eval batch counts do
-    not match — the deadlock the hatch exists to avoid."""
+    """A split's exit must not lift the outer hatch.
+    The next split would re-arm the DP-scoped gather on ranks with unequal batches and deadlock."""
     monkeypatch.setattr("halo.trainers.evaluation.has_process_group", lambda: True)
     monkeypatch.setattr("halo.trainers.evaluation.barrier", lambda *args, **kwargs: None)
-    # The dict call and the first split are ragged; the second split is even, so it takes no hatch
-    # of its own and must inherit the outer's.
+    # The dict call and the first split are ragged; the second split is even, so it must inherit the outer hatch.
     trainer = _NestingTrainer([True, True, False])
 
     trainer.evaluate()
@@ -125,8 +102,7 @@ def test_the_escape_hatch_survives_the_per_split_recursion(monkeypatch):
 
 
 def test_the_unequal_batch_escape_hatch_keeps_its_identity_gather():
-    """``evaluate()`` swaps in an identity gather when ranks hold unequal eval batch counts; the
-    re-arm must not undo it mid-loop, or that loop deadlocks on the very gather it removed."""
+    """The re-arm must not undo the identity gather mid-loop, or that loop deadlocks on the gather it removed."""
     trainer = _Trainer(scoped=True)
     identity = lambda data: data  # noqa: E731 — the escape hatch's own spelling
     trainer.gather_function = identity

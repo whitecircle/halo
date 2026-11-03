@@ -1,14 +1,8 @@
 #!/usr/bin/env python
 """A send stream running behind the caller must still read the tensors it was handed.
 
-Both weight-sync clients read the caller's snapshots on CUDA streams of their own (the vLLM
-producer's pack streams, the SGLang client's send stream), and the caller drops a chunk's snapshots
-once the engine has replied, which need not wait for those reads. Unless the reads are recorded with
-the allocator, the next allocation on the caller's stream takes a freed block and overwrites it
-before the queued read runs. Each case holds the reading stream back with a GPU sleep, drops the
-sources, refills their blocks from the caller's stream and checks what reached the wire.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_weight_sync_stream_safety.py
+The caller drops a chunk's snapshots once the engine replies, before those reads need to finish. Unless they are
+recorded with the allocator, the next allocation on the caller's stream takes the freed block and overwrites it.
 """
 
 from unittest import mock
@@ -24,7 +18,7 @@ from tests.common.weight_sync import offline_client
 
 _TENSORS = 8
 _ELEMENTS = 1 << 20
-# About 50 ms on current parts: far longer than the refill below takes to run on the caller's stream.
+# About 50 ms on current parts: far longer than the refill below takes on the caller's stream.
 _SLEEP_CYCLES = 100_000_000
 
 
@@ -38,7 +32,7 @@ def _refill_freed_blocks(device: torch.device) -> list[torch.Tensor]:
 
 
 class _WireGroup:
-    """Broadcast sink keeping what the wire carries: a copy taken on the sending stream."""
+    """Keeps what the wire carries: a copy taken on the sending stream."""
 
     def __init__(self):
         self.sent: list[torch.Tensor] = []

@@ -1,11 +1,5 @@
-"""The zeroed-LoRA-dropout warning gives advice that silences it.
-
-Trainers with ``disable_dropout`` on zero PEFT's ``lora_dropout`` after the adapter wrap. Leaving
-``lora_dropout`` out of the YAML does not help: TRL's ``ModelConfig`` defaults it above zero, so
-the only config that stops expecting inert regularization is an explicit ``lora_dropout: 0.0``.
-
-    python tests/cpu/peft/test_lora_dropout_live_warning.py
-"""
+"""The zeroed-LoRA-dropout warning's advice silences it.
+TRL's ``ModelConfig`` defaults ``lora_dropout`` above zero, so only an explicit ``lora_dropout: 0.0`` silences it."""
 
 from types import SimpleNamespace
 
@@ -48,7 +42,6 @@ def warnings(monkeypatch) -> list[str]:
 
 
 def test_omitting_lora_dropout_keeps_a_nonzero_default():
-    """Premise of the advice: a recipe that leaves the key out still configures dropout."""
     assert ModelArguments(model_name_or_path="m").lora_dropout > 0
 
 

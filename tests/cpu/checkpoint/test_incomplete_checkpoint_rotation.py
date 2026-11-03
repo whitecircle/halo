@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""An incomplete checkpoint must never take a rotation slot, on any filesystem.
-
-A resume passes over a newer ``checkpoint-<N>`` whose save never completed and continues from an older
-one, so the run's next saves are numbered below that directory. Rotation orders by mtime, and on a
-mount whose mtimes it distrusts (a fuse/S3 mount reporting one value for every directory) by step —
-where the torn directory is the newest and the one it protects. Under ``save_total_limit: 1`` the next
-save then deletes the checkpoint the run resumed from and itself. The resume therefore moves every
-incomplete step directory into ``_incomplete_checkpoints/`` on each save rank, data kept.
-
-Two gloo ranks, as one shared output filesystem (one writer) and as two nodes with their own local
-disks (one writer each). On per-node storage ``checkpoint-200`` is complete on node 0 but torn on
-node 1, and ``checkpoint-250`` exists on node 1 alone: both are incomplete world-wide, and node 0's
-rotation must not keep its own complete-looking copy. Every mtime reads the same, as on such a mount;
-the resumed run saves step 150 under ``save_total_limit: 1``.
-
-    python tests/cpu/checkpoint/test_incomplete_checkpoint_rotation.py
-"""
+"""An incomplete checkpoint never takes a rotation slot: under ``save_total_limit: 1`` a torn newer directory would
+make the next save delete the resume source. Every mtime here reads the same."""
 
 import datetime
 import json
@@ -55,8 +40,6 @@ class _ShardStore:
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
-    """The mixin's save over HF's, rotation left to the mixin."""
-
     def __init__(self, run_dir):
         self.run_dir = run_dir
         self.args = SimpleNamespace(
@@ -116,7 +99,7 @@ def _worker(rank: int, root: str, per_node: bool) -> None:
         holding = os.path.join(run_dir, HOLDING_DIR)
         outcome["held"] = sorted(os.listdir(holding)) if os.path.isdir(holding) else []
         outcome["next_resume"] = os.path.basename(resume_checkpoint_from_config(config, overwrite_output_dir=False))
-    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+    except Exception as e:  # The setup failing must still leave a verdict file.
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
         reset_shared_filesystem_consensus()

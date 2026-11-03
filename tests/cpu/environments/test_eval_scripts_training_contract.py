@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""``--training_config`` makes an eval sample under the generation contract the policy was trained with.
-
-The shared eval flags carry temperature, top-p, max tokens and a request timeout; the training
-rollout also fixes chat-template variables, stop tokens, a thinking budget and the backend. A policy
-trained with ``preserve_thinking`` or ``rollout_stop_tokens`` and evaluated without them is measured
-under a different contract; the meta line records the whole contract.
-
-    python tests/cpu/environments/test_eval_scripts_training_contract.py
-"""
+"""``--training_config`` makes an eval sample under the generation contract the policy was trained with:
+chat-template variables, stop tokens, a thinking budget and the backend. The meta line records the whole
+contract."""
 
 import argparse
 import json
@@ -153,8 +147,8 @@ def test_the_yaml_environment_config_reaches_the_eval(contract):
 
 
 def test_a_mixed_case_environment_type_reaches_the_coding_eval_as_the_registry_name(tmp_path, monkeypatch):
-    """The registry resolves ``environment_type`` case-insensitively, so a ``Code_Contests`` YAML trains;
-    the coding eval compares the name against its coding envs, and must accept the run it trained."""
+    """The registry resolves the type case-insensitively, so the coding eval must accept the ``Code_Contests`` run
+    it trained."""
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML.replace("environment_type: code_contests", "environment_type: Code_Contests"))
     monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
@@ -220,8 +214,8 @@ rollout_max_tokens: 4096
 
 
 def test_a_level_budget_vllm_cannot_enforce_is_refused_without_a_run_wide_one(tmp_path, monkeypatch):
-    """A drawable level's ``thinking_tokens`` reaches vLLM as the turn's budget just as the run-wide cap does,
-    so a Mistral 4 run budgeted per level alone is refused too; the same run without the level budget samples."""
+    """A level's ``thinking_tokens`` reaches vLLM as the turn's budget, so a Mistral 4 run budgeted per level alone
+    is refused too."""
     mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
     monkeypatch.setattr(eval_contract.AutoConfig, "from_pretrained", lambda *a, **k: mistral_small_4)
     budgeted = tmp_path / "budgeted.yaml"
@@ -239,8 +233,8 @@ def test_a_level_budget_vllm_cannot_enforce_is_refused_without_a_run_wide_one(tm
 
 
 def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_budget(tmp_path, monkeypatch):
-    """The tokenizer resolves the stop tokens and, under a vLLM thinking budget, the reasoning close the eval
-    counts each turn's reasoning up to: a contract with neither never loads one, and captures no ids."""
+    """The tokenizer resolves the stop tokens and, under a vLLM budget, the reasoning close; a contract with neither
+    never loads one."""
     budgeted = tmp_path / "budgeted.yaml"
     budgeted.write_text(_TRAINING_YAML.replace('rollout_stop_tokens: ["<|call|>"]\n', ""))
     monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
@@ -272,9 +266,8 @@ def test_the_eval_resolves_stop_tokens_as_the_trainer_does():
     ids=["null", "absent"],
 )
 def test_the_coding_eval_takes_the_level_the_training_env_was_built_with(tmp_path, monkeypatch, effort_line, level):
-    """A YAML's ``reasoning_effort: null`` trains at no level and one without the key at the env
-    class's default: the eval resolves each to the level training built its env with, instead of
-    reading the null as unset and grading a no-level policy at the default."""
+    """``reasoning_effort: null`` trains at no level and a missing key at the class default; the eval resolves each
+    to what training built."""
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML.replace("  timeout_per_test: 3\n", f"  timeout_per_test: 3\n{effort_line}"))
     monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())

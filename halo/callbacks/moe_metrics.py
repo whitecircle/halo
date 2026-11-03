@@ -1,9 +1,6 @@
-"""MoE load-distribution metrics (``moe/*``) for any HF MoE model that declares a router.
-
-A forward hook counts each router's own selection, since a balancing bias or group-limited routing moves
-it away from ``topk(router_logits)`` (the fallback for a router publishing logits alone). Asking for
-metrics does not turn ``output_router_logits`` on by itself: that also couples the aux loss into the loss.
-"""
+"""MoE load-distribution metrics (``moe/*``). A forward hook counts each router's own selection, since a balancing bias
+or group-limited routing moves it away from ``topk(router_logits)``. Asking for metrics does not turn
+``output_router_logits`` on by itself: that also couples the aux loss into the loss."""
 
 from __future__ import annotations
 
@@ -32,12 +29,8 @@ def compute_moe_load_metrics(
     counts: torch.Tensor,
     exclude_last_slot: bool = False,
 ) -> dict[str, float]:
-    """Summarize per-layer expert load counts into the ``moe/`` metrics both load callbacks emit.
-
-    Args:
-        counts: ``[num_layers, num_experts]`` token totals per (layer, expert); already all-reduced if distributed.
-        exclude_last_slot: drop the trailing column before stats (routers with a discard/null slot, e.g. Zaya).
-    """
+    """Summarize ``[num_layers, num_experts]`` token totals, already all-reduced if distributed; ``exclude_last_slot``
+    drops a router's trailing discard slot (Zaya)."""
     if exclude_last_slot and counts.shape[-1] > 1:
         counts = counts[:, :-1]
 
@@ -78,7 +71,6 @@ def compute_moe_load_metrics(
 
 
 def _extract_router_logits(output) -> tuple[torch.Tensor, ...] | None:
-    """Return the tuple of per-layer router logits if present, else None."""
     router_logits = getattr(output, ROUTER_LOGITS_KEY, None)
     if router_logits is None and isinstance(output, dict):
         router_logits = output.get(ROUTER_LOGITS_KEY)
@@ -91,11 +83,8 @@ def _extract_router_logits(output) -> tuple[torch.Tensor, ...] | None:
 
 
 def _selected_experts(router_output, logits_index: int) -> torch.Tensor | None:
-    """The expert ids a router selected, taken from its own output, or None if it returns logits alone.
-
-    Identified structurally rather than per family: the selection is the integer tensor sharing the
-    logits' token dimensions with a narrower trailing one (``[*tokens, top_k]``), at any position.
-    """
+    """The expert ids a router selected, or None if it returns logits alone: the integer tensor sharing the logits'
+    token dimensions with a narrower trailing one (``[*tokens, top_k]``), at any position."""
     if not isinstance(router_output, (tuple, list)) or not 0 <= logits_index < len(router_output):
         return None
     logits = router_output[logits_index]
@@ -112,17 +101,9 @@ def _selected_experts(router_output, logits_index: int) -> torch.Tensor | None:
 
 
 class MoELoadMetricsCallback(TrainerCallback):
-    """Base for the callbacks that derive ``moe/*`` from per-expert load counters.
-
-    A derived summary waits in ``_pending`` until the next ``on_log`` merges it into the logs.
-    ``reduce_group`` is the expert-load all-reduce group (``None`` = world); the trainer narrows it to
-    the stage under PP, where a world reduce would blend stages holding different routers.
-
-    Args:
-        exclude_last_slot: drop the trailing expert from stats — for routers with a learned
-            "discard" slot at the last index (Zaya).
-        log_every_n_steps: derive + emit the summary every Nth optimizer step.
-    """
+    """Base for callbacks deriving ``moe/*`` from per-expert load counters; a summary waits in ``_pending`` until the
+    next ``on_log``. ``reduce_group`` (``None`` = world) narrows to the stage under PP, where a world reduce would
+    blend stages holding different routers."""
 
     def __init__(self, exclude_last_slot: bool = False, log_every_n_steps: int = 1):
         if log_every_n_steps < 1:
@@ -140,15 +121,9 @@ class MoELoadMetricsCallback(TrainerCallback):
 
 
 class MoEMetricsCallback(MoELoadMetricsCallback):
-    """Expert-load metrics counted off the routers' forward hooks.
-
-    Args (beyond the base's ``exclude_last_slot`` / ``log_every_n_steps``):
-        topk: experts selected per token. Default 1 (top-1 routers); pass the model's top-k otherwise.
-            Used only where a router exposes no selection of its own and its logits must be re-ranked.
-        enable_router_logits: allow the callback to switch ``output_router_logits`` on — pass True
-            only from a balancing mode that already requires them, since it costs a
-            ``[B*S, num_experts]`` tensor per layer per forward and couples the aux loss into the loss.
-    """
+    """Expert-load metrics off the routers' forward hooks. ``topk`` is used only where a router exposes no selection
+    and its logits must be re-ranked. Pass ``enable_router_logits`` only from a balancing mode that requires them: it
+    costs a ``[B*S, num_experts]`` tensor per layer per forward and couples the aux loss into the loss."""
 
     def __init__(
         self,
@@ -201,8 +176,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
             set_config_field_run_scoped(cfg, "output_router_logits", True)
 
         self._model_type = getattr(cfg, "model_type", type(cfg).__name__)
-        # Without this, a second train() on the same callback would stack another hook per router
-        # and double every count.
+        # A second train() on the same callback would stack another hook per router and double every count.
         self._remove_hooks()
         routers = declared_routers(model)
         if routers:
@@ -229,9 +203,8 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
             self._reset_counters()
             return
 
-        # Rank-uniform: a rank whose hook captured nothing must not return early or build a
-        # differently-shaped payload, which would hang its peers in NCCL, and it still joins on its
-        # CUDA device since NCCL rejects CPU tensors.
+        # Rank-uniform: a rank whose hook captured nothing still joins with the same shape or its peers hang, and on
+        # its CUDA device since NCCL rejects CPU tensors.
         active = [c for c in counters if c is not None]
         device = active[0].device if active else current_device()
         num_layers, max_e = rank_max(
@@ -239,8 +212,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         )
 
         if num_layers == 0 or max_e == 0:
-            # Only a hooked callback can diagnose an empty capture; when wiring was declined the
-            # reason was already logged at train begin, so this warning would name the wrong cause.
+            # Where wiring was declined the reason was logged at train begin, so this warning would misname the cause.
             if not self._warned_empty and state.global_step >= 1 and self._hook_handles:
                 self._warned_empty = True
                 if is_global_main_process():
@@ -272,11 +244,8 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         self._remove_hooks()
 
     def _router_hook(self, position: int, router: DeclaredRouter, module, inputs, output):
-        """Count what this router selected; re-rank its logits only if it returns no selection.
-
-        Gradient checkpointing re-runs the router in the recompute pass; every metric is a per-layer
-        share, so the doubled counts cancel and no de-duplication is needed.
-        """
+        """Re-rank logits only if the router returns no selection. A checkpoint recompute re-runs the router, but every
+        metric is a per-layer share, so the doubled counts cancel."""
         if not module.training:
             return
         with torch.no_grad():
@@ -321,7 +290,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         self._hook_handles = []
 
     def _reset_counters(self) -> None:
-        """Zero every router's counts; done each optimizer step, logged or not, so each metric covers one."""
+        """Done each optimizer step, logged or not, so each metric covers one."""
         for counter in self._counters:
             if counter is not None:
                 counter.zero_()

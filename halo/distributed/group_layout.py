@@ -7,12 +7,8 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True, kw_only=True)
 class NodeLocalLayout:
-    """Groups as contiguous ``group_size`` blocks tiling each ``domain_size``-wide NVLink domain, numbered
-    domain-major (2 domains of 8, group_size=4)::
-
-        group 0: [0, 1, 2, 3]     group 1: [4, 5, 6, 7]        # domain 0
-        group 2: [8, 9, 10, 11]   group 3: [12, 13, 14, 15]    # domain 1
-    """
+    """Contiguous ``group_size`` blocks tiling each ``domain_size``-wide NVLink domain, numbered domain-major (2
+    domains of 8, group_size=4: ``[0..3] [4..7]`` then ``[8..11] [12..15]``)."""
 
     world_size: int
     group_size: int
@@ -49,15 +45,9 @@ class NodeLocalLayout:
 
 @dataclass(frozen=True, kw_only=True)
 class CrossNodeLayout:
-    """The column-block layout of global-scope EP (``ep_scope="global"``); construction raises on a group that
-    cannot tile it.
-
-    DeepEP's intranode P2P kernel addresses peers by device offset, so each group takes one contiguous block per
-    domain (group-rank = ``rdma_rank * members_per_domain + nvl_rank``). World=16, 2 domains of 8, group=8::
-
-        EP group 0: [0, 1, 2, 3, 8, 9, 10, 11]      # block 0 of each domain
-        EP group 1: [4, 5, 6, 7, 12, 13, 14, 15]    # block 1 of each domain
-    """
+    """Global-scope EP layout; construction raises on a group that cannot tile it. DeepEP's intranode P2P kernel
+    addresses peers by device offset, so each group takes one contiguous block per domain (world=16, 2 domains of 8,
+    group=8: ``[0..3, 8..11]``, ``[4..7, 12..15]``)."""
 
     world_size: int
     group_size: int
@@ -124,7 +114,6 @@ def ep_layout(
 
 
 def reject_node_local_ep_group(ep_group_size: int, domain_size: int, *, ep_size: int, expert_tp_size: int) -> None:
-    """Reject a node-local EP group that does not fit in and tile its NVLink domain."""
     shape = f"ep_group_size = expert_parallel_size({ep_size}) * expert_tensor_parallel_size({expert_tp_size})."
     if ep_group_size > domain_size:
         raise ValueError(
@@ -138,8 +127,7 @@ def reject_node_local_ep_group(ep_group_size: int, domain_size: int, *, ep_size:
 def reject_cross_node_ep_group(
     ep_group_size: int, scope_size: int, *, scope_desc: str, ep_size: int, expert_tp_size: int
 ) -> None:
-    """Reject a global-scope EP group that does not fit and divide its scope (``scope_desc`` names it:
-    the world, or one pipeline stage's world under PP)."""
+    """``scope_desc`` names the scope: the world, or one pipeline stage's world under PP."""
     shape = f"ep_group_size = expert_parallel_size({ep_size}) * expert_tensor_parallel_size({expert_tp_size})."
     if ep_group_size > scope_size:
         raise ValueError(f"EP group size ({ep_group_size}) cannot exceed {scope_desc} ({scope_size}). {shape}")
@@ -148,7 +136,6 @@ def reject_cross_node_ep_group(
 
 
 def reject_cross_node_etp_shape(expert_tp_size: int, members_per_domain: int, ep_size: int, num_domains: int) -> None:
-    """Reject a cross-node EP+ETP shape that is not exactly one ETP group per NVLink domain."""
     if expert_tp_size != members_per_domain or ep_size != num_domains:
         raise ValueError(
             f"Cross-node EP+ETP supports one ETP group per NVLink domain only: requires "

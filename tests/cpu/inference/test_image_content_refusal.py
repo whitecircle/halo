@@ -1,16 +1,7 @@
 #!/usr/bin/env python
-"""Text-only inference seams must REFUSE an image-carrying conversation, not render it.
-
-Reward-model scoring takes a conversation straight from the user's data. It has no vision path:
-the reward model is a text sequence classifier, so a chat template expands an image part into
-placeholder tokens with no pixels behind them and the returned "reward" is a number computed over
-holes — which `rejection_sample` then writes into a DPO/SMPO or offline-GRPO training file.
-
-Driven through the functions the scripts actually call, so the guard is proven to sit ON the path:
-the stub past each guard raises `_PastTheGuard`, which is what a clean text conversation must reach.
-
-Run: pytest tests/cpu/inference/test_image_content_refusal.py
-"""
+"""Text-only inference seams refuse an image-carrying conversation: the reward model is a text classifier, so a chat
+template expands an image into placeholder tokens with no pixels behind them. The stub past each guard raises
+``_PastTheGuard``, which a clean text conversation must reach."""
 
 import asyncio
 import types
@@ -28,7 +19,7 @@ _IMAGE_TURNS = [
 
 
 class _PastTheGuard(Exception):
-    """Raised by the first stub past the guard — the conversation was accepted."""
+    """Raised by the first stub past the guard: the conversation was accepted."""
 
 
 def _rm_tokenizer():
@@ -46,8 +37,7 @@ def _score_offloaded(*args):
         return asyncio.run(reward_scoring.score_conversations_offloaded(executor, *args))
 
 
-# Both entry points into the reward model: the batched scorer and the thread offload the scripts
-# await. A guard that the offload path did not carry would leave the scripts unprotected.
+# A guard the thread offload path did not carry would leave the scripts unprotected.
 _RM_SCORERS = pytest.mark.parametrize(
     "score",
     [reward_scoring.score_conversations, _score_offloaded],
@@ -58,15 +48,13 @@ _RM_SCORERS = pytest.mark.parametrize(
 @_RM_SCORERS
 @pytest.mark.parametrize("correct_answer", [None, "4"])
 def test_score_refuses_an_image_conversation(score, correct_answer):
-    """Every scored conversation feeds a preference / offline-GRPO training file; the answer-context
-    branch must not bypass the guard."""
+    """The answer-context branch must not bypass the guard."""
     with pytest.raises(ValueError, match="carries an image content part"):
         score(_rm_tokenizer(), None, "cpu", [_IMAGE_TURNS], correct_answer, 8)
 
 
 @_RM_SCORERS
 def test_a_text_conversation_still_reaches_the_reward_model(score):
-    """Anti-vacuity: the guard rejects image parts, not conversations."""
     with pytest.raises(_PastTheGuard):
         score(_rm_tokenizer(), None, "cpu", [_TEXT_TURNS], "4", 8)
 

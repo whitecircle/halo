@@ -1,7 +1,5 @@
-"""Off-policy teacher→student knowledge distillation (a separate frozen teacher scores fixed dataset
-completions through a ``divergences.DIVERGENCES`` entry). EP/TP on the student; CP unsupported (would
-require wrapping both models). Same-model variants live in ``self_distillation`` and ``sdpg``.
-"""
+"""Off-policy teacher→student knowledge distillation: a separate frozen teacher scores fixed dataset completions. EP/TP
+on the student; CP unsupported (would require wrapping both models)."""
 
 import logging
 from collections.abc import Callable
@@ -59,15 +57,10 @@ def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
 
 
 class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
-    """Knowledge distillation from teacher to student, with EP/TP on the student.
-
-    Loss is ``distill_alpha * L_distill + (1 - distill_alpha) * L_clm`` (``distill_alpha=1.0`` drops
-    CLM), each term one mean over the micro-batch's supervised tokens. The teacher is not parallelized
-    and runs under ``torch.no_grad()``.
-    """
+    """Loss is ``distill_alpha * L_distill + (1 - distill_alpha) * L_clm``, each term one mean over the micro-batch's
+    supervised tokens. The teacher is not parallelized and runs no-grad."""
 
     _tag_names = ["trl", "distillation", "knowledge-distillation"]
-    # compute_loss returns the batch's own token mean over the distillation + CLM terms.
     LOSS_IS_OWN_MEAN = True
 
     PP_REFUSAL = (
@@ -138,8 +131,6 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
             student_model, peft_config, args, disable_dropout=False
         )
 
-        # The method knobs live on ``args`` (TeacherDistillationConfig) and are read there; only the
-        # resolved loss callable is worth holding.
         self.distillation_loss_fn = require_distill_loss(args)
 
         self.teacher_model = teacher_model
@@ -174,7 +165,6 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         return_outputs: bool = False,
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict]:
-        """Distillation loss: distill term (KL/MSE/...) between student/teacher logits + optional CLM on hard labels."""
         self._warn_once_on_empty_labels(inputs)
 
         hard_labels = inputs["labels"][..., 1:]
@@ -183,7 +173,6 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         real_rows = self.eval_split_rows(hard_labels.size(0))
         supervised[real_rows:] = False
 
-        # Full-vocab logits even under fused-LCE; the CLM loss below reuses them.
         model_inputs = logits_forward_inputs(inputs)
 
         with peft_bf16_autocast(self._peft_has_been_casted_to_bf16, self.accelerator.device):
@@ -194,10 +183,9 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         with torch.no_grad():
             teacher_logits = self.teacher_model(**model_inputs).logits[..., :-1, : self._vocab_width]
 
-        # The CLM term is METRIC-ONLY at distill_alpha=1.0: a grad-carrying cross-entropy there would
-        # be built and backward-ed for a summand of exactly zero. Rank-uniform config, so no rank
-        # builds a different graph. In the loss it shares the divergence's chunked pass, so backward builds
-        # one gradient plane of the student logits, not one per term.
+        # The CLM term is METRIC-ONLY at distill_alpha=1.0: a grad-carrying cross-entropy there would be built and
+        # backward-ed for a summand of zero. In the loss it shares the divergence's chunked pass, so backward builds
+        # one gradient plane of the student logits.
         clm_in_loss = self.args.distill_alpha != 1.0
         divergence_args = (self.distillation_loss_fn, student_logits, teacher_logits, self.args.distill_temperature)
         if clm_in_loss:

@@ -48,27 +48,22 @@ from halo.rewards.samples import CUT_TOOL_CALLS_KEY
 
 logger = logging.getLogger(__name__)
 
-# Message fields a persisted turn records beside its render (which must not carry them): the turn's reasoning cap,
-# the reasoning it sampled, and the calls a cut turn never ran, apart from the ``tool_calls`` the re-grader replays.
+# Recorded beside a persisted turn's render: reasoning cap, reasoning sampled, and calls a cut turn never ran.
 _SERIALIZED_TURN_FIELDS = ("thinking_cap", "reasoning_tokens", CUT_TOOL_CALLS_KEY)
-# The sample-record key of an episode the driver lost past every retry, which carries no verdict, and the private
-# trajectory stamp it is read from.
+# Sample-record key of an episode the driver lost past every retry, which carries no verdict, and its private stamp.
 GENERATION_ERROR_KEY = "generation_error"
 _DRIVER_FAULT_KEY = "_driver_fault"
-# The driver's per-episode telemetry, persisted as ``eval_stats``.
 EVAL_STATS_KEY = "_eval_stats"
 
 
 def _serialized_message(message: Message) -> dict[str, Any]:
-    """A message's render plus the :data:`_SERIALIZED_TURN_FIELDS` it recorded."""
     record = message.to_dict()
     record.update({name: value for name in _SERIALIZED_TURN_FIELDS if (value := getattr(message, name)) is not None})
     return record
 
 
 def serialize_trajectory(traj: Trajectory | None) -> dict[str, Any] | None:
-    """A finished episode as persisted: every message, and ``info`` without the row payload and the private
-    ``_``-prefixed grading stamps."""
+    """Every message, and ``info`` without the row payload and the private ``_``-prefixed grading stamps."""
     if traj is None:
         return None
     info = {k: v for k, v in traj.info.items() if not k.startswith("_") and k != CONTEXT_KEY}
@@ -87,16 +82,15 @@ def serialize_trajectory(traj: Trajectory | None) -> dict[str, Any] | None:
 
 
 def trajectory_path(directory: str, *parts: str) -> str:
-    """Build ``<directory>/<part>__<part>__….jsonl``, each part slugified to a filesystem-safe token,
-    so a model × dataset × language matrix lands as distinct, self-describing files."""
+    """``<directory>/<part>__<part>__….jsonl``, each part slugified, so a model × dataset × language matrix lands as
+    distinct, self-describing files."""
     name = "__".join(re.sub(r"[^A-Za-z0-9._-]+", "-", str(p)).strip("-") or "x" for p in parts if p)
     return os.path.join(directory, f"{name}.jsonl")
 
 
 def write_trajectories_jsonl(path: str, meta: dict[str, Any], results: list[dict[str, Any]]) -> int:
-    """Write a run's trajectories to ``path`` as JSONL and return the episode count: a ``{"type": "meta"}`` line,
-    then one ``{"type": "episode"}`` line per sample (``collect_trajectories=True``) with its messages and verdict,
-    addressed by ``index`` and dataset ``id``, :data:`GENERATION_ERROR_KEY` naming a lost sample's failure."""
+    """A ``{"type": "meta"}`` line, then one ``{"type": "episode"}`` line per sample (``collect_trajectories=True``);
+    returns the episode count."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     count = 0
     with open(path, "w") as fh:
@@ -123,8 +117,7 @@ def write_trajectories_jsonl(path: str, meta: dict[str, Any], results: list[dict
 
 
 def reject_answerless_examples(env: EnvironmentBase, examples: list[dict[str, Any]], source: str) -> None:
-    """The trainer's ``requires_answer`` dataset gate for the eval: refuse examples without the answer an
-    answer-graded environment needs, before any episode runs; ``source`` names where it was read from."""
+    """The trainer's ``requires_answer`` dataset gate for the eval, before any episode runs."""
     if env.requires_answer and any(ANSWER_KEY not in example["context"] for example in examples):
         raise ValueError(
             f"{type(env).__name__} grades each episode against an expected answer (requires_answer), but "
@@ -133,13 +126,13 @@ def reject_answerless_examples(env: EnvironmentBase, examples: list[dict[str, An
 
 
 def _is_terminal_for_eval(exc: BaseException) -> bool:
-    """Give-up predicate of the eval's turn retries: everything but an engine fault, the one failure the OpenAI
-    client's own transport retries cannot tell from a client error."""
+    """Everything but an engine fault, the one failure the OpenAI client's own transport retries cannot tell from a
+    client error."""
     return not (isinstance(exc, APIStatusError) and is_engine_fault(exc.status_code, exc.message))
 
 
 async def _detokenize(client: AsyncOpenAI, rollout: RolloutConfig, ids: list[int]) -> str:
-    """vLLM's ``/detokenize`` of ``ids``, at the server root the client's ``/v1`` base sits under."""
+    """At the server root the client's ``/v1`` base sits under."""
     root = client.base_url.path.rstrip("/").removesuffix("/v1")
     reply = await client.post(
         str(client.base_url.copy_with(path=f"{root}/detokenize")),
@@ -157,8 +150,7 @@ async def _chat_turn(
     rollout: RolloutConfig,
     effort: EpisodeEffort,
 ) -> TurnGeneration:
-    """One generation request for the turn ``rollout`` caps, read back by the training rollout's own parser, a
-    call cut at the cap decoded as the policy wrote it (:func:`with_cut_call_as_written`)."""
+    """Read back by the training rollout's own parser, a call cut at the cap decoded as the policy wrote it."""
     request: dict[str, Any] = {
         "model": rollout.model_name or NOT_GIVEN,
         "messages": messages,
@@ -185,8 +177,8 @@ async def _request_turn(
     rollout: RolloutConfig,
     effort: EpisodeEffort,
 ) -> TurnGeneration:
-    """One turn under the training rollout's retry policy (:func:`generate_turn`). The tools are read per turn,
-    after the reset: an MCP environment learns its tools only when the first reset connects to the server."""
+    """The tools are read per turn, after the reset: an MCP environment learns its tools only when the first reset
+    connects to the server."""
     try:
         return await generate_turn(
             partial(_chat_turn, client, messages, env.get_tools_schema() or None, rollout, effort),
@@ -204,8 +196,8 @@ async def _request_turn(
 def _bind_eval_effort(
     env: EnvironmentBase, prompt: str | list[dict[str, Any]], context: dict[str, Any], rollout: RolloutConfig
 ) -> tuple[dict[str, Any], EpisodeEffort]:
-    """The episode's effort, bound as the training rollout binds it, and the reset context carrying its level; a
-    ``random`` level is drawn from the problem, so every checkpoint scores a problem at the same level."""
+    """Bound as the training rollout binds it; a ``random`` level is drawn from the problem, so every checkpoint scores
+    a problem at the same level."""
     if env.reasoning_effort == RANDOM_REASONING_EFFORT and not (context or {}).get("reasoning_effort"):
         context = {**(context or {}), "reasoning_effort": stable_reasoning_effort(prompt)}
     effort = bind_episode_effort(
@@ -229,8 +221,8 @@ async def run_episode(
     *,
     rollout: RolloutConfig,
 ) -> Trajectory | None:
-    """Play one episode against ``client``; a generation lost past the retries closes it on what it earned,
-    stamped :data:`_DRIVER_FAULT_KEY` unless the request itself caused it."""
+    """A generation lost past the retries closes the episode on what it earned, stamped :data:`_DRIVER_FAULT_KEY`
+    unless the request itself caused it."""
     context, effort = _bind_eval_effort(env, prompt, context, rollout)
     played = await play_episode(
         env,
@@ -264,15 +256,13 @@ async def run_episode(
 
 
 def _solved(env: EnvironmentBase, traj: Trajectory | None, reward: float, success_threshold: float) -> bool:
-    """Whether a sample solved its task: the environment's :func:`solve_verdict` where it reports one, else
-    ``reward >= success_threshold``, since a shaped total mixes in prices a solve does not depend on."""
+    """The environment's :func:`solve_verdict` where it reports one, else the threshold, since a shaped total mixes in
+    prices a solve does not depend on."""
     verdict = solve_verdict(env.rollout_metrics(traj)) if traj is not None else None
     return reward >= success_threshold if verdict is None else verdict
 
 
 def _sample_record(env: EnvironmentBase, traj: Trajectory | None, success_threshold: float) -> dict[str, Any]:
-    """One sample's verdict: its reward and success (:func:`_solved`), none where the driver lost the episode,
-    and a zero with the cause where the grade carries no signal; the driver's stats beside them."""
     reward = traj.total_reward if traj and traj.done else 0.0
     stats = (traj.info.get(EVAL_STATS_KEY) if traj else None) or {}
     if traj is not None and _DRIVER_FAULT_KEY in traj.info:
@@ -296,9 +286,8 @@ async def collect_results(
     max_workers: int = 32,
     collect_trajectories: bool = False,
 ) -> list[dict[str, Any]]:
-    """Run every ``example × num_samples`` episode under a concurrency cap; return one ``{"group", "id",
-    "samples"}`` result per example, each sample carrying its ``"trajectory"`` under ``collect_trajectories``. The
-    trainer's turn-cap gate (:func:`efforts_by_level`) runs first, so a bad level refuses the run up front."""
+    """One ``{"group", "id", "samples"}`` result per example. The trainer's turn-cap gate (:func:`efforts_by_level`)
+    runs first, so a bad level refuses the run up front."""
     efforts_by_level(
         env,
         max_tokens=rollout.max_tokens,
@@ -331,15 +320,14 @@ async def collect_results(
 
 
 def _mean_or_nan(values: Iterable[float]) -> float:
-    """The mean, or NaN when a bucket has nothing left to average (every sample a generation error)."""
+    """NaN when a bucket has nothing left to average (every sample a generation error)."""
     values = list(values)
     return statistics.mean(values) if values else math.nan
 
 
 def summarize(rows: list[dict[str, Any]], num_samples: int) -> dict[str, float]:
-    """Mean reward, ``success@1`` (first scored sample), ``success@k`` (any scored sample), and the ``invalid`` and
-    ``generation_errors`` counts over ``rows``. A generation-error sample leaves every score, each read over the
-    rows with a scored sample left, so ``success@1`` never exceeds ``success@k``; with none left a score is NaN."""
+    """A generation-error sample leaves every score, each read over the rows with a scored sample left, so
+    ``success@1`` never exceeds ``success@k``; with none left a score is NaN."""
     if not rows:
         # Raise with the actual cause; the bare StatisticsError from mean([]) does not name it.
         raise ValueError("summarize() got no results — the eval produced zero episodes (empty dataset or all failed)")
@@ -359,8 +347,7 @@ def summarize(rows: list[dict[str, Any]], num_samples: int) -> dict[str, float]:
 
 
 def report(results: list[dict[str, Any]], *, num_samples: int, title: str, group_label: str | None = None) -> None:
-    """Log overall mean-reward / success@k, per-episode trajectory telemetry, and an optional
-    per-``group`` breakdown. The whole report is emitted as one ``logger.info`` record (no ``print``)."""
+    """Emitted as one ``logger.info`` record."""
     k = num_samples
     lines = [f"{title} ({len(results)} examples × {k} samples)"]
 

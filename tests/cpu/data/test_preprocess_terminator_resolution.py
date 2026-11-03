@@ -1,9 +1,5 @@
-"""The completion mask's terminator set is resolved once per corpus, before any tokenization pass.
-
-It reads the model config, so an unreadable one (a remote-code config under
-``--no-trust_remote_code``, a mistyped model id) must fail before the train split is tokenized, not
-after, and the read must not repeat per split.
-"""
+"""The completion mask's terminator set is resolved once per corpus, before any tokenization pass, so an unreadable
+model config fails before the train split is tokenized."""
 
 import pytest
 from datasets import Dataset, DatasetDict

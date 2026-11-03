@@ -1,8 +1,6 @@
 """What keys a coordinated dataset map's cache: the callable's source and closure, its arguments, the input's
-rank-stable identity and the render-library versions. A mapped callable is a module-level function, a partial of
-one or a builder closure, and every helper it calls a first-party module-level function imported by bare name:
-the source fold follows bare-name globals only, so a helper reached as an attribute or a method drops out of the
-key and editing it would serve stale rows."""
+rank-stable identity and the render-library versions. The source fold follows bare-name globals only, so a helper
+reached as an attribute or a method drops out of the key and editing it would serve stale rows."""
 
 import functools
 import hashlib
@@ -24,24 +22,21 @@ logger = logging.getLogger(__name__)
 # The datasets attribute holding a rank-stable cache key; only its value enters a key.
 CACHE_KEY_ATTR = "_halo_cache_key"
 
-# Modules whose helper source a mapped function's key folds in: derived from this package's root, so a package
-# rename keeps invalidating on helper edits.
+# Derived from this package's root, so a package rename keeps invalidating on helper edits.
 _FIRST_PARTY_PREFIXES = (__name__.partition(".")[0] + ".", "scripts.")
 
 # In every cache name, since no third-party source is hashed: a transformers/TRL bump re-keys every map.
 _RENDER_LIBRARY_VERSIONS = f"tf{importlib.metadata.version('transformers')}-trl{importlib.metadata.version('trl')}"
 
-# Values a cache-key fingerprint can read directly; anything else takes the one-time skip warning.
+# Anything else takes the one-time skip warning.
 _SCALAR_TYPES = (str, int, float, bool, type(None))
 
 # Per-call state a fast tokenizer's serialized backend carries (any call with ``truncation=``/``padding=``
 # rewrites it): hashed, it would key on the last call and split the writer rank from its peers.
 _MUTABLE_BACKEND_STATE_KEYS = ("padding", "truncation")
 
-# (owner, type name) pairs :func:`_warn_unfingerprintable` already reported.
 _unfingerprintable_warned: set[tuple[str, str]] = set()
 
-# Tokenizer type names whose content hash raised, reported once by :func:`_tokenizer_content_sig`.
 _content_sig_failed_warned: set[str] = set()
 
 
@@ -65,7 +60,6 @@ def _referenced_local_functions(func: Callable, seen: set) -> list[Callable]:
 
 
 def _template_sig(chat_template: Any) -> str | None:
-    """Short hash of a chat template. Dict templates (multi-template processors) hash per-name."""
     if isinstance(chat_template, str):
         return hashlib.md5(chat_template.encode()).hexdigest()[:8]
     if isinstance(chat_template, dict):
@@ -108,9 +102,8 @@ def _tokenizer_content_sig(val: Any) -> str | None:
 
 
 def _leaf_tokenizer_identity(val: Any) -> str | None:
-    """Cache-key signature for a bare tokenizer, or None if ``val`` isn't one. The template hash and special-token
-    ids catch the overrides that change baked ids at identical content; the source term is the content hash, not
-    the path a resume repoints at the run's checkpoint."""
+    """Signature for a bare tokenizer, or None. The template hash and special-token ids catch overrides that change
+    baked ids at identical content; the source term is the content hash, not a path a resume repoints."""
     name_or_path = getattr(val, "name_or_path", None)
     vocab_size = getattr(val, "vocab_size", None)
     if name_or_path is None and vocab_size is None:
@@ -128,9 +121,8 @@ def _leaf_tokenizer_identity(val: Any) -> str | None:
 
 
 def _tokenizer_identity(val: Any) -> str | None:
-    """Cache-key signature for a tokenizer or a ``ProcessorMixin`` (its inner tokenizer plus its own template), or
-    None. Any other ``.tokenizer`` holder (a collator) carries render knobs this cannot see, so it keys by class
-    name and its knobs belong in ``cache_key_extras``."""
+    """Signature for a tokenizer or ``ProcessorMixin``, or None. Any other ``.tokenizer`` holder (a collator) carries
+    render knobs this cannot see, so it keys by class name and its knobs belong in ``cache_key_extras``."""
     leaf = _leaf_tokenizer_identity(val)
     if leaf is not None:
         return leaf
@@ -145,8 +137,7 @@ def _tokenizer_identity(val: Any) -> str | None:
 
 
 def _warn_unfingerprintable(owner: str, kind: str) -> None:
-    """Report ONCE per (owner, type) that a cache-key input could not be fingerprinted: a value the
-    key cannot see does not invalidate the cache, so editing it reuses the previous run's rows."""
+    """Warn once: a value the key cannot see does not invalidate the cache, so editing it reuses old rows."""
     warn_once(
         logger,
         _unfingerprintable_warned,
@@ -160,8 +151,8 @@ def _warn_unfingerprintable(owner: str, kind: str) -> None:
 
 
 def _scalar_collection_repr(val: Any) -> str | None:
-    """Deterministic repr for a list, tuple or (sorted) set of scalars, or None. Dicts are left out: a captured
-    dict is a schema carrier (``none_example``) and takes the skip warning."""
+    """For a list, tuple or (sorted) set of scalars, or None. Dicts are left out: a captured dict is a schema carrier
+    (``none_example``) and takes the skip warning."""
     if isinstance(val, (list, tuple)) and all(isinstance(item, _SCALAR_TYPES) for item in val):
         return repr(val)
     if isinstance(val, (set, frozenset)) and all(isinstance(item, _SCALAR_TYPES) for item in val):
@@ -170,8 +161,7 @@ def _scalar_collection_repr(val: Any) -> str | None:
 
 
 def kwargs_fingerprint(kwargs: dict) -> str:
-    """Fingerprint of a map's keyword arguments: tokenizers by identity, scalars and JSON-able collections by
-    content, anything else by type name."""
+    """Tokenizers by identity, scalars and JSON-able collections by content, anything else by type name."""
     if not kwargs:
         return ""
     parts = []
@@ -205,8 +195,8 @@ def kwargs_fingerprint(kwargs: dict) -> str:
 
 
 def function_cache_id(func: Callable, _seen: set | None = None) -> str:
-    """Deterministic identifier for a function: a hash of its source (else its bytecode, else its qualified name)
-    folded with the ids of the first-party helpers it calls, so editing a helper re-keys its callers."""
+    """A hash of the source (else bytecode, else qualified name) folded with the ids of the first-party helpers it
+    calls, so editing a helper re-keys its callers."""
     # partial hides its func + bound args from source inspection: unfolded, every partial shares one id.
     if isinstance(func, functools.partial):
         base = function_cache_id(func.func, _seen)
@@ -240,8 +230,7 @@ def function_cache_id(func: Callable, _seen: set | None = None) -> str:
 
 
 def _closure_fingerprint(func: Callable) -> str:
-    """Fingerprint of the output-affecting values ``func`` captures (scalars, scalar collections, tokenizers,
-    helper functions), which neither its source nor its arguments show; any other cell takes the skip warning."""
+    """The output-affecting values ``func`` captures, which neither source nor arguments show; others warn."""
     closure = getattr(func, "__closure__", None)
     if not closure:
         return ""
@@ -275,13 +264,12 @@ def _closure_fingerprint(func: Callable) -> str:
 
 
 def stamp_cache_key(dataset: Dataset, key: str) -> None:
-    """Stamp ``dataset`` with the rank-stable cache ``key`` later keys derived from it read."""
     setattr(dataset, CACHE_KEY_ATTR, key)
 
 
 def rank_stable_dataset_id(dataset: Dataset) -> str:
-    """A rank- and run-independent identifier for a Dataset, where HF's ``_fingerprint`` and ``cache_files``
-    diverge across ranks: its stamp, else its cache file paths, else its in-memory ``_fingerprint``."""
+    """A rank- and run-independent identifier, where HF's ``_fingerprint`` and ``cache_files`` diverge across ranks:
+    the stamp, else cache file paths, else in-memory ``_fingerprint``."""
     stamp = getattr(dataset, CACHE_KEY_ATTR, None)
     if stamp:
         return stamp
@@ -293,9 +281,8 @@ def rank_stable_dataset_id(dataset: Dataset) -> str:
 
 
 def carry_cache_key(source: Dataset, derived: Dataset, step: str) -> Dataset:
-    """Stamp ``derived`` with ``source``'s cache key extended by ``step``, the deterministic transform that made it
-    (a column rename, an ordering): ``datasets`` copies the stamp unchanged, which would key the derived rows like
-    their source. An unstamped ``source`` leaves ``derived`` as it is."""
+    """Stamp ``derived`` with ``source``'s key extended by ``step``: ``datasets`` copies the stamp unchanged, which
+    would key the derived rows like their source. An unstamped ``source`` leaves ``derived`` as it is."""
     stamp = getattr(source, CACHE_KEY_ATTR, None)
     if stamp:
         stamp_cache_key(derived, f"{stamp}|{step}")
@@ -303,7 +290,6 @@ def carry_cache_key(source: Dataset, derived: Dataset, step: str) -> Dataset:
 
 
 def dataset_content_fingerprint(dataset: Dataset | DatasetDict) -> str:
-    """Row count plus :func:`rank_stable_dataset_id` of a Dataset, or of every split of a DatasetDict."""
     if isinstance(dataset, DatasetDict):
         parts = [
             f"{name}:{len(dataset[name])}:{rank_stable_dataset_id(dataset[name])}" for name in sorted(dataset.keys())
@@ -320,8 +306,7 @@ def map_cache_file_name(
     kwargs: dict,
     cache_key_extras: dict | None = None,
 ) -> str:
-    """The cache file name of a coordinated map or filter: function identity, closure, every kwarg (each shapes
-    the output), ``cache_key_extras`` (tunables the closure cannot reach), the input and the library versions."""
+    """Function identity, closure, every kwarg, ``cache_key_extras``, the input and the library versions."""
     func_id = function_cache_id(func)
     closure_fp = _closure_fingerprint(func)
     fn_kwargs_fp = kwargs_fingerprint(kwargs.get("fn_kwargs", {}))
@@ -337,9 +322,8 @@ def map_cache_file_name(
 
 
 def transform_cache_name(operation_name: str, dataset: Dataset, cache_key_extras: dict, run_token: str) -> str:
-    """The published directory name of a coordinated whole-dataset transform, keyed like
-    :func:`map_cache_file_name`. An input without the toolkit's stamp keys on ``run_token`` too: its file
-    paths name neither its content nor an in-memory selection, so no later run may trust a match."""
+    """Keyed like :func:`map_cache_file_name`. An input without the toolkit's stamp keys on ``run_token`` too: its file
+    paths name neither content nor an in-memory selection, so no later run may trust a match."""
     scope = "" if getattr(dataset, CACHE_KEY_ATTR, None) else f"_run{run_token}"
     key = (
         f"{operation_name}_{dataset_content_fingerprint(dataset)}_{kwargs_fingerprint(cache_key_extras)}"
@@ -349,8 +333,7 @@ def transform_cache_name(operation_name: str, dataset: Dataset, cache_key_extras
 
 
 def packed_cache_file_name(dataset: Dataset, strategy: str, seq_length: int, split: str) -> str:
-    """The cache file name of a coordinated pack of ``dataset``'s ``split``, keyed on the columns it packs: a pack
-    that stored another column set (an ``attention_mask``) never serves these rows."""
+    """Keyed on packed columns: a pack storing another set (an ``attention_mask``) never serves these rows."""
     columns = hashlib.md5("|".join(sorted(dataset.column_names)).encode()).hexdigest()[:8]
     return (
         f"packed_{strategy}_{seq_length}_{rank_stable_dataset_id(dataset)}_{columns}_{split}"

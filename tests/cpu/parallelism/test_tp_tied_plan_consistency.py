@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Tied embedding/head TP contract: both ends shard, or neither does.
-
-transformers shards module by module (``apply_tensor_parallelism``) and ties afterwards, so a tied
-pair ends as ONE parameter — a tied config's injected ``embed_tokens: embedding_rowwise`` and a
-ForCausalLM's ``lm_head: colwise_gather_output`` agree on ``Shard(0)`` of the vocab dim, which is
-what makes the pair vocab-parallel instead of a full replica per rank. ``consistent_tied_tp_plan``
-therefore leaves a symmetric plan alone and only drops the lone entry of an asymmetric one;
-``validate_tied_pair_consistent`` fails the load loud when the loaded pair and the applied plan
-disagree. The GPU behavioural proof lives in ``tests/gpu/parallelism/tp/test_tp_correctness.py``.
-
-Run: python tests/cpu/parallelism/test_tp_tied_plan_consistency.py
-"""
+"""Tied embedding/head TP contract: both ends shard, or neither. A tied pair ends as one parameter on ``Shard(0)``; the
+GPU proof is ``tests/gpu/parallelism/tp/test_tp_correctness.py``."""
 
 import pytest
 import torch.nn as nn
@@ -23,8 +13,7 @@ from halo.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, va
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
 
-# A tied config, per config shape: the flag has to reach the BACKBONE config, which is the outer one
-# for a plain model and the text sub-config for a composite.
+# The flag has to reach the backbone config: the outer one for a plain model, the text sub-config for a composite.
 TIED_CONFIG_KWARGS = {
     "qwen3": {"tie_word_embeddings": True},
     "qwen3_5": {"text_config": {"tie_word_embeddings": True}},
@@ -42,9 +31,8 @@ def _saved_keys(model) -> set[str]:
 
 @pytest.mark.parametrize("model_type", sorted(TIED_CONFIG_KWARGS), ids=["plain", "composite"])
 def test_a_symmetric_tied_plan_is_left_alone(model_type):
-    """Both ends of the tie carry a plan entry, so both must survive the load: dropping either one
-    costs the vocab-dim shard of the embedding AND the head (a full replica per rank on a 150k+
-    vocabulary), and dropping only one is the mixed plain/DTensor forward crash."""
+    """Dropping either costs a full replica per rank on a 150k+ vocabulary; dropping one is the mixed plain/DTensor
+    crash."""
     config = CONFIG_MAPPING[model_type](**TIED_CONFIG_KWARGS[model_type])
     backbone_config = config.get_text_config()
     concrete = AutoModelForCausalLM._model_mapping[type(config)]
@@ -59,9 +47,7 @@ def test_a_symmetric_tied_plan_is_left_alone(model_type):
 
 
 def test_an_embedding_only_plan_drops_the_embedding():
-    """A wrapper class declaring no ``lm_head`` entry over a tied text config that still injects
-    ``embed_tokens``. Sharding only the embedding hands the tied head a DTensor its un-transformed
-    forward cannot multiply, so the entry comes out and the pair stays replicated."""
+    """Sharding only the embedding hands the tied head a DTensor its un-transformed forward cannot multiply."""
 
     class _EmbeddingOnly:
         _tp_plan = {}
@@ -78,9 +64,8 @@ def test_an_embedding_only_plan_drops_the_embedding():
 
 
 def test_a_head_only_plan_drops_the_head():
-    """The mirror asymmetry — a class planning ``lm_head`` over a backbone shipping no
-    ``base_model_tp_plan``. The tie then overwrites the sharded head with the replicated embedding
-    while the head keeps TP's input/output transforms, which is the same crash from the other side."""
+    """The tie overwrites the sharded head with the replicated embedding while the head keeps TP's transforms, the
+    same crash."""
 
     class _HeadOnly:
         _tp_plan = {"lm_head": "colwise_gather_output"}
@@ -114,9 +99,8 @@ def test_untied_config_is_a_no_op():
 
 
 def test_remote_code_config_class_does_not_crash():
-    """A config class outside the Auto mapping (remote code) declares no tie keys to derive from —
-    the context manager must yield instead of raising KeyError; the post-load check is the guard
-    that remains."""
+    """A class outside the Auto mapping declares no tie keys, so the context manager yields; the post-load check is
+    the guard left."""
 
     class _RemoteConfig(PretrainedConfig):
         model_type = "halo-test-remote-tied"
@@ -128,8 +112,8 @@ def test_remote_code_config_class_does_not_crash():
 
 
 def test_validate_rejects_a_pair_the_load_left_untied():
-    """transformers ties AFTER sharding, so two objects here mean it refused the tie — each end
-    would then train on half the tied gradient."""
+    """transformers ties after sharding, so two objects mean it refused the tie, and each end trains on half the
+    gradient."""
     model = _tiny_tied_model()
     model.lm_head.weight = nn.Parameter(model.lm_head.weight.detach().clone())
     with pytest.raises(RuntimeError, match="two independent parameters"):
@@ -137,18 +121,16 @@ def test_validate_rejects_a_pair_the_load_left_untied():
 
 
 def test_validate_rejects_a_replicated_pair_the_plan_shards():
-    """The applied plan gave the head TP's input/output transforms while the tie handed it a plain
-    replica: the forward dies on mixed plain/DTensor operands. Loud here, not there."""
+    """The forward would die on mixed plain/DTensor operands."""
     model = _tiny_tied_model()
     assert model.lm_head.weight is model.get_input_embeddings().weight, "premise: the pair is tied"
-    validate_tied_pair_consistent(model, {})  # no plan entry, replicated weight — consistent
+    validate_tied_pair_consistent(model, {})  # No plan entry, replicated weight: consistent.
     with pytest.raises(RuntimeError, match="disagree"):
         validate_tied_pair_consistent(model, {"lm_head": "colwise_gather_output"})
 
 
 def test_validate_accepts_a_sharded_pair_the_plan_shards():
-    """Anti-vacuity for the branch above: a DTensor weight under a sharding entry is the healthy
-    vocab-parallel pair and must pass — and the same pair under an EMPTY plan must still raise."""
+    """The same pair under an empty plan must still raise."""
     with fake_process_group_mesh(rank=0, world_size=2) as mesh:
         model = _tiny_tied_model()
         embedding = model.get_input_embeddings()
@@ -160,16 +142,12 @@ def test_validate_accepts_a_sharded_pair_the_plan_shards():
 
 
 def test_a_tied_pair_reaches_the_export_as_one_key():
-    """One key, one gather. transformers own 5.20 ``save_pretrained`` gathers per key and only then
-    de-duplicates by storage, so at ``tp_size > 1`` it writes ``lm_head.weight`` a second time — and
-    that duplicate is exactly what sends the NEXT load into the tie equality collective. The
-    toolkit gathered save de-duplicates FIRST (``named_parameters()`` visits a tied pair once), so
-    the export carries the embedding key alone and pays one ``full_tensor()`` instead of two.
-    """
+    """transformers 5.20 gathers per key, then de-duplicates, writing ``lm_head.weight`` again, which sends the next
+    load into the tie collective."""
     tied_keys = _saved_keys(_tiny_tied_model())
     assert "model.embed_tokens.weight" in tied_keys
     assert "lm_head.weight" not in tied_keys
-    # Anti-vacuity: an UNTIED head is its own parameter and must still reach the export.
+    # Anti-vacuity: an untied head must still reach the export.
     assert "lm_head.weight" in _saved_keys(_tiny_tied_model(tie=False))
 
 

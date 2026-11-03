@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """``DistributedSFTTrainer`` forwards exactly the inputs TRL's ``SFTTrainer.compute_loss`` would.
-
-The trainer calls the base ``Trainer.compute_loss`` itself, so its metrics stay on the device, and therefore
-repeats the input preparation TRL's ``compute_loss`` does before it: the cache off, the eval-intent key popped,
-the router logits where TRL weighs the aux loss and Liger's fused-loss keys. Run against the installed TRL across
-every switch that preparation reads, so a TRL release that adds or changes a key fails here instead of drifting.
-
-Run: python tests/cpu/trainers/test_sft_trl_loss_inputs.py
+The trainer repeats TRL's input preparation, so a TRL release that adds or changes a key fails here.
 """
 
 import itertools

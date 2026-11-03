@@ -1,8 +1,6 @@
-"""Tree rows: conversations that share a prefix up to a configured marker, ordered side by side and built into
-packed-ready trees (:mod:`halo.data.tree_layout`); :func:`prepare_tree_dataset` is the whole of it. Every row is
-rendered and tokenized on its own, exactly as the flat pipeline does it, so a tree path holds the flat example's
-tokens and trains the tokens the packing collator trains for it; the key only decides which rows are examined
-together."""
+"""Tree rows: conversations sharing a prefix up to a configured marker, built into packed-ready trees. Every row is
+rendered and tokenized on its own, as the flat pipeline does, so a tree path holds the flat example's tokens; the key
+only decides which rows are examined together."""
 
 import functools
 import hashlib
@@ -40,11 +38,9 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = info_logger(__name__)
 
-# The one column of the share-key map's output.
 SHARE_KEY_COLUMN = "tree_key"
 
-# Columns of a processed tree row, all per token, at the narrowest types that hold them: inferred,
-# the two layout columns would be 8-byte integers.
+# All per token, at the narrowest types: inferred, the two layout columns would be 8-byte integers.
 TREE_ROW_FEATURES = Features(
     {
         "input_ids": List(Value("int32")),
@@ -54,14 +50,12 @@ TREE_ROW_FEATURES = Features(
     }
 )
 
-# The row emitted in place of a conversation that does not fit the length budget. One per dropped
-# conversation, so the filter that removes them also counts them.
+# One per dropped conversation, so the filter removing them also counts them.
 _DROPPED_ROW = dict.fromkeys(TREE_ROW_FEATURES, [])
 
 
 def _shared_part(conversation: list[dict[str, Any]], markers: tuple[str, ...], requires: str | None) -> Any:
-    """The part of a conversation other rows may repeat verbatim: up to and including a marker in the message
-    before the final turn, or the whole conversation where no single cut exists."""
+    """Up to and including a marker in the message before the final turn, or the whole conversation if no cut."""
     if len(conversation) < 2 or not isinstance(conversation[-2].get("content"), str):
         return conversation
     content = conversation[-2]["content"]
@@ -75,9 +69,8 @@ def _shared_part(conversation: list[dict[str, Any]], markers: tuple[str, ...], r
 
 
 def share_key(conversation: list[dict[str, Any]], markers: tuple[str, ...], requires: str | None) -> str:
-    """Digest of :func:`_shared_part`: it ends at a marker when exactly one of ``markers`` occurs exactly once in
-    the message before the final turn, after ``requires`` if set; any other conversation keys on its whole
-    content, so only an exact duplicate joins it."""
+    """Ends at a marker when exactly one of ``markers`` occurs exactly once in the message before the final turn, after
+    ``requires`` if set; any other conversation keys on its whole content, so only an exact duplicate joins it."""
     shared = _shared_part(conversation, markers, requires)
     encoded = json.dumps(shared, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8", "surrogatepass")
     return hashlib.blake2b(encoded, digest_size=16).hexdigest()
@@ -86,8 +79,6 @@ def share_key(conversation: list[dict[str, Any]], markers: tuple[str, ...], requ
 def build_share_key_map(
     conversation_field: str, markers: tuple[str, ...], requires: str | None
 ) -> Callable[[dict[str, list]], dict[str, list]]:
-    """Build the batched map that reduces every row to its :func:`share_key`."""
-
     def key_batch(batch: dict[str, list]) -> dict[str, list]:
         return {
             SHARE_KEY_COLUMN: [
@@ -113,9 +104,8 @@ def _trained_tokens(
     assistant_message_template: str,
     train_on_last_assistant_only: bool,
 ) -> list[bool]:
-    """Which tokens of one flat example ``DataCollatorForCompletionOnlyLMWithPacking`` trains: each completion
-    span through its closing token, minus its pad-valued tokens where pad is not the EOS, and never the
-    document's first token, which nothing precedes."""
+    """Which tokens of a flat example the packing completion collator trains: each span through its closing token,
+    minus pad-valued tokens where pad is not the EOS, never the document's first token."""
     trained = [False] * len(input_ids)
     spans = resolve_spans_or_warn(
         input_ids,
@@ -149,12 +139,9 @@ def build_tree_row_processor(
     train_on_last_assistant_only: bool,
     **render_kwargs,
 ) -> Callable[[dict[str, list]], dict[str, list]]:
-    """Build the batched map that turns runs of adjacent rows with one share key into tree columns: one row per
-    tree, more when a run overflows ``max_length`` and splits into trees that each repeat the shared part, and
-    several roots in one row when they share under ``min_shared_tokens``. A conversation over ``max_length`` alone
-    is dropped, as on the flat path; a run a batch or map-worker boundary cuts becomes two trees and changes no
-    example.
-    ``render_kwargs`` are the flat row processor's, so a row renders by the same call."""
+    """Batched map turning runs of adjacent rows with one share key into tree columns: one row per tree, more when a
+    run overflows ``max_length``, several roots in one row when they share under ``min_shared_tokens``. A conversation
+    over ``max_length`` is dropped; a run a batch or worker boundary cuts becomes two trees and changes no example."""
     # Partials: the map's cache key reads a partial's bound arguments and skips a dict a closure captures.
     render = functools.partial(
         render_row_conversation,
@@ -192,17 +179,15 @@ def build_tree_row_processor(
 
 
 def _share_key_order(keys: Dataset) -> np.ndarray:
-    """The indices that sort ``keys`` by share key, ties in row order. Sorted in Arrow: read into Python strings, the
-    column takes about a minute and 1.5 GB per rank at 10M rows. int64, since ``select`` fingerprints the indices,
-    dtype included, and an unstamped in-memory split keys its next map on that fingerprint."""
+    """Sorted in Arrow: as Python strings the column takes about a minute and 1.5 GB per rank at 10M rows. int64, since
+    ``select`` fingerprints the indices, dtype included, and an unstamped in-memory split keys its next map on that."""
     return pc.sort_indices(keys.with_format("arrow")[SHARE_KEY_COLUMN]).to_numpy().astype(np.int64)
 
 
 def _order_by_share_key(
     dataset: DatasetDict, conversation_field: str, markers: tuple[str, ...], requires: str | None, num_proc: int
 ) -> DatasetDict:
-    """Every split with the rows of one share key adjacent, the keys in digest order, which doubles as the
-    shuffle."""
+    """Rows of one share key adjacent, keys in digest order, which doubles as the shuffle."""
     keys = coordinated_map(
         dataset,
         build_share_key_map(conversation_field, markers, requires),
@@ -231,8 +216,7 @@ def prepare_tree_dataset(
     num_proc: int,
     **processor_kwargs,
 ) -> DatasetDict:
-    """Raw conversations to packed-ready tree rows, every split: key, order, build trees, drop the conversations
-    longer than ``max_length`` and report them; ``processor_kwargs`` are :func:`build_tree_row_processor`'s."""
+    """Raw conversations to packed-ready tree rows, every split: key, order, build trees, drop and report overlong."""
     for split in dataset:
         # A map over no rows returns its input untouched, so the tree columns would not exist below.
         if agree_probe_across_ranks(len(dataset[split]) == 0, f"the {split} split", "empty split"):

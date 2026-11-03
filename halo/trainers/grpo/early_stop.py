@@ -1,9 +1,5 @@
-"""Early stop for a GRPO run whose policy has left its healthy regime (:class:`EarlyStopConfig`).
-
-Each condition (entropy band, trainer-vs-sampler log-prob gap, trust-region skips) counts its breaching
-readings in a row; once one reaches ``patience`` training ends there, without saving or evaluating that
-step, so the run keeps only the periodic checkpoints taken before it.
-"""
+"""Early stop for a GRPO run whose policy has left its healthy regime. Each condition counts breaching readings in a
+row; once one reaches ``patience`` training ends there, without saving or evaluating that step."""
 
 import logging
 
@@ -21,14 +17,8 @@ SAMPLING_LOGP_GAP_KEY = "sampling/sampling_logp_difference/mean"
 
 
 class GRPOEarlyStopCallback(StopsTrainingEarly):
-    """Ends training once an :class:`EarlyStopConfig` condition breaches on ``patience`` readings in a row.
-
-    Reads training logs only (an eval log carries ``eval_``-prefixed keys). The gap and the breaker's
-    verdict are logged once per generation round, so a logged step that reuses a round carries neither:
-    a missing reading leaves its condition's streak where it was, and only a healthy one resets it. The
-    stop verdict is taken across ranks: the readings are world-reduced already, but a split verdict would
-    leave the ranks that carry on waiting in the next step's collectives.
-    """
+    """Reads training logs only. A missing reading leaves a streak where it was, as the gap and the breaker's verdict
+    log once per round. The verdict is taken across ranks, since a split one would strand the ranks that carry on."""
 
     def __init__(self, config: EarlyStopConfig, gap_key: str):
         self.config = config
@@ -84,10 +74,8 @@ class GRPOEarlyStopCallback(StopsTrainingEarly):
 def build_early_stop_callback(
     config: EarlyStopConfig, *, gap_key: str, gap_logged: bool
 ) -> GRPOEarlyStopCallback | None:
-    """The callback a trainer attaches for ``config``, or ``None`` when no condition is set.
-
-    Refuses a log-prob gap condition the trainer would never feed: ``gap_logged`` is whether its run logs
-    ``gap_key`` at all (both trainers log it only under the importance-sampling correction)."""
+    """``None`` when no condition is set. Refuses a log-prob gap condition the run never feeds: ``gap_logged`` is
+    whether it logs ``gap_key`` (both trainers only under the importance-sampling correction)."""
     if not config.active:
         return None
     if config.logratio_gap is not None and not gap_logged:

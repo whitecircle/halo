@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CLI-override edge cases a naive cast gets wrong.
-
-Two classes of bug live here: a ``float | str`` field whose string sentinel (``"auto"``) cannot
-survive a blind ``float(val)`` cast, and a ``__post_init__`` cross-field guard the override must
-meet. Both are exercised through the real ``HaloArgumentParser`` override path.
-
-Run: ``python tests/cpu/config/test_cli_override_edge_cases.py`` (or ``pytest -m cpu``).
-"""
+"""CLI-override edge cases a naive cast gets wrong: a ``float | str`` field whose sentinel cannot survive
+``float(val)``, and a ``__post_init__`` cross-field guard the override must meet."""
 
 from __future__ import annotations
 
@@ -60,7 +54,6 @@ def test_plain_float_still_rejects_a_non_numeric_override():
 
 
 def test_classification_mutual_exclusion_guard_fires_on_cli_override():
-    """The YAML path already rejects setting both; the CLI path must too."""
     parser = HaloArgumentParser((ClassificationConfig,))
     with pytest.raises(ValueError, match="mutually exclusive"):
         _override(
@@ -88,16 +81,15 @@ class _OptionalUnionArgs:
 
 @pytest.mark.parametrize("spelling", ["none", "None", "null"])
 def test_optional_container_union_clears_to_none(spelling):
-    """--report_to=none must clear the field: it is the standard smoke-run override, and the
-    None | str | list[str] union has no confident value cast to hide behind."""
+    """--report_to=none is the standard smoke-run override; the None | str | list[str] union has no confident value
+    cast to hide behind."""
     parser = HaloArgumentParser((_OptionalUnionArgs,))
     (parsed,) = _override(parser, [f"--report_to={spelling}"])
     assert parsed.report_to is None
 
 
 def test_optional_container_union_still_rejects_a_value_override():
-    """Setting a VALUE on the container union stays unsupported — a raw string in a list field
-    is iterated char-wise downstream, so the guard must survive the clearing feature."""
+    """A raw string in a list field is iterated char-wise downstream, so the guard survives the clearing feature."""
     parser = HaloArgumentParser((_OptionalUnionArgs,))
     with pytest.raises(ValueError, match="not supported"):
         _override(parser, ["--report_to=wandb"])
@@ -105,8 +97,8 @@ def test_optional_container_union_still_rejects_a_value_override():
 
 @pytest.mark.parametrize("spelling", ["none", "None", "null"])
 def test_optional_bool_refuses_none_clearing(spelling):
-    """--bf16=none must RAISE, not clear: an optional bool reads any none-spelling as a mistyped
-    boolean, and clearing it would silently flip the run's precision or re-arm an auto-default."""
+    """An optional bool reads any none-spelling as a mistyped boolean; clearing it would silently flip the run's
+    precision or re-arm an auto-default."""
     parser = HaloArgumentParser((_OptionalUnionArgs,))
     with pytest.raises(ValueError, match="boolean"):
         _override(parser, [f"--bf16={spelling}"])
@@ -125,8 +117,7 @@ def test_optional_int_clears_to_none():
 
 
 def test_literal_choice_spelled_none_outranks_clearing():
-    """A field whose Literal includes the string "none" must get the string from --mode=none;
-    the capitalized spellings still clear the Optional."""
+    """The capitalized spellings still clear the Optional."""
     parser = HaloArgumentParser((_OptionalUnionArgs,))
     (parsed,) = _override(parser, ["--mode=none"])
     assert parsed.mode == "none"

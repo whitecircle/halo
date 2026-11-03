@@ -1,6 +1,5 @@
-"""``AsyncOpenAI`` stand-ins for the chat path: a minimal completion, the client wiring every fake shares, a
-client that records what it was asked, and scripted replies in the shape the SDK's ``model_dump()`` hands
-:func:`~halo.environments.engine_wire.turn_from_chat_completion`."""
+"""``AsyncOpenAI`` stand-ins for the chat path, in the shape the SDK's ``model_dump()`` hands
+``turn_from_chat_completion``."""
 
 import copy
 import types
@@ -8,8 +7,8 @@ from typing import Any
 
 
 def fake_completion(content: str = "ok", **choice_extras):
-    """Minimal stand-in for a chat-completion response (choices[0].message + usage); ``choice_extras``
-    are attributes outside the OpenAI schema that an engine attaches to the choice."""
+    """Minimal chat-completion response; ``choice_extras`` are attributes outside the OpenAI schema an engine attaches
+    to the choice."""
     message = types.SimpleNamespace(content=content, tool_calls=None, reasoning=None, reasoning_content=None)
     choice = types.SimpleNamespace(message=message, finish_reason="stop", stop_reason=None, **choice_extras)
     usage = types.SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
@@ -27,8 +26,7 @@ class FakeChatClient:
 
 
 class RecordingChatClient(FakeChatClient):
-    """Records the create() kwargs it is called with (the last call in ``captured``, every call in
-    ``calls``) and answers with ``completion`` (a plain :func:`fake_completion` when omitted)."""
+    """Records create() kwargs (the last in ``captured``, every call in ``calls``) and answers with ``completion``."""
 
     def __init__(self, completion=None):
         super().__init__()
@@ -51,9 +49,8 @@ def chat_reply(
     reasoning: str | None = None,
     token_ids: list[int] | None = None,
 ) -> types.SimpleNamespace:
-    """A stand-in for an SDK ``ChatCompletion``. A tool call is given as an object with ``id`` and
-    ``function.name``/``function.arguments``, as the SDK types it; ``completion_tokens=None`` reports no usage;
-    ``token_ids`` arrive as vLLM's ``token_id:<N>`` logprob entries."""
+    """A stand-in for an SDK ``ChatCompletion``; ``completion_tokens=None`` reports no usage, ``token_ids`` arrive as
+    vLLM's ``token_id:<N>`` entries."""
     calls = [
         {
             "id": call.id,
@@ -72,7 +69,7 @@ def chat_reply(
 
 
 def scripted_chat(script: list[Any]):
-    """An async stand-in for ``chat_completion(client, **request)`` driven by a list of replies/exceptions."""
+    """An async stand-in for ``chat_completion(client, **request)`` driven by a list of replies and exceptions."""
     queue = list(script)
 
     async def chat(client: Any, **request: Any) -> Any:

@@ -1,12 +1,5 @@
-"""RepeatSampler geometry for the GRPO custom DP-sharded dataloader.
-
-TRL sizes the train ``RepeatSampler`` from ``generation_batch_size`` (world-rate: one full prompt
-block consumed per generation round across ``accelerator.num_processes``). The custom dataloader
-(TP/ETP/pre-sharded) consumes only ``data_parallel_size`` batches per fetch, so under the
-world-rate geometry each generation round re-rolls the leading ``dp/world`` fraction of every
-prompt block and silently skips the rest. ``GenerationRoundMixin._get_train_sampler`` rebuilds
-the sampler at the DP consumption rate; these tests assert the exact per-round index geometry.
-"""
+"""RepeatSampler geometry for the GRPO custom DP-sharded dataloader. Consumed at the DP rate, TRL's world-rate sampler
+re-rolls the leading ``dp/world`` of every prompt block and silently skips the rest."""
 
 from types import SimpleNamespace
 
@@ -33,8 +26,6 @@ class _TrlWorldRateBase:
 
 
 class _Trainer(GenerationRoundMixin, _TrlWorldRateBase):
-    """Minimal composition exposing exactly the attributes the mixin reads."""
-
     def __init__(
         self,
         *,
@@ -57,7 +48,7 @@ class _Trainer(GenerationRoundMixin, _TrlWorldRateBase):
         self.accelerator = SimpleNamespace(num_processes=world_size)
         self.num_generations = num_generations
         self.num_iterations = num_iterations
-        self.shuffle_dataset = False  # deterministic index geometry
+        self.shuffle_dataset = False
         self.train_dataset = list(range(dataset_size))
         self._dataset_presharded = presharded
         self.parallelism_config = SimpleNamespace(data_parallel_size=dp_size)
@@ -68,13 +59,9 @@ class _Trainer(GenerationRoundMixin, _TrlWorldRateBase):
 
 
 def _generated_prompts_per_round(sampler, *, loader_batch, shard_processes, consumer_ranks, generate_every):
-    """Prompt sets each generation round actually trains on, in round order.
-
-    Mirrors the runtime data path: accelerate's ``BatchSamplerShard`` hands per-rank fetch ``f`` on
-    process ``p`` the underlying dataloader batch ``f * shard_processes + p``; TRL's
-    ``_prepare_inputs`` generates only on fetches where ``step % generate_every == 0`` and discards
-    the fetched content of every other step (buffer reuse). Stops at the first incomplete round.
-    """
+    """Prompt sets each generation round trains on. Mirrors the runtime path: ``BatchSamplerShard`` hands fetch ``f``
+    on process ``p`` the batch ``f * shard_processes + p``, and TRL's ``_prepare_inputs`` generates only where
+    ``step % generate_every == 0``."""
     stream = list(sampler)
     batches = [stream[i : i + loader_batch] for i in range(0, len(stream), loader_batch)]
     rounds = []
@@ -91,7 +78,6 @@ def _generated_prompts_per_round(sampler, *, loader_batch, shard_processes, cons
 
 @pytest.mark.parametrize("num_iterations", [1, 2])
 def test_dp_geometry_covers_every_prompt_once_per_epoch(num_iterations):
-    """world=8, tp=2 -> dp=4, G=4, spg=4: every prompt generated exactly once, in order."""
     trainer = _Trainer(
         world_size=8,
         dp_size=4,
@@ -109,13 +95,11 @@ def test_dp_geometry_covers_every_prompt_once_per_epoch(num_iterations):
         consumer_ranks=4,
         generate_every=4 * num_iterations,  # steps_per_generation * num_iterations
     )
-    # 8 rounds of 4 unique prompts each: full coverage, no re-rolls, no skips. Under TRL's
-    # world-rate geometry this is [{0..3}, {0..3}, {8..11}, {8..11}, ...] instead.
+    # Under TRL's world-rate geometry this is [{0..3}, {0..3}, {8..11}, {8..11}, ...] instead.
     assert rounds == [set(range(4 * r, 4 * r + 4)) for r in range(8)]
 
 
 def test_world_rate_geometry_rerolls_and_skips_under_dp_consumption():
-    """What the DP geometry prevents: a world-rate sampler consumed at DP rate skips half the data."""
     trainer = _Trainer(
         world_size=8,
         dp_size=4,
@@ -175,7 +159,6 @@ def test_presharded_geometry_is_per_rank():
 
 
 def test_indivisible_dp_generation_batch_raises():
-    """Fail loud when the DP-rate round cannot hold whole prompt groups."""
     trainer = _Trainer(
         world_size=8,
         dp_size=4,
@@ -191,9 +174,8 @@ def test_indivisible_dp_generation_batch_raises():
 
 
 def test_tp_group_spanning_dp_ranks_raises():
-    """world=8, tp=2, G=8, tb*spg=4: the DP-rate gate alone passes (16 % 8 == 0) but a prompt
-    group spans two DP ranks — TRL's world-order reward gather would then regroup TP-duplicated
-    blocks and silently corrupt the advantages. Must fail loud."""
+    """The DP-rate gate alone passes (16 % 8 == 0) but a prompt group spans two DP ranks, and TRL's world-order reward
+    gather would regroup TP-duplicated blocks and silently corrupt the advantages."""
     trainer = _Trainer(
         world_size=8,
         dp_size=4,

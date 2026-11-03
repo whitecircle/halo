@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""EP families with no validated sync into either engine must be rejected at trainer construction,
-not at the first sync.
-
-``sync_weights_to_client`` feeds the engine's ``model.load_weights`` directly, so a family declaring
-a spec ``weight_sync_refusal`` (no engine registers it, or no end-to-end sync has been validated
-into the one that does) would otherwise fail, or land nowhere, mid-run.
-``reject_unsyncable_model`` is the construction gate.
-
-Run: ``python tests/cpu/grpo/test_grpo_weight_sync_ep_family_gate.py`` (or ``pytest -m cpu``).
-"""
+"""EP families with no validated sync into either engine are rejected at trainer construction by
+``reject_unsyncable_model``. Otherwise ``sync_weights_to_client`` would fail, or land nowhere, mid-run."""
 
 from __future__ import annotations
 
@@ -33,9 +25,8 @@ EXPECTED_UNSUPPORTED = {
 
 
 class _EPModuleStub(EPMoELayerBase):
-    """Stands in for an EP-wrapped MoE block. Subclasses the real base (the gate's predicate) and
-    takes the family flag from its type, exactly as a real wrapper does; the base ``__init__`` needs
-    a live process group, so only the ``nn.Module`` half is initialized."""
+    """Subclasses the real base, the gate's predicate. The base ``__init__`` needs a live process group, so only the
+    ``nn.Module`` half is initialized."""
 
     FAMILY = MoEFamilySpec(model_types=())
 
@@ -52,9 +43,8 @@ class _UnsupportedEPModuleStub(_EPModuleStub):
 
 
 class _PeftStyleWrapper(nn.Module):
-    """PEFT's ``ModulesToSaveWrapper`` forwards ``__getattr__`` to the module it wraps, so a
-    duck-typed ``ep_config`` probe matches the WRAPPER while the flag resolves off the wrapper's own
-    type. Reachable via ``lora_modules_to_save`` naming an EP-wrapped MoE block."""
+    """PEFT's ``ModulesToSaveWrapper`` forwards ``__getattr__`` to the module it wraps, so a duck-typed ``ep_config``
+    probe matches the wrapper. Reachable via ``lora_modules_to_save`` naming an EP-wrapped MoE block."""
 
     def __init__(self, wrapped: nn.Module):
         super().__init__()
@@ -68,16 +58,14 @@ class _PeftStyleWrapper(nn.Module):
 
 
 def test_unsupported_family_roster_is_pinned():
-    """Read off the EP layer registry, not a hand-maintained list: a new family that cannot sync,
-    or a flag cleared on an existing one, must be a deliberate edit here with the evidence in the
-    declaring class."""
+    """Read off the EP layer registry: a new family that cannot sync, or a flag cleared on an existing one, must be a
+    deliberate edit here."""
     unsupported = {cls.__name__ for cls in set(MOE_LAYER_MAP.values()) if cls.FAMILY.weight_sync_refusal is not None}
     assert unsupported == EXPECTED_UNSUPPORTED
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_gate_rejects_unsupported_ep_family(backend):
-    """The family flag is engine-independent: the refusal holds on both engines."""
     model = nn.Module()
     model.mlp = _UnsupportedEPModuleStub()
     with pytest.raises(ValueError, match="does not support weight sync"):
@@ -85,7 +73,6 @@ def test_gate_rejects_unsupported_ep_family(backend):
 
 
 def test_gate_reports_the_offending_module_path():
-    """The message must name where the module sits — a multi-layer model gives no other clue."""
     model = nn.Module()
     model.layers = nn.ModuleList([_EPModuleStub(), _UnsupportedEPModuleStub()])
     with pytest.raises(ValueError, match=r"layers\.1"):
@@ -95,28 +82,25 @@ def test_gate_reports_the_offending_module_path():
 def test_gate_passes_supported_ep_family():
     model = nn.Module()
     model.mlp = _EPModuleStub()
-    reject_unsyncable_model(model, "vllm")  # must not raise
+    reject_unsyncable_model(model, "vllm")
 
 
 def test_gate_ignores_non_ep_modules_declaring_the_flag():
-    """A plain module that happens to carry the attribute is not an EP layer and must not trip the
-    gate."""
     model = nn.Module()
     model.dense = nn.Linear(4, 4)
     model.dense.FAMILY = _UnsupportedEPModuleStub.FAMILY
-    reject_unsyncable_model(model, "vllm")  # must not raise
+    reject_unsyncable_model(model, "vllm")
 
 
 def test_gate_survives_a_peft_wrapper_around_a_supported_family():
-    """The wrapper forwards ``ep_config`` but its own type has no family flag: a duck-typed probe
-    would raise AttributeError on a family that IS supported."""
+    """A duck-typed probe would raise AttributeError on a supported family: the wrapper has no family flag."""
     model = nn.Module()
     model.mlp = _PeftStyleWrapper(_EPModuleStub())
-    reject_unsyncable_model(model, "vllm")  # must not raise
+    reject_unsyncable_model(model, "vllm")
 
 
 def test_gate_still_rejects_an_unsupported_family_behind_a_peft_wrapper():
-    """Skipping the wrapper must not lose the rejection — the wrapped layer is its own child module."""
+    """The wrapped layer is its own child module."""
     model = nn.Module()
     model.mlp = _PeftStyleWrapper(_UnsupportedEPModuleStub())
     with pytest.raises(ValueError, match="does not support weight sync"):

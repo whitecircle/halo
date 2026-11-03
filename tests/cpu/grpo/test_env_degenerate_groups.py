@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""A GRPO group whose members tie on the environment's reward leaves the loss.
-
-The environmental trainer charges a reasoning under-use floor on top of the reward the environment
-settled: judged on the totals it trains on, an all-solved group whose members reasoned short of the
-floor by different amounts would train on that shortfall alone. The narrow phase judges degeneracy on
-each rollout's settled environment reward instead, which it reads off the rollouts. These tests drive it
-with a group tied on that reward, which leaves, and with a group one member of which a priced contrast
-(a resubmission) sets apart, which stays.
-
-    python tests/cpu/grpo/test_env_degenerate_groups.py
-"""
+"""A GRPO group tied on the environment's reward leaves the loss. Judged on the totals instead, an all-solved group
+would train on its reasoning-floor shortfall alone."""
 
 import pytest
 import torch
@@ -18,8 +9,7 @@ from tests.cpu.grpo.test_grpo_advantage_application_equivalence import _env_appl
 
 
 def _narrowed(env_rewards: list[float]):
-    """Drive the real narrow phase over two groups of three single-row trajectories settled at
-    ``env_rewards``; returns per-trajectory kept-token counts, the normalizer and the dropped share."""
+    """The real narrow phase over two groups of three single-row trajectories."""
     _adv, comp, _tool, num_items, frac, _metrics = _env_application(
         torch.zeros(6),
         torch.tensor(env_rewards),

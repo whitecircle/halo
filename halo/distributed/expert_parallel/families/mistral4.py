@@ -1,5 +1,4 @@
-"""EP layer for Mistral4 MoE: GLM-4 MoE Lite's group-limited routing with a softmax score and no
-correction bias, over fused experts and a shared expert."""
+"""EP layer for Mistral4 MoE: group-limited routing with a softmax score and no correction bias."""
 
 from __future__ import annotations
 
@@ -11,8 +10,6 @@ from halo.models.moe.family_specs import MISTRAL4
 
 
 class EPMistral4MoELayer(EPGroupLimitedMoELayerBase):
-    """EP layer for Mistral4 MoE (``Mistral4MoE``) using DeepEP."""
-
     HF_MODULE_NAMES = ("Mistral4MoE",)
     FAMILY = MISTRAL4
 
@@ -24,6 +21,5 @@ class EPMistral4MoELayer(EPGroupLimitedMoELayerBase):
         return (f"n_group={self.n_group}, topk_group={self.topk_group}, top_k={self.top_k}",)
 
     def _routing_scores(self, router_logits: torch.Tensor) -> torch.Tensor:
-        """``Mistral4TopkRouter`` scores with a softmax over all experts, where the rest of the
-        group-limited families use a per-expert sigmoid."""
+        """``Mistral4TopkRouter`` scores with a softmax over all experts."""
         return router_logits.softmax(dim=-1)

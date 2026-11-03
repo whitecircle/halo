@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""The preprocessed-dataset probe runs once per input-filesystem scope, not once per rank.
-
-``load_datasets_auto`` branches every rank on whether the source is a preprocessed artifact. For a
-Hub-named dataset the probe is a ``metadata.json`` request to the Hub, and a per-rank probe sends one
-per rank — a storm the Hub rate-limits on a large job. The verdict is the same on every rank of a
-filesystem scope, so only the scope's load rank asks and the rest take the agreed answer: one
-request on a shared input filesystem, one per node on per-node storage. Proven on a real gloo group
-by counting the requests each rank makes, and by every rank — probing or not — taking the branch the
-verdict decides. A probe that raises on a probing rank raises its cause on every rank, rather than
-leaving the peers in the consensus all-reduce until the process-group timeout. Since one rank's
-answer is the whole scope's, a Hub it cannot reach must raise rather than read as a raw dataset;
-offline, a cache without the file is the absence it reads as.
-
-    python tests/cpu/data/test_input_probe_scope.py
-"""
+"""The preprocessed-dataset probe runs once per input-filesystem scope: a per-rank ``metadata.json`` request is a
+storm the Hub rate-limits, and the verdict is the same across a scope. A probe raising on a probing rank raises
+on every rank; a Hub it cannot reach must raise, while offline a cache without the file reads as absent."""
 
 import datetime
 import json
@@ -97,7 +85,7 @@ def _uncached_hub_worker(rank: int, tmp_dir: str, offline: bool) -> None:
             lambda: is_preprocessed_dataset(HUB_PATH), HUB_PATH, "is_preprocessed_dataset"
         )
         outcome = f"verdict {verdict}"
-    except Exception as exc:  # the raise itself is the outcome under test
+    except Exception as exc:
         outcome = f"{type(exc).__name__}: {exc}"
     with open(os.path.join(tmp_dir, f"rank_{rank}.json"), "w") as f:
         json.dump({"requests": len(requests), "outcome": outcome}, f)
@@ -124,9 +112,8 @@ def _run(tmp_path, *, shared: bool, ranks_per_node: int, stamped: bool) -> list[
 def test_hub_probe_runs_once_per_filesystem_scope_and_every_rank_follows_it(
     tmp_path, shared, ranks_per_node, expected_requests
 ):
-    """A shared input filesystem is one scope (global rank 0 asks); per-node storage makes each node
-    its own (its local rank 0 asks). Every rank, including the ones that never asked, must take the
-    preprocessed branch — whose Hub refusal is the observable here."""
+    """Every rank, including those that never asked, takes the preprocessed branch, whose Hub refusal is the
+    observable here."""
     results = _run(tmp_path, shared=shared, ranks_per_node=ranks_per_node, stamped=True)
 
     assert sum(r["requests"] for r in results) == expected_requests, results
@@ -134,8 +121,6 @@ def test_hub_probe_runs_once_per_filesystem_scope_and_every_rank_follows_it(
 
 
 def test_a_raw_hub_dataset_reads_raw_on_every_rank_from_one_request(tmp_path):
-    """The common case — a hub dataset without a stamp — must agree on False from the single probe,
-    not leave the abstaining ranks on a verdict they never read."""
     results = _run(tmp_path, shared=True, ranks_per_node=WORLD_SIZE, stamped=False)
 
     assert sum(r["requests"] for r in results) == 1, results
@@ -144,8 +129,8 @@ def test_a_raw_hub_dataset_reads_raw_on_every_rank_from_one_request(tmp_path):
 
 @pytest.mark.parametrize(("shared", "ranks_per_node"), [(True, 2), (False, 2)], ids=["shared", "per-node"])
 def test_a_probe_raising_on_a_probing_rank_raises_its_cause_on_every_rank(tmp_path, shared, ranks_per_node):
-    """Rank 0 probes for its scope and raises: under a shared declaration its peers only abstain, and
-    per-node rank 2 probes its own node cleanly. Every rank must still raise naming rank 0's cause."""
+    """Under a shared declaration the peers only abstain, and per-node rank 2 probes its own node cleanly; every
+    rank still raises naming rank 0's cause."""
     run_gloo_ranks(
         _raising_probe_worker,
         WORLD_SIZE,
@@ -165,8 +150,8 @@ def test_a_probe_raising_on_a_probing_rank_raises_its_cause_on_every_rank(tmp_pa
 
 
 def test_an_unreachable_hub_raises_on_every_rank_instead_of_reading_raw(tmp_path):
-    """Only rank 0 asks, so a transient Hub failure there is the whole job's answer: read as absence,
-    every rank would take the raw path for a dataset that may be preprocessed."""
+    """Only rank 0 asks; read as absence, a transient failure there sends every rank down the raw path for a dataset
+    that may be preprocessed."""
     run_gloo_ranks(
         _uncached_hub_worker,
         WORLD_SIZE,
@@ -185,8 +170,7 @@ def test_an_unreachable_hub_raises_on_every_rank_instead_of_reading_raw(tmp_path
 
 
 def test_an_offline_cache_without_the_stamp_reads_raw_on_every_rank(tmp_path):
-    """Offline, the cache stands for the repo: a raw dataset cached without a ``metadata.json`` must still
-    train, so the same cache miss is a clean absence there."""
+    """Offline the cache stands for the repo, so a raw dataset cached without a ``metadata.json`` must still train."""
     run_gloo_ranks(
         _uncached_hub_worker,
         WORLD_SIZE,

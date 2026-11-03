@@ -1,6 +1,5 @@
-"""A save that rewrites an existing ``checkpoint-N`` in place, as a resumed run saving a step it saved before does:
-the mixin's real ``_save_checkpoint`` over :class:`~tests.common.base_save.BaseTrainerSave`, with HF's own RNG-state
-writer and the real per-rank optimizer shard store over a stepped optimizer, and no weights."""
+"""A save rewriting an existing ``checkpoint-N`` in place, as a resumed run saving a step again: the mixin's real save,
+no weights."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +20,7 @@ from tests.common.checkpoint_io import load_context
 
 
 def stepped_store_context(*, fsdp_wrapped: bool = True) -> CheckpointLoadContext:
-    """A load context over a live model and an optimizer that holds state to save."""
+    """A load context over a live model and an optimizer holding state to save."""
     model = nn.Linear(4, 4)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     model.weight.grad = torch.zeros_like(model.weight)
@@ -59,8 +58,7 @@ class _ResavingTrainer(DistributedTrainerMixin, BaseTrainerSave):
 
 
 def resave_in_place(checkpoint_dir: Path, *, world_size: int) -> None:
-    """COLLECTIVE. Save the step of ``checkpoint_dir``, a ``checkpoint-N`` directory, into it again, as this
-    process's global rank of a ``world_size``-rank run (above one, so the RNG file is the rank's own)."""
+    """COLLECTIVE. Save ``checkpoint_dir``'s step into it again, as this rank of a ``world_size``-rank run."""
     step = CHECKPOINT_STEP_DIR_RE.match(checkpoint_dir.name)
     if step is None:
         raise ValueError(f"{checkpoint_dir} is no checkpoint-N directory, the only kind a save rewrites")

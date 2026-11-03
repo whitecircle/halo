@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""A parsed config copies its pinned batches to the device without blocking.
-
-transformers defaults ``accelerator_config.non_blocking`` to False, so every batch the prepared loader moves to the
-device is a blocking copy, which waits for the kernels already queued to finish before the host can launch more.
-The parser sets the key whenever ``dataloader_pin_memory`` is not false, merged into a user's
-``accelerator_config`` dict key by key, never over a key the user set and never into a JSON file the user names.
-The pins read the flag off the loaders both accelerator paths prepare: the toolkit's plain accelerator (custom
-parallelism) and the base Trainer's.
-
-    python tests/cpu/config/test_accelerator_non_blocking.py
-"""
+"""A parsed config copies its pinned batches to the device without blocking. transformers defaults
+``accelerator_config.non_blocking`` to False, and a blocking copy waits for the kernels already queued. The
+parser merges the key into a user's dict, never over a key they set or into a JSON file they name."""
 
 import json
 
@@ -79,7 +71,6 @@ def test_the_default_merges_into_the_users_dict(tmp_path):
 
 
 def test_a_json_file_config_is_left_whole(tmp_path):
-    """A file the user names is the whole config: nothing is merged into it."""
     path = tmp_path / "accelerator.json"
     path.write_text(json.dumps({"even_batches": False}))
     config = _config(tmp_path, f"accelerator_config: {path}\n")

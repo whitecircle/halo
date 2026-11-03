@@ -1,25 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the VLM preference pair used by Bradley-Terry reward modeling.
-
-The map (:func:`render_vlm_preference_row`) and the collator
-(:class:`DataCollatorForVLMPreference`) are one contract, so they are tested as one:
-
-* the map renders BOTH sides whole (the reward head scores the full sequence), extracts the prompt's
-  images out of the conversation, and persists no pixels;
-* the collator emits TRL's ``[chosen ⧺ rejected]`` layout — pinned against TRL's OWN
-  ``DataCollatorForPreference`` on a text-only batch rather than against a restatement of it, because
-  a swapped half inverts every preference while every shape stays right;
-* vision tensors ride that same layout row-major, repeated once per half (both sides share the
-  prompt, hence the prompt's images);
-* an over-length batch raises instead of truncating expanded image placeholders.
-
-The stub processor mimics the real contract: ``apply_chat_template`` renders un-expanded
-placeholders, ``__call__`` takes the whole ``2 * batch_size`` text block, expands each placeholder to
-a fixed patch span, right-pads, and emits Qwen-style flat ``pixel_values`` in the order the images
-were handed to it (filled with each image's width, so patch order is observable).
-
-Run: python tests/cpu/data/test_vlm_preference_collator.py  (or pytest)
-"""
+"""The VLM preference pair for Bradley-Terry reward modeling: the map renders both sides whole and persists no
+pixels, and the collator emits TRL's chosen-then-rejected layout, pinned against TRL's own since a swapped half
+changes no shape. The stub's flat ``pixel_values`` hold each image's width, so patch order shows."""
 
 import re
 
@@ -141,9 +123,6 @@ def render(row, processor):
     return render_vlm_preference_row(row, processor)
 
 
-# --- the map -------------------------------------------------------------------------------------
-
-
 def test_render_produces_both_sides_whole_and_extracts_the_images():
     processor = StubProcessor(StubTokenizer())
     row = make_row()
@@ -230,20 +209,13 @@ def test_map_roundtrip_hands_back_pil_images_and_no_pixels():
     assert isinstance(mapped[0]["images"][0], Image.Image)
 
 
-# --- the collator --------------------------------------------------------------------------------
-
-
 def collate(processor, rows, **kwargs):
     return DataCollatorForVLMPreference(processor=processor, **kwargs)(rows)
 
 
 def test_layout_is_trls_own_chosen_then_rejected_block():
-    """Pinned against TRL's collator, not a restatement of it.
-
-    ``RewardTrainer.compute_loss`` chunks the pooled scores in two and reads the FIRST half as
-    chosen. On a text-only batch this collator must therefore produce byte-identical ids to the
-    collator that contract was written for — a swapped half changes no shape and no dtype.
-    """
+    """``RewardTrainer.compute_loss`` reads the first half as chosen, so on a text-only batch the ids match the
+    collator that contract was written for."""
     tokenizer = StubTokenizer()
     processor = StubProcessor(tokenizer)
     rows = [
@@ -327,8 +299,8 @@ def test_collator_requires_a_processor():
 
 
 def test_collator_declares_the_columns_pruning_would_drop():
-    """TRL's reward signature set is chosen_ids / rejected_ids / margin — every column this collator
-    reads has to be declared, or the dataloader mixin cannot keep it past column pruning."""
+    """Every column this collator reads must be declared, or the dataloader mixin cannot keep it past column
+    pruning."""
     declared = set(DataCollatorForVLMPreference.required_dataset_columns)
     consumed = {"chosen_text", "rejected_text", "images"}
     assert consumed <= declared

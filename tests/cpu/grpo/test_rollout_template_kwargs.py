@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: the template variables a rollout's requests carry and the trainer's renders reproduce.
-
-``generation_control_fields`` (the request side) and ``rollout_template_kwargs`` (the trainer's render
-side) must agree on the per-episode variables — the level as the top-level ``reasoning_effort`` field and
-its thinking budget under ``reasoning_budget`` in the nested form — or the trainer scores log-probs
-against a prompt the engine never rendered.
-
-Run: python tests/cpu/grpo/test_rollout_template_kwargs.py  (or pytest)
-"""
+"""The template variables a rollout's requests carry and the trainer's renders reproduce must agree, or the trainer
+scores log-probs against a prompt the engine never rendered."""
 
 from dataclasses import replace
 
@@ -35,9 +28,8 @@ def test_request_and_render_agree_on_the_episode_variables():
 
 
 def test_the_template_states_the_levels_cap_while_the_engine_enforces_the_turns():
-    """Under an output budget the two diverge: the engine enforces the narrowed cap of this turn, the
-    template states the level's whole per-turn cap — the one value the trajectory carries and every
-    trainer-side render reproduces. Omitted, the template is told no budget: the drivers always pass the level's."""
+    """Under an output budget the engine enforces this turn's narrowed cap, while the template states the level's whole
+    cap, the one value the trajectory carries and every trainer-side render reproduces."""
     run = AsyncRolloutConfig(
         rollout_max_thinking_tokens=4000, rollout_chat_template_kwargs={"preserve_thinking": True}
     )
@@ -56,8 +48,7 @@ def test_the_template_states_the_levels_cap_while_the_engine_enforces_the_turns(
 
 
 def test_a_soft_budget_is_flagged_on_both_sides_and_only_beside_a_budget():
-    """A soft budget rides with its flag so the template states a target, not a cut; the engine meanwhile
-    enforces only the run's ceiling. The flag never travels without a budget, and an enforced budget sends none."""
+    """A soft budget rides with its flag so the template states a target; the engine enforces only the run ceiling."""
     run = AsyncRolloutConfig(rollout_max_thinking_tokens=21800, rollout_max_tokens=30000)
     fields = generation_control_fields(run.get_rollout_config(), "high", 16384, budget_soft=True)
     assert fields["thinking_token_budget"] == 21800
@@ -79,8 +70,7 @@ def test_a_soft_budget_is_flagged_on_both_sides_and_only_beside_a_budget():
 
 
 def test_the_control_fields_never_ask_for_the_sampled_ids():
-    """The id capture is the payload builder's, from ``capture_token_ids``; the control fields the eval
-    sends as its extra body carry no capture flag on either engine, so an eval samples without one."""
+    """The id capture is the payload builder's, from ``capture_token_ids``, so an eval samples without one."""
     for config in (
         RolloutConfig(max_tokens=20000, max_thinking_tokens=4000, reasoning_end_token_id=5),
         RolloutConfig(backend="sglang", max_tokens=20000),
@@ -113,9 +103,8 @@ def test_run_wide_template_kwargs_refuse_the_per_episode_variables():
 
 
 def test_run_wide_template_kwargs_must_be_a_mapping():
-    """A JSON string satisfies ``in`` and ``set()`` character-wise, so the per-episode key check alone
-    passes it through: the run then loads the model and brings up the servers before the trainer
-    rejects the value."""
+    """A JSON string satisfies ``in`` and ``set()`` character-wise, so the per-episode key check alone passes it, and
+    the run loads the model and brings up the servers before the trainer rejects the value."""
     for wrong in ('{"preserve_thinking": true}', ["preserve_thinking"], 3):
         with pytest.raises(ValueError, match="must be a mapping"):
             AsyncRolloutConfig(rollout_chat_template_kwargs=wrong)

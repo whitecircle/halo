@@ -1,8 +1,5 @@
-"""The parallelism axis vocabulary, the allowlist of axis combinations, and every config-time refusal.
-
-Each ``reject_*`` reads a ``ParallelismConfig`` and raises ``ValueError``. ``reject_unsupported_axes`` reads only the
-axis sizes, before topology resolution; the composition refusals read the resolved topology. The config applies both
-at construction; the trainers and entry scripts apply the accelerate-launch and determinism refusals."""
+"""Parallelism axis vocabulary, the allowlist of axis combinations, and every config-time refusal.
+``reject_unsupported_axes`` reads only axis sizes, before topology resolution; the rest read the resolved topology."""
 
 from __future__ import annotations
 
@@ -49,8 +46,7 @@ AXES = (
     Axis("cp", "context_parallel_size", "cp_size"),
 )
 
-# ALLOWLIST of combinable model-sharding axes (FSDP is not an axis — it shards the leftover DP
-# width). Unlisted combinations are rejected rather than running unvalidated, as a denylist allows.
+# ALLOWLIST: an unlisted combination is rejected. FSDP is not an axis; it shards the leftover DP width.
 SUPPORTED_AXIS_SETS: frozenset[frozenset[str]] = frozenset(
     map(
         frozenset,
@@ -136,13 +132,11 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
 
 
 def render_axis_set(axes: frozenset[str]) -> str:
-    """Axis set as the user's mental model: 'PP + EP', or 'plain data parallelism' when empty."""
     ordered = [a.name for a in AXES if a.name in axes]
     return " + ".join(a.upper() for a in ordered) if ordered else "plain data parallelism"
 
 
 def reject_unsupported_axes(pc: ParallelismConfig) -> None:
-    """Reject any axis combination outside :data:`SUPPORTED_AXIS_SETS`, naming why it is unsupported."""
     axes = pc.active_axes
     if axes in SUPPORTED_AXIS_SETS:
         return
@@ -161,8 +155,7 @@ def reject_unsupported_axes(pc: ParallelismConfig) -> None:
 
 
 def _reject_pp_stage_shape(pc: ParallelismConfig) -> None:
-    """A split names one layer count per stage, and a stage is whole NVLink domains (every domain-local group
-    inside one stage) of at least two ranks."""
+    """A split names one layer count per stage; a stage is whole NVLink domains of at least two ranks."""
     if pc.pp_split is not None:
         if len(pc.pp_split) != pc.pp_size:
             raise ValueError(
@@ -184,8 +177,7 @@ def _reject_pp_stage_shape(pc: ParallelismConfig) -> None:
         )
 
     if pc.stage_world_size == 1:
-        # apply_fsdp2_for_dp skips wrapping at dp<=1, so the runtime FSDP contract assert would
-        # blame a wrap bug that doesn't exist. Reject honestly instead.
+        # apply_fsdp2_for_dp skips wrapping at dp<=1, so the runtime contract assert would blame a wrap bug.
         raise ValueError(
             f"pipeline_parallel_size={pc.pp_size} leaves each pipeline stage with a single "
             f"rank (world_size={pc.world_size}): unsharded one-rank stages are not "
@@ -208,7 +200,6 @@ def _reject_pp_stage_sharding(pc: ParallelismConfig) -> None:
         )
 
     if pc.use_hsdp:
-        # The shape is coherent; what is missing is a stage-restricted 2-D mesh.
         raise ValueError(
             f"PP + HSDP is not supported (pipeline_parallel_size={pc.pp_size}, "
             f"stage_world_size={pc.stage_world_size}, {pc.num_nvlink_domains} NVLink domain(s) "
@@ -259,10 +250,7 @@ def _reject_pp_stage_sharding(pc: ParallelismConfig) -> None:
 
 
 def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
-    """PP stages must be whole NVLink domains, keeping every domain-local group inside one stage, and PP
-    refuses the settings whose collectives or loss aggregation it would break."""
     if pc.pp_size == 1:
-        # Nothing reads the PP-only knobs at pp_size == 1, so a set one does not do what it says.
         for name, value, default in (
             ("pipeline_split", pc.pp_split, None),
             ("pipeline_microbatches", pc.pp_microbatches, 0),
@@ -294,7 +282,7 @@ def _reject_ep_group(pc: ParallelismConfig) -> None:
             reject_node_local_ep_group(
                 pc.ep_group_size, pc.nvlink_domain_size, ep_size=pc.ep_size, expert_tp_size=pc.expert_tp_size
             )
-        else:  # global scope
+        else:
             # Named after the unit, or an ep16+pp2 job reads "cannot exceed world size (8)" on 16 GPUs.
             scope_desc = (
                 "world size"
@@ -334,7 +322,6 @@ def _is_multi_domain_multi_group_ep(pc: ParallelismConfig) -> bool:
 
 
 def _reject_tp(pc: ParallelismConfig) -> None:
-    """TP must divide the stage and the NVLink domain; under EP+TP each EP group spans whole TP groups."""
     if pc.tp_size > 1:
         if pc.tp_size > pc.stage_world_size:
             raise ValueError(f"tensor_parallel_size ({pc.tp_size}) cannot exceed world size ({pc.stage_world_size})")
@@ -412,7 +399,6 @@ def _reject_ep_cp(pc: ParallelismConfig) -> None:
 
 
 def _reject_single_domain_multigroup_ep(pc: ParallelismConfig) -> None:
-    """Refuse ``is_racy_single_domain_multigroup_ep`` topologies before any model loading."""
     if pc.is_racy_single_domain_multigroup_ep:
         raise ValueError(
             f"expert_parallel_size={pc.ep_size} on a single {pc.nvlink_domain_size}-GPU NVLink "
@@ -430,7 +416,6 @@ def _reject_single_domain_multigroup_ep(pc: ParallelismConfig) -> None:
 
 
 def _reject_ep_buffer_backend(pc: ParallelismConfig) -> None:
-    """Refuse a ``legacy`` (DeepEP V1) backend this topology cannot drive, before the model load."""
     if pc.ep_buffer_backend != "legacy" or pc.ep_size <= 1:
         return
     # The DISPATCH group is what rides the buffer; under expert-TP it is narrower than the EP group.
@@ -443,8 +428,6 @@ def _reject_ep_buffer_backend(pc: ParallelismConfig) -> None:
 
 
 def _reject_hsdp(pc: ParallelismConfig) -> None:
-    """HSDP takes pure DP or CP only: TP/expert-TP build their own mesh, and EP's grad sync must share
-    the combine's membership."""
     if not pc.use_hsdp:
         return
     if pc.tp_size > 1 or pc.expert_tp_size > 1:
@@ -534,7 +517,6 @@ def _reject_fsdp_settings(pc: ParallelismConfig) -> None:
 
 
 def reject_invalid_composition(pc: ParallelismConfig) -> None:
-    """Apply every composition refusal, in a fixed order."""
     _reject_pipeline_parallel(pc)
     _reject_ep_group(pc)
     _reject_cp_locality(pc)
@@ -548,8 +530,7 @@ def reject_invalid_composition(pc: ParallelismConfig) -> None:
 
 
 def reject_accelerate_launch(pc: ParallelismConfig) -> None:
-    """Refuse the custom EP/CP/TP/PP meshes under ``accelerate launch``, which owns the wrapping for every
-    ``distributed_type``; the trainer and the loader both ask, with this one message."""
+    """Refuse the custom meshes under ``accelerate launch``, which owns the wrapping for every ``distributed_type``."""
     if not pc.has_custom_parallelism or not is_accelerate_launch():
         return
 
@@ -583,8 +564,6 @@ def reject_accelerate_launch(pc: ParallelismConfig) -> None:
 
 
 def reject_cross_domain_determinism(pc: ParallelismConfig, full_determinism: bool) -> None:
-    """Refuse ``full_determinism`` on an EP group spanning NVLink domains: DeepEP's hybrid RDMA kernels
-    have no deterministic mode."""
     if full_determinism and pc.requires_rdma:
         raise ValueError(
             f"full_determinism cannot run over an EP group spanning NVLink domains (ep_scope=global "

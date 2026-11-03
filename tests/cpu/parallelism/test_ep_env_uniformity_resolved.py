@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""The cross-rank DeepEP env check compares RESOLVED settings, not raw strings.
-
-``agree_rank_uniform_env`` refuses a job whose ranks disagree on a knob that changes how many
-collectives a rank runs. Every ``HALO_*`` knob in that set is consumed through :mod:`halo.env`, where
-an ABSENT variable and the variable set to its default are the same behaviour. Comparing the raw
-strings instead would reject the ordinary multi-node shape — a launcher or per-node ``--env-file``
-exporting a default on the head node only — killing a correctly configured job and naming variables
-that are in fact aligned.
-
-These tests pin both directions: default-valued equals unset, and a genuinely different value still
-differs. Run: ``pytest -m cpu tests/cpu/parallelism/test_ep_env_uniformity_resolved.py``
-"""
+"""The cross-rank DeepEP env check compares resolved settings, since an absent knob and its default are one behaviour.
+Comparing raw strings would kill a job whose launcher exports a default on the head node only."""
 
 from __future__ import annotations
 
@@ -37,12 +27,12 @@ _KNOBS_AT_DEFAULT = {
 }
 
 
-# The process capacity scope the backends hold; reloading ``capacity`` for its Gin ceiling must not replace it.
+# Reloading ``capacity`` for its Gin ceiling must not replace the scope the backends hold.
 _CAPACITY_SCOPE = capacity_mod.capacity_scope
 
 
 def _reload_modules() -> None:
-    """Re-resolve every supplier of the settings, then the check that binds their values."""
+    """Suppliers first, then the check that binds their values."""
     importlib.reload(grad_reduce_mod)
     importlib.reload(settings_mod)
     importlib.reload(capacity_mod).capacity_scope = _CAPACITY_SCOPE
@@ -50,13 +40,11 @@ def _reload_modules() -> None:
 
 
 def _reload_settings() -> dict:
-    """Re-resolve the settings from the current environment."""
     _reload_modules()
     return rank_uniform_env.rank_uniform_settings()
 
 
 def _settings_with(monkeypatch, env: dict[str, str]) -> dict:
-    """Resolved rank-uniform settings with exactly ``env`` set (others cleared)."""
     for name in _KNOBS_AT_DEFAULT:
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
@@ -66,13 +54,12 @@ def _settings_with(monkeypatch, env: dict[str, str]) -> dict:
 
 @pytest.fixture(autouse=True)
 def _restore_module():
-    """Reload with the ambient environment so a reloaded module never leaks into other tests."""
+    """So a reloaded module never leaks into other tests."""
     yield
     _reload_modules()
 
 
 def test_default_valued_env_is_not_a_divergence(monkeypatch):
-    """A node exporting each knob's own default must compare EQUAL to a node leaving it unset."""
     unset = _settings_with(monkeypatch, {})
     explicit = _settings_with(monkeypatch, _KNOBS_AT_DEFAULT)
 
@@ -83,7 +70,7 @@ def test_default_valued_env_is_not_a_divergence(monkeypatch):
 
 
 def test_truthy_spellings_agree(monkeypatch):
-    """``1``/``true``/``on`` are one boolean to env_flag, so they must not read as three settings."""
+    """One boolean to env_flag."""
     spellings = [
         _settings_with(monkeypatch, {"HALO_EP_CAPACITY_DEDUP": v})["HALO_EP_CAPACITY_DEDUP"]
         for v in ("1", "true", "TRUE", "yes", "on")
@@ -92,7 +79,6 @@ def test_truthy_spellings_agree(monkeypatch):
 
 
 def test_a_real_difference_still_differs(monkeypatch):
-    """Anti-vacuity: the check must still catch a knob genuinely set differently."""
     default = _settings_with(monkeypatch, {})
     disabled = _settings_with(monkeypatch, {"HALO_EP_CAPACITY_DEDUP": "0"})
     assert disabled != default, "HALO_EP_CAPACITY_DEDUP=0 changes collective counts and must be caught"
@@ -108,12 +94,7 @@ def test_a_real_difference_still_differs(monkeypatch):
 
 
 def test_coordination_timeouts_are_compared(monkeypatch):
-    """A per-rank timeout divergence is one rank aborting the job alone, ahead of its peers.
-
-    Both are set exactly the way a divergence happens — a per-node ``--env-file`` or a launcher task
-    that pins one of them — and the symptom is the worst kind: the node that gives up first dies
-    inside a healthy collective, and the survivors then fail on the NEXT one and blame it.
-    """
+    """The node giving up first dies in a healthy collective, and the survivors blame the next one."""
     default = _settings_with(monkeypatch, {})
     assert default["DIST_NCCL_TIMEOUT_MINUTES"] == 30, "the NCCL watchdog bound must be in the compared set"
     assert default["DIST_STORE_TIMEOUT_HOURS"] == 4, "the store-join bound must be in the compared set"
@@ -123,28 +104,25 @@ def test_coordination_timeouts_are_compared(monkeypatch):
 
 
 def test_the_filesystem_probe_budget_is_compared(monkeypatch):
-    """A node with a shorter probe budget stops looking for a slow shared mount's file first and reports
-    the mount as unshared while its peers saw it."""
+    """A shorter budget reports a slow shared mount as unshared while peers saw it."""
     default = _settings_with(monkeypatch, {})
     assert default["DIST_FS_PROBE_TIMEOUT_SECONDS"] == 60
     assert _settings_with(monkeypatch, {"DIST_FS_PROBE_TIMEOUT_SECONDS": "180"}) != default
 
 
 def test_grad_bucket_is_reported_in_operator_units(monkeypatch):
-    """The bucket entry carries MB — the unit the operator sets — so a divergence message names a
-    value they can grep their ``--env-file`` for, not the derived byte count."""
+    """MB, the unit the operator can grep their ``--env-file`` for."""
     assert _settings_with(monkeypatch, {})["HALO_GRAD_BUCKET_MB"] == 256
 
 
 def test_every_resolved_knob_is_a_plain_value(monkeypatch):
-    """Values must be resolved (bool/int), never the raw string — that is the whole point."""
     settings = _settings_with(monkeypatch, _KNOBS_AT_DEFAULT)
     for name in _KNOBS_AT_DEFAULT:
         assert isinstance(settings[name], (bool, int)), (
             f"{name} resolved to {settings[name]!r} ({type(settings[name]).__name__}); a raw string "
             f"here means unset-vs-default would compare unequal across ranks"
         )
-    # EP_DISABLE_GIN is DeepEP-owned and read by DeepEP as a raw string, so it stays a string/None.
+    # EP_DISABLE_GIN is DeepEP-owned and read as a raw string, so it stays a string/None.
     assert "EP_DISABLE_GIN" in settings, "the DeepEP-owned Gin switch must still be compared"
 
 

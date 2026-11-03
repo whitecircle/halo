@@ -97,7 +97,6 @@ def repo(tmp_path) -> Path:
 
 
 def _check(repo: Path, head: str, labels: list[str]) -> subprocess.CompletedProcess:
-    """Run the check as the workflow does, against the base branch."""
     return subprocess.run(
         [sys.executable, str(repo / _SCRIPT), _BASE_BRANCH, head, "--labels", json.dumps(labels)],
         capture_output=True,

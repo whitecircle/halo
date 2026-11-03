@@ -1,8 +1,5 @@
-"""Shared body of the Environmental-GRPO end-to-end tests, which the vLLM, SGLang and single-process wrappers drive
-through :func:`run_env_grpo_e2e`, asserting on the served policy (:mod:`tests.common.on_policy_e2e`). Here is what
-Environmental GRPO alone needs (Ray rollout actors, multi-turn trajectories, per-turn token capture), the multi-rank
-rows' task (:class:`DrawNumberEnvironment`) and the flip-rate bar each R3 row measures (:func:`routing_probe_round`).
-"""
+"""Shared body of the Environmental-GRPO e2e tests, driven by the vLLM, SGLang and single-process wrappers via
+:func:`run_env_grpo_e2e`."""
 
 import contextlib
 import math
@@ -68,27 +65,23 @@ from tests.common.thinking_budget import (
     record_thinking_budget_checks,
 )
 
-# Default for the vLLM legs; the SGLang and 4-GPU wrappers own their own knob (their servers and
-# default families differ).
+# Default for the vLLM legs; the SGLang and 4-GPU wrappers own their own knob.
 MODEL_NAME = env_str("HALO_TEST_ENV_GRPO_MODEL", QWEN3_30B_A3B)
 MAX_STEPS = env_int("HALO_TEST_ENV_GRPO_MAX_STEPS", 2)
-# Per-family overrides for a pass on a family the defaults do not fit: an attention backend the
-# family's code lacks (Bailing's remote code has no FA4), or projection names the checkpoint index
-# cannot derive (``query_key_value``). Unset keeps auto-selection and the derived targets.
+# Overrides for a family the defaults do not fit: a backend its code lacks (Bailing has no FA4), or projection names
+# the checkpoint index cannot derive (``query_key_value``). Unset keeps auto-selection.
 ATTN_IMPL = env_str("HALO_TEST_ENV_GRPO_ATTN_IMPL") or None
 LORA_TARGETS = [name for name in env_str("HALO_TEST_ENV_GRPO_LORA_TARGETS", "").split(",") if name] or None
-# Deliberately large: the sync has to move the served weights measurably within MAX_STEPS.
+# Large, since the sync has to move the served weights measurably within MAX_STEPS.
 LEARNING_RATE = 1e-4
-# Steps a prefetch row runs past its prefetch_depth cold rounds, each popping the round submitted that many steps
-# earlier.
+# Steps a prefetch row runs past its prefetch_depth cold rounds.
 PREFETCH_POPPED_STEPS = 2
 MAX_TURNS = 2
 # The task every policy trains on: one call of the draw tool, then the number it returned as the answer.
 DRAW_TOOL = "draw_number"
 DRAW_RANGE = 10**6
 DRAW_PROMPT = f"Call the {DRAW_TOOL} tool once, then reply with the number it returned and nothing else."
-# Openings of different lengths the rows take in turn, so their prompts route apart and the length deal reorders rows
-# that differ.
+# Different lengths, so rows route apart and the length deal reorders rows that differ.
 DRAW_PREAMBLES = (
     "",
     "The river bends twice before it reaches the old mill. ",
@@ -97,12 +90,10 @@ DRAW_PREAMBLES = (
     "The miller's grandfather built the wheel from oak felled on the north ridge, hauled it down in winter on "
     "sledges, and set it turning the spring the stone bridge was finished. ",
 )
-# gpt-oss's tool-call terminator, which harmony-disabled serving does not stop on (it is no eos); a tokenizer without
-# it ends its turns at eos alone.
+# gpt-oss's tool-call terminator, which harmony-disabled serving does not stop on since it is no eos.
 HARMONY_CALL_TOKEN = "<|call|>"
-# The flip-rate bar's two ends, measured on this one row: the policy's routing against itself with every MoE layer
-# input moved by 2**-7 of its magnitude (one to two bf16 ulps, what an independent bf16 forward disagrees by), and
-# against its own routing one token over (a misplaced mask).
+# The flip-rate bar's two ends, measured on this row: the policy against itself with every MoE input moved by 2**-7 of
+# its magnitude (one to two bf16 ulps), and against its own routing one token over (a misplaced mask).
 ROUTING_PROBE_TEXT = (
     "The river bends twice before it reaches the old mill, where the water slows and turns green. Farmers along "
     "its banks measure the season by the height of the reeds, and the miller keeps a ledger of every flood since "
@@ -115,19 +106,15 @@ ROUTING_PROBE_SEPARATION = 4.0
 
 
 def _draw_number(**_arguments) -> str:
-    """A fresh draw from ``[1, DRAW_RANGE)`` per call, unseeded: the two samples of one prompt run as separate
-    episodes, on any rollout worker, and must not draw alike."""
+    """A fresh unseeded draw from ``[1, DRAW_RANGE)``: a prompt's two samples run as separate episodes and must not
+    draw alike."""
     return str(random.SystemRandom().randrange(1, DRAW_RANGE))
 
 
 class DrawNumberEnvironment(NativeToolUseEnvironment):
-    """One tool, which returns a fresh random number, and the answer graded on reporting it: ``number / DRAW_RANGE``
-    when the final answer carries the episode's draw, 0 otherwise.
-
-    Two samples of one prompt draw apart, so a group in which both report spreads however peaked the policy is. A
-    grade the policy's own text decides ties whenever its samples coincide, which a confident instruct model's do on
-    a short answer even at temperature 1: its groups then carry no advantage and the step no gradient.
-    """
+    """One tool returning a fresh random number; the grade is ``number / DRAW_RANGE`` when the answer carries the draw,
+    else 0. Samples draw apart, so a group's rewards spread however peaked the policy is. A grade on the policy's own
+    text ties whenever its samples coincide, leaving no advantage and no gradient."""
 
     def __init__(self, **kwargs):
         registry = NativeToolRegistry().register(
@@ -147,16 +134,14 @@ class DrawNumberEnvironment(NativeToolUseEnvironment):
 
 
 def draw_number_dataset(num_samples: int) -> Dataset:
-    """``num_samples`` rows of :data:`DRAW_PROMPT`, each opening with the next of :data:`DRAW_PREAMBLES`."""
     return Dataset.from_dict(
         {"prompt": [DRAW_PREAMBLES[i % len(DRAW_PREAMBLES)] + DRAW_PROMPT for i in range(num_samples)]}
     )
 
 
 def _environment_and_dataset(environment_type: str | None) -> tuple[dict, Dataset]:
-    """The trainer's environment keywords and the rows it trains on: :class:`DrawNumberEnvironment` over
-    :func:`draw_number_dataset`, or the registry's ``environment_type`` over the arithmetic rows it grades
-    against their answers."""
+    """The trainer's environment keywords and rows: :class:`DrawNumberEnvironment`, or the registry's
+    ``environment_type`` on arithmetic rows."""
     if environment_type is None:
         environment = {"environment_cls": DrawNumberEnvironment, "environment_kwargs": {"max_turns": MAX_TURNS}}
         return environment, draw_number_dataset(8)
@@ -192,8 +177,8 @@ def _grpo_config(*, output_dir: str, max_steps: int, save: bool, peft: str | Non
     return GRPOConfig(
         output_dir=output_dir,
         max_steps=max_steps,
-        # The same two rows a step either way; a chunked row forwards them one per micro-batch, two micro-batches
-        # a round, the shape the length deal reorders.
+        # The same two rows a step either way; a chunked row forwards them one per micro-batch, the shape the length
+        # deal reorders.
         per_device_train_batch_size=1 if chunked else 2,
         gradient_accumulation_steps=2 if chunked else 1,
         learning_rate=LEARNING_RATE,
@@ -201,12 +186,12 @@ def _grpo_config(*, output_dir: str, max_steps: int, save: bool, peft: str | Non
         logging_steps=1,
         save_strategy="steps" if save else "no",
         save_steps=RESUME_SAVE_STEP,
-        # A full fine-tune's optimizer shards are 4 B/param of AdamWBF16 moments, 2x the checkpoint's
-        # own weights at this size. The adapter rows carry the optimizer-continuity assertion; here the
-        # EP saver still writes scheduler.pt under save_only_model, which this row's continuity check reads.
+        # A full fine-tune's optimizer shards are 2x the checkpoint's weights at this size, and the adapter rows carry
+        # the optimizer-continuity assertion. The EP saver still writes scheduler.pt, which this row's continuity check
+        # reads.
         save_only_model=save and peft is None,
-        # The invariant under test is the train-begin push, not the dataloader's replay: re-walking
-        # the consumed batches would re-run generation for steps already in the checkpoint.
+        # The row tests the train-begin push; replaying consumed batches would re-run generation for steps in the
+        # checkpoint.
         ignore_data_skip=True,
         report_to="none",
         logging_nan_inf_filter=False,
@@ -234,7 +219,6 @@ def _async_config(
     return AsyncRolloutConfig(
         rollout_backend=backend,
         rollout_server_url=server_url,
-        # Each pool server's group port is the base rollout_group_port plus its index.
         rollout_server_configs=[{"url": url} for url in pool_urls] or None,
         rollout_group_port=group_port,
         rollout_connection_timeout=180.0,
@@ -250,20 +234,18 @@ def _async_config(
         length_ordered_microbatches=length_ordered,
         sync_weights_every_n_steps=1,
         model_name=model_name,
-        # The engine-specific capture wiring exists for this: the trainer trains the ids the engine
-        # sampled, not a re-tokenization of the text it rendered.
+        # Train the ids the engine sampled, not a re-tokenization of the text it rendered.
         train_on_sampled_tokens=True,
     )
 
 
 def routing_probe_ids(tokenizer, device: torch.device) -> torch.Tensor:
-    """``[1, seq]`` token ids of :data:`ROUTING_PROBE_TEXT`, the same on every rank."""
     return tokenizer(ROUTING_PROBE_TEXT, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
 
 
 def capture_routing(trainer, ids: torch.Tensor) -> torch.Tensor:
-    """COLLECTIVE. The policy's own top-k selections on ``ids``, ``[rows, seq, EP layers, top_k]``, through the
-    trainer's routing-replay injector; the model is left resharded."""
+    """COLLECTIVE. The policy's top-k selections on ``ids``, ``[rows, seq, EP layers, top_k]``; the model is left
+    resharded."""
     with trainer._routing_injector.capture(ids.size(0), ids.size(1)) as captured, torch.no_grad():
         trainer.model(input_ids=ids)
     reshard_fsdp2_modules(unwrap(trainer.model))
@@ -272,8 +254,8 @@ def capture_routing(trainer, ids: torch.Tensor) -> torch.Tensor:
 
 @contextlib.contextmanager
 def perturbed_moe_inputs(model, relative: float):
-    """Every EP MoE layer's input moved by ``relative`` of each element's own magnitude, the element's sign drawn
-    from a generator seeded per layer, so every rank and every call moves it alike."""
+    """Every EP MoE layer's input moved by ``relative`` of each element's magnitude; signs are seeded per layer, so all
+    ranks and calls agree."""
 
     def hook_for(index: int):
         def hook(_module, args, kwargs):
@@ -299,9 +281,8 @@ def perturbed_moe_inputs(model, relative: float):
 
 
 def replayed_flip_rate(trainer, ids: torch.Tensor, mask: torch.Tensor, *, perturbation: float = 0.0) -> float:
-    """COLLECTIVE. The world share of ``mask``'s forced selections a forward of ``ids`` picks differently, counted
-    by the injector the training steps count with (``routing/replay_flip_rate``), under
-    :func:`perturbed_moe_inputs` when ``perturbation`` is set; the model is left resharded."""
+    """COLLECTIVE. The world share of ``mask``'s forced selections a forward of ``ids`` picks differently; the model is
+    left resharded."""
     injector = trainer._routing_injector
     injector.arm(mask)
     moved = perturbed_moe_inputs(trainer.model, perturbation) if perturbation else contextlib.nullcontext()
@@ -316,17 +297,14 @@ def replayed_flip_rate(trainer, ids: torch.Tensor, mask: torch.Tensor, *, pertur
 
 
 def misplaced_mask(mask: torch.Tensor) -> torch.Tensor:
-    """``mask`` one token over: each position gets its predecessor's selection, the first replays nothing."""
     shifted = torch.full_like(mask, -1)
     shifted[:, 1:] = mask[:, :-1]
     return shifted
 
 
 def routing_probe_round(trainer, ids: torch.Tensor, before_training: torch.Tensor) -> dict[str, float]:
-    """COLLECTIVE. The flip rates the run's bar is measured from, all on ``ids``: the trained policy against its own
-    routing with every MoE input moved by :data:`ROUTING_FLOOR_PERTURBATION` (``floor``) and one token over
-    (``misplaced``); and, recorded, against the routing it gave before training (``stale``: what the trained steps
-    moved, the mismatch a round sampled before an update replays)."""
+    """COLLECTIVE. The flip rates on ``ids``: ``floor`` (moved MoE inputs), ``misplaced`` (one token over), ``stale``
+    (pre-training routing, recorded)."""
     routing = capture_routing(trainer, ids)
     probe = {
         "floor": replayed_flip_rate(trainer, ids, routing, perturbation=ROUTING_FLOOR_PERTURBATION),
@@ -338,7 +316,7 @@ def routing_probe_round(trainer, ids: torch.Tensor, before_training: torch.Tenso
 
 
 def routing_flip_bar(floor: float, misplaced: float) -> float:
-    """Halfway between the noise floor and a misplaced mask's rate, in log space: as far from each in ratio."""
+    """Halfway between the noise floor and a misplaced mask's rate, in log space."""
     return math.sqrt(floor * misplaced)
 
 
@@ -350,24 +328,10 @@ def record_routing_replay(
     probe: dict[str, float],
     acquired: list[bool],
 ) -> None:
-    """The engine's own routed-expert ids reached the loss, lined up with the sampled tokens, and the trainer's
-    router agrees with them as closely as bf16 noise allows.
-
-    Reaching here already covers the capture wire: a batch in which no rollout returned ``routed_experts``
-    raises rather than falling back. What it does not cover is placement: a mask the assembler cannot line up
-    against the turn's tokens lands in ``unresolved``, and that turn replays nothing while the run continues.
-    Each step's ``routing/replay_flip_rate`` is held to a bar measured on this policy (:func:`routing_flip_bar`
-    over :func:`routing_probe_round`), since the near-tie density that sets the noise floor differs per family
-    (top-8 of 128 flips several times more often than top-4 of 32) and no fixed rate fits. The bar catches a mask
-    shifted along its row and a server routing with materially different router weights (half a weight std of
-    noise on every router flips 2.8-3.2x the bar on both default checkpoints, a tenth of it 0.7-1.3x); a whole row's
-    mask swapped with a sibling's reads near the floor, since the long chat-template prompt every row shares routes
-    alike.
-
-    The bar holds on every step whose round was sampled by the weights it trains (``acquired`` False, and every
-    step of a run that does not prefetch); a popped round was sampled before the updates since its submission, so
-    its flip rate is recorded beside ``stale``, not bounded.
-    """
+    """The engine's routed-expert ids reached the loss, lined up with the sampled tokens, and the trainer's router
+    agrees within bf16 noise. Each step's flip rate is held to a bar measured on this policy, since near-tie density
+    differs per family (top-8 of 128 flips far more than top-4 of 32). A popped round was sampled before later updates,
+    so its rate is recorded unbounded."""
     history = trainer.state.log_history
     coverage = [
         {key: float(value) for key, value in entry.items() if key.startswith("routing/rollout_")}
@@ -406,8 +370,7 @@ def record_routing_replay(
 
 
 def record_prefetch_acquisitions(trainer) -> list[bool]:
-    """Record, per training step, whether its acquire popped a prefetched round (``True``) or left the step to
-    collect its own prompts (``False``: a cold round, or a popped failure)."""
+    """Per training step, whether its acquire popped a prefetched round; False is a cold round or a popped failure."""
     acquired: list[bool] = []
     acquire = trainer._acquire_prefetched_round
 
@@ -421,12 +384,9 @@ def record_prefetch_acquisitions(trainer) -> list[bool]:
 
 
 def record_prefetch(trainer, checks: dict[str, bool], metrics: dict[str, float], acquired: list[bool], depth: int):
-    """The run prefetched at ``depth``: exactly its first ``depth`` steps collected their own prompts, every later
-    step popped the round submitted ``depth`` steps earlier, and the IS log-ratio was scored, finite, on every step,
-    the stale rounds included.
-
-    A liveness check on the log-ratio, not a bound: at this row's ``LEARNING_RATE`` no fixed limit separates a stale
-    round from a wrong one, so the band is the landing A/B's to enforce."""
+    """The first ``depth`` steps collected their own prompts, later ones popped earlier rounds, and the IS log-ratio is
+    finite on every step. A liveness check: at this ``LEARNING_RATE`` no fixed limit separates a stale round from a
+    wrong one."""
     history = trainer.state.log_history
     hits = max((entry.get("async/prefetch_hits", 0) for entry in history), default=0)
     logratios = [float(entry[LOGRATIO_MEAN_KEY]) for entry in history if LOGRATIO_MEAN_KEY in entry]
@@ -436,17 +396,15 @@ def record_prefetch(trainer, checks: dict[str, bool], metrics: dict[str, float],
     )
     checks["prefetch_skipped_no_submission"] = not any("async/prefetch_input_skips" in entry for entry in history)
     checks["logratio_scored_every_step"] = len(logratios) == len(acquired) and all(map(math.isfinite, logratios))
-    # A hit (the round ready before its step asks) depends on round versus update time: measured, not checked.
+    # A hit depends on round versus update time, so it is measured with no check.
     metrics["prefetch_hits"] = float(hits)
     metrics["logratio_mean_max_abs"] = max((abs(v) for v in logratios), default=math.nan)
     log(f"  prefetch depth {depth}: popped per step {acquired}, {hits} hits; {LOGRATIO_MEAN_KEY}: {logratios}")
 
 
 def record_grad_norms(trainer, checks: dict[str, bool], metrics: dict[str, float]) -> None:
-    """Every step logged a finite gradient norm. On a chunked row each row is its own forward, so one backward
-    recomputes every reentrant-checkpointed layer once per row; a recompute FSDP2 failed to reduce leaves a
-    norm missing its contributions or a guard raising mid-step. Zero is a tied group's legitimate norm, so the
-    spread across steps is recorded rather than bounded."""
+    """Every step logged a finite gradient norm; a chunked row's recompute FSDP2 failed to reduce would lose
+    contributions or raise. Zero is a tied group's legitimate norm, so the spread is recorded unbounded."""
     norms = [float(entry["grad_norm"]) for entry in trainer.state.log_history if "grad_norm" in entry]
     checks["grad_norms_logged_finite"] = bool(norms) and all(map(math.isfinite, norms))
     metrics["grad_norm_max"] = max_or_nan(norms, default=math.nan)
@@ -455,12 +413,8 @@ def record_grad_norms(trainer, checks: dict[str, bool], metrics: dict[str, float
 
 
 def record_first_step_gradient(trainer, checks: dict[str, bool], metrics: dict[str, float]) -> None:
-    """Step 1 trained on a gradient: a group's rewards spread, and the step's gradient norm is finite and positive.
-
-    Step 1's rollouts are the checkpoint's own on every row (a prefetching row's first round is cold), so only the
-    task decides whether they tie; a tied step reduces nothing through the expert-parallel or tensor-parallel
-    backward, and every later check would pass over an update that never ran.
-    """
+    """Step 1 trained on a gradient; a tied step reduces nothing through the EP or TP backward and later checks would
+    pass with no update."""
     first = next((entry for entry in trainer.state.log_history if "grad_norm" in entry), {})
     spread = float(first.get("reward/within_group_std", math.nan))
     norm = float(first.get("grad_norm", math.nan))
@@ -489,24 +443,9 @@ def run_env_grpo_e2e(
     chunked: bool = False,
     length_ordered: bool | None = None,
 ) -> dict:
-    """Train Environmental GRPO against a live ``backend`` server and assert the sync landed.
-
-    ``model_name`` is the checkpoint both sides use, which the server must already serve. ``layout`` is the
-    policy's parallel shape: its ``ep_size`` 1 and 2 are an A/B across the expert gather (DTensor experts in the
-    FSDP2 shard vs FSDP-ignored plain tensors), and its data-parallel half (FULL_SHARD, whole ep1 experts, HSDP,
-    several EP groups, fp32 masters) is read off the trained policy by :func:`record_dp_layout`.
-    ``peft`` puts the run on an adapter fold; ``resume`` adds a fresh phase with one step left, whose
-    train-begin push must land the engine on the checkpoint's policy; ``thinking_budget`` sets and grades
-    ``rollout_max_thinking_tokens``. ``pool_urls`` (``server_url`` among them) pushes through a WeightSyncPool
-    instead of one client, and every one of those servers must serve the moved policy. ``prefetch_depth`` turns
-    ``enable_prefetch`` on at that depth, however many servers serve; unset leaves it off. ``chunked`` scores with
-    chunked log-probs, one row per micro-batch, so each row is its own forward and the length deal reorders the
-    round; ``length_ordered`` sets ``length_ordered_microbatches`` (unset: on wherever it changes only the order).
-    The policy trains on :class:`DrawNumberEnvironment`, whose rewards spread on every policy, so step 1 must
-    carry a gradient (:func:`record_first_step_gradient`); ``environment_type`` trains a registry environment on
-    arithmetic rows graded by their answers instead (the one-process rows' ``react_math``), where a confident
-    policy ties its groups and step 1's gradient goes unchecked.
-    """
+    """Train Environmental GRPO against a live ``backend`` server and assert the sync landed. ``model_name`` must
+    already be served. ``layout`` is the policy's parallel shape, and :class:`DrawNumberEnvironment` guarantees a step
+    1 gradient unless ``environment_type`` swaps in a registry environment, where it goes unchecked."""
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     pre_perturb: dict[str, float] = {}
@@ -517,16 +456,13 @@ def run_env_grpo_e2e(
             raise ValueError("a prefetch row sets its own step count, which a resume row's save step does not fit")
         max_steps = prefetch_depth + PREFETCH_POPPED_STEPS
 
-    # ── 0. expert TP refuses the native grouped expert adapters, at config time ───────────────
-    # Before the load, which is the point of the refusal: it fires ahead of a multi-hundred-GB
-    # checkpoint download rather than at group construction.
+    # Before the load: the refusal fires ahead of a multi-hundred-GB download.
     if layout.expert_tp_size > 1:
         refusal = expert_lora_under_etp_refusal(layout.expert_tp_size)
         checks["expert_lora_under_expert_tp_refused"] = bool(refusal)
         checks["expert_lora_etp_refusal_names_expert_tp"] = "expert_tensor_parallel_size > 1" in refusal
         log(f"  expert-LoRA under expert_tp_size={layout.expert_tp_size} refusal: {refusal or '<NOT RAISED>'}")
 
-    # ── 1. the server is up, serving the checkpoint we are about to train, and reproducible ───
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -537,7 +473,6 @@ def run_env_grpo_e2e(
             record_budget_acceptance(server_url, model_name, thinking_budget, checks)
     ctx.barrier()
 
-    # ── 2. train ──────────────────────────────────────────────────────────────────────────────
     ensure_model_downloaded(model_name, ctx.rank)
     output_dir = shared_output_dir(ctx) if resume else ctx.output_dir
     environment, dataset = _environment_and_dataset(environment_type)
@@ -575,8 +510,7 @@ def run_env_grpo_e2e(
         else DistributedAsyncEnvironmentalGRPOTrainer,
     }
 
-    # Adapters under TP are refused where the trainer realizes its parallel modes, so the refusal
-    # needs a loaded, PEFT-wrapped model and nothing more. The row ends here: there is no trainer.
+    # The trainer refuses adapters under TP, so this needs only a loaded PEFT-wrapped model. The row ends here.
     if peft is not None and layout.tp_size > 1:
         refusal = ""
         try:
@@ -584,8 +518,7 @@ def run_env_grpo_e2e(
         except ValueError as e:
             refusal = str(e)
         checks["adapters_under_tp_refused"] = bool(refusal)
-        # Matched by name rather than by exception type: every other construction-time refusal on
-        # this path (weight sync, environment spec, batch shape) also raises ValueError.
+        # Matched by name: every other construction refusal on this path also raises ValueError.
         checks["tp_refusal_names_tensor_parallelism"] = "Tensor Parallelism (tensor_parallel_size > 1)" in refusal
         log(
             f"  adapters under tp_size={layout.tp_size} refusal: "
@@ -593,12 +526,9 @@ def run_env_grpo_e2e(
         )
         return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
-    # One finalizer over a mutable slot rather than a bound method per phase: a registered
-    # ``trainer.cleanup_ep`` pins its trainer (and its model's GPU memory) for the whole run, which a
-    # resume row cannot afford, since it builds a second one. The engine client goes first: the
-    # forced pushes below re-form the weight-sync group outside ``train()``, and a group still
-    # registered when the harness destroys every process group is finalized against an engine that
-    # never enters destroy — under NCCL's cuMem transports that finalize waits forever.
+    # One finalizer over a mutable slot: a bound ``trainer.cleanup_ep`` would pin its trainer's GPU memory across a
+    # resume. The engine client goes first, since a group still registered when the harness destroys process groups is
+    # finalized against an engine that never enters destroy, and under NCCL's cuMem transports that waits forever.
     live: dict[str, object] = {"trainer": None}
 
     def _release() -> None:
@@ -624,15 +554,14 @@ def run_env_grpo_e2e(
 
     adapters_before: dict[str, torch.Tensor] = {}
     if peft is not None:
-        # Inspected on the trainer's model: attention LoRA is applied by TRL's get_peft_model, so the
-        # adapters only exist after construction.
+        # TRL's get_peft_model applies attention LoRA, so the adapters only exist after construction.
         ok, detail = assert_only_adapters_trainable(unwrap(trainer.model))
         checks["only_adapters_trainable"] = ok
         log(f"  [trainable] {detail}")
         adapters_before = snapshot_adapters(unwrap(trainer.model), expert_lora=expert_lora)
 
     if chunked:
-        # The deal resolves at construction; a chunked row runs the shape it reorders, so only false turns it off.
+        # The deal resolves at construction; only false turns it off on a chunked row.
         checks["rows_dealt_by_length_as_set"] = trainer._orders_rows_by_length is (length_ordered is not False)
     acquired = record_prefetch_acquisitions(trainer) if prefetch_depth is not None else []
     if routing_replay == "rollout":
@@ -641,11 +570,8 @@ def run_env_grpo_e2e(
         routing_before_training = capture_routing(trainer, probe_ids)
     trainer.train()
     log("  training completed")
-    # Everything below reads or writes parameters by identity, and the run leaves the FSDP2 modules
-    # holding their transient unsharded params, which the optimizer never stepped and the next unshard
-    # discards. Reading those reports zero movement for a run that trained, and perturbing them writes
-    # into a buffer the trainer's own weights never see. Same call the optimizer build and the save
-    # path make.
+    # The run leaves FSDP2 modules holding transient unsharded params the optimizer never stepped. Reading those
+    # reports zero movement, and perturbing them writes into a buffer the trainer's weights never see.
     reshard_fsdp2_modules(unwrap(trainer.model))
 
     losses, trained = record_step_losses(trainer, checks)
@@ -658,13 +584,11 @@ def run_env_grpo_e2e(
     if chunked:
         record_grad_norms(trainer, checks, metrics)
     record_dp_layout(ctx, trainer, layout, checks)
-    # Before the perturbation rounds below move the weights off the trained policy the probe measures.
+    # Before the perturbation rounds move the weights off the trained policy.
     probe = routing_probe_round(trainer, probe_ids, routing_before_training) if routing_replay == "rollout" else {}
 
-    # ── 3. the engine's own sampled ids reached the loss ──────────────────────────────────────
-    # The trainer falls back to re-tokenization when a rollout returns no ids, and that fallback warns
-    # rather than raising, so on a backend whose capture spelling is wrong training succeeds while
-    # optimizing tokens the engine never sampled.
+    # Re-tokenization is a warning-only fallback, so a wrong capture spelling would train on tokens the engine never
+    # sampled.
     checks["trained_on_engine_sampled_ids"] = (
         trainer.async_config.train_on_sampled_tokens and SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
     )
@@ -672,9 +596,7 @@ def run_env_grpo_e2e(
     if peft is not None:
         record_adapter_training(trainer, checks, before=adapters_before, expert_lora=expert_lora, trained=trained)
 
-    # ── 4. a sync through the trainer's own client must reach the served policy ───────────────
-    # On every server: a pool push whose chunks stop at the first leaves the rest serving a stale policy
-    # with no error at all.
+    # On every server: a pool push whose chunks stop at the first leaves the rest serving stale with no error.
     servers = pool_urls or (server_url,)
     served: dict[str, dict[str, float]] = {}
     ctx.barrier()
@@ -699,16 +621,13 @@ def run_env_grpo_e2e(
         if unmoved:
             log(f"  IDENTICAL or non-finite logprobs on {unmoved} after a {what} perturbation: the sync did not land")
         log(f"  post-forced-sync: { {k: round(v, 4) for k, v in after[server_url].items()} }")
-        # A failed update leaves the engine partially written, and both engines' docs say to discard
-        # such a server rather than keep serving from it, so check that it still answers.
+        # A failed update leaves the engine partially written, and both engines' docs say to discard such a server.
         checks["server_usable_after_sync"] = bool(probe_top_logprobs(server_url, model_name))
         if pool_urls:
             clients = len(getattr(trainer._weight_sync_client, "_clients", ()))
             checks["pool_drove_one_client_per_server"] = trainer._multi_server_mode and clients == len(pool_urls)
     ctx.barrier()
 
-    # ── 5. the expert stream alone must move the served policy ───────────────────────────────
-    # Inert for a dense policy; see :func:`expert_round` for why the mixed round above cannot show it.
     expert_round(
         ctx,
         trainer.model,
@@ -717,8 +636,6 @@ def run_env_grpo_e2e(
         push=lambda: trainer._sync_weights_to_engine(force=True),
         checks=checks,
     )
-    # ── 6. GptOss attention sinks, in a round of their own ────────────────────────────────────
-    # Inert for a sink-less family (the vLLM half's default Qwen3 MoE); see :func:`sink_round`.
     sink_round(
         ctx,
         trainer.model,
@@ -736,28 +653,23 @@ def run_env_grpo_e2e(
     if not resume:
         return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
-    # ── 7. a resumed run's FIRST rollout must come from the checkpoint's weights ──────────────
-    # ``pre_perturb`` is that policy as the engine served it: with sync_weights_every_n_steps=1 the
-    # last push of phase 1 ran at the top of the step after the checkpoint, so when train() returned
-    # the engine held the checkpoint's weights. Everything since moved it off them.
+    # ``pre_perturb`` is the checkpoint's policy as served: phase 1's last push ran at the top of the step after the
+    # checkpoint.
     checkpoint = os.path.join(output_dir, f"checkpoint-{RESUME_SAVE_STEP}")
     checks["resume_checkpoint_written"] = os.path.isdir(checkpoint)
     phase1_lrs = logged_lrs(trainer)
     moved_off: dict[str, float] = {}
     if ctx.rank == 0:
-        # Negative control: an engine still sitting on the checkpoint's policy would satisfy the
-        # comparison below with nothing pushed. It is also the state a resume that skipped its push
-        # would leave behind, bit for bit.
+        # Negative control: an engine still on the checkpoint's policy would pass the comparison below with nothing
+        # pushed.
         moved_off = probe_top_logprobs(server_url, model_name)
         checks["engine_moved_off_the_checkpoint_policy"] = served_policy_moved(moved_off, pre_perturb)
     ctx.barrier()
 
-    # A fresh model and trainer, as a resumed job starts. The client is closed first: its group port
-    # is held for the process lifetime, and phase 2 rebuilds a client on the same one.
+    # The client's group port is held for the process lifetime, and phase 2 rebuilds a client on the same one.
     trainer._cleanup_async_components()
     trainer.cleanup_ep()
-    # The snapshot outlives its trainer, but only as values: holding the trainer would keep phase 1's
-    # model on the GPU next to phase 2's.
+    # Holding the trainer would keep phase 1's model on the GPU next to phase 2's.
     saved_state.trainer = None
     live["trainer"] = None
     del trainer, model
@@ -765,9 +677,7 @@ def run_env_grpo_e2e(
     ctx.barrier()
 
     parallelism_config = layout.parallelism_config()
-    # The production rule rather than a test-local one: under the EP/CP wrappers a full checkpoint's
-    # weights load only at construction (the trainer's loader refuses to reload them), while an
-    # adapter-only checkpoint keeps the base and has its adapters restored by the loader.
+    # Under EP/CP a full checkpoint's weights load only at construction; an adapter-only one keeps the base.
     weights_source = resolve_resume_weights_source(
         checkpoint, SimpleNamespace(model_name_or_path=model_name), parallelism_config
     )
@@ -784,8 +694,6 @@ def run_env_grpo_e2e(
         environment=environment,
         parallelism_config=parallelism_config,
         peft_config=peft_config,
-        # The resumed phase writes nothing: it is judged on the served policy and on what it
-        # restored, and a second full-model checkpoint would only cost scratch space.
         grpo_config=_grpo_config(output_dir=output_dir, max_steps=max_steps, save=False, peft=peft, chunked=chunked),
         async_config=async_config,
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
@@ -800,16 +708,15 @@ def run_env_grpo_e2e(
     log("  resumed run completed")
     reshard_fsdp2_modules(unwrap(trainer.model))
 
-    # Exactly one step ran, so the train-begin push is the only thing that reached the engine: the
-    # per-step sync declines a step whose number the train-begin push already stamped.
+    # Exactly one step ran, and the per-step sync declines a step the train-begin push already stamped.
     checks["resume_ran_the_remaining_step"] = trainer.state.global_step == RESUME_MAX_STEPS
     if ctx.rank == 0:
         after_resume = probe_top_logprobs(server_url, model_name)
-        # A skipped push leaves the engine bit-identical to what phase 1 left there (the server is
-        # idle and the probe is greedy), so this half is exact on every row.
+        # A skipped push leaves the engine bit-identical to phase 1's state (idle server, greedy probe), so this is
+        # exact.
         checks["resume_left_the_stale_engine_state"] = served_policy_moved(after_resume, moved_off)
         to_checkpoint = served_policy_delta(after_resume, pre_perturb)
-        # Both pushes send the same tensors, so the two probes must agree exactly on every row.
+        # Both pushes send the same tensors, so the two probes must agree exactly.
         checks["resumed_rollouts_served_the_checkpoint_policy"] = after_resume == pre_perturb
         if not checks["resumed_rollouts_served_the_checkpoint_policy"]:
             log("  the resumed run's engine is NOT on the checkpoint's policy: the train-begin sync did not land")
@@ -823,13 +730,11 @@ def run_env_grpo_e2e(
 
     if peft is not None:
         record_optimizer_restore(checks, saved_state.captured, capture)
-        # Captured at train-begin, not here: the resumed step moves the adapters off the values the
-        # restore put back, and the checkpoint file is what the restore is judged against.
+        # Captured at train-begin: the resumed step moves the adapters off the restored values.
         if ctx.rank == 0:
             matching, compared, nonzero_b = adapter_file_agreement(capture["adapters"], checkpoint)
             checks["resume_adapters_match_the_checkpoint_file"] = compared > 0 and matching == compared
-            # Same reason as ``adapters_moved_...``: with no gradient anywhere in phase 1 the
-            # checkpoint holds the zero-init B, so "restored non-zero" would assert nothing.
+            # With no gradient in phase 1 the checkpoint holds the zero-init B, and this would assert nothing.
             checks["resume_restored_a_trained_adapter"] = nonzero_b > 0 or not trained
             log(f"  restored adapters vs {checkpoint}: {matching}/{compared} exact, {nonzero_b} non-zero B")
     metrics["resume_steps"] = float(RESUME_MAX_STEPS - RESUME_SAVE_STEP)

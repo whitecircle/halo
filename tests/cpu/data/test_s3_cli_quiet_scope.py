@@ -1,9 +1,5 @@
-"""``s3.py --quiet`` exists only on the commands that draw a transfer progress bar.
-
-``push`` and ``download`` forward it as ``show_progress=False``; ``list`` / ``exists`` / ``delete`` draw
-no bar, so they refuse the flag instead of accepting it and doing nothing. The client is stubbed at its
-own methods (no boto3 session), patched by dotted path like the sibling CLI tests.
-"""
+"""``s3.py --quiet`` exists only on the commands that draw a progress bar; ``list``, ``exists`` and ``delete``
+refuse it. The client is stubbed at its own methods, patched by dotted path."""
 
 import sys
 from unittest.mock import patch

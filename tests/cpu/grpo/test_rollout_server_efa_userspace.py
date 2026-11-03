@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Every Halo image installs one EFA userspace from one script, so the weight-sync group can ride EFA.
-
-The stack is wire-sensitive down to rdma-core: the aws-ofi-nccl plugin probes libfabric for in-order
-RDMA writes at init and forces NCCL_PROTO=simple when the probe fails, and that probe answers through
-rdma-core's EFA provider. Two containers on different builds form the NCCL group with different
-protocol tables and hang at the first collective. The pins therefore live in a single script every
-Dockerfile runs whole; a Dockerfile that builds its own plugin, keeps its base's rdma-core, or skips
-the script reintroduces a silent cross-image mismatch. The script's own build-time checks (plugin
-identity, libfabric version, provider presence, resolution) are pinned here too, since they are what
-turn a drifted pin into a failed build.
-
-    python tests/cpu/grpo/test_rollout_server_efa_userspace.py
-"""
+"""Every Halo image installs one EFA userspace from one script: two containers on different builds form the NCCL
+group with different protocol tables and hang at the first collective."""
 
 import re
 
@@ -38,8 +27,8 @@ def test_the_script_pins_installer_libfabric_and_plugin():
 
 
 def test_every_dockerfile_installs_the_whole_shared_efa_userspace():
-    """Whole, not the plugin alone: rdma-core answers the plugin's in-order-write probe, so an image
-    keeping its base's rdma-core lands on a different NCCL protocol table than the others."""
+    """rdma-core answers the plugin's in-order-write probe, so an image keeping its base's rdma-core lands on a
+    different NCCL protocol table than the others."""
     for name in DOCKERFILES:
         text = (REPO_ROOT / name).read_text(encoding="utf-8")
         assert "COPY docker/efa/install_efa_userspace.sh" in text, f"{name} does not copy the shared EFA script"

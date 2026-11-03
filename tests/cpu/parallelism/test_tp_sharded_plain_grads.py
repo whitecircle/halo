@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: params the TP plan sharded as PLAIN tensors must not be treated as replicas.
-
-GptOss attention sinks cannot be DTensors — the forward concatenates them with already-sharded
-logits — so ``apply_tp_to_attention_only`` slices them by hand and registers the suffix with
-``register_hand_sliced`` (the same registry the save path all-gathers). They therefore
-reach the gradient path looking exactly like a replicated LayerNorm weight while each TP rank owns
-a DISJOINT head slice:
-
-  * a TP-group AVG mixes another rank's heads into every sink gradient;
-  * counting each slice as a full replica under-counts the global grad norm AND makes it
-    rank-dependent, so TP peers clip the same shard by different coefficients.
-
-Run: ``pytest -m cpu tests/cpu/parallelism/test_tp_sharded_plain_grads.py``
-"""
+"""Params the TP plan sharded as plain tensors must not be treated as replicas. GptOss sinks are hand-sliced: a
+TP-group AVG mixes other ranks' heads in, and counting slices as replicas under-counts the grad norm per rank."""
 
 from __future__ import annotations
 
@@ -49,8 +37,7 @@ class _Layer(nn.Module):
 
 
 class _Model(nn.Module):
-    """Stand-in for a TP-parallelized causal LM: sinks sliced to this rank's heads, everything
-    else replicated. ``register=False`` models a family whose TP plan shards nothing by hand."""
+    """``register=False`` models a family whose TP plan shards nothing by hand."""
 
     def __init__(self, n_layers: int = 2, local_heads: int = 2, register: bool = True):
         super().__init__()
@@ -63,14 +50,13 @@ def _trainer(model: nn.Module) -> SimpleNamespace:
     trainer = SimpleNamespace(
         _top_level_model=lambda: model,
         _sharded_grad_bucket=DistributedTrainerMixin._sharded_grad_bucket,
-        # A TP run: a bare TP mesh (its group is the stubbed reduce below), no expert shards.
+        # A bare TP mesh (its group is the stubbed reduce below), no expert shards.
         _device_mesh=SimpleNamespace(get_group=lambda: "tp-group"),
         _fsdp_wrapped=False,
         _ep_config=None,
         _get_sharded_expert_param_ids=lambda: set(),
         state=SimpleNamespace(global_step=0),
-        # The PP scope the norm path reads: None on every non-PP run (the stage IS the world, and
-        # there is no chain to reduce over), which is what this stub models.
+        # None on every non-PP run.
         _pp_stage_group=None,
         _pp_chain_group=None,
     )
@@ -106,14 +92,8 @@ def test_ids_empty_without_a_registered_hand_shard():
 
 
 def test_a_tp_plan_marks_nothing():
-    """transformers populates ``_tp_plan`` from the model CLASS on every load, TP or not — and when
-    it IS applied, every planned projection is a DTensor whose grad reduces itself.
-
-    Reading the plan here would mark every projection of a plainly-loaded model disjoint. On an
-    EP-only run — where ``_device_mesh`` is None, so the TP bucket reduce never runs — their norms
-    would then be dropped from the global grad norm entirely. Only the hand-shard registry records
-    a plain slice.
-    """
+    """``_tp_plan`` is populated on every load, so reading it marks every projection disjoint, dropping their norms
+    on an EP-only run."""
     model = _Model(n_layers=2, local_heads=2, register=False)
     model._tp_plan = {"layers.*.self_attn.q_proj": "colwise"}
 
@@ -121,8 +101,6 @@ def test_a_tp_plan_marks_nothing():
 
 
 class _StubMesh:
-    """The two DeviceMesh methods ``shard_sinks_param`` calls."""
-
     def __init__(self, size: int, rank: int):
         self._size, self._rank = size, rank
 
@@ -134,8 +112,6 @@ class _StubMesh:
 
 
 class _NamedAttnModel(nn.Module):
-    """A model holding its attention under a family-chosen attribute name."""
-
     def __init__(self, attn_name: str, n_layers: int = 2, total_heads: int = 4):
         super().__init__()
         self.layers = nn.ModuleList(nn.Module() for _ in range(n_layers))
@@ -145,14 +121,8 @@ class _NamedAttnModel(nn.Module):
 
 @pytest.mark.parametrize("attn_name", ("self_attn", "attention", "attn"))
 def test_hand_sharded_sinks_register_under_the_attribute_they_actually_live_on(attn_name):
-    """The registered suffix must be the parameter's real FQN tail, not one family's spelling.
-
-    ``apply_tp_to_attention_only`` resolves the attention attribute per family (``self_attn`` /
-    ``attention`` / ``attn``). A fixed ``self_attn.sinks`` entry matches no parameter on the others,
-    so their disjoint head slices read back as replicas: the TP group AVGs another rank's heads into
-    every sink gradient, the grad norm counts one slice as the whole tensor, and the save path
-    all-gathers nothing — writing rank 0's partial sinks into the checkpoint.
-    """
+    """A fixed ``self_attn.sinks`` matches no parameter on other families: AVG mixes heads, the norm undercounts,
+    and the save writes rank 0's partial sinks."""
     model = _NamedAttnModel(attn_name)
     mesh = _StubMesh(TP_SIZE, 0)
     for layer in model.layers:
@@ -165,14 +135,13 @@ def test_hand_sharded_sinks_register_under_the_attribute_they_actually_live_on(a
 
 
 def test_sharded_sinks_are_excluded_from_the_tp_average(monkeypatch):
-    """The TP-group AVG must cover the replicated params only — never the disjoint sink slices."""
     model = _Model(n_layers=2, local_heads=2)
     _fill_grads(model, sink_grad=1.0, replicated_grad=2.0)
     trainer = _trainer(model)
 
     reduced: dict[object, list[torch.Tensor]] = {}
     monkeypatch.setattr(dist, "get_world_size", lambda group=None: TP_SIZE)
-    monkeypatch.setattr(dist, "all_reduce", lambda tensor, op=None, group=None: None)  # every grad is present
+    monkeypatch.setattr(dist, "all_reduce", lambda tensor, op=None, group=None: None)  # Every grad is present.
     monkeypatch.setattr(
         grad_sync_module, "reduce_grads_bucketed", lambda grads, **kw: reduced.setdefault(kw["op"], []).extend(grads)
     )
@@ -180,8 +149,7 @@ def test_sharded_sinks_are_excluded_from_the_tp_average(monkeypatch):
     params = list(model.parameters())
     DistributedTrainerMixin._sync_tp_replicated_grads(trainer, params)
 
-    # The per-head-norm SUM bucket is the other collective; this model has none, so the AVG bucket
-    # must carry every replicated grad and nothing else.
+    # This model has no per-head norms, so the AVG bucket carries every replicated grad.
     assert not reduced.get(dist.ReduceOp.SUM), "this model has no per-head attention norms to SUM"
     synced = reduced[dist.ReduceOp.AVG]
     synced_ids = {id(g) for g in synced}
@@ -192,7 +160,6 @@ def test_sharded_sinks_are_excluded_from_the_tp_average(monkeypatch):
 
 
 def test_grad_norm_sums_sharded_sinks_over_the_tp_group(monkeypatch):
-    """Sink shard norms belong in the TP-summed bucket, not the un-reduced replicated total."""
     monkeypatch.setattr(grad_clipping_module, "current_device", lambda: torch.device("cpu"))
     model = _Model(n_layers=2, local_heads=2)
     _fill_grads(model, sink_grad=3.0, replicated_grad=0.5)
@@ -202,7 +169,7 @@ def test_grad_norm_sums_sharded_sinks_over_the_tp_group(monkeypatch):
 
     def _fake_reduce(tp1d_sq, tp2d_sq, dp_sq):
         captured.update(tp1d=float(tp1d_sq), tp2d=float(tp2d_sq), dp=float(dp_sq))
-        return tp1d_sq * TP_SIZE + tp2d_sq + dp_sq  # stand-in for the TP-group SUM over 2 ranks
+        return tp1d_sq * TP_SIZE + tp2d_sq + dp_sq  # Stand-in for the TP-group SUM over 2 ranks.
 
     trainer._reduce_shard_norm_buckets = _fake_reduce
 
@@ -220,7 +187,6 @@ def test_grad_norm_sums_sharded_sinks_over_the_tp_group(monkeypatch):
 
 
 def test_grad_norm_unchanged_without_hand_sharded_params(monkeypatch):
-    """Families whose TP plan shards nothing by hand keep the plain replicated accounting."""
     monkeypatch.setattr(grad_clipping_module, "current_device", lambda: torch.device("cpu"))
     model = _Model(n_layers=2, local_heads=2, register=False)
     _fill_grads(model, sink_grad=3.0, replicated_grad=0.5)

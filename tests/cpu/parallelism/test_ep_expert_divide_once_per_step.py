@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""A single EP group's expert gradients are divided by the DP width once per optimizer step, however many
-times reentrant checkpointing re-enters the backward, on 2 and 4 gloo ranks.
-
-With experts left out of FSDP2 and one EP group per rank block, the combine already summed every rank's
-tokens into each expert's gradient, so the only sync left is a divide by ``stage_world_size //
-expert_tp_size``. A post-accumulate hook fires once per nested backward of a reentrant recompute, and a
-divide is not idempotent: K segments in the window's last backward left the earlier ones divided K times.
-The divide runs in the trainer's post-backward sweep instead, while the router keeps its in-backward
-average, which is linear and absorbs every extra firing.
-
-Real EP layers (tiny Qwen3-MoE at ``ep2`` and ``ep2+etp2``, the dispatcher stubbed since no forward runs)
-take K reentrant-checkpointed segments over their expert and router weights in each of 3 accumulation
-microbatches, through ``DistributedTrainerMixin.training_step``; the sync step's EP clip, or with clipping
-off the optimizer's step pre-hook, then syncs. A twin of the same weights without checkpointing or hooks
-gives the expected gradients: expert = the local sum divided once, router = the ranks' mean. At K=1 the
-expert gradient must equal the twin's bit for bit, as the hook left it.
-
-    python tests/cpu/parallelism/test_ep_expert_divide_once_per_step.py
-"""
+"""A single EP group's expert grads are divided by DP width once per step, however often reentrant checkpointing
+re-enters the backward. A divide on a hook is not idempotent; the router's average is."""
 
 import datetime
 import functools
@@ -44,7 +27,7 @@ PG_TIMEOUT = datetime.timedelta(seconds=90)
 SEED = 0
 GRAD_ACCUM = 3
 K_VALUES = (1, 4)
-# Rank counts and EPConfig fields: one EP group spanning the ranks, without and with expert TP.
+# One EP group spanning the ranks, without and with expert TP.
 LAYOUTS = {"ep2": (2, {"ep_size": 2}), "ep2_etp2": (4, {"ep_size": 2, "expert_tp_size": 2})}
 OVERRIDES = {
     "num_hidden_layers": 2,
@@ -55,7 +38,7 @@ OVERRIDES = {
     "moe_intermediate_size": 32,
     "num_experts": 4,
 }
-# Clip threshold far above any norm here: the clip runs its sync and scales by exactly 1.
+# Far above any norm here: the clip runs its sync and scales by exactly 1.
 NO_CLIP = 1e9
 # The K>1 segments sum in a different order than the twin's single graph (fp32).
 RTOL = 1e-6
@@ -70,8 +53,6 @@ def _scales(k: int, micro: int, rank: int) -> list[float]:
 
 
 class _SegmentsBackward:
-    """The step the trainer seam wraps: one backward through K reentrant-checkpointed segments."""
-
     def training_step(self, model, inputs, num_items_in_batch=None):
         params, weights, scales = inputs
         segment = functools.partial(_segment, params=params, weights=weights)
@@ -81,8 +62,6 @@ class _SegmentsBackward:
 
 
 class _Trainer(DistributedTrainerMixin, _SegmentsBackward):
-    """The trainer's step, EP clip and step pre-hooks over the minimum state they read."""
-
     def __init__(self, model: nn.Module, ep_config: EPConfig, max_grad_norm: float):
         self.model = model
         self.args = SimpleNamespace(max_grad_norm=max_grad_norm)
@@ -108,7 +87,7 @@ class _Trainer(DistributedTrainerMixin, _SegmentsBackward):
 
 
 def _ep_model(world: int, fields: dict) -> tuple[nn.Module, EPConfig]:
-    """COLLECTIVE: the EP-patched tiny Qwen3-MoE; its dispatcher is never reached, since no forward runs."""
+    """COLLECTIVE: its dispatcher is never reached, since no forward runs."""
     ep_config = EPConfig(
         stage_world_size=world, nvlink_domain_size=world, use_grouped_gemm=False, experts_fsdp_managed=False, **fields
     )
@@ -120,7 +99,6 @@ def _ep_model(world: int, fields: dict) -> tuple[nn.Module, EPConfig]:
 
 
 def _run(world: int, fields: dict, *, k: int, clip: bool) -> dict:
-    """One accumulation window through the trainer, beside the twin; per-parameter gradients of both."""
     rank = dist.get_rank()
     model, ep_config = _ep_model(world, fields)
     trainer = _Trainer(model, ep_config, max_grad_norm=NO_CLIP if clip else 0.0)
@@ -177,7 +155,6 @@ def runs(request, tmp_path_factory):
 
 
 def _close(actual: list, expected: list) -> bool:
-    """Every tensor within ``RTOL`` of its expected one, in L2 norm."""
     return all(
         float((torch.tensor(a) - torch.tensor(e)).norm()) <= RTOL * float(torch.tensor(e).norm())
         for a, e in zip(actual, expected, strict=True)
@@ -186,9 +163,6 @@ def _close(actual: list, expected: list) -> bool:
 
 @pytest.mark.parametrize("clip", [True, False], ids=["ep_clip", "step_pre_hook"])
 def test_expert_grads_are_divided_once_per_step(runs, clip):
-    """Each expert gradient ends as the local sum over the window divided once by the DP width, whichever of
-    the clip or the step pre-hook runs the sync, and bit for bit the hook's result at K=1; the router's
-    in-backward average stays the ranks' mean when a recompute fires it once per segment."""
     for rank_runs in runs:
         for k in K_VALUES:
             run = rank_runs[f"k{k}-clip{clip}"]

@@ -15,8 +15,8 @@ _Grader = Callable[..., Sequence[float | None]]
 
 
 class TermRewardFunction:
-    """A synchronous TRL reward function over a local grader: ``grader(prompts=…, completions=…, **cols)``
-    returns one score in ``[0, 1]`` (or ``None``) per completion, which the term shapes."""
+    """``grader(prompts=…, completions=…, **cols)`` returns one score in ``[0, 1]`` (or ``None``) per completion, which
+    the term shapes."""
 
     def __init__(self, term: RewardTerm, grader: _Grader):
         self.term = term
@@ -29,15 +29,13 @@ class TermRewardFunction:
 
 
 class ScorerRewardFunction:
-    """An asynchronous TRL reward function over an external scorer; TRL runs coroutine reward functions together on
-    its own loop, so a judge's requests overlap with every other async reward's.
+    """TRL runs coroutine reward functions together on its own loop, so a judge's requests overlap with every other
+    async reward's.
 
-    ``prompt_column`` names the dataset column holding the conversation the policy was prompted with, read in place
-    of TRL's rendered ``prompts``, and ``reference_column`` the sample's reference; a declared column TRL did not
-    forward raises. A sample without a verdict returns ``None`` (TRL sums it as 0; the row leaves the baseline only
-    when every term returned ``None``), or ``0`` under ``on_error: neutral``. The scorer's diagnostic keys and the
-    term's ``<source>/<name>/scored`` rate reach TRL's metrics through its ``log_metric`` callback, every key on
-    every call: TRL gathers each key across ranks (0 stands in for a key no sample carried).
+    ``prompt_column`` and ``reference_column`` name dataset columns read in place of TRL's rendered ``prompts`` and as
+    the reference; a declared column TRL did not forward raises. A sample without a verdict returns ``None`` (TRL sums
+    it as 0; the row leaves the baseline only when every term returned ``None``), or ``0`` under ``on_error: neutral``.
+    Metrics go through ``log_metric``, every key on every call: TRL gathers each key across ranks.
     """
 
     def __init__(self, term: ScoredTerm, scorer: Scorer, *, prompt_column: str | None, reference_column: str | None):
@@ -63,7 +61,6 @@ class ScorerRewardFunction:
         return [missing if result.score is None else self.term.shape(result.score) for result in results]
 
     def _forwarded(self, kwargs: Mapping[str, Any], column: str) -> Sequence[Any]:
-        """The values TRL forwarded for the dataset ``column`` this term reads."""
         if column not in kwargs:
             raise ValueError(
                 f"Reward term {self.term.name!r} reads the dataset column {column!r}, which did not reach "
@@ -80,10 +77,8 @@ def build_trl_reward_functions(
     prompt_column: str | None = None,
     reference_column: str | None,
 ) -> tuple[list[Callable], list[float]]:
-    """TRL's ``reward_funcs`` and ``reward_weights`` for ``terms``: an externally scored term becomes a
-    :class:`ScorerRewardFunction`, any other a :class:`TermRewardFunction` over the grader its type
-    maps to in ``graders``. A veto judge gates an environment objective, which TRL's independent
-    reward functions have no way to express, so it is refused here."""
+    """A veto judge gates an environment objective, which TRL's independent reward functions cannot express, so it is
+    refused here."""
     reject_veto_judges(terms, where="the online arm's independent reward functions")
     functions: list[Callable] = []
     weights: list[float] = []

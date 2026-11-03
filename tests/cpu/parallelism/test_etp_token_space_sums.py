@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""The expert-TP sums of an EP MoE layer, run by the real ``_dispatch_compute_combine`` on two gloo ranks.
-
-Under expert TP each partner holds a slice of every local expert's FFN, so its combined output is a partial sum and so
-are the gradients it sends back into the tokens and the routing weights. ``SumAcrossGroup`` sums the outputs after the
-combine and ``SumGradAcrossGroup`` sums those gradients before the dispatch, both in token space
-(``halo/distributed/expert_parallel/moe_layer/layer.py``). A pure-ETP layer (``ep_size`` 1, ``expert_tp_size`` 2) over a
-pass-through transport must reproduce one rank holding the whole FFN: the output, the token and routing-weight
-gradients, and each rank's expert-weight gradients as its slice of the whole, and the output sum must leave the tensor
-the combine handed back as it was (it sums a copy in place). The negative controls replace one sum at its call site
-with the identity and must fail exactly the checks that sum carries.
-
-Run: python tests/cpu/parallelism/test_etp_token_space_sums.py
-"""
+"""The expert-TP sums under the real ``_dispatch_compute_combine`` on two gloo ranks, against one rank holding the
+whole FFN. Negative controls replace one sum with the identity."""
 
 import contextlib
 import json
@@ -29,10 +18,10 @@ from tests.common.gloo import run_gloo_ranks
 ETP = 2
 EXPERTS, HIDDEN, INTER, TOKENS, TOP_K = 4, 8, 8, 6, 2
 SEED = 0
-# Two partial down-projections summed against one over the whole intermediate dim: fp32 reassociation only.
+# Two partial down-projections summed against one over the whole dim: fp32 reassociation only.
 TOLERANCE = 1e-5
 CHECKS = ("output", "token_grad", "routing_weight_grad", "expert_weight_grads", "combine_output_untouched")
-# Each replaces one expert-TP sum at its call site with the identity: the layer-module name, the checks it must fail.
+# The layer-module name, and the checks it must fail.
 BREAKS = {
     "output_sum": ("SumAcrossGroup", {"output"}),
     "input_grad_sum": ("SumGradAcrossGroup", {"token_grad", "routing_weight_grad"}),
@@ -46,8 +35,8 @@ class _Identity:
 
 
 class _PassThroughTransport:
-    """The dispatch group of one rank at ``ep_size`` 1: every token reaches this rank's experts, and the combine
-    returns the weighted expert outputs as computed, keeping the tensor it returned and a copy of its values."""
+    """Every token reaches this rank's experts, and the combine keeps the tensor it returned and a copy of its
+    values."""
 
     def dispatch(self, flat, experts, weights, *, owner):
         return flat, experts, weights, None, None
@@ -58,9 +47,6 @@ class _PassThroughTransport:
 
 
 class _Layer(StubEPLayerBase):
-    """The EP state ``_dispatch_compute_combine`` and the per-expert loop read, holding this ETP rank's slice of
-    ``gate`` / ``up`` ``[E, M, H]`` and ``down`` ``[E, H, M]`` through the real ETP storage."""
-
     def __init__(self, gate, up, down, *, expert_tp_size: int, expert_tp_rank: int, expert_tp_group):
         super().__init__()
         self.dispatcher = _PassThroughTransport()
@@ -80,7 +66,6 @@ class _Layer(StubEPLayerBase):
 
 
 def _step(layer: _Layer, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, probe: torch.Tensor):
-    """One forward and backward through the layer: its output and the gradients of the tokens and routing weights."""
     tokens = tokens.clone().requires_grad_()
     weights = weights.clone().requires_grad_()
     output = layer._dispatch_compute_combine(tokens, experts, weights, torch.float32)
@@ -107,7 +92,7 @@ def _worker(rank: int, output_dir: str, broken: str | None) -> None:
     sharded = _Layer(gate, up, down, expert_tp_size=ETP, expert_tp_rank=rank, expert_tp_group=dist.group.WORLD)
     expected = _step(whole, tokens, experts, weights, probe)
     got = _step(sharded, tokens, experts, weights, probe)
-    # This rank's slice of each whole-FFN expert gradient, cut by the layer's own ETP narrowing.
+    # Cut by the layer's own ETP narrowing.
     expected_expert_grads = {
         "gate_proj": sharded._etp_narrow(whole.gate_proj.grad, 2),
         "up_proj": sharded._etp_narrow(whole.up_proj.grad, 2),
@@ -137,8 +122,6 @@ def test_the_expert_tp_layer_reproduces_the_whole_ffn(tmp_path):
 
 @pytest.mark.parametrize("broken", sorted(BREAKS))
 def test_each_dropped_sum_is_caught(tmp_path, broken):
-    """Exactly the checks the dropped sum carries fail, on every rank: the output sum owns the output, the gradient
-    sum the token and routing-weight gradients, and neither the expert-weight gradients."""
     expected = {check: check not in BREAKS[broken][1] for check in CHECKS}
     for rank, result in enumerate(_run(tmp_path, broken)):
         assert result == expected, f"rank {rank} with {broken} dropped: {result}"

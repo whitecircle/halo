@@ -1,22 +1,8 @@
 #!/usr/bin/env python
-"""Single EP group: the /world expert divide must survive a zero-token sync microbatch.
+"""Single EP group: the /world expert divide survives a zero-token sync microbatch, on a fixed-selection router stub.
 
-With one EP group the trainer's post-backward sweep divides each ACCUMULATED expert gradient by the DP
-width once per optimizer step (``EPConfig.runs_post_backward_sweep``). A rank whose expert bank receives
-tokens in an early accumulation microbatch and ZERO dispatched tokens in the final one must still end at
-accumulated/world — not at the raw sum — and a bank that never received a token keeps ``grad is None``.
-Routing is forced by a fixed-selection router stub so which rank idles is exact; the sweep runs through
-``DistributedTrainerMixin._sync_deferred_expert_grads`` over the real EP layers (``sweep_ep_grads``).
-
-Schedule (ep2, top_k=1, all tokens to ONE expert):
-  control: one microbatch to rank 1's expert, then the sweep           → grad_ctl = g / world
-  main:    µb1 to rank 1's expert, µb2 to rank 0's expert, then the sweep
-           → rank 1 idles in the sync microbatch; its grad must STILL equal grad_ctl
-             (a missed divide leaves it at world × grad_ctl).
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_ep_expert_divide_zero_token.py
+A rank idling in the final microbatch must still end at accumulated/world (a missed divide leaves it at world x the
+control), and a bank that never got a token keeps ``grad is None``.
 """
 
 import torch
@@ -36,14 +22,11 @@ from tests.common.rank_log import log, log_all
 
 SEED = 42
 BATCH, SEQ = 2, 64
-# The bug signal is exactly ×world (2.0 here); kernel reruns of the identical microbatch only carry
-# bf16 accumulation jitter, so a ±10% band is decisive.
+# The bug is exactly x world (2.0 here); reruns carry only bf16 accumulation jitter.
 GRAD_NORM_RATIO = (0.9, 1.11)
 
 
 class _FixedRouter(nn.Module):
-    """Router stub with x-independent selection: every token to ``target``, weight 1."""
-
     def __init__(self, num_experts: int, top_k: int):
         super().__init__()
         self.num_experts = num_experts
@@ -64,7 +47,6 @@ def _expert_params(ep_layers) -> list[list[nn.Parameter]]:
 
 
 def _expert_grad_norms(ep_layers) -> list[float | None]:
-    """Per-layer L2 norm over the expert params' grads (None = no grad anywhere)."""
     norms: list[float | None] = []
     for params in _expert_params(ep_layers):
         grads = [p.grad for p in params if p.grad is not None]
@@ -90,7 +72,7 @@ def run(ctx):
     ep_layers = [m for m in model.modules() if isinstance(m, EPMoELayerBase)]
     ep_cfg = ep_layers[0].ep_config
 
-    # Anti-vacuity: this file certifies the single-group sweep regime, router on its hook, experts swept.
+    # Anti-vacuity: certifies the single-group sweep regime, router on its hook, experts swept.
     checks["single_group_sweep_regime"] = (
         ep_cfg.runs_post_backward_sweep
         and not ep_cfg.sweep_reduces_across_replicas
@@ -102,27 +84,25 @@ def run(ctx):
         layer.gate = router
 
     experts_per_rank = config.num_experts // ctx.world_size
-    idle_rank_expert = experts_per_rank * (ctx.world_size - 1)  # rank world-1's first expert
+    idle_rank_expert = experts_per_rank * (ctx.world_size - 1)  # Rank world-1's first expert.
     owns_idle_expert = ctx.rank == ctx.world_size - 1
 
-    torch.manual_seed(SEED + ctx.rank)  # distinct per-rank batches, as in real DP
+    torch.manual_seed(SEED + ctx.rank)  # Distinct per-rank batches, as in real DP.
     input_ids = torch.randint(0, config.vocab_size, (BATCH, SEQ), device=device)
     labels = input_ids.clone()
     model.train()
 
-    # ── Control: one microbatch to the last rank's expert, then the sweep → divided grad ──
     router.target = idle_rank_expert
     model(input_ids=input_ids, labels=labels).loss.backward()
     sweep_ep_grads(model)
     ctl_norms = _expert_grad_norms(ep_layers)
     if not owns_idle_expert:
-        # This rank's bank never saw a token: the sweep must NOT have materialized a grad.
+        # The sweep must not have materialized a grad on this never-routed bank.
         checks["untouched_bank_grad_stays_none"] = all(n is None for n in ctl_norms)
     log_all(f"  control expert-grad norms: {[f'{n:.4f}' if n is not None else 'None' for n in ctl_norms]}")
 
     model.zero_grad(set_to_none=True)
 
-    # ── Main: accumulate on the last rank's expert, then a sync microbatch it idles in, then the sweep ──
     router.target = idle_rank_expert
     model(input_ids=input_ids, labels=labels).loss.backward()
     router.target = 0

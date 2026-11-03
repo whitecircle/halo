@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""``reject_multi_document_rows`` holds every rule on the rows a model cannot keep apart, or no kernel it runs can
-serve, and both callers that see a run's rows before it trains go through it: the collator factory after the load,
-and the SFT script before it.
-
-Each rule is shown refusing its rows and passing them once its one precondition is lifted. The SFT script is driven
-through ``main()`` up to its distributed init, with the checkpoint probe stubbed.
-
-    python tests/cpu/data/test_multi_document_rows.py
-"""
+"""``reject_multi_document_rows`` holds every rule on the rows a model cannot keep apart or no kernel can serve, and
+both callers (the collator factory after the load, the SFT script before it) go through it. Each rule refuses its
+rows and passes them once its precondition is lifted."""
 
 import contextlib
 import sys
@@ -205,7 +199,7 @@ def test_the_sft_script_refuses_the_rows_before_its_distributed_init(
 
 
 def test_rows_the_rules_accept_reach_the_distributed_init(tmp_path):
-    """Anti-vacuity: packed rows of a family whose kernels are in place pass every pre-load rule."""
+    """Packed rows of a family whose kernels are in place pass every pre-load rule."""
     with pytest.raises(_Initialized):
         _sft_main(tmp_path, "packing: true\n", _config(TINY_DENSE_FAMILIES["qwen3_5"]))
 

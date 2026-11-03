@@ -1,25 +1,9 @@
 #!/usr/bin/env python
-"""Distributed SMPO training (text or VLM).
+"""Distributed SMPO training (text or VLM): reference-model-free preference training. The model class follows the
+checkpoint, the data path the run, so a multimodal checkpoint on text-only pairs keeps CP, padding_free and PP.
 
-Smooth Margin Preference Optimization — reference-model-free preference training. One script serves
-both text and vision-language models. The model class follows the checkpoint
-(``load_policy_model`` auto-detects it); the data path follows the run (``is_vlm_run``), so a
-natively-multimodal checkpoint trained on text-only pairs takes the text path and keeps CP,
-padding_free and PP. A VLM run passes its raw rows through: the trainer normalizes and
-chat-templates them itself and auto-selects ``DataCollatorForVLMSMPO`` (image processing at
-collation, vision tensors threaded through the chosen/rejected concat). A text run templates the
-pairs here and runs generation-eval examples.
-
-Supported Parallelism Modes: EP, CP, TP, ETP, PP and their allowlisted combinations
-(``SUPPORTED_AXIS_SETS``; TP+CP unsupported; a VLM run supports none of CP, PP or padding_free).
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \\
-        examples/preference/gptoss/smpo-gptoss-20b-tulu3-prefmix-ep.yaml
-
-Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the same plus an
-``images``/``image`` column (single image or list), which is what declares the VLM run.
-"""
+A VLM run passes raw rows through: the trainer templates them and auto-selects ``DataCollatorForVLMSMPO``. It supports
+none of CP, PP or padding_free."""
 
 from halo.config_validation import reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
@@ -63,10 +47,8 @@ def main():
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
 
-    # The run's data path, not the checkpoint's modality: a multimodal checkpoint carrying text-only
-    # pairs is a text run, and CP / padding_free / PP stay legal for it. Decided before the model
-    # load, which needs the checkpoint's processor for a VLM run, so the CP and PP refusals below
-    # raise before any weight is read (the trainer repeats them and adds padding_free).
+    # The data path, decided before the model load, which needs the processor for a VLM run, so the CP and PP refusals
+    # below raise before any weight is read (the trainer repeats them and adds padding_free).
     is_vlm = resolve_preference_vlm_run(args, model_config, ds, text_only_model=args.text_only_model, method="SMPO")
     if dist_args.context_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Context Parallelism — drop --context_parallel_size.")
@@ -77,8 +59,7 @@ def main():
         # `tools=`, so a declared tools column would render toolless.
         reject_unsupported_args("SMPO VLM mode", tools_field=args.tools_field)
 
-    # --- Model (class follows the checkpoint); padded preference takes the shared padded-workload
-    # request (dropped under live sinks and under CP) ---
+    # Padded preference takes the shared padded-workload request (dropped under live sinks and under CP).
     policy = load_policy_model(
         context,
         smpo_config,

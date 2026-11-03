@@ -17,12 +17,9 @@ from halo.models.moe.family_specs import find_moe_family_spec
 
 
 def _registry_conversions(model: nn.Module) -> list:
-    """``model``'s whole conversion mapping, as ``from_pretrained`` applies it.
-
-    Each of the family spec's ``hub_conversion_keys`` (read through ``text_config``, where a composite config
-    keeps ``model_type``) must resolve to entries: its vendor-namespace checkpoint would otherwise read
-    unconverted, which the planner skips as unmatched, leaving the model at its meta-device init.
-    """
+    """The whole conversion mapping, as ``from_pretrained`` applies it. Each ``hub_conversion_keys`` entry must
+    resolve, or its vendor-namespace checkpoint reads unconverted, which the planner skips, leaving the model at its
+    meta-device init."""
     model_type = getattr(text_config(model.config), "model_type", "")
     spec = find_moe_family_spec(model_type)
     declared = []
@@ -48,9 +45,8 @@ def _registry_conversions(model: nn.Module) -> list:
 def family_key_mapping(
     model: nn.Module, disk_keys: list[str], *, replay_loaded: bool = False
 ) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
-    """:func:`.conversion.lazy_key_mapping` of ``disk_keys`` planned onto ``model``'s state-dict names through
-    its family's whole conversion mapping, or with ``replay_loaded`` the conversions an eager load of ``model``
-    recorded."""
+    """:func:`.conversion.lazy_key_mapping` planned through the family's whole mapping, or with ``replay_loaded`` the
+    conversions an eager load recorded."""
     if replay_loaded:
         # transformers records the broad Bnb4bitDeserialize template (target "weight"), which also matches
         # ordinary norms and embeddings as an identity; packed Params4bit are never masters, so it is skipped.

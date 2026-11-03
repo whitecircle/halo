@@ -73,9 +73,7 @@ def resolve_policy_attn_implementation(
     init_from_scratch: bool,
     fa4_fallback: str = "sdpa",
 ) -> str:
-    """The attention backend :func:`load_distributed_model` resolves for a policy from its config, dtype and GPU,
-    before the Context Parallelism swap: what a run can check before any weight loads. ``fa4_fallback`` is
-    :func:`resolve_attn_implementation`'s."""
+    """The attention backend a policy resolves to before the CP swap; what a run can check before any weight loads."""
     return resolve_attn_implementation(
         model_config,
         requested,
@@ -178,11 +176,9 @@ def _load_undistributed_model(
     wraps_experts: bool,
     init_from_scratch: bool,
 ) -> PreTrainedModel:
-    """COLLECTIVE: load a whole model onto this rank for plain DDP/FSDP data parallelism.
-
-    ``wraps_experts`` adds the EP layers anyway: at ``ep_group_size == 1`` they distribute nothing
-    and exist for the grouped-GEMM expert compute and the FSDP-managed ep1 expert shard.
-    """
+    """COLLECTIVE: load a whole model for plain DDP/FSDP. ``wraps_experts`` adds the EP layers anyway: at
+    ``ep_group_size == 1`` they distribute nothing and exist for the grouped-GEMM compute and the FSDP-managed ep1
+    expert shard."""
     # Creating the groups must precede the node-serialized rank-local checkpoint replay.
     ep_config = pc.ep_config() if wraps_experts else None
     if init_from_scratch:
@@ -299,10 +295,10 @@ def _resolve_run_config(
     model_class,
     text_only_model: bool,
 ) -> tuple[ModelSource, AutoConfig, type, bool]:
-    """COLLECTIVE: the agreed source, the run's config, its model class and whether the EP layers apply, with
-    every refusal config.json answers raised before the process groups and the meta shell: a second, not minutes."""
+    """COLLECTIVE: the agreed source, the config, its model class and whether EP layers apply, with every refusal
+    config.json answers raised before the process groups and the meta shell."""
     apply_remote_code_compat_shims()
-    # Every read below — config, tokenizer, weights — takes this source's revision, so a Hub source loads
+    # Every read below (config, tokenizer, weights) takes this source's revision, so a Hub source loads
     # one agreed commit on every rank, straight from the cache.
     source = resolve_model_source(model_name_or_path, revision, tag="policy")
     model_config = AutoConfig.from_pretrained(
@@ -333,9 +329,8 @@ def _resolve_run_config(
 
 
 def _built_model_config(model_config, model_class):
-    """The config the built model carries, which Liger resolves its applier on and stamps: on a composite config
-    ``AutoModelForCausalLM`` builds the text-only sibling (``resolve_auto_model_class`` refuses a family whose
-    CausalLM entry is the wrapper itself) on the text sub-config, whose own head the fused loss patches."""
+    """The config the built model carries, which Liger stamps: on a composite config ``AutoModelForCausalLM`` builds
+    the text-only sibling on the text sub-config, whose own head the fused loss patches."""
     return text_config(model_config) if model_class is AutoModelForCausalLM else model_config
 
 
@@ -359,21 +354,15 @@ def load_distributed_model(
     preserve_checkpoint_precision: bool = False,
     **model_kwargs,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
-    """COLLECTIVE: load the policy and its tokenizer under ``parallelism_config`` (EP, CP, TP, PP or
-    combinations).
-
-    ``attn_implementation`` and ``model_class`` resolve from the config when None;
-    ``reset_sinks``/``train_sinks`` resolve to the GptOss :class:`SinksPolicy`; ``text_only_model`` picks
-    the text-only class of a multimodal checkpoint. Configured FP32 masters are restored before any
-    wrap for every checkpoint start; ``preserve_checkpoint_precision`` marks a full-finetune resume
-    source and also requires complete master coverage.
-    """
+    """COLLECTIVE: load the policy and its tokenizer under ``parallelism_config``. ``text_only_model`` picks a
+    multimodal checkpoint's text-only class; ``preserve_checkpoint_precision`` marks a full-finetune resume and
+    requires complete fp32-master coverage."""
     # Latched: free after the entry script's own pre-load call, a backstop for a caller without it.
     agree_rank_uniform_env()
     reject_unsupported_run(parallelism_config, dtype)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks, train_sinks=train_sinks)
 
-    # True fp32 matmuls before any forward — the image's TF32 default corrupts long-context RoPE.
+    # True fp32 matmuls before any forward, as the image's TF32 default corrupts long-context RoPE.
     configure_float32_matmul_precision()
 
     source, model_config, model_class, wraps_experts = _resolve_run_config(
@@ -424,9 +413,9 @@ def load_distributed_model(
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path, trust_remote_code=trust_remote_code, revision=source.revision
     )
-    # Training pads right. Half the collators force their side per call, the other half inherit this
-    # one — so a left-padding tokenizer (GLM-4.7-Flash, Gemma 4) makes the packing collator read
-    # leading pads as an attended document and drop the last real document's labels.
+    # Half the collators force their side per call and the others inherit this, so a left-padding tokenizer
+    # (GLM-4.7-Flash, Gemma 4) makes the packing collator read leading pads as an attended document and drop the last
+    # document's labels.
     tokenizer.padding_side = "right"
 
     model = _dispatch_model_loading(
@@ -444,8 +433,7 @@ def load_distributed_model(
         model_kwargs=model_kwargs,
     )
 
-    # Where weights were actually READ, or None for a random init: the resume loaders key their
-    # "already holds these weights" skip on this, since ``_name_or_path`` survives init_from_scratch.
+    # The weights' source, None for a random init, where ``_name_or_path`` survives; the resume's skip keys on this.
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, None if init_from_scratch else model_name_or_path)
     apply_run_model_policies(
         model,

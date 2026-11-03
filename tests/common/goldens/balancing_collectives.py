@@ -1,11 +1,5 @@
-"""Balancing collective-sequence golden: what configuring a run's MoE balancing and building its callback
-roster issue on rank 0 of a two-rank job, for every requested ``moe_balancing`` mode, loss kind and
-weight-sync flag, over tiny dense and MoE stand-ins.
-
-A case's trace holds the collectives in call order with the toolkit's log records between them, what the
-build raised, the roster it returned (the balancing callbacks with their settings) and the router config
-fields it left.
-"""
+"""Balancing collective-sequence golden: what configuring MoE balancing and building callbacks issue on rank 0 of two,
+per mode, loss and sync flag."""
 
 from __future__ import annotations
 
@@ -33,9 +27,8 @@ from tests.common.parallelism import make_parallelism_config
 GOLDEN_PATH = Path(__file__).with_suffix(".json")
 WORLD_SIZE = 2
 MODES = ("auto", "aux_loss", "bias_update", "bias_update_transient", "none")
-# The logging period MoE load callbacks receive, so the trace shows it reaching them.
+# So the trace shows the period reaching MoE load callbacks.
 LOGGING_STEPS = 5
-# The balancing callbacks' settings a trace records.
 _CALLBACK_SETTINGS = ("topk", "enable_router_logits", "update_rate", "exclude_last_slot", "log_every_n_steps")
 
 
@@ -49,8 +42,8 @@ class _Config:
 
 
 class _Model(torch.nn.Module):
-    """A config and the submodules ``modules()`` yields; ``forward`` declares ``output_router_logits``, the
-    parameter that says the class honours the config flag."""
+    """A config and submodules; ``forward`` declares ``output_router_logits``, which says the class honours the
+    flag."""
 
     def __init__(self, config: _Config, submodules=()):
         super().__init__()
@@ -141,8 +134,8 @@ class _TracedRecords(logging.Handler):
 
 @contextlib.contextmanager
 def _traced_records(trace: CollectiveTrace) -> Iterator[None]:
-    """Every INFO-and-above toolkit record into ``trace``, in place of the root handlers and whatever
-    level :func:`regen_main` disables."""
+    """Every INFO-and-above toolkit record into ``trace``, past the root handlers and whatever level :func:`regen_main`
+    disables."""
     root = logging.getLogger()
     handlers, level, disabled = root.handlers[:], root.level, root.manager.disable
     root.handlers, root.level = [_TracedRecords(trace)], logging.INFO
@@ -217,7 +210,6 @@ def trace_case(model_name: str, mode: str, policy_gradient_loss: bool, syncs: bo
 
 
 def render_golden() -> str:
-    """The golden file: every case's trace, one event a line."""
     return json.dumps({case_key(*case): trace_case(*case) for case in CASES}, indent=2) + "\n"
 
 

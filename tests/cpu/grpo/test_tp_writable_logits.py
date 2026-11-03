@@ -1,9 +1,5 @@
 """TRL's full-logits GRPO path divides the sliced logits by the temperature in place. A TP-gathered head on
-transformers' DTensor forward returns a view autograd forbids writing, so ``_writable_logits`` clones that head's
-output; a head on the local-shard forward returns a fresh tensor and needs no clone.
-
-    python tests/cpu/grpo/test_tp_writable_logits.py
-"""
+transformers' DTensor forward returns a view autograd forbids writing, so ``_writable_logits`` clones its output."""
 
 from __future__ import annotations
 
@@ -54,7 +50,7 @@ def test_a_local_shard_head_is_not_cloned_and_its_logits_take_the_in_place_divid
 
 
 def test_a_head_on_transformers_forward_is_cloned():
-    """Premise and gate together: transformers' gathered output refuses the divide, so that head keeps the clone."""
+    """Transformers' gathered output refuses the divide, so that head keeps the clone."""
     with fake_process_group_mesh(rank=0, world_size=TP) as mesh:
         model = _sharded_model(mesh)
         ALL_PARALLEL_STYLES[STYLE].install_forward(model.lm_head, mesh)

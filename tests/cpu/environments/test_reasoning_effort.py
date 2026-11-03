@@ -1,11 +1,5 @@
-"""CPU tests for reasoning-effort resolution (incl. "random") and the per-level CoT budget.
-
-Covers the general facility on EnvironmentBase (validation, the resolve_reasoning_effort helper,
-the thinking_budget_for_effort hook), the eval's stable per-task draw, which no process's hash seed
-moves, and the CodeContestsEnvironment override that binds each level to a token budget.
-
-    python tests/cpu/environments/test_reasoning_effort.py
-"""
+"""Reasoning-effort resolution (incl. random) and the per-level CoT budget: the base facility, the eval's stable
+per-task draw, and the CodeContestsEnvironment override."""
 
 import json
 import os

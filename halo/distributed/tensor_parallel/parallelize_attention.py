@@ -49,8 +49,6 @@ _ATTENTION_TP_STYLES: dict[str, str] = {
 
 
 def _find_attention(layer: nn.Module) -> tuple[nn.Module | None, str | None]:
-    """``(attention module, attribute)`` for the first of ``self_attn``/``attention``/``attn`` on ``layer``,
-    else ``(None, None)``."""
     for name in ("self_attn", "attention", "attn"):
         if hasattr(layer, name):
             return getattr(layer, name), name
@@ -58,16 +56,12 @@ def _find_attention(layer: nn.Module) -> tuple[nn.Module | None, str | None]:
 
 
 def _is_mla_attention(attn: nn.Module) -> bool:
-    """An MLA attention (compressed KV) shards by query head through its ``q_b_proj``/``kv_b_proj`` expansions.
-
-    ``is not None``, not ``hasattr``: transformers keeps an unused MLA Q-branch attribute present but None.
-    """
+    """Compressed-KV attention, sharded by query head. ``is not None``, since transformers keeps an unused MLA Q-branch
+    attribute present but None."""
     return getattr(attn, "q_b_proj", None) is not None or getattr(attn, "kv_b_proj", None) is not None
 
 
 def _parallelize_or_raise(attn: nn.Module, tp_mesh: DeviceMesh, plan: dict[str, str], what: str) -> None:
-    """Shard each planned projection of ``attn`` under its style, any failure raised as a ``RuntimeError``
-    naming ``what``."""
     try:
         for name, style_name in plan.items():
             shard_linear(getattr(attn, name), style_name, tp_mesh, name=name)
@@ -76,9 +70,9 @@ def _parallelize_or_raise(attn: nn.Module, tp_mesh: DeviceMesh, plan: dict[str, 
 
 
 def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
-    """The unplanned trainable children of ``attn``: norms applied after a colwise projection (Qwen3 ``q_norm``,
-    LFM2 ``q_layernorm``), whose replicated gradient covers this rank's heads only, as the projection returns
-    this rank's heads alone. MLA's norms sit before the colwise expansion, whose input gradient is SUMmed."""
+    """The unplanned trainable children of ``attn``: norms after a colwise projection (Qwen3 ``q_norm``, LFM2
+    ``q_layernorm``), whose replicated gradient covers this rank's heads only. MLA's norms sit before the colwise
+    expansion, whose input gradient is SUMmed."""
     if _is_mla_attention(attn):
         return []
     return [
@@ -95,15 +89,14 @@ def _attention_tp_plan(attn: nn.Module) -> dict[str, str]:
 
 
 def _is_tp_shardable(attn: nn.Module | None) -> bool:
-    """Whether the plan shards ``attn``: a validated class holding at least one planned projection."""
     return (
         attn is not None and type(attn).__name__ in TP_SHARDABLE_ATTENTION_CLASSES and bool(_attention_tp_plan(attn))
     )
 
 
 def _tp_decoder_layers(model: nn.Module, cfg, tp_size: int) -> nn.ModuleList:
-    """The decoder layers TP shards, their attention heads checked to divide ``tp_size``. Only these: the
-    embed_tokens/lm_head stay replicated, since DTensor-sharding them faults cuBLAS under EP+TP."""
+    """The decoder layers TP shards, heads checked to divide ``tp_size``. embed_tokens/lm_head stay replicated, since
+    DTensor-sharding them faults cuBLAS under EP+TP."""
     underlying = backbone_with_layers(model)
     layers = decoder_layers(underlying) if underlying is not None else None
     if layers is None:
@@ -136,9 +129,8 @@ def _reject_zero_shardable(layers: nn.ModuleList, cfg, tp_size: int) -> None:
 
 
 def reject_unshardable_tp_model(model: nn.Module, tp_size: int) -> None:
-    """Refuse a model whose decoder heads ``tp_size`` cannot split or whose attention the selective plan shards
-    in no layer, as :func:`apply_tp_to_attention_only` does. Reads the module tree alone, so a meta-device shell
-    answers before any weight loads."""
+    """Refuse a model :func:`apply_tp_to_attention_only` cannot shard. Reads the module tree alone, so a meta-device
+    shell answers before any weight loads."""
     cfg = getattr(model, "config", None)
     _reject_zero_shardable(_tp_decoder_layers(model, cfg, tp_size), cfg, tp_size)
 
@@ -213,9 +205,8 @@ def _declared_head_counts(text_config, field: str) -> tuple[int, ...]:
 
 
 def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool | None = None) -> None:
-    """Reject a head count TP cannot split evenly. Also run by ``load_rules.reject_unsupported_model`` before any
-    weight is read, since HF-native ``tp_plan="auto"`` checks none and dies on the first forward's reshape.
-    ``uses_mla`` defaults to a config probe; the module-tree caller passes what it observed."""
+    """Reject a head count TP cannot split evenly. Also run before any weight is read, since HF-native
+    ``tp_plan="auto"`` checks none and dies on the first forward's reshape."""
     if tp_size <= 1 or text_config is None:
         return
     for n_heads in _declared_head_counts(text_config, "num_attention_heads"):
@@ -240,13 +231,9 @@ def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool |
 
 
 def register_mla_rope_grad_reduction(attn: nn.Module, tp_mesh: DeviceMesh, config) -> None:
-    """SUM the gradient of the rope half of MLA's ``kv_a_proj_with_mqa`` output over the TP group, in backward.
-
-    The ``kv_lora_rank`` half feeds the colwise ``kv_b_proj``, whose input gradient is already SUMmed; the rope
-    half is broadcast to this rank's local heads without passing a TP projection, so its gradient covers those
-    heads only. Reducing at the output (transformers' ``mla_kv_a_proj`` remedy) keeps the weight a plain replica
-    whose gradient is complete on every rank, so the trainer's AVG is idempotent.
-    """
+    """SUM the gradient of the rope half of MLA's ``kv_a_proj_with_mqa`` output over the TP group, in backward. That
+    half is broadcast to this rank's heads without passing a TP projection, so its gradient covers those heads only;
+    reducing at the output keeps the weight a plain replica, so the trainer's AVG is idempotent."""
     text_config = config.get_text_config() if config is not None else None
     rope_dim = getattr(text_config, "qk_rope_head_dim", None)
     if rope_dim is None:

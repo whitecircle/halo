@@ -1,18 +1,7 @@
 #!/usr/bin/env python
-"""Every EP MoE family has one tiny model, and the per-family sweeps run each of them.
-
-The merge-on-save, precompute-resume, LoRA sync-exactness and EP determinism GPU suites take their
-``--family`` names from ``tests/common/tiny_models.py``'s ``TINY_MOE_FAMILIES`` (the sync-exactness
-suite its dense ones from ``TINY_DENSE_FAMILIES``) and their rows from ``tests/gpu/manifest.py``. A family registered
-in ``halo/distributed/expert_parallel/families`` with no tiny model, or one the rows skip for an adapter
-shape or a layout, would leave its path untested with nothing failing; the roster is therefore held to
-the EP registry, and the rows to the roster (for the sync-exactness suite, the part of it some
-rollout engine takes an online update for). The CP-vs-reference and CP fused-loss suites run the CP roster
-(``tests/common/equivalence/cp_equivalence.py``), which covers every Ulysses wrapper class, and the FSDP2
-reentrant-recompute suite trains every family on ep1 and on two EP groups.
-
-    python tests/cpu/conventions/test_tiny_family_roster.py
-"""
+"""Every EP MoE family has one tiny model and the per-family sweeps run each of them: the roster is held to the EP
+registry and the manifest rows to the roster. A family the rows skip would leave its path untested with nothing
+failing."""
 
 import shlex
 

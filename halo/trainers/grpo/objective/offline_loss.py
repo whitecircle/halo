@@ -1,9 +1,5 @@
-"""The offline-GRPO objective, shared by the non-PP loss, its pipeline counterpart and CP scoring.
-
-Pure tensor math over one batch, pipeline microbatch or CP token shard. The reduction splits because the
-pipeline divides once per step: :func:`offline_loss_numerator` is row-local (microbatch numerators sum to
-the batch's), :func:`offline_loss_normalizer` reads batch metadata alone, :func:`offline_loss` divides.
-"""
+"""The offline-GRPO objective, pure tensor math. The reduction splits because the pipeline divides once per step:
+:func:`offline_loss_numerator` is row-local, :func:`offline_loss_normalizer` reads batch metadata alone."""
 
 from __future__ import annotations
 
@@ -16,8 +12,7 @@ from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.sequence_chunks import cp_sum_rows
 from halo.trainers.grpo.objective.logratio import clamp_ref_logps
 
-# Derived from the config's own Literal annotations, so the dispatches here and the parse-time gate
-# can never drift apart.
+# From the config's own Literal annotations, so these dispatches and the parse-time gate cannot drift.
 LOSS_TYPES: tuple[str, ...] = get_args(OfflineGRPOConfig.__annotations__["loss_type"])
 PG_FORMULATIONS: tuple[str, ...] = get_args(OfflineGRPOConfig.__annotations__["policy_gradient_formulation"])
 
@@ -25,12 +20,8 @@ PG_FORMULATIONS: tuple[str, ...] = get_args(OfflineGRPOConfig.__annotations__["p
 def clamp_negative_advantage_logps(
     token_logps: torch.Tensor, advantages: torch.Tensor, min_log_prob: float | None
 ) -> torch.Tensor:
-    """``token_logps`` ([B, T]) floored at ``min_log_prob`` on the rows whose advantage ([B]) is negative.
-
-    Below the floor the clamp passes no gradient, so a negative-advantage row stops pushing a token
-    it already rates that unlikely further toward zero probability. Returns ``token_logps`` itself when
-    no floor is configured.
-    """
+    """Floored on negative-advantage rows. Below the floor the clamp passes no gradient, so such a row stops pushing a
+    token it already rates that unlikely further toward zero probability."""
     if min_log_prob is None:
         return token_logps
     return torch.where((advantages < 0).unsqueeze(1), token_logps.clamp(min=min_log_prob), token_logps)
@@ -46,13 +37,9 @@ def offline_token_objective(
     ref_logps: torch.Tensor | None = None,
     ref_logps_unclamped: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """The per-token loss (unmasked and unweighted) plus the per-token diagnostics to buffer.
-
-    ``prob_weighted`` L = -(π·A) weights high-prob tokens more; ``reinforce`` L = -(log π·A) is uniform.
-    At ``beta != 0`` the capped k3 KL ``exp(Δ) - Δ - 1`` lands on top; ``pg_objective`` is the term before
-    it. ``clamp_ref_logps`` takes the detached policy log-probs: its ceiling is ``policy + the clamp``, so
-    a grad-carrying policy would zero the KL gradient on every clamped token instead of bounding it.
-    """
+    """``prob_weighted`` L = -(π·A) weights high-prob tokens more; ``reinforce`` L = -(log π·A) is uniform.
+    ``clamp_ref_logps`` takes the detached policy log-probs, since a grad-carrying ceiling would zero the KL gradient
+    on every clamped token."""
     weights = torch.exp(token_logps) if policy_gradient_formulation == "prob_weighted" else token_logps
     per_token_loss = -(weights * advantages.unsqueeze(1))
     sample_values = {"logps": token_logps, "logps_unclamped": token_logps_unclamped, "pg_objective": -per_token_loss}
@@ -87,10 +74,8 @@ def offline_loss_numerator(
     row_token_counts: torch.Tensor | None = None,
     cp_config: CPConfig | None = None,
 ) -> torch.Tensor:
-    """The per-token loss summed over the supervised tokens, each row weighted ``1/group_size`` so every
-    source group counts equally; ``grpo`` first averages each row over its own tokens, counted by
-    ``row_token_counts`` (required under CP). Row-local, so pipeline microbatch numerators sum to the
-    batch's."""
+    """Summed over supervised tokens, each row weighted ``1/group_size`` so every source group counts equally; ``grpo``
+    first averages each row over its own tokens. Row-local, so pipeline microbatch numerators sum to the batch's."""
     if per_token_loss.shape != supervised_mask.shape or per_token_loss.shape[0] != group_sizes.numel():
         raise ValueError("Offline loss needs one supervision mask and group size per token row")
     group_weights = 1.0 / group_sizes.float()
@@ -105,10 +90,8 @@ def offline_loss_numerator(
 def offline_loss_normalizer(
     token_counts: torch.Tensor | None, group_sizes: torch.Tensor, *, loss_type: str, max_completion_length: int | None
 ) -> torch.Tensor:
-    """The loss type's whole-batch denominator over the ``1/group_size`` row weights: their sum
-    (``grpo``), the weighted completion-token count (``bnpo``; ``token_counts`` holds complete per-row
-    counts), or their sum times ``max_completion_length`` (``dr_grpo``). Group metadata is replicated
-    on every CP peer, so no collective runs here."""
+    """``grpo``: the ``1/group_size`` weights' sum; ``bnpo``: the weighted completion-token count; ``dr_grpo``: the sum
+    times ``max_completion_length``. Group metadata is replicated on CP peers, so no collective runs."""
     group_weights = 1.0 / group_sizes.float()
     if loss_type == "grpo":
         return group_weights.sum()
@@ -132,8 +115,7 @@ def offline_loss(
     row_token_counts: torch.Tensor | None = None,
     cp_config: CPConfig | None = None,
 ) -> torch.Tensor:
-    """Offline objective on complete rows or CP-owned token shards of the same rows; a shard passes
-    each row's complete ``row_token_counts``."""
+    """A CP token shard passes each row's complete ``row_token_counts``."""
     counts = _complete_row_token_counts(supervised_mask, row_token_counts, cp_config)
     numerator = offline_loss_numerator(
         per_token_loss, supervised_mask, group_sizes, loss_type=loss_type, row_token_counts=counts, cp_config=cp_config

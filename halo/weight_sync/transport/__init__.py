@@ -1,3 +1,2 @@
-"""The NCCL wire under the engine clients: the group rendezvous, bounded broadcast waits, the vLLM libnccl binding
-and pynccl communicator, packed broadcast with its send-buffer bookkeeping, and the SGLang c10d weight-update
-group."""
+"""The NCCL wire under the engine clients: group rendezvous, bounded waits, the vLLM libnccl binding and communicator,
+packed broadcast and the SGLang c10d group."""

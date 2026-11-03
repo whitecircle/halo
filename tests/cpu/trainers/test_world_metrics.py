@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """``WorldMetrics``: world values from rank-local records, folded in fixed-width all-reduces.
-
-TRL's ``log`` averages each process's own ``_metrics`` list and only the main process reports, so a fraction
-computed over one rank's rows is logged as the batch's: with the tied groups on other ranks,
-``sampling/degenerate_group_frac`` reads 0 while the drop fires. Real gloo ranks flush every kind twice and each
-fold is checked against a numpy reference over the pooled population. Once the ranks agreed on their keys, the
-non-percentile path must not reach an object collective: ``all_gather_object`` costs ~3W device-to-host syncs and
-W unpickles per flush on NCCL.
-
-    python tests/cpu/trainers/test_world_metrics.py
-"""
+Agreed keys must skip object collectives: ``all_gather_object`` costs ~3W host syncs and W unpickles per flush."""
 
 import datetime
 import json
@@ -68,9 +59,8 @@ def _moments(key: str, values: np.ndarray) -> dict[str, float]:
 
 
 def _record_every_kind(world: WorldMetrics, rank: int) -> None:
-    """Every kind but ``percentile`` from this rank's samples, plus the edge cases: a key of no world weight, moments
-    only rank 0 has a sample of and moments nobody has one of, a zero world denominator, and a value an fp32 fold
-    would round."""
+    """Every kind but ``percentile``, plus the edge cases: a key of no world weight, moments on rank 0 only and on no
+    rank, a zero world denominator, and a value an fp32 fold would round."""
     values, weights, mask = _samples(rank)
     world.fraction("frac", mask.sum(), mask.numel())
     for value, weight in zip(values, weights, strict=True):
@@ -156,9 +146,8 @@ def _record_a_percentile_alone(world: WorldMetrics, rank: int) -> None:
     world.percentile("p", float(rank), 50)
 
 
-# Per scenario: what each rank records, the flush's key_mismatch_error, and the object collectives its second
-# flush, once the keys were agreed, must not issue (each raises if called, so a transport that gathers objects
-# there fails instead of passing). No flush broadcasts an object.
+# Per scenario: what each rank records, the flush's key_mismatch_error, and the object collectives its second flush
+# must not issue (each raises if called). No flush broadcasts an object.
 _SCENARIOS: dict[str, tuple[Callable[[WorldMetrics, int], None], type[Exception] | None, tuple[str, ...]]] = {
     "every_kind": (_record_every_kind, None, _OBJECT_COLLECTIVES),
     "percentiles": (_record_percentiles, None, ("broadcast_object_list",)),
@@ -194,8 +183,7 @@ def _counted_flush(world: WorldMetrics, key_mismatch_error, forbidden: tuple[str
 
 
 def _scenario_worker(rank: int, out: str) -> None:
-    """Every scenario in order, recorded and flushed twice on one accumulator: each rank keeps both flushes'
-    outcomes (the logged metrics or the raised error) and how many times each called every collective."""
+    """Every scenario in order, recorded and flushed twice on one accumulator: outcomes and collective counts."""
     outcomes = {}
     for name, (record, key_mismatch_error, forbidden) in _SCENARIOS.items():
         world = WorldMetrics()
@@ -248,8 +236,7 @@ def test_every_kind_folds_to_its_reference_in_fixed_width_all_reduces(outcomes):
 
 
 def test_a_percentile_is_the_nearest_rank_of_the_pooled_values(outcomes):
-    """The one kind that ships raw values pools them in one object gather on every flush; the other keys still
-    reduce."""
+    """The one kind that ships raw values pools them in one object gather per flush; the other keys still reduce."""
     pooled = _pooled(0, masked=True)
     reference = {
         "frac": len(pooled) / len(_pooled(0, masked=False)),
@@ -262,8 +249,7 @@ def test_a_percentile_is_the_nearest_rank_of_the_pooled_values(outcomes):
 
 
 def test_a_rank_with_no_records_learns_the_keys_and_weighs_nothing(outcomes):
-    """Rank 0 abstains from the key check, learns the keys from the first flush's gather and then adds nothing to
-    the fixed-width reduce."""
+    """Rank 0 abstains from the key check, learns the keys from the first gather, then adds nothing to the reduce."""
     reference = {"m": (3.0 * 2 + 6.0 * 1) / 3, **_moments("v", _pooled(0, masked=True, ranks=(1, 2)))}
     for rank, logged in enumerate(_logged(outcomes, "abstaining_rank")):
         assert logged == pytest.approx(reference, rel=1e-12), f"rank {rank}"
@@ -301,8 +287,8 @@ def test_a_flush_nobody_recorded_for_is_one_all_reduce_and_logs_nothing(outcomes
 
 @pytest.mark.parametrize("scenario", list(_SCENARIOS))
 def test_the_fake_world_logs_or_raises_what_the_gloo_ranks_do(outcomes, scenario):
-    """The trainers' metric tests flush through ``fake_world``: it must keep the flush's folds and its key checks,
-    or a caller test pushing a key mismatch through it passes where the real ranks raise."""
+    """The trainers' metric tests flush through ``fake_world``; without the folds and key checks a mismatch test passes
+    where the real ranks raise."""
     record, key_mismatch_error, _ = _SCENARIOS[scenario]
     ranks = [WorldMetrics() for _ in _RANKS]
     for rank, world in enumerate(ranks):
@@ -325,8 +311,7 @@ def test_the_fake_world_logs_or_raises_what_the_gloo_ranks_do(outcomes, scenario
     ids=["nothing", "percentile"],
 )
 def test_a_flush_with_no_column_to_reduce_builds_no_tensor(record, expected):
-    """A flush with nothing to all-reduce (an empty window, as SFT's last log flushes, or percentiles alone) touches
-    no device: on NCCL an empty column tensor is still an allocation and a read-back."""
+    """On NCCL an empty column tensor is still an allocation and a read-back."""
     world = WorldMetrics()
     record(world, 0)
     with patch.object(world_metrics, "collective_device", side_effect=AssertionError("a column tensor was built")):
@@ -349,8 +334,7 @@ def test_a_key_recorded_as_two_kinds_is_refused_on_a_rank():
 
 @pytest.mark.parametrize("weight", [int, torch.tensor], ids=["number", "tensor"])
 def test_a_tensor_mean_of_no_weight_adds_nothing_even_a_nan(weight):
-    """A tensor value weighs by a number or a tensor; at a weight of 0 either way the record adds nothing, where a
-    plain product would carry the NaN into the weighted sum."""
+    """At a weight of 0 the record adds nothing, where a plain product would carry the NaN into the weighted sum."""
     world = WorldMetrics()
     world.mean("m", torch.tensor(math.nan), weight(0))
     world.mean("m", torch.tensor(2.0), weight(1))
@@ -367,8 +351,7 @@ def test_a_flush_appends_to_the_target_and_consumes_the_records():
 
 
 def _group_worker(rank: int, out: str) -> None:
-    """Two groups of two: each folds its own ranks' records and never sees the other's. Rank 2 records nothing
-    and learns the keys from rank 3, which is rank 1 of its group."""
+    """Two groups of two, each folding its own ranks' records. Rank 2 records nothing and learns keys from rank 3."""
     group = new_groups(rank, [[0, 1], [2, 3]], _PG_TIMEOUT)
     world = WorldMetrics()
     if rank != 2:
@@ -408,8 +391,7 @@ def _layout_worker(rank: int, out: str) -> None:
 
 
 def test_a_new_key_is_gathered_once_and_then_rides_the_agreed_layout(tmp_path):
-    """A key outside the agreed layout costs one object gather; the layout keeps it afterwards, so its absence
-    reports nothing and its return on another rank is again a plain SUM and MAX all-reduce."""
+    """The layout keeps the key afterwards, so its absence reports nothing and its return is a plain reduce."""
     out = str(tmp_path / "windows")
     run_gloo_ranks(_layout_worker, 2, out, pg_timeout=_PG_TIMEOUT)
     expected = [
@@ -440,8 +422,7 @@ def _dropped_key_worker(rank: int, out: str) -> None:
 
 
 def test_a_key_mismatch_inside_the_agreed_layout_raises_on_every_rank(tmp_path):
-    """A rank dropping a key the layout holds still fits the layout: the fixed-width reduce must still tell the
-    ranks' keys apart and raise, not log a key only some ranks recorded."""
+    """A rank dropping a key still fits the agreed layout, so the fixed-width reduce must tell the keys apart."""
     out = str(tmp_path / "windows")
     run_gloo_ranks(_dropped_key_worker, 2, out, pg_timeout=_PG_TIMEOUT)
     for rank in range(2):
@@ -452,8 +433,7 @@ def test_a_key_mismatch_inside_the_agreed_layout_raises_on_every_rank(tmp_path):
 
 
 def _alternating_groups_worker(rank: int, out: str) -> None:
-    """One accumulator flushed over the world and over a subgroup in turn: each keeps its own agreed layout, so a
-    rank of only one of them never reduces at the other's width."""
+    """One accumulator flushed over the world and a subgroup in turn: neither reduces at the other's width."""
     group = new_groups(rank, [[0, 1], [2, 3]], _PG_TIMEOUT)
     world = WorldMetrics()
     windows = []
@@ -546,16 +526,16 @@ def test_the_device_fold_is_pythons_fold_bit_for_bit():
 
 
 def test_the_exact_fold_data_tells_a_plain_sum_from_pythons():
-    """The control for the check above: on these columns a plain left-to-right sum and ``torch.sum`` both differ
-    from Python's compensated ``sum``, so a device fold that is either one fails it."""
+    """On these columns a plain sum and ``torch.sum`` both differ from Python's compensated ``sum``, so either fold
+    fails the check above."""
     columns = _hard_columns(300, seed=0, specials=False)
     assert any(_left_fold(column) != sum(column) for column in columns)
     assert any(float(torch.tensor(column, dtype=torch.float64).sum()) != sum(column) for column in columns)
 
 
 def _exact_worker(rank: int, out: str) -> None:
-    """Two windows of mixed tensor and number records on one accumulator, each flush checked against the host
-    fold of both ranks' records: at two ranks the backend's SUM and MAX are order-free, so they must agree exactly."""
+    """Two windows of mixed records on one accumulator: at two ranks the backend's SUM and MAX are order-free, so each
+    flush must match the host fold exactly."""
     world = WorldMetrics()
     results = []
     for window in range(2):

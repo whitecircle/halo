@@ -10,11 +10,7 @@ from halo.models.moe.family_specs import QWEN3
 
 
 class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
-    """EP layer for Qwen3 MoE with pre-fused expert tensors.
-
-    ``Qwen3MoeExperts`` provides fused ``gate_up_proj``/``down_proj``; gate_up is split here and the
-    halves stored in matmul convention.
-    """
+    """``Qwen3MoeExperts`` fuses ``gate_up_proj``/``down_proj``; gate_up splits into matmul-convention halves."""
 
     HF_MODULE_NAMES = ("Qwen3MoeSparseMoeBlock",)
     FAMILY = QWEN3
@@ -28,8 +24,6 @@ class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
     _NUM_EXPERTS_ATTR_PATHS = ("num_experts", "experts.num_experts", "experts")
 
     def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
-        """Split pre-fused gate_up_proj into separate matmul-convention tensors (ETP shards dim M;
-        weights_already_sharded skips dim-0 slicing)."""
         self._require_fused_experts(experts)
         start, end = self._local_expert_range(weights_already_sharded)
 
@@ -39,9 +33,8 @@ class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
         self._store_separate_glu_params(gate, up, local_down)
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """``Qwen3MoeTopKRouter`` weights at ``indices``: the shared softmax gating, renormalized per the
-        router's own configurable (default-off) ``norm_topk_prob``, read live so routing replay matches
-        the router the forward just called."""
+        """Renormalized per the router's configurable (default-off) ``norm_topk_prob``, read live so routing replay
+        matches the router the forward just called."""
         return self._softmax_gate_weights_at(router_logits, indices, normalize=self.gate.norm_topk_prob)
 
     def _route_hidden_states(self, flat: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
@@ -50,10 +43,9 @@ class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
             router_logits, weights, experts = self.gate(self._router_input(flat))
         if self._balancing_bias(router_logits) is None:
             return self._replay_router_choice(router_logits, experts, weights)
-        # Balancing shifts selection only. Weights come from _gate_weights_at, the same function routing replay
-        # uses, so they honour this family's configurable norm_topk_prob; the unconditional renormalization in
-        # _deepseek_biased_route would not, and a zero bias must reproduce the unbalanced route exactly.
-        # _biased_topk applies the routing replay itself.
+        # Balancing shifts selection only. Weights come from _gate_weights_at so they honour the configurable
+        # norm_topk_prob, which the unconditional renormalization in _deepseek_biased_route would not: a zero bias must
+        # reproduce the unbalanced route exactly.
         experts = self._biased_topk(router_logits)
         weights = self._gate_weights_at(router_logits, experts)
         self._record_expert_load(experts)

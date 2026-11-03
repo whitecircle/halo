@@ -1,6 +1,3 @@
-"""The module-tree lookups: the attribute probe misses with None, the layer-list lookup raises naming
-its candidates, and a module path is strict or lenient by name."""
-
 import pytest
 import torch.nn as nn
 

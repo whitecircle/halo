@@ -1,9 +1,6 @@
-"""Non-finite optimizer steps are never applied, since one NaN or inf in a step's gradients reaches every weight.
-
-The verdict is read off the global gradient norm every clip path all-reduces, so every rank reaches the same one. A
-toolkit optimizer skips the step on the device under a flag whose norm the host reads a step late; any other is
-skipped on the host. Weights already non-finite, or too many non-finite steps in a row, raise on every rank.
-"""
+"""Non-finite optimizer steps are never applied, since one NaN or inf reaches every weight. The verdict comes off the
+all-reduced global gradient norm, so every rank reaches the same one. Non-finite weights or too long a streak raise
+everywhere."""
 
 import functools
 import logging
@@ -26,13 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 def _stepped_optimizer(optimizer):
-    """The optimizer whose ``step`` runs: the one inside accelerate's ``AcceleratedOptimizer``, which steps it."""
+    """The optimizer inside accelerate's ``AcceleratedOptimizer``, which steps it."""
     return getattr(optimizer, "optimizer", optimizer)
 
 
 class NonFiniteStepGuardMixin:
-    """Skips the optimizer step whose global gradient norm is NaN or inf, for :class:`DistributedTrainerMixin`."""
-
     _max_consecutive_nonfinite_steps = DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS
     # The verdict on the step about to be taken: a host skip, or (step, device flag) for a toolkit optimizer.
     _skip_next_optimizer_step = False
@@ -52,14 +47,9 @@ class NonFiniteStepGuardMixin:
     _window_loss_scale = 1.0
 
     def _install_nonfinite_step_skip(self) -> None:
-        """Route ``self.optimizer.step`` through the verdict :meth:`_get_grad_norm` leaves for it.
-
-        Installed once, on the optimizer accelerate's wrapper steps (a later ``train()`` finds ``self.optimizer``
-        wrapped), over whatever ``step`` is at that point, holding the trainer weakly as torch's LR scheduler holds
-        the optimizer. Before a scheduler exists it is a method bound to the optimizer, the shape the scheduler
-        re-wraps (it reads ``step.__func__``); after one built ahead of ``create_optimizer`` (a caller's
-        ``optimizers=(optimizer, scheduler)``) it wraps the scheduler's step and keeps its marker.
-        """
+        """Installed once, over whatever ``step`` is then: a method bound to the optimizer, the shape the LR scheduler
+        re-wraps (it reads ``step.__func__``), or the step of a scheduler built ahead of ``create_optimizer``, keeping
+        its marker."""
         optimizer = _stepped_optimizer(self.optimizer)
         if getattr(optimizer, "_nonfinite_step_skip_installed", False):
             return
@@ -93,13 +83,9 @@ class NonFiniteStepGuardMixin:
         optimizer._nonfinite_step_skip_installed = True
 
     def _hand_over_verdict(self, optimizer) -> bool:
-        """Give the step about to run on ``optimizer`` its verdict; True when the host skips it instead of stepping.
-
-        A non-finite step returns transformers' loss accumulator to its value before the step's micro-batches
-        (:meth:`get_batch_samples`), on the device under a flag. A host skip discards the gradients through the
-        optimizer's own ``zero_grad``, which also drops state it deferred for them (AdamWBF16's clip scale). The
-        zero-LR step that materializes state for a shard restore or save takes neither, and always steps.
-        """
+        """True when the host skips the step. A non-finite step returns HF's loss accumulator to its pre-step value; a
+        host skip also drops state the optimizer deferred (AdamWBF16's clip scale). The zero-LR step that materializes
+        state always steps."""
         if getattr(self, "_materializing_optimizer_state", False):
             return False
         if self._device_skip is not None:
@@ -116,9 +102,8 @@ class NonFiniteStepGuardMixin:
         return True
 
     def _get_grad_norm(self, model, grad_norm=None):
-        """HF's pre-step gradient norm, plus the verdict the optimizer step reads, once the previous step's device
-        verdict is settled. A loss scaler stepping accelerate's optimizer wrapper (fp16) owns overflow steps: it
-        skips them itself and lowers its scale, so no verdict is taken."""
+        """HF's pre-step gradient norm, plus the verdict the step reads. A loss scaler on accelerate's wrapper (fp16)
+        owns overflow steps, skipping them and lowering its scale, so no verdict is taken."""
         grad_norm = super()._get_grad_norm(model, grad_norm=grad_norm)
         self._read_device_verdict()
         if isinstance(self.optimizer, AcceleratedOptimizer) and self.optimizer.scaler is not None:
@@ -143,10 +128,8 @@ class NonFiniteStepGuardMixin:
         return torch.isfinite(norm).logical_not_()
 
     def _read_device_verdict(self) -> None:
-        """COLLECTIVE on a non-finite norm (:meth:`_record_verdict`). Read the norm of the last step an optimizer
-        took under a device flag, if still unread, and settle it: the optimizer settles the step (its bookkeeping
-        rolled back where the flag skipped it), then the guard counts, warns or raises. Its copy finished with its
-        own step, so the wait returns at once unless the host runs a whole step ahead of the device."""
+        """COLLECTIVE on a non-finite norm. The optimizer rolls back its bookkeeping where the flag skipped the step,
+        then the guard counts, warns or raises."""
         if self._unread_verdict is None:
             return
         (step, optimizer), self._unread_verdict = self._unread_verdict, None
@@ -157,8 +140,8 @@ class NonFiniteStepGuardMixin:
         self._record_verdict(step, norm)
 
     def _record_verdict(self, step: int, norm: float) -> bool:
-        """COLLECTIVE on a non-finite ``norm``. Whether optimizer step ``step``, whose global gradient norm is
-        ``norm``, may be applied; counts, warns about or raises on one that may not."""
+        """COLLECTIVE on a non-finite ``norm``. Whether ``step`` may be applied; counts, warns or raises on one that
+        may not."""
         if math.isfinite(norm):
             self._nonfinite_streak = 0
             return True
@@ -185,10 +168,8 @@ class NonFiniteStepGuardMixin:
         return False
 
     def _raise_on_nonfinite_weights(self, step: int) -> None:
-        """COLLECTIVE: raise on every rank when any rank holds a non-finite parameter value.
-
-        Runs only on a non-finite step: one isfinite reduction per local parameter shard, read back once.
-        """
+        """COLLECTIVE. Raise on every rank when any rank holds a non-finite parameter; runs only on a non-finite
+        step."""
         reshard_fsdp2_modules(self.model)
         named = [(name, to_local(param.detach())) for name, param in self.model.named_parameters()]
         finite = torch.stack([torch.isfinite(shard).all() for _, shard in named]).tolist() if named else []
@@ -205,23 +186,20 @@ class NonFiniteStepGuardMixin:
         reject_across_ranks(reason, f"The finite-weights check at optimizer step {step}")
 
     def _init_training_state(self, *args, **kwargs):
-        """A training run starts with no unread verdict, settled ahead of any optimizer-state load (one an earlier
-        run left when it raised), and counts its skipped steps from zero, as transformers restarts its state and
-        loss accumulators."""
+        """Settle a verdict an earlier run left when it raised, ahead of any optimizer-state load, and count skipped
+        steps from zero, as transformers restarts its accumulators."""
         self._read_device_verdict()
         self._run_steps_skipped = self._window_steps_skipped = 0
         return super()._init_training_state(*args, **kwargs)
 
     def get_batch_samples(self, *args, **kwargs):
-        """The batches of the optimizer step about to start, fetched ahead of its micro-batches: the loss
-        accumulator's value here is the one a skip of this step restores."""
+        """Fetched ahead of the step's micro-batches, so the loss accumulator here is the value a skip restores."""
         self._tr_loss_before_step = self._tr_loss.clone()
         return super().get_batch_samples(*args, **kwargs)
 
     def _maybe_log_save_evaluate(self, tr_loss, *args, **kwargs):
-        """A step that logs, evaluates or saves settles the unread verdict first, so a log reports it and a
-        checkpoint's optimizer state counts applied steps only (an evaluation decides a ``save_strategy: best``
-        save). A logged window's loss is over its applied steps, NaN where it applied none."""
+        """Settle the unread verdict first, so a log reports it and a checkpoint's optimizer state counts applied steps
+        only. A window's loss is over its applied steps, NaN at none."""
         control = self.control
         if control.should_log or control.should_evaluate or control.should_save:
             self._read_device_verdict()
@@ -241,8 +219,8 @@ class NonFiniteStepGuardMixin:
         super().log(logs, start_time)
 
     def _finalize_training(self, *args, **kwargs):
-        """Read the last step's verdict before the run ends, so a final non-finite step is reported; the run's
-        ``train_loss`` over the steps it applied, NaN where it applied none."""
+        """Read the last step's verdict, so a final non-finite step is reported; ``train_loss`` is over applied steps,
+        NaN at none."""
         self._read_device_verdict()
         if self._run_steps_skipped:
             steps = self.state.global_step - self._initial_global_step

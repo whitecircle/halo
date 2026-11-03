@@ -1,12 +1,6 @@
-"""The thinking-budget e2e check grades the turns the checkpoint's own policy sampled.
-
-The e2e takes one large optimizer step, after which a gpt-oss policy writes turns that never open an
-analysis channel: the engine's budget, counted per analysis message, has nothing to cap there, while the
-reasoning parser still reports the whole turn as reasoning. The recorder keeps only the turns sampled
-before the first optimizer step, so the check measures the engine's budget rather than the step, and it
-probes the engine's enforcement only after the trainer's first push: until then a server shared by the rows
-of a tier serves the previous row's trained policy.
-"""
+"""The thinking-budget e2e check grades turns sampled before the first optimizer step: after its large step a
+gpt-oss policy never opens an analysis channel, so the budget has nothing to cap. It probes the engine only after
+the trainer's first push, since a shared server serves the previous row's policy until then."""
 
 import types
 
@@ -84,7 +78,6 @@ def test_a_rank_without_a_probe_only_pushes(recorder, monkeypatch):
 
 
 def test_an_accepted_field_is_not_enough_until_the_probe_runs(monkeypatch):
-    """A run whose probe never fires cannot pass on the acceptance check alone."""
     monkeypatch.setattr(thinking_budget, "_chat", lambda *a, **k: types.SimpleNamespace(status_code=200, text=""))
     checks: dict[str, bool] = {}
 

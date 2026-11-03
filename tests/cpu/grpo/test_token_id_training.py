@@ -1,17 +1,5 @@
-"""Golden tests for env-GRPO ``train_on_sampled_tokens`` (training on the actual sampled generation
-token ids captured from vLLM logprobs, instead of re-tokenizing a chat-template re-render).
-
-Two units are covered without a GPU / a live model:
-  1. ``_extract_token_ids`` — parsing the ``token_id:N`` logprobs the server emits under
-     ``--return-tokens-as-token-ids`` (and refusing malformed/absent logprobs, so the caller falls back
-     to re-tokenization rather than training on a corrupted sequence).
-  2. The per-turn assembly invariant — each assistant turn's row completion is EXACTLY that turn's
-     captured sampled ids (verbatim, no re-tokenization or trimming), and the row prompt is the
-     serving-template render of the prior history. This is the whole point of the feature: the loss
-     reinforces the sampled tokens verbatim, model-agnostically.
-
-    python tests/cpu/grpo/test_token_id_training.py
-"""
+"""Env-GRPO ``train_on_sampled_tokens``: parsing ``token_id:N`` logprobs and the per-turn row assembly. A row's
+completion is that turn's captured ids verbatim, its prompt the serving-template render of the prior history."""
 
 import types
 
@@ -41,12 +29,12 @@ def test_extract_token_ids_parses_token_id_form():
 
 
 def test_extract_token_ids_rejects_missing_or_malformed():
-    # No logprobs at all → None (caller falls back to re-tokenization).
+    # No logprobs at all: the caller falls back to re-tokenization.
     assert _extract_token_ids({}) is None
     assert _extract_token_ids({"logprobs": None}) is None
-    # An empty content list is a zero-token completion the capture DID return, not a missing capture.
+    # An empty content list is a zero-token completion the capture did return.
     assert _extract_token_ids({"logprobs": {"content": []}}) == []
-    # A plain-text token (server not run with --return-tokens-as-token-ids) → None, not a guess.
+    # A plain-text token means the server ran without --return-tokens-as-token-ids.
     assert _extract_token_ids(_choice(["token_id:1", "hello"])) is None
     assert _extract_token_ids(_choice(["token_id:notanint"])) is None
 
@@ -62,17 +50,12 @@ def test_extract_token_logprobs_rejects_missing_or_malformed():
     assert _extract_token_logprobs({}) is None
     assert _extract_token_logprobs({"logprobs": None}) is None
     assert _extract_token_logprobs({"logprobs": {"content": []}}) == []
-    # An entry with no numeric logprob → None (don't fabricate a confidence value).
     assert _extract_token_logprobs({"logprobs": {"content": [{"token": "token_id:1"}]}}) is None
     assert _extract_token_logprobs(_choice_lp([("token_id:1", "nan")])) is None
 
 
-# --- per-turn assembly invariant (needs the gpt-oss tokenizer; skips cleanly offline) -------------
-
-
 def _make_trainer_stub(tok):
-    """A minimal object exposing exactly what _tokenize_trajectory_turns touches, with the real methods
-    bound so the prompt render is the genuine template path."""
+    """Real methods bound, so the prompt render takes the real template path."""
     stub = types.SimpleNamespace(
         processing_class=tok,
         _tokenizer=tok,
@@ -93,10 +76,8 @@ def _make_trainer_stub(tok):
 
 
 def test_per_turn_prompt_uses_engine_ids_verbatim():
-    """When a turn carries the ENGINE's rendered prompt ids (vLLM return_token_ids), the row's prompt
-    must be those ids verbatim — no template re-render (which drifts from the server on effort
-    steering, tool-schema formatting, and channel placement). Turns without them fall back to the
-    render. Model-agnostic: the ids are opaque to the assembly."""
+    """A turn carrying the engine's prompt ids uses them verbatim, since a template re-render drifts from the server on
+    effort steering, tool-schema formatting and channel placement. Turns without them fall back to the render."""
     engine_prompt = [11, 22, 33, 44, 55]
     comp = [7, 8, 9]
     traj = Trajectory()
@@ -134,7 +115,6 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
 def test_per_turn_assembly_uses_sampled_ids_verbatim():
     tok = load_cached_tokenizer(GPT_OSS_20B)
 
-    # Distinct sampled-id sequences per turn; assembly must reproduce each without re-tokenizing.
     turn1 = tok(
         '<|channel|>commentary to=functions.python_repl <|constrain|>json<|message|>{"code":"print(1)"}<|call|>',
         add_special_tokens=False,
@@ -168,10 +148,8 @@ def test_per_turn_assembly_uses_sampled_ids_verbatim():
 
 
 def test_prompt_render_includes_tool_schema():
-    """The recompute prompt must condition on the SAME tool-definition block vLLM sampled under: the
-    rollout sends env.get_tools_schema() as chat-template `tools=`, so the trainer render must too.
-    Omitting it drops ~2/3 of the prompt (the harmony tool block) and mis-conditions every completion
-    token. This fails if the render stops passing tools."""
+    """The rollout sends ``env.get_tools_schema()`` as chat-template ``tools=``. Omitting it from the render drops ~2/3
+    of the prompt (the harmony tool block) and mis-conditions every completion token."""
     tok = load_cached_tokenizer(GPT_OSS_20B)
     # Production pins this harmony template on both the trainer and the vLLM server; mirror it.
     with open("jinja-templates/gpt-oss/gpt-oss-harmony.jinja") as f:
@@ -206,8 +184,7 @@ def test_prompt_render_includes_tool_schema():
 
 
 def test_fallback_context_render_is_the_engine_view():
-    """A turn without engine prompt ids re-renders its history exactly as the engine was told it:
-    with carried reasoning only the previous assistant turn keeps its thought, without it none does."""
+    """With carried reasoning only the previous assistant turn keeps its thought; without it none does."""
 
     def _episode():
         traj = Trajectory()
@@ -232,8 +209,7 @@ def test_fallback_context_render_is_the_engine_view():
 
 
 def test_a_per_turn_row_over_the_train_row_cap_leaves_the_batch():
-    """The cap is the rank's memory bound: the oversized turn is left out, its episode's other turns stay,
-    and the trainer's counter records it. Without a cap the same row trains."""
+    """The cap is the rank's memory bound. The episode's other turns stay and the trainer's counter records it."""
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("short", token_ids=[5, 6], prompt_token_ids=[1, 2]))
@@ -261,8 +237,6 @@ def test_every_turn_over_the_cap_trains_as_one_masked_row():
 
 
 def _turns_stub():
-    """A stub exposing only _tokenize_trajectory_turns + its render dep, no tokenizer needed for the
-    old-logps rows (fallback path is not exercised)."""
     stub = types.SimpleNamespace(
         _warned_once=set(),
         _rollout_routing_replay=False,
@@ -271,7 +245,7 @@ def _turns_stub():
         _rows_over_cap=0,
     )
     stub._render_messages_to_ids = lambda *a, **k: [1, 2, 3]
-    stub._context_limit = lambda: 10**9  # no overflow in this test's tiny rows
+    stub._context_limit = lambda: 10**9
     stub._tokenize_trajectory = lambda result: (torch.tensor([0]),) * 3
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
     for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
@@ -280,8 +254,7 @@ def _turns_stub():
 
 
 def test_old_logps_aligned_1to1_with_sampled_ids():
-    """The behavior-policy reference (4th tuple element) is the turn's sampling logprobs, exactly aligned
-    with completion_ids — so the PPO ratio exp(cur - old) is well-defined per sampled token."""
+    """The 4th tuple element is the turn's sampling logprobs, so the PPO ratio exp(cur - old) holds per token."""
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("a1", token_ids=[10, 11, 12], token_logprobs=[-0.1, -0.2, -0.3]))
@@ -301,8 +274,7 @@ def test_old_logps_aligned_1to1_with_sampled_ids():
 
 
 def test_old_logps_none_when_a_turn_lacks_logprobs():
-    """A turn with ids but no logprobs → old is None for that row, so the batch-level gate disables the
-    IS trust region (never a misaligned/partial reference)."""
+    """The batch-level gate then disables the IS trust region, so a misaligned or partial reference never trains."""
     traj = Trajectory()
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("a1", token_ids=[10, 11], token_logprobs=[-0.1, -0.2]))
@@ -313,9 +285,7 @@ def test_old_logps_none_when_a_turn_lacks_logprobs():
 
 
 def test_turns_path_records_context_overflow():
-    """The sampled-tokens (default) path must record an oversize error when a per-turn row exceeds the
-    context window — never silently truncate. The single-sequence path already does; this locks the
-    turns path, which every shipped env config uses."""
+    """The turns path, which every shipped env config uses, must record an oversize error and never truncate."""
     stub = _turns_stub()
     stub._context_limit = lambda: 4  # render=3 prompt tokens + 5 completion ids = 8 > 4
     stub._batch_errors = BatchBuildFence()
@@ -332,7 +302,6 @@ def test_turns_path_records_context_overflow():
 
 
 def _render_stub(render):
-    """A stub with the REAL whole-trajectory tokenizer and per-turn splitter wired over ``render``."""
     stub = types.SimpleNamespace(
         _warned_once=set(),
         _rollout_routing_replay=False,
@@ -357,10 +326,8 @@ def _render_stub(render):
 
 
 def test_unrenderable_trajectory_invalidates_the_episode_instead_of_the_run():
-    """A turn without engine ids sends the trajectory through the whole-render fallback; when the chat
-    template rejects it (a malformed tool-call payload), the episode must be dropped as invalid — fully
-    masked row, no group-baseline weight — and NOT recorded as the fatal batch error that takes every
-    rank down mid-run."""
+    """When the chat template rejects a trajectory (a malformed tool-call payload) the episode drops as invalid: a
+    masked row, no group-baseline weight, and no fatal batch error to take every rank down."""
 
     def render(*_a, **_k):
         raise TypeError("Can only get item pairs from a mapping.")
@@ -402,8 +369,7 @@ def test_per_turn_prefix_render_failure_drops_the_episode_not_the_run():
 
 
 def test_an_untrainable_turns_prefix_render_failure_drops_only_that_turn():
-    """An untrainable turn's row only ever adds a penalty, so a prefix the template rejects for it costs
-    that row alone: the episode stays valid and its finished turn still trains."""
+    """An untrainable turn's row only ever adds a penalty, so a prefix the template rejects costs that row alone."""
 
     def render(*_a, **_k):
         raise ValueError("template rejects this prefix")
@@ -421,9 +387,8 @@ def test_an_untrainable_turns_prefix_render_failure_drops_only_that_turn():
 
 
 def test_prefix_render_failure_masks_the_episode_even_when_the_whole_render_would_succeed():
-    """The invalidated episode must not reach the whole-trajectory fallback: that render can succeed
-    where the per-turn prefix render failed and would hand an episode already excluded from the group
-    baseline a weighted row (and, under rollout routing replay, a row with no captured routing)."""
+    """That render can succeed where the prefix render failed, handing an episode already out of the group baseline a
+    weighted row (and, under rollout routing replay, one with no captured routing)."""
 
     def render(*_a, **_k):
         raise ValueError("template rejects this prefix")
@@ -446,9 +411,6 @@ def test_prefix_render_failure_masks_the_episode_even_when_the_whole_render_woul
 
 
 def test_prefix_render_failure_on_a_later_turn_masks_the_earlier_rows_too():
-    """An episode is invalid as a whole: a first turn whose engine prompt ids made it a trainable row
-    must not survive a later turn's failed prefix render at the episode's (now excluded) advantage."""
-
     def render(*_a, **_k):
         raise ValueError("template rejects this prefix")
 

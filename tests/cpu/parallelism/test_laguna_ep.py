@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""CPU parity coverage for Laguna's EP layer, against the REAL in-library MoE block.
-
-The wrapper claims `transformers.models.laguna` by class name and by ``model_type``, so the block it
-is checked against must be the real one: a hand-written stand-in can declare attributes the library
-class does not have (``norm_topk_prob`` is exactly such an attribute — ``modular_laguna`` deletes the
-field, so nothing in the real block/gate/config carries it) and would then hide a resolution bug that
-fires the moment a checkpoint loads in library format.
-
-Run: ``python tests/cpu/parallelism/test_laguna_ep.py`` (or ``pytest -m cpu``).
-"""
+"""Laguna's EP layer against the real in-library MoE block, since a stand-in could declare ``norm_topk_prob``, which
+``modular_laguna`` deletes."""
 
 from __future__ import annotations
 
@@ -46,7 +38,7 @@ def _library_config() -> LagunaConfig:
 
 
 def _library_block() -> LagunaSparseMoeBlock:
-    """The real `LagunaSparseMoeBlock`, fp64 so routing-weight scale errors cannot hide in bf16 noise."""
+    """fp64 so routing-weight scale errors cannot hide in bf16 noise."""
     torch.manual_seed(7)
     block = LagunaSparseMoeBlock(_library_config()).to(torch.float64)
     for parameter in block.parameters():
@@ -56,8 +48,7 @@ def _library_block() -> LagunaSparseMoeBlock:
 
 
 def test_laguna_owns_its_wrapper_by_module_name_and_model_type():
-    """Both registries must land on the Laguna class, not on GLM-4's — they differ in the routing
-    default below, so resolving to the parent silently changes every routed weight."""
+    """Resolving to GLM-4's class would silently change every routed weight."""
     assert MOE_LAYER_MAP["LagunaSparseMoeBlock"] is EPLagunaMoELayer
     assert find_moe_family_spec("laguna") is EPLagunaMoELayer.FAMILY
     assert find_moe_family_spec("glm4_moe_lite") is EPGlm4MoELayer.FAMILY
@@ -65,13 +56,11 @@ def test_laguna_owns_its_wrapper_by_module_name_and_model_type():
 
 
 def test_library_block_declares_no_norm_topk_prob_so_the_family_default_decides():
-    """Anti-vacuity guard for the test below: if a future transformers release puts the attribute
-    back on the block/gate/config, the resolution chain — not the default — supplies it, and the
-    parity assertion would stop exercising `_NORM_TOPK_PROB_DEFAULT`."""
+    """Anti-vacuity: if transformers puts the attribute back, the parity assert stops exercising
+    `_NORM_TOPK_PROB_DEFAULT`."""
     block = _library_block()
     assert not any(hasattr(source, "norm_topk_prob") for source in (block, block.gate, _library_config()))
-    # Laguna is the family that OPTS OUT of the knob, which is what lets its default decide; GLM-4
-    # declares it on gate and config, so there it stays required and no default may stand in.
+    # Laguna opts out of the knob, letting its default decide; GLM-4 declares it, so no default may stand in.
     assert "norm_topk_prob" in EPLagunaMoELayer._OPTIONAL_ROUTING_KNOBS
     assert "norm_topk_prob" not in EPGlm4MoELayer._OPTIONAL_ROUTING_KNOBS
     assert EPLagunaMoELayer._NORM_TOPK_PROB_DEFAULT is True
@@ -81,9 +70,8 @@ def test_library_block_declares_no_norm_topk_prob_so_the_family_default_decides(
 
 
 def test_laguna_forward_matches_the_library_block():
-    """`LagunaTopKRouter.forward` normalizes the gathered sigmoid scores unconditionally. Skipping it
-    scales every token's routed output by the sum of its top-k scores (~0.9-2.0x, data dependent),
-    which no shape or dtype check can catch."""
+    """Skipping the router's normalization scales routed output by the top-k sum (~0.9-2.0x), past any shape or
+    dtype check."""
     block = _library_block()
     inputs = torch.randn(2, 5, H, dtype=torch.float64)
 
@@ -100,7 +88,7 @@ def test_laguna_shared_expert_and_bias_follow_the_library_block():
     layer = EPLagunaMoELayer(block, single_process_ep_config(E)).cpu()
     assert layer._shared_expert_attr == "shared_experts"
     assert layer.routed_scaling_factor == SCALING
-    assert layer.n_group == 1 and layer.topk_group == 1  # no group-limited selection in Laguna
+    assert layer.n_group == 1 and layer.topk_group == 1  # No group-limited selection in Laguna.
     assert layer.act_fn is expected_act_fn
     assert {name for name, _ in layer.replicated_named_params()} == {
         f"shared_experts.{name}" for name, _ in layer.shared_experts.named_parameters()
@@ -122,7 +110,7 @@ def test_laguna_gather_restores_the_hub_per_expert_layout():
 
 
 class _RemoteRouter(nn.Module):
-    """The revision-pinned hub router: declares ``norm_topk_prob`` itself and ships no bias tensor."""
+    """The revision-pinned hub router declares ``norm_topk_prob`` itself and ships no bias tensor."""
 
     def __init__(self, norm_topk_prob: bool):
         super().__init__()
@@ -133,7 +121,7 @@ class _RemoteRouter(nn.Module):
 
     def forward(self, hidden_states):
         logits = F.linear(hidden_states, self.weight).float()
-        # Deliberately incorrect cached choices: the EP layer must route from the logits itself.
+        # Deliberately incorrect cached choices: the EP layer must route from the logits.
         weights = torch.ones(*logits.shape[:-1], K, device=logits.device)
         indices = torch.zeros(*logits.shape[:-1], K, dtype=torch.long, device=logits.device)
         return logits, weights, indices
@@ -149,7 +137,7 @@ class _RemoteExperts(nn.Module):
 
 
 class _RemoteBlock(nn.Module):
-    """Hub remote-code layout: shared expert named ``shared_expert``, knobs on the router."""
+    """Shared expert named ``shared_expert``, knobs on the router."""
 
     def __init__(self, norm_topk_prob: bool = True):
         super().__init__()
@@ -161,12 +149,11 @@ class _RemoteBlock(nn.Module):
 
 @pytest.mark.parametrize("declared", [True, False])
 def test_remote_code_declaration_still_wins_over_the_family_default(declared):
-    """The hub revisions the shipped configs pin put the knob on the router. Hard-coding the Laguna
-    default instead of keeping the resolution chain would ignore a checkpoint that says otherwise."""
+    """Hard-coding the default would ignore a checkpoint that says otherwise."""
     torch.manual_seed(3)
     layer = EPLagunaMoELayer(_RemoteBlock(norm_topk_prob=declared), single_process_ep_config(E)).cpu()
     assert layer.norm_topk_prob is declared
-    # Remote-code blocks name the shared expert in the singular and omit the correction bias.
+    # Singular shared expert, no correction bias.
     assert layer._shared_expert_attr == "shared_expert"
     assert not layer.gate.e_score_correction_bias.is_meta
     assert torch.count_nonzero(layer.gate.e_score_correction_bias) == 0

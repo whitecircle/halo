@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Test: SMPOTrainer on a VLM (Qwen3-VL-2B) — single-GPU vision-SMPO smoke.
-
-A ProcessorMixin ``processing_class`` flips the trainer into VLM mode: rows are chat-templated with
-the prefix-strip invariant, images are processed at collation (``DataCollatorForVLMSMPO``), and the
-vision tensors ride the chosen|rejected concatenated forward duplicated row-major. Runs a real model
-forward/backward on that path and checks that VLM mode is entered, the final training loss is finite
-and SMPO's ``rewards/*`` metrics are logged. It does not compare the loss to a reference.
-
-Run with 1 GPU:
-    torchrun --nproc_per_node=1 tests/gpu/trainers/preference/test_smpo_vlm.py
-"""
+"""SMPOTrainer on Qwen3-VL-2B, a single-GPU vision smoke: VLM mode entered, finite loss, ``rewards/*`` logged. Compares
+no loss against a reference."""
 
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor

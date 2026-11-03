@@ -1,27 +1,6 @@
 #!/usr/bin/env python
-"""Delegating Liger specs: upstream's applier runs, and the toolkit adds one role on top.
-
-Qwen3.5 / Qwen3.6 and Qwen3-Next are covered by upstream liger-kernel except for the gated-delta-net
-blocks' gated norm and, on the MoE siblings, the shared-expert MLP. Their specs therefore delegate:
-the upstream applier keeps every role it declares, and the spec names only what it leaves eager. What
-this file pins is the seam, not the kernel numerics (those are
-``tests/gpu/kernels/test_liger_family_kernels.py``):
-
-* the toolkit applier claims the model types AND carries upstream's whole knob surface — a dropped
-  knob silently refuses a kernel the family had before the spec existed;
-* the delegation is derived from liger-kernel's own registry, so a family it stops covering fails at
-  import instead of resolving to a spec that patches one role and reports the rest as applied;
-* neither side patches what the other did — not at class level, and not when re-applied on a built
-  model — and the roles upstream always swaps are absent from the spec;
-* a role the spec takes over (``upstream_off``) is the toolkit's variant, not upstream's — GptOss's
-  Gemma-cast norm, Gemma 4's always-on dense MLP, the Qwen MoE families' shared-expert MLP (whose
-  upstream flag would also swap the routed experts);
-* cross-entropy never reaches upstream's branch (a process-wide ``F.cross_entropy`` rebind): the
-  toolkit's scoped patch serves it;
-* the EP fused-GLU decision still fires through the delegation.
-
-    pytest -m cpu tests/cpu/model_loading/test_liger_upstream_delegation.py
-"""
+"""Delegating Liger specs: upstream's applier runs and the toolkit adds one role on top.
+Pins the seam; the kernel numerics are in ``tests/gpu/kernels/test_liger_family_kernels.py``."""
 
 from __future__ import annotations
 
@@ -41,10 +20,7 @@ from tests.common.repo import probe_findings
 
 DELEGATING_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.delegates_to_upstream]
 
-# The families the delegation exists for: upstream covers them, and the toolkit adds their GDN
-# blocks' gated norm (the Qwen families) or takes over a role upstream gets wrong or runs slower for them
-# (GptOss's norm casting, Gemma 4's EP-surviving dense MLP, the Qwen3 MoE norms on the native kernel). Named here so deleting a spec fails rather than
-# shrinking the sweep.
+# Named here so deleting a spec fails rather than shrinking the sweep.
 EXPECTED_DELEGATING_TYPES = {
     "qwen3_5",
     "qwen3_5_text",
@@ -60,12 +36,8 @@ QWEN3_NEXT_MODELING = "transformers.models.qwen3_next.modeling_qwen3_next"
 
 
 class _DelegatingProbe:
-    """A toolkit applier standing in front of a REAL upstream one, without applying anything.
-
-    Every rule dispatch derives from the applier reads the same two things a real
-    :class:`LigerApplier` exposes — its signature and its ``upstream`` — so the probe exercises them
-    while leaving the process's transformers classes untouched.
-    """
+    """Dispatch reads an applier's signature and ``upstream``, so the probe exercises both without touching
+    transformers classes."""
 
     def __init__(self, upstream):
         self.upstream = upstream
@@ -84,7 +56,6 @@ class _DelegatingProbe:
 
 
 def test_the_delegating_families_resolve_on_the_toolkit_branch():
-    """Each resolves to a toolkit applier that delegates, with at least one role of its own."""
     delegating = {model_type for spec in DELEGATING_SPECS for model_type in spec.model_types}
     assert delegating == EXPECTED_DELEGATING_TYPES
 
@@ -101,14 +72,8 @@ def test_the_delegating_families_resolve_on_the_toolkit_branch():
 
 
 def test_the_taken_over_roles_are_declared_where_upstreams_variant_is_wrong():
-    """GptOss's norm, Gemma 4's dense MLP and the Qwen MoE GLU are the roles taken back from upstream.
-
-    Upstream applies the llama-cast ``LigerRMSNorm`` to ``GptOssRMSNorm``, which multiplies its
-    weight in fp32 before the cast back (Gemma's mode); its ``geglu`` swaps ``Gemma4TextMLP``, the
-    dense MLP every Gemma-4 decoder layer keeps beside its experts, which the EP force-off would
-    otherwise strip on every grouped-GEMM run; and its Qwen3.5-MoE / Qwen3-Next ``swiglu`` also swaps
-    the routed experts for ``LigerExperts``, a kernel the routed experts never run.
-    """
+    """Upstream's llama-cast norm miscasts ``GptOssRMSNorm``, its ``geglu`` would be force-stripped under EP, and
+    its Qwen ``swiglu`` also swaps the routed experts."""
     by_type = {spec.model_types[0]: spec for spec in DELEGATING_SPECS}
     assert by_type["gpt_oss"].upstream_off == ("rms_norm",)
     assert by_type["gpt_oss"].rms_norm == ("GptOssRMSNorm",) and by_type["gpt_oss"].rms_norm_casting_mode == "gemma"
@@ -142,18 +107,13 @@ def test_a_withheld_flag_needs_the_role_it_stands_for():
 
 @pytest.mark.parametrize("spec", DELEGATING_SPECS, ids=lambda s: s.model_types[0])
 def test_a_delegating_applier_offers_upstreams_knobs_with_the_toolkit_loss_convention(spec):
-    """Signature = upstream's names, toolkit's loss defaults.
-
-    Dispatch reads valid kernels, the ``rope`` auto-off and ``_PER_MODEL_DEFAULTS`` off this
-    signature. Narrowing it drops a kernel the family otherwise gets; widening it offers one upstream
-    would reject as an unexpected keyword.
-    """
+    """Narrowing it drops a kernel the family otherwise gets; widening it offers one upstream would reject."""
     applier = dispatch._TOOLKIT_LIGER_APPLIERS[spec.model_types[0]]
     parameters = inspect.signature(applier).parameters
     upstream = inspect.signature(applier.upstream).parameters
     assert set(parameters) == set(upstream)
-    # Liger's own defaults are FLCE on / CE off; the toolkit's are the reverse, because CE keeps the
-    # logits every metric reads. The rest of the knobs stay exactly as upstream declares them.
+    # Liger defaults to FLCE on / CE off; the toolkit's are the reverse, because CE keeps the logits every metric
+    # reads.
     assert parameters["cross_entropy"].default is True
     assert parameters["fused_linear_cross_entropy"].default is False
     for name in set(upstream) - {"cross_entropy", "fused_linear_cross_entropy", "model"}:
@@ -161,11 +121,7 @@ def test_a_delegating_applier_offers_upstreams_knobs_with_the_toolkit_loss_conve
 
 
 def test_the_moe_families_add_their_shared_expert_mlp():
-    """Dropping the shared-expert role would leave it eager on every layer, under EP included.
-
-    Upstream's ``swiglu`` never runs for these families (it would swap ``*Experts``); the shared
-    expert every EP layer adopts unchanged is fused only because the spec names its MLP class.
-    """
+    """The shared expert every EP layer adopts is fused only because the spec names its MLP class."""
     shared_expert_mlps = {
         model_type: spec.glu_mlp
         for spec in DELEGATING_SPECS
@@ -177,18 +133,13 @@ def test_the_moe_families_add_their_shared_expert_mlp():
         "qwen3_5_moe_text": ("Qwen3_5MoeMLP",),
         "qwen3_next": ("Qwen3NextMLP",),
     }
-    # The dense sibling must NOT declare one: upstream's dense applier class-swaps `Qwen3_5MLP`
-    # itself, and the patch-time guard below refuses to stack on top of that.
+    # Upstream's dense applier class-swaps `Qwen3_5MLP` itself, and the patch-time guard refuses to stack on that.
     dense = next(spec for spec in DELEGATING_SPECS if spec.model_types[0] == "qwen3_5")
     assert not dense.glu_mlp
 
 
 def test_delegation_to_a_family_upstream_does_not_cover_is_refused():
-    """Derived from liger-kernel's registry, so a family it drops fails loudly at build.
-
-    Silently falling back to "patch only the added role" would leave the norms, the fused GLU and the
-    head unpatched while dispatch reported the whole kernel set as applied.
-    """
+    """Patching only the added role would leave the rest unpatched while dispatch reported the whole set as applied."""
     spec = LigerFamilySpec(
         model_types=("a_family_liger_does_not_cover",),
         modeling_module=QWEN3_NEXT_MODELING,
@@ -200,10 +151,7 @@ def test_delegation_to_a_family_upstream_does_not_cover_is_refused():
 
 
 def test_delegation_across_two_upstream_appliers_is_refused():
-    """Aliases of one family share an upstream applier; two different ones is a mis-grouped spec.
-
-    The build would pick one of them and patch the other family's model types with it.
-    """
+    """The build would pick one applier and patch the other family's model types with it."""
     spec = LigerFamilySpec(
         model_types=("qwen3_next", "qwen3_5_moe"),
         modeling_module=QWEN3_NEXT_MODELING,
@@ -215,11 +163,7 @@ def test_delegation_across_two_upstream_appliers_is_refused():
 
 
 def test_a_delegating_spec_may_still_choose_the_familys_loss_default():
-    """The delegating signature carries the toolkit's loss convention, not upstream's own defaults.
-
-    ``flce_default`` is the knob Zaya and DeepSeek-V4 use for a binding logits plane; a delegating
-    family reaches the same default through the same field, which is what the branch is for.
-    """
+    """``flce_default`` is the knob Zaya and DeepSeek-V4 use for a binding logits plane."""
     spec = LigerFamilySpec(
         model_types=("qwen3_next",),
         modeling_module=QWEN3_NEXT_MODELING,
@@ -233,7 +177,6 @@ def test_a_delegating_spec_may_still_choose_the_familys_loss_default():
 
 
 def test_a_delegating_spec_that_adds_nothing_is_refused():
-    """Delegating with no added role is a spec that shadows upstream to do exactly nothing."""
     with pytest.raises(ValueError, match="adds no role"):
         LigerFamilySpec(
             model_types=("qwen3_next",),
@@ -244,12 +187,7 @@ def test_a_delegating_spec_that_adds_nothing_is_refused():
 
 def test_cross_entropy_never_reaches_upstreams_branch():
     """Upstream's CE branch is a process-wide ``F.cross_entropy`` rebind.
-
-    It is moot because a delegating applier withholds the flag from upstream and installs the
-    toolkit's scoped patch itself — so the dense Qwen3.5 family keeps a fused loss with CE on.
-
-    Subprocess: applying rebinds the family's classes for the rest of the process.
-    """
+    Subprocess: applying rebinds the family's classes for the rest of the process."""
     script = """
 import torch.nn.functional as F
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
@@ -287,7 +225,6 @@ print("FAILURES:" + "|".join(failures))
 
 
 def test_a_delegating_probe_is_called_with_cross_entropy_withheld(monkeypatch):
-    """Dispatch hands a delegating applier CE on; the applier hands upstream CE off."""
     probe = _DelegatingProbe(MODEL_TYPE_TO_APPLY_LIGER_FN["qwen3_next"])
     monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "qwen3_next", probe)
     original = loss_utils.nn
@@ -309,15 +246,8 @@ def test_a_delegating_probe_is_called_with_cross_entropy_withheld(monkeypatch):
 
 
 def test_re_application_neither_stacks_nor_undoes_the_added_glu():
-    """HF Trainer re-applies Liger on the built model — through UPSTREAM's applier, not this one.
-
-    Two failures to rule out on the shared-expert MLP a delegating spec names. Stacking: a second
-    pass must not subclass the subclass, or every re-application deepens the MRO. Undoing: upstream's
-    instance patch binds its own SwiGLU forward over the toolkit's class swap, and the toolkit's
-    ``model=`` path — which runs after it, inside the same call — has to be the final word.
-
-    Subprocess: the swaps are process-global, and this one builds a model on top of them.
-    """
+    """A second pass must not deepen the MRO, and the toolkit's ``model=`` path has to win over upstream's instance
+    patch. Subprocess: the swaps are process-global."""
     script = """
 import transformers.models.qwen3_5_moe.modeling_qwen3_5_moe as modeling
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
@@ -373,15 +303,7 @@ print("FAILURES:" + "|".join(failures))
 
 def test_the_upstream_applier_actually_runs():
     """Dropping the delegation call must fail here rather than pass as a gated-norm-only patch.
-
-    The proof that upstream ran is a class it swapped that the spec never names: with ``rms_norm`` on
-    and every other flag off, upstream replaces the family's plain norm while the toolkit replaces the
-    gated one. Read off the module's own class table rather than a named expectation, so it holds for
-    whatever upstream patches under that flag.
-
-    Subprocess: applying rebinds the upstream classes for the rest of the process, and a later test
-    building one of these families would then see the patched ones.
-    """
+    Subprocess: applying rebinds the upstream classes for the rest of the process."""
     script = """
 import importlib, inspect
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
@@ -422,15 +344,8 @@ print("FAILURES:" + "|".join(failures))
 
 
 def test_a_role_upstream_also_swaps_is_refused_when_the_patch_runs():
-    """The dataclass cannot know which classes upstream claims — the patch site can, and must.
-
-    Upstream's DENSE Qwen3.5 applier class-swaps ``Qwen3_5MLP``. A spec naming it would subclass
-    Liger's replacement instead of the family's own MLP: still a fused GLU, but stacked on a class
-    the family no longer has, and silently so. The guard reads the class's own ``__module__``, so it
-    covers any role and any future upstream swap rather than a list of known collisions.
-
-    Subprocess: proving the guard means letting upstream's applier really swap the class.
-    """
+    """A spec naming ``Qwen3_5MLP`` would silently subclass Liger's replacement; the guard reads the class's own
+    ``__module__``. Subprocess: proving the guard means letting upstream really swap the class."""
     script = """
 from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_qwen3_5
 from halo.model_loading.liger.applier import LigerApplier
@@ -456,33 +371,24 @@ except ValueError as error:
 
 
 def test_ep_keeps_the_shared_expert_glu_a_delegating_spec_names():
-    """The force-off is about WHAT the applier swaps, and a delegating spec swaps the shared expert.
-
-    The routed experts are the wrapper's (upstream's ``LigerExperts`` swap is withheld); the
-    shared-expert MLP the spec names is adopted by that wrapper unchanged and keeps paying on every
-    token. Forcing the flag off would delete it for nothing.
-    """
+    """The shared-expert MLP is adopted by the wrapper unchanged and keeps paying on every token."""
     moe = types.SimpleNamespace(model_type="qwen3_5_moe", text_config=None, num_experts=64)
     assert dispatch.liger_ep_disables_fused_glu(True, moe) is False
 
-    # Anti-vacuity, both directions: a non-delegating toolkit family keeps its GLU, and a family whose
-    # only GLU patch IS upstream's routed-expert swap (Qwen3 MoE, whose spec takes over just the norm)
-    # still loses it.
+    # Anti-vacuity: a family whose only GLU patch is upstream's routed-expert swap still loses it.
     laguna = types.SimpleNamespace(model_type="laguna", text_config=None, num_experts=256)
     assert dispatch.liger_ep_disables_fused_glu(True, laguna) is False
     routed_glu_only = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=128)
     assert dispatch.liger_ep_disables_fused_glu(True, routed_glu_only) is True
 
-    # Gemma 4's dense MLP sits beside the experts in every decoder layer and survives the wrapper,
-    # so the delegating spec that names it keeps `geglu` on — through the wrapper's text config too.
+    # Gemma 4's dense MLP survives the wrapper, so its spec keeps `geglu` on through the text config too.
     text = types.SimpleNamespace(model_type="gemma4_text", num_experts=128)
     gemma4 = types.SimpleNamespace(
         model_type="gemma4", text_config=text, num_experts=128, get_text_config=lambda: text
     )
     assert dispatch.liger_ep_disables_fused_glu(True, gemma4) is False
     assert dispatch.liger_ep_disables_fused_glu(True, text) is False
-    # ...while a delegating spec that takes over a different role (GptOss's norm) still loses upstream's
-    # routed-expert swap, which is inert under the wrapper anyway.
+    # A spec taking over a different role still loses upstream's routed-expert swap, inert under the wrapper anyway.
     gpt_oss = types.SimpleNamespace(model_type="gpt_oss", text_config=None, num_local_experts=32)
     assert dispatch.liger_ep_disables_fused_glu(True, gpt_oss) is True
 

@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """SMPO's padding-free row hands a flash backend its varlen set, so no attention layer derives it from
-``position_ids``.
-
-The trainer the policy load builds carries the markers ``_forward_padding_free`` passes: the family's own, plus
-``cu_seq_lens`` on every flash backend. transformers' flash dispatch runs on CPU reference kernels, and the derivation
-it would otherwise run in every layer is counted.
-
-    python tests/cpu/trainers/test_smpo_padding_free_varlen.py
+``position_ids``. Transformers' flash dispatch runs on CPU reference kernels, and the per-layer derivation is counted.
 """
 
 from types import SimpleNamespace
@@ -57,8 +51,7 @@ def _trainer(model, tmp_path) -> SMPOTrainer:
 
 
 def _step(trainer: SMPOTrainer, model, markers: SegmentMarkers):
-    """One padding-free forward and backward under ``markers``: the per-document log-probs, every gradient, and the
-    calls of transformers' per-layer varlen derivation."""
+    """One padding-free forward and backward: per-document log-probs, every gradient, the derivation's call count."""
     trainer._segment_markers = markers
     model.zero_grad(set_to_none=True)
     _kernels, counts = install_reference_flash(attn_implementation=FA2)
@@ -77,9 +70,7 @@ def test_the_policy_load_hands_a_flash_backend_the_varlen_set(tmp_path, family, 
 
 
 def test_no_attention_layer_derives_the_set_and_the_step_is_unchanged(tmp_path):
-    """With the set handed over no layer runs transformers' packed-row check or its varlen derivation, and the
-    log-probs and gradients are bitwise those of the per-layer derivation, which the family markers alone leave in
-    every layer (the negative control)."""
+    """Log-probs and gradients are bitwise those of the per-layer derivation that family markers alone keep running."""
     model = tiny_model("qwen3", FA2).train()
     trainer = _trainer(model, tmp_path)
     handed_logps, handed_grads, handed = _step(trainer, model, trainer._segment_markers)
@@ -93,8 +84,8 @@ def test_no_attention_layer_derives_the_set_and_the_step_is_unchanged(tmp_path):
 
 
 def test_the_kernels_read_the_handed_set(tmp_path, monkeypatch):
-    """A set whose first document boundary sits one token later moves the log-probs: the kernels attend over the
-    set the trainer hands them, not over one rebuilt from ``position_ids``."""
+    """A boundary one token later moves the log-probs, so the kernels attend over the handed set, not one rebuilt from
+    ``position_ids``."""
     model = tiny_model("qwen3", FA2)
     trainer = _trainer(model, tmp_path)
     baseline, _, _ = _step(trainer, model, trainer._segment_markers)

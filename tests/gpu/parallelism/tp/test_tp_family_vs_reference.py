@@ -55,8 +55,7 @@ ROWS = 2
 SEQ_LEN = 64
 # Far above any norm here: the clip runs its syncs and scales by exactly 1.
 NO_CLIP = 1e9
-# The MoE families whose attention the toolkit's TP plan shards; the tiny-family roster test holds this to
-# TP_SHARDABLE_ATTENTION_CLASSES.
+# The tiny-family roster test holds this to TP_SHARDABLE_ATTENTION_CLASSES.
 TP_MOE_FAMILIES = ("cohere2_moe", "glm4_moe_lite", "gpt_oss", "lfm2_moe", "mistral4", "qwen3_5_moe_text", "qwen3_moe")
 DENSE_FAMILIES = {
     **TINY_DENSE_ATTENTION_FAMILIES,
@@ -88,7 +87,6 @@ def _batch(vocab: int, device) -> dict[str, torch.Tensor]:
 
 
 def _expert_slices(model) -> dict[str, slice]:
-    """Each EP-sharded expert parameter's name and the expert range this rank holds."""
     names = {id(param): name for name, param in model.named_parameters()}
     return {
         names[id(param)]: slice(layer.expert_start, layer.expert_end)
@@ -119,7 +117,7 @@ def run(ctx):
     log(f"{ARGS.family} {ARGS.mode}: {pc.mode_string}")
     load = {"trust_remote_code": family.trust_remote_code, "attn_implementation": "eager", "use_liger_kernel": False}
     model, tokenizer = load_distributed_model(checkpoint, pc, torch.bfloat16, model_class=family.load_class, **load)
-    # Unwrapped: the same checkpoint on the same EP layers (a MoE) with no TP and no EP group.
+    # Unwrapped: the same checkpoint on the same EP layers with no TP and no EP group.
     reference, _ = load_distributed_model(
         checkpoint, ParallelismConfig(), torch.bfloat16, model_class=family.load_class, **load
     )

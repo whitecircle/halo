@@ -1,26 +1,11 @@
 #!/usr/bin/env python
-"""SDPG self-distillation (text or VLM) with distributed parallelism.
+"""SDPG self-distillation (text or VLM): one model is student (prompt only) and privileged teacher (prompt + a
+gold-answer hint), whose full-vocabulary distribution supervises the shared response tokens
+(``L = L_sft + beta(k)·L_OPD + alpha·L_ref``).
 
-Privileged-context self-distillation on top of SFT (:class:`DistributedSelfDistillationTrainer`):
-one model is both the student (prompt only) and a privileged teacher (prompt + a hint revealing
-the gold answer), and the teacher's full-vocabulary distribution supervises the student on the
-shared response tokens (``L = L_sft + beta(k)·L_OPD + alpha·L_ref``). One script serves both text
-and vision-language models: the run's modality (``resolve_vlm_run``, read off the data and the
-checkpoint) selects the text or VLM self-distillation collator. This is the offline SDPG
-approximation (scores a fixed dataset; the faithful on-policy SDPG runs via
-``grpo/online.py --use_sdpg``). For off-policy teacher→student distillation use
-``teacher_distill.py``.
-
-Dataset: raw SFT conversations (``conversation_field``) plus a privileged answer field (VLM adds an
-``images`` column). The text path tokenizes the student and teacher (hinted) branches once at prep, the VLM
-collator at collation time; a pre-tokenized dataset is not usable here.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/distillation/self_distill.py \\
-        examples/distillation/qwen3_5/self-distill-qwen3.5-9b.yaml
-
-That student is dense, so it takes no --expert_parallel_size; the MoE configs pin it themselves.
-"""
+The offline SDPG approximation; the faithful on-policy one runs via ``grpo/online.py --use_sdpg``, off-policy
+teacher→student distillation via ``teacher_distill.py``. Takes raw SFT conversations plus a privileged answer field; a
+pre-tokenized dataset is not usable here."""
 
 import logging
 from functools import partial
@@ -83,14 +68,9 @@ logger = logging.getLogger(__name__)
 
 
 def _require_privileged_columns(ds, args) -> None:
-    """Raise when a column the collators read is absent: the confidence column, and while the OPD
-    term carries weight, each column filling a slot the hint template names.
-
-    A missing hint column would leave every row without a hint, and the OPD term would distil toward
-    the unhinted model. The on-policy arm (:class:`DistributedSDPGTrainer`) gates its answer the same
-    way; this is the offline half of it. Rows with a blank named slot get no hint, which is logged
-    once here.
-    """
+    """Raise when a column the collators read is absent: the confidence column and, while OPD carries weight, each
+    column filling a hint slot. A missing hint column would distil toward the unhinted model. Rows with a blank named
+    slot get no hint, logged once here."""
     if args.confidence_field:
         reject_missing_render_column(ds, str(args.dataset), "confidence_field", args.confidence_field)
     if args.sdpg_beta_base == 0.0:
@@ -115,21 +95,16 @@ def _require_privileged_columns(ds, args) -> None:
 
 
 def _confidence_normalizer(train_dataset, eval_dataset, args) -> float | None:
-    """The train split's mean ``conf ** confidence_power``, or ``None`` without a confidence column.
-
-    Every rank reads the whole split (self-distillation refuses a presharded load with confidence
-    weighting), so every rank computes the same divisor.
-    """
+    """``None`` without a confidence column. Every rank reads the whole split (a presharded load is refused with
+    confidence weighting), so every rank computes the same divisor."""
     if args.confidence_field is None:
         return None
     return confidence_normalizer(train_dataset, eval_dataset, args.confidence_field, args.confidence_power)
 
 
 def _encode_text_rows(collator, dataset, split: str, num_proc, keep: tuple[str, ...]):
-    """``dataset`` rendered, tokenized and labelled per branch (:func:`encode_self_distill_row`),
-    every column but ``keep`` replaced, so collation only pads. The collator's length and alignment contract
-    raises here, world-uniform: at collate time only the rank drawing the bad row would raise, and its peers
-    hang in the step's collectives until the watchdog."""
+    """Rendered, tokenized and labelled per branch so collation only pads. The length and alignment contract raises
+    here, world-uniform: at collate time only the rank drawing the bad row would, and peers hang until the watchdog."""
     return coordinated_map(
         dataset,
         encode_self_distill_row,
@@ -142,14 +117,9 @@ def _encode_text_rows(collator, dataset, split: str, num_proc, keep: tuple[str, 
 
 
 def _audit_rows(collator, train_dataset, eval_dataset, num_proc) -> None:
-    """Run every row through the VLM collator's alignment contract now, where a raise is world-uniform: at
-    collate time only the rank drawing the bad row raises, and its peers hang in the step's collectives
-    until the watchdog.
-
-    Every input column is removed from the map's output: the function still reads them, but a map
-    writes each column it leaves in place to its cache file, so the audit would store a full copy of
-    the split, image bytes included, on every node of a non-shared filesystem.
-    """
+    """Run every row through the VLM collator's alignment contract now, where a raise is world-uniform. Every input
+    column is removed from the output: a map writes each column it leaves in place to its cache file, so the audit
+    would store a full copy of the split, image bytes included, per node on a non-shared filesystem."""
     for split, dataset in (("train", train_dataset), ("eval", eval_dataset)):
         if dataset is not None:
             coordinated_map(
@@ -164,8 +134,7 @@ def _audit_rows(collator, train_dataset, eval_dataset, num_proc) -> None:
 
 
 def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_config, num_proc, hint_template):
-    """Text path: the splits encoded once at prep (:func:`_encode_text_rows`), the confidence column kept for
-    the collator's weights."""
+    """Text path: the splits encoded once at prep, the confidence column kept for the collator's weights."""
     train_dataset = ds["train"]
     eval_dataset = ds.get("test")
     collator = SelfDistillTextCollator(
@@ -191,11 +160,8 @@ def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_conf
 
 
 def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, num_proc, model_config, hint_template):
-    """VLM path: map raw conversations to history/images (keeping the privileged fields) + collator.
-
-    The over-length filter measures the hinted teacher branch, the longer of the two: a row whose
-    hint alone pushes it over would otherwise raise inside one rank's collator and hang its peers.
-    """
+    """The over-length filter measures the hinted teacher branch, the longer: a row whose hint pushes it over would
+    otherwise raise in one rank's collator and hang its peers."""
     privileged = tuple(f for f in (args.sdpg_answer_field, args.privileged_solution_field, args.confidence_field) if f)
     hint_kwargs = {"answer_field": args.sdpg_answer_field, "solution_field": args.privileged_solution_field}
     measured_history = (
@@ -230,16 +196,13 @@ def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, 
 
 
 def _reference_path(args, model_config) -> str:
-    """The ``L_ref`` anchor's weights: ``reference_model_name_or_path``, else the policy's init weights."""
+    """``reference_model_name_or_path``, else the policy's init weights."""
     return args.reference_model_name_or_path or model_config.model_name_or_path
 
 
 def _require_reference_token_ids(args, model_config) -> None:
-    """A weighted anchor from another repo must tokenize as the policy's repo does.
-
-    Reads only the two tokenizers' files, so main runs it before the dataset prep and the policy load;
-    the run's added tokens are then grown into both alike.
-    """
+    """A weighted anchor from another repo must tokenize as the policy's does. Reads only the tokenizer files, so main
+    runs it before the dataset prep and policy load."""
     ref_path = _reference_path(args, model_config)
     if args.reference_kl_coef <= 0 or ref_path == model_config.model_name_or_path:
         return
@@ -259,14 +222,9 @@ def _require_reference_token_ids(args, model_config) -> None:
 def _load_sdpg_reference(
     *, args, model_config, sft_config, tokenizer, is_vlm: bool, attn_default: str | None
 ) -> PreTrainedModel | None:
-    """Load the frozen reference for the ``L_ref`` KL anchor, or ``None`` when the anchor is off.
-
-    It goes through the shared frozen-reference loader for the reason the KL term exists: ``L_ref``
-    is a divergence between this model's distribution and the policy's, so a reference on a
-    different attention backend, carrying live sinks the policy reset, or missing the special tokens
-    the run added moves the anchor rather than the model; ``attn_default`` is the policy's request. The
-    token-id check ran before any load.
-    """
+    """``None`` when the anchor is off. Through the shared frozen-reference loader: ``L_ref`` is a divergence against
+    the policy, so a reference on another attention backend, carrying live sinks the policy reset, or missing added
+    tokens moves the anchor rather than the model."""
     if args.reference_kl_coef <= 0:
         return None
     ref_path = _reference_path(args, model_config)
@@ -290,12 +248,10 @@ def main():
         SelfDistillScriptArguments, SFTConfig, ModelArguments, ParallelismArguments
     )
 
-    # Inherited from SFTScriptArguments but unreachable: GenerateExamplesCallback needs a tokenized
-    # "generate" split and self-distillation keeps the dataset raw. num_eval_examples rides along on
-    # the default-comparing form, since its own default (50) is truthy.
+    # Unreachable: GenerateExamplesCallback needs a tokenized "generate" split and this keeps the dataset raw.
+    # num_eval_examples's own default (50) is truthy, hence the default-comparing form.
     reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
-    # Tree packing lives in the SFT script's data path; the collators here pack nothing as trees, and no
-    # multi-document row at all for allow_cross_document_linear_attention to admit.
+    # Tree packing lives in the SFT script's data path; the collators here make no multi-document row at all.
     reject_non_default_args("Self-distillation", args, *TREE_PACKING_FIELDS, "allow_cross_document_linear_attention")
 
     # Both only feed the reference term, which is not built at all below this coefficient.
@@ -327,8 +283,7 @@ def main():
             "self-distillation renders each row's raw conversation, so conversation_field must name its "
             "column. Set conversation_field in the YAML."
         )
-    # Reject inherited options the SelfDistill collators do not implement; ignoring them would train
-    # something other than the config states.
+    # Inherited options the SelfDistill collators do not implement; ignoring them would train something else.
     if args.train_on_last_assistant_only:
         raise ValueError(
             "train_on_last_assistant_only is not implemented for self-distillation (the SelfDistill "
@@ -344,8 +299,7 @@ def main():
     # eval_packing has nothing to narrow with packing refused above.
     reject_trl_dataset_prep_args("Self-distillation", sft_config, "eval_packing")
 
-    # The teacher branch, the confidence column and the VLM path's raw columns are no forward kwargs, so
-    # they have to survive HF's remove_unused_columns=True, which would strip them.
+    # The teacher branch, the confidence column and the VLM raw columns are no forward kwargs, so HF would strip them.
     sft_config.remove_unused_columns = False
 
     context = init_training_script(
@@ -367,9 +321,8 @@ def main():
             "Load the raw dataset unsharded, or drop confidence_field."
         )
     _require_privileged_columns(ds, args)
-    # The data path follows the run, not the checkpoint class: a natively-multimodal student
-    # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
-    # which requires the checkpoint's processor for an image run.
+    # The data path follows the run: a multimodal student distilled on text-only rows is a text run. Decided before the
+    # model load, which needs the checkpoint's processor for an image run.
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
     # One padded row per conversation in each branch: more than one per batch reaches the varlen kernel.

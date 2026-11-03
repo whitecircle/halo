@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""The order of ``ParallelismConfig``'s gates: each row breaks two adjacent gates and pins the earlier
-one's message, the one a user acts on, and breaks the later gate alone to prove the overlap is real.
-
-Run: python tests/cpu/parallelism/test_parallelism_config_gate_order.py
-"""
+"""The order of ``ParallelismConfig``'s gates: each row breaks two adjacent gates and pins the earlier message, the
+one a user acts on."""
 
 import pytest
 
@@ -11,8 +8,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.lowp.spec import LowpSpec
 from tests.common.parallelism import create_config, simulated_world
 
-# (shape breaking both gates, the earlier gate's message head, shape breaking only the later gate,
-# the later gate's message head) on 8-GPU nodes, world 8 unless a row says otherwise.
+# On 8-GPU nodes, world 8 unless a row says otherwise.
 GATE_OVERLAPS = (
     pytest.param(
         {"ep_scope": "rack", "tp_size": 2, "cp_size": 2},
@@ -184,7 +180,7 @@ def test_the_earlier_gate_reports_a_shape_both_refuse(shape, first, later_shape,
 
 
 def test_the_node_width_is_resolved_before_the_node_width_rule(monkeypatch):
-    """Left at 0, the node width would skip the node-width rule and fall through to the domain rules."""
+    """Left at 0, it would skip this rule and fall through to the domain rules."""
     monkeypatch.delenv("NVLINK_DOMAIN_SIZE", raising=False)
     with simulated_world(world_size=12, gpus_per_node=8), pytest.raises(ValueError) as excinfo:
         ParallelismConfig()
@@ -192,7 +188,7 @@ def test_the_node_width_is_resolved_before_the_node_width_rule(monkeypatch):
 
 
 def test_a_sub_node_job_clamps_the_node_width_before_the_node_width_rule(monkeypatch):
-    """Four ranks on an 8-GPU node: the resolved width is clamped to the world, not refused."""
+    """Clamped to the world, not refused."""
     monkeypatch.delenv("NVLINK_DOMAIN_SIZE", raising=False)
     with simulated_world(world_size=4, gpus_per_node=8):
         config = ParallelismConfig()

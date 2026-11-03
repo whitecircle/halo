@@ -1,14 +1,5 @@
-"""CPU tests for the FSDP2 fp32-pin cast warning (``halo/distributed/fsdp.py``).
-
-FSDP2's ``MixedPrecisionPolicy`` casts per fully_shard group and has no per-parameter dtype
-mechanism, so params pinned fp32 via transformers' ``_keep_in_fp32_modules(_strict)`` class
-attributes (e.g. DeepSeek-V4's HC mixers / ``sinks`` / norms) compute at ``param_dtype`` under
-multi-GPU while a single-GPU run honors fp32. The wrap-time warning must fire exactly when
-fp32-stored pinned params meet a low-precision policy — and stay silent for uniform-bf16 loads
-(the EP loader path) and for families without pins.
-
-    python tests/cpu/parallelism/test_fsdp_fp32_pin_warning.py
-"""
+"""The FSDP2 fp32-pin cast warning (``halo/distributed/fsdp.py``): ``MixedPrecisionPolicy`` casts per group and has no
+per-parameter dtype. Pinned params compute at ``param_dtype`` under multi-GPU while a single-GPU run honors fp32."""
 
 import logging
 
@@ -21,7 +12,7 @@ from halo.distributed.fsdp import _warn_fp32_pins_cast_by_policy
 
 
 class _PinnedModel(nn.Module):
-    """Minimal stand-in for a transformers class carrying fp32 pins (module names AND bare params)."""
+    """Module names and bare params."""
 
     _keep_in_fp32_modules = ["compressor.kv_proj"]
     _keep_in_fp32_modules_strict = ["sinks", "input_layernorm"]
@@ -38,7 +29,7 @@ class _PinnedModel(nn.Module):
 class _PinlessModel(nn.Module):
     def __init__(self):
         super().__init__()
-        self.proj = nn.Linear(4, 4)  # fp32, but no pin declaration → not a divergence
+        self.proj = nn.Linear(4, 4)  # fp32 with no pin declaration, so no divergence.
 
 
 def _bf16_policy():
@@ -46,7 +37,7 @@ def _bf16_policy():
 
 
 def _warning_text(caplog, model, mp_policy) -> str:
-    """The wrap-time warning the policy produces for ``model``, or ``""`` when it stays silent."""
+    """``""`` when it stays silent."""
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="halo.distributed.fsdp"):
         _warn_fp32_pins_cast_by_policy(model, mp_policy)
@@ -54,17 +45,17 @@ def _warning_text(caplog, model, mp_policy) -> str:
 
 
 def test_fp32_pins_under_bf16_policy_are_named(caplog):
-    """The warning must name the affected modules — a count alone cannot be acted on."""
+    """A count alone cannot be acted on."""
     message = _warning_text(caplog, _PinnedModel(), _bf16_policy())
     assert "fp32-pinned" in message
     assert "5 fp32-pinned" in message  # sinks + LayerNorm weight/bias + kv_proj weight/bias
     for pinned_module in ("sinks", "input_layernorm", "compressor.kv_proj"):
         assert pinned_module in message
-    assert "q_proj" not in message  # unpinned bf16 param never reported
+    assert "q_proj" not in message
 
 
 def test_uniform_bf16_load_is_silent(caplog):
-    """The EP loader materializes uniform bf16 — no fp32 storage, no warning."""
+    """The EP loader materializes uniform bf16."""
     assert _warning_text(caplog, _PinnedModel(pin_dtype=torch.bfloat16), _bf16_policy()) == ""
 
 

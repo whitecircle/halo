@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Callback scoping under pipeline parallelism (CPU).
-
-Under PP each stage holds different layers, so world-wide callback collectives and world-based
-throughput math are wrong:
-
-* ``BalancingBiasCallback`` must all-reduce its stacked per-layer expert counters over the
-  trainer-injected ``reduce_group`` (the stage group) — a world all-reduce is a shape mismatch or a
-  silent cross-stage blend.
-* ``build_run_callbacks`` must not install ``MoEMetricsCallback`` at ``pp_size > 1`` (a stage
-  forward returns a bare tensor, so its router-logits hook would silently record nothing).
-
-Run: python tests/cpu/parallelism/test_pp_callback_scoping.py
-"""
+"""Callback scoping under pipeline parallelism, where each stage holds different layers. A world all-reduce is a shape
+mismatch or a cross-stage blend; a stage forward returns a bare tensor, so MoE metrics would record nothing."""
 
 from __future__ import annotations
 
@@ -28,9 +17,6 @@ from halo.callbacks.factory import build_run_callbacks
 _BALANCING_MOD = "halo.callbacks.balancing"
 
 
-# BalancingBiasCallback.reduce_group
-
-
 class _Router(torch.nn.Module):
     def __init__(self, counts, num_experts=4):
         super().__init__()
@@ -45,7 +31,7 @@ class _RouterModel(torch.nn.Module):
 
 
 def _run_step(callback) -> dict:
-    """Drive ``on_step_end`` with ``dist`` stubbed as a 2-rank job; capture the all-reduce kwargs."""
+    """``dist`` stubbed as a 2-rank job; captures the all-reduce kwargs."""
     captured: dict = {}
 
     def _fake_all_reduce(tensor, op=None, group=None):
@@ -73,12 +59,9 @@ def test_bias_balancing_all_reduce_honors_injected_reduce_group():
 
 def test_bias_balancing_defaults_to_world_group():
     callback = BalancingBiasCallback()
-    assert callback.reduce_group is None  # trainer injects; default = world group
+    assert callback.reduce_group is None  # The trainer injects it; default = world group.
     captured = _run_step(callback)
     assert captured["group"] is None, captured
-
-
-# build_run_callbacks: MoEMetricsCallback skipped under PP
 
 
 class _MoEConfig:

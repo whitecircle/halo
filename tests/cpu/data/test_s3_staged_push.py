@@ -1,21 +1,7 @@
 #!/usr/bin/env python
-"""The staged-push protocol — ``push_dataset`` must never hold the only copy hostage.
-
-The generation CLIs (``halo/entrypoints/resumable_generation.py``) push their accumulated results through
-``push_dataset`` every checkpoint interval. Deleting the destination prefix before uploading is what
-the staging exists to avoid: a crash in that window either tears the prefix (loud) or — after the
-delete, before the first byte — leaves ``exists()`` False, and the next resume silently regenerates
-everything the checkpointing existed to protect.
-
-The staged protocol is pinned here on an in-memory fake S3, crash point by crash point: a complete
-copy exists either at the destination or in a sealed staging tree at every instant; an interrupted
-promote leaves the destination loudly unreadable (a load gate missing), never a readable old/new
-mixture and never an empty prefix; ``load_dataset`` recovers from the newest sealed staging tree;
-and a completed push sweeps stale objects and every staging tree. On the load side a tree is downloaded
-straight into the cache it publishes, and one missing its load gates is never published.
-
-    python tests/cpu/data/test_s3_staged_push.py
-"""
+"""The staged-push protocol, crash point by crash point on an in-memory fake S3: a complete copy exists at the
+destination or in a sealed staging tree at every instant, an interrupted promote leaves the destination loudly
+unreadable, and ``load_dataset`` recovers from the newest sealed tree."""
 
 import uuid
 from pathlib import Path
@@ -125,7 +111,6 @@ class FakeBoto:
 
 
 def _new_push_key(full_key: str) -> str:
-    """A fresh push prefix for ``full_key``, spelled as ``push_dataset`` spells one."""
     return f"{s3_dataset_store._push_scan_prefix(full_key)}{uuid.uuid4().hex[:8]}"
 
 
@@ -160,7 +145,7 @@ def _fake_dataset_dict_save(fake: FakeBoto, rows_tag: bytes = b"new"):
 def _seed_old_copy(fake: FakeBoto):
     for rel in (
         "train/data-00000-of-00002.arrow",
-        "train/data-00001-of-00002.arrow",  # stale under the new 1-shard tree — must be swept
+        "train/data-00001-of-00002.arrow",  # stale under the new 1-shard tree, so it must be swept
         "train/state.json",
         "train/dataset_info.json",
         "test/data-00000-of-00001.arrow",
@@ -333,8 +318,8 @@ def test_no_overwrite_raises_before_any_write():
 
 
 def test_staging_sibling_never_pollutes_the_destination_namespace():
-    """The staging tree must live OUTSIDE the destination's anchored prefix: listings, exists(), the
-    content fingerprint, and recursive delete on the dataset key must all be blind to it."""
+    """The staging tree lives outside the destination's anchored prefix: listings, exists(), the fingerprint and
+    recursive delete are blind to it."""
     client, fake = _client()
     _seed_old_copy(fake)
     fingerprint_before = client.content_fingerprint(KEY)
@@ -354,10 +339,8 @@ def test_staging_sibling_never_pollutes_the_destination_namespace():
 
 
 def test_sibling_dataset_staging_is_never_swept_or_recovered_across():
-    """The staging scan prefix for ``…/results`` is a plain string prefix of sibling ``…/results-2``'s
-    staging trees. Unanchored, a successful push of ``results`` sweeps the sibling's SEALED staging
-    tree — its only complete copy while torn — and ``results``'s recovery can then serve the
-    sibling's rows."""
+    """The scan prefix for ``.../results`` is a string prefix of sibling ``.../results-2``'s staging trees.
+    Unanchored, a push sweeps the sibling's sealed tree and recovery can serve its rows."""
     client, fake = _client()
     _seed_old_copy(fake)
     sibling_key = f"{KEY}-2"
@@ -365,7 +348,7 @@ def test_sibling_dataset_staging_is_never_swept_or_recovered_across():
     _fake_dataset_dict_save(fake, b"sib")(f"s3://{BUCKET}/{sibling_staging}")
     fake.put_object(Bucket=BUCKET, Key=f"{sibling_staging}/{_PUSH_COMPLETE_MARKER}", Body=sibling_key.encode())
 
-    # The sibling's sealed tree is the ONLY sealed staging around — recovery for KEY must not take it.
+    # The sibling's sealed tree is the only sealed staging around, and recovery for KEY must not take it.
     assert s3_dataset_store._latest_complete_push(client, KEY) is None
     assert s3_dataset_store._latest_complete_push(client, sibling_key) == sibling_staging
 
@@ -408,9 +391,8 @@ def test_recover_from_pending_push_loads_the_sealed_tree_and_guards_recursion(mo
     assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is recovered
     assert loaded_keys == [sealed], "recovery must load exactly the sealed staging tree"
 
-    # A load already targeting a staging tree must not recover into another — one level only.
+    # A load already targeting a staging tree must not recover into another: one level only.
     assert s3_dataset_store._recover_from_pending_push(client, sealed, None, True, cause=cause) is None
-    # No sealed tree → nothing to recover.
     fake.delete_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}")
     assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is None
 
@@ -438,7 +420,7 @@ def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
 
 def test_load_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
     """The fetch is the client's own download into the cache's publish temp, every object once, with no
-    datasets-side copy of the tree held anywhere else for the life of the process."""
+    datasets-side copy."""
     client, fake = _client()
     _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[1, 2, 3]), KEY)
     cache_root = tmp_path / "cache"
@@ -452,8 +434,8 @@ def test_load_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
 
 
 def test_folder_marker_objects_are_not_downloaded_as_files(tmp_path):
-    """The S3 console's "Create folder" leaves zero-byte keys ending in "/"; written as files they would fail
-    the download of a tree that loads fine."""
+    """The S3 console's Create folder leaves zero-byte keys ending in /, which written as files would fail the
+    download."""
     client, fake = _client()
     _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[4]), KEY)
     for marker in (f"{KEY}/", f"{KEY}/train/"):

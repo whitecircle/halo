@@ -1,23 +1,6 @@
 #!/usr/bin/env python
 """SMPO under context parallelism trains the unsplit objective: same loss, same gradient.
-
-Each CP rank holds one sequence chunk and all-reduces its partial per-sequence log-prob and NLL sums,
-so every rank computes the same loss. Those sum reduces must be autograd-aware: their backward sums
-the gradient over the CP group, which FSDP2's world-wide gradient average then divides back by
-``cp_size``. An in-place ``dist.all_reduce`` on a grad-carrying tensor instead reaches autograd
-through PyTorch's deprecated c10d fallback — identity backward plus an "autograd kernel was not
-registered" warning — and trains on ``1/cp_size`` of the gradient unless the loss is rescaled. The
-percentile clip's all-gather must likewise see only detached values.
-
-This drives the real ``get_batch_loss_metrics`` over a 2-rank gloo CP group in float64 and compares
-the per-sequence log-probs, the loss, the FSDP-averaged gradient and every logged metric with a
-``cp_size=1`` run of the same batch. The ``logits/*`` means are logging-only reduces: each rank's
-chunk mean would differ from the sequence's. A batch whose prompts the collator left-padded must
-reach the CP forward with trailing padding only — the stand-in model refuses a left-padded batch, which
-the CP attention cannot serve — and still match the unsplit run.
-
-    python tests/cpu/trainers/test_smpo_cp_gradient.py
-"""
+An in-place ``dist.all_reduce`` has an identity backward in c10d's fallback, training ``1/cp_size`` of the grad."""
 
 import copy
 import warnings
@@ -45,8 +28,7 @@ PER_SEQUENCE_KEYS = ("chosen_logps", "rejected_logps", "chosen_sft_loss", "rejec
 
 
 class _TokenTableLM(nn.Module):
-    """Logits looked up per token; under CP it refuses a left-padded batch and forwards only this
-    rank's chunk."""
+    """Logits looked up per token; under CP it refuses a left-padded batch and forwards only this rank's chunk."""
 
     def __init__(self):
         super().__init__()
@@ -74,11 +56,8 @@ def _trainer(parallelism_config: ParallelismConfig, cp_config) -> SMPOTrainer:
 
 
 def _batch(ragged_prompts: bool) -> dict[str, torch.Tensor]:
-    """Two pairs with ragged completions, so the loss tokens split unevenly across the two chunks.
-
-    ``ragged_prompts`` left-pads the second prompt the way ``DataCollatorForSMPO`` does, which the CP
-    forward must turn into trailing padding.
-    """
+    """Two pairs with ragged completions, so the loss tokens split unevenly across the chunks.
+    ``ragged_prompts`` left-pads the second prompt like ``DataCollatorForSMPO``, which the CP forward must undo."""
     generator = torch.Generator().manual_seed(1)
 
     def ids(rows, length):
@@ -96,8 +75,7 @@ def _batch(ragged_prompts: bool) -> dict[str, torch.Tensor]:
 
 
 def _loss_and_grad(trainer: SMPOTrainer, model: _TokenTableLM, batch: dict) -> tuple:
-    """Per-sequence outputs, the loss, the table gradient, the logged metrics and the warnings the
-    backward raised."""
+    """Per-sequence outputs, the loss, the table gradient, the logged metrics and the backward's warnings."""
     outputs = trainer.concatenated_forward(model, batch)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

@@ -1,7 +1,5 @@
-"""Raw checkpoint reads: the layout cascade a directory's weights resolve through, the streaming reader, and
-the standalone tools' shard walks, header sizing and family sniffing. Model-free; rank coordination around
-these calls belongs to the caller.
-"""
+"""Raw, model-free checkpoint reads: layout cascade, streaming reader, shard walks, header sizing and family sniffing.
+Rank coordination around these calls belongs to the caller."""
 
 from __future__ import annotations
 
@@ -30,20 +28,16 @@ from halo.checkpoint.format import (
     index_declares_ep_shards,
 )
 
-# Header dtypes of the full-precision floating tensors a conversion casts or quantizes.
 SAFETENSORS_FLOAT_DTYPES = frozenset({"F64", "F32", "F16", "BF16"})
-# Header dtype of the fp8 e4m3 storage the fp8 → bf16 converters dequantize.
 FP8_HEADER_DTYPE = "F8_E4M3"
-# Bytes per element by header dtype. The sizes feed warn-only preflights, so an unknown spelling falls
-# back to bf16-sized rather than aborting a valid conversion over an estimate.
+# Sizes feed warn-only preflights, so an unknown spelling falls back to bf16-sized rather than aborting a conversion.
 _SAFETENSORS_DTYPE_BYTES = {
     **dict.fromkeys(("F64", "I64", "U64"), 8),
     **dict.fromkeys(("F32", "I32", "U32"), 4),
     **dict.fromkeys(("F16", "BF16", "I16", "U16"), 2),
     **dict.fromkeys(("F8_E4M3", "F8_E5M2", "I8", "U8", "BOOL"), 1),
 }
-# Why a stage finds its own tensors absent from a per-node pipeline checkpoint: each node's directory holds
-# only the shards of the stages that node ran.
+# Each node's directory holds only the shards of the stages that node ran.
 PER_NODE_PLACEMENT_REMEDY = (
     "A per-node pipeline checkpoint resumes only onto the same topology and rank placement; for "
     "anything else merge every node's directory with scripts/after_training/merge_pp_stages.py first."
@@ -52,11 +46,7 @@ PER_NODE_PLACEMENT_REMEDY = (
 
 @dataclass(frozen=True)
 class CheckpointWeights:
-    """Where a checkpoint directory's tensors live, as resolved by :func:`resolve_checkpoint_weights`.
-
-    Filenames are relative to ``directory``. Neither ``shard_files`` nor ``legacy_bin`` means the
-    directory holds no whole-model weight file.
-    """
+    """Where a directory's tensors live; neither ``shard_files`` nor ``legacy_bin`` means no whole-model file."""
 
     directory: str
     shard_files: tuple[str, ...] = ()
@@ -68,8 +58,7 @@ class CheckpointWeights:
 
     @cached_property
     def weight_map(self) -> dict[str, str]:
-        """``{tensor key: shard filename}``; ``{}`` for a legacy bin. Lazy: a single file is opened for its
-        header, an index answers from itself."""
+        """``{tensor key: shard filename}``; ``{}`` for a legacy bin."""
         if self.index is not None:
             return self.index.get("weight_map") or {}
         if not self.shard_files:
@@ -79,8 +68,7 @@ class CheckpointWeights:
             return dict.fromkeys(f.keys(), single)
 
     def absent_shard_files(self, keys: Iterable[str] | None = None) -> list[str]:
-        """The index-named shard files the directory does not hold, sorted; with ``keys``, only the files
-        holding those keys."""
+        """The index-named shard files the directory lacks, sorted; with ``keys``, only those holding the keys."""
         if keys is None:
             names = set(self.shard_files)
         else:
@@ -105,10 +93,9 @@ class CheckpointWeights:
 
 
 class StreamingCheckpointReader:
-    """One tensor at a time out of a checkpoint directory (safetensors, or a legacy bin read whole), so
-    co-located ranks do not each hold the whole dict. Construction opens every shard holding a requested
-    key (``keys=None``: all): a truncated file raises before the caller's consensus and any collective.
-    """
+    """One tensor at a time out of a checkpoint directory, so co-located ranks do not each hold the whole dict.
+    Construction opens every shard holding a requested key, so a truncated file raises before the caller's consensus
+    and any collective."""
 
     def __init__(self, checkpoint: str, keys: Iterable[str] | None):
         layout = resolve_checkpoint_weights(checkpoint)
@@ -148,7 +135,7 @@ class StreamingCheckpointReader:
         return self._handles[self._key_to_shard[key]].get_slice(key).get_dtype()
 
     def close(self) -> None:
-        """Release every open shard handle. Idempotent."""
+        """Release every open shard handle; idempotent."""
         self._open_shards.close()
         self._handles.clear()
         self._legacy = None
@@ -161,8 +148,7 @@ class StreamingCheckpointReader:
 
 
 def read_checkpoint_index(checkpoint_dir: str, *, missing_ok: bool = False) -> dict:
-    """Parse a checkpoint's safetensors index; ``{}`` for an absent one under ``missing_ok``, a raise for a
-    torn one."""
+    """Parse the safetensors index; ``{}`` for an absent one under ``missing_ok``, a raise for a torn one."""
     index_path = os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)
     if missing_ok and not os.path.isfile(index_path):
         return {}
@@ -183,7 +169,6 @@ def is_ep_sharded_checkpoint(checkpoint_dir: str) -> bool:
 
 
 def ep_sharded_checkpoint_reason(checkpoint_dir: str) -> str:
-    """The refusal for reading a per-rank EP-sharded save as a whole model."""
     return (
         f"{checkpoint_dir} is a per-rank sharded checkpoint: EP shards under a reused index, each holding "
         f"partial per-rank tensors, so it cannot be read as a whole model. Merge it first with "
@@ -192,9 +177,8 @@ def ep_sharded_checkpoint_reason(checkpoint_dir: str) -> str:
 
 
 def resolve_checkpoint_weights(checkpoint_dir: str) -> CheckpointWeights:
-    """Where a checkpoint directory's tensors live: the index (no shard opened), else a single
-    ``model.safetensors``, else the legacy bin. Policy-free: an empty layout or a per-rank index is the
-    caller's call; a torn index raises."""
+    """The index (no shard opened), else a single ``model.safetensors``, else the legacy bin. Policy-free: an empty
+    layout or a per-rank index is the caller's call; a torn index raises."""
     if os.path.isfile(os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)):
         index = read_checkpoint_index(checkpoint_dir)
         shards = tuple(sorted(set((index.get("weight_map") or {}).values())))
@@ -207,8 +191,7 @@ def resolve_checkpoint_weights(checkpoint_dir: str) -> CheckpointWeights:
 
 
 def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool = False) -> bool:
-    """Whether a directory holds a whole-model weight file (the legacy bin too unless ``safetensors_only``),
-    from stats alone: callers probe on rank 0 and broadcast, so a torn index fails in the reader after."""
+    """From stats alone, since callers probe on rank 0 and broadcast and a torn index must fail in the reader after."""
     return any(
         os.path.isfile(os.path.join(checkpoint_dir, name))
         for name in WHOLE_MODEL_WEIGHT_FILES
@@ -219,8 +202,7 @@ def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool =
 def read_checkpoint_config(
     checkpoint_dir: str, *, missing_ok: bool = False, filename: str = CONFIG_NAME
 ) -> dict | None:
-    """Parse a checkpoint's JSON config (``config.json`` unless ``filename`` names another); ``None`` only
-    for an absent file under ``missing_ok``."""
+    """Parse a checkpoint's JSON config; ``None`` only for an absent file under ``missing_ok``."""
     path = os.path.join(checkpoint_dir, filename)
     if missing_ok and not os.path.isfile(path):
         return None
@@ -229,11 +211,7 @@ def read_checkpoint_config(
 
 
 def load_full_state_dict(checkpoint_dir: str, device: str = "cpu") -> dict[str, torch.Tensor] | None:
-    """A gathered checkpoint as one full state dict, from any layout of the cascade; ``None`` without one.
-
-    Raises ``ValueError`` for a per-rank EP save and ``RuntimeError`` for a torn index, naming the cause
-    on whichever rank holds the torn copy.
-    """
+    """A gathered checkpoint as one state dict, ``None`` without one; raises on a per-rank EP save or torn index."""
     index_path = os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)
     try:
         layout = resolve_checkpoint_weights(checkpoint_dir)
@@ -263,8 +241,7 @@ def load_full_state_dict(checkpoint_dir: str, device: str = "cpu") -> dict[str, 
 
 
 def _reject_absent_index_shards(checkpoint_dir: str) -> None:
-    """Refuse an index naming shard files the directory does not hold: one node's copy of a PP save on a
-    non-shared filesystem, or a half-copied checkpoint."""
+    """Refuse an index naming absent shards: one node's copy of a PP save on a non-shared FS, or a half copy."""
     if not os.path.isfile(os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)):
         return
     absent = resolve_checkpoint_weights(checkpoint_dir).absent_shard_files()
@@ -280,8 +257,7 @@ def _reject_absent_index_shards(checkpoint_dir: str) -> None:
 
 
 def _reject_indexless_ep_shards(checkpoint_dir: str) -> None:
-    """Refuse per-rank EP shards whose save died before their index, by peeking the first file's keys; an
-    unparseable header is left to the caller's read."""
+    """Refuse per-rank EP shards whose save died before their index; an unparseable header is the caller's to read."""
     if os.path.isfile(os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)):
         return
     shards = sorted(glob.glob(os.path.join(checkpoint_dir, SAFETENSORS_FAMILY_GLOB)))
@@ -303,10 +279,8 @@ def _reject_indexless_ep_shards(checkpoint_dir: str) -> None:
 
 
 def reject_partial_checkpoint(checkpoint_dir: str) -> None:
-    """Refuse a checkpoint directory that reads as whole but is not: a per-rank EP save (with or without
-    its index) or an index naming absent shards, which ``from_pretrained`` would random-initialize around.
-    Every tool that opens a checkpoint directory calls this first.
-    """
+    """Refuse a directory that reads as whole but is not, which ``from_pretrained`` would random-initialize around.
+    Every tool that opens a checkpoint directory calls this first."""
     if is_ep_sharded_checkpoint(checkpoint_dir):
         raise ValueError(ep_sharded_checkpoint_reason(checkpoint_dir))
     _reject_indexless_ep_shards(checkpoint_dir)
@@ -314,8 +288,8 @@ def reject_partial_checkpoint(checkpoint_dir: str) -> None:
 
 
 def checkpoint_shard_files(checkpoint_dir: str) -> list[str]:
-    """A checkpoint's model safetensors shards as paths, from its index else a ``model*.safetensors`` glob
-    (safe behind :func:`reject_partial_checkpoint`); raises when it has none, a legacy bin included."""
+    """Model shard paths from the index, else a ``model*.safetensors`` glob (safe behind
+    :func:`reject_partial_checkpoint`); raises when there are none, a legacy bin included."""
     reject_partial_checkpoint(checkpoint_dir)
 
     layout = resolve_checkpoint_weights(checkpoint_dir)
@@ -337,8 +311,7 @@ def iter_checkpoint_shards(checkpoint_dir: str) -> Iterator[tuple[str, Any]]:
 
 
 def iter_checkpoint_shard_entries(checkpoint_dir: str) -> Iterator[tuple[str, Any, str]]:
-    """Yield ``(shard_path, open reader, key)`` for every tensor a checkpoint stores; a header- or key-only
-    scan reads no tensor data."""
+    """Yield ``(shard_path, open reader, key)`` per stored tensor; a header- or key-only scan reads no tensor data."""
     for shard, reader in iter_checkpoint_shards(checkpoint_dir):
         for key in reader.keys():  # noqa: SIM118 - safe_open has .keys() but is not a mapping
             yield shard, reader, key
@@ -354,18 +327,15 @@ def iter_checkpoint_tensors(
 
 
 def header_numel(header) -> int:
-    """Element count from a ``safe_open`` slice header alone."""
     return math.prod(header.get_shape())
 
 
 def header_nbytes(header) -> int:
-    """Storage size from a ``safe_open`` slice header alone."""
     return header_numel(header) * _SAFETENSORS_DTYPE_BYTES.get(header.get_dtype(), 2)
 
 
 def detect_model_types(checkpoint_dir: str) -> list[str]:
-    """The ``model_type`` spellings a checkpoint's ``config.json`` declares, ``text_config``'s (which fixes
-    the expert layout) first; ``[]`` without a config, a raise for an unreadable one."""
+    """The ``model_type`` spellings ``config.json`` declares, ``text_config``'s (which fixes the layout) first."""
     config = read_checkpoint_config(checkpoint_dir, missing_ok=True)
     if config is None:
         return []
@@ -374,7 +344,6 @@ def detect_model_types(checkpoint_dir: str) -> list[str]:
 
 
 def detect_model_type(checkpoint_dir: str) -> str:
-    """The least specific of :func:`detect_model_types` (``""`` without one): the top-level family, or
-    the ``text_config`` one of a composite config that declares none."""
+    """The least specific of :func:`detect_model_types`, ``""`` without one."""
     model_types = detect_model_types(checkpoint_dir)
     return model_types[-1] if model_types else ""

@@ -1,21 +1,8 @@
 #!/usr/bin/env python
-"""PP × ep1 grouped-GEMM MoE vs the unsplit model (pp2 × dp2, fsdp_shard_ep1_experts=True).
+"""PP x ep1 grouped-GEMM MoE against the unsplit model (pp2 x dp2, fsdp_shard_ep1_experts=True).
 
-At ep_size==1 the grouped-GEMM EP layers stay on every MoE model and fsdp_shard_ep1_experts
-folds the replicated experts into the stage FSDP mesh: no EP hooks, no deferred sweep — FSDP's
-reduce-scatter is the sole grad sync and every parameter (experts included) is a stage-mesh
-DTensor, so the plain ``pp_clip_grad_norm`` covers the whole stage. The reference is the same
-model with the same ep1 wrappers, single-process (its EPConfig is world_size=1, so every hook is
-inert), run on the full global batch — identical parametrization, so gradients compare per param
-through ``global_parameter_name`` with a full_tensor() gather.
-
-Checks: per-replica loss vs the reference slice loss; experts are DTensors on the stage mesh; no
-grad-sync hooks registered; every stage param's grad matches the reference (worst rel err, bf16
-gate) and the union of stage param names covers the reference exactly; the installed clip is
-``pp_clip_grad_norm`` and returns one identical norm on all ranks.
-
-Topology: 4 GPUs as 2 simulated NVLink domains of 2. Run:
-    torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep1_gmm_vs_unsplit.py
+No EP hooks or deferred sweep: FSDP's reduce-scatter is the sole grad sync, and every parameter is a stage-mesh
+DTensor, so plain ``pp_clip_grad_norm`` covers the stage.
 """
 
 import sys
@@ -29,7 +16,7 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 
 PP_SIZE = 2
-GLOBAL_BATCH = 4  # 2 DP replicas × per-device batch 2 (2 microbatches of 1)
+GLOBAL_BATCH = 4  # 2 DP replicas x per-device batch 2 (2 microbatches of 1).
 PER_DEVICE_BATCH = 2
 DP_SIZE = 2
 GRAD_REL_TOL = 5e-2
@@ -42,7 +29,6 @@ def run(ctx):
     rows, labels = ppeq.build_ragged_batch(GLOBAL_BATCH)
     reference = ppeq.ep1_reference(rows, labels, ctx.device, DP_SIZE, ctx.rank)
 
-    # ── PP × ep1-gmm × dp2 through the real trainer ─────────────────────────────────────────────
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     model = ppeq.build_patched_moe_model(config)
     trainer = ppeq.build_pp_sft_trainer(
@@ -52,7 +38,7 @@ def run(ctx):
     ep_modules = named_ep_layers(stage)
     checks["stage_keeps_4_ep_layers"] = len(ep_modules) == 4
 
-    # ep1-shard contract: experts are stage-mesh DTensors, no EP hooks, plain PP clip installed.
+    # Stage-mesh DTensor experts, no EP hooks, plain PP clip.
     expert_params = [p for _, m in ep_modules for _, p in m.expert_named_params()]
     checks["experts_are_stage_mesh_dtensors"] = all(
         isinstance(p, DTensor) and p.device_mesh.size() == config.stage_world_size for p in expert_params

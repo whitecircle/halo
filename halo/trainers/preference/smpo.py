@@ -9,12 +9,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Smooth Margin Preference Optimization (SMPO): reference-free margin loss plus an optional SFT term.
-
-EP/CP/TP (log-prob sums and counts aggregate across CP ranks) and PP (:class:`SMPOPipelineLoss`). ``is_vlm`` takes
-raw message rows plus an ``images`` column, processed in the collator; image tokens sit in the prompt (labels
-``-100``). VLM mode excludes ``padding_free``, CP and PP.
-"""
+"""SMPO: reference-free margin loss plus an optional SFT term. EP/CP/TP and PP (:class:`SMPOPipelineLoss`). ``is_vlm``
+takes raw message rows plus ``images``, processed in the collator, and excludes ``padding_free``, CP and PP."""
 
 import logging
 from collections.abc import Callable
@@ -85,12 +81,9 @@ _RAW_PAIR_COLUMNS = ("chosen", "rejected")
 
 
 def resolve_vlm_mode(processing_class, is_vlm: bool | None) -> bool:
-    """The run's data path: VLM rows plus the vision collator, or the text tokenize path.
-
-    The checkpoint cannot decide it: a natively multimodal checkpoint trained on text-only pairs is a text run,
-    and only the text path keeps CP, ``padding_free`` and PP. The script decides it (``is_vlm_run``); omitted,
-    it follows the modality of ``processing_class``.
-    """
+    """The checkpoint cannot decide the data path: a natively multimodal checkpoint on text pairs is a text run, and
+    only the text path keeps CP, ``padding_free`` and PP. The script decides it; omitted, it follows
+    ``processing_class``."""
     if is_vlm is None:
         return resolve_tokenizer(processing_class) is not processing_class
     if is_vlm and not isinstance(processing_class, ProcessorMixin):
@@ -138,18 +131,11 @@ def _side_statistics(
 
 
 class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
-    """Reference-model-free preference optimization (:class:`SMPOObjective`). Supports EP/CP/TP/PP.
-
-    ``is_vlm`` selects the VLM data path, raw message rows plus ``images`` processed at collation, with vision
-    tensors threaded through the chosen|rejected concat (:func:`resolve_vlm_mode`).
-    """
-
     _tag_names = ["trl", "smpo", "smooth-margin-po"]
 
     SUPPORTS_CP = True
     # Reference-free single forward; correct once the concat is interleaved so no pair splits.
     PP_REFUSAL = None
-    # The objective is already its own mean, so HF's num_items_in_batch rescaling must stay off.
     LOSS_IS_OWN_MEAN = True
     # chosen ⧺ rejected ride one forward, so every MoE layer sees twice the collator's rows.
     FORWARD_ROWS_PER_EXAMPLE = 2
@@ -178,7 +164,6 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         if processing_class is None:
             raise ValueError("processing_class (tokenizer) must be provided")
 
-        # A VLM ProcessorMixin keeps token ids on its inner tokenizer, not on itself.
         tokenizer = resolve_tokenizer(processing_class)
         self.is_vlm = resolve_vlm_mode(processing_class, is_vlm)
         self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
@@ -190,7 +175,6 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
 
         model = self._load_policy(model, args, peft_config, parallelism_config, tokenizer)
 
-        # The model rides through the distributed seam so PP can split it into this rank's stage.
         dist_kwargs = self._init_distributed_config(
             kwargs,
             training_args=args,
@@ -277,12 +261,8 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         batch: dict[str, torch.Tensor],
         train_eval: Literal["train", "eval"] = "train",
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float], torch.Tensor]:
-        """SMPO loss, metrics and the per-pair ``[pairs, 2]`` (chosen, rejected) rewards.
-
-        Metrics are detached rank-local 0-dim tensors, drained by ``StoredMetricsMixin`` at log time (no
-        per-microbatch host sync). In eval the loss and metrics read the split's own pairs
-        (:meth:`eval_split_rows`); the rewards keep every pair, the shape every rank's evaluation gather expects.
-        """
+        """Metrics are detached rank-local 0-dim tensors, drained at log time. In eval the loss and metrics read the
+        split's own pairs; the rewards keep every pair, the shape every rank's evaluation gather expects."""
         prefix = "eval_" if train_eval == "eval" else ""
         real_pairs = self.eval_split_rows(batch["prompt_input_ids"].size(0)) if train_eval == "eval" else None
 
@@ -333,11 +313,8 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
     def concatenated_forward(
         self, model: nn.Module, batch: dict[str, torch.Tensor], real_pairs: int | None = None
     ) -> dict[str, torch.Tensor]:
-        """One forward over the chosen ⧺ rejected concat → each side's log-probs, logit means and SFT NLL.
-
-        ``real_pairs`` (an eval batch's :meth:`eval_split_rows`) supervises only the batch's first pairs: the
-        rest pad the split's final round, so their labels are ignored. ``None`` supervises every pair.
-        """
+        """One forward over the chosen ⧺ rejected concat. ``real_pairs`` supervises only the batch's first pairs, since
+        the rest pad the split's final round; ``None`` supervises every pair."""
         concat_batch = concatenate_pairs(batch, self.pad_token_id, self.parallelism_config.cp_size)
         num_chosen = concat_batch["num_chosen"]
         device = model.device if hasattr(model, "device") else next(model.parameters()).device
@@ -396,8 +373,7 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         parallelism_config: ParallelismConfig | None,
         tokenizer: PreTrainedTokenizerBase,
     ) -> nn.Module:
-        """The loaded policy with its PEFT wrap and dropout settled; refuses a padding-free run whose kernels
-        cannot keep the flattened rows apart."""
+        """Refuses a padding-free run whose kernels cannot keep the flattened rows apart."""
         model = resolve_trainer_model(model, args, parallelism_config=parallelism_config)
         # After the load: the ctor accepts a model id, and the config is where a family that closes
         # turns with a role marker (GLM-4, Gemma) declares it. Resolved once, because the tokenize map
@@ -434,11 +410,8 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         args: SMPOConfig,
         dataset_name: str,
     ) -> Dataset | IterableDataset | dict[str, Dataset] | None:
-        """Tokenize the preference rows unless already prepared; a dict prepares each named split.
-
-        Text mode tokenizes templated (prompt, chosen, rejected) strings; VLM mode keeps the prompt as text plus
-        images so the collator processes them per batch instead of persisting pixel tensors into the Arrow cache.
-        """
+        """Text mode tokenizes templated strings; VLM mode keeps the prompt as text plus images, so the collator
+        processes them per batch instead of persisting pixel tensors into the Arrow cache."""
         if dataset is None:
             return None
         if isinstance(dataset, dict):
@@ -453,8 +426,8 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
             map_kwargs = {"features": VLM_SMPO_FEATURES}
         else:
             prepared_columns, tokenize_fn, map_kwargs = _TEXT_COLUMNS, tokenize_preference_row, {}
-            # The text row fn calls ``processing_class(text, add_special_tokens=False)`` — a processor reads
-            # that second slot as images — and reads bos/eos ids a ProcessorMixin does not carry.
+            # The text row fn calls ``processing_class(text, add_special_tokens=False)``, whose second slot a processor
+            # reads as images, and reads bos/eos ids a ProcessorMixin does not carry.
             row_processing_class = resolve_tokenizer(processing_class)
         if isinstance(dataset, Dataset):
             missing = [column for column in prepared_columns if column not in dataset.column_names]
@@ -492,8 +465,8 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
             self._signature_columns = list(_VLM_COLUMNS if self.is_vlm else _TEXT_COLUMNS)
-        # The dataloader mixin's union of the collator's required_dataset_columns sits below this
-        # override in the MRO — chain to it, or a collator input would be pruned here alone.
+        # The dataloader mixin's union of required_dataset_columns sits below this override in the MRO; unchained, a
+        # collator input would be pruned here alone.
         super()._set_signature_columns_if_needed()
 
     def _forward_padding_free(
@@ -545,12 +518,8 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         )
 
     def _get_current_margin(self) -> float:
-        """The live target margin, which the scheduler callback writes onto the model each step.
-
-        No default: whenever the schedule is on, ``__init__`` seeds ``target_margin`` on the model it hands the
-        base Trainer (under PP, this rank's stage), so a miss means that seeding was skipped. The recursive
-        :meth:`_top_level_model` walk is paid only past a wrapper that does not delegate attributes (DDP).
-        """
+        """Written by the scheduler callback each step. No default: ``__init__`` seeds ``target_margin`` on the model
+        it hands the base Trainer, so a miss means that seeding was skipped."""
         if not self.args.use_margin_schedule:
             return self.args.target_margin
         margin = getattr(self.model, "target_margin", None)

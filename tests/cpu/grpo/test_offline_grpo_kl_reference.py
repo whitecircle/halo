@@ -53,7 +53,7 @@ def _tiny_llama():
 
 
 def _wrapped_moe_policy():
-    """A policy holding an EP layer: the shape ``deepcopy`` cannot reproduce."""
+    """A policy holding an EP layer, which ``deepcopy`` cannot reproduce."""
     policy = _tiny_llama()
     policy.model.layers[0].mlp = StubEPLayerBase()
     return policy
@@ -256,7 +256,6 @@ def _tokenizer():
 
 
 def _load(policy, *, model_source: str, reset_sinks: bool, parallelism=None):
-    """The script's reference load for ``policy``, as ``main`` calls it."""
     args = _script_args()
     args.reset_sinks = reset_sinks
     return offline_grpo_script._load_kl_reference(
@@ -272,7 +271,6 @@ def _load(policy, *, model_source: str, reset_sinks: bool, parallelism=None):
 
 
 def test_native_expert_lora_keeps_the_original_base_when_the_policy_resumes():
-    """The unadapted base uses the policy's load settings, never its trained checkpoint."""
     with stub_frozen_loader() as caps:
         reference = _load(
             _wrapped_moe_policy(), model_source=RESUMED, reset_sinks=False, parallelism=_native_expert_lora_config()
@@ -298,8 +296,6 @@ def test_the_script_loads_nothing_for_a_precomputed_full_finetuning_reference(po
 
 
 class _PeftPolicy:
-    """The policy's ``disable_adapter()`` switch, recording whether a forward ran with the adapters off."""
-
     def __init__(self):
         self.adapters_off = False
 
@@ -317,8 +313,7 @@ class _ReferenceReached(Exception):
 
 
 def _loss_forwards(ref_model) -> tuple[list[dict], _PeftPolicy]:
-    """Each ``_get_per_token_logps`` call ``_compute_loss_inner`` makes under ``kl_beta > 0``: the model
-    it forwarded, and whether grad and the policy's adapters were on during it."""
+    """Records each ``_get_per_token_logps`` call ``_compute_loss_inner`` makes under ``kl_beta > 0``."""
     policy = _PeftPolicy()
     forwards = []
 
@@ -365,8 +360,7 @@ def test_a_held_reference_model_forwards_with_no_grad_and_the_policy_adapters_un
 
 
 def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None, chunked=False, pipeline=False, bf16=True):
-    """A trainer whose sweep scores rows off ``lm_head``; ``chunked`` and ``pipeline`` pick the scoring
-    path the reference identity records, which the stub sweep does not otherwise follow."""
+    """``chunked`` and ``pipeline`` pick the path the reference identity records; the stub sweep ignores them."""
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = _tiny_llama()
     with torch.no_grad():
@@ -451,8 +445,7 @@ def test_explicit_reference_does_not_allow_a_resume_to_replace_its_missing_ancho
     ids=["full-logits-bf16", "full-logits-fp32", "chunked", "pipeline"],
 )
 def test_a_reference_split_records_the_precision_its_scoring_path_returns(tmp_path, scoring, precision):
-    """TRL's full-logits ``selective_log_softmax`` returns the logits' (compute) dtype; the chunked
-    kernel and the pipeline's last stage return fp32."""
+    """TRL's ``selective_log_softmax`` returns the compute dtype; the chunked kernel and last PP stage return fp32."""
     trainer = _anchor_trainer(output_dir=str(tmp_path), **scoring)
     trainer._precompute_reference_logps(_anchor_dataset(), "training")
     assert trainer._reference_logps_by_split["training"]["settings"][LOGPROB_PRECISION_KEY] == precision
@@ -479,14 +472,12 @@ def _assert_resume_refuses_the_saved_anchor(tmp_path, **scoring) -> None:
     ids=["full-to-chunked", "chunked-to-full", "full-to-pipeline", "pipeline-to-full"],
 )
 def test_a_resume_scoring_at_another_precision_refuses_the_saved_reference(tmp_path, saved, resumed):
-    """The saved scores carry their path's rounding: attached to a run that scores the policy at
-    another precision, the KL would start off zero at the first step."""
+    """Saved scores carry their path's rounding, so at another precision the KL would start the run off zero."""
     _saved_anchor(tmp_path, **saved)
     _assert_resume_refuses_the_saved_anchor(tmp_path, **resumed)
 
 
 def test_a_reference_saved_without_a_recorded_precision_is_not_restored(tmp_path):
-    """As for DPO/KTO, a split that records no precision is never assumed to match this run's."""
     saved = _saved_anchor(tmp_path)
     del saved["training"]["settings"][LOGPROB_PRECISION_KEY]
     torch.save(saved, os.path.join(tmp_path, REFERENCE_LOGPS_FILE))

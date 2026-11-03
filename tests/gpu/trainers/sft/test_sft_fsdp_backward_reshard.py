@@ -1,29 +1,9 @@
 #!/usr/bin/env python
-"""``fsdp_reshard_after_backward: false`` must honour torch's PER-WINDOW reshard contract.
+"""``fsdp_reshard_after_backward: false`` honors torch's per-window reshard contract and tracks the default arm.
 
-torch toggles ``set_reshard_after_backward`` per gradient-accumulation window: off for microbatches
-1..n-1, back on for the last. This separates the three states that flag can be in.
-
-  * **Correct** — microbatches 1..n-1 end UNSHARDED (the saving: no full-model re-all-gather on the
-    next microstep's forward) and the window's last backward reshards.
-  * **Pinned off for the run** — ``FSDPParamGroup.post_backward`` clears the unsharded params'
-    ``.grad`` before reduce-scattering onto the sharded DTensors and never re-registers those, so at
-    the optimizer step ``model.parameters()`` yields plain grad-less tensors: ``grad_norm`` is 0.0,
-    nothing is clipped, and ``unshard()`` no-ops on the already-unsharded group so the update never
-    reaches a forward and the loss does not move at all.
-  * **Never armed** — indistinguishable from the default arm, so only the microstep-end check
-    catches it.
-
-Both arms train identical data (one example repeated, so every window's logged loss reports the
-same loss surface at that window's weights), and the lever arm must track the default arm step for
-step: the two are the same math, differing only in how many times FSDP re-gathers parameters that
-did not change.
-
-Needs 2 GPUs (DP=2 — at DP=1 FSDP2 is skipped and the flag is a no-op).
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_fsdp_backward_reshard.py
+Pinned off for the run, ``post_backward`` never re-registers the sharded DTensors: ``grad_norm`` is 0.0 and the loss
+never moves. Never armed looks like the default arm, so only the microstep-end check catches it. At DP=1 FSDP2 is
+skipped and the flag is a no-op.
 """
 
 import math
@@ -50,23 +30,16 @@ MAX_STEPS = 4
 GRAD_ACCUM = 4
 DATASET_ROWS = 64
 MAX_SEQ_LENGTH = 512
-# Large enough that a real update moves the loss well past HF's 4-decimal log rounding.
+# Moves the loss well past HF's 4-decimal log rounding.
 LEARNING_RATE = 5e-5
 SEED = 42
-# The two arms issue the same reduce-scatters on the same values — only the number of (exact,
-# value-preserving) all-gathers differs — so their curves should agree to well inside bf16 noise.
+# Same reduce-scatters on the same values; only the number of value-preserving all-gathers differs.
 CURVE_ABS_TOL = 1e-3
 
 
 class ReshardInvariantCallback(TrainerCallback):
-    """Record what ``model.parameters()`` holds at each end of a backward.
-
-    The two hooks bracket the window and together separate all three states. ``on_substep_end`` fires
-    after microbatches 1..n-1, where the lever must leave parameters UNSHARDED — its whole purpose,
-    and the half a merely-inert lever silently drops. ``on_pre_optimizer_step`` fires after clipping
-    and before the step, the moment every consumer of the post-backward parameters (grad norm, the EP
-    sweeps, the optimizer) reads them, where they must be sharded and carrying gradients.
-    """
+    """``on_substep_end`` must see parameters unsharded, the half an inert lever drops. ``on_pre_optimizer_step``,
+    where every consumer of post-backward parameters reads them, must see them sharded and carrying gradients."""
 
     def __init__(self, model):
         self.model = model
@@ -89,11 +62,9 @@ class ReshardInvariantCallback(TrainerCallback):
 
 
 def run_sft(reshard_after_backward, tokenizer, train_dataset, output_dir):
-    """Train ``MAX_STEPS`` optimizer steps and return the losses, grad norms and step-time invariants."""
     log(f"\n--- fsdp_reshard_after_backward={reshard_after_backward} ---")
 
-    # AdamWBF16 (the bf16 default) stochastically rounds every weight write, so two arms would drift
-    # on RNG rather than on the flag under test; stock AdamW makes them comparable step for step.
+    # AdamWBF16 stochastically rounds every write, so two arms would drift on RNG; stock AdamW keeps them comparable.
     parallelism_config = ParallelismConfig(fsdp_reshard_after_backward=reshard_after_backward, bf16_optimizer=False)
     model, _ = load_distributed_model(
         model_name_or_path=MODEL_NAME,
@@ -151,11 +122,8 @@ def run_sft(reshard_after_backward, tokenizer, train_dataset, output_dir):
 
 
 def _every_step_moved(values) -> bool:
-    """Each window saw different weights than the last, and the run net-learned.
-
-    Stale weights make every window bit-identical (same data, same parameters), so the equality is
-    the discriminator; the net decrease keeps a merely-diverging run from passing on churn alone.
-    """
+    """Stale weights make every window bit-identical; the net decrease keeps a diverging run from passing on churn
+    alone."""
     return (
         len(values) >= 2
         and values[-1] < values[0]
@@ -170,8 +138,7 @@ def run(ctx) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # One example repeated: every microbatch in every window carries the same loss surface, so the
-    # logged per-step loss can only move if an optimizer update reached a forward.
+    # Every microbatch carries one loss surface, so the logged loss moves only if an update reached a forward.
     row = create_sft_dataset(1, tokenizer, seed=SEED, multi_turn_ratio=0.0)[0]
     train_dataset = Dataset.from_list([row] * DATASET_ROWS)
 
@@ -185,17 +152,16 @@ def run(ctx) -> dict:
         losses, norms, inv = arm["losses"], arm["grad_norms"], arm["invariants"]
         n_steps = len(inv.n_params)
         checks[f"{label}_ran_all_steps"] = n_steps == MAX_STEPS and len(losses) == MAX_STEPS
-        # The invariant the pin breaks: post-backward parameters ARE the optimizer's sharded
-        # DTensors, and they carry this window's gradients.
+        # What the pin breaks: post-backward parameters are the optimizer's sharded DTensors, carrying this window's
+        # gradients.
         checks[f"{label}_params_resharded"] = n_steps > 0 and inv.n_dtensor == inv.n_params
         checks[f"{label}_params_carry_grads"] = n_steps > 0 and inv.n_with_grad == inv.n_params
         checks[f"{label}_grad_norm_usable"] = bool(norms) and all(
             g is not None and math.isfinite(g) and g > 0.0 for g in norms
         )
-        # Identical data every step, so a loss that never moves means the update never reached a forward.
         checks[f"{label}_loss_responds_to_update"] = _every_step_moved(losses)
-        # The other half of the contract, and the only one a lever that is never armed at all would
-        # break: microbatches 1..n-1 END unsharded under the lever, sharded on torch's default.
+        # What a never-armed lever breaks: microbatches 1..n-1 end unsharded under the lever, sharded on torch's
+        # default.
         expected_mid = 0 if label == "lever" else (inv.n_params[0] if n_steps else -1)
         mid = inv.microstep_dtensor
         checks[f"{label}_microstep_sharding"] = len(mid) == MAX_STEPS * (GRAD_ACCUM - 1) and all(

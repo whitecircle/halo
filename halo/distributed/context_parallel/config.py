@@ -1,8 +1,5 @@
 """Ulysses CP's process groups: contiguous ``cp_size`` rank blocks inside each NVLink domain of a pipeline stage.
-
-Domain-local is the only shape ``ParallelismConfig`` accepts: the Ulysses all-to-all is bandwidth-heavy, and DeepEP
-dispatch under EP+CP is domain-local.
-"""
+Domain-local only, since the all-to-all is bandwidth-heavy and DeepEP dispatch under EP+CP is domain-local."""
 
 from __future__ import annotations
 
@@ -20,12 +17,8 @@ class CPConfigError(ValueError):
 
 
 class CPConfig:
-    """COLLECTIVE over the default group: this rank's CP process group, ``cp_rank`` and ``cp_group_idx``.
-
-    ``stage_world_size`` and ``stage_base_rank`` are the width and first global rank of this rank's pipeline stage
-    (the whole job without PP); the layout math runs in stage-local ranks. Without an initialized process group
-    only ``cp_size == 1`` builds, with no group.
-    """
+    """COLLECTIVE over the default group: this rank's CP process group, ``cp_rank`` and ``cp_group_idx``. Without an
+    initialized process group only ``cp_size == 1`` builds, with no group."""
 
     def __init__(self, cp_size: int, *, stage_world_size: int, stage_base_rank: int, nvlink_domain_size: int):
         self.cp_size = cp_size

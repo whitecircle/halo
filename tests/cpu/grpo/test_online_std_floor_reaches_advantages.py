@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""``scale_rewards_std_floor`` must actually reach the online-GRPO advantage math.
-
-The floor is the collapse guard: with ``scale_rewards="group"`` (TRL's default) a behaviourally
-degenerate group — every reward within a few hundredths — divides its own noise by a near-zero std
-and gets full-scale advantages. TRL's own divisor is a fixed ``1e-4``, so the floor can only be
-applied by the trainer's own recompute hook.
-
-Two gates guard that hook: the reward stash in ``_calculate_rewards`` and the early return in
-``_apply_std_floor_advantages``. A knob covered by one but not the other is silently inert: the stash
-stays ``None`` and the hook returns. These tests pin that both gates honour the floor on its own.
-
-    python tests/cpu/grpo/test_online_std_floor_reaches_advantages.py
-"""
+"""``scale_rewards_std_floor`` must reach the online-GRPO advantage math through the trainer's recompute hook, since
+TRL's divisor is a fixed ``1e-4``. A knob one of the hook's two gates misses is silently inert."""
 
 from collections import deque
 
@@ -45,8 +34,8 @@ class _OnlineStub:
         self.num_generations = G
         self.args = _Args()
         self.accelerator = _Accelerator()
-        # TRL appends one entry per gathered completion before either hook runs, into a BOUNDED
-        # deque (generation_batch_size) — a plain list would support operations production cannot.
+        # TRL appends one entry per gathered completion into a bounded deque before either hook runs; a plain list
+        # would support operations production cannot.
         self._logs = {"advantages": deque([0.0] * G, maxlen=G)}
 
     _recomputes_from_gathered_rewards = DistributedOnlineGRPOTrainer._recomputes_from_gathered_rewards
@@ -64,7 +53,6 @@ def _trl_baseline_advantages():
 
 
 def test_std_floor_alone_arms_the_reward_stash():
-    """The stash gate must fire for the floor alone, or the hook finds no stashed rewards to recompute from."""
     assert _OnlineStub(std_floor=0.2)._recomputes_from_gathered_rewards is True
     assert _OnlineStub()._recomputes_from_gathered_rewards is False
 
@@ -77,12 +65,10 @@ def test_std_floor_alone_arms_the_reward_stash():
     ],
 )
 def test_other_hooks_still_arm_the_stash(kwargs):
-    """Widening the gate must not narrow it for the pre-existing consumers."""
     assert _OnlineStub(**kwargs)._recomputes_from_gathered_rewards is True
 
 
 def test_std_floor_alone_suppresses_degenerate_group_amplification():
-    """With only the floor set, the hook must rewrite advantages and shrink them by ~std_floor/std."""
     baseline = _trl_baseline_advantages()
     assert baseline.abs().max() > 0.5, "fixture no longer amplifies; pick a tighter reward spread"
 
@@ -94,16 +80,13 @@ def test_std_floor_alone_suppresses_degenerate_group_amplification():
     # The floor replaces the tiny std with 0.2, so the amplification drops by that ratio.
     expected = group_relative_advantages(DEGENERATE_REWARDS.float(), G, "group", std_floor=0.2)
     assert torch.allclose(result["advantages"], expected, atol=1e-6)
-    # The durable completions record must carry the SAME values the gradient sees, not TRL's.
+    # The completions record must carry the values the gradient sees.
     assert torch.allclose(torch.tensor(list(stub._logs["advantages"])), expected, atol=1e-6)
 
 
 def test_a_short_advantage_log_raises_instead_of_misattributing_rows():
-    """TRL logs one advantage per gathered completion; a shorter tail cannot be realigned.
-
-    Overwriting the last N entries of a log that holds fewer than N would attribute each row's
-    advantage to the wrong completion, and the parquet gives no sign of it.
-    """
+    """Overwriting the last N entries of a log holding fewer than N would attribute each row's advantage to the wrong
+    completion, and the parquet gives no sign of it."""
     stub = _OnlineStub(std_floor=0.2)
     stub._logs["advantages"] = deque([0.0] * (G - 1), maxlen=G - 1)
     with pytest.raises(RuntimeError, match="cannot realign the completions record"):
@@ -111,7 +94,6 @@ def test_a_short_advantage_log_raises_instead_of_misattributing_rows():
 
 
 def test_no_floor_leaves_trl_advantages_untouched():
-    """The default path must not be recomputed at all — TRL's values stand."""
     baseline = _trl_baseline_advantages()
     stub = _OnlineStub()
     result = {"advantages": baseline.clone()}
@@ -120,7 +102,7 @@ def test_no_floor_leaves_trl_advantages_untouched():
 
 
 def test_floor_preserves_advantages_when_the_group_has_real_spread():
-    """A group whose std exceeds the floor must be unaffected — the floor is a bound, not a rescale."""
+    """The floor is a bound, never a rescale."""
     spread = torch.tensor([0.0, 0.4, 0.8, 1.0])
 
     class _SpreadStub(_OnlineStub):

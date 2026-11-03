@@ -10,12 +10,8 @@ from halo.models.moe.family_specs import LFM2
 
 
 class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
-    """EP layer for LFM2 MoE fused experts using DeepEP.
-
-    Fused gate_up_proj/down_proj experts, SwiGLU, sigmoid routing with optional
-    ``expert_bias`` correction. No shared experts (the block carries none, so the declared slot
-    registers ``None`` and the shared base forward skips that leg), no group routing.
-    """
+    """EP layer for LFM2 MoE: sigmoid routing with optional ``expert_bias`` correction. The block carries no shared
+    expert, so the declared slot registers ``None`` and the shared leg is skipped."""
 
     HF_MODULE_NAMES = ("Lfm2MoeSparseMoeBlock",)
     FAMILY = LFM2
@@ -28,9 +24,8 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
-        """Top-k plus the sigmoid-routing knobs, read off ``Lfm2MoeTopKRouter`` (the gate) rather than
-        the block, and without defaults: these change the routing math, so a moved attribute must
-        raise here rather than route with a substituted constant."""
+        """Top-k plus the sigmoid-routing knobs off the gate, without defaults: they change the routing math, so a
+        moved attribute must raise."""
         super()._adopt_routing(original_layer)
         self.norm_topk_prob = self.gate.norm_topk_prob
         self.routed_scaling_factor = self.gate.routed_scaling_factor
@@ -39,8 +34,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
         if not self.use_expert_bias:
             return
         if not hasattr(original_layer, "expert_bias"):
-            # The router asks for a bias the block does not carry: an upstream move, not a
-            # configuration. Flipping the flag off here would route unbiased for the rest of the run
+            # An upstream move, not a configuration: flipping the flag off would route unbiased for the rest of the run
             # with no shape, dtype or key changing.
             raise AttributeError(
                 f"EPLfm2MoELayer: the router declares use_expert_bias=True but "
@@ -59,20 +53,12 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
         self.register_buffer("expert_bias", eb.clone())
 
     def _native_slot_absence_is_legal(self) -> bool:
-        """``use_expert_bias: false`` registers no buffer, which is a configuration, not a rename.
-
-        Read off the EP layer's own flag, which routing and slot materialization both key on;
-        :meth:`_adopt_routing` rejects the one state that would make it inaccurate (a router asking
-        for a bias its block does not carry).
-        """
+        """``use_expert_bias: false`` registers no buffer, which is a configuration and not a rename."""
         return not self.use_expert_bias
 
     def _materialize_native_balancing_slot(self) -> bool:
-        """Create the architecture's own ``expert_bias`` on a ``use_expert_bias: false`` checkpoint.
-
-        Zero-initialized, a no-op at creation, so materializing it only makes the trained bias exportable;
-        the strategy layer mirrors ``use_expert_bias`` into ``model.config``.
-        """
+        """Create the architecture's own ``expert_bias`` on a ``use_expert_bias: false`` checkpoint. Zero-initialized,
+        a no-op at creation; the strategy layer mirrors the flag into ``model.config``."""
         self.register_buffer(
             "expert_bias", torch.zeros(self.num_experts, dtype=torch.float32, device=self._resident_device())
         )
@@ -80,17 +66,14 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
         return True
 
     def _router_logits(self, flat: torch.Tensor) -> torch.Tensor:
-        """Bare linear over the router's weight. ``Lfm2MoeTopKRouter.forward`` cannot be called here:
-        it requires the block's ``expert_bias`` and runs its own top-k, while selection must stay
-        with the EP layer (balancing bias and routing replay recompute it)."""
+        """``Lfm2MoeTopKRouter.forward`` needs the block's ``expert_bias`` and runs its own top-k, while selection must
+        stay with the EP layer (balancing bias and routing replay recompute it)."""
         return self._linear_router_logits(flat)
 
     def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """LFM2 routing with sigmoid activation and optional expert bias."""
         routing_weights = router_logits.sigmoid()
 
-        # Both biases perturb selection only; the gate weights gathered below stay unbiased. The
-        # declared native slot is ``expert_bias``, registered exactly when ``use_expert_bias`` holds.
+        # Both biases perturb selection only; the gate weights gathered below stay unbiased.
         scores_for_routing = self._selection_scores(routing_weights)
 
         # Identity, not equality: an unbiased selection returns the same object, which selects the

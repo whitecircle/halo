@@ -17,8 +17,6 @@ SEPARATE_GLU_PROJECTIONS: tuple[str, str, str] = ("gate_proj", "up_proj", "down_
 
 
 class ExpertLayoutKind(enum.Enum):
-    """How a family's runtime expert banks become its hub tensors."""
-
     # Contiguous ``[gate; up]`` halves, transposed to ``F.linear`` convention.
     FUSED = "fused"
     # FUSED, then one tensor per expert under ``per_expert_keys``.
@@ -46,13 +44,8 @@ _RUNTIME_KEYS: dict[ExpertLayoutKind, frozenset[str]] = {
 
 @dataclass(frozen=True)
 class ExpertLayout:
-    """A family's hub expert layout.
-
-    ``per_expert_keys`` is the ``(gate, up, down)`` spelling of a one-tensor-per-expert checkpoint: what the
-    per-expert kinds write, and for a fused family the spelling transformers fuses on load, which
-    ``unfuse_moe_experts.py`` writes. ``key_prefix`` leads every exported key relative to the EP layer: empty
-    where the layer replaces the expert container itself (Gemma 4).
-    """
+    """``per_expert_keys`` is the ``(gate, up, down)`` spelling of a one-tensor-per-expert checkpoint. ``key_prefix``
+    is empty where the EP layer replaces the expert container itself (Gemma 4)."""
 
     kind: ExpertLayoutKind = ExpertLayoutKind.FUSED
     per_expert_keys: tuple[str, str, str] | None = None
@@ -75,13 +68,11 @@ def interleave_gate_up(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 
 def split_interleaved_gate_up(interleaved: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(gate, up)`` views of an interleaved last axis, the inverse of :func:`interleave_gate_up`."""
     return interleaved[..., ::2], interleaved[..., 1::2]
 
 
 def iter_per_expert_split(banks: Sequence[tuple[torch.Tensor, tuple[str, ...]]]) -> Iterator[tuple[str, torch.Tensor]]:
-    """``("<expert>.<name>", view)`` expert by expert: each bank's expert slice split evenly along its first axis
-    into one view per name, banks in the order given."""
+    """``("<expert>.<name>", view)`` expert by expert, each bank's expert slice split evenly into one view per name."""
     for expert in range(banks[0][0].shape[0]):
         for bank, names in banks:
             for name, part in zip(names, bank[expert].chunk(len(names)), strict=True):
@@ -91,11 +82,8 @@ def iter_per_expert_split(banks: Sequence[tuple[torch.Tensor, tuple[str, ...]]])
 def to_hub_expert_tensors(
     layout: ExpertLayout, tensors: Mapping[str, torch.Tensor], *, device: torch.device | str
 ) -> dict[str, torch.Tensor]:
-    """``tensors`` (full expert banks keyed by runtime attribute) in ``layout``'s hub layout on ``device``, keyed
-    relative to the EP layer before the family's export renames.
-
-    Raises on a tensor the layout has no branch for: an expert tensor dropped from the export loads and is wrong.
-    """
+    """Keyed relative to the EP layer before the family's export renames. Raises on a tensor the layout has no branch
+    for, as an expert tensor dropped from the export loads and is wrong."""
     accepted = _RUNTIME_KEYS[layout.kind]
     if unexpected := set(tensors) - accepted:
         raise ValueError(

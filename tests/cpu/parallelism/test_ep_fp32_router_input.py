@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""An ``fp32_router`` EP layer feeds its router at the dtype the live router weight holds at the forward.
-
-``fp32_router`` keeps fp32 router masters. Where no FSDP2 group casts them the router projects in fp32, so its
-input is upcast; where an FSDP2 group unshards the router at its bf16 ``param_dtype`` the input stays bf16. Which
-one a layer meets is not ``experts_fsdp_managed``: that verdict holds at ep1 by default, yet FSDP2 never wraps a
-one-rank job, nor an unwrapped copy of a model, and a wrap that does leaves a frozen fp32 router (an adapter run)
-out of every shard group; each of those fp32 routers then met a bf16 input. Every family runs a whole
-tiny model in each regime while every projection taking a router parameter, or the copy a router casting its own
-weight projects with, is recorded; each regime must record one.
-
-    python tests/cpu/parallelism/test_ep_fp32_router_input.py
-"""
+"""An ``fp32_router`` EP layer feeds its router at the dtype the live weight holds at the forward, which
+``experts_fsdp_managed`` does not decide: FSDP2 skips one-rank jobs and frozen routers."""
 
 from __future__ import annotations
 
@@ -38,17 +28,16 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 BF16, FP32 = torch.bfloat16, torch.float32
 # ``a @ b`` reaches a torch function mode as ``Tensor.matmul``.
 _PROJECTIONS = (F.linear, torch.matmul, torch.Tensor.matmul)
-# Casts a router may apply to its own weight before projecting (``self.weight.type(torch.float32)``).
+# Casts a router may apply to its own weight before projecting.
 _CASTS = (torch.Tensor.to, torch.Tensor.type, torch.Tensor.type_as, torch.Tensor.float, torch.Tensor.bfloat16)
 
 
 class _RouterProjections(TorchFunctionMode):
-    """Records ``(router weight dtype, other operand dtypes)`` for every projection taking a router parameter, or a
-    cast copy of one, the parameters as each EP layer's forward sees them (FSDP2 swaps in its unsharded ones)."""
+    """The parameters as each EP layer's forward sees them, since FSDP2 swaps in its unsharded ones."""
 
     def __init__(self):
         super().__init__()
-        # Held, not only their ids: a freed cast copy's id could be reused by an unrelated tensor.
+        # Held, since a freed cast copy's id could be reused by an unrelated tensor.
         self.router_tensors: dict[int, torch.Tensor] = {}
         self.weight_dtypes: set[torch.dtype] = set()
         self.projections: list[tuple[torch.dtype, set[torch.dtype]]] = []
@@ -109,7 +98,7 @@ def _assert_router_projects_at(recorder: _RouterProjections, model: nn.Module, d
 
 
 def _fsdp2_wrap(model: nn.Module, mesh, ignored_params: list[nn.Parameter] | None = None) -> None:
-    """The DP wrap past its width gate: per-layer FSDP2 under the production bf16 policy."""
+    """Per-layer FSDP2 under the production bf16 policy."""
     _apply_fsdp2(
         model, mesh, compute_dtype=BF16, fp32_reduce=False, topology="one rank", ignored_params=ignored_params
     )
@@ -128,8 +117,7 @@ def single_rank_mesh(tmp_path):
 @pytest.mark.parametrize("shard_ep1_experts", [True, False], ids=["experts-fsdp-managed", "fsdp-ignored"])
 @pytest.mark.parametrize("family", TINY_MOE_FAMILIES)
 def test_a_router_no_fsdp2_group_casts_projects_in_fp32(family, shard_ep1_experts):
-    """A one-rank job's model, or an unwrapped copy of any: under the managed verdict FSDP2 owns the ep1 experts,
-    yet the DP wrap at a width of one wraps nothing, so the router keeps its fp32 master either way."""
+    """Under the managed verdict the DP wrap at width one wraps nothing, so the router keeps its fp32 master."""
     config = _one_rank_config(fsdp_shard_ep1_experts=shard_ep1_experts)
     assert config.experts_fsdp_managed is shard_ep1_experts
     model = _ep_model(family, config.ep_config())
@@ -139,8 +127,6 @@ def test_a_router_no_fsdp2_group_casts_projects_in_fp32(family, shard_ep1_expert
 
 @pytest.mark.parametrize("family", TINY_MOE_FAMILIES)
 def test_a_router_fsdp2_unshards_projects_at_the_policy_dtype(family, single_rank_mesh):
-    """The managed verdict on a model FSDP2 wraps, as every stage of two or more ranks is (a pipeline stage of one
-    is refused at config time)."""
     config = _one_rank_config(fsdp_shard_ep1_experts=True)
     model = _ep_model(family, config.ep_config())
     _fsdp2_wrap(model, single_rank_mesh)
@@ -149,9 +135,7 @@ def test_a_router_fsdp2_unshards_projects_at_the_policy_dtype(family, single_ran
 
 @pytest.mark.parametrize("family", TINY_MOE_FAMILIES)
 def test_a_frozen_router_the_wrap_leaves_out_projects_in_fp32(family, single_rank_mesh):
-    """The managed verdict on a wrapped model training adapters: its frozen fp32 router shares no trainable
-    parameter's dtype, so the trainer's FSDP2 exclusions leave it out of every shard group, no policy casts it, and
-    it keeps its fp32 master inside a wrapped layer."""
+    """It shares no trainable parameter's dtype, so the FSDP2 exclusions leave it out and no policy casts it."""
     config = _one_rank_config(fsdp_shard_ep1_experts=True)
     model = _ep_model(family, config.ep_config())
     ep_layers = [layer for _, layer in named_ep_layers(model)]

@@ -15,23 +15,16 @@ VLM_IMAGE_COLUMNS = (*VLM_RAW_IMAGE_COLUMNS, "pixel_values")
 
 
 def _splits(dataset) -> list:
-    """The splits of a ``DatasetDict``, or a single split as the only one."""
     return list(dataset.values()) if isinstance(dataset, dict) else [dataset]
 
 
 def carried_image_columns(dataset) -> set[str]:
-    """The :data:`VLM_IMAGE_COLUMNS` spellings present in any split of ``dataset`` (a ``DatasetDict`` or one
-    split), as every image-column guard reads them."""
     return {column for split in _splits(dataset) for column in split.column_names} & set(VLM_IMAGE_COLUMNS)
 
 
 def reject_image_columns(dataset, method: str) -> None:
-    """Fail loud when a method with NO vision path is handed a dataset carrying images.
-
-    Every such method prunes its dataset to the columns it names, so an image column is dropped
-    without a word and the run trains on the rows' text alone at full cost. Read off the
-    :data:`VLM_IMAGE_COLUMNS` spellings a VLM-capable method routes on.
-    """
+    """Fail loud when a method with no vision path gets image columns: it prunes to the columns it names, so images
+    drop silently and the run trains on text alone at full cost."""
     carried = sorted(carried_image_columns(dataset))
     if not carried:
         return
@@ -44,20 +37,17 @@ def reject_image_columns(dataset, method: str) -> None:
 
 
 def _list_element_feature(feature):
-    """The element feature of a list-shaped features node (``List``/``LargeList``/``Sequence`` or the
-    ``[inner]`` shorthand), ``None`` when it is not list-shaped."""
+    """``List``/``LargeList``/``Sequence`` or the ``[inner]`` shorthand; ``None`` when not list-shaped."""
     if isinstance(feature, (list, tuple)):
         return feature[0] if len(feature) == 1 else None
     return getattr(feature, "feature", None)
 
 
 def _struct_fields(feature) -> dict | None:
-    """The named fields of a struct features node, ``None`` when it is not a struct."""
     return feature if isinstance(feature, dict) else None
 
 
 def _feature_carries_image(feature) -> bool:
-    """Whether a features subtree declares a ``datasets.Image`` anywhere inside it."""
     if isinstance(feature, ImageFeature):
         return True
     fields = _struct_fields(feature)
@@ -68,9 +58,7 @@ def _feature_carries_image(feature) -> bool:
 
 
 def _conversation_schema_declares_images(column_feature) -> bool:
-    """Whether a parts-form conversation column's Arrow schema can hold image parts: an
-    :data:`~halo.data.conversation.IMAGE_PART_PAYLOAD_KEY` field or a ``datasets.Image`` feature.
-    Row-independent, since Arrow unions the parts struct over the whole split."""
+    """A parts-form conversation column can hold image parts. Row-independent: Arrow unions the parts struct."""
     messages = _struct_fields(_list_element_feature(column_feature))
     if messages is None or "content" not in messages:
         return False
@@ -83,7 +71,7 @@ def _conversation_schema_declares_images(column_feature) -> bool:
 
 
 def _column_embeds_images(split, column: str) -> bool:
-    """Whether ``column`` of ``split`` embeds image parts: by Arrow schema, else by its first row."""
+    """By Arrow schema, else by its first row."""
     features = getattr(split, "features", None) or {}
     if _conversation_schema_declares_images(features.get(column)):
         return True
@@ -91,8 +79,7 @@ def _column_embeds_images(split, column: str) -> bool:
 
 
 def _declares_images_locally(dataset, conversation_field: str | None) -> bool:
-    """:func:`dataset_declares_images` on the local rank's slice: an image column, or image parts embedded in
-    the conversation (by Arrow schema, else by the first row of a JSON-string column); ``None`` declares none."""
+    """An image column, or image parts embedded in the conversation, on the local slice; ``None`` declares none."""
     if dataset is None:
         return False
     if carried_image_columns(dataset):
@@ -105,9 +92,8 @@ def _declares_images_locally(dataset, conversation_field: str | None) -> bool:
 
 
 def dataset_image_evidence(dataset) -> str | None:
-    """The declaration that makes ``dataset`` image data on the local rank, or ``None``: the
-    :func:`dataset_declares_images` reading, probing every column for a consumer that never learns the
-    conversation field."""
+    """The declaration making ``dataset`` image data locally, or ``None``, probing every column for a consumer that
+    never learns the conversation field."""
     if dataset is None:
         return None
     columns = carried_image_columns(dataset)
@@ -135,14 +121,9 @@ def is_vlm_run(
     config=None,
     vlm_checkpoint: bool | None = None,
 ) -> bool:
-    """Whether this run takes the VLM data path: a multimodal checkpoint plus image data to feed it,
-    agreed across ranks once for the whole verdict.
-
-    A natively multimodal family (Gemma 4, Qwen3.5/3.6) is a VLM by config while its text-only recipes
-    are text runs, so the run must also name an ``images_field`` or carry image data. The checkpoint's
-    side comes from the loaded ``config`` or from ``vlm_checkpoint``
-    (:func:`~halo.model_loading.parallel.model_source.probe_checkpoint`); one of the two is required.
-    """
+    """A multimodal checkpoint plus image data, agreed across ranks once. A natively multimodal family (Gemma 4,
+    Qwen3.5/3.6) is a VLM by config while its text-only recipes are text runs, so the run must also name an
+    ``images_field`` or carry image data. One of ``config`` or ``vlm_checkpoint`` is required."""
     if vlm_checkpoint is None:
         if config is None:
             raise ValueError(

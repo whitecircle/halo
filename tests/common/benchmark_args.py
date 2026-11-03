@@ -1,8 +1,4 @@
-"""Shared argparse setup and baseline-key spelling for the profiling benchmarks.
-
-Individual benchmarks extend the parser with add_argument() before calling
-parse_args().
-"""
+"""Shared argparse setup and baseline-key spelling for the profiling benchmarks."""
 
 import argparse
 
@@ -18,14 +14,7 @@ def create_benchmark_parser(
     description: str,
     require_ep: bool = True,
 ) -> argparse.ArgumentParser:
-    """Create ArgumentParser with common benchmark arguments.
-
-    Common args: --model, --model_path, --attn_implementation, --no_liger,
-                 --ep, --seq, --steps, --warmup, --batch_size, --grad_accum, --pp,
-                 --pp_microbatches, --num_samples.
-
-    Returns parser that benchmarks can extend with custom args.
-    """
+    """ArgumentParser with the common benchmark arguments, for benchmarks to extend."""
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--model",
@@ -118,21 +107,14 @@ def create_benchmark_parser(
 
 
 def axis_tags(**sizes: int) -> list[str]:
-    """``<axis><size>`` for every parallel axis wider than one rank, in argument order: how a benchmark's
-    baseline key spells its layout."""
+    """``<axis><size>`` for every parallel axis wider than one rank: how a baseline key spells its layout."""
     return [f"{axis}{size}" for axis, size in sizes.items() if size > 1]
 
 
 def pp_topology_kwargs(pp_size: int, world_size: int) -> dict:
-    """ParallelismConfig topology kwargs for benchmarking PP on a single physical NVLink domain.
-
-    PP requires stage boundaries on NVLink-domain boundaries (``stage_world_size %
-    nvlink_domain_size == 0``), which one 8-GPU domain cannot satisfy for pp > 1. Mirror the
-    correctness matrix (tests/gpu/parallelism/pp/): simulate one NVLink domain per stage, so each
-    stage owns a whole (simulated) domain and every intra-stage EP/FSDP group stays NVLink-local.
-    Groups, transports and schedules match a real multi-domain placement, except that the P2P
-    boundary activations ride NVLink instead of RDMA (an upper bound on cross-node PP throughput).
-    """
+    """ParallelismConfig kwargs for benchmarking PP on one physical NVLink domain, simulating one domain per stage. PP
+    needs stage boundaries on domain boundaries. P2P boundary activations ride NVLink instead of RDMA: an upper bound
+    on cross-node throughput."""
     if pp_size <= 1:
         return {}
     stage_world = world_size // pp_size
@@ -144,13 +126,7 @@ def resolve_benchmark_attn(
     attn_implementation: str | None,
     dtype: torch.dtype = torch.bfloat16,
 ) -> str:
-    """Concrete attention backend for a benchmark that calls ``from_pretrained`` directly.
-
-    ``load_distributed_model`` resolves ``attn_implementation=None`` through
-    :func:`resolve_attn_implementation` (GPU auto-detect, per-family limits and the sinks
-    validator), but a direct ``from_pretrained`` falls back to transformers' own default,
-    ``sdpa``. Benchmarks that bypass the loader resolve the backend here, or they measure a
-    different kernel than production runs.
-    """
+    """Concrete attention backend for a benchmark calling ``from_pretrained`` directly, whose own default ``sdpa`` is a
+    different kernel than production."""
     model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     return resolve_attn_implementation(model_config, attn_implementation, dtype, sinks_policy=SinksPolicy.NEUTRALIZED)

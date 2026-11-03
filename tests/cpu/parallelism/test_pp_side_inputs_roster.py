@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""What a pipeline stage hands its backbone beside the activation, across every registered family: the token ids
-only the families whose layers re-read them take on a later stage, and the segment markers a packed microbatch's
-stage rebuilds. Everywhere but a marker-reading family's packed microbatch, the stage hands what it handed before
-those families were admitted (:func:`_previous_kwargs`, the rule it replaced), on every backend and microbatch
-shape a pipeline batch takes.
-
-    python tests/cpu/parallelism/test_pp_side_inputs_roster.py
-"""
+"""What a pipeline stage hands its backbone beside the activation, across every registered family.
+Everywhere but a marker-reading family's packed microbatch, it hands what :func:`_previous_kwargs` gives."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -24,7 +18,7 @@ from tests.common.packed_flash_varlen import SWEEP_ATTN_IMPLEMENTATION, set_attn
 from tests.common.pp_fakes import fake_runner
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
 
-# Every registered backbone by the tiny family that builds it (a composite's text tower for the shipped wrappers).
+# A composite's text tower for the shipped wrappers.
 ROSTER = {
     "Qwen3Model": TINY_DENSE_FAMILIES["qwen3"],
     "GptOssModel": TINY_MOE_FAMILIES["gpt_oss"],
@@ -39,7 +33,7 @@ ROSTER = {
     "Glm5NextTextModel": TINY_MOE_FAMILIES["glm5_next"],
     "Qwen4ExpTextModel": TINY_MOE_FAMILIES["qwen4_exp_text"],
 }
-# The families whose later stages re-read the token ids, and the backbone kwarg they take them under.
+# The kwarg later stages take the token ids under.
 TOKEN_ID_READERS = {"Qwen4ExpTextModel": "ple_input_ids"}
 LENGTH = 32
 BACKENDS = (SWEEP_ATTN_IMPLEMENTATION, "flash_attention_2", "sdpa", "eager")
@@ -52,7 +46,7 @@ def _config(backbone: str, attn_implementation: str):
 
 
 def _microbatches() -> dict[str, dict]:
-    """``(hidden rows, attention_mask, position_ids)`` per shape a pipeline microbatch takes."""
+    """``(hidden rows, attention_mask, position_ids)`` per shape."""
     packed = torch.cat([torch.arange(9), torch.arange(14), torch.arange(LENGTH - 23) % 256]).unsqueeze(0)
     one_document = torch.arange(LENGTH).unsqueeze(0)
     return {
@@ -65,8 +59,8 @@ def _microbatches() -> dict[str, dict]:
 
 
 def _previous_kwargs(config, hidden, attention_mask, position_ids) -> dict:
-    """The stage's handed kwargs before the marker-reading families' packed rows were admitted: the flash varlen set
-    alone, on a one-row unmasked microbatch, for a family whose own mixers read no ``cu_seq_lens``."""
+    """The flash varlen set alone, on a one-row unmasked microbatch, for a family whose mixers read no
+    ``cu_seq_lens``."""
     if (
         attention_mask is not None
         or position_ids is None
@@ -127,8 +121,7 @@ def test_segment_kwargs_change_only_on_a_marker_familys_packed_row(backbone, att
 
 
 def test_the_sweep_reaches_both_sides_of_the_change():
-    """Anti-vacuity: the roster holds marker-reading families and families without markers, and the flash backend
-    hands a set on a packed row of the latter."""
+    """Anti-vacuity: the roster holds both kinds of family."""
     configs = {name: _config(name, SWEEP_ATTN_IMPLEMENTATION) for name in ROSTER}
     readers = {name for name, config in configs.items() if segment_markers_for(config).seq_idx}
     assert {"Qwen3_5TextModel", "Qwen3_5MoeTextModel", "Qwen4ExpTextModel"} <= readers

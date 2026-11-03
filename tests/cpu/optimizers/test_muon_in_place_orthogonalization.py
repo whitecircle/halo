@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: Muon orthogonalizes its matrix updates in place, chunk by chunk.
-
-The matrix step writes each Newton-Schulz chunk straight back into the Nesterov updates instead of
-collecting the results per shape and rebuilding the updates from them, so it holds one chunk beyond the
-updates rather than a second full copy. The written updates must be bitwise the ones upstream's
-split → stack → scale → reconstruct composition yields, on a group mixing 2D matrices with 3D expert
-stacks (the 2D-first order the toolkit builds) and on a 3D-only group (which upstream splits into its 2D
-experts). The fused Triton momentum and weight-decay kernels around it are GPU-only
-(``tests/gpu/optimizers/test_muon.py``).
-
-Run: pytest tests/cpu/optimizers/test_muon_in_place_orthogonalization.py
-"""
+"""Muon orthogonalizes its matrix updates in place, holding one chunk beyond the updates rather than a second full
+copy, bitwise against upstream's composition."""
 
 import pytest
 import torch
@@ -39,7 +29,7 @@ def _small_chunks(monkeypatch):
 
 @pytest.fixture(scope="module")
 def optimizer():
-    """A toolkit-built Muon on the pure-torch Newton-Schulz backend."""
+    """On the pure-torch Newton-Schulz backend."""
     return build_muon_optimizer(nn.Linear(8, 8, bias=False, dtype=torch.bfloat16), ns_use_kernels=False)
 
 
@@ -49,8 +39,7 @@ def _updates(shapes, seed):
 
 
 def _upstream_updates(newton_schulz, updates, lr, adjust_lr_fn):
-    """Upstream's composition at the same chunk size: per-shape results collected and concatenated, scaled,
-    then reconstructed into each parameter's shape."""
+    """Per-shape results collected, concatenated, scaled, then reconstructed."""
     by_shape, shape_indices, metadata = get_newton_schulz_inputs_from_gradients(updates, None)
     orthogonalized = {
         shape: torch.cat(
@@ -81,11 +70,10 @@ def test_in_place_updates_are_bitwise_upstreams(optimizer, shapes, adjust_lr_fn)
 
 
 def test_step_holds_one_chunk_beyond_the_updates(optimizer, monkeypatch):
-    """With Newton-Schulz stubbed to a fresh same-size tensor, the region holds the stacked chunk and its
-    result and nothing else; upstream's composition holds every shape's results on top."""
+    """Upstream's composition holds every shape's results on top."""
     monkeypatch.setattr(optimizer, "newton_schulz", lambda batch: batch.flip(-1))
     shapes = [(16, 24)] * 12 + [(3, 16, 24)] * 4
-    chunk_bytes = CHUNK * 16 * 24 * 3 * torch.bfloat16.itemsize  # largest stacked chunk: two 3D stacks
+    chunk_bytes = CHUNK * 16 * 24 * 3 * torch.bfloat16.itemsize  # Largest stacked chunk: two 3D stacks.
     total_bytes = sum(torch.Size(shape).numel() for shape in shapes) * torch.bfloat16.itemsize
 
     updates, upstream_inputs = _updates(shapes, seed=0), _updates(shapes, seed=0)

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """A flash run builds its attention masks without transformers' packed-sequence probe.
-
-transformers' mask construction tests ``position_ids`` for packed documents whenever it builds a causal or
-sliding-window mask from them without a padding mask (``find_packed_sequence_indices``, a device read at the start
-of every forward), and ``flash_attention_mask`` discards the packed mask that test feeds. Across the tiny roster of
-packing families (:mod:`tests.common.packed_flash_varlen`, one fresh interpreter each), a packed flash training step
-must make no host read in mask construction and train bit-identically to the same step with the probe, while an
-SDPA forward of the same rows still runs it.
-
-    python tests/cpu/models/test_flash_mask_packed_probe.py
-"""
+The probe reads the device at every forward's start, and ``flash_attention_mask`` discards the packed mask it feeds."""
 
 import pytest
 
@@ -43,7 +34,6 @@ def test_a_packed_flash_step_builds_its_masks_without_the_probe(family):
 
 @pytest.mark.parametrize("family", sorted(_PROBE_READS))
 def test_the_sweep_reaches_a_causal_and_a_sliding_window_mask(family):
-    """Anti-vacuity: with the probe in place, these families' masks read the device once per mask built."""
     report = _report(family)
     assert not report[0].startswith(SKIP_PREFIX), report
     assert _reach(report) == _PROBE_READS[family], report

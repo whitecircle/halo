@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``S3Client.push_folder`` overwrite protocol: never destroy the only copy.
-
-Deleting the whole prefix BEFORE uploading loses the old dataset on a mid-upload failure and can
-leave a metadata.json-bearing partial that the preprocessed probe accepts. The protocol: delete the
-marker first, upload the bulk, upload the marker LAST, sweep stale objects only after the upload
-completes.
-
-    python tests/cpu/data/test_s3_push_folder_ordering.py
-"""
+"""``S3Client.push_folder`` overwrite protocol: delete the marker first, upload the bulk, upload the marker last,
+sweep stale objects after. Deleting the prefix first loses the old dataset on a mid-upload failure."""
 
 import pytest
 
@@ -15,12 +8,8 @@ from halo.data.sources.s3_client import S3Client
 
 
 class _FakePaginator:
-    """botocore's ``list_objects_v2`` paginator over a fixed key set.
-
-    Pages in twos so a reader that consumed only the first page (or capped the listing) would miss
-    stale objects — the sweep below deletes what the listing does NOT contain, so a truncated view
-    silently keeps them.
-    """
+    """``list_objects_v2`` paginator over a fixed key set, paging in twos so a truncated view of the listing would
+    keep stale objects."""
 
     _PAGE_SIZE = 2
 

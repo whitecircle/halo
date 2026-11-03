@@ -1,10 +1,4 @@
-"""The env-GRPO e2e's own task and verdicts, which only a GPU row with a live server would otherwise exercise.
-
-``DrawNumberEnvironment`` must spread a group's rewards whatever the policy writes, so its two samples have to draw
-apart and its grade has to read the episode's own draw. ``record_routing_replay`` holds every step trained on its
-own weights' rollouts to the measured bar and leaves a popped round's flip rate out of it, and
-``record_first_step_gradient`` fails a step 1 whose groups tied.
-"""
+"""The env-GRPO e2e's own task and verdicts, which only a GPU row with a live server would otherwise exercise."""
 
 import math
 import pickle

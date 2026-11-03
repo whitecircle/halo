@@ -1,10 +1,4 @@
 #!/usr/bin/env python
-"""
-Tests for select_data_collator routing logic in halo/data/collators/factory.py.
-
-Run: python tests/cpu/data/test_collator_factory.py
-"""
-
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +17,6 @@ from tests.common.tokenizers import load_cached_tokenizer
 
 
 def _make_tokenizer():
-    """Create a minimal mock tokenizer for collator construction."""
     tok = MagicMock()
     tok.pad_token_id = 0
     tok.eos_token_id = 2
@@ -32,8 +25,7 @@ def _make_tokenizer():
 
 
 def _mock_model_config(model_type: str = "qwen3") -> MagicMock:
-    """Real values where the factory reads them: ``model_type_matches`` does ``.startswith`` on
-    ``model_type`` via ``get_text_config``, and a bare MagicMock is truthy for EVERY family gate,
+    """Real values where the factory reads them: a bare MagicMock is truthy for every family gate,
     ``layer_group_size`` included."""
     config = MagicMock()
     config.model_type = model_type
@@ -47,7 +39,6 @@ def _select(**kwargs):
 
 
 def test_packing_and_padding_free_conflict():
-    """packing + padding_free raises ValueError."""
     try:
         _select(packing=True, padding_free=True)
         raise AssertionError("Should have raised ValueError")
@@ -56,7 +47,6 @@ def test_packing_and_padding_free_conflict():
 
 
 def test_cp_with_padding_free_conflict():
-    """CP + padding_free raises ValueError."""
     try:
         _select(use_context_parallel=True, padding_free=True)
         raise AssertionError("Should have raised ValueError")
@@ -65,7 +55,6 @@ def test_cp_with_padding_free_conflict():
 
 
 def test_completions_without_template():
-    """train_on_completions_only without assistant_message_template raises ValueError."""
     try:
         _select(train_on_completions_only=True, assistant_message_template=None)
         raise AssertionError("Should have raised ValueError")
@@ -74,7 +63,6 @@ def test_completions_without_template():
 
 
 def test_last_only_without_completions():
-    """train_on_last_assistant_only without train_on_completions_only raises ValueError."""
     try:
         _select(train_on_last_assistant_only=True, train_on_completions_only=False)
         raise AssertionError("Should have raised ValueError")
@@ -83,8 +71,8 @@ def test_last_only_without_completions():
 
 
 def test_cp_packing_rejected():
-    """CP + packing is rejected: the Ulysses CP attention path has no per-document boundaries,
-    so packed documents would silently attend across each other."""
+    """The Ulysses CP attention path has no per-document boundaries, so packed documents would silently attend
+    across each other."""
     with pytest.raises(ValueError, match="packing is not supported with Context Parallelism"):
         _select(use_context_parallel=True, packing=True, pad_to_multiple_of=8)
     with pytest.raises(ValueError, match="packing is not supported with Context Parallelism"):
@@ -98,15 +86,13 @@ def test_cp_packing_rejected():
 
 
 def test_cp_no_packing():
-    """CP without packing -> padded causal-LM collator that PRODUCES labels (a labels-less
-    collator makes every CP SFT step fail with 'model did not return a loss')."""
+    """A labels-less collator makes every CP SFT step fail with 'model did not return a loss'."""
     collator = _select(use_context_parallel=True, pad_to_multiple_of=8)
     assert type(collator).__name__ == "DataCollatorForCausalLMWithPadding"
     assert collator.pad_to_multiple_of == 8
 
 
 def test_cp_completions_routing():
-    """CP + train_on_completions_only must keep the completion mask, not silently drop it."""
     collator = _select(
         use_context_parallel=True,
         train_on_completions_only=True,
@@ -118,8 +104,7 @@ def test_cp_completions_routing():
 
 
 def test_cp_collator_produces_and_preserves_labels():
-    """Real-tokenizer check: labels built from input_ids when absent, precomputed (ragged,
-    prompt-masked) labels padded with -100 — not crashed on, not discarded."""
+    """Labels built from input_ids when absent; precomputed ragged labels padded with -100."""
     tok = load_cached_tokenizer(QWEN3_0_6B)
     tok.pad_token = tok.eos_token
     collator = DataCollatorForCausalLMWithPadding(tokenizer=tok, mlm=False, pad_to_multiple_of=4)
@@ -142,13 +127,8 @@ def test_cp_collator_produces_and_preserves_labels():
 
 
 def test_cp_collator_restores_real_eos_when_pad_equals_eos():
-    """Raw-labels path with pad == eos (GLM-4.7-Flash natively; any family via the pad=eos
-    fallback): the parent LM collator masks every pad-valued label — including the REAL
-    turn-ending EOS — so the model never learns to stop. Real-token EOS labels must be restored
-    from input_ids (attention_mask == 1); true padding stays masked.
-
-    Without the restore, labels at the real EOS positions are -100.
-    """
+    """With pad == eos the parent LM collator masks every pad-valued label, including the real turn-ending EOS, so
+    the model never learns to stop. Real-token EOS labels are restored from input_ids; true padding stays masked."""
     tok = load_cached_tokenizer(QWEN3_0_6B)
     tok.pad_token = tok.eos_token  # the pad=eos fallback layout
     eos = tok.eos_token_id
@@ -174,7 +154,6 @@ def test_cp_collator_restores_real_eos_when_pad_equals_eos():
 
 
 def test_padding_free_with_completions():
-    """padding_free + completions -> DataCollatorWithFlatteningAndCompletionMask."""
     collator = _select(
         padding_free=True,
         train_on_completions_only=True,
@@ -184,13 +163,11 @@ def test_padding_free_with_completions():
 
 
 def test_padding_free_no_completions():
-    """padding_free alone -> DataCollatorWithFlattening."""
     collator = _select(padding_free=True)
     assert type(collator).__name__ == "DataCollatorWithFlattening"
 
 
 def test_packing_with_completions():
-    """packing + completions -> DataCollatorForCompletionOnlyLMWithPacking."""
     collator = _select(
         packing=True,
         train_on_completions_only=True,
@@ -200,13 +177,11 @@ def test_packing_with_completions():
 
 
 def test_packing_no_completions():
-    """packing alone -> DataCollatorWithPacking."""
     collator = _select(packing=True)
     assert type(collator).__name__ == "DataCollatorWithPacking"
 
 
 def test_completions_only():
-    """completions only -> DataCollatorForCompletionOnlyLM."""
     collator = _select(
         train_on_completions_only=True,
         assistant_message_template="<|assistant|>",
@@ -215,13 +190,11 @@ def test_completions_only():
 
 
 def test_default_returns_none():
-    """No flags set -> returns None (TRL default)."""
     collator = _select()
     assert collator is None
 
 
 def test_completions_template_propagated():
-    """The assistant_message_template reaches the collator's response_prompt_template."""
     collator = _select(
         train_on_completions_only=True,
         assistant_message_template="<|MYASSISTANT|>",
@@ -230,7 +203,6 @@ def test_completions_template_propagated():
 
 
 def test_last_only_flag_propagated_to_completions_collator():
-    """train_on_last_assistant_only flows into the standard completions collator."""
     collator = _select(
         train_on_completions_only=True,
         assistant_message_template="<|assistant|>",
@@ -241,7 +213,6 @@ def test_last_only_flag_propagated_to_completions_collator():
 
 
 def test_last_only_flag_propagated_to_packing_collator():
-    """train_on_last_assistant_only flows into the packing completions collator too."""
     collator = _select(
         packing=True,
         train_on_completions_only=True,
@@ -253,7 +224,6 @@ def test_last_only_flag_propagated_to_packing_collator():
 
 
 def test_last_only_default_false_when_unset():
-    """When not requested, the selected completions collator keeps train_on_last_assistant_only=False."""
     collator = _select(
         train_on_completions_only=True,
         assistant_message_template="<|assistant|>",
@@ -262,7 +232,6 @@ def test_last_only_default_false_when_unset():
 
 
 def test_padding_free_completions_template_propagated():
-    """Padding-free + completions wires the template into the flattening completion-mask collator."""
     collator = _select(
         padding_free=True,
         train_on_completions_only=True,
@@ -274,9 +243,6 @@ def test_padding_free_completions_template_propagated():
     assert collator.train_on_last_assistant_only is True
 
 
-# Varlen gate — derived from the RESOLVED attention impl, never from a family list.
-
-
 class _Cfg:
     """Stand-in for a HF config carrying only the resolved attention implementation."""
 
@@ -286,31 +252,17 @@ class _Cfg:
 
 @pytest.mark.parametrize("attn_impl", ["eager", "sdpa", "flex_attention", None])
 def test_non_varlen_attention_rejects_padding_free(attn_impl):
-    """padding_free must be refused without a varlen kernel — the mask cost is unbounded.
-
-    padding_free flattens the whole batch into ONE row, so a non-varlen backend materializes a dense
-    mask over the summed token count: the area grows with the square of the batch size. No family
-    name appears here or in the implementation — adding a new one must not require editing either.
-    """
+    """padding_free flattens the batch into one row, so a non-varlen backend builds a dense mask whose area grows
+    with the square of the batch size."""
     with pytest.raises(ValueError, match="varlen"):
         _select(padding_free=True, model_config=_Cfg(attn_impl))
 
 
 @pytest.mark.parametrize("attn_impl", ["eager", "sdpa", "flex_attention", None])
 def test_non_varlen_attention_allows_packing(attn_impl):
-    """packing must be ALLOWED without a varlen kernel: document isolation is not backend-specific.
-
-    Both collators emit position_ids that reset per document, and transformers derives a
-    packed_sequence_mask from them for every backend (``masking_utils.find_packed_sequence_indices``),
-    so eager/SDPA isolate documents just as flash does — verified directly against the installed transformers.
-    Refusing packing here would strand the models that CANNOT run a varlen kernel (Gemma 4's
-    head_dim=512, Laguna) with no packing at all, on a false correctness premise. The real difference
-    is cost — a dense ``[max_length, max_length]`` mask, the same one a padded batch builds — which
-    warrants a warning, not a raise.
-
-    The selected class is pinned, not merely non-None: a gate that quietly downgraded packing to the
-    padded collator would keep every row padded to max_length and silently stop packing.
-    """
+    """Transformers derives a packed_sequence_mask from reset position_ids on every backend, so eager and SDPA
+    isolate documents too; the cost is a dense mask, which warrants a warning. The class is pinned, since a quiet
+    downgrade to the padded collator would stop packing."""
     collator = _select(packing=True, model_config=_Cfg(attn_impl))
     assert type(collator).__name__ == "DataCollatorWithPacking"
 
@@ -318,18 +270,14 @@ def test_non_varlen_attention_allows_packing(attn_impl):
 @pytest.mark.parametrize("flag", ["padding_free", "packing"])
 @pytest.mark.parametrize("attn_impl", ["flash_attention_2", "flash_attention_3", "flash_attention_4"])
 def test_varlen_attention_allows_flattening(attn_impl, flag):
-    """Every flash variant honours document boundaries, so the gate must let it through — into the
-    collator the flag asks for, not a padded fallback that would undo the throughput win."""
+    """Into the collator the flag asks for, not a padded fallback that would undo the throughput win."""
     expected = {"padding_free": "DataCollatorWithFlattening", "packing": "DataCollatorWithPacking"}[flag]
     collator = _select(**{flag: True}, model_config=_Cfg(attn_impl))
     assert type(collator).__name__ == expected
 
 
 def test_varlen_gate_covers_every_declared_flash_impl():
-    """The accepted set IS ``VARLEN_ATTN_IMPLEMENTATIONS`` — no second hand-maintained copy.
-
-    Fails if someone adds a flash backend to the constant but the collator keeps its own list.
-    """
+    """The accepted set is ``VARLEN_ATTN_IMPLEMENTATIONS``, with no second copy."""
     assert VARLEN_ATTN_IMPLEMENTATIONS, "the varlen constant went empty — the loop below tests nothing"
     for impl in VARLEN_ATTN_IMPLEMENTATIONS:
         collator = _select(packing=True, model_config=_Cfg(impl))
@@ -351,11 +299,7 @@ def _warnings_for(**kwargs) -> str:
 
 
 def test_packing_above_batch_one_warns_about_the_merge():
-    """batch>1 under packing must say what it builds — one merged row, not B independent sequences.
-
-    The merge is backend-independent (flatten_packed_batch), so the warning cannot hide behind the
-    non-varlen branch: on FA4, the production path, the shape change is otherwise silent.
-    """
+    """The merge is backend-independent (flatten_packed_batch), so on FA4 the shape change is otherwise silent."""
     config = _mock_model_config()
     config._attn_implementation = VARLEN_ATTN_IMPLEMENTATIONS[0]
     blob = _warnings_for(packing=True, per_device_train_batch_size=2, model_config=config)
@@ -363,7 +307,6 @@ def test_packing_above_batch_one_warns_about_the_merge():
 
 
 def test_packing_at_batch_one_is_silent():
-    """Anti-over-reach: the default shape must not warn."""
     config = _mock_model_config()
     config._attn_implementation = VARLEN_ATTN_IMPLEMENTATIONS[0]
     blob = _warnings_for(packing=True, per_device_train_batch_size=1, model_config=config)
@@ -371,7 +314,6 @@ def test_packing_at_batch_one_is_silent():
 
 
 def test_batch_above_one_without_packing_is_silent():
-    """Anti-over-reach: unpacked batches are never merged."""
     config = _mock_model_config()
     config._attn_implementation = VARLEN_ATTN_IMPLEMENTATIONS[0]
     blob = _warnings_for(packing=False, per_device_train_batch_size=8, model_config=config)
@@ -379,14 +321,11 @@ def test_batch_above_one_without_packing_is_silent():
 
 
 def test_pipeline_parallelism_is_not_warned():
-    """PP keeps the rows and splits them into microbatches — batch>1 there IS B independent rows."""
+    """PP keeps the rows and splits them into microbatches, so batch>1 there is B independent rows."""
     config = _mock_model_config()
     config._attn_implementation = VARLEN_ATTN_IMPLEMENTATIONS[0]
     blob = _warnings_for(packing=True, per_device_train_batch_size=4, keeps_packed_rows=True, model_config=config)
     assert "independent sequences" not in blob, f"PP must not be warned about a merge it never does: {blob}"
-
-
-# The chat-template probe
 
 
 _MARKER_LOGGER = "halo.data.turn_markers"
@@ -416,10 +355,8 @@ def _select_with_probe(tokenizer):
 
 
 def test_unrenderable_chat_template_probe_warns(caplog):
-    """The probe verifies that the configured ``assistant_message_template`` occurs in the RENDERED
-    template. When no probe conversation renders, the check does not run at all — indistinguishable
-    from a pass, while the defect it exists to catch (a marker the template never emits) trains the
-    run at loss ~0. It must say so out loud."""
+    """When no probe conversation renders, the check does not run, indistinguishable from a pass, while a marker the
+    template never emits trains at loss ~0."""
     with caplog.at_level(logging.WARNING, logger=_MARKER_LOGGER):
         assert _select_with_probe(_probe_tokenizer(renders=False)) is not None
     records = [r for r in caplog.records if "Could not verify assistant_message_template" in r.getMessage()]
@@ -428,7 +365,6 @@ def test_unrenderable_chat_template_probe_warns(caplog):
 
 
 def test_renderable_template_carrying_the_marker_stays_quiet(caplog):
-    """The verified case must not warn — a warning on every good run trains operators to ignore it."""
     with caplog.at_level(logging.WARNING, logger=_MARKER_LOGGER):
         assert _select_with_probe(_probe_tokenizer(renders=True)) is not None
     assert not [r for r in caplog.records if "Could not verify assistant_message_template" in r.getMessage()]
@@ -467,10 +403,9 @@ _CROSSING_ALLOWED_MESSAGE = "under allow_cross_document_linear_attention"
     ("name", "flag"), _LINEAR_ATTENTION_CASES, ids=[f"{name}-{flag}" for name, flag in _LINEAR_ATTENTION_CASES]
 )
 def test_unmarked_linear_attention_is_refused_on_flash(caplog, monkeypatch, name, flag):
-    """On a flash label the softmax layers isolate and nothing else refuses, so Ring's Lightning Attention-2
-    or a KDA layer would carry state across the row's documents silently: refused, and built only under
-    allow_cross_document_linear_attention, with a warning. GatedDeltaNet reads the cu_seq_lens markers and
-    softmax-only models have no such layer: built without the opt-in, and quiet with it."""
+    """On a flash label the softmax layers isolate, so Ring's Lightning Attention-2 or a KDA layer would carry state
+    across documents silently. GatedDeltaNet reads the cu_seq_lens markers and softmax-only models have no such
+    layer, so they build without the opt-in."""
     # GatedDeltaNet's segment-aware kernels need CUDA; taken as present, as on the images.
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
     monkeypatch.setattr(segment_markers, "_crossing_allowed_warned", set())

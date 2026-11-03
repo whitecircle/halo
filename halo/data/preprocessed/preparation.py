@@ -1,5 +1,4 @@
-"""Offline dataset preparation: tokenize, optionally pack, then save or shard the artifact beside its
-``metadata.json`` stamp."""
+"""Offline dataset preparation: tokenize, optionally pack, then save or shard the artifact beside its stamp."""
 
 import logging
 import os
@@ -26,7 +25,7 @@ def shard_dataset(
     output_dir: str,
     split_name: str = "train",
 ) -> ShardIndex:
-    """Shard a dataset into Arrow files (remainder distributed to the first shards; empty shards skipped)."""
+    """Arrow files, the remainder distributed to the first shards; empty shards skipped."""
     total_examples = len(dataset)
     base_shard_size = total_examples // num_shards
     remainder = total_examples % num_shards
@@ -107,8 +106,7 @@ def _reject_unconsumed_image_columns(dataset: Dataset | DatasetDict, config: Pre
 
 
 def _resolve_baked_splits(dataset: Dataset | DatasetDict) -> tuple[Dataset | None, Dataset | None]:
-    """The input's ``(train, test)`` pair, a lone ``validation`` split baked as ``test``; any other split is left
-    out with a warning."""
+    """``(train, test)``, a lone ``validation`` split baked as ``test``; any other split is left out with a warning."""
     if isinstance(dataset, Dataset):
         return dataset, None
     test_source = eval_split_name(dataset)
@@ -123,10 +121,8 @@ def _resolve_baked_splits(dataset: Dataset | DatasetDict) -> tuple[Dataset | Non
 def _tokenize_splits(
     splits: dict[str, Dataset | None], tokenizer_or_processor: Any, tokenizer: Any, config: PreprocessingConfig
 ) -> dict[str, Dataset]:
-    """Tokenize, and pack when configured, every split present."""
     tokenize = tokenize_vlm_dataset if config.is_vlm else tokenize_dataset
-    # Once per corpus and before any tokenization pass: the set reads the model config, and an
-    # unreadable one would otherwise surface only after the whole train split was tokenized.
+    # Before any tokenization pass: the set reads the model config, and an unreadable one would surface only later.
     eos_token_ids = resolve_label_eos_token_ids(config, tokenizer) if config.train_on_completions_only else None
     tokenized = {}
     for split, split_data in splits.items():
@@ -146,16 +142,14 @@ def _tokenize_splits(
 
 
 def _has_pixel_values(tokenized: dict[str, Dataset], config: PreprocessingConfig) -> bool:
-    """Whether a VLM bake stored pixels in any train row, warning when it stored none."""
+    """Warns when a VLM bake stored no pixels."""
     train = tokenized.get("train")
     if not config.is_vlm or train is None:
         return False
-    # The VLM schema is uniform (vision columns exist as nulls on text-only rows), so column
-    # presence proves nothing; count non-nulls via Arrow metadata.
+    # The VLM schema is uniform (vision columns exist as nulls), so presence proves nothing; count non-nulls via Arrow.
     has_pixels = "pixel_values" in train.column_names and train.data.column("pixel_values").null_count < len(train)
     if not has_pixels:
-        # Legitimate for a text-only corpus rendered with a VLM processor, but also what a
-        # dropped images column looks like, and the training side reads is_vlm, not this flag.
+        # Legitimate for a text-only corpus, but also what a dropped images column looks like; training reads is_vlm.
         logger.warning(
             "VLM preprocessing produced NO pixel_values: every row baked text only, while the "
             "artifact is stamped is_vlm=True. If the images live in a separate column, name it "
@@ -168,8 +162,7 @@ def _has_pixel_values(tokenized: dict[str, Dataset], config: PreprocessingConfig
 def _write_artifact(
     splits: dict[str, Dataset], metadata: PreprocessedDatasetMetadata, config: PreprocessingConfig, output_dir: str
 ) -> dict[str, ShardIndex] | None:
-    """Save the baked splits, sharded at ``num_shards > 1``, then their ``metadata.json`` stamp; returns the shard
-    indices of a sharded artifact."""
+    """Save the splits, sharded at ``num_shards > 1``, then the stamp; returns a sharded artifact's shard indices."""
     os.makedirs(output_dir, exist_ok=True)
     shard_indices = None
     if config.num_shards > 1:
@@ -181,8 +174,7 @@ def _write_artifact(
             write_stamped_sidecar(os.path.join(output_dir, split, SHARD_INDEX_FILE), index)
         _warn_on_shard_count_ceiling(shard_indices, config.num_shards)
     else:
-        # No shard index: training then loads the whole dataset on every rank and its DataLoader
-        # splits the rows by data-parallel rank, so the artifact trains at any DP size.
+        # No shard index: every rank loads the whole dataset and its DataLoader splits by DP rank, at any DP size.
         DatasetDict(splits).save_to_disk(output_dir)
 
     write_stamped_sidecar(os.path.join(output_dir, METADATA_FILE), metadata)
@@ -196,14 +188,11 @@ def preprocess_dataset(
     config: PreprocessingConfig,
     output_dir: str | None = None,
 ) -> dict[str, Any]:
-    """Tokenize a dataset's train and test splits (a VLM one with the processor), pack them when configured, and
-    with ``output_dir`` save them, sharded at ``num_shards > 1``. Returns the baked ``train``/``test`` splits,
-    ``metadata`` and, when sharded, ``shard_indices``."""
+    """Returns the baked ``train``/``test`` splits, ``metadata`` and, when sharded, ``shard_indices``."""
     _reject_unconsumed_image_columns(dataset, config)
     train_data, test_data = _resolve_baked_splits(dataset)
 
-    # Refused before the tokenization pass: training rejects a sharded dataset without a test split,
-    # while an unsharded one is handed a placeholder test split at load.
+    # Before tokenizing: training rejects a sharded dataset without a test split; an unsharded one gets a placeholder.
     if output_dir is not None and config.num_shards > 1 and test_data is None:
         raise ValueError(
             f"num_shards={config.num_shards} writes a sharded dataset, which training refuses without a "

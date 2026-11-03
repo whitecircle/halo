@@ -1,12 +1,5 @@
-"""MoEMetricsCallback's expert-load all-reduce must be reached by every rank, or none.
-
-Neither participation nor payload shape may derive from rank-LOCAL state: a rank whose hook captured
-no router logits (a ragged final accumulation cycle, a stage running no MoE forward) then returns
-before the collective while its peers enter it — a NCCL hang — and a payload whose expert dimension
-is the local max turns that asymmetry into a size mismatch instead.
-
-These tests drive ``on_step_end`` with a stubbed process group and assert on the collectives issued.
-"""
+"""MoEMetricsCallback's expert-load all-reduce must be reached by every rank, or none. A rank with no captured router
+logits returning early is a NCCL hang, and a payload shaped by the local max is a size mismatch."""
 
 from __future__ import annotations
 
@@ -25,11 +18,8 @@ class _State:
 
 
 class _RecordingDist:
-    """Stands in for ``torch.distributed``, recording every all-reduce payload shape.
-
-    ``get_world_size`` also stands in for the callback's world-size read, which goes through
-    :func:`get_global_world_size` rather than this object, and ``rank_max`` for the dims agreement.
-    """
+    """Records every all-reduce payload shape. ``get_world_size`` also stands in for :func:`get_global_world_size`, and
+    ``rank_max`` for the dims agreement."""
 
     ReduceOp = torch.distributed.ReduceOp
 
@@ -50,7 +40,6 @@ class _RecordingDist:
 
 
 def _install(monkeypatch, stub: _RecordingDist) -> None:
-    """Point the callback's collectives AND its world-size read at one stub."""
     monkeypatch.setattr(moe_metrics, "dist", stub)
     monkeypatch.setattr(moe_metrics, "rank_max", stub.rank_max)
     monkeypatch.setattr(moe_metrics, "get_global_world_size", stub.get_world_size)
@@ -71,11 +60,7 @@ def _callback(counters):
 
 @pytest.mark.parametrize("counters", [[], [None, None]], ids=["never-captured", "hooked-but-idle"])
 def test_rank_with_no_counters_still_joins_the_collective(recording_dist, counters):
-    """The empty rank must reach the shape-agreement all-reduce, not return ahead of its peers.
-
-    Both spellings of "captured nothing" have to behave alike: no hook ever fired (empty list), and
-    routers hooked whose forwards never ran on this rank (a slot per router, all unfilled).
-    """
+    """Both spellings of captured-nothing behave alike: no hook ever fired, and hooked routers that never ran."""
     cb = _callback(counters)
 
     cb.on_step_end(args=None, state=_State(global_step=1), control=None)
@@ -114,7 +99,7 @@ def test_empty_and_populated_ranks_issue_the_same_collective_sequence(recording_
 
 
 def test_non_logging_step_issues_no_collective_on_any_rank(recording_dist):
-    """The skip gate is rank-uniform trainer state, so skipping entirely is safe — and must be total."""
+    """The skip gate is rank-uniform trainer state, so skipping entirely is safe."""
     cb = MoEMetricsCallback(topk=1, log_every_n_steps=10)
     cb._counters = [torch.ones(4)]
 

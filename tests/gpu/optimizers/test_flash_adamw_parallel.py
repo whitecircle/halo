@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""FlashAdamW (``optim: flash_adamw``) through ``DistributedSFTTrainer`` on two ranks: EP2, dense FSDP2, and an
-unevenly sharded model.
+"""FlashAdamW through ``DistributedSFTTrainer``: EP2, dense FSDP2 and an unevenly sharded model.
 
-FlashAdamW steps per parameter on the local shard, so one weight-decay group holds FSDP2 DTensor shards beside the
-plain rank-local tensors EP leaves (``--mode ep2``, a tiny Qwen3-MoE) or only DTensor shards (``--mode fsdp``, a
-tiny Qwen3):
-
-  1. **Train.** The last rank poisons step ``POISON_STEP``, which FlashAdamW's host-read step guard must skip (no
-     shard moves) while a clean step moves every leg; the losses of the finite steps are finite.
-  2. **Save, exact resume, export** (:func:`tests.common.resume_export.run_resume_export`): the sharded optimizer
-     save holds FlashAdamW's quantized state, and the resumed run restores it bit for bit and replays the unbroken
-     one.
-
-``--mode uneven`` gives the embedding an odd row count, which FSDP2 shards unevenly: the optimizer build must warn
-naming ``save_only_model``, the first checkpoint save with optimizer state must raise, and the same run with
+It steps per parameter on the local shard, so one decay group can hold DTensor shards beside plain EP tensors. On an
+uneven shard the build must warn naming ``save_only_model``, the first optimizer save must raise, and
 ``save_only_model`` must save.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/optimizers/test_flash_adamw_parallel.py --mode ep2
 """
 
 import argparse
@@ -51,7 +38,6 @@ SAVE_STEP = 3
 SEQ_LEN = 64
 # An odd row count FSDP2 cannot split evenly over two ranks.
 UNEVEN_VOCAB = TINY_QWEN3_CONFIG["vocab_size"] - 1
-# Each mode's tiny family, text-config overrides and ParallelismConfig fields.
 MODES = {
     "ep2": (TINY_MOE_FAMILIES["qwen3_moe"], {"vocab_size": TINY_QWEN3_MOE_CONFIG["vocab_size"]}, {"ep_size": 2}),
     "fsdp": (TINY_DENSE_FAMILY, {}, {}),
@@ -88,7 +74,6 @@ def sft_args(output_dir: str, *, max_steps: int = TOTAL_STEPS, save_every: int |
 
 
 def mixed_decay_group(optimizer) -> bool:
-    """Whether one parameter group holds both DTensor shards and plain tensors."""
     return any(
         len({isinstance(param.data, DTensor) for param in group["params"]}) == 2 for group in optimizer.param_groups
     )
@@ -133,7 +118,7 @@ def run(ctx):
             refusal = None
             try:
                 trainer.train()
-            # Whichever error flashoptim's state_dict raises: the property is that the save refuses, not its type.
+            # Whichever error flashoptim's state_dict raises: the save must refuse.
             except Exception as error:
                 refusal = f"{type(error).__name__}: {error}"
         if ctx.rank == 0:
@@ -170,7 +155,7 @@ def run(ctx):
     checks = {"optimizer_is_flash_adamw": type(optimizer).__name__ == "FlashAdamW"}
     if FIELDS.get("ep_size", 1) > 1:
         checks["one_decay_group_mixes_dtensor_and_plain_params"] = mixed_decay_group(optimizer)
-    # Some tensor, not every one: a sub-ULP update of a norm weight lands in the master-weight correction bits alone.
+    # Some tensor: a sub-ULP update of a norm weight lands in the master-weight correction bits alone.
     trainable = {name for name, param in trainer.model.named_parameters() if param.requires_grad}
     checks["a_clean_step_moved_trainable_tensors"] = bool(trainable & control.moved())
     checks["the_poisoned_step_moved_nothing"] = not poisoned.moved()

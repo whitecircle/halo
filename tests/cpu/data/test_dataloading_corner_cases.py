@@ -1,14 +1,5 @@
 #!/usr/bin/env python
-"""Hard corner cases of the data-loading and cache seams.
-
-Each test here is an edge a healthy run never shows but a degraded one does: a corrupt mirror on a
-flaky disk, a read-only cache volume during an outage, a dataset at the bucket root, a bare
-``Dataset`` push (single load gate), a dataset name ending in a hyphen (staging-sibling boundary), a
-pathological object in a map closure, and the arrow-cache reuse/invalidation contract itself —
-the map must run exactly once per identity and re-run on any identity change.
-
-    python tests/cpu/data/test_dataloading_corner_cases.py
-"""
+"""Hard corner cases of the data-loading and cache seams: edges a healthy run never shows and a degraded one does."""
 
 import json
 import os
@@ -46,11 +37,7 @@ def cache_root(tmp_path):
         yield tmp_path
 
 
-# Mirror-cache degradation
-
-
 def _new_push_key(full_key: str) -> str:
-    """A fresh push prefix for ``full_key``, spelled as ``push_dataset`` spells one."""
     return f"{s3_dataset_store._push_scan_prefix(full_key)}{uuid.uuid4().hex[:8]}"
 
 
@@ -63,9 +50,8 @@ def _seed_mirror(bucket: str, key: str, payload) -> str:
 
 
 def test_corrupt_mirror_during_outage_degrades_loud_not_crash(cache_root):
-    """A truncated mirror (disk corruption — the atomic publish cannot produce one) plus an outage:
-    the probes must degrade with their normal warnings, never crash a rank ahead of the consensus
-    all-reduce."""
+    """A truncated mirror plus an outage: the probes degrade with their warnings and never crash a rank ahead of the
+    consensus all-reduce."""
     _seed_mirror("b", "d/train/shard_index.json", '{"num_shards": 4, "sha')
     with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=OUTAGE):
         assert ShardedDatasetLoader.is_sharded_dataset("s3://b/d") is False
@@ -76,10 +62,8 @@ def test_corrupt_mirror_during_outage_degrades_loud_not_crash(cache_root):
 
 
 def test_an_unreadable_stamp_raises_rather_than_reading_raw(tmp_path, cache_root):
-    """One rank per filesystem scope probes, so its verdict is the whole scope's: a stamp it holds but
-    cannot read must raise, which the probe consensus raises on every rank, not send them all down the
-    raw path over pre-tokenized rows. On S3 the live read parses the stamp itself, so its parse error
-    must not pass for the outage the probe reads as raw."""
+    """One rank per filesystem scope probes, so its verdict is the scope's: a stamp it cannot read raises on every
+    rank. On S3 the stamp's parse error must not pass for the outage the probe reads as raw."""
     prepared = tmp_path / "prepared"
     prepared.mkdir()
     (prepared / "metadata.json").write_text('{"preprocessed": tr')
@@ -93,8 +77,7 @@ def test_an_unreadable_stamp_raises_rather_than_reading_raw(tmp_path, cache_root
 
 
 def test_absence_contract_survives_a_read_only_cache_volume(cache_root, monkeypatch):
-    """The mirror drop on a live 404 must stay best-effort — on a read-only volume the unlink's
-    PermissionError must not replace the FileNotFoundError the callers key on."""
+    """On a read-only volume the unlink's PermissionError must not replace the FileNotFoundError callers key on."""
     _seed_mirror("b", "d/metadata.json", {"preprocessed": True})
 
     def _read_only_unlink(path):
@@ -116,9 +99,6 @@ def test_distinct_control_files_never_share_a_mirror(cache_root):
         assert read_control_json_with_cache("b", "d/test/shard_index.json") == {"split": "test"}
 
 
-# Staged push at the namespace edges
-
-
 def _fake_bare_dataset_save(fake: FakeBoto, rows_tag: bytes = b"new"):
     """A save_to_disk side effect writing a bare-Dataset tree (single root state.json gate)."""
 
@@ -131,8 +111,7 @@ def _fake_bare_dataset_save(fake: FakeBoto, rows_tag: bytes = b"new"):
 
 
 def test_bucket_root_dataset_stages_and_promotes():
-    """A dataset keyed at the bucket root has no parent prefix — the staging sibling must still be
-    a valid dot-prefixed key, promote, and sweep."""
+    """With no parent prefix, the staging sibling must still be a valid dot-prefixed key, promote and sweep."""
     client, fake = _client()
     s3_dataset_store.push_dataset(client, _mock_dataset(_fake_bare_dataset_save(fake)), "rootset")
     assert "rootset/state.json" in fake.objects
@@ -141,8 +120,7 @@ def test_bucket_root_dataset_stages_and_promotes():
 
 
 def test_bare_dataset_promote_gates_on_its_root_state_json():
-    """A bare Dataset's only load gate is the root state.json — an interrupted promote must leave
-    the destination without it (loudly unreadable), never a readable old/new mixture."""
+    """An interrupted promote leaves the destination without the root state.json, never a readable old/new mixture."""
     client, fake = _client()
     for rel in ("data-00000-of-00001.arrow", "state.json", "dataset_info.json"):
         fake._write(f"bare/{rel}", b"old:" + rel.encode())
@@ -182,12 +160,9 @@ def test_trailing_hyphen_dataset_name_keeps_sibling_isolation():
     assert s3_dataset_store._latest_complete_push(client, "datasets/x-") == hyphen_staging
 
 
-# Fingerprint pathology
-
-
 def test_raising_attribute_object_in_a_closure_lands_in_the_skip_warning():
-    """An object whose attribute access raises (a lazy proxy, a property with a guard) must fall to
-    the unfingerprintable-cell skip, not crash cache naming for the whole run."""
+    """An object whose attribute access raises falls to the unfingerprintable-cell skip and does not crash cache
+    naming."""
 
     class Booby:
         @property
@@ -208,8 +183,7 @@ def test_raising_attribute_object_in_a_closure_lands_in_the_skip_warning():
 
 
 def test_nested_processor_descends_one_level_only():
-    """A processor whose .tokenizer is itself processor-like must not recurse (or loop): identity
-    comes from its own template, and two different outer templates still key apart."""
+    """Identity comes from its own template, and two different outer templates still key apart."""
 
     class Inner:
         tokenizer = None
@@ -223,9 +197,6 @@ def test_nested_processor_descends_one_level_only():
     sig_a = _tokenizer_identity(Outer("A"))
     sig_b = _tokenizer_identity(Outer("B"))
     assert sig_a is not None and sig_a != sig_b
-
-
-# The arrow-cache contract itself: run once per identity, re-run on any identity change.
 
 
 def _counting_fn(row, tokenizer=None, marker_dir=None):
@@ -261,8 +232,7 @@ def _run_map(ds, tmp_path, marker_dir, eos):
 
 
 def test_map_runs_once_per_identity_and_reruns_on_special_token_change(tmp_path):
-    """The end-to-end cache contract: identical identity → the second call reuses the arrow cache
-    and never re-executes the map; an in-vocab eos change → full re-execution."""
+    """Identical identity reuses the arrow cache; an in-vocab eos change re-executes."""
     ds = Dataset.from_dict({"value": [1, 2, 3]})
     marker_dir = tmp_path / "calls"
     marker_dir.mkdir()

@@ -27,7 +27,6 @@ MOE_LAYER_MAP: dict[str, type[EPMoELayerBase]] = build_class_claim_map(EPMoELaye
 
 
 def ep_layer_classes() -> list[type[EPMoELayerBase]]:
-    """Every EP layer class, the whole subclass tree the imports above populate."""
     return iter_subclasses(EPMoELayerBase)
 
 

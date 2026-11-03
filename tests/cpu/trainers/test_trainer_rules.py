@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""The trainer spine's optimizer, launcher and reference-sync refusals: each fires on its own condition, named by
-its mechanism, and the supported run passes it.
-
-Run: python tests/cpu/trainers/test_trainer_rules.py
-"""
+"""The trainer spine's optimizer, launcher and reference-sync refusals, and the supported run that passes them."""
 
 from types import SimpleNamespace
 

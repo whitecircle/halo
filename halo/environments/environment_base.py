@@ -1,6 +1,5 @@
-"""The environment lifecycle: :class:`EnvironmentBase` opens, steps, closes and records episodes, composing the
-tool accounting, turn recovery, effort profiles and episode scoring of its mixins. :class:`AsyncEnvironmentBase`
-runs a turn batch through ``asyncio.gather`` for I/O-bound tool and API calls."""
+"""Environment lifecycle: :class:`EnvironmentBase` opens, steps, closes and records episodes over its mixins;
+:class:`AsyncEnvironmentBase` runs a turn batch through ``asyncio.gather``."""
 
 import asyncio
 import itertools
@@ -34,27 +33,23 @@ from halo.rewards.terms import RewardTerm
 
 logger = logging.getLogger(__name__)
 
-# CJK ideographs, kana and hangul: the scripts a Latin-script task's CoT drifts into under RL.
-# ``episode/reasoning_cjk_rate`` counts the episodes whose reasoning carries any of them.
+# CJK ideographs, kana and hangul: what a Latin-script task's CoT drifts into under RL.
 _CJK_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
 
 class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfilesMixin, EpisodeScoringMixin, ABC):
-    """Abstract base class for multi-turn GRPO environments: subclasses implement ``_reset_single``,
-    ``_step_single`` and ``_grade_episode``. One instance serves concurrent episodes (a Ray actor multiplexes
-    them on its loop), so per-episode state lives on the trajectory, never on the instance."""
+    """A multi-turn GRPO environment; subclasses implement ``_reset_single``, ``_step_single`` and ``_grade_episode``.
+    One instance serves concurrent episodes, so per-episode state lives on the trajectory, never on the instance."""
 
-    # The turn budget when the config names none: an edit-run-test loop and a one-shot exam need very different ones.
     DEFAULT_MAX_TURNS: int = 10
 
-    # Whether the reward grades ONLY against ``context["answer"]``, so the trainer refuses an answerless dataset.
-    # The native protocol and its presets leave it False and pay for completing the task where no row has one.
+    # Whether the reward grades only against ``context["answer"]``, so the trainer refuses an answerless dataset.
     requires_answer: bool = False
 
     # Whether the tools arrive on the first reset (an MCP server's, when it connects).
     TOOLS_ARRIVE_ON_RESET: bool = False
 
-    # The prompt trajectories open with, set by the protocol layers; the eval records it. ``None`` = no system turn.
+    # Set by the protocol layers; the eval records it. ``None`` = no system turn.
     system_prompt: str | None = None
 
     def __init__(
@@ -72,21 +67,13 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         reward_terms: Sequence[RewardTerm | Mapping[str, Any]] | None = None,
         **kwargs,
     ):
-        """Every knob is a constructor keyword, and so a YAML ``environment_kwargs`` key:
+        """Every knob is a YAML ``environment_kwargs`` key. ``max_length_cutoff_recoveries``: unproductive turns an
+        episode may recover from (``None`` = all in budget). ``reasoning_effort``: ``low``/``medium``/``high``,
+        ``"random"`` (one draw per episode) or ``None``. ``carry_reasoning``: send the last assistant turn's reasoning
+        back to the engine. ``reward_terms``: ``None`` is the env's own grade at weight 1.
 
-        - ``max_turns``: turns before truncation; ``None`` is the class's :data:`DEFAULT_MAX_TURNS`.
-        - ``max_observation_chars``: a tool observation's length cap (:meth:`_truncate_observation`).
-        - ``max_length_cutoff_recoveries``: unproductive turns an episode may recover from; ``None`` = all in budget.
-        - ``reasoning_effort``: ``low``/``medium``/``high``, ``"random"`` (one draw per episode) or ``None``.
-        - ``reasoning_effort_profiles``: per-level overrides merged over :data:`REASONING_EFFORT_PROFILES`.
-        - ``carry_reasoning``: send the last assistant turn's reasoning back to the engine (:func:`engine_view`).
-        - ``requires_answer``: overrides the class declaration; ``None`` keeps it, so read it off an instance.
-        - ``tool_success_reward`` / ``tool_error_penalty`` / ``tool_reward_cap``: per-call pricing
-          (:meth:`_init_tool_pricing`).
-        - ``reward_terms``: the reward's terms (:mod:`halo.rewards.terms`); ``None`` is the env's own grade at weight 1.
-
-        Any other keyword raises: the registry forwards the whole ``env_config``, so an unbound key is a typo or a
-        knob of another ``env_type``.
+        Any other keyword raises: the registry forwards the whole ``env_config``, so an unbound key is a typo or a knob
+        of another ``env_type``.
         """
         max_turns = self.DEFAULT_MAX_TURNS if max_turns is None else max_turns
         # 0 turns makes the rollout loop a no-op, producing an all-zero batch.
@@ -114,7 +101,6 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
     def reset(
         self, prompts: list[str | list[dict[str, str]]], contexts: list[dict[str, Any]] | None = None
     ) -> tuple[list[int], list[EnvStep]]:
-        """Reset the environment with multiple prompts."""
         episode_ids, steps = [], []
         for prompt, context in zip(prompts, self._contexts(contexts, prompts), strict=True):
             episode_id = next(self._episode_ids)
@@ -125,7 +111,6 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
     def step(
         self, episode_ids: list[int], actions: list[str], contexts: list[dict[str, Any]] | None = None
     ) -> list[EnvStep]:
-        """Take a step in multiple episodes."""
         steps = []
         for episode_id, action, context in zip(
             episode_ids, actions, self._contexts(contexts, episode_ids), strict=True
@@ -138,9 +123,9 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         return steps
 
     def finalize_truncated(self, episode_ids: list[int]) -> list[EnvStep]:
-        """Close still-open episodes as truncated without a synthetic model turn, which would mark them
-        ``completed`` and pay completion-graded envs; the reward already earned stands. A driver that lost
-        the episode stamps :data:`EPISODE_ERROR_KEY` first, keeping the turn-overflow price off it."""
+        """Close open episodes as truncated without a synthetic model turn, which would mark them ``completed`` and pay
+        completion-graded envs. A driver that lost the episode stamps :data:`EPISODE_ERROR_KEY` first, keeping the
+        turn-overflow price off it."""
         steps = []
         for episode_id in episode_ids:
             trajectory = self._episode(episode_id)
@@ -151,28 +136,25 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         return steps
 
     def get_trajectories(self, episode_ids: list[int]) -> list[Trajectory | None]:
-        """Get trajectories for the given episode IDs."""
         return [self._trajectories.get(eid) for eid in episode_ids]
 
     def cleanup(self, episode_ids: list[int]) -> None:
-        """Drop the named episodes, releasing what each holds."""
         for eid in episode_ids:
             self._release_episode(eid)
             self._trajectories.pop(eid, None)
 
     def close(self) -> None:
-        """Clean up resources: the reward scorers' clients here; subclasses extend and call ``super()``."""
+        """Subclasses extend and call ``super()``."""
         if self._rewards.external_terms:
             self._run_or_schedule(self._rewards.aclose())
 
     def get_tools_schema(self) -> list[dict[str, Any]] | None:
-        """OpenAI-format tool schema passed to the rollout engine as ``tools=``. Default ``None``;
-        overridden by the tool-use envs."""
+        """Passed to the rollout engine as ``tools=``; overridden by the tool-use envs."""
         return None
 
     def rollout_metrics(self, trajectory: Trajectory) -> dict[str, float]:
-        """Per-episode metrics the trainer means, by full path: ``outcome/*`` (task success, added by task envs),
-        ``episode/*`` (agent behavior), ``reward/*`` (the components, which sum to the reward) and the scorers' keys."""
+        """Per-episode metrics the trainer means, by full path: ``outcome/*`` (added by task envs), ``episode/*``,
+        ``reward/*`` (sum to the reward) and the scorers' keys."""
         if REWARD_PENDING_KEY in trajectory.info:
             raise RuntimeError(
                 "the episode's reward still owes its externally scored terms: the driver must await "
@@ -184,10 +166,9 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
             fault = trajectory.info.get(SANDBOX_FAULT_KEY)
             metrics["episode/sandbox_infra_fault"] = 1.0 if fault == SANDBOX_FAULT_INFRA else 0.0
             metrics["episode/sandbox_agent_fault"] = 1.0 if fault == SANDBOX_FAULT_AGENT else 0.0
-        # Apart: a termination rate cannot tell a cut-off turn, or one that stopped inside its reasoning, from an answer.
+        # Apart: a termination rate cannot tell a cut-off turn, or one stopped inside its reasoning, from an answer.
         for key in (LENGTH_CUTOFF_TURNS_KEY, LENGTH_CUTOFF_IN_CALL_TURNS_KEY, EMPTY_TURNS_KEY):
             metrics[f"episode/{key}"] = float(trajectory.info.get(key, 0))
-        # Turns whose counted reasoning reached their cap, emitted only where the rollout counts reasoning.
         counted = [m for m in trajectory.messages if m.role == "assistant" and m.reasoning_tokens is not None]
         if counted:
             metrics["episode/thinking_cap_turns"] = float(sum(m.reasoning_capped for m in counted))
@@ -217,7 +198,6 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
 
     @staticmethod
     def _contexts(contexts: list[dict[str, Any]] | None, batch: list) -> list[dict[str, Any] | None]:
-        """One context per batch entry: ``contexts`` as given, or ``None`` for each."""
         return [None] * len(batch) if contexts is None else contexts
 
     @staticmethod
@@ -227,8 +207,6 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         system_prompt: str | None = None,
         extra_info: dict[str, Any] | None = None,
     ) -> Trajectory:
-        """A fresh trajectory for ``_reset_single``: the system prompt, the user prompt, and the base info plus
-        ``extra_info`` (a protocol's tool counters)."""
         traj = Trajectory()
         context = context or {}
 
@@ -247,8 +225,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         return traj
 
     def _register_episode(self, episode_id: int, trajectory: Trajectory, context: dict[str, Any] | None) -> EnvStep:
-        """Open a freshly reset episode under ``episode_id`` (sync + async reset paths): bind its effort
-        profile, stamp and store it, and return its opening step."""
+        """Shared by the sync and async reset paths."""
         self._bind_effort_profile(trajectory, context)
         trajectory.info["episode_id"] = episode_id
         self._trajectories[episode_id] = trajectory
@@ -257,8 +234,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
     def _begin_step(
         self, episode_id: int, action: str, context: dict[str, Any] | None
     ) -> tuple[Trajectory, EnvStep | None]:
-        """The episode's trajectory with the model's action recorded (sync + async step paths), or its standing
-        step when the episode is already done."""
+        """The trajectory with the action recorded, or its standing step when the episode is already done."""
         trajectory = self._episode(episode_id)
         if trajectory.done:
             return trajectory, self._env_step(trajectory)
@@ -266,7 +242,6 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         return trajectory, None
 
     def _episode(self, episode_id: int) -> Trajectory:
-        """The open episode ``episode_id`` names; an unknown id raises."""
         trajectory = self._trajectories.get(episode_id)
         if trajectory is None:
             raise ValueError(f"Episode {episode_id} not found")
@@ -276,12 +251,9 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         return [self._episode(episode_id) for episode_id in episode_ids]
 
     def _add_action_message(self, trajectory: Trajectory, action: str, context: dict[str, Any] | None) -> None:
-        """Append the model's turn as an assistant message, its calls, reasoning and captures read off the step
-        context."""
         ctx = context or {}
         tool_calls = ctx.get("tool_calls")
-        # Uncapped, the message advertises more calls than tool-result messages, which is rejected
-        # by the re-tokenizer.
+        # Uncapped, the message advertises more calls than tool-result messages, which the re-tokenizer rejects.
         cap = self.max_tool_calls_per_turn
         if cap is not None and tool_calls is not None and len(tool_calls) > cap:
             tool_calls = tool_calls[:cap]
@@ -313,8 +285,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         info: dict[str, Any],
         context: dict[str, Any] | None,
     ) -> EnvStep:
-        """Close the step ``_step_single`` took: end the episode on a booked sandbox fault (uncompleted) or past
-        ``max_turns`` (truncated), record the reward and state, and price a finished episode."""
+        """End the episode on a booked sandbox fault (uncompleted) or past ``max_turns`` (truncated)."""
         done = done or SANDBOX_FAULT_KEY in trajectory.info
         if trajectory.num_turns >= self.max_turns and not done:
             truncated = True
@@ -336,8 +307,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         return self._env_step(trajectory, reward)
 
     def _env_step(self, trajectory: Trajectory, reward: float = 0.0) -> EnvStep:
-        """The :class:`EnvStep` mirroring ``trajectory`` as it stands, carrying this step's ``reward``
-        delta: a freshly reset episode's opening step, a no-op step on one already done, a taken step."""
+        """``reward`` is this step's delta; the rest mirrors ``trajectory`` as it stands."""
         return EnvStep(
             trajectory=trajectory,
             observation=[
@@ -350,12 +320,10 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         )
 
     def _release_episode(self, episode_id: int) -> None:  # noqa: B027  optional hook; subclasses override
-        """Release one episode's external resources (a sandbox session, a connection) as
-        :meth:`cleanup` drops it. A base episode holds none beyond its trajectory."""
+        """Release one episode's external resources (a sandbox session, a connection) as :meth:`cleanup` drops it."""
 
     def _run_or_schedule(self, coroutine) -> None:
-        """Run a teardown coroutine to completion when no loop runs here, else schedule it on the
-        running one (a close hook is called from an actor's loop and from plain teardown alike)."""
+        """A close hook is called from an actor's loop and from plain teardown alike."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -373,13 +341,9 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
 
 
 class AsyncEnvironmentBase(EnvironmentBase):
-    """EnvironmentBase with async reset/step for I/O-bound operations."""
-
     async def reset_async(
         self, prompts: list[str | list[dict[str, str]]], contexts: list[dict[str, Any]] | None = None
     ) -> tuple[list[int], list[EnvStep]]:
-        """Async reset for multiple prompts."""
-
         async def reset_one(prompt, context):
             episode_id = next(self._episode_ids)
             return episode_id, self._register_episode(
@@ -394,8 +358,6 @@ class AsyncEnvironmentBase(EnvironmentBase):
     async def step_async(
         self, episode_ids: list[int], actions: list[str], contexts: list[dict[str, Any]] | None = None
     ) -> list[EnvStep]:
-        """Async step for multiple episodes."""
-
         async def step_one(episode_id, action, context):
             trajectory, standing = self._begin_step(episode_id, action, context)
             if standing is not None:
@@ -413,11 +375,11 @@ class AsyncEnvironmentBase(EnvironmentBase):
     async def _reset_single_async(
         self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None
     ) -> Trajectory:
-        """Async version of reset. Override for async I/O."""
+        """Override for async I/O."""
         return self._reset_single(prompt, context)
 
     async def _step_single_async(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
     ) -> StepOutcome:
-        """Async version of step. Override for async I/O."""
+        """Override for async I/O."""
         return self._step_single(trajectory, action, context)

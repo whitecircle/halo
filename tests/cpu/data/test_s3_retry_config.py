@@ -1,12 +1,7 @@
 #!/usr/bin/env python
-"""``S3Client`` retries follow the AWS configuration.
-
-An explicit ``retries`` key in a botocore client ``Config`` overrides the environment and the profile, so a
-hardcoded policy would silently ignore ``AWS_MAX_ATTEMPTS`` / ``AWS_RETRY_MODE`` on the multi-node fetch path.
-The toolkit's defaults (standard mode, 4 attempts) apply only to the keys the AWS configuration leaves unset.
-
-    python tests/cpu/data/test_s3_retry_config.py
-"""
+"""``S3Client`` retries follow the AWS configuration: an explicit ``retries`` key would override
+``AWS_MAX_ATTEMPTS`` and ``AWS_RETRY_MODE``. The toolkit's defaults (standard mode, 4 attempts) apply only to the
+keys left unset."""
 
 import pytest
 

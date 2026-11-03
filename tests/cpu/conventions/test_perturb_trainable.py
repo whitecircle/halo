@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.numerics.perturb_trainable``: the deterministic weight perturbation a GPU suite's measured floor
-starts from.
-
-The GPU suites run it on every rank of a sharded model, so these pin what they rely on: a perturbation the dtype can
-hold changes stored elements by about its relative size and reports how many, one below half a ULP changes none and
-says so, ranks holding the same values perturb them alike, a DTensor's local shard is what changes, and a frozen
-parameter is left alone.
-
-Run: python tests/cpu/conventions/test_perturb_trainable.py
-"""
+"""``tests.common.numerics.perturb_trainable``, the deterministic weight perturbation a GPU suite's measured floor
+starts from."""
 
 import pytest
 import torch

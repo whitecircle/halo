@@ -1,14 +1,5 @@
-"""Manifest-driven GPU suite entrypoint.
-
-This module holds no test logic — it is the single parametrized node that pytest expands,
-via ``tests/gpu/conftest.py``, into one launch per ``(script, args)`` in
-``tests/gpu/manifest.py``. Each ``GPUCase`` shells out ``torchrun`` for its script and
-classifies the result (PASS / FAIL / ERROR / SKIP). Run it with the usual selectors::
-
-    pytest -m "gpu and core"      # PR tier
-    pytest -m gpu                 # full tier
-    pytest -m "gpu and ep"        # just Expert-Parallelism tests
-"""
+"""The one parametrized node pytest expands, via ``tests/gpu/conftest.py``, into a launch per row of
+``tests/gpu/manifest.py``."""
 
 
 def test_gpu_script(gpu_case, tmp_path):

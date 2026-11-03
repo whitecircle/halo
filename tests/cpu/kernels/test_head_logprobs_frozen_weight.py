@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the chunked head backward computes only the gradients autograd asks for.
-
-A LoRA run scores the chunked head with a frozen ``lm_head``. Its backward must then build no fp32 ``[V, H]``
-weight-gradient buffer and run no weight-gradient GEMM per tile, while the hidden-state gradient stays bitwise
-the one a trainable head gets.
-
-    python tests/cpu/kernels/test_head_logprobs_frozen_weight.py
-"""
+"""The chunked head backward computes only the gradients autograd asks for, so a frozen ``lm_head`` builds no fp32
+``[V, H]`` buffer."""
 
 import pytest
 import torch
@@ -22,7 +16,7 @@ GEMMS = (torch.ops.aten.mm.default, torch.ops.aten.addmm.default)
 
 
 class _BackwardOps(TorchDispatchMode):
-    """Records the GEMM count and the shape and dtype of every tensor an op returns."""
+    """The GEMM count and the shape and dtype of every tensor an op returns."""
 
     def __init__(self):
         super().__init__()
@@ -50,7 +44,7 @@ def _inputs(with_bias):
 
 
 def _backward(hidden, weight, bias, targets, upstream, *, train_head):
-    """``(grads, ops)``: the leaves' gradients after one backward and the ops that backward ran."""
+    """``(grads, ops)``."""
     hidden = hidden.clone().requires_grad_(True)
     weight = weight.clone().requires_grad_(train_head)
     bias = None if bias is None else bias.clone().requires_grad_(train_head)

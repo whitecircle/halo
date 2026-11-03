@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: the tree layout stores prefix-sharing examples once without changing any of them.
-
-A tree row is only worth having if every root-to-leaf path is still exactly the flat example it came
-from, and if the attention plan the collator derives gives each token that path and nothing else. A
-shared span cut one token too far trains a completion from another branch's token; a plan that keeps
-one sibling key is a plausible loss on leaked context. Both are checked here against brute-force
-references over random tries: path reconstruction against the input paths, and each kernel plan
-against the dense keep-mask.
-
-Run: python tests/cpu/data/test_tree_layout.py  (or pytest)
-"""
+"""The tree layout stores prefix-sharing examples once without changing any of them: every root-to-leaf path is the
+flat example it came from, and the attention plan gives each token that path and nothing else. Checked against
+brute-force references over random tries."""
 
 import random
 from itertools import accumulate

@@ -1,8 +1,5 @@
-"""The trainer's evaluation loop and its data-parallel gather: one chunk per DP replica, the final round's padding cut.
-
-accelerate pads every rank's last eval batch with the split's first rows; the cut counts them off the
-active loader's own geometry, after the DP scope drops the rows TP/CP/ETP siblings and pipeline peers repeat.
-"""
+"""The evaluation loop and its data-parallel gather. accelerate pads every rank's last eval batch with the split's
+first rows; the cut counts them off the active loader's geometry, after the DP scope drops what siblings repeat."""
 
 from __future__ import annotations
 
@@ -32,16 +29,9 @@ _COUNTED_SAMPLERS = (SequentialSampler, RandomSampler, SubsetRandomSampler, Leng
 
 
 def final_round_split_rows(loader, dataset_drawing: tuple[type[BatchSampler], ...] = ()) -> int | None:
-    """How many of ``loader``'s final-round rows, over every rank in rank order, are the split's own; ``None``
-    when no round falls short (no ``BatchSamplerShard``, or ``drop_last``).
-
-    The split's rows are the ones the sampler draws, modulo one round. accelerate's own ``remainder``
-    counts the dataset instead, which miscounts TRL's ``RepeatSampler`` and trims real rows from a
-    one-process loader. The count is trusted only where the rows drawn are known: torch's
-    ``BatchSampler`` iteration over a :data:`_COUNTED_SAMPLERS` sampler, or a ``dataset_drawing`` batch
-    sampler, which draws every row of its ``dataset`` once. Anything else is ``None`` too, so nothing is
-    cut (group-by-label draws fewer rows than its dataset holds).
-    """
+    """How many of the final-round rows, over every rank in rank order, are the split's own; ``None`` when nothing is
+    cut. accelerate's ``remainder`` counts the dataset, which miscounts TRL's ``RepeatSampler`` and trims real rows
+    from a one-process loader."""
     shard = find_batch_sampler_shard(loader)
     if shard is None or shard.drop_last:
         return None
@@ -57,14 +47,14 @@ def final_round_split_rows(loader, dataset_drawing: tuple[type[BatchSampler], ..
 
 
 def split_rows_head(tensor: torch.Tensor, real_rows: int) -> torch.Tensor:
-    """``tensor``'s first ``real_rows`` rows (:meth:`EvaluationMixin.eval_split_rows`), or ``tensor`` itself
-    when that is every row: a recorded full-range slice would copy a whole-tensor gradient in backward."""
+    """``tensor`` itself when ``real_rows`` is every row: a recorded full-range slice would copy a whole-tensor
+    gradient in backward."""
     return tensor if real_rows >= tensor.size(0) else tensor[:real_rows]
 
 
 def split_rows_mean(values: torch.Tensor, real_rows: int) -> torch.Tensor:
-    """The mean over every element of ``values``' first ``real_rows`` rows, 0 over none (a rank holding only
-    padding); over every row ``values.mean()`` itself, so a train batch reduces bit for bit like a plain mean."""
+    """Mean of ``values``' first ``real_rows`` rows, 0 over none; over every row ``values.mean()`` itself, so a train
+    batch reduces bit for bit like a plain mean."""
     if real_rows >= values.size(0):
         return values.mean()
     head = values[:real_rows]
@@ -72,22 +62,19 @@ def split_rows_mean(values: torch.Tensor, real_rows: int) -> torch.Tensor:
 
 
 def _rank_split_rows(split_rows: int, rows_per_rank: int, rank: int) -> int:
-    """How many of ``rank``'s ``rows_per_rank`` final-round rows are real, the split's ``split_rows``
-    filling the round in rank order."""
+    """Real rows among ``rank``'s final round; the split fills it in rank order."""
     return max(0, min(rows_per_rank, split_rows - rank * rows_per_rank))
 
 
 def _split_head(entries: int, *, split_rows: int, rows_per_rank: int, rank: int) -> int:
-    """How many of ``rank``'s ``entries`` gathered final-round entries stand for its real rows: its share of
-    ``rows_per_rank`` scaled to the entries and rounded up, since a chunk need not hold one entry per row (HF
+    """``rank``'s share of ``entries`` gathered entries, rounded up: a chunk need not hold one entry per row (HF
     repeats the scalar eval loss ``eval_batch_size`` times) and a rank holding any real row keeps one."""
     return -(-_rank_split_rows(split_rows, rows_per_rank, rank) * entries // rows_per_rank)
 
 
 def trim_to_split_rows(tensor: torch.Tensor, *, split_rows: int, rows_per_rank: int, num_ranks: int) -> torch.Tensor:
-    """The split's share of a gathered final round: ``num_ranks`` equal chunks in rank order, each
-    standing for ``rows_per_rank`` rows, of which the first ``split_rows`` are real. Each chunk keeps
-    its own :func:`_split_head`."""
+    """The split's share of a gathered final round: ``num_ranks`` equal chunks in rank order, each standing for
+    ``rows_per_rank`` rows, the first ``split_rows`` real."""
     chunk, ragged = divmod(tensor.shape[0], num_ranks)
     if ragged:
         raise ValueError(
@@ -104,23 +91,16 @@ def trim_to_split_rows(tensor: torch.Tensor, *, split_rows: int, rows_per_rank: 
 
 
 class EvaluationMixin:
-    """``evaluate`` / ``evaluation_loop`` overrides, the DP-scoped evaluation gather and the final-round cut."""
-
     # ``(keep_ranks, world_size)`` once the eval gather is DP-scoped, None while it is the world's.
     _dp_metric_gather_scope: tuple[list[int], int] | None = None
     # Raised for the unequal-eval-batch escape hatch, whose identity gather must survive the loop's re-arm.
     _dp_metric_gather_suspended: bool = False
-    # Batch samplers this trainer builds whose own iteration draws every row of their ``dataset`` once;
-    # a final round over one is counted off that dataset (:func:`final_round_split_rows`).
+    # Batch samplers whose iteration draws every row of their ``dataset`` once, so a final round is counted off it.
     DATASET_DRAWING_BATCH_SAMPLERS: ClassVar[tuple[type[BatchSampler], ...]] = ()
 
     def evaluate(self, *args, **kwargs):
-        """COLLECTIVE: swap the eval loop's cross-rank gather for the identity where ranks hold unequal eval batch
-        counts.
-
-        The default loop's per-step ``gather_for_metrics`` deadlocks there, so each rank scores its own shard and
-        the logged metrics are rank 0's, which the swap warns about; equal-batch DP keeps the gather.
-        """
+        """COLLECTIVE. Swap the eval gather for the identity where ranks hold unequal batch counts, since the per-step
+        ``gather_for_metrics`` deadlocks there; each rank scores its own shard and the logged metrics are rank 0's."""
         if (
             self._needs_custom_accelerator()
             and has_process_group()
@@ -153,15 +133,15 @@ class EvaluationMixin:
                     result = super().evaluate(*args, **kwargs)
             finally:
                 self.gather_function = original_gather
-                # del, not re-assignment: assigning the bound method back pins a permanent instance attribute.
+                # Assigning the bound method back would pin a permanent instance attribute.
                 self.accelerator.__dict__.pop("pad_across_processes", None)
             barrier()
             return result
         return super().evaluate(*args, **kwargs)
 
     def evaluation_loop(self, *args, **kwargs):
-        """Re-arm the DP-scoped metric gather unless the escape hatch suspended it (HF hands ``gather_function``
-        back to accelerate after every loop), then re-shard a pipeline stage the forward-only drives left gathered."""
+        """Re-arm the DP-scoped gather unless suspended, since HF hands ``gather_function`` back to accelerate after
+        every loop, then re-shard a pipeline stage the forward-only drives left gathered."""
         if not self._dp_metric_gather_suspended:
             self.gather_function = self._dp_gather_for_metrics
         output = super().evaluation_loop(*args, **kwargs)
@@ -171,8 +151,8 @@ class EvaluationMixin:
 
     @contextlib.contextmanager
     def suspended_dp_metric_gather(self):
-        """Hold whatever gather is installed across the evaluation loops run inside the block. Restored, not
-        reset: ``Trainer.evaluate`` re-enters itself per split of a dict ``eval_dataset``."""
+        """Hold whatever gather is installed across the block's evaluation loops. Restored on exit, since
+        ``Trainer.evaluate`` re-enters itself per split of a dict ``eval_dataset``."""
         was_suspended = self._dp_metric_gather_suspended
         self._dp_metric_gather_suspended = True
         try:
@@ -181,14 +161,9 @@ class EvaluationMixin:
             self._dp_metric_gather_suspended = was_suspended
 
     def eval_split_rows(self, num_rows: int) -> int:
-        """How many of this rank's ``num_rows`` batch rows are the eval split's own; the rest pad it.
-
-        accelerate fills every rank's last eval batch by repeating the split's first rows, which scored
-        would count twice. The split's rows fill the final round in rank order
-        (:func:`final_round_split_rows`). ``num_rows`` in train mode, outside a padded final round, without
-        ``even_batches`` (a short batch holds real rows alone) and on an iterable split. Read off the
-        loader, whose ``process_index`` TP/CP/ETP siblings share. Per-rank, no collective.
-        """
+        """How many of this rank's ``num_rows`` batch rows are the split's own, since accelerate's padding rows would
+        count twice. ``num_rows`` in train mode, outside a padded final round, without ``even_batches`` and on an
+        iterable split. Per-rank."""
         final_round = None if self.model.training else self._active_final_round()
         if final_round is None or not final_round[2].even_batches:
             return num_rows
@@ -196,8 +171,8 @@ class EvaluationMixin:
         return min(num_rows, _rank_split_rows(split_rows, rows_per_rank, shard.process_index))
 
     def _eval_ranks_have_unequal_batches(self, eval_args: tuple, eval_kwargs: dict) -> bool:
-        """COLLECTIVE: whether the eval dataloader yields different batch counts across ranks; True when a rank
-        cannot measure its count (iterable dataset, no len), so the gather is dropped rather than risk a deadlock."""
+        """COLLECTIVE. True when batch counts differ across ranks or a rank cannot measure its own (iterable dataset),
+        so the gather is dropped rather than risk a deadlock."""
         eval_dataset = eval_kwargs.get("eval_dataset", eval_args[0] if eval_args else None)
         try:
             local_batches = len(self.get_eval_dataloader(eval_dataset))
@@ -212,9 +187,8 @@ class EvaluationMixin:
         return most != -negated_fewest
 
     def _install_dp_metric_gather(self) -> None:
-        """COLLECTIVE. Point HF's evaluation gather at :meth:`_dp_gather_for_metrics`, DP-scoped where the
-        loader is DP-sharded: TP/CP/ETP siblings and pipeline chain peers all return their replica's rows
-        (PP broadcasts the last stage's), which a world gather would repeat once per sibling."""
+        """COLLECTIVE. DP-scoped where the loader is DP-sharded, since TP/CP/ETP siblings and pipeline peers all return
+        their replica's rows (PP broadcasts the last stage's)."""
         if self._needs_custom_dataloader():
             dp_rank_by_global_rank = self._data_parallel_rank_by_global_rank()
             world_size = len(dp_rank_by_global_rank)
@@ -232,14 +206,9 @@ class EvaluationMixin:
         self.gather_function = self._dp_gather_for_metrics
 
     def _dp_gather_for_metrics(self, input_data, use_gather_object: bool | None = None):
-        """The evaluation gather: one chunk per DP rank, then the final round's padding cut away.
-
-        The cut keeps a prefix by the loader's own geometry (:func:`final_round_split_rows`), so it runs
-        after the DP scope drops the siblings' duplicates; a half-padded rank's scalar loss keeps its share
-        of entries. ``use_gather_object`` (default ``args.eval_use_gather_object``) or an input that is not
-        all tensors takes the object gather under the same scope and cut. A dispatching loader (an iterable
-        split on plain DP) takes accelerate's ``gather_for_metrics``; under a DP scope it raises.
-        """
+        """One chunk per DP rank, then the final round's padding cut; a half-padded rank's scalar loss keeps its share
+        of entries. Non-tensor input takes the object gather; a dispatching loader takes accelerate's
+        ``gather_for_metrics``, and raises under a DP scope."""
         if use_gather_object is None:
             use_gather_object = self.args.eval_use_gather_object
         if isinstance(self.accelerator.gradient_state.active_dataloader, DataLoaderDispatcher):
@@ -271,8 +240,7 @@ class EvaluationMixin:
         return recursively_apply(trim, gathered)
 
     def _active_final_round(self) -> tuple[int, int, BatchSamplerShard] | None:
-        """``(split_rows, rows_per_rank, shard)`` while the active loader's padded final round runs; checks the
-        loader's geometry on every batch first (:meth:`_active_eval_shard`)."""
+        """``(split_rows, rows_per_rank, shard)`` while the active loader's padded final round runs."""
         shard = self._active_eval_shard()
         state = self.accelerator.gradient_state
         if shard is None or not state.end_of_dataloader:
@@ -284,9 +252,8 @@ class EvaluationMixin:
         return split_rows, loader.total_batch_size // shard.num_processes, shard
 
     def _active_eval_shard(self) -> BatchSamplerShard | None:
-        """The active loader's ``BatchSamplerShard``, refused on any batch when its shard count is not the
-        gathered chunk count (the DP scope's replicas, else the world): a loader built around the DP-aware
-        eval build would lose its distinct rows as sibling duplicates. Per-rank, no collective."""
+        """The active loader's shard, refused when its shard count is not the gathered chunk count: a loader built
+        around the DP-aware eval build would lose its distinct rows as sibling duplicates. Per-rank, no collective."""
         shard = find_batch_sampler_shard(self.accelerator.gradient_state.active_dataloader)
         if shard is None:
             return None
@@ -302,10 +269,8 @@ class EvaluationMixin:
         return shard
 
     def _gather_objects_for_metrics(self, input_data, final_round: tuple[int, int, BatchSamplerShard] | None):
-        """COLLECTIVE. accelerate's object gather (every rank's entries as one list) kept to one rank per DP
-        replica and cut to the split's rows per rank, as the tensor gather is. Without ``even_batches`` only
-        entries every rank sends at one length (HF's repeated scalar loss) are cut; a single process returns
-        its input unchanged."""
+        """COLLECTIVE. accelerate's object gather kept to one rank per DP replica and cut to the split's rows. Without
+        ``even_batches`` only entries every rank sends at one length (HF's repeated scalar loss) are cut."""
         if not is_multi_rank_run():
             return input_data
         per_rank: list[Any] = [None] * dist.get_world_size()

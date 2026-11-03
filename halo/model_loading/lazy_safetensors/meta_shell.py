@@ -1,9 +1,4 @@
-"""The meta-device model shell the lazy loaders plan against: zero RAM, real buffers.
-
-:func:`instantiate_on_meta` builds it from ``from_pretrained(device_map="meta")`` where the
-architecture allows and from the config alone where it does not, grafting back the non-persistent
-buffers the meta dispatch strands.
-"""
+"""The meta-device model shell the lazy loaders plan against: zero RAM, real buffers."""
 
 from __future__ import annotations
 
@@ -28,17 +23,13 @@ _ATTN_IMPLEMENTATION_CHECK = "_check_and_adjust_attn_implementation"
 
 
 class MetaShellBuildError(RuntimeError):
-    """A model class that cannot be built from its config on the meta device; each caller states what that
-    blocks and any setting past it."""
+    """A model class that cannot be built from its config on the meta device; each caller states what that blocks."""
 
 
 def _resolve_remote_code_class(model_class, config, trust_remote_code: bool, revision: str | None):
-    """The concrete remote-code model class, resolved from the config's hub id at the run's ``revision``.
-
-    Auto dispatch against the local snapshot dir hits a transformers HF-cache-symlink bug (relative imports
-    fail); unpinned, the modeling file would come from the repo's ``main`` while the weights come from the
-    run's revision.
-    """
+    """The concrete remote-code class at the run's ``revision``. Auto dispatch against a local snapshot hits a
+    transformers HF-cache-symlink bug, and unpinned the modeling file would come from ``main`` while the weights come
+    from the revision."""
     auto_map = getattr(config, "auto_map", None)
     class_name = getattr(model_class, "__name__", "")
     if not (trust_remote_code and auto_map and class_name in auto_map):
@@ -54,11 +45,8 @@ def _resolve_remote_code_class(model_class, config, trust_remote_code: bool, rev
 
 
 def _restore_checkpoint_generation_config(model: nn.Module, model_name_or_path: str, revision=None) -> None:
-    """Re-read ``generation_config.json`` onto a config-only shell, which ``from_config`` derives from the model
-    config alone and the next save would write without the checkpoint's eos set and sampling defaults.
-
-    An absent file keeps the derived defaults, as ``from_pretrained`` does; an unreadable one raises.
-    """
+    """Re-read ``generation_config.json`` onto a config-only shell, whose derived one a save would write without the
+    checkpoint's eos set and sampling defaults. An unreadable file raises."""
     try:
         model.generation_config = GenerationConfig.from_pretrained(model_name_or_path, revision=revision)
     except OSError:
@@ -67,10 +55,8 @@ def _restore_checkpoint_generation_config(model: nn.Module, model_name_or_path: 
 
 
 def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
-    """Give a config-built shell the fp32 pins (``_keep_in_fp32_modules[_strict]``) ``from_pretrained``'s dtype
-    plan applies and ``from_config`` does not: the lazy loaders read which parameters load fp32 off the shell.
-    Matched with transformers' own rule on meta parameters, so nothing is allocated.
-    """
+    """Give a config-built shell the fp32 pins ``from_pretrained``'s dtype plan applies, which the lazy loaders read
+    off the shell. Matched on meta parameters, so nothing is allocated."""
     if not isinstance(model, PreTrainedModel):
         return
     for name in fp32_pin_matches((name for name, _ in model.named_parameters()), model._get_dtype_plan(dtype)):
@@ -79,13 +65,9 @@ def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
 
 
 def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code: bool, **model_kwargs) -> nn.Module:
-    """The model shell built from the config alone: parameters on meta, buffers real.
-
-    Buffers must be real: checkpoints do not carry the non-persistent ones, and not every family's can be
-    recomputed afterwards (a config-less rotary derives ``inv_freq`` from ctor args it never stores). Only
-    ``dtype`` and ``attn_implementation`` are forwarded, since ``from_config`` hands anything else to
-    ``__init__``; the fp32 pins follow the build, so both shells carry the same parameter dtypes.
-    """
+    """The shell built from the config: parameters on meta, buffers real, as not every non-persistent one can be
+    recomputed later (a config-less rotary's ``inv_freq``). Only ``dtype`` and ``attn_implementation`` are forwarded,
+    since ``from_config`` hands anything else to ``__init__``."""
     kwargs: dict = {"dtype": dtype}
     if "attn_implementation" in model_kwargs:
         kwargs["attn_implementation"] = model_kwargs["attn_implementation"]
@@ -112,8 +94,6 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
                 f"attn_implementation to one the architecture supports: sdpa, or eager where sdpa is the "
                 f"one refused."
             ) from e
-        # On the fallback path the caller's warning has already named the from_pretrained failure;
-        # on the config_only path this build is the only attempt, so the message claims no more.
         raise MetaShellBuildError(
             f"Could not build a config-only meta-device shell for {model_class.__name__} ({type(e).__name__}: {e})."
         ) from e
@@ -124,10 +104,8 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
 def _materialize_nonpersistent_buffers_from_config_twin(
     model: nn.Module, model_class, config, dtype, trust_remote_code: bool, **model_kwargs
 ) -> None:
-    """Graft the non-persistent buffers ``from_pretrained(device_map="meta")`` strands on meta from a
-    config-only twin, whose buffers are real by construction. Persistent ones stay meta (the checkpoint
-    carries them); one the twin cannot supply either is named by the trainer's meta-buffer gate.
-    """
+    """Graft the non-persistent buffers ``device_map="meta"`` strands from a config-only twin, whose buffers are real;
+    one the twin cannot supply is named by the trainer's meta-buffer gate."""
     stranded = [
         (module_name, attr)
         for module_name, module in model.named_modules()
@@ -160,14 +138,9 @@ def instantiate_on_meta(
     config_only: bool = False,
     **model_kwargs,
 ) -> nn.Module:
-    """Instantiate a HuggingFace model on the meta device (zero RAM), at the run's ``dtype``.
-
-    ``from_pretrained(device_map="meta")`` first (it handles weight tying and custom init), with the buffers
-    its dispatch strands repaired; a config-only build when that fails (GLM4's non-Parameter attrs) or under
-    ``config_only``, for a checkpoint whose index names shards this filesystem lacks (a per-node pipeline
-    save), which ``from_pretrained`` would open. The run's dtype, not the checkpoint's: what the checkpoint
-    omits (a task head) keeps the shell's dtype.
-    """
+    """Instantiate on meta at the run's ``dtype``. ``from_pretrained(device_map="meta")`` first (weight tying, custom
+    init); a config-only build when that fails (GLM4's non-Parameter attrs) or under ``config_only``, for an index
+    naming shards this filesystem lacks (a per-node pipeline save)."""
     model_class = _resolve_remote_code_class(model_class, config, trust_remote_code, model_kwargs.get("revision"))
     dtype = resolve_load_dtype(dtype, config)
     if not config_only:

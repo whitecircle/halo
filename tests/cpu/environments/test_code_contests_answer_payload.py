@@ -1,8 +1,5 @@
-"""A code-contests episode refuses an ``answer`` payload holding no tests, at reset.
-
-Graded against no tests, a submission scores 0 inside its GRPO group, indistinguishable from a wrong
-solution, so a malformed or empty payload fails the episode instead of training as signal.
-"""
+"""A code-contests episode refuses an ``answer`` payload holding no tests, at reset: graded against no tests, a
+submission scores 0 like a wrong solution."""
 
 import pytest
 

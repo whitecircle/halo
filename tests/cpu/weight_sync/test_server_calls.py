@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""``AsyncCall``: a blocking server call on a background thread, joined within the bound its caller names.
-
-Every caller bounds its own wait (a chunk RPC by ``CHUNK_SYNC_TIMEOUT_S``), so the join takes no default that
-could silently apply another call's bound; a call still running past it raises rather than returning as done.
-
-    python tests/cpu/weight_sync/test_server_calls.py
-"""
+"""``AsyncCall`` joins within the bound its caller names, so the join takes no default that could silently apply
+another call's bound; a call still running past it raises."""
 
 import threading
 

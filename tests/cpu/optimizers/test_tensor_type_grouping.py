@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""``build_tensor_type_grouped_optimizer`` splits (weight decay, dtype, tensor type) groups, since FSDP2 DTensors and
-FSDP-ignored plain EP tensors cannot share a foreach/fused update. A ``fp32_non_ep_params`` run whose optimizer the
-args ask to be fused (``adamw_torch_fused``) steps each group fused, and that step matches the single-tensor one; any
-other optimizer runs every group single-tensor.
-
-    python tests/cpu/optimizers/test_tensor_type_grouping.py
-"""
+"""``build_tensor_type_grouped_optimizer`` splits (weight decay, dtype, tensor type) groups, since DTensors and
+plain EP tensors cannot share a foreach/fused update."""
 
 from types import SimpleNamespace
 
@@ -28,7 +23,7 @@ FUSED_MATCH_ATOL = 1e-6
 
 @pytest.fixture
 def mesh(tmp_path):
-    # file:// rendezvous — a fixed MASTER_PORT collides with any concurrently running suite.
+    # A fixed MASTER_PORT collides with any concurrently running suite.
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path}/pg_init")
     try:
         yield init_device_mesh("cpu", (1,))
@@ -37,7 +32,7 @@ def mesh(tmp_path):
 
 
 def _model(mesh, *, bf16_plain: bool = True) -> nn.Module:
-    """A DTensor weight beside plain-tensor parameters, as FSDP2 leaves the non-EP and EP params."""
+    """As FSDP2 leaves the non-EP and EP params."""
     generator = torch.Generator().manual_seed(0)
     model = nn.Module()
     weight = torch.randn(4, 4, generator=generator)
@@ -49,7 +44,6 @@ def _model(mesh, *, bf16_plain: bool = True) -> nn.Module:
 
 
 def _build(model, optim: str):
-    """The optimizer a ``fp32_non_ep_params`` trainer builds for ``optim`` without AdamWBF16, with HF's own kwargs."""
     args = TrainingArguments(output_dir="unused", optim=optim, learning_rate=1e-2, weight_decay=0.1, report_to="none")
     return build_optimizer(
         model,
@@ -77,7 +71,7 @@ def test_groups_split_by_tensor_type_and_dtype(mesh):
     )
 
     groups = optimizer.param_groups
-    # (wd=0.1, fp32, DTensor), (wd=0.0, bf16, plain), (wd=0.1, fp32, plain) — never merged.
+    # (wd=0.1, fp32, DTensor), (wd=0.0, bf16, plain), (wd=0.1, fp32, plain), never merged.
     assert len(groups) == 3
     for group in groups:
         assert group["foreach"] is False
@@ -95,7 +89,6 @@ def test_every_group_is_fused_exactly_when_the_args_ask(mesh, optim, fused):
 
 
 def test_a_fused_step_matches_the_single_tensor_step(mesh):
-    """fp32 throughout, so the two steps differ by the kernels' operation order only."""
     models = {optim: _model(mesh, bf16_plain=False) for optim in ("adamw_torch_fused", "adamw_torch")}
     optimizers = {optim: _build(model, optim) for optim, model in models.items()}
     assert {group["fused"] for group in optimizers["adamw_torch_fused"].param_groups} == {True}

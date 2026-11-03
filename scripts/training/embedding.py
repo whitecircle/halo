@@ -1,10 +1,7 @@
 #!/usr/bin/env python
 """Distributed embedding training: sentence-transformers losses over pairs, triplets, scored pairs and labeled texts.
-
-Text-only (the parallel loader's preloaded transformer only tokenizes text); CP is not supported, since pooling
-reads the complete sequence. Usage:
-    torchrun --nproc_per_node=8 scripts/training/embedding.py examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml
-"""
+Text-only (the parallel loader's preloaded transformer only tokenizes text); CP is not supported, since pooling reads
+the complete sequence."""
 
 import json
 import logging
@@ -69,10 +66,9 @@ REBUILT_MODULES = (Pooling, Normalize)
 
 
 class SourcePipeline(NamedTuple):
-    """A checkpoint's sentence-transformers pipeline as the parallel loader's pipeline rebuilds it around its own
-    backbone: the modules past the backbone it rebuilds (each from its saved config), the ``modules.json`` types of
-    any other, the backbone module's settings :class:`PreloadedTransformer` takes, and the model-level settings
-    (:data:`~halo.checkpoint.format.ST_CARRIED_MODEL_SETTINGS`). All empty for a bare backbone."""
+    """A checkpoint's sentence-transformers pipeline as the parallel loader rebuilds it around its own backbone:
+    rebuilt modules, ``modules.json`` types of any other, backbone settings for :class:`PreloadedTransformer` and
+    model-level settings. All empty for a bare backbone."""
 
     modules: list[nn.Module]
     unrebuilt: list[str]
@@ -81,13 +77,8 @@ class SourcePipeline(NamedTuple):
 
 
 def resolve_embedding_max_length(embedding_config: EmbeddingConfig, transformer_module) -> int:
-    """Fix ``embedding_config.max_length`` against the pipeline's backbone and return it.
-
-    Both loading paths land here before the length reaches a tokenizer, so ``null`` means the same
-    thing on either: the backbone's context window. ``transformer_module`` is the pipeline's first
-    module — SentenceTransformers' own ``Transformer`` or our :class:`PreloadedTransformer`, both of
-    which hold the backbone as ``auto_model``.
-    """
+    """Both loading paths land here before the length reaches a tokenizer, so ``null`` means the backbone's context
+    window on either. ``transformer_module`` holds the backbone as ``auto_model``."""
     backbone = getattr(transformer_module, "auto_model", None)
     if backbone is None:
         raise ValueError(
@@ -102,12 +93,8 @@ def resolve_embedding_max_length(embedding_config: EmbeddingConfig, transformer_
 
 
 def _align_pipeline_modules(modules: Iterable[nn.Module], embedding_config: EmbeddingConfig) -> bool:
-    """Apply ``pooling_mode`` to every Pooling of a checkpoint's pipeline ``modules`` and hold its Normalize to
-    ``normalize_embeddings``; True when a Normalize must be appended.
-
-    Warns on every value it changes, since the config overrides a checkpoint that ships its own
-    pooling (Qwen3-Embedding is ``lasttoken``).
-    """
+    """Apply ``pooling_mode`` and hold Normalize to ``normalize_embeddings``; True when a Normalize must be appended.
+    Warns on every change, since the config overrides a checkpoint's own pooling (Qwen3-Embedding is ``lasttoken``)."""
     pooling_modules = [module for module in modules if isinstance(module, Pooling)]
     if not pooling_modules:
         raise ValueError(
@@ -138,11 +125,8 @@ def _align_pipeline_modules(modules: Iterable[nn.Module], embedding_config: Embe
 
 
 def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config: EmbeddingConfig) -> None:
-    """Apply ``pooling_mode`` / ``normalize_embeddings`` / ``max_length`` to a loaded ST pipeline.
-
-    ``max_length`` must already be resolved (:func:`resolve_embedding_max_length`); it is installed as
-    SentenceTransformers' ``max_seq_length``, the length its tokenizer truncates to.
-    """
+    """``max_length`` must already be resolved; it becomes SentenceTransformers' ``max_seq_length``, the length its
+    tokenizer truncates to."""
     st_model.max_seq_length = embedding_config.max_length
     if _align_pipeline_modules(st_model, embedding_config):
         st_model.append(Normalize())
@@ -157,7 +141,7 @@ def _rebuilt_module_class(module_type: str) -> type[nn.Module] | None:
 
 
 def read_source_pipeline(source: str, revision: str | None, *, local_files_only: bool) -> SourcePipeline:
-    """``source``'s :class:`SourcePipeline`, read from the cache alone under ``local_files_only``."""
+    """Read from the cache alone under ``local_files_only``."""
     location = {"revision": revision, "local_files_only": local_files_only}
 
     def read_json(filename: str, subfolder: str = ""):
@@ -194,9 +178,8 @@ def _assemble_preloaded_pipeline(
     model_config: ModelArguments,
     args: EmbeddingScriptArguments,
 ) -> SentenceTransformer:
-    """The parallel loader's pipeline: its backbone, then the checkpoint's own pipeline aligned to the config as
-    sentence-transformers' load is (:func:`align_st_pipeline_to_config`), or over a bare backbone the pooling and
-    normalization the config describes."""
+    """The parallel loader's backbone, then the checkpoint's own pipeline aligned to the config, or over a bare
+    backbone the pooling and normalization the config describes."""
     source = hub_metadata_main_first(
         "embedding_source_pipeline",
         lambda local_files_only: read_source_pipeline(
@@ -230,17 +213,15 @@ def _assemble_preloaded_pipeline(
     transformer_module.max_seq_length = resolve_embedding_max_length(embedding_config, transformer_module)
 
     if not modules:
-        # get_text_config() resolves composite (multimodal) configs whose hidden_size lives in
-        # text_config (Qwen3.5, Gemma4); plain configs return themselves.
+        # get_text_config() resolves composite configs whose hidden_size lives in text_config (Qwen3.5, Gemma4).
         hidden_dim = backbone.config.get_text_config().hidden_size
         modules = [Pooling(word_embedding_dimension=hidden_dim, pooling_mode=embedding_config.pooling_mode)]
         if embedding_config.normalize_embeddings:
             modules.append(Normalize())
 
     st_model = SentenceTransformer(modules=[transformer_module, *modules], **source.model_settings)
-    # The TP loader attaches the (dp, tp) mesh to the backbone but the trainer reads it off the
-    # top-level ST model. Without propagating it, TP+DP builds a conflicting mesh and pure TP skips
-    # the TP grad-sync.
+    # The TP loader attaches the mesh to the backbone but the trainer reads it off the ST model: unpropagated, TP+DP
+    # builds a conflicting mesh and pure TP skips the TP grad-sync.
     mesh = getattr(backbone, "_device_mesh", None)
     if mesh is not None:
         st_model._device_mesh = mesh
@@ -253,20 +234,18 @@ def _load_sentence_transformer(
     model_config: ModelArguments,
     args: EmbeddingScriptArguments,
 ) -> SentenceTransformer:
-    """The pipeline sentence-transformers loads itself, given the parallel loader's post-load steps and the
-    config's pooling, normalization and length."""
+    """The pipeline sentence-transformers loads itself, with the parallel loader's post-load steps and settings."""
     parallelism_config = context.parallelism_config
     model_kwargs: dict = {"dtype": resolve_training_dtype(embedding_config)}
 
-    # The parallel loader's two seams, since sentence-transformers loads the backbone itself: the
-    # source fetched once per scope and agreed across ranks (revision threaded as on the parallel loader's
-    # branch, so a pinned checkpoint does not depend on flags), then a node-batched load joined
-    # over the store. The whole repo: the pipeline's pooling and dense modules sit in subfolders.
+    # The parallel loader's two seams, as sentence-transformers loads the backbone itself: the source fetched once per
+    # scope and agreed across ranks, then a node-batched load joined over the store. The whole repo: pooling and dense
+    # modules sit in subfolders.
     revision = resolve_model_source(
         context.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
     ).revision
-    # The family patches the parallel loader applies, keyed on the backbone's own config; unpinned, transformers picks
-    # the backend at the build and only the backend-independent patches apply (Zaya's checkpointing refusal).
+    # The parallel loader's family patches, keyed on the backbone's config; unpinned, transformers picks the backend at
+    # the build and only backend-independent patches apply (Zaya's checkpointing refusal).
     backbone_config = resolve_build_config(
         context.model_source, revision=revision, trust_remote_code=model_config.trust_remote_code
     )
@@ -294,9 +273,8 @@ def _load_sentence_transformer(
         )
     # Refuses a pipeline without a transformer backbone before anything reads it.
     resolve_embedding_max_length(embedding_config, st_model[0])
-    # ST loads the backbone itself, so the post-load steps of the parallel loader run here too: the
-    # stamp drop, the run-dtype cast, the buffer repair, and the shared finalization (a GptOss backbone
-    # would otherwise keep live sinks under an attention backend that drops them).
+    # ST loads the backbone itself, so the parallel loader's post-load steps run here too (a GptOss backbone would
+    # otherwise keep live sinks under a backend that drops them).
     backbone = st_model[0].auto_model
     drop_toolkit_stamps(backbone.config)
     cast_parameters_to_run_dtype(backbone, model_kwargs["dtype"], keep_fp32=parallelism_config.fp32_non_ep_params)
@@ -307,18 +285,16 @@ def _load_sentence_transformer(
         sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
         attn_implementation=model_kwargs.get("attn_implementation"),
     )
-    # Every rank builds the pipeline here, so the FA4 and flex-sliding compiles run fenced now rather than
-    # at one rank's first forward while its peers wait in a collective.
+    # Every rank builds the pipeline here, so the FA4 and flex-sliding compiles run fenced, not at a first forward.
     warm_attention_kernels(backbone, dtype=model_kwargs["dtype"])
-    # The checkpoint's modules.json decides pooling/normalization/length; aligned, as on the parallel loader's
-    # branch, or those three knobs are inert.
+    # The checkpoint's modules.json decides pooling/normalization/length; unaligned, those three knobs are inert.
     align_st_pipeline_to_config(st_model, embedding_config)
     return st_model
 
 
 def _ep1_layers_requested(context: ScriptContext, model_config: ModelArguments) -> bool:
-    """Whether a run without EP or TP puts the grouped-GEMM EP layers on this backbone: a MoE an EP layer class wraps,
-    at ``use_grouped_gemm``. COLLECTIVE where the verdict needs the checkpoint's config."""
+    """A MoE an EP layer class wraps, at ``use_grouped_gemm``, in a run without EP or TP. COLLECTIVE where the verdict
+    needs the checkpoint's config."""
     parallelism_config = context.parallelism_config
     if parallelism_config.has_ep_group or parallelism_config.is_tp_mode or not parallelism_config.needs_ep_layers:
         return False
@@ -326,9 +302,8 @@ def _ep1_layers_requested(context: ScriptContext, model_config: ModelArguments) 
 
 
 def _loads_through_parallel_loader(context: ScriptContext, model_config: ModelArguments) -> bool:
-    """Whether the backbone takes the parallel loader rather than sentence-transformers' own load: under EP or TP,
-    and where the grouped-GEMM EP layers take a MoE's experts, which only that loader puts in. COLLECTIVE as
-    :func:`_ep1_layers_requested`."""
+    """Under EP or TP, and where the grouped-GEMM EP layers take a MoE's experts, which only that loader puts in.
+    COLLECTIVE as :func:`_ep1_layers_requested`."""
     parallelism_config = context.parallelism_config
     return (
         parallelism_config.has_ep_group
@@ -353,11 +328,9 @@ def build_sentence_transformer(
     model_config: ModelArguments,
     args: EmbeddingScriptArguments,
 ) -> SentenceTransformer:
-    """Build the run's SentenceTransformer: the parallel loader's backbone wrapped in :class:`PreloadedTransformer`
-    and assembled into a pipeline where that loader owns the load (:func:`_loads_through_parallel_loader`),
-    otherwise ``SentenceTransformer(model_name)``."""
-    # QLoRA/k-bit is unsupported here: neither the parallel loader's pipeline nor the SentenceTransformer
-    # path applies it, so --load_in_4bit/--load_in_8bit would train at full precision.
+    """The parallel loader's backbone in :class:`PreloadedTransformer` where that loader owns the load, otherwise
+    ``SentenceTransformer(model_name)``."""
+    # Neither path applies QLoRA/k-bit, so --load_in_4bit/--load_in_8bit would train at full precision.
     if get_quantization_config(model_config) is not None:
         raise ValueError(
             "QLoRA / k-bit quantization is not supported for embedding training. The SentenceTransformer "
@@ -374,22 +347,16 @@ def build_sentence_transformer(
 
 
 def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: EmbeddingScriptArguments) -> None:
-    """Inject the run's LoRA into ``model``'s transformer backbone in place and train the adapters
-    alone; no-op without PEFT.
-
-    The backbone only: checkpoints fold and resume its adapters, and the trainer refuses any outside
-    it. ``inject_adapter_in_model``, not ``SentenceTransformer.add_adapter``: that goes through
-    transformers' adapter API, which requires peft >= 0.20.0, above the image's pin (pyproject.toml). EP, TP and the
-    grouped-GEMM EP layers are rejected by the trainer's own gates, which see the injected adapters structurally
-    (EP and the EP layers also before the load, :func:`reject_lora_before_the_load`).
-    """
+    """Inject LoRA into the transformer backbone in place and train the adapters alone; checkpoints fold and resume
+    only its adapters. ``inject_adapter_in_model``, not ``add_adapter``: that goes through transformers' adapter API,
+    which requires peft >= 0.20.0, above the image's pin (pyproject.toml). The trainer's gates reject EP, TP and the
+    grouped-GEMM EP layers."""
     backbone = model[0].auto_model
     peft_config = build_peft_config(backbone, model_config)
     if peft_config is None:
         return
-    # modules_to_save is unsupported here: the trainable copies are created, the freeze below
-    # re-freezes them, and the wrapper renames the base tensor, so the saved ST module lacks the
-    # plain <mod>.weight.
+    # The freeze below re-freezes trainable copies and the wrapper renames the base tensor, so the saved ST module
+    # lacks the plain <mod>.weight.
     if model_config.lora_modules_to_save:
         raise ValueError(
             f"lora_modules_to_save={list(model_config.lora_modules_to_save)} is not supported for "
@@ -397,7 +364,7 @@ def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: 
             "leaves the modules_to_save copies frozen and rewrites the base module's keys so the "
             "saved model no longer reloads. Train those modules with a full fine-tune instead."
         )
-    # The freeze below re-freezes everything that is not an adapter — trainable sinks included.
+    # The freeze below re-freezes everything that is not an adapter, trainable sinks included.
     if args.train_sinks:
         raise ValueError(
             "train_sinks: true needs full fine-tuning: embedding LoRA freezes every non-adapter "
@@ -414,8 +381,8 @@ def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: 
 
 
 def _reject_unhonored_args(args: EmbeddingScriptArguments) -> None:
-    """Refuse the shared script knobs the sentence-transformers path would parse and ignore: it has no
-    configure_run_tokenizer / freeze stage, so a freeze request would become a full fine-tune."""
+    """Refuse knobs this path would ignore: it has no configure_run_tokenizer / freeze stage, so a freeze request would
+    become a full fine-tune."""
     reject_unsupported_args(
         "Embedding training",
         pad_token=args.pad_token,
@@ -429,8 +396,7 @@ def _reject_unhonored_args(args: EmbeddingScriptArguments) -> None:
         # No chat-template rendering and no log_dataset_examples stage on this path.
         tools_field=args.tools_field,
         log_decoded_samples=args.log_decoded_samples,
-        # Neither branch can honor it: the parallel loader pins model_class=AutoModel (the loader then
-        # only warns), and the SentenceTransformer branch never reads the flag.
+        # The parallel loader pins model_class=AutoModel and the SentenceTransformer branch never reads the flag.
         text_only_model=args.text_only_model,
     )
     # SentenceTransformer owns tokenization, so only the default backend is accepted.

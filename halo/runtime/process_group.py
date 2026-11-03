@@ -1,5 +1,4 @@
-"""Default process-group construction for a torchrun / SLURM launch, with the NCCL watchdog timeout
-pinned for every later subgroup."""
+"""Default process group for a torchrun or SLURM launch, with the NCCL watchdog pinned for later subgroups."""
 
 import datetime
 import logging
@@ -23,12 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def _apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
-    """Make ``timeout`` the NCCL watchdog of every later ``new_group`` and extend the world group's.
-
-    ``new_group`` otherwise falls back to PyTorch's 10 minutes, and ``init_device_mesh`` takes no
-    timeout at all. A torch without ``default_pg_nccl_timeout`` raises rather than silently leaving
-    every subgroup on that default.
-    """
+    """Make ``timeout`` the watchdog of every later ``new_group`` and extend the world group's. ``new_group`` otherwise
+    falls back to PyTorch's 10 minutes and ``init_device_mesh`` takes no timeout."""
     if not hasattr(c10d, "default_pg_nccl_timeout"):
         raise RuntimeError(
             "torch.distributed.distributed_c10d.default_pg_nccl_timeout is absent on this PyTorch "
@@ -39,7 +34,7 @@ def _apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
         )
     c10d.default_pg_nccl_timeout = timeout
 
-    # Extend-only: shortening the world group would resurface the straggler aborts.
+    # Extend only: shortening the world group brings back straggler aborts.
     if not has_process_group():
         return
     try:
@@ -64,8 +59,7 @@ def _apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
 
 
 def _require_rendezvous_env() -> None:
-    """Refuse a multi-rank launch without an ``env://`` rendezvous (bare ``srun --ntasks-per-node``),
-    naming the fix c10d's own error does not."""
+    """Refuse a multi-rank launch without an ``env://`` rendezvous (bare ``srun --ntasks-per-node``)."""
     missing = [var for var in ("MASTER_ADDR", "MASTER_PORT") if not os.environ.get(var)]
     if not missing:
         return
@@ -80,15 +74,11 @@ def _require_rendezvous_env() -> None:
 
 
 def init_distributed(backend: str = "nccl") -> bool:
-    """COLLECTIVE: initialize the default process group with ``nccl_timeout()``, bind this rank's CUDA
-    device and agree the shared-filesystem flags; return whether it initialized.
-
-    A single process with no launcher vars is a no-op; an already-initialized group (``accelerate
-    launch``) still gets the timeout pin and the consensus.
-    """
+    """COLLECTIVE: init the default process group, bind this rank's CUDA device, agree the shared-filesystem flags;
+    return whether it initialized. No-op for a lone process; an existing group (``accelerate launch``) still gets the
+    timeout and the consensus."""
     timeout = nccl_timeout()
-    # A multi-rank world counts even without RANK: that is exactly the bare-srun shape, where
-    # skipping init leaves every rank at world 1, "main", and writing the same output_dir.
+    # Bare srun has a multi-rank world without RANK; skipping init would leave every rank "main" on one output_dir.
     world = launcher_global_world_size()
     if ("RANK" not in os.environ and world <= 1) or has_process_group():
         if has_process_group():
@@ -100,11 +90,10 @@ def init_distributed(backend: str = "nccl") -> bool:
 
     kwargs = {"backend": backend, "timeout": timeout}
     if "RANK" not in os.environ:
-        # Bare srun declares the world through SLURM_* alone, while c10d's env:// handler reads
-        # RANK / WORLD_SIZE itself and raises on their absence.
+        # Bare srun sets only SLURM_*; c10d's env:// handler raises without RANK / WORLD_SIZE.
         kwargs.update(rank=launcher_global_rank(), world_size=world)
     if backend == "nccl" and torch.cuda.is_available():
-        # Launcher's rank, not is_global_main_process(): pre-init the latter is 0 on every rank.
+        # Pre-init, is_global_main_process() is true on every rank.
         if os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS") != "1" and launcher_global_rank() == 0:
             logger.warning(
                 "CUDA_DEVICE_MAX_CONNECTIONS is %r; Expert Parallelism is validated with 1, the image "
@@ -118,7 +107,6 @@ def init_distributed(backend: str = "nccl") -> bool:
 
     dist.init_process_group(**kwargs)
     _apply_default_pg_timeout(timeout)
-    # The flag picks the coordination scope, so it must be one value for the whole job.
     resolve_shared_filesystem_consensus()
     if is_global_main_process():
         logger.info("Initialized distributed: backend=%s timeout=%s world_size=%d", backend, kwargs["timeout"], world)

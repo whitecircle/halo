@@ -11,14 +11,9 @@ from halo.models.moe.family_specs import INKLING
 
 
 class EPInklingMoELayer(EPMoELayerBase):
-    """EP layer for Inkling (``InklingMoE``) using DeepEP.
-
-    Fused routed experts (GLM4 layout). One router projection emits ``n_routed_experts + n_shared_experts``
-    logits, and the routed top-k and the shared experts are normalised jointly, so the shared FFN is scaled by its
-    share (``gammas``) — why this layer cannot use :class:`EPSharedExpertsMoELayerBase`, whose shared-expert call
-    takes no extra arguments. Selection runs on ``sigmoid(routed_logits) + e_score_correction_bias``; the weights
-    stay derived from the unbiased logits.
-    """
+    """EP layer for ``InklingMoE``. One router projection emits routed and shared logits, and the routed top-k and
+    shared experts are normalised jointly, so the shared FFN is scaled by its share (``gammas``). That is why this
+    layer cannot use :class:`EPSharedExpertsMoELayerBase`, whose shared-expert call takes no extra arguments."""
 
     HF_MODULE_NAMES = ("InklingMoE",)
     FAMILY = INKLING
@@ -32,7 +27,6 @@ class EPInklingMoELayer(EPMoELayerBase):
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts",)
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
-        """Top-k plus the two knobs of the joint routed+shared normalisation, both on the router."""
         super()._adopt_routing(original_layer)
         self.n_shared_experts = self.gate.n_shared_experts
         self.route_scale = self.gate.route_scale
@@ -45,10 +39,7 @@ class EPInklingMoELayer(EPMoELayerBase):
         return (f"top_k={self.top_k}, n_shared={self.n_shared_experts}, route_scale={self.route_scale}",)
 
     def _route_joint(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Reproduce ``InklingTopkRouter``: biased-sigmoid selection, joint routed+shared softmax.
-
-        Returns ``(topk_indices, topk_weights, shared_gammas)``.
-        """
+        """Reproduce ``InklingTopkRouter``; returns ``(topk_indices, topk_weights, shared_gammas)``."""
         routed_logits = router_logits[..., : -self.n_shared_experts]
         shared_logits = router_logits[..., -self.n_shared_experts :]
 
@@ -76,9 +67,8 @@ class EPInklingMoELayer(EPMoELayerBase):
         residuals = hidden_states  # shared experts read the layer input, not the routed output
         flat = hidden_states.view(-1, H)
 
-        # The router projection is re-run here rather than calling ``self.gate``: the balancing bias
-        # enters between the logits and the top-k, and the shared logits are needed for the joint
-        # normalisation that produces ``gammas``.
+        # Re-run the projection instead of calling ``self.gate``: the balancing bias enters between the logits and the
+        # top-k, and the joint normalisation needs the shared logits.
         topk_indices, topk_weights, shared_gammas = self._route_joint(self._linear_router_logits(flat).float())
 
         # Routing runs in fp32, but the shared FFN is a bf16 bmm: an fp32 gamma promotes its

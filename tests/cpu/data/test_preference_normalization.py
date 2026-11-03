@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
-"""normalize_preference_row: hub preference-shape adaptation.
-
-Covers the three hub shapes (string prompt + full-conversation chosen/rejected — ultrafeedback/tulu-3;
-already-contract continuation rows; implicit prompt — Skywork-Reward) and the fail-loud cases.
-
-Usage:
-    python tests/cpu/data/test_preference_normalization.py
-"""
+"""``normalize_preference_row``: the three hub preference shapes (string prompt + full-conversation chosen/rejected,
+contract continuation rows, implicit prompt) and the fail-loud cases."""
 
 import copy
 
@@ -119,9 +113,8 @@ def test_apply_chat_template_renders_prompt_once():
 
 
 def test_generative_prep_normalizes_hub_shapes_before_templating(monkeypatch):
-    """The eval-generation prep receives RAW hub rows; a string prompt (tulu-3 mixtures) must go
-    through the same contract normalizer as the training path — the chat template dies on a bare
-    string. Asserted at the seam: the row that reaches ``prepare_generative_row`` is normalized."""
+    """The eval-generation prep receives raw hub rows, and the chat template dies on a bare string prompt, so the
+    row reaching ``prepare_generative_row`` is normalized."""
     seen = {}
 
     def fake_prepare(row, tokenizer, max_length, tools_field=None):

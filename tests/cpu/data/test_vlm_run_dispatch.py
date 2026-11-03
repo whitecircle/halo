@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: modality is a property of the RUN, not of the checkpoint.
-
-Every natively-multimodal family (Gemma 4, Qwen3.5/3.6) is a VLM by config while its text-only
-recipes are ordinary text runs. ``is_vlm_run`` is the seam that separates the two: the checkpoint
-must be multimodal AND the run must declare image data — ``images_field``, an image column
-(:data:`VLM_IMAGE_COLUMNS`), or images embedded in the conversation's own content parts. Anything
-else takes the text path, where packing and padding-free are legal.
-
-The embedded-parts declaration is read twice: off the conversation column's Arrow schema (exact and
-row-independent — a mixed dataset's image rows are in the schema of every row) and, for a column of
-JSON strings that has no schema to read, off the first row. Behind both, every text renderer refuses
-an image content part rather than rendering it as an unbacked placeholder.
-
-Run: python tests/cpu/data/test_vlm_run_dispatch.py  (or pytest)
-"""
+"""Modality is a property of the run: the checkpoint must be multimodal and the run must declare image data
+(``images_field``, an image column, or embedded content parts), read off the Arrow schema or, for JSON strings,
+the first row. Every text renderer refuses an image part, so it cannot become an unbacked placeholder."""
 
 import json
 import re
@@ -80,18 +68,14 @@ def _script_module(relative_path: str):
 
 
 def _mixed_dataset(image_rows: int = 1, text_rows: int = 9) -> DatasetDict:
-    """A dataset whose image rows all sit past the first row — the shape the row probe cannot see."""
+    """A dataset whose image rows all sit past the first row, which a row probe cannot see."""
     rows = [{"prompt": TEXT_PARTS_TURNS}] * text_rows + [{"prompt": IMAGE_TURNS}] * image_rows
     split = Dataset.from_list(rows)
     return DatasetDict({"train": split, "test": split})
 
 
 class _UnreachableTokenizer:
-    """A tokenizer whose chat template must never run: reaching it is the bug under test.
-
-    The renderers guard BEFORE templating, so every image-content rejection here is proof the row
-    never became placeholder tokens — not merely that some later stage complained.
-    """
+    """Reaching its chat template is the bug: the renderers guard before templating."""
 
     bos_token = None
 
@@ -102,12 +86,9 @@ class _UnreachableTokenizer:
         raise AssertionError("the text renderer tokenized an image-carrying conversation")
 
 
-# --- the run verdict -----------------------------------------------------------------------------
-
-
 def test_multimodal_checkpoint_with_text_data_is_a_text_run():
-    """Keying the dispatch on the checkpoint alone would send every Gemma 4 / Qwen3.5 text recipe
-    down the VLM path, which refuses packing outright."""
+    """Keying on the checkpoint alone would send every Gemma 4 / Qwen3.5 text recipe down the VLM path, which
+    refuses packing."""
     assert not is_vlm_run(_args(), "google/gemma-4-26B-A4B-it", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
 
 
@@ -117,27 +98,25 @@ def test_images_field_declares_a_vlm_run():
 
 
 def test_images_field_is_a_declaration_even_before_the_dataset_is_known():
-    """The column guard in ``prepare_vlm_dataset`` owns a mistyped ``images_field`` — the dispatch
-    must not quietly demote it to a text run and skip that guard entirely."""
+    """``prepare_vlm_dataset``'s column guard owns a mistyped ``images_field``, so the dispatch must not demote it
+    to a text run."""
     assert is_vlm_run(_args(images_field="pictures"), "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
 
 
 @pytest.mark.parametrize("column", VLM_IMAGE_COLUMNS)
 def test_each_image_column_declares_a_vlm_run(column):
-    """Every column the VLM path consumes as image payload — the raw ``images``/``image`` spellings
-    and the preprocessed artifact's ``pixel_values`` — is a declaration on its own."""
+    """The raw ``images``/``image`` spellings and the preprocessed artifact's ``pixel_values``."""
     dataset = _dataset([TEXT_TURNS], {column: [[]]})
     assert is_vlm_run(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
 
 
 def test_embedded_image_content_declares_a_vlm_run():
-    """The SFT-VLM format with no separate column: images ride in the message content parts."""
     assert is_vlm_run(_args(), "Qwen/Qwen3.5-9B", _dataset([IMAGE_TURNS]), config=VLM_CONFIG)
 
 
 def test_text_checkpoint_never_becomes_a_vlm_run():
-    """The model class is the gate the data cannot open: a text-only architecture has no processor
-    to run, so image data must fail at the VLM loader, not silently switch the data path."""
+    """A text-only architecture has no processor, so image data fails at the VLM loader and does not switch the data
+    path."""
     dataset = _dataset([IMAGE_TURNS], {"images": [[]]})
     assert not is_vlm_run(_args(images_field="images"), "Qwen/Qwen3-8B", dataset, config=TEXT_CONFIG)
 
@@ -147,16 +126,14 @@ def test_no_dataset_yet_is_not_a_declaration():
 
 
 def test_args_without_the_modality_knobs_still_resolve():
-    """DPO's script args declare neither knob; ``getattr`` defaults must not turn that into a crash
-    or into a spurious VLM verdict."""
+    """DPO's script args declare neither knob."""
     bare = SimpleNamespace()
     assert not is_vlm_run(bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
     assert is_vlm_run(bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS], {"image": [None]}), config=VLM_CONFIG)
 
 
 def test_the_script_seam_probes_the_checkpoint_the_run_loads(monkeypatch):
-    """A training script's probe must read the pinned commit under the run's own trust: hub ``main``
-    can name a different modality, and a forced trust would execute code the run never trusted."""
+    """Hub ``main`` can name a different modality, and a forced trust would execute code the run never trusted."""
     seen = []
     monkeypatch.setattr(
         data_setup, "probe_checkpoint", lambda *args, **kwargs: seen.append((args, kwargs)) or (None, True)
@@ -183,16 +160,13 @@ def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm
     assert verdict is vlm_checkpoint
 
 
-# --- the dataset-side declaration ----------------------------------------------------------------
-
-
 def test_dataset_declares_images_accepts_a_single_split():
     assert dataset_declares_images(Dataset.from_dict({"images": [[]], "prompt": [TEXT_TURNS]}))
     assert not dataset_declares_images(Dataset.from_dict({"prompt": [TEXT_TURNS]}), "prompt")
 
 
 def test_dataset_declares_images_needs_the_conversation_field_to_see_embedded_images():
-    """Without the field name there is no column to probe — the caller must pass it."""
+    """Without the field name there is no column to probe."""
     dataset = _dataset([IMAGE_TURNS])
     assert not dataset_declares_images(dataset)
     assert dataset_declares_images(dataset, "prompt")
@@ -205,8 +179,8 @@ def test_empty_split_does_not_crash_the_probe():
 
 
 def test_dataset_image_evidence_probes_every_column_and_names_the_declaration():
-    """The field-less probe (for a consumer that never learns ``conversation_field``): an image
-    column, or embedded parts under ANY column name, each named in the verdict; text is ``None``."""
+    """For a consumer that never learns ``conversation_field``: each declaration is named in the verdict, and text
+    is ``None``."""
     assert dataset_image_evidence(None) is None
     assert dataset_image_evidence(_dataset([TEXT_TURNS])) is None
     assert dataset_image_evidence(Dataset.from_dict({"input_ids": [[1, 2, 3]], "labels": [[1, 2, 3]]})) is None
@@ -217,46 +191,34 @@ def test_dataset_image_evidence_probes_every_column_and_names_the_declaration():
 
 
 def test_json_string_conversations_are_probed_too():
-    """Conversations stored as JSON strings render the same as native ones, so they must be read
-    the same way here."""
     dataset = DatasetDict({"train": Dataset.from_dict({"prompt": [json.dumps(IMAGE_TURNS)]})})
     assert dataset_declares_images(dataset, "prompt")
 
 
-# --- the mixed dataset: the schema, not a row window -----------------------------------------------
-
-
 def test_mixed_dataset_whose_first_rows_are_text_is_still_a_vlm_run():
-    """The gap a bigger row window cannot close: on a 10%-image dataset a first-row probe misses the
-    image rows ~81% of the time (0.9**16 for TRL's own window), resolving to a TEXT run that crashes
-    mid-map once the model is already on the GPUs. Arrow types the parts struct over the WHOLE split,
-    so the image field is in the schema of every row — including the text ones."""
+    """On a 10%-image dataset a first-row probe misses ~81% of the time (0.9**16 for TRL's window), crashing
+    mid-map. Arrow types the parts struct over the whole split, so the image field is in every row's schema."""
     assert dataset_declares_images(_mixed_dataset(), "prompt")
     assert is_vlm_run(_args(), "Qwen/Qwen3.5-9B", _mixed_dataset(), config=VLM_CONFIG)
 
 
 def test_one_image_row_in_a_thousand_still_declares_the_run():
-    """Row-independent means row-independent: the verdict must not thin out with the image ratio."""
     assert dataset_declares_images(_mixed_dataset(image_rows=1, text_rows=999), "prompt")
 
 
 def test_parts_form_text_schema_is_not_a_declaration():
-    """The other half of the contract: a ``type``/``text``-only parts struct is TEXT. Flipping it
-    would route every parts-form text dataset to the VLM path, which refuses packing outright."""
+    """Flipping this would route every parts-form text dataset to the VLM path, which refuses packing."""
     dataset = _dataset([TEXT_PARTS_TURNS, TEXT_PARTS_TURNS])
     assert not dataset_declares_images(dataset, "prompt")
     assert not is_vlm_run(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
 
 
 def test_string_content_schema_is_not_a_declaration():
-    """Plain-string content carries no parts struct at all."""
     assert not dataset_declares_images(_dataset([TEXT_TURNS]), "prompt")
 
 
 def test_cast_image_feature_declares_images_under_any_name():
-    """A dataset that casts its image payload to ``datasets.Image`` (the shape a hub VLM dataset
-    ships) declares images even under a field name the pipeline does not read — the feature is the
-    declaration."""
+    """The feature is the declaration, even under a field name the pipeline does not read."""
     image = PILImage.fromarray(np.zeros((4, 4, 3), dtype=np.uint8))
     features = Features(
         {
@@ -278,8 +240,7 @@ def test_cast_image_feature_declares_images_under_any_name():
 
 
 def test_empty_split_with_an_image_schema_declares_images():
-    """The schema stands on its own: an empty split has no row to probe, and its declaration must
-    still route the run (the split fills on the next shard)."""
+    """An empty split has no row to probe, and its declaration still routes the run."""
     features = Features(
         {
             "prompt": [
@@ -294,30 +255,22 @@ def test_empty_split_with_an_image_schema_declares_images():
     assert dataset_declares_images(empty, "prompt")
 
 
-# --- the per-row backstop ------------------------------------------------------------------------
-
-
 def test_conversation_carries_images_predicate():
     assert conversation_carries_images(IMAGE_TURNS)
     assert not conversation_carries_images(TEXT_TURNS)
-    # Parts-form text is not image data.
     assert not conversation_carries_images([{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
     assert not conversation_carries_images("not a conversation")
     assert not conversation_carries_images(None)
 
 
 def test_text_renderer_refuses_an_image_content_part():
-    """The shape neither dispatch line sees — a JSON-string conversation column, which has no Arrow
-    struct to read and only its first row probed — must not become placeholder tokens with no pixels
-    behind them."""
+    """A JSON-string column has no Arrow struct and only its first row probed, so this shape reaches the renderer."""
     with pytest.raises(ValueError, match="image content part"):
         render_row_conversation({"prompt": IMAGE_TURNS}, tokenizer=None, conversation_field="prompt")
 
 
 def test_self_distill_text_collator_refuses_an_image_content_part():
-    """``SelfDistillTextCollator`` encodes its rows in its own map, not the SFT row map, so the backstop
-    has to reach it too — its shipped VLM configs declare no images column and reach the dispatch on
-    the conversation column alone."""
+    """The collator encodes its rows in its own map, and its VLM configs declare no images column."""
     collator = SelfDistillTextCollator(
         tokenizer=SimpleNamespace(eos_token_id=0),
         max_length=256,
@@ -335,9 +288,8 @@ def test_self_distill_text_collator_refuses_an_image_content_part():
 
 @pytest.mark.parametrize("field", ["prompt", "chosen", "rejected"])
 def test_preference_renderer_refuses_an_image_content_part(field):
-    """DPO/SMPO/KTO text prep. DPO's script args declare no ``conversation_field``, so an
-    image-carrying preference row reaches this renderer with the dispatch none the wiser — the exact
-    failure class the backstop exists for."""
+    """DPO's script args declare no ``conversation_field``, so an image row reaches this renderer with the dispatch
+    none the wiser."""
     image_content = [{"type": "image", "image": "b64"}, {"type": "text", "text": "q"}]
     row = {
         "prompt": [{"role": "user", "content": "q"}],
@@ -387,17 +339,9 @@ def test_classification_renderer_refuses_an_image_content_part():
         )
 
 
-# --- one spelling of the image part ----------------------------------------------------------------
-
-
 def test_every_image_part_site_reads_the_shared_constants(monkeypatch):
-    """Detector, extractor, images-column merge and schema probe must key on ONE spelling.
-
-    Re-spelling the constants in every module that imports them moves all four together — a site
-    that re-inlined the literal instead would keep matching the old spelling and fail here. That is
-    the failure that matters: a detector and an extractor which disagree read as "this row has no
-    images", which is exactly the silent placeholder-training the guard exists to prevent.
-    """
+    """Re-spelling the constants moves all four sites together; a re-inlined literal keeps the old spelling and
+    fails here. A detector and extractor that disagree read as no images, training placeholders."""
     alt_type, alt_key = "picture", "picture_payload"
     for module in (conversation_module, vlm_render_module, vlm_rows_module):
         monkeypatch.setattr(module, "IMAGE_PART_TYPE", alt_type)
@@ -435,10 +379,8 @@ def test_every_image_part_site_reads_the_shared_constants(monkeypatch):
 
 
 def test_no_module_re_inlines_the_image_part_spelling():
-    """The one image-part site a unit test cannot reach — the offline VLM preprocessor's extractor,
-    which needs a live processor — plus every future one. Scoped to the pipeline package, which owns
-    the part shape; the ``image``/``images`` DATASET COLUMN names are a different contract
-    (:data:`VLM_IMAGE_COLUMNS`) and are spelled there."""
+    """Scoped to the pipeline package, which owns the part shape; the dataset column names are another contract
+    (:data:`VLM_IMAGE_COLUMNS`)."""
     inlined = (
         re.compile(r'"type"\s*\)\s*==\s*"image"'),
         re.compile(r'"type"\s*:\s*"image"'),
@@ -456,21 +398,16 @@ def test_no_module_re_inlines_the_image_part_spelling():
     assert not offenders, "image-part shape re-inlined instead of read from the constants:\n" + "\n".join(offenders)
 
 
-# --- the text path's padding side ----------------------------------------------------------------
-
-
 def test_text_path_forces_right_padding():
-    """A VLM processor's tokenizer keeps the checkpoint's side (left for Gemma 4 / GLM-4.7-Flash);
-    the text path normalizes it as the text load does. The packing collator refuses a left-padding
-    tokenizer outright, so a multimodal checkpoint's text run would otherwise die at collator build."""
+    """A VLM processor's tokenizer keeps the checkpoint's side (left for Gemma 4 / GLM-4.7-Flash), and the packing
+    collator refuses left at build."""
     tokenizer = SimpleNamespace(padding_side="left")
     apply_text_path_padding_side(tokenizer, False)
     assert tokenizer.padding_side == "right"
 
 
 def test_vlm_run_keeps_the_processor_padding_side():
-    """VLM batches pad through the processor, not the text collators — flipping its side would
-    change every existing VLM run."""
+    """VLM batches pad through the processor, so flipping its side would change every VLM run."""
     tokenizer = SimpleNamespace(padding_side="left")
     apply_text_path_padding_side(tokenizer, True)
     assert tokenizer.padding_side == "left"

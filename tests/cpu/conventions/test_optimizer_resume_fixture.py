@@ -7,8 +7,7 @@ from transformers import AutoTokenizer, Qwen3ForCausalLM, Qwen3MoeForCausalLM
 
 from tests.common.tiny_models import build_tied_qwen3_checkpoint, word_level_tokenizer
 
-# With <unk> and <eos>, 65 tokens: odd, so a TP2 embedding cannot split it until it is padded to the next
-# multiple of 128.
+# 65 tokens with <unk> and <eos>: odd, so a TP2 embedding cannot split it until padded to the next multiple of 128.
 ODD_VOCAB_WORDS = tuple(f"token{i}" for i in range(63))
 PADDED_VOCAB = 128
 

@@ -1,10 +1,5 @@
-"""text_only_model resolution: a multimodal config loads its text-only CausalLM sibling on demand.
-
-The flag exists for text-only training of VLM checkpoints (Qwen3.5/3.6): the CausalLM class drops
-the vision tower and honors ``config.output_router_logits`` (``moe_balancing: aux_loss``), which the
-multimodal wrapper's forward never consults. These tests fail if the flag stops forcing
-``AutoModelForCausalLM`` or starts leaking into non-multimodal resolution.
-"""
+"""text_only_model: a multimodal config loads its text-only CausalLM sibling on demand, dropping the tower and
+honoring ``config.output_router_logits``."""
 
 from types import SimpleNamespace
 
@@ -32,9 +27,8 @@ def test_text_only_is_a_noop_for_text_configs():
 
 
 def test_text_only_refuses_a_family_with_no_causal_lm_sibling():
-    """glm5_next ships only ``Glm5NextForConditionalGeneration`` — no CausalLM sibling exists in the
-    AutoModelForCausalLM mapping, so the flag must be refused HERE, by name, instead of surfacing
-    later as transformers' generic "Unrecognized configuration class"."""
+    """glm5_next has no sibling in the mapping; refused here instead of transformers' generic "Unrecognized
+    configuration class"."""
     config = SimpleNamespace(model_type="glm5_next")
     assert resolve_auto_model_class(config) is AutoModelForImageTextToText
     with pytest.raises(ValueError, match="glm5_next.*no.*ForCausalLM"):
@@ -42,9 +36,8 @@ def test_text_only_refuses_a_family_with_no_causal_lm_sibling():
 
 
 def test_text_only_refuses_a_native_causal_lm_entry_naming_the_vlm_class():
-    """transformers maps ``gemma4`` to ``Gemma4ForConditionalGeneration`` in its CausalLM mapping too, so
-    the flag would load the full VLM, vision tower included, while claiming to drop it. The text-only
-    ``gemma4_text`` checkpoint keeps its genuine sibling."""
+    """transformers maps ``gemma4`` to its VLM class in the CausalLM mapping too, so the flag would keep the tower
+    while claiming to drop it."""
     with pytest.raises(ValueError, match="gemma4.*CausalLM mapping.*Gemma4ForConditionalGeneration"):
         resolve_auto_model_class(SimpleNamespace(model_type="gemma4"), text_only=True)
     # Fuyu's CausalLM entry is its image-text-to-text class under a *ForCausalLM name.
@@ -54,8 +47,6 @@ def test_text_only_refuses_a_native_causal_lm_entry_naming_the_vlm_class():
 
 
 def test_text_only_accepts_a_remote_code_causal_lm_sibling():
-    """A remote-code family is absent from the static mapping but loads through its ``auto_map``
-    entry — the refusal must not close that door."""
     config = SimpleNamespace(
         model_type="some_remote_vlm", auto_map={"AutoModelForCausalLM": "modeling.RemoteForCausalLM"}
     )
@@ -63,10 +54,8 @@ def test_text_only_accepts_a_remote_code_causal_lm_sibling():
 
 
 def test_text_only_refuses_a_conditional_generation_class_under_the_causal_lm_key():
-    """step3p7's hub repo maps ``AutoModelForCausalLM`` to its own legacy remote-code
-    ``Step3p7ForConditionalGeneration`` — the multimodal class masquerading under the CausalLM key.
-    Counting it as a text-only sibling would silently load the full VLM remote code as the
-    "text-only" model, so the refusal must fire and name the masquerade."""
+    """step3p7's hub repo maps ``AutoModelForCausalLM`` to its VLM remote code, so counting it loads the full VLM as
+    text-only."""
     config = SimpleNamespace(
         model_type="step3p7",
         auto_map={
@@ -79,9 +68,7 @@ def test_text_only_refuses_a_conditional_generation_class_under_the_causal_lm_ke
 
 
 def test_text_only_refuses_a_causal_lm_entry_aliasing_the_vision_class():
-    """The second masquerade shape: the CausalLM entry names the SAME class a vision auto_map key
-    maps — the class need not be spelled ``*ForConditionalGeneration`` for the aliasing to give it
-    away."""
+    """The class need not be spelled ``*ForConditionalGeneration`` for the aliasing to give it away."""
     config = SimpleNamespace(
         model_type="some_remote_vlm",
         auto_map={
@@ -94,8 +81,7 @@ def test_text_only_refuses_a_causal_lm_entry_aliasing_the_vision_class():
 
 
 def test_text_only_keeps_a_genuine_sibling_beside_a_vision_entry():
-    """A repo declaring BOTH a real CausalLM sibling and a vision class must keep working — the
-    masquerade check keys on the target class, not on the mere presence of vision entries."""
+    """The check keys on the target class, not on vision entries being present."""
     config = SimpleNamespace(
         model_type="some_remote_vlm",
         auto_map={
@@ -107,9 +93,8 @@ def test_text_only_keeps_a_genuine_sibling_beside_a_vision_entry():
 
 
 def test_text_only_skips_the_vlm_branch_in_load_policy_model(monkeypatch):
-    """The flag must divert BEFORE the VLM probe: the probe enters a rank-coordinated store phase,
-    and the wrapper class it leads to is exactly what text_only_model exists to avoid — patching
-    the resolver alone is not enough, since sft.py loads through this entry point."""
+    """The probe enters a rank-coordinated store phase; sft.py loads through this entry point, so patching the
+    resolver is not enough."""
     calls = {}
     monkeypatch.setattr(
         model_setup, "probe_checkpoint", lambda *a, **k: calls.setdefault("probe", True) and (None, True)

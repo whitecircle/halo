@@ -1,11 +1,6 @@
-"""The routing sort's oracle: the receives a dispatch hands the expert compute, the counting sort's kernels against the
-torch construction they replace (:func:`counting_sort_mismatches`, on CUDA or under ``TRITON_INTERPRET=1`` on CPU),
-that comparison's and the count check's negative controls (:func:`control_findings`, CPU only: on CUDA the check is a
-device-side assert, which ends the process's CUDA context), the Triton specialization of every launch against the
-warm-up's (:func:`launch_key_findings`, under ``TRITON_INTERPRET=1``), the backward's kernels against the warm-up's
-(:func:`backward_kernel_findings`, likewise), and the counts of the kernels' compiled binaries and of the pinned host
-blocks handed out.
-"""
+"""The routing sort's oracle: receives a dispatch hands expert compute, and the counting sort's kernels vs the torch
+construction. Controls are CPU only: on CUDA the count check is a device-side assert that ends the process's CUDA
+context. Launch-key and backward comparisons against the warm-up run under ``TRITON_INTERPRET=1``."""
 
 from __future__ import annotations
 
@@ -41,14 +36,13 @@ class Case(NamedTuple):
     local_experts: int
     # 1: no dispatch, every id local and no receive counts.
     ep_size: int
-    # Rows whose every slot is another rank's; DeepEP sends none, the kernels must still pass them through.
+    # Rows whose every slot is another rank's; DeepEP sends none, but the kernels must pass them through.
     empty_rows: int = 0
-    # A local expert no slot routes to.
     idle_expert: int | None = None
 
 
-# The roster's EP shapes (top_k 4 to 10) and the edges past them (top_k 1, one local expert, no local slot, no
-# token), over one to several sort blocks (1024 slots each); and at ep_size 1 the full expert sets (256 and 512).
+# The roster's EP shapes (top_k 4 to 10) and edges past them, over one to several sort blocks (1024 slots each). At
+# ep_size 1, the full expert sets (256 and 512).
 CASES = (
     Case("gpt_oss_ep8", 600, 4, 4, 8),
     Case("qwen3_5_ep8", 300, 8, 32, 8, empty_rows=17),
@@ -72,22 +66,19 @@ class Receive(NamedTuple):
     weights: torch.Tensor
     # None at ep_size 1, where nothing is dispatched.
     counts: tuple[int, ...] | None
-    # The gradient arriving at ``sorted_weights``.
     upstream: torch.Tensor
 
 
 def receive_counts(experts: torch.Tensor, experts_per_rank: int) -> tuple[int, ...]:
-    """The per-local-expert slot counts a DeepEP dispatch reports for the received ids ``experts`` (``-1`` = not
-    this rank's), read back to the host."""
+    """The per-local-expert slot counts a DeepEP dispatch reports for ``experts`` (``-1`` = not this rank's), read back
+    to the host."""
     local = experts[(experts >= 0) & (experts < experts_per_rank)]
     return tuple(torch.bincount(local, minlength=experts_per_rank).tolist())
 
 
 def receive(case: Case, device, seed: int = 0) -> Receive:
-    """``case``'s ``[rows, top_k]`` local ids (``-1`` = another rank's; one slot of each fourth row holds an id past
-    the local range, which the sort drops too), fp32 gate weights, host-side receive counts and an upstream
-    gradient, built on the host and moved to ``device``. At ``ep_size`` 1 every id is local (an idle expert's slots
-    go to expert 0) and there are no counts."""
+    """``case``'s ``[rows, top_k]`` local ids, fp32 gate weights, host-side counts and an upstream gradient, built on
+    the host and moved. One slot of each fourth row holds an id past the local range, which the sort drops too."""
     g = torch.Generator().manual_seed(seed)
     picks = torch.rand(case.rows, case.local_experts * case.ep_size, generator=g).argsort(dim=1)[:, : case.top_k]
     if case.idle_expert is not None:
@@ -103,7 +94,7 @@ def receive(case: Case, device, seed: int = 0) -> Receive:
 
 
 def sort_with_grad(sort, case: Case, inputs: Receive) -> tuple[list[torch.Tensor], torch.Tensor]:
-    """``sort``'s five outputs on ``inputs`` and the gate-weight gradient that ``inputs.upstream`` gives."""
+    """``sort``'s five outputs on ``inputs`` and the gate-weight gradient ``inputs.upstream`` gives."""
     leaf = inputs.weights.clone().requires_grad_(True)
     outputs = sort(inputs.experts, leaf, case.local_experts, inputs.counts)
     (grad,) = torch.autograd.grad(outputs[1], leaf, inputs.upstream)
@@ -119,7 +110,7 @@ def _differs(got: torch.Tensor, want: torch.Tensor) -> bool:
 
 
 def result_mismatches(case: Case, got, want) -> list[str]:
-    """The outputs, and the gradient, of two :func:`sort_with_grad` results that differ in any bit."""
+    """The outputs and gradient of two :func:`sort_with_grad` results that differ in any bit."""
     (got_outputs, got_grad), (want_outputs, want_grad) = got, want
     names = [name for name, g, w in zip(OUTPUTS, got_outputs, want_outputs, strict=True) if _differs(g, w)]
     if _differs(got_grad, want_grad):
@@ -144,8 +135,8 @@ def case_findings(case: Case, inputs: Receive) -> list[str]:
 
 
 def counting_sort_mismatches(device) -> list[str]:
-    """Every :data:`CASES` output and gate-weight gradient where the counting sort differs from the torch
-    construction, and each case that exercised less than it claims."""
+    """Every :data:`CASES` output and gradient where the counting sort differs from torch's, and each case that
+    exercised less than it claims."""
     findings = []
     for index, case in enumerate(CASES):
         inputs = receive(case, device, seed=index)
@@ -157,12 +148,9 @@ def counting_sort_mismatches(device) -> list[str]:
 
 
 def control_findings() -> list[str]:
-    """The controls on CPU, each named when it does not hold: counts one slot short and one slot over raise the count
-    check, while a count moved between two experts passes it and sorts as the torch construction does, since the sort
-    reads only their sum; at ``ep_size`` 1 an id past the local range or a ``-1``, which no dispatch padded, raises the
-    ``ep_size`` 1 check in the counting sort, which every slot sizes, and in the torch construction alike; a swap of two
-    of one expert's sorted entries, and a one-bit change of one gradient element, are both reported by the
-    comparison."""
+    """The CPU controls, each named when it fails: counts a slot off raise, a count moved between two experts passes
+    (the sort reads only the sum). At ``ep_size`` 1 a stray id raises in both constructions; a swapped entry and a
+    one-bit gradient change are both reported."""
     findings = []
     case = CASES[1]
     inputs = receive(case, "cpu")
@@ -212,9 +200,8 @@ def control_findings() -> list[str]:
 
 
 def swept_receives(top_k: int, local_experts: int) -> list[tuple[int, int, Receive]]:
-    """``(rows, local slots, receive)`` at the row, block and slot counts Triton would class apart if it specialized
-    on them (0, 1, a multiple of 16, neither): one block, sixteen and seventeen, ``local slots`` dealt row by row,
-    expert after expert, the rest another rank's; then, as at ``ep_size`` 1, every slot local and no counts."""
+    """``(rows, local slots, receive)`` at the row, block and slot counts Triton would class apart if it specialized on
+    them."""
     rows_per_block = moe_route_sort._BLOCK_SLOTS // triton.next_power_of_2(top_k)
     many = 16 * rows_per_block
     receives = []
@@ -233,13 +220,9 @@ def swept_receives(top_k: int, local_experts: int) -> list[tuple[int, int, Recei
 
 
 def launch_key_findings(shapes: tuple[tuple[int, int], ...] = LAUNCH_SHAPES) -> list[str]:
-    """Each launch of the counting sort's kernels, over :func:`swept_receives` at every ``(top_k, local experts)`` of
-    ``shapes``, whose Triton specialization differs from the layer warm-up's at the same shape, named by the arguments
-    that moved: such a launch would compile its binary mid-step, between a dispatch and its combine.
-
-    Under ``TRITON_INTERPRET=1`` the kernels run on CPU, the warm-up's routed through the counting sort, and each
-    launch's key is what the compiled kernel's binder makes of the same arguments (:func:`recorded_launch_keys`). The
-    kernels are read off the module, so a probe may rebind one first."""
+    """Each kernel launch whose Triton specialization differs from the warm-up's at the same shape, which would compile
+    mid-step between dispatch and combine. Under ``TRITON_INTERPRET=1``. Kernels are read off the module, so a probe
+    may rebind one first."""
     kernels = [getattr(moe_route_sort, kernel.__name__) for kernel in SORT_KERNELS]
     findings = []
     with (
@@ -264,10 +247,8 @@ def launch_key_findings(shapes: tuple[tuple[int, int], ...] = LAUNCH_SHAPES) -> 
 
 
 def backward_kernel_findings(shapes: tuple[tuple[int, int], ...] = LAUNCH_SHAPES) -> list[str]:
-    """Each kernel the counting sort's backward launches, over :func:`swept_receives` at every ``(top_k, local experts)``
-    of ``shapes``, that the layer warm-up at the same shape did not launch (:class:`KernelLaunches` classes): CUDA would
-    load it on that first launch, mid-step, between a dispatch and its combine. Under ``TRITON_INTERPRET=1``, the
-    warm-up routed through the counting sort."""
+    """Each kernel the backward launches that the warm-up did not, which CUDA would load mid-step between dispatch and
+    combine. Under ``TRITON_INTERPRET=1``."""
     if not isinstance(moe_route_sort._place_kernel, InterpretedFunction):
         raise RuntimeError("backward_kernel_findings runs the kernels under TRITON_INTERPRET=1")
     findings = []
@@ -289,7 +270,6 @@ def backward_kernel_findings(shapes: tuple[tuple[int, int], ...] = LAUNCH_SHAPES
 
 
 def compiled_sort_binaries() -> int:
-    """The binaries :data:`SORT_KERNELS` hold compiled for the current CUDA device."""
     return sum(len(kernel.device_caches[torch.cuda.current_device()][0]) for kernel in SORT_KERNELS)
 
 

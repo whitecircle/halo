@@ -1,15 +1,5 @@
-"""CPU tests for the Liger implementation pin (``pin_liger_impls``).
-
-Liger's CuTe DSL RoPE is wrong on every launch after the first of a shape under ``CUTE_DSL_ENABLE_TVM_FFI``,
-so the toolkit pins ``rope`` to Triton through ``LIGER_KERNEL_IMPL_ROPE``, the per-op variable Liger's
-dispatcher reads on every call. The pin runs where the toolkit turns TVM-FFI on and at both Liger application
-sites (``sanitize_liger_config``); an explicit choice of another implementation must raise. With every
-implementation available, as on an sm_90+ GPU where ``cutlass.cute`` imports, Liger must resolve ``rope`` to
-the CuTe DSL kernel unpinned and to Triton pinned. The kernels themselves are checked on GPU
-(``tests/gpu/kernels/test_liger_rope_repeated_calls.py``).
-
-    python tests/cpu/model_loading/test_liger_impl_pin.py
-"""
+"""The Liger implementation pin (``pin_liger_impls``): the CuTe DSL RoPE is wrong after the first launch of a shape
+under ``CUTE_DSL_ENABLE_TVM_FFI``, so ``LIGER_KERNEL_IMPL_ROPE`` pins Triton."""
 
 import os
 
@@ -28,7 +18,7 @@ LEGACY_ROPE_VAR = "LIGER_KERNEL_BACKEND_ROPE"
 
 @pytest.fixture
 def rope_unset(monkeypatch):
-    # Set first so monkeypatch records the variable and removes the pin's own write at teardown.
+    # Set first so monkeypatch removes the pin's own write at teardown.
     for var in (ROPE_VAR, LEGACY_ROPE_VAR):
         monkeypatch.setenv(var, "unset")
         monkeypatch.delenv(var)

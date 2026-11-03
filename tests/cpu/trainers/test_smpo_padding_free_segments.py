@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""SMPO padding-free keeps each flattened document's conv / linear-attention state its own.
-
-``_forward_padding_free`` runs the chosen ⧺ rejected batch as one ``[1, total]`` row. Attention keeps
-its documents apart through the resetting ``position_ids``; LFM2's ShortConv and the GatedDeltaNet
-conv + chunked delta rule (Qwen3-Next) only through the segment markers their forward reads from kwargs;
-the Qwen3.5/3.6 decoders rotate by M-RoPE, whose flattened row the trainer refuses. So every document's
-mean log-prob from that one forward must equal the same document run alone, and a family that reads no
-marker must get exactly the base kwargs.
-
-The CPU forward runs the torch fallbacks, which honor the markers through the device-aware dispatch
-fixups (``halo/kernels/hub_kernel_dispatch.py``); the CUDA kernels are covered by
-``tests/gpu/trainers/preference/test_smpo_padding_free_segments.py``.
-
-    python tests/cpu/trainers/test_smpo_padding_free_segments.py
-"""
+"""SMPO padding-free keeps each flattened document's conv and linear-attention state its own.
+Attention separates documents by resetting ``position_ids``; LFM2's ShortConv and GatedDeltaNet only by markers.
+Every document's mean log-prob from the one ``[1, total]`` forward must equal the same document run alone."""
 
 from types import SimpleNamespace
 
@@ -46,13 +34,11 @@ from tests.common.tiny_models import (
     tiny_family_model,
 )
 
-# Same tokens, same weights: only the matmul reduction order differs between the flattened row and a
-# lone document, so fp32 agreement is at rounding level.
+# Same tokens and weights: only the matmul reduction order differs, so fp32 agreement is at rounding level.
 ISOLATION_TOL = 1e-5
-# Without markers the mixers carry state across documents; the drift must clear the isolation
-# tolerance by orders of magnitude, or the equality would hold for a model that leaks too.
+# Without markers the mixers carry state across documents; the drift must clear the isolation tolerance by orders of
+# magnitude, or the equality would hold for a leaky model too.
 LEAK_FLOOR = 1e-3
-# The forward kwargs every flattened row carries.
 BASE_FORWARD_KWARGS = {"input_ids", "position_ids", "use_cache"}
 VARLEN_KWARGS = {"cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k"}
 # Ring's Lightning Attention-2 layers read no segment marker; Qwen3 has softmax layers only.
@@ -68,7 +54,6 @@ def _model(family: str):
 
 
 def _trainer(markers: SegmentMarkers) -> SMPOTrainer:
-    """A construction-free SMPO carrying only what the padding-free forward reads."""
     trainer = smpo_trainer(pad_token_id=PAD_ID, padding_free=True)
     trainer._segment_markers = markers
     return trainer
@@ -105,7 +90,7 @@ def test_padding_free_documents_match_their_lone_forward(family):
     ("family", "control"), [(family, control) for family, controls in LEAK_CONTROLS.items() for control in controls]
 )
 def test_without_markers_the_mixers_leak(family, control):
-    """Anti-vacuity: the isolation above is the markers' doing, not a model that ignores its context."""
+    """The isolation above is the markers' doing, not a model that ignores its context."""
     model = _model(family)
     logps, _ = _padding_free_logps(model, LEAK_CONTROLS[family][control])
     drift = (logps - lone_document_logps(model)).abs().max().item()
@@ -120,7 +105,6 @@ def test_without_markers_the_mixers_leak(family, control):
     [("qwen3", set()), ("lfm2", {"seq_idx"}), ("qwen3_next", {"seq_idx"} | VARLEN_KWARGS)],
 )
 def test_forward_receives_only_the_family_markers(family, extra_kwargs):
-    """Family-gated: a family reading no marker gets the base call alone."""
     model = _model(family)
     _, received = _padding_free_logps(model, segment_markers_for(model.config))
     assert received == BASE_FORWARD_KWARGS | extra_kwargs
@@ -153,28 +137,27 @@ def _smpo_trainer(model, tmp_path, *, padding_free: bool) -> SMPOTrainer:
 
 @pytest.mark.parametrize("family", ["qwen3_5", "qwen3_5_moe_text"])
 def test_padding_free_is_refused_on_an_m_rope_decoder(monkeypatch, tmp_path, family):
-    """A flattened M-RoPE row faults the flash varlen kernels, so the trainer refuses it on a varlen backend
-    with the segment-aware kernels present, as the SFT collator does; padded rows on the same model build."""
+    """A flattened M-RoPE row faults the flash varlen kernels, so the trainer refuses it as the SFT collator does;
+    padded rows on the same model build."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla", lambda: True),))
     model = tiny_family_model({**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}[family])
     model.config._attn_implementation = "flash_attention_2"
     with pytest.raises(ValueError, match="padding_free is refused .* rotates by M-RoPE") as excinfo:
         _smpo_trainer(model, tmp_path, padding_free=True)
-    # The remedy must be one SMPOConfig accepts: it has no packing field, so naming only that one strands the user.
+    # The remedy must be one SMPOConfig accepts, and it has no packing field.
     assert "packing" not in SMPOConfig.__dataclass_fields__
     assert "padding_free: false" in str(excinfo.value)
     _smpo_trainer(model, tmp_path, padding_free=False)
 
 
 def test_padding_free_builds_on_a_gated_delta_net_decoder_without_m_rope(monkeypatch, tmp_path):
-    """Anti-vacuity: Qwen3-Next (GatedDeltaNet, plain RoPE) clears every padding_free gate on the same backend."""
+    """Qwen3-Next (GatedDeltaNet, plain RoPE) clears every padding_free gate on the same backend."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla", lambda: True),))
     assert _smpo_trainer(tiny_model("qwen3_next", "flash_attention_2"), tmp_path, padding_free=True).args.padding_free
 
 
 def test_padding_free_is_refused_on_compressed_kv_layers(tmp_path):
-    """The flattened row restarts positions per document while DeepSeek-V4's compressor windows are
-    cut by row index, so the trainer refuses it before its backend gate."""
+    """The flattened row restarts positions per document; DeepSeek-V4 cuts its compressor windows by row index."""
     model = DeepseekV4ForCausalLM(DeepseekV4Config(**TINY_DSV4_CONFIG))
     with pytest.raises(ValueError, match="padding_free is refused .* layers pool KV over windows"):
         SMPOTrainer(
@@ -201,9 +184,8 @@ class _PolicyLoaded(Exception):
 def test_padding_free_is_refused_where_linear_attention_crosses(
     monkeypatch, tmp_path, name, padding_free, allow_crossing, refused
 ):
-    """On a flash label the flattened row's softmax layers isolate and nothing else refuses, so a
-    linear-attention layer would carry state across its documents silently: refused at the policy load,
-    as on the SFT collators, unless allow_cross_document_linear_attention is set."""
+    """On a flash label nothing else refuses, so a linear-attention layer would carry state across documents silently.
+    Refused unless allow_cross_document_linear_attention is set."""
 
     def stop(*_args, **_kwargs):
         raise _PolicyLoaded
@@ -230,8 +212,7 @@ def test_padding_free_is_refused_where_linear_attention_crosses(
 
 
 def _composite_config(text_attn: str | None, top_attn: str | None = None) -> SimpleNamespace:
-    """A VLM-wrapper-shaped config: the decoder's backend on the text sub-config, the wrapper's own
-    left unset as transformers leaves it on a composite."""
+    """A VLM-wrapper-shaped config: the decoder's backend on the text sub-config, the wrapper's own unset."""
     text = SimpleNamespace(_attn_implementation=text_attn, get_text_config=None)
     return SimpleNamespace(_attn_implementation=top_attn, get_text_config=lambda: text)
 
@@ -243,8 +224,7 @@ def _reject_dense_padding_free(config) -> None:
 
 @pytest.mark.parametrize("backend", ["flash_attention_2", "flash_attention_3", "flash_attention_4"])
 def test_padding_free_admits_a_composite_whose_decoder_runs_varlen(backend):
-    """A multimodal checkpoint records the backend on its text sub-config only; a top-level read
-    sees None and would refuse a run whose decoder does consume cu_seqlens."""
+    """A multimodal checkpoint records the backend on its text sub-config; a top-level read refuses a valid run."""
     _reject_dense_padding_free(_composite_config(backend))
 
 

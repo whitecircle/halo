@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""EP+CP gathered-checkpoint save→reload round-trip correctness.
+"""EP+CP gathered save then reload, through the CP wrapper: every expert tensor full-shape under a canonical key, loss
+reproduced.
 
-Under EP+CP the trainer holds a ``UlyssesModel`` whose ``named_modules()`` walk yields
-wrapper-prefixed EP-layer paths while ``named_parameters()`` yields inner names. A save that walks
-the wrapper misclassifies every expert param as non-EP: the rank-local expert shard is written
-under the canonical key, gathered full experts land under doubled bogus keys, and the checkpoint
-silently reloads with random-init experts. This test saves through the CP wrapper (the exact
-object the saver ladder passes), asserts every expert tensor in the checkpoint has the
-FULL ``[E, ...]`` shape under a canonical key, and asserts the reloaded per-rank CP loss matches
-the pre-save loss.
-
-Usage (2 GPUs — ep_size=2, cp_size=2, dp=1):
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/combined/test_ep_cp_save_reload_roundtrip.py
-
-Env:
-    HALO_TEST_EP_CP_RT_MODEL  local checkpoint dir (default: $HALO_DATA_ROOT/models/gpt-oss-20b-BF16-patched)
-    HALO_TEST_EP_CP_RT_ATTN   attn_implementation (default: flash_attention_2)
+A save walking the wrapper misclassifies experts as non-EP, because ``named_modules()`` is wrapper-prefixed and
+``named_parameters()`` inner, and the checkpoint silently reloads with random-init experts.
 """
 
 import json
@@ -47,9 +34,8 @@ MODEL = env_str("HALO_TEST_EP_CP_RT_MODEL", GPT_OSS_20B_PATCHED)
 ATTN = env_str("HALO_TEST_EP_CP_RT_ATTN", "flash_attention_2")
 EP_SIZE = 2
 CP_SIZE = 2
-SEQ_LEN = 128  # must be divisible by cp_size
-# Same weights + same input + same EP+CP partition on both sides of the round-trip, so the loss
-# must match to bf16 serialization noise. Dropped/reinitialized experts shift it by >>1.
+SEQ_LEN = 128  # Must be divisible by cp_size.
+# Same weights, input and partition on both sides, so only bf16 serialization noise; dropped experts shift it by >>1.
 LOSS_TOL = TOL.resume_loss_abs
 
 
@@ -65,8 +51,7 @@ def _fixed_batch(tokenizer, device):
 
 
 def _per_rank_cp_loss(model, ids, labels) -> float:
-    """The CP group's loss: under no_grad the wrapper returns the group mean on every rank. Its forward
-    is collective, so every rank calls."""
+    """COLLECTIVE. Under no_grad the wrapper returns the group mean on every rank."""
     model.eval()
     with torch.no_grad():
         out = model(input_ids=ids, labels=labels, use_cache=False)
@@ -74,7 +59,6 @@ def _per_rank_cp_loss(model, ids, labels) -> float:
 
 
 def _checkpoint_keys_and_shapes(save_dir: str) -> dict[str, list[int]]:
-    """key → shape for every tensor in the saved checkpoint (index or single-file)."""
     index_path = Path(save_dir) / "model.safetensors.index.json"
     if index_path.exists():
         weight_map = json.loads(index_path.read_text())["weight_map"]
@@ -90,7 +74,6 @@ def _checkpoint_keys_and_shapes(save_dir: str) -> dict[str, list[int]]:
 
 
 def _assert_checkpoint_layout(save_dir: str, num_experts: int) -> list[str]:
-    """Layout problems in the saved checkpoint (empty == OK)."""
     problems = []
     shapes = _checkpoint_keys_and_shapes(save_dir)
     if not shapes:
@@ -153,7 +136,7 @@ def run(ctx):
         shutil.rmtree(save_dir, ignore_errors=True)
     ctx.barrier()
     log(f"--- Saving (gathered, through the CP wrapper) → {save_dir} ---")
-    # The ladder's call: the CP WRAPPER under a CP config, which remaps the CP attention keys.
+    # The ladder's call: the CP wrapper under a CP config, which remaps the CP attention keys.
     save_ctx = save_context(model, pc, tokenizer=tokenizer)
     save_tokenizer(save_ctx, save_dir)
     save_ep_gathered_checkpoint(save_ctx, save_dir)

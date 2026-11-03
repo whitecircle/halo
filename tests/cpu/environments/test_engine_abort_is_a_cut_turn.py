@@ -1,10 +1,6 @@
-"""An engine-aborted generation (vLLM finish reason ``abort``: a pause in abort mode, an engine restart)
-must be recorded like a length cut — a truncated turn the trainer never trains as a natural stop — and
-not as an ordinary completed turn. A fragment scored as a natural termination teaches the policy to end
-its reasoning wherever the engine happened to stop it.
-
-    python tests/cpu/environments/test_engine_abort_is_a_cut_turn.py
-"""
+"""An engine-aborted generation (vLLM finish reason ``abort``) is recorded like a length cut, which the trainer
+never trains as a natural stop; a fragment scored as one teaches the policy to end its reasoning wherever the
+engine stopped it."""
 
 from types import SimpleNamespace
 

@@ -1,6 +1,5 @@
-"""Rank 0's half of vLLM's weight-transfer bootstrap: the NCCL unique id published through a rendezvous store that
-leaves the global torch.distributed state alone, and the communicator formed from it. Vendored from vLLM v0.18.0,
-Apache-2.0."""
+"""Rank 0's half of vLLM's weight-transfer bootstrap, over a rendezvous store that leaves the global torch.distributed
+state alone. Vendored from vLLM v0.18.0, Apache-2.0."""
 
 import logging
 import pickle
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Bounds the one-key id handshake alone, not DIST_STORE_TIMEOUT_HOURS' whole-job waits.
 _STORE_TIMEOUT_S = 300
 
-# Where vLLM's workers read the id: the key of rank 0's first StatelessProcessGroup broadcast.
+# The key of rank 0's first StatelessProcessGroup broadcast, where vLLM's workers read the id.
 _UNIQUE_ID_KEY = "broadcast_from/0/0"
 
 # vLLM's own truthy spellings for its VLLM_DISABLE_PYNCCL, narrower than the toolkit's env_flag.
@@ -36,12 +35,11 @@ _WARMUP_SYNC_TIMEOUT_S = 120.0
 
 
 def vllm_pynccl_disabled() -> bool:
-    """Whether the vLLM server's ``VLLM_DISABLE_PYNCCL`` is set, parsed the way vLLM parses it."""
     return env_str("VLLM_DISABLE_PYNCCL", "").strip().lower() in _VLLM_TRUE_VALUES
 
 
 class UniqueIdStore:
-    """Rank 0's rendezvous store for one vLLM weight-transfer group, carrying only the NCCL unique id."""
+    """Rank 0's rendezvous store, carrying only the NCCL unique id."""
 
     def __init__(self, store: TCPStore, world_size: int):
         self._store: TCPStore | None = store
@@ -53,28 +51,24 @@ class UniqueIdStore:
         return cls(listener.start_store(host, world_size, timeout_s=_STORE_TIMEOUT_S, use_libuv=False), world_size)
 
     def publish(self, unique_id: ncclUniqueId) -> None:
-        """Write ``unique_id`` where the engine's workers read it."""
         if self._store is None:
             raise RuntimeError("The unique-id store is closed — form a new group to publish an id.")
         self._store.set(_UNIQUE_ID_KEY, pickle.dumps(unique_id))
 
     def close(self) -> None:
-        """Release the listener so the group port can be rebound, even while a thread parked in
-        ``ncclCommInitRank`` still holds this object; idempotent."""
+        """Release the listener so the group port can be rebound, even while a thread parked in ``ncclCommInitRank``
+        still holds this object; idempotent."""
         self._store = None
 
 
 class PyNcclCommunicator:
-    """Rank 0's NCCL communicator for one vLLM weight-transfer group: broadcasts from the trainer, abortable."""
-
     def __init__(self, store: UniqueIdStore, device: torch.device):
         world_size = store.world_size
-        # Assigned before the disabled short-circuit: callers read ``.device`` with the server paused.
+        # Before the disabled short-circuit, as callers read ``.device`` with the server paused.
         self.device = device
         # Set by abort(), so a null-handle communicator fails by name rather than "invalid argument".
         self.aborted = False
 
-        # A server knob that, reaching the trainer, would silently disable the broadcast for the whole run.
         if vllm_pynccl_disabled() and world_size > 1:
             raise RuntimeError(
                 "VLLM_DISABLE_PYNCCL is set in the trainer process, which would silently disable the "
@@ -83,14 +77,13 @@ class PyNcclCommunicator:
                 "--env-file to the trainer."
             )
         if world_size == 1:
-            # Nobody to broadcast to, so a no-op is correct here.
             self.disabled = True
             return
 
         try:
             self.nccl = NCCLLibrary()
         except Exception as e:
-            # Raised, not disabled: the server would block for the full timeout on a broadcast that never comes.
+            # Disabling instead would block the server for the full timeout on a broadcast that never comes.
             raise ImportError(f"libnccl.so.2 unavailable — NCCL weight sync cannot run: {e}") from e
 
         self.disabled = False
@@ -116,18 +109,17 @@ class PyNcclCommunicator:
             del data, out
 
     def abort(self) -> None:
-        """Terminate the communicator, killing in-flight NCCL kernels; unusable afterwards."""
+        """Kill in-flight NCCL kernels; unusable afterwards."""
         self.aborted = True
         if self.disabled or not self.comm:
             return
         try:
             self.nccl.ncclCommAbort(self.comm)
-        except Exception as e:  # abort is best-effort cleanup on an already-failing path
+        except Exception as e:  # best-effort on an already-failing path
             logger.warning(f"ncclCommAbort failed: {e}")
         self.comm = ncclComm_t()
 
     def broadcast(self, tensor: torch.Tensor) -> None:
-        """Broadcast ``tensor`` from the trainer, the group's root, on the current stream."""
         if self.disabled:
             return
         if self.aborted:

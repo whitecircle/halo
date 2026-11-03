@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the SGLang weight-sync client's device staging and deferred settle.
-
-The engine acknowledges a chunk once it has queued the receives, before the sender's kernels
-retire; the client must not wait for them before declaring the next chunk (that would serialize each
-chunk's tail with the next declaration), yet a peer that never joins must still be bounded. What is
-pinned:
-
-  * a chunk's uploads land in one device arena, sized to the chunk budget and grown for a tensor
-    above it, as views carrying each tensor's values, dtype and shape;
-  * the arena is allocated on the caller's stream and held for the send stream, so a closed
-    client leaves it in a pool the next client and the training step reuse;
-  * every source the send stream copies is held for it, so a snapshot the caller drops on the
-    engine's reply is not handed out again before the queued copy reads it;
-  * the arena is reused across chunks with no host wait — a chunk's sends are settled two chunks
-    later — and every chunk's broadcasts go out in declared order;
-  * a deferred settle that passes the drain deadline, whether staging the next chunk or ending the
-    sync, aborts the group and retires the client;
-  * a chunk that fails before its event is recorded drains the send stream as a whole under the
-    cleanup deadline, and the deadline aborts the group and retires the client;
-  * the end of a sync settles what is outstanding and drops the arena, so it does not pin the sync
-    GPU at the largest chunk's size between syncs.
-
-    python tests/cpu/weight_sync/test_sglang_arena.py
-"""
+"""The SGLang weight-sync client's device staging and deferred settle. The engine acknowledges a chunk before the
+sender's kernels retire, and waiting for them would serialize chunks, yet a peer that never joins must stay bounded."""
 
 import contextlib
 
@@ -54,15 +32,11 @@ class _FakeEvent:
 
 
 class _PendingEvent:
-    """The event of a chunk whose sends never retire: the engine stopped receiving."""
-
     def query(self) -> bool:
         return False
 
 
 class _StreamContexts:
-    """``torch.cuda.stream`` and ``current_stream`` stand-ins: entering a stream makes it current."""
-
     def __init__(self):
         self.active = [_FakeStream()]
 
@@ -85,7 +59,7 @@ def streams() -> _StreamContexts:
 
 @pytest.fixture
 def recorded_streams(monkeypatch) -> list:
-    """Every ``record_stream`` call as ``(storage pointer, stream)``; the real one takes CUDA tensors only."""
+    """The real ``record_stream`` takes CUDA tensors only."""
     calls: list = []
     monkeypatch.setattr(
         torch.Tensor,
@@ -97,8 +71,7 @@ def recorded_streams(monkeypatch) -> list:
 
 @pytest.fixture
 def client(monkeypatch, streams, recorded_streams):
-    """A client staging on the CPU, with the CUDA stream/event calls stubbed and the engine's declare
-    answered at once; the arena, the settle bookkeeping and the failure path run as in production."""
+    """The arena, the settle bookkeeping and the failure path run as in production."""
     handle = offline_client(SGLangWeightSyncClient)
     handle._sync_device = torch.device("cpu")
     handle._transport = (object(), None)
@@ -116,7 +89,6 @@ _DRAIN_DEADLINE = 1234.5
 
 
 def _settle_probe(monkeypatch) -> list:
-    """Records every settle as ``(event, timeout_s)``; the drain deadline is a sentinel."""
     settled: list = []
     monkeypatch.setattr(sglang_module, "CHUNK_SYNC_TIMEOUT_S", _DRAIN_DEADLINE)
     monkeypatch.setattr(
@@ -128,8 +100,6 @@ def _settle_probe(monkeypatch) -> list:
 
 
 def _expired(waited: list):
-    """A ``bounded_stream_sync`` whose deadline passes: it records ``(stream, timeout_s)``, aborts and raises."""
-
     def expired(stream, timeout_s, what, abort):
         waited.append((stream, timeout_s))
         abort()
@@ -139,8 +109,8 @@ def _expired(waited: list):
 
 
 def test_chunks_are_uploaded_into_one_arena_sized_to_the_budget(client, monkeypatch):
-    """Per-tensor device allocations churn the allocator on the critical path and, once freed with a
-    pending NCCL event, block the next upload inside the allocator; the arena sidesteps both."""
+    """Per-tensor device allocations churn the allocator on the critical path and, once freed with a pending NCCL
+    event, block the next upload inside the allocator."""
     settled = _settle_probe(monkeypatch)
     first = [torch.arange(6, dtype=torch.bfloat16).reshape(2, 3), torch.full((5,), 2.5, dtype=torch.float32)]
 
@@ -170,11 +140,9 @@ def test_chunks_are_uploaded_into_one_arena_sized_to_the_budget(client, monkeypa
 def test_the_arena_is_allocated_on_the_callers_stream_and_held_for_the_send_stream(
     client, monkeypatch, streams, recorded_streams
 ):
-    """The caching allocator reuses a cached block only for the stream that allocated it, and the send
-    stream is the client's own: an arena allocated under it stays reserved after the client closes,
-    one per reconnect. Allocated under the caller's stream it returns to a pool the next client and
-    the training step share; ``record_stream`` keeps that stream off the block until the sends that
-    read it retire, which the close path relies on, since it drops the arena without settling."""
+    """The allocator reuses a cached block only for the stream that allocated it, so an arena allocated under the
+    client's own send stream stays reserved after close, one per reconnect. ``record_stream`` keeps that stream off the
+    block until the sends that read it retire."""
     _settle_probe(monkeypatch)
     monkeypatch.setattr(sglang_module.dist, "broadcast", lambda tensor, src, group: None)
     caller = streams.current()
@@ -211,9 +179,8 @@ def test_the_arena_is_allocated_on_the_callers_stream_and_held_for_the_send_stre
 
 
 def test_every_source_is_held_for_the_send_stream(client, monkeypatch):
-    """The engine may reply before the send stream has copied a chunk, and the caller drops the chunk's
-    snapshots on that reply; a block the allocator was not told is still being read goes to the next
-    snapshot, which overwrites it before the queued copy runs."""
+    """The caller drops a chunk's snapshots on the engine's reply, possibly before the send stream copied them. A block
+    the allocator was not told is still being read goes to the next snapshot, which overwrites it first."""
     _settle_probe(monkeypatch)
     monkeypatch.setattr(sglang_module.dist, "broadcast", lambda tensor, src, group: None)
     held: list = []
@@ -258,10 +225,8 @@ def test_a_chunks_sends_are_settled_two_chunks_later_not_before_the_next_declara
 
 
 def test_a_chunk_that_fails_mid_upload_drains_the_stream_and_aborts_on_deadline(client, monkeypatch):
-    """A broadcast that raises before the chunk's event is recorded (a NCCL error surfaced
-    synchronously, an OOM growing the arena) leaves the engine's workers parked in the broadcasts it
-    declared. The failure path must bound the stream as a whole and abort the group when that
-    deadline passes, or the reconnect's destroy blocks forever behind them."""
+    """A broadcast raising before the chunk's event is recorded leaves the engine's workers parked in the broadcasts it
+    declared. Without the abort at the deadline, the reconnect's destroy blocks forever behind them."""
 
     def failing_broadcast(tensor, src, group):
         raise RuntimeError("NCCL error: invalid argument")
@@ -290,8 +255,7 @@ def test_a_chunk_that_fails_mid_upload_drains_the_stream_and_aborts_on_deadline(
 
 
 def test_a_drain_deadline_on_the_failure_path_still_reports_the_engines_own_error(client, monkeypatch):
-    """The engine rejecting the chunk is what usually leaves a broadcast spinning: the drain then
-    passes its deadline, and the error raised must still be the engine's, not the deadline's."""
+    """The engine rejecting the chunk is what usually leaves a broadcast spinning, so its error is the one to raise."""
 
     def rejected(method, path, **kwargs):
         raise RuntimeError("HTTP 500: the engine refused the declared shapes")
@@ -321,9 +285,8 @@ def _end_the_sync(client) -> None:
 
 @pytest.mark.parametrize("settle", [_stage_the_next_chunk, _end_the_sync], ids=["next-chunk", "end-of-sync"])
 def test_a_deferred_settle_that_passes_the_drain_deadline_aborts_the_group(client, monkeypatch, settle):
-    """The settle is the only host wait on a chunk's sends once the engine has acknowledged it; a peer
-    that stopped receiving leaves those kernels spinning, and without the abort the client is not
-    retired and the reconnect's destroy blocks behind them."""
+    """The settle is the only host wait on a chunk's sends once the engine acknowledged it. Without the abort the
+    client is not retired and the reconnect's destroy blocks behind the spinning kernels."""
     monkeypatch.setattr(sglang_module, "CHUNK_SYNC_TIMEOUT_S", 0.0)
     aborted: list = []
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", aborted.append)

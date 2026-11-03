@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""Every EP family must claim EVERY ``model_type`` spelling its checkpoints ship under.
-
-``find_moe_family_spec`` is how an off-line consumer — the sharded-expert merge, the export
-tooling, the save-time gate — resolves a ``config.json`` back to the family that produced its layout.
-A family that declares only one of its spellings does not fail loudly: the composite/VLM wrapper
-config simply resolves to ``None`` and the caller reports the family as unsupported, so a checkpoint
-that trained fine cannot be merged or exported. That is the failure mode this pins, and it is exactly
-the shape a new tower spelling arrives in (``lfm2_vl`` next to ``lfm2_moe``, ``gemma4`` next to
-``gemma4_text``, ``mistral3`` — the VLM wrapper — next to ``mistral4``).
-
-The claims are therefore pinned per class as a literal table. It is deliberately not derived from the
-registry it checks (that would assert ``x == x``): adding a family, dropping a spelling, or moving a
-spelling between classes all have to move this file, which is the point.
-
-Run: ``python tests/cpu/parallelism/test_hf_model_types_completeness.py`` (or ``pytest -m cpu``).
-"""
+"""Every EP family claims every ``model_type`` spelling its checkpoints ship under, or a trained checkpoint cannot be
+merged or exported. A literal table, since deriving it from the registry would assert ``x == x``."""
 
 from __future__ import annotations
 
@@ -24,9 +10,7 @@ from halo.distributed.expert_parallel.families.roster import ep_layer_classes
 from halo.models.moe.family_specs import find_moe_family_spec
 from tests.common.rosters import ep_layer_class_by_model_type
 
-# class name -> the ``model_type`` spellings the class declares ITSELF, in declaration order.
-# Multi-spelling entries are the composite families: a text tower plus the wrapper config a
-# multimodal (or renamed) checkpoint writes at the top level.
+# Multi-spelling entries are composite families: a text tower plus the wrapper config a multimodal checkpoint writes.
 _EXPECTED_CLAIMS: dict[str, tuple[str, ...]] = {
     "EPBailingMoELayer": ("bailing_moe", "bailing_moe_linear", "bailing_hybrid"),
     "EPCohere2MoELayer": ("cohere2_moe", "cohere2_vision"),
@@ -47,7 +31,7 @@ _EXPECTED_CLAIMS: dict[str, tuple[str, ...]] = {
     "EPZayaMoELayer": ("zaya",),
 }
 
-# The flat registry the resolvers actually consult, derived from the table above (one source).
+# The flat registry the resolvers consult, derived from the table above.
 _EXPECTED_MAPPING = {
     model_type: cls_name for cls_name, spellings in _EXPECTED_CLAIMS.items() for model_type in spellings
 }
@@ -56,18 +40,17 @@ assert len(_EXPECTED_MAPPING) == sum(len(s) for s in _EXPECTED_CLAIMS.values()),
 
 
 def _own_model_types(cls) -> tuple[str, ...]:
-    """What the registry reads: the class's OWN spec, never an inherited one."""
+    """The class's own spec, never an inherited one."""
     family = vars(cls).get("FAMILY")
     return family.model_types if family else ()
 
 
 def _declaring_classes() -> dict[str, type]:
-    """Registered classes that claim an HF module — i.e. real families, not intermediate bases."""
+    """Real families, not intermediate bases."""
     return {cls.__name__: cls for cls in ep_layer_classes() if vars(cls).get("HF_MODULE_NAMES", ())}
 
 
 def test_the_roster_of_declaring_families_is_exactly_the_pinned_one():
-    """A family added (or deleted) without its ``model_type`` spellings lands here first."""
     assert set(_declaring_classes()) == set(_EXPECTED_CLAIMS)
 
 
@@ -81,8 +64,7 @@ def test_each_family_claims_every_spelling_it_ships_under(cls_name):
 
 
 def test_the_flat_registry_matches_the_declarations():
-    """The union the resolvers read must contain exactly the pinned spellings and nothing more —
-    a spelling that silently migrated to another class would still resolve, to the wrong layout."""
+    """A spelling that migrated to another class would still resolve, to the wrong layout."""
     assert {key: cls.__name__ for key, cls in ep_layer_class_by_model_type().items()} == _EXPECTED_MAPPING
 
 
@@ -92,8 +74,6 @@ assert _COMPOSITE, "no composite family in the table — the both-towers check b
 
 @pytest.mark.parametrize("cls_name", sorted(_COMPOSITE), ids=sorted(_COMPOSITE))
 def test_composite_families_resolve_from_every_tower(cls_name):
-    """The user-facing consequence: each spelling must reach the SAME family through the public
-    resolver, so a top-level wrapper config and its text tower export identically."""
     resolved = {spelling: find_moe_family_spec(spelling) for spelling in _COMPOSITE[cls_name]}
     assert all(spec is _declaring_classes()[cls_name].FAMILY for spec in resolved.values()), (
         f"{cls_name}: {[s for s, spec in resolved.items() if spec is None]} resolve to no family spec"

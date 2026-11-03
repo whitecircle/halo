@@ -1,6 +1,5 @@
-"""Databricks' FlashAdamW: 8-bit quantized moments plus compressed master weights (24-bit default:
-bf16 param + 8-bit correction, ~5 B/param), quantization fused into the Triton update step.
-"""
+"""Databricks' FlashAdamW: 8-bit quantized moments plus compressed master weights (24-bit default: bf16 param + 8-bit
+correction, ~5 B/param), quantization fused into the Triton update step."""
 
 import logging
 from collections.abc import Collection, Sequence
@@ -21,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _warn_if_uneven_shards(params) -> None:
-    """Warn at build time when optimizer-state checkpointing cannot work: flashoptim's ``state_dict``
-    raises for a DTensor param whose sharded dim does not divide the mesh (training is unaffected)."""
+    """flashoptim's ``state_dict`` raises for a DTensor param whose sharded dim does not divide the mesh."""
     uneven = [
         (name, tuple(p.shape))
         for name, p in params
@@ -43,11 +41,8 @@ def _warn_if_uneven_shards(params) -> None:
 
 
 def _bump_version_counters_after_step(optimizer: torch.optim.Optimizer, args, kwargs) -> None:
-    """Step post-hook: advance ``param._version``, which FlashAdamW's Triton stores leave untouched.
-
-    Otherwise ``cached_fake_quant`` (keyed on the counter) serves the step-0 quantization for the whole
-    run under any ``lowp_precision`` but bf16. Only params with a grad were written, so only they bump.
-    """
+    """FlashAdamW's Triton stores leave ``param._version`` untouched, so ``cached_fake_quant``, keyed on the counter,
+    would serve the step-0 quantization for the whole run under any ``lowp_precision`` but bf16."""
     for group in optimizer.param_groups:
         for param in group["params"]:
             if param.grad is not None:
@@ -64,11 +59,7 @@ def build_flash_adamw_optimizer(
     master_weight_bits: int | None = 24,
     decay_parameters: Collection[str] | None = None,
 ):
-    """FlashAdamW over ``model``'s trainable params, split into weight-decay groups.
-
-    ``master_weight_bits`` is 24 or 32, or ``None`` to drop the master-weight correction;
-    ``decay_parameters=None`` decays every param.
-    """
+    """``master_weight_bits`` is 24 or 32, or ``None`` to drop the master-weight correction."""
     if FlashAdamW is None:
         raise ImportError(
             "FlashAdamW requires the 'flashoptim' package. "
@@ -92,7 +83,6 @@ def build_flash_adamw_optimizer(
 
 
 def flash_adamw_optimizer_from_args(model: torch.nn.Module, args: Any, decay_parameters: Sequence[str]):
-    """FlashAdamW built from the training args (24-bit master weights)."""
     optimizer = build_flash_adamw_optimizer(
         model,
         lr=args.learning_rate,

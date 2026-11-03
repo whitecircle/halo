@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the fp32-result matmuls and the callers of the batched one.
-
-``bmm_fp32`` keeps half-precision CUDA operands in their dtype and asks ``bmm`` for an fp32 result, so the GEMM
-stays on the tensor cores; every other input is upcast, which on CPU is the only form (``bmm``'s ``out_dtype``
-has no CPU kernel). ``mm_fp32``, the chunked log-prob head's GEMM, does the same over 2-D operands and also
-accumulates into an fp32 ``out``. The CUDA branch is read off ``is_cuda`` alone, so a CPU tensor reporting it
-(``tests.common.fake_cuda.CudaLike``) takes that branch here, with a stand-in for the CUDA ``out_dtype`` kernel.
-GLM-5 Next's sparse latent attention and the wide-head score matmul of the flex sliding patch both run on it.
-
-    python tests/cpu/kernels/test_fp32_matmul.py
-"""
+"""The fp32-result matmuls: half-precision CUDA operands keep their dtype so the GEMM stays on tensor cores.
+``out_dtype`` has no CPU kernel, so ``tests.common.fake_cuda.CudaLike`` takes the CUDA branch with a stand-in."""
 
 import pytest
 import torch
@@ -24,9 +15,7 @@ HALF = (torch.bfloat16, torch.float16)
 
 
 class _CudaBmm:
-    """Stands in for ``torch.bmm`` while installed: records every call's operand dtypes and ``out_dtype``, and runs
-    the CUDA-only ``out_dtype`` form as fp32 math on plain CPU tensors. A patch rather than a function mode, which
-    the backward of an autograd function does not see."""
+    """A patch, since a function mode does not see the backward of an autograd function."""
 
     def __init__(self, bmm):
         self._bmm = bmm
@@ -77,7 +66,7 @@ def test_fp32_cuda_inputs_take_the_plain_gemm(bmm):
 
 
 def _sparse_problem(dtype):
-    """``(query, latent, keys)`` of a small sparse latent attention call, a query with no key among them."""
+    """A query with no key among them."""
     generator = torch.Generator().manual_seed(1)
     query = torch.randn(6, 2, 8, generator=generator).to(dtype)
     latent = torch.randn(6, 8, generator=generator).to(dtype)
@@ -130,8 +119,7 @@ def test_score_matmul_keeps_half_cuda_operands(bmm, dtype):
 
 
 class _CudaMm:
-    """Stands in for ``torch.mm`` and ``torch.addmm`` while installed: records each call's name, operand dtypes and
-    ``out_dtype``, and runs the CUDA-only ``out_dtype`` form as fp32 math on plain CPU tensors."""
+    """Records each call's name, operand dtypes and ``out_dtype``."""
 
     def __init__(self, mm, addmm):
         self._mm, self._addmm = mm, addmm

@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""A stale cache tree that cannot be moved aside must fail the re-download, not be served.
-
-``publish_cached_download`` renames the stale tree aside, then renames the fresh download into its
-place. Only an absent tree means "nothing to replace". Reading any other failure to move it (a
-permission or busy error) that way would leave the stale tree in place: the second rename then fails
-as if another writer had published first, the fresh download is discarded and the stale rows are
-served.
-
-Run: pytest tests/cpu/data/test_cache_publish_rename.py
-"""
+"""A stale cache tree that cannot be moved aside fails the re-download. Reading a permission or busy error as an
+absent tree leaves it in place, so the second rename fails as if another writer published, and the stale rows are
+served."""
 
 import os
 

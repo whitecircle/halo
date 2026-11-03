@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """Every pipeline family registered as validated has a GPU row scoring its stages against the unsplit model, and
-every validated MoE family one with its experts distributed.
-
-``PPFamilySpec.validated`` claims the stages reproduce the unsplit model on the pipeline GPU tier, so a backbone no
-row builds holds that claim on nothing; the rows are read off ``tests/gpu/manifest.py`` and each row's family is
-resolved to the backbone class the split keys its spec on.
-
-    python tests/cpu/conventions/test_pp_family_roster.py
-"""
+every validated MoE family one with its experts distributed."""
 
 import functools
 import shlex
@@ -45,7 +38,6 @@ def _backbone(family: str) -> str:
 
 
 def _rows() -> list[tuple[str, int]]:
-    """``(family, expert-parallel size)`` per row of the pipeline equivalence suites."""
     rows = []
     for suite, (family, ep_size) in PP_EQUIVALENCE_SUITES.items():
         for args, _spec in MANIFEST[suite].launches():

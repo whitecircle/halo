@@ -1,12 +1,5 @@
-"""The on-disk names in ``halo.checkpoint.format`` are the files every saved checkpoint already carries.
-
-A changed spelling orphans them: a resume that cannot find ``trainer_state.json`` restarts at step 0,
-an export that drops ``router_balancing_biases.pt`` serves pretrained routing, and a merge that misses
-``adapter_config.json`` writes the bare base. The adapter and trainer names are spelled here rather
-than imported from peft and transformers, so they are also held equal to the libraries' own.
-
-    python tests/cpu/checkpoint/test_format_names.py
-"""
+"""The on-disk names in ``halo.checkpoint.format`` are what every saved checkpoint carries, so a changed spelling
+orphans them. Adapter and trainer names are spelled here, held equal to the libraries' own."""
 
 import peft.utils
 import pytest
@@ -98,7 +91,7 @@ def test_a_ranks_own_resume_file_is_per_rank(name):
     ],
 )
 def test_a_file_of_the_whole_save_is_not_per_rank(name):
-    """Files a save writes once for all its ranks, and one rank's weight shard: none is a rank's resume state."""
+    """None is a rank's resume state."""
     assert not checkpoint_format.is_per_rank_resume_file(name)
 
 

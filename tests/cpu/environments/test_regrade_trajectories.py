@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""The offline re-grader must validate a trajectory's meta record before it grades anything.
-
-``regrade_trajectories.py`` consumes meta keys two different producers stamp: ``eval_code_contests.py``
-adds ``adapter``/``language`` on top of the generic eval meta, ``eval_env.py`` does not. Pointed at an
-``eval_env.py`` file, an unvalidated selector surfaces as a bare ``KeyError`` and a report-only key as
-a ``TypeError`` in the summary line — the latter only AFTER the whole file has been graded, which is
-minutes of sandboxed execution per file.
-
-Run: python tests/cpu/environments/test_regrade_trajectories.py  (or pytest)
-"""
+"""The offline re-grader validates a trajectory's meta record before grading. ``eval_code_contests.py`` stamps
+``adapter``/``language`` and ``eval_env.py`` does not; unvalidated, a report-only key would raise ``TypeError``
+only after minutes of sandboxed grading."""
 
 import json
 import logging
@@ -58,8 +51,7 @@ def test_validate_meta_reports_every_missing_key_and_its_producer():
 
 
 def test_a_meta_without_its_split_is_refused():
-    """The split picks the rows whose tests the re-grade rebuilds; guessing one would grade every
-    episode of a train-split run (HLCE) against another split's problems."""
+    """Guessing a split would grade every episode of a train-split run (HLCE) against another split's problems."""
     with pytest.raises(ValueError, match="split"):
         code_contests_regrade.validate_meta("f.jsonl", {k: v for k, v in _FULL_META.items() if k != "split"})
 
@@ -82,13 +74,8 @@ def test_regrade_file_validates_before_it_grades_anything(tmp_path, monkeypatch)
         code_contests_regrade.regrade_file(path, workers=1)
 
 
-# --- The grading contract carried across the dump ---
-
-
 def test_every_grading_knob_reaches_the_meta_block():
-    """The block ``eval_code_contests.py`` stamps must cover the WHOLE contract, derived from the
-    dataclass. A hand-typed subset silently defaults the ninth field added tomorrow — precisely the
-    re-threading :class:`GradingSpec` exists to prevent."""
+    """Derived from the dataclass: a hand-typed subset silently defaults the next field added."""
     env = CodeContestsEnvironment(language="python", sandbox_backend="local")
     meta = env.grading_spec.to_meta()
 
@@ -97,8 +84,7 @@ def test_every_grading_knob_reaches_the_meta_block():
 
 
 def test_the_regrader_rebuilds_the_run_s_contract_not_the_class_defaults():
-    """A run that raised ``timeout_per_test``/``max_time_limit`` must be re-graded at ITS limits: the
-    class defaults would TLE a solution the online run passed. The two offline overrides still win."""
+    """The class defaults would TLE a solution the online run passed. The two offline overrides still win."""
     ran_at = CodeContestsEnvironment(
         language="cpp",
         sandbox_backend="local",
@@ -120,27 +106,22 @@ def test_the_regrader_rebuilds_the_run_s_contract_not_the_class_defaults():
 
 
 def test_a_retired_meta_spelling_is_refused_rather_than_defaulted():
-    """A meta block that spells two knobs after the ENV constructor (``output_comparison``,
-    ``timeout_per_test``) is refused: silently ignoring them would re-grade at the class defaults and report a
-    solve rate the run never produced."""
+    """Silently ignoring env-constructor spellings would re-grade at the class defaults and report a solve rate the
+    run never produced."""
     spec = CodeContestsEnvironment(language="python", sandbox_backend="local").grading_spec
     with pytest.raises(ValueError, match="output_comparison"):
         spec.with_meta({"output_comparison": "tokens", "timeout_per_test": 5})
 
 
 def test_an_unstamped_run_falls_back_to_the_rebuilt_environment():
-    """Older trajectory files carry no block at all; the env's own spec must stand."""
+    """A file with no block keeps the env's own spec."""
     spec = CodeContestsEnvironment(language="python", sandbox_backend="local", timeout_per_test=4.0).grading_spec
     assert spec.with_meta({}, stop_on_first_failure=True, max_grading_seconds=None).default_timeout == 4.0
 
 
-# --- Per-submission language and the stamped submission budget ---
-
-
 def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
-    """A recorded ``submit_solution`` call the tool refused (no code, a missing or foreign language,
-    unparseable arguments) never ran and spent no budget, so it takes no slot in the re-graded prefix;
-    the admitted ones carry the language each call named."""
+    """A refused call never ran and spent no budget, so it takes no slot in the re-graded prefix; admitted ones
+    carry the language each named."""
 
     def call(arguments):
         return {"function": {"name": "submit_solution", "arguments": arguments}}
@@ -173,9 +154,8 @@ def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
 
 
 def test_submitted_solutions_read_arguments_the_way_the_environment_admitted_them():
-    """The environment admits a Python-literal ``arguments`` string (single quotes, ``True``/``None``)
-    and runs the submission; a re-grade reading JSON alone would drop that submission and score the
-    episode on a different prefix than the one the run graded."""
+    """The environment admits a Python-literal ``arguments`` string, so a JSON-only re-grade would score a different
+    prefix than the run graded."""
     tool_calls = [
         {"function": {"name": "submit_solution", "arguments": "{'code': 'print(1)', 'language': 'python'}"}},
         {"function": {"name": "submit_solution", "arguments": {"code": "print(2)", "language": "python"}}},
@@ -189,9 +169,8 @@ def test_submitted_solutions_read_arguments_the_way_the_environment_admitted_the
 
 
 def test_submitted_solutions_skip_a_program_the_environment_refused_for_its_language():
-    """A submission whose code the environment refused as written in another listed language was never
-    graded and spent no budget; replayed, it would take the slot of the real first submission and
-    score s@1 on a program the run never judged."""
+    """Refused as written in another language, it was never graded; replayed, it would take the real first
+    submission's slot and score s@1 on it."""
     cpp = "#include <bits/stdc++.h>\nusing namespace std;\nint main() { cout << 1; }"
     tool_calls = [
         {"function": {"name": "submit_solution", "arguments": json.dumps({"code": cpp, "language": "python"})}},
@@ -228,9 +207,8 @@ def test_episode_submission_budget_reads_the_stamped_tool_budget():
 
 
 def test_the_regrader_rebuilds_the_run_s_protocol_from_the_meta_line_the_eval_writes():
-    """Written by ``contest_meta``, read by ``rebuild_environment``: a leaderboard run re-grades at one
-    submission even where an episode stamped no budget, over a trained ladder that bound three. A meta
-    line naming no protocol ran the harness."""
+    """A leaderboard run re-grades at one submission even where an episode stamped no budget; a meta line naming no
+    protocol ran the harness."""
     profiles = {"high": {"thinking_tokens": 16384, "max_submissions": 3, "max_test_calls": 6}}
     env = CodeContestsEnvironment(
         language="python", sandbox_backend="local", eval_protocol="leaderboard", reasoning_effort_profiles=profiles
@@ -255,9 +233,7 @@ def _submission(code: str) -> dict:
 
 
 def test_an_episode_the_driver_lost_leaves_n_and_is_counted(tmp_path, monkeypatch):
-    """The eval leaves a generation-error sample out of every score; re-graded as an unsolved episode it
-    would pull ``s@1`` below the online number for an endpoint fault. The solved and the unsubmitted
-    episodes are what ``n`` counts."""
+    """Re-graded as unsolved it would pull ``s@1`` below the online number for an endpoint fault."""
     payload = {"tests": [{"input": "", "output": "X"}], "checker": None, "time_limit": None}
     monkeypatch.setattr(code_contests_regrade, "build_payloads", lambda meta: (payload,))
     episodes = [
@@ -273,8 +249,8 @@ def test_an_episode_the_driver_lost_leaves_n_and_is_counted(tmp_path, monkeypatc
 
 
 def test_an_episode_past_the_rebuilt_problems_refuses_the_file(tmp_path, monkeypatch):
-    """An index the rebuilt dataset does not reach means the dataset or its selection changed since the
-    run: re-grading on would score that episode unsolved with nothing saying why."""
+    """The dataset or its selection changed since the run; re-grading on would score that episode unsolved with
+    nothing saying why."""
     payload = {"tests": [{"input": "", "output": "X"}], "checker": None, "time_limit": None}
     monkeypatch.setattr(code_contests_regrade, "build_payloads", lambda meta: (payload,))
     episode = {"type": "episode", "index": 3, "messages": [_submission("print('X')")], "generation_error": None}

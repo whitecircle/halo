@@ -1,26 +1,10 @@
 #!/usr/bin/env python
-"""Distributed DPO training (text or VLM).
+"""Distributed DPO training (text or VLM): ``load_policy_model`` auto-detects the modality, and a VLM's processor flips
+TRL's DPOTrainer into vision mode.
 
-Direct Preference Optimization on preference pairs (chosen vs rejected). One script serves both
-text and vision-language models: ``load_policy_model`` auto-detects the modality. For a VLM
-the processor is the ``processing_class``, which flips TRL 1.14's DPOTrainer into vision mode and
-auto-selects ``DataCollatorForVisionPreference`` for an images-bearing dataset; for a text model
-the repo tokenizes the pairs and runs generation-eval examples.
-
-CP is not supported (``concatenated_forward`` needs full sequences). Under EP/TP use PEFT
-(``ref_model=None``) or ``precompute_ref_log_probs`` — the reference is not parallelized; PP runs
-text-only full fine-tuning of the per-pair loss types (sigmoid, hinge, ipo) with
-``precompute_ref_log_probs`` only.
-
-Usage:
-    # Text or VLM (auto-detected) — EP / TP via torchrun
-    torchrun --nproc_per_node=8 scripts/training/preference/dpo.py \\
-        examples/preference/gptoss/dpo-gptoss-20b-tulu3-prefmix-ep.yaml
-
-Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the same plus an
-``images``/``image`` column (TRL applies the chat template and threads pixel_values), or
-``images_field`` naming the column a hub dataset stores them in.
-"""
+CP is not supported (``concatenated_forward`` needs full sequences). Under EP/TP use PEFT (``ref_model=None``) or
+``precompute_ref_log_probs``, as the reference is not parallelized; PP runs text-only full fine-tuning of the per-pair
+loss types (sigmoid, hinge, ipo) with ``precompute_ref_log_probs`` only."""
 
 from trl import DPOConfig
 
@@ -67,11 +51,9 @@ def main():
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
 
-    # Vision routing keys on the dataset, not the model: natively-multimodal models train on text
-    # preference data through the normal text pipeline, and only an image-carrying dataset takes TRL's
-    # vision path. There the rows pass through untouched: TRL tokenizes them, auto-selects
-    # DataCollatorForVisionPreference and applies no hub-shape normalization of its own. Decided
-    # before the model load, which requires the checkpoint's processor for a vision run.
+    # Vision routing keys on the dataset: natively-multimodal models train on text preference data through the text
+    # pipeline, and only an image-carrying dataset takes TRL's vision path, rows untouched. Before the model load,
+    # which needs the checkpoint's processor.
     is_vlm_data = resolve_preference_vlm_run(
         args, model_config, ds, text_only_model=args.text_only_model, method="DPO"
     )

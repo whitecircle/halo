@@ -1,5 +1,4 @@
-"""Offline GRPO's sign diagnostics: the logged keys, and under CP full logical rows, zero-target shards
-included."""
+"""Offline GRPO's sign diagnostics: the logged keys and, under CP, full logical rows with zero-target shards."""
 
 import datetime
 from collections import defaultdict
@@ -83,14 +82,13 @@ def test_drained_metrics_name_the_policy_gradient_term_not_a_reward():
     trainer._sign_metrics["train"].flush(trainer._metrics["train"])
     metrics = trainer._metrics["train"]
     assert not any("rewards" in key for key in metrics), sorted(metrics)
-    # The pre-KL advantage-weighted log-prob, log π · A, averaged over each row's tokens.
+    # Pre-KL log π · A, averaged over each row's tokens.
     assert metrics["positive/pg_objective_mean"] == [pytest.approx(-0.75)]
     assert metrics["negative/pg_objective_mean"] == [pytest.approx(1.125)]
 
 
 def test_a_pipeline_batchs_filler_rows_are_no_samples():
-    """PP pads a batch with all-ignore rows of zero advantage; read as real they would be zero-valued positive
-    samples, pulling the positive mean and minimum toward 0."""
+    """PP's all-ignore filler rows have zero advantage; read as real they pull the positive mean and minimum to 0."""
     values = {key: torch.tensor([[-2.0, -1.0], [-3.0, -0.5], [0.0, 0.0]]) for key in ("logps", "pg_objective")}
     advantages, mask = torch.tensor([1.0, 0.5, 0.0]), torch.tensor([[1, 1], [1, 1], [0, 0]])
     padded, alone = _trainer(), _trainer()

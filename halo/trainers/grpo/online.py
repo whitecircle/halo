@@ -1,8 +1,5 @@
-"""Online GRPO trainer under EP / TP / ETP and their supported combinations (no CP or PP).
-
-Server-mode vLLM generation and weight sync run through ``TrlVLLMClient``; vLLM is not installed in
-the training environment (ABI-incompatible extensions, older transformers than the image).
-"""
+"""Online GRPO under EP / TP / ETP (no CP or PP). Server-mode vLLM runs through ``TrlVLLMClient``; vLLM is not
+installed in the training environment (ABI-incompatible extensions, older transformers than the image)."""
 
 import contextlib
 import logging
@@ -55,8 +52,6 @@ class DistributedOnlineGRPOTrainer(
     DistributedTrainerMixin,
     GRPOTrainer,
 ):
-    """Online GRPO over server-mode vLLM rollouts. No CP (``SUPPORTS_CP`` stays off) and no PP (below)."""
-
     PP_REFUSAL = (
         "the vLLM weight sync gathers and sends the model's full named_parameters() from one "
         "rank-set in a fixed collective order, but under PP no rank holds all the layers, so the "
@@ -66,8 +61,7 @@ class DistributedOnlineGRPOTrainer(
         "is a single forward over precomputed advantages and reference log-probs, so the loss is not "
         "the blocker"
     )
-    # Online GRPO is vLLM-only by construction (TRL's server-mode generation), so the engine the
-    # weight-sync gate reads is fixed here rather than configured.
+    # TRL's server-mode generation is vLLM-only, so the engine the weight-sync gate reads is fixed here.
     _rollout_backend = VLLM_BACKEND
 
     def __init__(self, *args, **kwargs):
@@ -116,11 +110,8 @@ class DistributedOnlineGRPOTrainer(
 
     @staticmethod
     def sums_sequence_logratio(grpo_args) -> bool:
-        """Whether TRL's vLLM IS correction sums the per-token log-ratios over each sequence — the online arm's
-        counterpart of ``ISMaskConfig.sums_sequence_logratio``, the consumer the sampler-logprob preflight gates
-        a nucleus-renormalized reference against: one ratio per sequence (``sequence_*`` modes), or ``vespo``,
-        whose gamma weight takes the per-token ratios' log-sum in place of the per-token multiply. Off with the
-        correction off, whatever the mode or loss says."""
+        """Whether TRL's vLLM IS correction sums per-token log-ratios over each sequence (``sequence_*`` modes, or
+        ``vespo``), the consumer the sampler-logprob preflight gates a nucleus-renormalized reference against."""
         if not grpo_args.vllm_importance_sampling_correction:
             return False
         return grpo_args.loss_type == "vespo" or grpo_args.vllm_importance_sampling_mode.startswith("sequence")
@@ -135,9 +126,8 @@ class DistributedOnlineGRPOTrainer(
     @staticmethod
     @contextlib.contextmanager
     def _installing_trl_vllm_client() -> Iterator[None]:
-        """Install ``TrlVLLMClient`` and force TRL's ``is_vllm_available`` True for the duration of TRL's ctor,
-        since vLLM is not installed here; server mode, the only shape TRL builds that client for, is required
-        first."""
+        """Force TRL's ``is_vllm_available`` True during TRL's ctor, since vLLM is not installed here; server mode, the
+        only shape TRL builds that client for, is required first."""
         originals = (
             _trl_vllm_generation.is_vllm_available,
             _trl_vllm_client.is_vllm_available,
@@ -161,9 +151,8 @@ class DistributedOnlineGRPOTrainer(
         return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
 
     def _install_weight_sync(self) -> None:
-        """Replace ``VLLMGeneration.sync_weights`` with the distributed-aware push: TRL unfolds DTensors only
-        under ``is_fsdp_enabled``, which the toolkit's ``fully_shard`` under accelerate MULTI_GPU never sets, so
-        it would forward them verbatim and deadlock against the trainer-vLLM NCCL group."""
+        """TRL unfolds DTensors only under ``is_fsdp_enabled``, which the toolkit's ``fully_shard`` under accelerate
+        MULTI_GPU never sets, so it would forward them verbatim and deadlock against the trainer-vLLM NCCL group."""
         if getattr(self, "vllm_generation", None) is None:
             raise RuntimeError(
                 "TRL built no vllm_generation for this trainer, so the distributed-aware weight sync "
@@ -182,17 +171,13 @@ class DistributedOnlineGRPOTrainer(
             )
 
     def _distributed_sync_weights(self) -> None:
-        """COLLECTIVE: the EP/TP/FSDP2/PEFT-aware ``VLLMGeneration.sync_weights``; the client TRL holds on
-        ``vllm_generation`` forwards from the main process."""
+        """COLLECTIVE. The client TRL holds on ``vllm_generation`` forwards from the main process."""
         client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
         sync_trainer_weights(self, client)
 
     def _generate_single_turn(self, *args, **kwargs):
-        """Override TRL's single-turn vLLM generation to be TP-consistent.
-
-        TRL slices the result by ``process_index``, so TP ranks land on different completions and
-        deadlock at the first all-reduce in ``model.forward``. Broadcast the tuple from the TP leader.
-        """
+        """TRL slices the result by ``process_index``, so TP ranks land on different completions and deadlock at the
+        first all-reduce in ``model.forward``; broadcast from the TP leader."""
         result = super()._generate_single_turn(*args, **kwargs)
         return self._broadcast_object_from_tp_leader(result)
 
@@ -205,15 +190,12 @@ class DistributedOnlineGRPOTrainer(
 
     @property
     def _recomputes_from_gathered_rewards(self) -> bool:
-        """Whether any hook re-derives advantages or masks from the stashed full reward set; the stash in
-        :meth:`_calculate_rewards` and every consumer read this one gate."""
         return self._rlrr_config is not None or self._drop_degenerate_groups or self._scale_rewards_std_floor > 0
 
     def _generate_and_score_completions(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
-        """Generate, score, run the advantage hooks, and broadcast the scored tensors across the TP/ETP group,
-        whose generation ``_generate_single_turn`` already shares: CPU-side post-processing may diverge."""
+        """Broadcast the scored tensors across the TP/ETP group, since CPU-side post-processing may diverge."""
         result = super()._generate_and_score_completions(inputs)
 
         # Before the TP/ETP broadcast, so the reshaped tensors are what gets broadcast.
@@ -229,8 +211,8 @@ class DistributedOnlineGRPOTrainer(
         return self._broadcast_tensors_from_tp_leader(result)
 
     def _apply_rlrr_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """Replace the group-normalized advantages with RLRR relative-ranking ones, recomputed on the full
-        gathered reward set in TRL's group order. Train mode only."""
+        """Replace advantages with RLRR ones, recomputed on the full gathered reward set in TRL's group order. Train
+        mode only."""
         if self._rlrr_config is None:
             return
         gathered = self._gathered_rewards()
@@ -257,10 +239,8 @@ class DistributedOnlineGRPOTrainer(
         self._install_advantages(result, advantages_full, "RLRR")
 
     def _apply_std_floor_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """Replace TRL's group-normalized advantages with ones whose std divisor honours
-        ``scale_rewards_std_floor``, recomputed on the full gathered reward set and re-sliced to this
-        rank. Train mode only. TRL divides by a fixed ``std + 1e-4`` and cannot take the floor.
-        """
+        """Replace advantages with ones whose std divisor honours ``scale_rewards_std_floor``, on the full gathered
+        set; TRL divides by a fixed ``std + 1e-4``. Train mode only."""
         if self._scale_rewards_std_floor <= 0:
             return
         gathered = self._gathered_rewards()
@@ -279,9 +259,8 @@ class DistributedOnlineGRPOTrainer(
         self._install_advantages(result, advantages_full, "scale_rewards_std_floor")
 
     def _apply_degenerate_group_drop(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """Mask the completions of all-equal-reward groups out of the loss (parity with the
-        environmental trainer): their advantage is already 0, but their tokens would still inflate
-        the DAPO normalizer and dilute the groups that carry signal. Train mode only."""
+        """Mask all-equal-reward groups out of the loss: their advantage is 0, but their tokens would inflate the DAPO
+        normalizer and dilute the groups that carry signal. Train mode only."""
         if not self._drop_degenerate_groups:
             return
         gathered = self._gathered_rewards()
@@ -308,9 +287,8 @@ class DistributedOnlineGRPOTrainer(
             result["num_items_in_batch"] = gathered_num_items(loss_mask, self.accelerator.gather)
 
     def _apply_token_mass_balance(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """Log the batch's net token mass and, under ``balance_token_mass``, cancel it
-        (:func:`~halo.trainers.grpo.objective.loss_inputs.record_token_mass`), as the environmental
-        trainer does: a token weighs its place in the loss times TRL's vLLM IS ratio. Train mode only."""
+        """Log the net token mass and, under ``balance_token_mass``, cancel it; a token weighs its place in the loss
+        times TRL's vLLM IS ratio. Train mode only."""
         if not self.model.training:
             return
         loss_mask = effective_loss_mask(result)
@@ -332,9 +310,8 @@ class DistributedOnlineGRPOTrainer(
             self._install_advantages(result, balance.apply(self.accelerator.gather(advantages)), "balance_token_mass")
 
     def _clamp_kl_reference(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """The k3 tail clamp on the reference log-probs, and ``kl_clamp_frac`` over the batch's loss
-        tokens (:func:`kl_clamp_counts`). Both tensors exist only when ``beta != 0`` and TRL's
-        recompute gate fired, config verdicts every rank shares, so the all-reduce is reached by all or none."""
+        """``old_per_token_logps`` and ``ref_per_token_logps`` exist only when ``beta != 0`` and TRL's recompute gate
+        fired, config verdicts every rank shares, so all or none reach the all-reduce."""
         old_logps = result.get("old_per_token_logps")
         ref_logps = result.get("ref_per_token_logps")
         if old_logps is None or ref_logps is None:
@@ -345,13 +322,8 @@ class DistributedOnlineGRPOTrainer(
         self._metrics[mode][KL_CLAMP_FRAC_KEY].append(clamped_tokens / loss_tokens if loss_tokens else 0.0)
 
     def _gathered_rewards(self) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Stashed full (gathered) rewards as ``(rewards, unscorable)``, or ``None`` outside train.
-
-        ``rewards`` aggregates the reward functions as TRL's ``sum_then_normalize`` branch does (weighted
-        nansum), in the gathered process order; ``unscorable`` marks rows where every reward fn returned NaN
-        (TRL forces their advantage to 0). Only an armed hook calls it, so a missing stash in train mode, TRL
-        scoring the batch past :meth:`_calculate_rewards`, raises rather than leave the hook unapplied.
-        """
+        """``(rewards, unscorable)``, or ``None`` outside train; ``rewards`` aggregates as TRL's
+        ``sum_then_normalize``. A missing stash in train mode raises rather than leave the hook unapplied."""
         if not self.model.training:
             return None
         if self._last_rewards_per_func is None:
@@ -367,20 +339,16 @@ class DistributedOnlineGRPOTrainer(
         return rewards, torch.isnan(rewards_per_func).all(dim=1)
 
     def _local_slice(self, full: torch.Tensor, n_local: int) -> torch.Tensor:
-        """This rank's rows of a gathered per-completion tensor, TRL's own world-order process slice. The hooks
-        compute on the full gathered set, where groups are contiguous, so a group may span two ranks."""
+        """TRL's world-order process slice. Hooks compute on the full gathered set, where groups are contiguous, so a
+        group may span two ranks."""
         start = self.accelerator.process_index * n_local
         return full[start : start + n_local]
 
     def _install_advantages(
         self, result: dict[str, torch.Tensor | Any], advantages_full: torch.Tensor, what: str
     ) -> None:
-        """Slice ``advantages_full`` (a hook's full gathered set) to this rank, install it, and realign TRL's
-        advantage log, so the logged record carries the values trained on.
-
-        TRL fills ``_logs["advantages"]`` inside ``_generate_and_score_completions``, before any hook runs, in
-        the gathered tensor's world order and length, so overwriting that tail realigns the record row for row.
-        """
+        """Slice to this rank, install, and realign TRL's advantage log. TRL fills ``_logs["advantages"]`` before any
+        hook runs, in world order and length, so overwriting that tail realigns the record row for row."""
         local = self._local_slice(advantages_full, result["advantages"].shape[0])
         result["advantages"] = local.to(device=result["advantages"].device, dtype=result["advantages"].dtype)
         logged = self._logs["advantages"]

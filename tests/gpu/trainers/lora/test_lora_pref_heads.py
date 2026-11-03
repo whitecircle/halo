@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""LoRA / QLoRA on the preference + classification-head trainers (dense FSDP2, + adapter checkpoint).
-
-One file, five trainers (``--trainer``), two modes (``--mode``): confirms every non-GRPO/non-distill
-trainer trains adapters with a frozen base and writes a round-trippable adapter checkpoint, under both
-plain LoRA (FSDP2 grad sync) and 4-bit QLoRA (AllReduce-hook grad sync). Dense Qwen3-0.6B throughout.
-
-    dpo / smpo            — preference {prompt, chosen, rejected}, CausalLM, CAUSAL_LM adapters
-    kto                   — unpaired {prompt, completion, label}, CausalLM, CAUSAL_LM adapters
-    reward                — preference, SequenceClassification(num_labels=1), SEQ_CLS adapters + score head
-    classification        — {input_ids, labels}, SequenceClassification(num_labels=2), SEQ_CLS + score head
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_pref_heads.py --trainer dpo --mode lora
-"""
+"""LoRA and QLoRA on the preference and classification-head trainers on dense Qwen3-0.6B: frozen base, trained
+adapters, a round-trippable checkpoint."""
 
 import argparse
 import math
@@ -77,8 +64,8 @@ def _pref_rows(n):
 
 
 def _pref_rows_str(tokenizer, n):
-    """SMPO tokenizes pre-templated STRING prompt/chosen/rejected (it concatenates prompt+completion),
-    unlike DPO/KTO which accept conversational message lists and template internally."""
+    """SMPO tokenizes pre-templated strings (it concatenates prompt+completion); DPO/KTO template message lists
+    internally."""
     rng = random.Random(SEED)
     rows = []
     for _ in range(n):
@@ -181,7 +168,6 @@ def _peft_config(trainer: str) -> LoraConfig:
 
 
 def _build_trainer(trainer, model, tokenizer, peft_config, output_dir, parallelism_config):
-    """Construct the requested trainer with a tiny config + dataset. Returns the trainer."""
     common = {
         "output_dir": output_dir,
         "max_steps": MAX_STEPS,
@@ -264,9 +250,8 @@ def run(ctx) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = _load_model(trainer_name, mode)
-    # Through the seam the training scripts run (apply_max_length → configure_run_tokenizer),
-    # never a hand-written config.pad_token_id: the two seq-cls heads pool against that id, so
-    # recording it here by hand would keep this test green through a regression in the sync.
+    # Through the scripts' seam: the seq-cls heads pool against that id, so recording it by hand would stay green
+    # through a regression in the sync.
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), model, tokenizer, MAXLEN, embeddings_sharded=is_input_embedding_tp_sharded
     )

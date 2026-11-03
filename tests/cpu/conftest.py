@@ -1,15 +1,6 @@
-"""CPU-tier setup: each test process copies remote code into a dynamic-module cache of its own.
-
-transformers copies every ``trust_remote_code`` module into ``HF_MODULES_CACHE``, by default
-``$HF_HOME/modules``: shared with every xdist worker and every session mounting the same HF home,
-unwritable when that home is mounted read-only, and left holding a copy of each temp checkpoint a
-test loads. transformers reads the variable when it is imported, so it is set here, ahead of every
-test module. A standalone ``python tests/cpu/<file>.py`` of a file that imports transformers keeps the
-default cache.
-
-The directory carries ``SCRATCH_DIR_TAG``, so the root conftest's sweep reclaims it if a crash skips
-the removal below.
-"""
+"""CPU-tier setup: each test process copies remote code into a dynamic-module cache of its own, since
+``$HF_HOME/modules`` is shared across xdist workers and unwritable on a read-only mount. transformers reads it at
+import, so it is set here; ``SCRATCH_DIR_TAG`` lets the root conftest reclaim it."""
 
 import os
 import shutil

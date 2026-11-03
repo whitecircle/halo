@@ -1,7 +1,6 @@
-"""TP linears computed on their local shards: ``F.linear`` on ``weight.to_local()`` between explicit c10d collectives
-carrying the values DTensor's redistributes carried over the same group, in place of DTensor dispatch (about ten
-dispatches per linear and a copy inside every functional all-reduce). The parameters keep their DTensor placements.
-"""
+"""TP linears computed on their local shards: ``F.linear`` on ``weight.to_local()`` between explicit c10d collectives,
+in place of DTensor dispatch (about ten dispatches per linear and a copy inside every functional all-reduce). The
+parameters keep their DTensor placements."""
 
 from __future__ import annotations
 
@@ -23,19 +22,15 @@ from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
 
 @dataclass(frozen=True)
 class LinearTPStyle:
-    """Where a TP linear splits its weight and which side of the matmul keeps a full-width activation.
-
-    Colwise shards the output features (weight and bias ``Shard(0)``) and takes a replicated input; rowwise
-    shards the input features (weight ``Shard(1)``, bias replicated and added once after the SUM).
-    ``full_width`` gathers a colwise output, or takes a rowwise input replicated and splits it here.
-    """
+    """Where a TP linear splits its weight. Colwise shards output features (weight and bias ``Shard(0)``) with a
+    replicated input; rowwise shards input features (weight ``Shard(1)``, bias replicated and added once after the
+    SUM). ``full_width`` gathers a colwise output, or splits a replicated rowwise input here."""
 
     colwise: bool
     full_width: bool
 
     @property
     def placements(self) -> dict[str, Placement]:
-        """Each parameter's placement on the TP mesh, by parameter name."""
         return {"weight": Shard(0), "bias": Shard(0)} if self.colwise else {"weight": Shard(1), "bias": Replicate()}
 
 
@@ -149,8 +144,7 @@ def _require_tp_mesh(linear: nn.Linear, name: str, style_name: str) -> DeviceMes
 
 
 def install_local_forward(linear: nn.Linear, style_name: str, *, name: str = "linear") -> None:
-    """Make ``linear`` compute on its local shards under ``style_name``, over the TP group its parameters'
-    mesh names; raises unless they sit in that style's placements. ``name`` labels the errors."""
+    """Compute ``linear`` on its local shards under ``style_name``; raises off that style's placements."""
     matmul = _local_matmul(linear, name)
     style = LINEAR_TP_STYLES[style_name]
     mesh = _require_tp_mesh(linear, name, style_name)
@@ -182,19 +176,14 @@ def shard_linear(linear: nn.Linear, style_name: str, tp_mesh: DeviceMesh, *, nam
 
 
 def runs_local_forward(module: nn.Module) -> bool:
-    """Whether ``module`` computes through the forward :func:`install_local_forward` installed."""
     forward = vars(module).get("forward")
     return isinstance(forward, MethodType) and forward.__func__.__module__ == __name__
 
 
 def install_planned_local_forwards(model: nn.Module, applied_plan: dict[str, str]) -> int:
-    """Install the local-shard forward on every ``nn.Linear`` an HF-native load sharded under a style of
-    :data:`LINEAR_TP_STYLES`, replacing transformers' DTensor forward; returns how many.
-
-    The style is resolved per module as transformers' apply resolved it. Embeddings, the MoE and activation
-    styles, and Linear subclasses with a forward of their own keep transformers' forward, which computes
-    their own math.
-    """
+    """Install the local-shard forward on every plain ``nn.Linear`` an HF-native load sharded under
+    :data:`LINEAR_TP_STYLES`; returns how many. Embeddings, MoE and activation styles, and Linear subclasses with their
+    own forward keep transformers' forward."""
     installed = 0
     for name, module in model.named_modules():
         style_name = _get_parameter_plan(name, applied_plan, is_weight=False)

@@ -1,27 +1,5 @@
 #!/usr/bin/env python
-"""
-Test script for SMPO trainer with Expert Parallelism (EP=2) on GptOss-20B MoE.
-
-Smoke test: runs SMPOTrainer with expert parallelism enabled, using synthetic
-preference data (math Q&A with 30% multi-turn prompts).
-
-Test validates:
-1. EP model loading via load_distributed_model
-2. SMPO training completes without errors
-3. Loss values are finite (no NaN/Inf)
-4. Every step runs, with logged, finite gradient norms
-
-It does not compare the SMPO loss or gradients against a non-EP reference.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_ep.py
-
-Requirements:
-    - 2x GPUs with >=80GB memory each
-    - DeepEP installed
-    - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
-"""
+"""SMPOTrainer smoke at EP=2 on GptOss-20B. It compares no loss or gradient against a non-EP reference."""
 
 import torch
 from transformers import AutoTokenizer
@@ -52,7 +30,6 @@ SEED = 42
 
 
 def run(ctx) -> dict:
-    """Run SMPO trainer test with Expert Parallelism (EP=2)."""
     log(f"\n{'=' * 70}")
     log("SMPO EP TEST: Expert Parallelism (EP=2) with GptOss-20B")
     log(f"{'=' * 70}")
@@ -116,7 +93,7 @@ def run(ctx) -> dict:
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # already applied by load_distributed_model
+        use_liger_kernel=False,  # Already applied by load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",

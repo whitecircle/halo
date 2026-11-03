@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.parallel_shape.parallel_shape_checks`` fails on a model the axis never reached.
-
-The SFT mode suites gate "the mode engaged" on these probes and run only on the GPU tiers, so a probe
-that stopped reading the model (and started agreeing with the config again) would go unnoticed. Each
-probe is driven here with the model the axis leaves behind and with one it left untouched: real
-Ulysses wrappers on a tiny Qwen3, a real TP DTensor over a fake process group, and EP layers stubbed
-down to the class and attributes the probe reads.
-
-Run: python tests/cpu/conventions/test_parallel_shape_checks.py
-"""
+"""``tests.common.parallel_shape.parallel_shape_checks`` fails on a model the axis never reached. Each probe runs on
+the model the axis leaves behind and on one it left untouched."""
 
 import pytest
 import torch
@@ -31,8 +23,8 @@ HIDDEN = 8
 
 
 class _StubEPLayer(EPMoELayerBase):
-    """The attributes and expert weights an EP layer carries, for ``expert_count`` local experts.
-    The base ``__init__`` needs a live process group, so only the ``nn.Module`` half is initialized."""
+    """The attributes and expert weights an EP layer carries. The base ``__init__`` needs a live process group, so
+    only the ``nn.Module`` half is initialized."""
 
     def __init__(self, ep_size: int, *, expert_count: int | None = None, expert_tp_size: int = 1):
         nn.Module.__init__(self)

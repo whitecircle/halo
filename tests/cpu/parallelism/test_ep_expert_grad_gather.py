@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""``gather_expert_grads`` returns every expert's gradient in its family's hub layout.
-
-The layout must not depend on what the family stores locally: separately stored GLU halves (with or
-without expert-TP shards) reach Qwen3's per-expert layout, a fused ``gate_up_proj`` GLM-4's per-expert
-split, and GptOss keeps its interleaved matmul layout with biases from either of its stored layouts.
-
-Collectives are emulated in-process: each group's rank ``r`` contributes the local tensor plus
-``r`` times a group-specific offset, so a wrong concatenation axis, rank order or group shows up as a
-value mismatch. Gradients differ from the weights everywhere, so a gather that read the weights
-fails too.
-
-Run: python tests/cpu/parallelism/test_ep_expert_grad_gather.py
-"""
+"""``gather_expert_grads`` returns every expert's gradient in its family's hub layout. Rank ``r`` contributes the
+local tensor plus ``r`` times a group offset, so a wrong axis or rank order shows."""
 
 from types import SimpleNamespace
 
@@ -49,8 +38,7 @@ def fake_collectives(monkeypatch):
 
 
 def _layer(cls, expert_tp_size: int = 1, **shapes) -> nn.Module:
-    """``cls`` without its constructor (which needs live EP groups), holding random expert weights of
-    ``shapes`` whose gradients are a different random draw."""
+    """Without its constructor, which needs live EP groups."""
     layer = object.__new__(cls)
     nn.Module.__init__(layer)
     layer._expert_lora_attrs = frozenset()
@@ -79,8 +67,7 @@ def _assert_per_expert(gathered: torch.Tensor, expected_local: torch.Tensor) -> 
 
 
 def _assert_split_per_expert(gathered: dict, names: tuple[str, ...], expected_local: torch.Tensor) -> None:
-    """Global expert ``e``'s ``experts.{e}.<name>.weight`` tensors are the even split of rank ``e // LOCAL_EXPERTS``'s
-    local expert ``e % LOCAL_EXPERTS`` along its first axis (``F.linear`` convention)."""
+    """The even split of rank ``e // LOCAL_EXPERTS``'s local expert along its first axis (``F.linear`` convention)."""
     for rank in range(EP_SIZE):
         for j in range(LOCAL_EXPERTS):
             parts = (expected_local[j] + rank * RANK_OFFSET[EP_GROUP]).chunk(len(names))
@@ -90,8 +77,7 @@ def _assert_split_per_expert(gathered: dict, names: tuple[str, ...], expected_lo
 
 @pytest.mark.parametrize("expert_tp_size", [1, 2])
 def test_separately_stored_glu_grads_gather_into_the_per_expert_layout(expert_tp_size):
-    """Qwen3/Bailing store gate and up apart (and ETP shards each along the intermediate dim); the
-    gather reassembles each and writes one ``F.linear`` tensor per expert and projection."""
+    """Qwen3/Bailing store gate and up apart, and ETP shards each along the intermediate dim."""
     shard = INTER // expert_tp_size
     torch.manual_seed(0)
     layer = _layer(
@@ -115,7 +101,6 @@ def test_separately_stored_glu_grads_gather_into_the_per_expert_layout(expert_tp
 
 
 def test_fused_glu_grads_gather_into_the_split_per_expert_layout():
-    """A family storing the fused ``gate_up_proj`` whose hub layout splits it per expert (GLM-4)."""
     torch.manual_seed(1)
     layer = _layer(
         EPGlm4MoELayer,
@@ -132,8 +117,7 @@ def test_fused_glu_grads_gather_into_the_split_per_expert_layout():
 
 @pytest.mark.parametrize("grouped_gemm", [False, True])
 def test_gptoss_grads_keep_the_interleaved_matmul_layout_with_biases(grouped_gemm):
-    """GptOss exports ``[g0, u0, g1, u1, ...]`` untransposed; the grouped-GEMM path stores the pair
-    de-interleaved, so its gradients are re-interleaved on the way out."""
+    """The grouped-GEMM path stores the pair de-interleaved, so gradients are re-interleaved on the way out."""
     torch.manual_seed(2)
     down = {"down_proj": (LOCAL_EXPERTS, INTER, HIDDEN), "down_proj_bias": (LOCAL_EXPERTS, HIDDEN)}
     if grouped_gemm:

@@ -1,6 +1,5 @@
-"""A generative judge: an OpenAI-compatible chat model reads the task and one view of the episode
-and answers with one JSON verdict — integer scores per requirement, or per check whether it fires
-and the lines of the policy's actions that show it."""
+"""A generative judge: a chat model reads the task and one view of the episode and answers one JSON verdict, with
+integer scores per requirement or, per check, whether it fires and the lines of the policy's actions that show it."""
 
 import json
 import re
@@ -39,15 +38,13 @@ SYSTEM_PROMPT = (
 )
 # A quote longer than this is a copy of the response, not evidence of one span in it.
 MAX_EVIDENCE_CHARS = 400
-# How much of a reply an error result quotes.
 _REPLY_EXCERPT_CHARS = 200
 
 # The lines a fired check may quote: one found among them supports it. A judge misquotes a line of a long program
 # about one time in four, and a second and third line make losing a true flag to a slip rare.
 MAX_EVIDENCE_QUOTES = 3
-# A judge copying a line out of a long program slips a word now and then (a synonym, a capital, a word dropped); a
-# quote is still evidence when all but this share of its words — one word at least — run in order at one place in
-# the actions, case aside. A quote shorter than the minimum must match whole.
+# A judge copying a long program's line slips a word now and then; a quote is still evidence when all but this share of
+# its words (one at least) run in order at one place, case aside. Below the minimum it must match whole.
 _EVIDENCE_SLIP_SHARE = 0.2
 _EVIDENCE_MIN_SLIP_WORDS = 4
 
@@ -57,8 +54,7 @@ _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 @dataclass(frozen=True)
 class Verdict:
-    """A parsed judge reply: per-requirement scores (score mode) or per-check ``{fired, evidence}``
-    (veto mode), and the rationale."""
+    """Per-requirement scores (score mode) or per-check ``(fired, evidence)`` (veto mode), and the rationale."""
 
     scores: dict[str, float]
     checks: dict[str, tuple[bool, tuple[str, ...]]]
@@ -66,7 +62,6 @@ class Verdict:
 
 
 def scorer_api_key(term: JudgeTerm) -> str:
-    """The judge's key: the term's ``api_key_env`` variable, then the hosted chain."""
     key = env_str(term.api_key_env) or resolve_external_api_key()
     if not key:
         names = " or ".join(dict.fromkeys((term.api_key_env, *EXTERNAL_API_KEY_CHAIN)))
@@ -79,8 +74,6 @@ def _object_of(properties: dict[str, Any]) -> dict[str, Any]:
 
 
 def response_schema(term: JudgeTerm) -> dict[str, Any]:
-    """The strict JSON schema of a verdict: one integer per requirement, or one ``{fired, evidence}``
-    per check (the evidence a list of quoted lines), plus a rationale."""
     if term.is_veto:
         check = {
             "type": "object",
@@ -104,8 +97,6 @@ def _tagged(tag: str, text: str) -> str:
 
 
 def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
-    """The user turn the judge grades from: the setting the term describes, the instructions and task the
-    policy was given, its tools, the reference, the view of the episode, the rubric and the reply shape."""
     response = view_text(sample, term.view, include_reasoning=term.include_reasoning, max_chars=term.max_view_chars)
     # The setting is the term's own prompt text; every other part quotes text the prompt does not control, escaped
     # (the view escapes its own around the reasoning blocks it sets apart).
@@ -162,16 +153,13 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
 
 
 def action_text(term: JudgeTerm, sample: ScoringSample) -> str:
-    """What a quoted piece of evidence must come from (:func:`~halo.rewards.samples.render_actions`): the policy's
-    actions and the results it received, never its reasoning — a check raised on a thought teaches the policy to hide
-    its reasoning rather than act well.
-    """
+    """Evidence must come from the policy's actions and the results it received, never its reasoning: a check raised on
+    a thought teaches the policy to hide its reasoning rather than act well."""
     return render_actions(sample, term.view, max_chars=term.max_view_chars)
 
 
 def _parse_json_object(content: str) -> Any | None:
-    """The JSON value ``content`` is, or the first JSON object it embeds in prose; ``None`` when
-    neither parses."""
+    """The JSON value ``content`` is, or the first object it embeds in prose; ``None`` when neither parses."""
     match = _JSON_OBJECT.search(content)
     for candidate in (content, match.group(0) if match else None):
         if candidate is None:
@@ -184,8 +172,8 @@ def _parse_json_object(content: str) -> Any | None:
 
 
 def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
-    """The verdict in a judge reply, or ``None`` when the reply holds no JSON object answering every
-    requirement with a finite number (score mode) or every check with a ``fired`` boolean (veto mode)."""
+    """``None`` when the reply holds no JSON object answering every requirement with a finite number (score mode) or
+    every check with a ``fired`` boolean (veto mode)."""
     payload = _parse_json_object(content)
     if not isinstance(payload, Mapping):
         return None
@@ -226,10 +214,8 @@ def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
 
 
 def evidence_supported(evidence: str, text: str) -> bool:
-    """Whether ``evidence`` is a span of ``text``, both read as the prompt shows them (:func:`escape_tags`), whitespace
-    folded since a model reflows what it quotes, case aside with a slipped word or so (:data:`_EVIDENCE_SLIP_SHARE`),
-    and short enough to be a span rather than a copy of the text.
-    """
+    """Whether ``evidence`` is a span of ``text``: whitespace folded since a model reflows what it quotes, case aside
+    with a slipped word or so (:data:`_EVIDENCE_SLIP_SHARE`), and short enough to be a span rather than a copy."""
     quote = _WHITESPACE.sub(" ", escape_tags(evidence)).strip()
     if not 0 < len(quote) <= MAX_EVIDENCE_CHARS:
         return False
@@ -258,8 +244,7 @@ def evidence_supported(evidence: str, text: str) -> bool:
 
 
 class GenerativeJudge(Scorer):
-    """The judge behind a :class:`JudgeTerm`: one lazily built OpenAI-compatible client per instance
-    (per Ray actor or trainer rank), shared by every sample it grades."""
+    """One lazily built client per instance (per Ray actor or trainer rank), shared by every sample."""
 
     term_type = JudgeTerm
     term: JudgeTerm
@@ -290,7 +275,6 @@ class GenerativeJudge(Scorer):
             await client.close()
 
     def _usage_metrics(self, completion) -> dict[str, float]:
-        """The usage a reply reports: its completion tokens and, where the endpoint prices it, its cost."""
         metrics: dict[str, float] = {}
         usage = getattr(completion, "usage", None)
         if usage is not None:
@@ -349,9 +333,8 @@ class GenerativeJudge(Scorer):
     def _veto_result(
         self, verdict: Verdict, actions: str, metrics: dict[str, float], facts: frozenset[str]
     ) -> ScoreResult:
-        """A fired check counts only with a line of its evidence found in the policy's actions and while the
-        episode fact it is exempt under (``unless``) does not hold; the veto checks strip the episode's
-        credits, and the checks that carry weight make the term's score."""
+        """A fired check counts only with a line of its evidence found in the policy's actions and while the fact it is
+        exempt under (``unless``) does not hold."""
         term = self.term
         fired: dict[str, bool] = {}
         unsupported = 0

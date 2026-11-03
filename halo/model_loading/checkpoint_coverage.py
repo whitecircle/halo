@@ -1,9 +1,6 @@
-"""Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized, load the checkpoint's
-weights on every rank, and read the checkpoint's own config without another run's toolkit stamps.
-
-``from_pretrained`` reports the keys it re-initialized only through the transformers logger, which
-``configure_training_run`` silences off the logging rank. Which absences are legitimate is read off the model class.
-"""
+"""Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized. ``from_pretrained`` reports
+re-initialized keys only through the transformers logger, which ``configure_training_run`` silences off the logging
+rank."""
 
 from __future__ import annotations
 
@@ -31,18 +28,9 @@ _FSDP_CPU_RAM_EFFICIENT_LOADING = "FSDP_CPU_RAM_EFFICIENT_LOADING"
 def unexpected_missing_keys(
     model: nn.Module, missing_keys: Iterable[str], *, excuse_task_head: bool = True
 ) -> list[str]:
-    """The subset of ``missing_keys`` that cannot be a legitimate absence.
-
-    Legitimate absences, all read off the model class:
-
-    * a tie (``lm_head.weight`` under ``tie_word_embeddings``): one object answering to two keys;
-    * a task head the architecture adds on top of the backbone, i.e. anything outside
-      ``base_model_prefix``, so a class that is itself the backbone (``AutoModel``) excuses nothing;
-    * ``_keys_to_ignore_on_load_missing``, the class's own declaration.
-
-    ``excuse_task_head=False`` withdraws the second excuse, for a caller that consumes a head it
-    cannot train: a random ``score`` produces plausible but meaningless numbers instead of an error.
-    """
+    """The ``missing_keys`` that cannot be legitimate. Excused, off the model class: a tie, a task head outside
+    ``base_model_prefix`` (unless ``excuse_task_head=False``, for a caller consuming a head it cannot train), and
+    ``_keys_to_ignore_on_load_missing``."""
     missing = set(missing_keys)
     if not missing:
         return []
@@ -70,11 +58,7 @@ def unexpected_missing_keys(
 def verify_checkpoint_coverage(
     model: nn.Module, missing_keys: Iterable[str], *, source: str, excuse_task_head: bool = True
 ) -> None:
-    """Raise when ``missing_keys`` holds an absence that is not a legitimate one.
-
-    ``source`` names the checkpoint (or the caller, for the lazy loaders) in the message;
-    ``excuse_task_head`` is passed through to :func:`unexpected_missing_keys`.
-    """
+    """Raise when ``missing_keys`` holds an absence not legitimate; ``source`` names the checkpoint or caller."""
     unexpected = unexpected_missing_keys(model, missing_keys, excuse_task_head=excuse_task_head)
     if not unexpected:
         return
@@ -101,14 +85,9 @@ def verify_checkpoint_coverage(
 
 @contextmanager
 def full_weights_on_every_rank() -> Iterator[None]:
-    """Turn accelerate's ``FSDP_CPU_RAM_EFFICIENT_LOADING`` off for the loads inside the scope.
-
-    With it on under an accelerate FSDP launch, ``from_pretrained`` reads the checkpoint on every rank and then
-    replaces every parameter and buffer off each node's local rank 0 with a CPU zero copy, leaving the weights to the
-    broadcast in ``accelerator.prepare``. A frozen model never gets that broadcast, and the policy is that zero copy
-    until it does, so anything that uses it first (a reference sweep at construction, a teacher placed on the policy's
-    device) fails. The broadcast at ``prepare`` still runs, from weights every rank already holds.
-    """
+    """Turn ``FSDP_CPU_RAM_EFFICIENT_LOADING`` off for the scope. Under an accelerate FSDP launch it leaves off-rank-0
+    weights as CPU zero copies until ``accelerator.prepare``'s broadcast, which a frozen model never gets and which
+    anything using the policy first (a reference sweep, a teacher on its device) precedes."""
     previous = os.environ.get(_FSDP_CPU_RAM_EFFICIENT_LOADING)
     os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = "false"
     try:
@@ -123,14 +102,9 @@ def full_weights_on_every_rank() -> Iterator[None]:
 def from_pretrained_verified(
     model_class, model_name_or_path: str, *, excuse_task_head: bool = True, **kwargs
 ) -> PreTrainedModel:
-    """``model_class.from_pretrained`` with the missing-key report captured and gated, inside
-    :func:`full_weights_on_every_rank` so every rank holds the checkpoint's weights.
-
-    The report is taken from ``output_loading_info`` rather than the transformers logger so it
-    survives the ``set_verbosity_error`` that ``configure_training_run`` applies off the logging rank. A
-    ``config`` the caller passes carries this run's stamps and is kept; one the load reads from the checkpoint
-    takes :func:`drop_toolkit_stamps`.
-    """
+    """``from_pretrained`` with its missing-key report gated, inside :func:`full_weights_on_every_rank`. A passed
+    ``config`` carries this run's stamps and is kept; one read from the checkpoint takes
+    :func:`drop_toolkit_stamps`."""
     with full_weights_on_every_rank():
         model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
     if kwargs.get("config") is None:

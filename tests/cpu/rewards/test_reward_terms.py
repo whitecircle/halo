@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests: reward terms parsed from a ``rewards:`` list and priced as ``weight * score ** exponent``.
-
-Run: python tests/cpu/rewards/test_reward_terms.py  (or pytest)
-"""
+"""Reward terms parsed from a ``rewards:`` list and priced as ``weight * score ** exponent``."""
 
 import math
 
@@ -183,18 +180,18 @@ def test_a_checks_term_from_config_is_unpriced_and_neutral_by_default():
         Check(name="sloppy", description="The policy skipped a required step."),
         Check(name="rude", description="The policy insulted the user."),
     )
-    # A negative weight prices the fired process flags as a penalty; the config may also keep on_error strict.
+    # A negative weight prices the fired process flags as a penalty.
     (penalty,) = parse_reward_terms(
         [{"source": "judge", "name": "gate", "checks": CHECKS, "weight": -0.2, "on_error": "invalid"}], SOURCES
     )
     assert penalty.weight == -0.2 and penalty.on_error is OnError.INVALID and penalty.price(0.5) == -0.1
-    # The constructor's own weight default is a scoring judge's 1.0: a direct veto build must say 0.
+    # The constructor's weight default is a scoring judge's 1.0, so a direct veto build must say 0.
     with pytest.raises(ValueError, match="never adds reward"):
         JudgeTerm(name="gate", checks=penalty.checks)
 
 
 def test_an_empty_checks_list_beside_requirements_leaves_a_scoring_judge_as_it_is():
-    """``checks: []`` is no veto judge: the veto defaults (weight 0, on_error neutral) must not apply."""
+    """The veto defaults (weight 0, on_error neutral) must not apply."""
     (term,) = parse_reward_terms([{**JUDGE_SPEC, "checks": []}], SOURCES)
     assert not term.is_veto and term.weight == 1.0 and term.on_error is OnError.INVALID
 
@@ -227,7 +224,7 @@ def test_flag_fraction_weighs_each_process_check():
             Check(name="sloppy", description="d", weight=3.0),
         ),
     )
-    # A zero-weight flag is logged, never priced: firing alone it leaves the score at 0.
+    # A zero-weight flag is logged, never priced.
     assert term.flag_fraction({"logged": True, "cheat": True}) == 0.0
     assert term.flag_fraction({"wasted": True}) == 0.25
     assert term.flag_fraction({"wasted": True, "sloppy": True, "logged": True}) == 1.0
@@ -237,8 +234,7 @@ def test_flag_fraction_weighs_each_process_check():
 
 
 def test_a_veto_check_given_a_weight_also_prices():
-    """Weighted, a veto check is priced like a process flag on top of its gate: each fired check costs its own
-    share of the term weight, so the prices add."""
+    """Each fired check costs its own share of the term weight on top of its gate, so the prices add."""
     term = JudgeTerm(
         name="gate",
         weight=-0.7,
@@ -313,7 +309,6 @@ def test_judge_score_is_the_weighted_fraction_of_the_scale_with_clamping():
     )
     assert term.score_from(term.requirement_fractions({"a": 10, "b": 10})) == 1.0
     assert term.score_from(term.requirement_fractions({"a": 10, "b": 0})) == pytest.approx(0.25)
-    # Out-of-scale replies are clamped, never extrapolated into a score above 1 or below 0.
     assert term.requirement_fractions({"a": 25, "b": -4}) == {"a": 1.0, "b": 0.0}
     assert term.score_from(term.requirement_fractions({"a": 25, "b": -4})) == pytest.approx(0.25)
     # Fractional weights round a full score past 1 by an ulp; the term must still price it.
@@ -341,10 +336,7 @@ def test_reward_model_normalization_is_a_shifted_scaled_logistic():
 
 
 def test_a_reward_with_no_terms_is_refused():
-    """``rewards: []`` leaves the episode reward as turn shaping alone — a run with no objective at
-    all, which trains on shaping and reports nothing wrong. The composer refuses it wherever it is
-    built (including inside a Ray actor), and the term parser refuses it for both arms' configs
-    before the cluster comes up."""
+    """With no terms a run would train on turn shaping alone and report nothing wrong."""
     with pytest.raises(ValueError, match="at least one term"):
         RewardComposer([])
     with pytest.raises(ValueError, match="at least one reward term"):
@@ -353,15 +345,13 @@ def test_a_reward_with_no_terms_is_refused():
         EnvironmentConfig(rewards=[])
     with pytest.raises(ValueError, match="at least one reward term"):
         OnlineGRPOScriptArguments(rewards=[])
-    # The upper bound and the lower bound are the same guard's two sides.
     with pytest.raises(ValueError, match="at most one environment term"):
         RewardComposer([EnvironmentTerm(), EnvironmentTerm()])
     assert len(RewardComposer([EnvironmentTerm()]).terms) == 1
 
 
 def test_the_rlvr_arm_admits_its_graders_and_the_external_scorers_only():
-    """The RLVR arm runs its two graders and scores the judge and reward-model terms externally; it has
-    no environment whose grade an environment term would read."""
+    """The RLVR arm has no environment whose grade an environment term would read."""
     args = OnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, {"source": "format"}, JUDGE_SPEC, RM_SPEC])
     assert [type(term) for term in args.reward_terms] == [AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm]
     with pytest.raises(ValueError, match="unknown reward source 'environment'"):
@@ -369,9 +359,7 @@ def test_the_rlvr_arm_admits_its_graders_and_the_external_scorers_only():
 
 
 def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():
-    """``checks: environment`` parses as a veto judge with a veto judge's config defaults, binds to the checks given
-    and leaves other terms alone, stays unbound when given none, and is refused where no environment's objective
-    gates it or it stays unbound."""
+    """Refused where no environment's objective gates it or it stays unbound."""
     spec = {"source": "judge", "name": "audit", "checks": "environment"}
     term, judge = parse_reward_terms([spec, JUDGE_SPEC], SOURCES)
     assert term.is_veto and term.checks == "environment"
@@ -388,9 +376,7 @@ def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():
 
 
 def test_a_judge_context_file_is_read_into_its_context_when_a_config_parses(tmp_path):
-    """Both arms read a judge's ``context_file`` into its ``context`` at parse time, so what the environment config
-    forwards to the actors holds the text, never a path another node or directory cannot resolve. Setting both, a
-    missing file and the key on another source are refused."""
+    """The config forwarded to the actors holds the text, never a path another node cannot resolve."""
     setting = tmp_path / "setting.txt"
     setting.write_text("The policy has a scratchpad.\n", encoding="utf-8")
     spec = {**JUDGE_SPEC, "context_file": str(setting)}

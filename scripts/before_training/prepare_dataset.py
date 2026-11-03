@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Offline SFT dataset preparation: tokenize, optionally pack, optionally shard, then publish to S3, the Hub or a
-local path, so training skips tokenization at startup. The flags are :class:`PreprocessingConfig`'s fields plus
-:class:`PrepareDatasetArguments`'s, and a YAML file of them works as the first argument."""
+"""Offline SFT dataset preparation: tokenize, optionally pack and shard, then publish, so training skips tokenization
+at startup. The flags are :class:`PreprocessingConfig`'s plus :class:`PrepareDatasetArguments`'s; a YAML file of them
+works as first argument."""
 
 from halo.configs.parser import HaloArgumentParser
 from halo.data.preprocessed.metadata import PreprocessingConfig
@@ -12,10 +12,8 @@ from scripts.cli_arguments import add_trust_remote_code_arg
 
 
 def parse_args() -> tuple[PrepareDatasetArguments, PreprocessingConfig]:
-    """The tool's arguments and the bake's config, built before anything is fetched. Where the tool's defaults
-    differ from the config's: completion masking follows the mode as training does (on for chat, while text
-    refuses it), and the worker count (:func:`bake_num_proc`) and chat template are recorded resolved.
-    ``--model_name_or_path`` may be a Hub repo, so its own code stays opt-in, as in training."""
+    """Completion masking follows the mode as training does (on for chat, refused for text), and the worker count and
+    chat template are recorded resolved. ``--model_name_or_path`` may be a Hub repo, so its code stays opt-in."""
     parser = add_trust_remote_code_arg(
         HaloArgumentParser((PrepareDatasetArguments, PreprocessingConfig)),
         default=PreprocessingConfig.trust_remote_code,

@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""The two FSDP2 entry points must wrap a model identically — one body, one mesh — and the EP+TP
-wrap must go through the TP one.
-
-``apply_fsdp2_for_dp`` (plain/EP/CP data parallelism) and ``apply_fsdp2_for_tp`` (the DP dimension of
-a TP run) differ only in how the DP mesh is obtained. A copy of the wrap per path would let a policy
-or reshard fix land on one path and leave the other behind — silently, because both still report
-success and every failure mode of a wrong FSDP2 policy (a cast that should not happen, a reduce
-dtype, a layer that never became its own shard group) shows up as drift, not as an error.
-
-The TP path also takes the mesh the loader already attached: rebuilding one there would leave the
-model's params sharded on the first mesh while FSDP2 reduces their grads over the second. EP+TP
-takes the same path with its EP modules as ignored params, so it inherits the cast policy and the
-single-device check rather than wrapping beside them.
-
-    python tests/cpu/parallelism/test_fsdp2_entry_points.py
-"""
+"""The two FSDP2 entry points wrap a model identically, and EP+TP wraps through the TP one.
+Every failure of a wrong FSDP2 policy shows up as drift, so a per-path copy would hide a fix landing on one path."""
 
 import contextlib
 from types import SimpleNamespace
@@ -33,7 +19,7 @@ _FP32 = {"compute_dtype": torch.float32, "fp32_reduce": False}
 
 
 class _FakeMesh:
-    """The wrap reads a mesh's size, its dim names, and (TP) its ``dp`` slice — nothing else."""
+    """The wrap reads a mesh's size, dim names and (TP) its ``dp`` slice."""
 
     def __init__(self, size: int, dim_names: tuple[str, ...] = ()):
         self._size = size
@@ -57,7 +43,7 @@ class _CausalLmLike(nn.Module):
 
 @contextlib.contextmanager
 def _fake_world(world_size: int = 8):
-    """A live group as far as the wrap can tell, logging as rank 0 (both paths log there)."""
+    """Logs as rank 0, where both paths log."""
     with (
         patch(f"{fsdp.__name__}.dist.is_initialized", return_value=True),
         patch(f"{fsdp.__name__}.dist.get_world_size", return_value=world_size),
@@ -67,11 +53,7 @@ def _fake_world(world_size: int = 8):
 
 
 def _record_wrap(entry, **kwargs) -> list[tuple[str, int, torch.dtype | None, bool]]:
-    """Run one entry point and return, per ``fully_shard`` call, what it wrapped and how.
-
-    Modules are recorded by NAME (a multi-layer unit's joined by ``+``) so runs over two model instances stay
-    comparable.
-    """
+    """Modules recorded by name (a unit's joined by ``+``) so runs over two instances stay comparable."""
     model = _CausalLmLike()
     names = {id(module): name or "<root>" for name, module in model.named_modules()}
     calls: list[tuple[str, int, torch.dtype | None, bool]] = []
@@ -99,28 +81,24 @@ def _record_wrap(entry, **kwargs) -> list[tuple[str, int, torch.dtype | None, bo
 
 
 def test_the_tp_entry_point_takes_its_dp_width_from_the_caller_not_the_world():
-    """``data_parallel_size`` is ``stage_world_size // max(tp, cp, expert_tp)``; ``world // tp_size``
-    reproduces it only while PP+TP, TP+CP and TP+ETP are all rejected. Deriving it here would build
-    a DP mesh spanning ranks that hold a DIFFERENT batch the day one of those is allowed — grads
-    reduced across unrelated data, with nothing to see but drift."""
+    """``world // tp_size`` matches only while PP+TP, TP+CP and TP+ETP are rejected; afterwards grads reduce across
+    unrelated data."""
     model = _CausalLmLike()
     model._device_mesh = _FakeMesh(4, (MeshDim.DP, MeshDim.TP))
 
-    # world 8, tp 2 -> the world-derived answer is 4; a cp2/pp2 composition makes the true DP 2.
+    # World 8, tp 2 derives 4; a cp2/pp2 composition makes the true DP 2.
     with _fake_world(world_size=8), patch.object(fsdp, "_apply_fsdp2") as applied:
         wrapped, _ = fsdp.apply_fsdp2_for_tp(model, tp_size=2, dp_size=2, **_BF16)
     assert wrapped and "2×2" in applied.call_args.kwargs["topology"], (
         f"the wrap reported {applied.call_args.kwargs['topology']}, not the caller's dp_size"
     )
 
-    # And dp_size==1 skips FSDP even though world // tp_size would say 4.
     with _fake_world(world_size=8), patch.object(fsdp, "_apply_fsdp2") as never:
         assert fsdp.apply_fsdp2_for_tp(model, tp_size=2, dp_size=1, **_BF16) == (False, None)
     never.assert_not_called()
 
 
 def test_both_entry_points_wrap_the_same_modules_the_same_way():
-    """The shared body, pinned end to end: same groups, same mesh, same policy, same reshard mode."""
     dp_calls = _record_wrap(fsdp.apply_fsdp2_for_dp, dp_size=4, **_BF16)
     tp_calls = _record_wrap(fsdp.apply_fsdp2_for_tp, tp_size=2, dp_size=4, **_BF16)
 
@@ -133,7 +111,7 @@ def test_both_entry_points_wrap_the_same_modules_the_same_way():
 
 
 def test_both_entry_points_carry_the_reshard_and_precision_knobs_into_the_wrap():
-    """Anti-vacuity for the comparison above: the recorded fields must track the arguments."""
+    """Anti-vacuity: the recorded fields must track the arguments."""
     for entry, axis in (
         (fsdp.apply_fsdp2_for_dp, {"dp_size": 4}),
         (fsdp.apply_fsdp2_for_tp, {"tp_size": 2, "dp_size": 4}),
@@ -166,7 +144,7 @@ def test_the_tp_entry_point_reuses_the_mesh_the_loader_attached():
 
 
 def test_the_tp_entry_point_refuses_a_mesh_with_no_dp_dimension():
-    """Wrapping over a TP-only mesh trains with no DP gradient sync, and reports success."""
+    """It would train with no DP gradient sync and report success."""
     model = _CausalLmLike()
     model._device_mesh = _FakeMesh(4, (MeshDim.TP,))
 
@@ -179,13 +157,13 @@ def test_the_tp_entry_point_refuses_a_mesh_with_no_dp_dimension():
 
 
 class _Fp32ResidualLayer(nn.Linear):
-    """A layer declaring an fp32 activation across layer boundaries (Zaya's residual)."""
+    """Declares an fp32 activation across layer boundaries (Zaya's residual)."""
 
     _fp32_interlayer_residual = True
 
 
 class _EPTPHost(ModeSetupMixin):
-    """What the EP+TP wrap reads: the config, the args, the model and the FSDP exclusions."""
+    """The config, the args, the model and the FSDP exclusions."""
 
     def __init__(self, model, excluded):
         self.model = model
@@ -211,8 +189,7 @@ def _ep_tp_model() -> _CausalLmLike:
 
 
 def test_the_ep_tp_wrap_runs_the_shared_body_with_its_ep_modules_left_out():
-    """EP+TP wraps over the loader's mesh like TP does, plus the EP modules as ignored params; the
-    shared body is what reads the model's fp32-residual declaration into the cast policy."""
+    """The shared body reads the model's fp32-residual declaration into the cast policy."""
     model = _ep_tp_model()
     expert = model.model.layers[1].weight
     calls = []
@@ -240,7 +217,7 @@ def test_the_ep_tp_wrap_runs_the_shared_body_with_its_ep_modules_left_out():
 
 
 def test_the_ep_tp_wrap_refuses_a_model_spread_over_two_devices():
-    """The single-device check is rank-local and must run before the wrap's collective mesh work."""
+    """The check is rank-local and must run before the wrap's collective mesh work."""
     model = _ep_tp_model()
     model.lm_head.to("meta")
 
@@ -249,7 +226,6 @@ def test_the_ep_tp_wrap_refuses_a_model_spread_over_two_devices():
 
 
 def test_neither_entry_point_wraps_a_single_rank_dp_group():
-    """One DP rank has nothing to synchronize, and both paths must skip rather than shard."""
     with _fake_world(world_size=2), patch.object(fsdp, "fully_shard", side_effect=AssertionError("wrapped")):
         assert fsdp.apply_fsdp2_for_dp(_CausalLmLike(), dp_size=1, **_BF16) is False
         assert fsdp.apply_fsdp2_for_tp(_CausalLmLike(), tp_size=2, dp_size=1, **_BF16) == (False, None)

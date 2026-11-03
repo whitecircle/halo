@@ -1,9 +1,5 @@
-"""Safetensors weight and adapter files follow the umask like every other checkpoint file.
-
-``safetensors.torch.save_file`` creates its file ``0600`` whatever the umask, so a checkpoint whose JSON and
-``torch.save`` files are group-readable would hold weights only their writer can read. Each writer below must
-leave ``0o666 & ~umask``; the ``077`` case is the control where the two agree.
-"""
+"""Safetensors weight and adapter files follow the umask: ``save_file`` creates them ``0600`` whatever it is.
+Each writer must leave ``0o666 & ~umask``; ``077`` is the control where the two agree."""
 
 import os
 import stat
@@ -79,8 +75,7 @@ def test_full_checkpoint_files_follow_the_umask(umask, tmp_path):
 
 
 def test_an_adapter_conversion_changes_the_mode_of_its_own_file_only(umask, tmp_path):
-    """``convert_to_bf16 --peft`` writes adapter files and removes nothing, so an earlier save's weights in its
-    output directory keep their mode (another user's file would refuse the chmod)."""
+    """It removes nothing, so earlier weights keep their mode (another user's file would refuse the chmod)."""
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(tmp_path / "base")
     base = Qwen3ForCausalLM.from_pretrained(tmp_path / "base")
     get_peft_model(base, LoraConfig(r=4, target_modules=["q_proj"])).save_pretrained(tmp_path / "adapter")
@@ -93,7 +88,7 @@ def test_an_adapter_conversion_changes_the_mode_of_its_own_file_only(umask, tmp_
     assert _modes(output) == {**_expect(umask, ["adapter_model.safetensors"]), "model.safetensors": "600"}
 
 
-# A head past the pooling, and the module folders its save writes weights into: a ``Router`` nests one per route.
+# A ``Router`` nests one module folder per route.
 _EMBEDDING_HEADS = [
     pytest.param(lambda dimension: Dense(dimension, dimension), ["2_Dense"], id="dense"),
     pytest.param(
@@ -105,7 +100,6 @@ _EMBEDDING_HEADS = [
 
 
 def _embedding_pipeline(head) -> SentenceTransformer:
-    """The toolkit's backbone wrapper, mean pooling and ``head``."""
     torch.manual_seed(0)
     backbone = PreloadedTransformer(Qwen3Model(Qwen3Config(**TINY_QWEN3_CONFIG)), word_level_tokenizer(["a", "b"]))
     dimension = backbone.get_embedding_dimension()
@@ -114,8 +108,7 @@ def _embedding_pipeline(head) -> SentenceTransformer:
 
 @pytest.mark.parametrize(("head", "weight_folders"), _EMBEDDING_HEADS)
 def test_an_embedding_save_follows_the_umask_in_every_module_folder(umask, head, weight_folders, tmp_path):
-    """sentence-transformers writes each module's weights into its own folder (``2_Dense/``) at ``0600``,
-    under the trainer's save of the whole pipeline."""
+    """sentence-transformers writes each module's weights into its own folder at ``0600``."""
     args = EmbeddingConfig(
         output_dir=str(tmp_path / "run"),
         use_cpu=True,
@@ -123,7 +116,7 @@ def test_an_embedding_save_follows_the_umask_in_every_module_folder(umask, head,
         bf16=False,
         use_liger_kernel=False,
         max_length=16,
-        router_mapping={"anchor": "query", "positive": "document"},  # the Router head's routes
+        router_mapping={"anchor": "query", "positive": "document"},  # The Router head's routes.
     )
     pairs = Dataset.from_dict({"anchor": ["a b"], "positive": ["b a"]})
     trainer = EmbeddingTrainer(
@@ -139,7 +132,7 @@ def test_an_embedding_save_follows_the_umask_in_every_module_folder(umask, head,
 
 @pytest.mark.parametrize(("head", "weight_folders"), _EMBEDDING_HEADS)
 def test_a_distributed_embedding_save_follows_the_umask_in_every_module_folder(umask, head, weight_folders, tmp_path):
-    """The pipeline modules past the backbone, which a sharded run's save writes one by one."""
+    """A sharded run's save writes these modules one by one."""
     host = object.__new__(EmbeddingTrainer)
 
     host._save_st_pipeline_config(_embedding_pipeline(head), str(tmp_path))

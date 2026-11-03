@@ -1,9 +1,5 @@
-"""Attention geometry and the per-layer attention cost layout: which decoder layers score a key matrix,
-over how many keys, at what head width.
-
-Keyed on transformers' ``layer_types`` vocabulary, never on a model name, and read off the rank's own
-decoder layers, so a pipeline stage describes its slice. Costs are algorithmic key counts.
-"""
+"""Attention geometry and the per-layer attention cost layout, keyed on transformers' ``layer_types`` vocabulary and
+read off the rank's own decoder layers, so a pipeline stage describes its slice."""
 
 from __future__ import annotations
 
@@ -35,8 +31,6 @@ INDEX_PASSES = 2.0
 
 
 class _AttentionKind(enum.StrEnum):
-    """How many keys a decoder layer's score matrix spans per token."""
-
     FULL = "full"
     WINDOW = "window"
     CHUNKED = "chunked"
@@ -45,8 +39,8 @@ class _AttentionKind(enum.StrEnum):
     NONE = "none"
 
 
-# ``config.layer_types`` entry -> cost kind ("hybrid" is full attention with a convolution branch). An
-# entry outside this table raises rather than costing an unknown mixer as full attention.
+# "hybrid" is full attention with a convolution branch. An entry outside this table raises rather than costing an
+# unknown mixer as full attention.
 LAYER_TYPE_KINDS: dict[str, _AttentionKind] = {
     "full_attention": _AttentionKind.FULL,
     "hybrid": _AttentionKind.FULL,
@@ -60,7 +54,6 @@ LAYER_TYPE_KINDS: dict[str, _AttentionKind] = {
     "conv": _AttentionKind.NONE,
 }
 
-# The kinds whose keys a fixed count bounds: the window, the chunk, the sparse top-k.
 _BOUNDED_KINDS = frozenset({_AttentionKind.WINDOW, _AttentionKind.CHUNKED, _AttentionKind.SPARSE})
 
 # The layer types that select their keys through a QK-only indexer bounded by ``index_topk``.
@@ -72,18 +65,14 @@ _INDEXER_FIELDS = (
     ("indexer_n_heads", "indexer_head_dim", "indexer_compress_ratio"),
 )
 
-# A decoder layer's own declaration of its type, read before ``config.layer_types`` because a sliced
-# pipeline stage re-bases list positions.
+# Read before ``config.layer_types``, as a sliced pipeline stage re-bases list positions.
 _LAYER_TYPE_ATTRS = ("layer_type", "attention_type", "block_type")
 
 
 @dataclass(frozen=True)
 class LayerAttention:
-    """One decoder layer's score cost: the keys it attends at ``width``, plus a QK-only indexer.
-
-    ``keys`` bounds the attended keys, ``rate`` compresses the key stream, ``local_window`` adds a
-    compressed layer's local band, and ``index_width`` / ``index_pool`` describe the indexer.
-    """
+    """``keys`` bounds the attended keys, ``rate`` compresses the key stream, ``local_window`` adds a compressed
+    layer's local band, and ``index_width`` / ``index_pool`` describe a QK-only indexer."""
 
     kind: _AttentionKind
     width: float
@@ -94,7 +83,6 @@ class LayerAttention:
     index_pool: int = 1
 
     def score_keys(self, lengths: torch.Tensor) -> torch.Tensor:
-        """Keys a token of a document of each length attends through the score matrix."""
         if self.kind == _AttentionKind.NONE:
             return torch.zeros_like(lengths)
         if self.kind == _AttentionKind.FULL:
@@ -111,21 +99,14 @@ class LayerAttention:
 
 @dataclass(frozen=True)
 class AttentionLayout:
-    """The score cost of every decoder layer on this rank. ``source`` is ``"layers"`` when read off the
-    rank's module tree, ``"config"`` when standing in for the config's full depth."""
+    """``source`` is ``"layers"`` when read off the rank's module tree, ``"config"`` standing in for full depth."""
 
     layers: tuple[LayerAttention, ...]
     source: str = "layers"
 
     def flops_for_documents(self, lengths: torch.Tensor, own_tokens: torch.Tensor | None = None) -> torch.Tensor:
-        """Attention-score FLOPs of documents of the given token lengths (a float64 scalar), summed per
-        document because the varlen kernels never attend across a packed row. Full attention is costed
-        at every key (the PaLM convention), bounded layers at the keys their kernel visits.
-
-        ``own_tokens`` counts only part of each document: a tree node is the tail of its root-to-leaf
-        path, so it costs its own tokens at that path's length and its ancestors are costed once, as
-        their own nodes.
-        """
+        """Summed per document, as the varlen kernels never attend across a packed row. Full attention is costed at
+        every key (the PaLM convention). A tree node, the tail of its path, costs ``own_tokens`` at its length."""
         lengths = lengths.to(torch.float64)
         own_tokens = lengths if own_tokens is None else own_tokens.to(torch.float64)
         total = torch.zeros((), dtype=torch.float64, device=lengths.device)
@@ -138,15 +119,13 @@ class AttentionLayout:
         return total
 
     def flops_per_token(self, seq_len: int) -> float:
-        """Per-token score FLOPs when every token belongs to a document of ``seq_len`` tokens."""
         if seq_len <= 0:
             return 0.0
         return float(self.flops_for_documents(torch.tensor([seq_len], dtype=torch.float64))) / seq_len
 
     @cached_property
     def grouped(self) -> tuple[LayerAttention, ...]:
-        """Layers sharing a rule merged, widths summed — one vectorized pass per rule; merged once per layout,
-        which every batch's costing reads."""
+        """Layers sharing a rule merged, widths summed, for one vectorized pass per rule."""
         merged: dict[LayerAttention, LayerAttention] = {}
         for layer in self.layers:
             rule = replace(layer, width=0.0, index_width=0.0)
@@ -157,7 +136,7 @@ class AttentionLayout:
         return tuple(merged.values())
 
     def describe(self) -> str:
-        """``18×full + 18×window(128) @ width 8192`` — the banner form."""
+        """The banner form, ``18×full + 18×window(128) @ width 8192``."""
         counts: dict[tuple[str, int | None, int], int] = {}
         for layer in self.layers:
             key = (layer.kind, layer.keys if layer.kind != _AttentionKind.COMPRESSED else None, layer.rate)
@@ -178,8 +157,7 @@ class AttentionLayout:
 
 
 def _layer_field(decoder, index: int, field: str):
-    """``field`` for layer ``index``: the per-layer config view, else a ``<field>_per_layer`` list, else
-    the global value."""
+    """The per-layer config view, else a ``<field>_per_layer`` list, else the global value."""
     view = getattr(decoder, "per_layer_config", None)
     if view is not None:
         try:
@@ -202,8 +180,7 @@ def _positive(decoder, index: int, field: str, layer_type: str) -> int:
 
 
 def _qk_v_head_dims(field: Callable[[str], int | None], head_dim: int | None) -> tuple[int | None, int | None]:
-    """``(d_qk, d_v)`` read through ``field``, a config-field getter: MLA stacks a RoPE slice on a nope slice
-    (with only ``qk_rope_head_dim``, ``head_dim`` is the whole width), else both are ``head_dim``."""
+    """MLA stacks a RoPE slice on a nope slice (with only ``qk_rope_head_dim``, ``head_dim`` is the whole width)."""
     qk_dim = field("qk_head_dim")
     if not qk_dim:
         nope = field("qk_nope_head_dim")
@@ -212,8 +189,7 @@ def _qk_v_head_dims(field: Callable[[str], int | None], head_dim: int | None) ->
 
 
 def _score_width(decoder, index: int) -> float:
-    """``heads·(d_qk + d_v)`` for layer ``index``; ``2·hidden_size`` (the PaLM ``H`` convention)
-    when the config declares no head geometry."""
+    """``heads·(d_qk + d_v)``; ``2·hidden_size`` (the PaLM ``H`` convention) when the config declares no geometry."""
     heads = _layer_field(decoder, index, "num_attention_heads")
     hidden = _layer_field(decoder, index, "hidden_size")
     if not heads:
@@ -228,8 +204,7 @@ def _score_width(decoder, index: int) -> float:
 
 
 def _indexer(decoder, index: int) -> tuple[float, int]:
-    """Width and key pooling of a sparse / compressed layer's QK-only indexer (0, 1 without one), in the first
-    spelling of :data:`_INDEXER_FIELDS` the config declares."""
+    """Width and key pooling of a QK-only indexer (0, 1 without one)."""
     for heads_field, dim_field, pool_field in _INDEXER_FIELDS:
         heads = _layer_field(decoder, index, heads_field)
         dim = _layer_field(decoder, index, dim_field)
@@ -239,8 +214,7 @@ def _indexer(decoder, index: int) -> tuple[float, int]:
 
 
 def _sparse_keys(decoder, index: int, layer_type: str) -> int:
-    """Keys a sparse layer attends: ``index_topk``, or a block indexer's ``indexer_budget`` plus the incomplete
-    tail block (up to ``indexer_compress_ratio - 1`` tokens) it always keeps."""
+    """``index_topk``, or a block indexer's ``indexer_budget`` plus the incomplete tail block it always keeps."""
     if _layer_field(decoder, index, "index_topk") is None and _layer_field(decoder, index, "indexer_budget"):
         budget = _positive(decoder, index, "indexer_budget", layer_type)
         return budget + _positive(decoder, index, "indexer_compress_ratio", layer_type) - 1
@@ -290,14 +264,11 @@ def _layer_attention(decoder, layer_type: str, index: int) -> LayerAttention:
 
 
 def _uniform_layer_type(cfg) -> str:
-    """The type of every layer of a family that declares no ``layer_types``, as transformers derives it: sliding
-    when ``sliding_window`` is set, else full attention."""
+    """As transformers derives it for a family that declares no ``layer_types``."""
     return "sliding_attention" if get_config_field(cfg, "sliding_window") else "full_attention"
 
 
 def _declared_layer_types(decoder) -> list[str]:
-    """``layer_types``, or :func:`_uniform_layer_type` on every layer where a family declares none. Hybrid layer
-    groups raise."""
     layer_types = get_config_field(decoder, "layer_types")
     if layer_types:
         return list(layer_types)
@@ -313,7 +284,6 @@ def _declared_layer_types(decoder) -> list[str]:
 
 
 def _layer_index(layer: torch.nn.Module, position: int) -> int:
-    """The layer's global index: its own ``layer_idx``, its attention's, else the list position."""
     own = getattr(layer, "layer_idx", None)
     if isinstance(own, int):
         return own
@@ -335,9 +305,8 @@ def _layer_type_of(layer: torch.nn.Module, index: int, declared: list[str]) -> s
 
 
 def resolve_head_dim(cfg) -> int:
-    """The attention head dimension: a declared ``head_dim`` (which may be decoupled from the ratio, as
-    Gemma 4's 512 is), else ``hidden_size // num_attention_heads``; the largest across per-layer values,
-    since every consumer sizes a buffer from it."""
+    """A declared ``head_dim`` (which may be decoupled from the ratio, as Gemma 4's 512 is), else the ratio; the
+    largest across per-layer values, since every consumer sizes a buffer from it."""
     declared = get_config_field(cfg, "head_dim", per_layer_reduce=max)
     if declared:
         return int(declared)
@@ -346,33 +315,27 @@ def resolve_head_dim(cfg) -> int:
 
 
 def resolve_qk_v_head_dims(cfg) -> tuple[int, int]:
-    """The query/key and value head widths: MLA's nope + RoPE split and ``v_head_dim`` where declared, else
-    :func:`resolve_head_dim` for both."""
     qk_dim, v_dim = _qk_v_head_dims(partial(get_config_field, cfg), resolve_head_dim(cfg))
     return int(qk_dim), int(v_dim)
 
 
 def has_latent_attention(cfg) -> bool:
-    """Whether the decoder runs multi-head latent attention: keys and values expanded from a ``kv_lora_rank`` latent
-    (DeepSeek-V3, GLM-4.7-Flash, Mistral4, MiniCPM3)."""
+    """DeepSeek-V3, GLM-4.7-Flash, Mistral4, MiniCPM3."""
     return bool(get_config_field(cfg, "kv_lora_rank"))
 
 
 def has_sliding_window_layers(cfg) -> bool:
-    """Whether some decoder layer attends a sliding window, by ``layer_types`` or, where a family declares
-    none, :func:`_uniform_layer_type`. Unlike the cost layout it does not raise on an entry outside
-    :data:`LAYER_TYPE_KINDS`, which it counts as not sliding."""
+    """Does not raise on an entry outside :data:`LAYER_TYPE_KINDS`, which counts as not sliding."""
     declared = get_config_field(cfg, "layer_types") or (_uniform_layer_type(cfg),)
     return any(LAYER_TYPE_KINDS.get(layer_type) is _AttentionKind.WINDOW for layer_type in declared)
 
 
 def declares_attention_heads(cfg) -> bool:
-    """Whether the config declares a head width or an attention-head count; Mamba declares neither."""
+    """Mamba declares neither."""
     return any(get_config_field(cfg, field, per_layer_reduce=max) for field in ("head_dim", "num_attention_heads"))
 
 
 def resolve_num_key_value_heads(cfg) -> int:
-    """The KV head count, falling back to ``num_attention_heads``; the largest across per-layer values."""
     declared = get_config_field(cfg, "num_key_value_heads", per_layer_reduce=max)
     if declared:
         return int(declared)
@@ -380,17 +343,14 @@ def resolve_num_key_value_heads(cfg) -> int:
 
 
 def has_mrope_rotary(cfg) -> bool:
-    """Whether the decoder rotates by M-RoPE (per-section text/temporal/height/width positions), on a text-only
-    load too. Read off the text config, whose class lists ``mrope_section`` among the rope keys transformers'
-    validation skips: a checkpoint may omit the section and take the rotary's own default."""
+    """Read off the text config's class, which lists ``mrope_section`` among the rope keys transformers' validation
+    skips, as a checkpoint may omit the section and take the rotary's own default."""
     return "mrope_section" in (getattr(text_config(cfg), "ignore_keys_at_rope_validation", None) or ())
 
 
 class AttentionCall(NamedTuple):
-    """The geometry one causal attention module hands its kernel, which a compiled kernel keys on. ``head_dim`` is
-    the query/key width (MLA's ``qk_head_dim``) and ``v_head_dim`` the value width, which transformers' flash path
-    pads up to ``head_dim`` and SDPA takes as it is; ``window`` is ``None`` on a full-attention layer, ``softcap``
-    the logit cap it passes (Gemma 2), whose value FA4 hashes into its kernel key."""
+    """The geometry a compiled kernel keys on. ``head_dim`` is the query/key width and ``v_head_dim`` the value width,
+    which the flash path pads up to ``head_dim`` and SDPA takes as is; FA4 hashes ``softcap`` into its key."""
 
     heads: int
     kv_heads: int
@@ -402,8 +362,7 @@ class AttentionCall(NamedTuple):
 
 
 def _module_heads(module: torch.nn.Module) -> int:
-    """The query heads ``module`` attends with: its own ``num_heads`` where it declares one, else its layer's
-    config value, since a per-layer config (Step-3.7's 64/96, Laguna's 48/72, Inkling) has no global one."""
+    """A per-layer config (Step-3.7's 64/96, Laguna's 48/72, Inkling) has no global value."""
     heads = getattr(module, "num_heads", None)
     if isinstance(heads, int):
         return heads
@@ -411,15 +370,13 @@ def _module_heads(module: torch.nn.Module) -> int:
 
 
 def _module_window(module: torch.nn.Module) -> int | None:
-    """The window ``module`` passes its kernel; a module keeping none passes its config's (Mistral, Phi-3)."""
+    """A module keeping no window passes its config's (Mistral, Phi-3)."""
     if hasattr(module, "sliding_window"):
         return module.sliding_window or None
     return get_config_field(module.config, "sliding_window") or None
 
 
 def attention_call(module: torch.nn.Module) -> AttentionCall | None:
-    """The :class:`AttentionCall` ``module`` makes, or ``None`` for a module that is not a causal attention one
-    (no ``is_causal``, no GQA group count)."""
     if not getattr(module, "is_causal", False) or not hasattr(module, "num_key_value_groups"):
         return None
     heads = _module_heads(module)
@@ -436,14 +393,12 @@ def attention_call(module: torch.nn.Module) -> AttentionCall | None:
 
 
 def attention_calls(model: torch.nn.Module) -> set[AttentionCall]:
-    """The distinct :func:`attention_call` of every causal attention module ``model`` holds, read per module: a
-    pipeline stage reports its own layers, a Ulysses wrapper the module it wraps."""
+    """Read per module, so a pipeline stage reports its own layers and a Ulysses wrapper the module it wraps."""
     return {call for call in map(attention_call, model.modules()) if call is not None}
 
 
 def attention_layout(model: torch.nn.Module) -> AttentionLayout:
-    """The layout of the decoder layers this rank holds, the full depth when the tree exposes none.
-    Raises ``ValueError`` on a model whose layers cannot be classified."""
+    """The decoder layers this rank holds, the full depth when the tree exposes none."""
     if isinstance(model, torch.nn.Module):
         model = unwrap_toolkit_wrappers(model)
     config = getattr(model, "config", None)
@@ -464,7 +419,6 @@ def attention_layout(model: torch.nn.Module) -> AttentionLayout:
 
 
 def attention_layout_from_config(config) -> AttentionLayout:
-    """The full-depth layout a config describes, for trees whose decoder layers are not reachable."""
     decoder = text_config(config)
     declared = _declared_layer_types(decoder)
     return AttentionLayout(
@@ -473,22 +427,18 @@ def attention_layout_from_config(config) -> AttentionLayout:
 
 
 def has_linear_attention_layers(config) -> bool:
-    """Whether the decoder (read through a VLM wrapper) declares ``linear_attention`` layer types."""
     return config is not None and _LINEAR_ATTENTION_LAYER_TYPE in (get_config_field(config, "layer_types") or ())
 
 
 def has_gated_delta_net_layers(config) -> bool:
-    """Whether the decoder (read through a VLM wrapper) runs GatedDeltaNet layers, under any ``model_type``:
-    it declares linear-attention layers (:func:`has_linear_attention_layers`) and the head split those mixers
-    are built from."""
+    """Under any ``model_type``: linear-attention layers and the head split those mixers are built from."""
     return has_linear_attention_layers(config) and all(
         get_config_field(config, field) is not None for field in _GATED_DELTA_NET_HEAD_FIELDS
     )
 
 
 def compressed_layer_types(config) -> list[str]:
-    """The declared ``layer_types`` entries of kind ``"compressed"`` (DeepSeek-V4's CSA/HCA): layers that
-    pool KV over windows cut at fixed row indices."""
+    """DeepSeek-V4's CSA/HCA, which pool KV over windows cut at fixed row indices."""
     declared = get_config_field(config, "layer_types") or ()
     return sorted(
         {layer_type for layer_type in declared if LAYER_TYPE_KINDS.get(layer_type) is _AttentionKind.COMPRESSED}
@@ -496,6 +446,5 @@ def compressed_layer_types(config) -> list[str]:
 
 
 def declares_linear_layer_groups(config) -> bool:
-    """Whether the config declares hybrid layer groups (``layer_group_size``) that hold linear-attention
-    layers: the last layer of each group is softmax attention, so a group of one holds none."""
+    """The last layer of each group is softmax attention, so a group of one holds no linear-attention layer."""
     return (get_config_field(config, "layer_group_size") or 0) > 1

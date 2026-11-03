@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""Every head_dim-256 family trains on FA4, as the loader patches it, as accurately as on FA2.
+"""Every head_dim-256 family trains on FA4, as the loader patches it, as accurately as on FA2, on four row shapes.
 
-One family per launch (``--family``), at its real attention geometry on a tiny random-init model: Qwen3.5/3.6
-dense and MoE and Qwen3-Next (16:2 heads, ``head_dim`` 256, partial rotary), GLM-4.7-Flash (MLA, 192 + 64 query/key
-and 256 value width). Full-attention layers only, and every expert routed, so the comparison is a continuous
-function of the attention output. ``apply_family_patches`` installs FA4's backend fixes exactly as the loader does;
-the bf16 model then runs FA4 and FA2 against the same weights in fp32 on SDPA, on four rows: one unpacked row, three
-packed documents by ``position_ids`` alone and again with the ``cu_seq_lens`` markers the packing and padding-free
-collators emit, and a right-padded batch of two (FA's unpad path).
-
-Per row: logits, the attention parameters' gradients (worst one) and every gradient (median) must stay within
-1.5x of FA2's error, all finite. The unpacked and ``cu_seq_lens`` rows must hand FA4's entry points q/k/v strided,
-the layout flash-attn-4 4.0.0b16 read scrambled at head_dim 256 (transformers copies them on the ``position_ids``-only
-and unpad paths). Fails if FA4 trails FA2 on any row, or if those rows stop reaching FA4 strided and so stop testing
-that layout. GLM-4.7-Flash's row holds the kernel path alone: the resolver keeps its latent attention on FA2 as a
-precaution.
-
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_fa4_hd256_family_parity.py --family qwen3_5_moe_text
+Full-attention layers and every expert routed, so the comparison is continuous in the attention output. The unpacked
+and ``cu_seq_lens`` rows must reach FA4 strided, the layout flash-attn-4 4.0.0b16 read scrambled. GLM-4.7-Flash holds
+the kernel path alone: the resolver keeps its latent attention on FA2 as a precaution.
 """
 
 import argparse
@@ -46,9 +33,9 @@ SEED = 0
 SEQ = 1024
 DOCUMENT_LENGTHS = (400, 300, 324)
 PADDED_LENGTHS = (SEQ, SEQ - 200)
-# Two bf16 kernels accumulate in different orders; FA4 may trail FA2 by this factor.
+# Two bf16 kernels accumulate in different orders.
 FA2_ERROR_RATIO = 1.5
-# The rows whose q/k/v transformers hands the kernel strided; its position_ids-only and unpad paths copy them.
+# Transformers' position_ids-only and unpad paths copy q/k/v; these rows hand them strided.
 STRIDED_ROWS = ("unpacked", "packed_cu_seq_lens")
 
 _GQA_256 = {"num_hidden_layers": 2, "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 256}
@@ -89,7 +76,6 @@ def _rows(vocab_size: int, device) -> dict[str, dict]:
 
 
 def _forward_backward(model, row: dict):
-    """Logits over the real tokens and every parameter's gradient of a next-token loss over them."""
     model.zero_grad(set_to_none=True)
     logits = model(**row, use_cache=False).logits.float()
     real = row.get("attention_mask", torch.ones_like(row["input_ids"])).bool()
@@ -116,7 +102,6 @@ def _errors(model, row, reference) -> dict[str, float]:
 
 @contextlib.contextmanager
 def _fa4_strided_calls():
-    """Per FA4 entry-point call in the block, whether any of q, k, v reached it strided."""
     import flash_attn.cute as cute  # noqa: PLC0415 - optional Blackwell-only dependency
 
     strided = []
@@ -131,7 +116,7 @@ def _fa4_strided_calls():
         return wrapped
 
     cute.flash_attn_func, cute.flash_attn_varlen_func = (recording(fn) for fn in entry_points)
-    flash_utils._loaded_implementation = None  # transformers re-imports the entry points on its next call
+    flash_utils._loaded_implementation = None  # transformers re-imports the entry points on its next call.
     try:
         yield strided
     finally:

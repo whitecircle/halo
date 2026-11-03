@@ -1,24 +1,9 @@
 #!/usr/bin/env python
-"""
-Test: expert-LoRA checkpoint + RESUME on the ep1 + FSDP-sharded-experts path (GptOss-20B, 2 GPUs).
+"""Expert-LoRA resume at ep1 with FSDP-sharded experts: every rank walks the adapters in one order.
 
-``ep_size=1`` with ``fsdp_shard_ep1_experts`` (the default) leaves the EP module FSDP-managed, so the
-grouped adapters are DTensors and ``load_expert_lora_state_dict`` re-shards each one with
-``distribute_tensor`` — a COLLECTIVE. Every rank must therefore walk the adapters in the same order.
-``_expert_lora_attrs`` is a frozenset, and frozenset iteration order over strings varies per process
-(``PYTHONHASHSEED`` is unpinned under torchrun), so an unsorted loop lets ranks scatter different
-tensors against each other: NCCL size mismatch, or a hang.
-
-The ``ep_size=2`` sibling (test_lora_ep_experts_resume.py) cannot cover this — there the adapters are
-plain FSDP-ignored tensors and the load does a local ``copy_`` with no collective at all.
-
-To make the rank-consistency requirement deterministic rather than hash-seed dependent, rank 0 and
-rank 1 are handed DIFFERENT container orders before the resume. A loop that iterates the container
-visits them in opposite orders; only a name-sorted loop keeps the ranks in step.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_ep1_fsdp_experts_resume.py
+``load_expert_lora_state_dict`` re-shards each DTensor adapter with the collective ``distribute_tensor``, and
+``_expert_lora_attrs`` is a frozenset whose order varies per process, so an unsorted loop scatters different tensors
+(NCCL size mismatch, or a hang). Ranks get different container orders so this doesn't rest on the hash seed.
 """
 
 import os
@@ -59,7 +44,6 @@ def _zero_live_adapters(model):
 
 
 def _skew_attr_order_per_rank(model, rank: int):
-    """Give each rank a different container order, so only a sorted walk keeps them in step."""
     for module in ep_layers(model):
         attrs = sorted(module._expert_lora_attrs)
         module._expert_lora_attrs = attrs if rank % 2 == 0 else list(reversed(attrs))
@@ -68,8 +52,7 @@ def _skew_attr_order_per_rank(model, rank: int):
 def run(ctx) -> dict:
     log(f"\n{'=' * 70}\n  Expert-LoRA resume on ep1 + FSDP-sharded experts (DTensor adapters)\n{'=' * 70}")
 
-    # The trainer writes the checkpoint on rank 0 and every rank resumes from it, so the output dir
-    # must be one shared path rather than a per-rank temp dir.
+    # Rank 0 writes the checkpoint and every rank resumes from it, so the output dir is one shared path.
     output_dir = shared_scratch_dir("lora_ep1_fsdp_resume")
     if ctx.rank == 0:
         ctx.on_teardown(lambda: shutil.rmtree(output_dir, ignore_errors=True))
@@ -98,7 +81,7 @@ def run(ctx) -> dict:
     checks = {"experts_fsdp_managed": parallelism_config.ep_config().experts_fsdp_managed}
     checks["has_expert_lora"] = model_has_expert_lora(model)
     adapted = sorted({a for m in ep_layers(model) for a in m._expert_lora_attrs})
-    checks["multiple_adapted_attrs"] = len(adapted) >= 2  # else ordering cannot differ
+    checks["multiple_adapted_attrs"] = len(adapted) >= 2  # Else ordering cannot differ.
     log(f"  adapted attrs={adapted}, experts_fsdp_managed={checks['experts_fsdp_managed']}")
 
     config = SFTConfig(
@@ -133,8 +116,7 @@ def run(ctx) -> dict:
     log(f"\n[2/4] Training {SAVE_AT_STEP} steps + checkpointing...")
     trainer.train()
     unwrapped = extract_model_from_parallel(trainer.model, recursive=True)
-    # FSDP2 shards the EP module here, so the live adapters must be DTensors — that is what makes
-    # the resume path collective. Without it this test would be a duplicate of the ep2 one.
+    # DTensor adapters make the resume path collective; otherwise this duplicates the ep2 test.
     checks["adapters_are_dtensors"] = any(
         isinstance(getattr(m, f"{a}_lora_A").data, torch.distributed.tensor.DTensor)
         for m in ep_layers(unwrapped)

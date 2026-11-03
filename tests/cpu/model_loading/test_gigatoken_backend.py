@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the gigatoken tokenizer backend.
-
-Tests needing the real Rust encoder skip when the optional extra is absent; the equivalence-probe
-tests at the end drive a fake backend instead, so the guard that rejects a divergent tokenizer is
-pinned in every environment (including those without the optional extra)."""
+"""The gigatoken tokenizer backend. Equivalence-probe tests drive a fake backend, so the guard is pinned without the
+optional extra."""
 
 import pickle
 
@@ -32,8 +29,6 @@ VLM_MODEL_REVISION = PINNED_REVISIONS[QWEN2_5_VL_3B]
 
 
 class PreprocessingArgsStub:
-    """Minimal CommonScriptArguments stand-in for configure_run_tokenizer."""
-
     pad_token = bos_token = eos_token = chat_template = added_special_tokens = None
     force_chat_template = False
 
@@ -54,20 +49,18 @@ CONVERSATIONS = [
 
 
 def test_unknown_backend_rejected():
-    """An unknown backend name must fail loud, listing the valid choices."""
     with pytest.raises(ValueError, match="tokenizer_backend"):
         resolve_tokenizer_backend(object(), "typo")
 
 
 def test_hf_backend_is_passthrough():
-    """backend='hf' must return the tokenizer itself (no wrapping, no probes)."""
+    """No wrapping, no probes."""
     sentinel = object()
     assert resolve_tokenizer_backend(sentinel, "hf") is sentinel
 
 
 def test_vlm_processor_backend_parity():
-    """A processor with the gigatoken proxy installed must produce identical input_ids
-    (image pads included), pixel_values, and grid to the stock processor."""
+    """Image pads included, with pixel_values and grid identical."""
     pytest.importorskip("gigatoken")
 
     processor = load_cached_processor(VLM_MODEL_NAME, revision=VLM_MODEL_REVISION)
@@ -89,8 +82,6 @@ def test_vlm_processor_backend_parity():
 
 
 def test_proxy_matches_hf_tokenizer():
-    """Proxy token IDs must equal the HF tokenizer's on chat-rendered text (special tokens
-    included), plain text, and under truncation; fingerprinted metadata must delegate."""
     pytest.importorskip("gigatoken")
     tokenizer = load_cached_tokenizer(MODEL_NAME)
     proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
@@ -106,7 +97,7 @@ def test_proxy_matches_hf_tokenizer():
     actual = list(proxy(rendered, truncation=True, max_length=16)["input_ids"])
     assert actual == expected, "proxy diverges under truncation"
 
-    # The dataset cache fingerprint reads these off the tokenizer — they must delegate.
+    # The dataset cache fingerprint reads these off the tokenizer.
     assert proxy.name_or_path == tokenizer.name_or_path
     assert proxy.vocab_size == tokenizer.vocab_size
     assert len(proxy) == len(tokenizer)
@@ -115,8 +106,7 @@ def test_proxy_matches_hf_tokenizer():
 
 
 def test_verifier_catches_truncation_only_divergence(monkeypatch):
-    """The startup verifier must probe truncated encodes — production paths tokenize with
-    truncation=True, so a backend diverging only there must be rejected at resolve time."""
+    """Production paths tokenize with truncation=True."""
     pytest.importorskip("gigatoken")
 
     tokenizer = load_cached_tokenizer(MODEL_NAME)
@@ -134,8 +124,7 @@ def test_verifier_catches_truncation_only_divergence(monkeypatch):
 
 
 def test_proxy_pickle_roundtrip():
-    """datasets.map workers pickle the processor closure; the proxy must survive and re-encode
-    identically (the Rust backend is dropped and rebuilt lazily)."""
+    """datasets.map workers pickle the processor closure; the Rust backend is dropped and rebuilt lazily."""
     pytest.importorskip("gigatoken")
     tokenizer = load_cached_tokenizer(MODEL_NAME)
     proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
@@ -146,9 +135,7 @@ def test_proxy_pickle_roundtrip():
 
 
 def test_proxy_transparency():
-    """Trainers receive the proxy as processing_class: isinstance must report the wrapped type,
-    attribute writes must reach the wrapped tokenizer (so its bound methods see them), and
-    re-resolving must be a no-op."""
+    """Attribute writes must reach the wrapped tokenizer so its bound methods see them."""
     pytest.importorskip("gigatoken")
     tokenizer = load_cached_tokenizer(MODEL_NAME)
     proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
@@ -164,8 +151,7 @@ def test_proxy_transparency():
 
 
 def test_configure_run_tokenizer_resolves_backend():
-    """configure_run_tokenizer must return the backend-resolved tokenizer — the single seam
-    through which every training script gets the gigatoken proxy."""
+    """The single seam through which every training script gets the proxy."""
     pytest.importorskip("gigatoken")
 
     tokenizer = load_cached_tokenizer(MODEL_NAME)
@@ -185,7 +171,6 @@ def test_configure_run_tokenizer_resolves_backend():
 
 @pytest.mark.parametrize("mode", ["chat", "text"])
 def test_tokenize_dataset_backend_parity(mode):
-    """tokenize_dataset must produce identical rows under both backends, chat and text mode."""
     pytest.importorskip("gigatoken")
     tokenizer = load_cached_tokenizer(MODEL_NAME)
 
@@ -213,11 +198,7 @@ def test_tokenize_dataset_backend_parity(mode):
 
 
 class _FakeGigatoken:
-    """Stand-in for the optional ``gigatoken`` module.
-
-    ``Tokenizer(hf).as_hf()`` returns a callable that re-encodes with the wrapped HF tokenizer, then
-    applies ``corrupt`` to the ids. ``corrupt=None`` is a faithful backend.
-    """
+    """``corrupt=None`` is a faithful backend."""
 
     def __init__(self, corrupt=None):
         self._corrupt = corrupt
@@ -240,8 +221,7 @@ class _FakeGigatoken:
 
 
 def test_a_faithful_backend_is_accepted_without_the_package(monkeypatch):
-    """Anti-vacuity for the divergence test below: with an id-identical fake backend the verifier
-    must ACCEPT, so a verifier that rejected everything could not pass both tests."""
+    """Anti-vacuity: a verifier rejecting everything could not pass both tests."""
     monkeypatch.setattr(tb, "gigatoken", _FakeGigatoken())
     tokenizer = load_cached_tokenizer(MODEL_NAME)
     resolved = tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
@@ -249,12 +229,7 @@ def test_a_faithful_backend_is_accepted_without_the_package(monkeypatch):
 
 
 def test_a_backend_that_diverges_only_under_truncation_is_rejected(monkeypatch):
-    """The equivalence probe must sweep truncation, not just the plain encode.
-
-    A Rust backend that agrees untruncated but drops or keeps one token at the ``max_length``
-    boundary silently shifts every label in a packed dataset. Dropping the truncation leg of
-    ``_verify_backend_equivalence`` makes this pass — and needs no gigatoken install to catch.
-    """
+    """One token off at the ``max_length`` boundary silently shifts every label in a packed dataset."""
     monkeypatch.setattr(
         tb, "gigatoken", _FakeGigatoken(corrupt=lambda ids, kw: ids[:-1] if kw.get("truncation") and ids else ids)
     )
@@ -264,8 +239,7 @@ def test_a_backend_that_diverges_only_under_truncation_is_rejected(monkeypatch):
 
 
 def test_a_backend_that_diverges_on_special_tokens_is_rejected(monkeypatch):
-    """The probe must sweep ``add_special_tokens`` in both states: a backend that mishandles BOS/EOS
-    shifts every sequence by one token."""
+    """Mishandled BOS/EOS shifts every sequence by one token."""
     monkeypatch.setattr(
         tb,
         "gigatoken",

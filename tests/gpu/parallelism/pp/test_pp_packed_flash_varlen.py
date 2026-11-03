@@ -1,24 +1,9 @@
 #!/usr/bin/env python
-"""Packed pipeline microbatches on the device's flash kernels: the stage seam's varlen set reproduces, bit for bit,
-the per-layer derivation it replaces, and takes that derivation's host syncs out of every attention layer.
+"""Packed PP microbatches on flash kernels: the stage seam's varlen set reproduces the per-layer derivation bit for
+bit, without its host syncs.
 
-Each arm builds the same seeded model and drives the same packed batch (one packed row per microbatch, padded to
-the pipeline's fixed shape or filled by its documents). The reference arm withholds the seam, so every attention layer
-derives the set from ``position_ids`` as before, and runs twice: a reference that does not repeat bit for bit
-cannot hold the seam to bit equality, and fails its own check instead. Checked against the reference: the step
-loss, every stage gradient, the eval loss and the forward-only output (runner mode) agree in every bit; with the
-seam no attention layer derives the set, forward or recompute, or reads back to the host; and a training step
-makes fewer device syncs.
-
-Modes:
-  runner (default): the pipeline runner over per-layer FSDP2 stages, pp2 x dp2, tiny dense Qwen3.
-  ``--trainer``: the real SFT trainer through its packing collator path, pp2 x dp2; with ``--ep 2`` tiny gpt-oss
-  (sinks neutralized as SFT runs them) as pp2 x ep2 on its EP layers.
-FA2 unless ``--attn`` names another flash backend; ``--attn flash_attention_4`` skips off Blackwell.
-
-Topology: 4 GPUs as 2 simulated NVLink domains of 2, one stage per domain. Run:
-    torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_packed_flash_varlen.py
-        [--schedule gpipe] [--microbatches 4] [--gc] [--fused] [--attn flash_attention_4] [--trainer [--ep 2]]
+The reference arm withholds the seam and runs twice, since a reference that doesn't repeat bit for bit can't hold the
+seam to bit equality. ``--attn flash_attention_4`` skips off Blackwell.
 """
 
 import contextlib
@@ -106,8 +91,6 @@ def _runner_arm(ctx, config, groups, reads, attn_implementation: str) -> tuple[S
 
 
 def _trainer_arm(ctx, config, reads, attn_implementation: str) -> tuple[ScheduleArm, int]:
-    """One step of the real SFT trainer on this replica's packed rows, through the collator the trainer wraps, with
-    checkpointing enabled where ``train`` would enable it."""
     torch.manual_seed(SEED)
     family = "gpt_oss" if EP_SIZE > 1 else "dense:qwen3"
     model = ppeq.build_patched_moe_model(config) if EP_SIZE > 1 else tiny_family_model(PACKING_FAMILIES[family])
@@ -144,7 +127,7 @@ def _trainer_arm(ctx, config, reads, attn_implementation: str) -> tuple[Schedule
         syncs: list[int] = []
         with counted_syncs(syncs), reads:
             loss = trainer.training_step(trainer.model, batch)
-        # Runs the EP replica sweep (a no-op without EP) and reads the norm; max_norm leaves every gradient as is.
+        # Runs the EP replica sweep and reads the norm; max_norm leaves every gradient as is.
         trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)
         grads = ppeq.gather_stage_grads(trainer.model, to_cpu=True)
     finally:

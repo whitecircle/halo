@@ -25,15 +25,13 @@ class TrajectorySpans:
 
 
 class _SpanLocator:
-    """Resolves message-block boundaries of one trajectory in its authoritative render."""
-
     def __init__(self, render: RenderFn, messages: Sequence[Any], first_assistant_idx: int):
         self._render = render
         self._messages = list(messages)
         self._first = first_assistant_idx
         try:
             self._full = list(render(self._messages, False, True))
-        except Exception as e:  # any template failure must become a TemplateSpanError
+        except Exception as e:
             # A raw template rejection escapes on one rank alone; converting lets the caller turn it
             # into a rank-uniform TemplateSpanError.
             raise TemplateSpanError(f"the chat template cannot render this trajectory: {type(e).__name__}: {e}") from e
@@ -41,7 +39,7 @@ class _SpanLocator:
         self._anchors: dict[int, tuple[int, bool] | None] = {}
         # Probe the reasoning-carrying render first; ``False`` is what a template hiding prior-turn CoT emits.
         self._anchor_flag_order = (True, False)
-        # The end of the last message's block is the end of the render — the one free boundary.
+        # The end of the last message's block is the end of the render, the one free boundary.
         self._block_starts: dict[int, int] = {len(self._messages): len(self._full)}
 
     def resolve(self) -> TrajectorySpans:
@@ -74,8 +72,7 @@ class _SpanLocator:
         return self._generation_start(self._first)
 
     def _generation_start(self, index: int) -> int:
-        """Where the policy's own tokens for the assistant turn at ``index`` begin, the point the generation prompt
-        stops agreeing with the render; raises without an anchored context."""
+        """Where the generation prompt stops agreeing with the render; raises without an anchored context."""
         anchored = self._anchor(index)
         prompt = None if anchored is None else self._try_render(self._messages[:index], True, anchored[1])
         if anchored is None or prompt is None:
@@ -95,7 +92,6 @@ class _SpanLocator:
         return generated_start
 
     def _block_start(self, index: int) -> int:
-        """Where message ``index``'s rendered block begins (its role header included)."""
         if index not in self._block_starts:
             anchored = self._anchor(index)
             if anchored is not None:
@@ -105,8 +101,8 @@ class _SpanLocator:
         return self._block_starts[index]
 
     def _block_len(self, index: int) -> int:
-        """Token length of message ``index``'s block, measured by duplicating it against the nearest anchor
-        above: both sides end on the same message, so the delta is the extra copy rendered non-finally."""
+        """Measured by duplicating the message against the nearest anchor above: both sides end on the same message, so
+        the delta is the extra copy rendered non-finally."""
         stop, base, include_thinking = self._next_anchor_above(index)
         duplicated = [*self._messages[: index + 1], *self._messages[index:stop]]
         rendered = self._try_render(duplicated, False, include_thinking)
@@ -118,9 +114,8 @@ class _SpanLocator:
         return len(rendered) - base
 
     def _next_anchor_above(self, index: int) -> tuple[int, int, bool]:
-        """``(message count, its anchored length, its include_thinking flag)`` for the shortest
-        anchored prefix that still contains message ``index``. The whole message list always
-        qualifies: the authoritative render is a prefix of itself."""
+        """``(message count, its anchored length, its include_thinking flag)`` for the shortest anchored prefix
+        containing message ``index``. The whole list always qualifies, as the render is a prefix of itself."""
         for stop in range(index + 1, len(self._messages)):
             anchored = self._anchor(stop)
             if anchored is not None:
@@ -128,8 +123,8 @@ class _SpanLocator:
         return len(self._messages), len(self._full), True
 
     def _anchor(self, index: int) -> tuple[int, bool] | None:
-        """Length of the render of ``messages[:index]`` when it is an exact prefix of the full render,
-        with the ``include_thinking`` flag that produced it."""
+        """The render's length when ``messages[:index]`` is an exact prefix of the full render, with the flag that
+        produced it."""
         if index not in self._anchors:
             self._anchors[index] = self._resolve_anchor(index)
         return self._anchors[index]
@@ -154,15 +149,14 @@ class _SpanLocator:
     def _try_render(
         self, messages: Sequence[Any], add_generation_prompt: bool, include_thinking: bool
     ) -> list[int] | None:
-        """A probe conversation's render, ``None`` when the template rejects it (strict role alternation, a tool
-        result without its call): the probe is unavailable, not the trajectory invalid."""
+        """``None`` when the template rejects the probe (strict role alternation, a tool result without its call): the
+        probe is unavailable, not the trajectory invalid."""
         try:
             return self._render(messages, add_generation_prompt, include_thinking)
-        except Exception:  # any template rejection means "this probe is unavailable"
+        except Exception:
             return None
 
 
 def locate_assistant_spans(render: RenderFn, messages: Sequence[Any], first_assistant_idx: int) -> TrajectorySpans:
-    """Every assistant turn's span inside one render of the whole trajectory; raises
-    :class:`TemplateSpanError` on a template this cannot decompose, which a caller must never paper over."""
+    """Raises :class:`TemplateSpanError` on a template this cannot decompose, which a caller must never paper over."""
     return _SpanLocator(render, messages, first_assistant_idx).resolve()

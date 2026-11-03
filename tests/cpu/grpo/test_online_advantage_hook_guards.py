@@ -1,21 +1,6 @@
 #!/usr/bin/env python
 """The online trainer's advantage hooks: which combinations are refused, when, and how a rank slices.
-
-* ``use_rlrr`` + ``drop_degenerate_groups`` cancels RLRR's point — the drop keys on raw-reward
-  equality, so every all-correct group RLRR just gave length-ranked advantages is masked out of the
-  loss — and must be refused at construction like the std-floor pairing.
-* ``balance_token_mass`` rescales whatever advantages the earlier hooks left, RLRR's included, and is
-  refused under a loss whose tokens do not share one normalizer (``grpo`` among them; TRL's default is ``dapo``).
-* ``multi_objective_aggregation`` other than ``sum_then_normalize`` makes every hook's recompute
-  diverge from TRL's; it is refused at construction, not at the first train step.
-* A hook computes on the FULL gathered set and slices this rank's rows the way TRL does, so a group
-  spanning two ranks (TRL-valid: only ``generation_batch_size % num_generations == 0`` is required)
-  must slice correctly rather than be refused.
-* An armed hook that finds no stashed rewards in train mode raises instead of returning, and every
-  generation batch clears the stash once its hooks have read it.
-
-    python tests/cpu/grpo/test_online_advantage_hook_guards.py
-"""
+Hooks compute on the full gathered set and slice like TRL, because a group may validly span two ranks."""
 
 import types
 from collections import defaultdict, deque
@@ -36,7 +21,7 @@ NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normaliz
 
 
 def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedOnlineGRPOTrainer:
-    """Run only the pre-super hook adoption and refusals on a bare instance (TRL's ctor needs a live server)."""
+    """Pre-super hook adoption and refusals only, since TRL's ctor needs a live server."""
     trainer = object.__new__(DistributedOnlineGRPOTrainer)
     trainer._adopt_advantage_hooks(kwargs)
     reject_conflicting_advantage_hooks(
@@ -63,8 +48,7 @@ def test_rlrr_refuses_every_hook_that_would_cancel_it(extra, match):
 
 
 def test_the_balance_is_refused_under_a_per_completion_loss_and_resolves_beside_rlrr():
-    """TRL's ``grpo`` loss averages each completion over its own length, so token mass is not what it pulls
-    with; under ``dapo``, TRL's default, the balance rescales whatever advantages RLRR set."""
+    """TRL's ``grpo`` loss averages each completion over its own length, so token mass is not what it pulls with."""
     per_completion = types.SimpleNamespace(
         multi_objective_aggregation="sum_then_normalize",
         scale_rewards="group",
@@ -93,7 +77,6 @@ def test_rlrr_alone_resolves_and_consumes_its_kwargs():
 
 
 def test_drop_without_rlrr_still_masks_degenerate_groups():
-    """The refusal is the pairing, not the drop: on its own the drop keeps masking all-alike groups."""
     trainer = _resolve({"drop_degenerate_groups": True})
     assert trainer._drop_degenerate_groups is True
     rewards = torch.tensor([1.0, 1.0, 1.0, 0.0, 1.0, 0.0])
@@ -123,12 +106,9 @@ def test_a_std_floor_is_refused_where_no_std_divides(scale_rewards):
 
 
 def test_foreign_aggregation_is_fine_with_no_hook_armed():
-    """No hook, no recompute: TRL's own aggregation runs untouched."""
     trainer = _resolve({}, NORMALIZE_THEN_SUM)
     assert trainer._recomputes_from_gathered_rewards is False
 
-
-# --- A group spanning two ranks slices the way TRL slices ---
 
 G = 6  # one group of 6 over 2 ranks x 3 rows: TRL-valid (generation_batch_size 6 % 6 == 0)
 FULL_REWARDS = torch.tensor([[1.0], [1.0], [1.0], [0.0], [1.0], [0.0]])
@@ -136,7 +116,6 @@ FULL_LENGTHS = torch.tensor([2, 30, 10, 5, 20, 5])
 
 
 def _rank(process_index: int, num_processes: int, *, rlrr=None, drop=False, std_floor=0.0):
-    """One rank's view: the stashed rewards are the gathered set, ``gather`` returns world order."""
     n_local = FULL_REWARDS.shape[0] // num_processes
     me = types.SimpleNamespace(
         _rlrr_config=rlrr,
@@ -193,9 +172,7 @@ def test_rlrr_hook_on_a_spanning_group_trains_each_rank_on_its_half_of_the_group
 
 
 def test_degenerate_drop_on_a_spanning_group_masks_the_rows_of_each_rank():
-    """Groups of 2 over 2 ranks x 3 rows: group 0 (rows 0-1, all-correct) is dropped, group 1 (rows
-    2-3) spans the rank boundary and carries signal. The gathered verdict is sliced per rank, so rank
-    0 loses exactly its first two rows and rank 1 keeps every row."""
+    """Group 1 (rows 2-3) spans the rank boundary and carries signal; only all-correct group 0 is dropped."""
     kept = []
     for process_index in (0, 1):
         me, result = _rank(process_index, 2, drop=True)
@@ -203,9 +180,6 @@ def test_degenerate_drop_on_a_spanning_group_masks_the_rows_of_each_rank():
         me._apply_degenerate_group_drop(result)
         kept.append([n > 0 for n in result["completion_mask"].sum(dim=1).tolist()])
     assert kept == [[False, False, True], [True, True, True]], kept
-
-
-# --- The gathered-rewards stash: present when a hook needs it, consumed once per batch ---
 
 
 @pytest.mark.parametrize(
@@ -225,7 +199,7 @@ def test_an_armed_hook_without_a_stash_raises_in_train(hook, armed):
 
 
 def test_a_missing_stash_is_not_needed_in_eval():
-    """The hooks are train-only; eval batches keep TRL's advantages by design."""
+    """The hooks are train-only."""
     me, result = _rank(0, 1, rlrr=RLRRConfig())
     me._last_rewards_per_func = None
     me.model.training = False
@@ -235,8 +209,8 @@ def test_a_missing_stash_is_not_needed_in_eval():
 
 
 def test_the_generation_batch_consumes_the_stash(monkeypatch):
-    """A stash left in place would be read by the next batch's hooks if that batch's scoring skipped
-    ``_calculate_rewards``, applying one batch's rewards to another batch's rows."""
+    """A stale stash would apply one batch's rewards to the next batch's rows if its scoring skipped
+    ``_calculate_rewards``."""
     monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {})
     me = object.__new__(DistributedOnlineGRPOTrainer)
     me._rlrr_config, me._drop_degenerate_groups = None, False
@@ -249,8 +223,8 @@ def test_the_generation_batch_consumes_the_stash(monkeypatch):
 
 
 def test_the_balance_weighs_what_the_other_hooks_leave(monkeypatch):
-    """RLRR and the std floor replace the batch's advantages and the drop narrows its loss mask; the balance
-    must weigh the result, or it cancels the net push of advantages the loss never sees."""
+    """RLRR and the std floor replace advantages and the drop narrows the mask; the balance must weigh the result,
+    or it cancels the net push of advantages the loss never sees."""
     monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {})
     me = object.__new__(DistributedOnlineGRPOTrainer)
     me.model = types.SimpleNamespace(training=True)

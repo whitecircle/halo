@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the contest selection a LiveCodeBench run scores: the date window, the platform
-filter, their validation, and the re-grader rebuilding the same selection.
-
-A LiveCodeBench release is cumulative, so an eval without a window scores every problem since 2023,
-most of them older than a current model's training cutoff. The window is what makes a run
-contamination-clean, and the offline re-grader rebuilds its payloads by example index: a selection it
-did not re-apply would grade every episode against another problem's tests.
-
-The release files are synthetic ``test*.jsonl`` written to a temp dir, served in place of the Hub
-download (no network).
-
-Run: python tests/cpu/environments/test_livecodebench_selection.py  (or pytest)
-"""
+"""The contest selection a LiveCodeBench run scores: the date window, the platform filter, their validation, and the
+re-grader rebuilding it. A release is cumulative, so a window is what makes a run contamination-clean, and the
+re-grader rebuilds payloads by example index. The release files are synthetic."""
 
 import json
 from types import SimpleNamespace
@@ -99,9 +89,6 @@ def _args(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**{**flags, **overrides})
 
 
-# --- The window and the platform filter ---
-
-
 def test_the_window_holds_both_edge_days_and_drops_the_days_outside(release):
     assert _scored(_WINDOW) == ["ac_2025_01_04", "cf_2025_03_01", "ac_2025_04_06"]
 
@@ -131,14 +118,11 @@ def test_the_platform_filter_takes_the_dataset_spellings(release):
 
 
 def test_a_platform_the_adapter_cannot_grade_is_refused():
-    """LeetCode rows are functional, which the stdin/stdout env drops: selecting them would download the
-    whole release to score nothing."""
+    """LeetCode rows are functional, which the stdin/stdout env drops, so selecting them would download the release
+    to score nothing."""
     assert "leetcode" not in _LCB.platforms
     with pytest.raises(ValueError, match=r"platform\(s\) \['leetcode'\] are not ones this adapter grades"):
         _scored(ContestSelection.parse(platforms=["leetcode"]))
-
-
-# --- Validation ---
 
 
 @pytest.mark.parametrize(
@@ -202,9 +186,6 @@ def test_the_eval_flags_exit_on_a_selection_the_adapter_refuses():
         resolve_selection(_args(include_examples_only=True), _LCB)
 
 
-# --- The record a re-grade reads back ---
-
-
 def test_the_selection_round_trips_through_the_meta_line():
     selection = ContestSelection.parse("2025-01-04", "2025-04-06", ["codeforces", "atcoder"])
     meta = json.loads(json.dumps(selection.to_meta()))
@@ -219,8 +200,8 @@ def test_the_selection_round_trips_through_the_meta_line():
     included = ContestSelection(include_examples_only=True)
     assert ContestSelection.from_meta(json.loads(json.dumps(included.to_meta()))) == included
     assert ContestSelection().label == "" and included.label == "with-examples-only"
-    # A meta line recording no selection, or none of the examples-only choice, predates the exclusion: its run
-    # scored every row, examples-only problems included, and the re-grade must rebuild that same sequence.
+    # A meta line recording no selection scored every row, examples-only problems included, and the re-grade rebuilds
+    # that sequence.
     assert ContestSelection.from_meta(None) == included
     assert ContestSelection.from_meta({k: v for k, v in meta.items() if k != "include_examples_only"}) == (
         ContestSelection.parse("2025-01-04", "2025-04-06", ["atcoder", "codeforces"], include_examples_only=True)
@@ -242,8 +223,7 @@ def test_an_adapter_declaring_platforms_must_name_their_field():
 
 
 def test_the_regrader_rebuilds_the_windowed_examples_from_the_meta_line_the_eval_writes(release):
-    """Round trip through the writer (``contest_meta``) and the reader: the same problems in the same
-    order, so every episode's index still names its own problem."""
+    """The same problems in the same order, so every episode's index still names its own problem."""
     selection = ContestSelection.parse("2025-01-04", "2025-04-06", ["atcoder"])
     env = build_environment("codeforces", {})
     generic = {"env_type": "codeforces", "model": "m", "dataset": _DATASET, "config": "release_v2", "split": "test"}

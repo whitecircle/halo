@@ -16,8 +16,6 @@ _TEXT_ONLY = (
 
 
 class TrlVLLMClient(VLLMWeightSyncClient):
-    """The surface TRL's server-mode generation calls: the vLLM weight sync plus ``generate``."""
-
     def __init__(self, *args, **kwargs):
         # Under the collective watchdog: a generation blocks every peer at the next collective.
         self._generation_timeout = env_positive_float(
@@ -36,7 +34,7 @@ class TrlVLLMClient(VLLMWeightSyncClient):
     def image_features(
         self, images: list[list | None], max_concurrent_requests: int | None = None
     ) -> list[dict | None]:
-        """TRL's server-side image processing, which feeds :meth:`generate`'s ``features``: refused for any image."""
+        """TRL's server-side image processing: refused for any image."""
         if any(images):
             raise NotImplementedError(_TEXT_ONLY)
         return [None] * len(images)
@@ -56,8 +54,7 @@ class TrlVLLMClient(VLLMWeightSyncClient):
         structured_outputs_regex: str | None = None,
         generation_kwargs: dict | None = None,
     ) -> dict[str, list]:
-        """TRL's ``VLLMClient.generate`` over ``/v1/completions``: ``{prompt_ids, completion_ids, logprobs,
-        logprob_token_ids}``, with the sampled token's logprob only."""
+        """Over ``/v1/completions``, with the sampled token's logprob only."""
         if features is not None and any(feature is not None for feature in features):
             raise NotImplementedError(_TEXT_ONLY)
         if not prompts:
@@ -91,7 +88,6 @@ class TrlVLLMClient(VLLMWeightSyncClient):
         return {"prompt_ids": prompt_ids, **self._parse_choices(data["choices"])}
 
     def _prompt_ids(self, prompts: list[str] | list[list[int]]) -> list[list[int]]:
-        """Each prompt's token ids: a token list as given, a string through the server's ``/tokenize``."""
         prompt_ids = []
         for prompt in prompts:
             if isinstance(prompt, (list, tuple)):
@@ -102,7 +98,6 @@ class TrlVLLMClient(VLLMWeightSyncClient):
         return prompt_ids
 
     def _parse_choices(self, choices: list[dict]) -> dict[str, list]:
-        """``{completion_ids, logprobs, logprob_token_ids}`` of the completion choices, in prompt order."""
         all_completion_ids: list[list[int]] = []
         all_logprobs: list[list[list[float]]] = []
         all_logprob_token_ids: list[list[list[int]]] = []

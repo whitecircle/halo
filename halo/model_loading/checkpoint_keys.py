@@ -1,8 +1,5 @@
-"""How a checkpoint's keys reach a model's live names, planned once on transformers' own rename rules.
-
-The lazy loaders and the resume's :class:`~halo.checkpoint.hub_layout.ModuleLayoutView` both read a checkpoint
-through :func:`build_key_plan`; rank-local and from key names alone, so it runs before any shard opens.
-"""
+"""How a checkpoint's keys reach a model's live names, planned once on transformers' rename rules, from key names
+alone, so it runs before any shard opens."""
 
 from __future__ import annotations
 
@@ -24,8 +21,8 @@ _PER_INDEX_SOURCE = re.compile(r"\.\*\.")
 
 @dataclass(frozen=True)
 class ConversionGroup:
-    """The checkpoint keys one converter claims for one first target: each with the source pattern it matched,
-    in arrival order, and every name the converter produces, spelled off the first as transformers does."""
+    """The checkpoint keys one converter claims for one first target, each with its matched pattern, in arrival order,
+    and every name the converter produces."""
 
     converter: WeightConverter
     parts: tuple[tuple[str, str], ...]
@@ -34,9 +31,8 @@ class ConversionGroup:
 
 @dataclass(frozen=True)
 class CheckpointKeyPlan:
-    """Where every checkpoint key lands: a key no converter claims under its rename target
-    (``renamed_by_key``, in natural key order), the rest in converter ``groups``. ``live`` names what the
-    model holds; ``renamings`` and ``base_model_prefix`` respell a key as the plan did."""
+    """Where every checkpoint key lands: a key no converter claims under its rename target (``renamed_by_key``, natural
+    order), the rest in converter ``groups``. ``live`` names what the model holds."""
 
     renamed_by_key: Mapping[str, str]
     groups: tuple[ConversionGroup, ...]
@@ -72,9 +68,8 @@ class CheckpointKeyPlan:
 
 
 def resolve_model_conversions(model: torch.nn.Module, *, add_legacy: bool) -> list:
-    """transformers' conversion mapping for ``model``'s family; empty without a ``config``, which keys the
-    registry. FSDP2's ``FSDP<Name>`` classes read as custom code there, so each module gets its
-    transformers class back for the lookup."""
+    """transformers' conversion mapping for the family, empty without a ``config``. FSDP2's ``FSDP<Name>`` classes read
+    as custom code there, so each module gets its transformers class back for the lookup."""
     if getattr(model, "config", None) is None:
         return []
     swapped = []
@@ -91,12 +86,8 @@ def resolve_model_conversions(model: torch.nn.Module, *, add_legacy: bool) -> li
 
 
 def is_expert_bank_merge(entry) -> bool:
-    """Whether ``entry`` fuses one-tensor-per-expert checkpoint keys into an expert bank: a converter whose
-    every source carries a per-index wildcard, which in transformers' mappings is only ever an expert list.
-
-    That layout is owned at both ends by the expert code, never by a generic conversion replay: the lazy
-    loaders' ``ExpertFuser`` reads it, each family's ``ExpertLayout`` writes it.
-    """
+    """Whether ``entry`` fuses one-tensor-per-expert keys into a bank: a converter whose every source carries a
+    per-index wildcard. The expert code owns that layout at both ends, never a generic conversion replay."""
     return isinstance(entry, WeightConverter) and all(_PER_INDEX_SOURCE.search(p) for p in entry.source_patterns)
 
 
@@ -106,11 +97,8 @@ def build_key_plan(
     conversions: Iterable[WeightRenaming | WeightConverter],
     base_model_prefix: str | None,
 ) -> CheckpointKeyPlan:
-    """Plan ``checkpoint_keys`` onto ``live_names`` the way ``from_pretrained`` does: every renaming, then at
-    most one converter, then the base-model prefix added or stripped against the live names; a key whose
-    rename misses the live tree but which is live itself stays. Keys walk in natural order, as
-    ``from_pretrained`` collects them, so a converter stacks experts in arrival order.
-    """
+    """Plan ``checkpoint_keys`` onto ``live_names`` as ``from_pretrained`` does: renamings, at most one converter, then
+    the base-model prefix. Keys walk in natural order, so a converter stacks experts in arrival order."""
     # A GroupWeightRename latches its guard and every transform its use: a recorded or snapshot mapping stays clean.
     conversions = deepcopy(list(conversions))
     # A mapping, not a set: ``rename_source_key`` probes its ``meta_state_dict`` with ``.get``.

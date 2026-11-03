@@ -1,23 +1,7 @@
 #!/usr/bin/env python
 """``lora_target_modules`` means what its spelling says, at any length.
-
-A list names modules: PEFT adapts every module whose path is an entry or ends in ``.<entry>``, so an entry matches
-whole trailing path segments. A bare string is PEFT's own spelling, the ``all-linear`` sentinel or a regex
-fullmatched against each full module path. TRL's ``ModelConfig`` collapses a one-entry list to its bare entry,
-which PEFT would then read as that regex, so ``[o_proj]`` would match no module and fail at injection;
-``ModelArguments`` keeps the list. Driven through the scripts' parser and the production ``build_peft_config`` to
-the adapted model:
-
-* one named target adapts that module on every layer, whichever way the list reaches the config (a YAML list, a
-  CLI override over a YAML, a flags-only command line, a tuple built in code), as a path suffix, and with DoRA too;
-* it does so on every tiny family, dense and MoE, under an attention target its LoRA rows name;
-* a one-entry ``[all-linear]`` is still PEFT's sentinel, and a bare YAML string is still a regex;
-* a regex written into the list, from the YAML or the command line, which PEFT would compare to module paths
-  verbatim and match to nothing (alone, or silently beside an entry that matches), is refused when the config is
-  parsed, for each character a regex spells and a module path does not.
-
-Run: pytest tests/cpu/peft/test_lora_target_spelling.py
-"""
+A list entry names whole trailing path segments; a bare string is PEFT's ``all-linear`` sentinel or a fullmatch regex.
+TRL's ``ModelConfig`` collapses a one-entry list to its bare entry, so ``ModelArguments`` keeps the list."""
 
 import pytest
 import torch
@@ -53,8 +37,7 @@ REGEX_CHARACTERS = {
 
 
 def _parse(tmp_path, argv: list[str], yaml_body: str | None = None) -> ModelArguments:
-    """``ModelArguments`` as the training scripts parse it: ``yaml_body`` (when given) is the config ``argv``
-    overrides, else ``argv`` is a flags-only command line."""
+    """``yaml_body`` (when given) is the config ``argv`` overrides, else ``argv`` is a flags-only command line."""
     if yaml_body is not None:
         config = tmp_path / "config.yaml"
         config.write_text(YAML_HEAD + yaml_body)
@@ -111,7 +94,7 @@ def test_one_target_names_a_module_by_its_path_suffix():
 
 
 def test_a_one_entry_tuple_built_in_code_names_its_module():
-    """TRL collapses any one-entry sequence, so a tuple a caller builds the config with is kept as names too."""
+    """TRL collapses any one-entry sequence, so a caller's tuple is kept as names too."""
     model_config = ModelArguments(model_name_or_path="dummy/model", use_peft=True, lora_target_modules=(TARGET,))
     model = tiny_family_model(TINY_DENSE_FAMILY)
 
@@ -138,8 +121,6 @@ def test_one_named_target_takes_dora():
 
 @pytest.mark.parametrize("family", sorted(ROSTER))
 def test_one_named_target_adapts_that_module_in_every_family(family):
-    """One attention target a family's LoRA rows name (Zaya's only one, ``o_proj``) adapts every module of that
-    name, as a longer list would."""
     tiny = ROSTER[family]
     torch.manual_seed(0)
     model = tiny_family_model(tiny)
@@ -156,8 +137,7 @@ def test_one_named_target_adapts_that_module_in_every_family(family):
     ids=["yaml-list", "cli-override"],
 )
 def test_a_one_entry_all_linear_list_is_peft_sentinel(argv, yaml_body, tmp_path):
-    """PEFT reads ``all-linear`` only as a bare string; the list a user writes reaches it as that sentinel and
-    adapts every linear layer but the output head."""
+    """PEFT reads ``all-linear`` only as a bare string; it adapts every linear layer but the output head."""
     model_config = _parse(tmp_path, argv, yaml_body)
     model = tiny_family_model(TINY_DENSE_FAMILY)
     expected = {
@@ -168,8 +148,7 @@ def test_a_one_entry_all_linear_list_is_peft_sentinel(argv, yaml_body, tmp_path)
 
 
 def test_a_bare_yaml_string_is_peft_regex(tmp_path):
-    """A string is fullmatched against each full module path: a pattern selects the paths it spells, and a bare
-    module name, which spells no full path, matches nothing."""
+    """A string is fullmatched against each full module path, so a bare module name matches nothing."""
     pattern = _parse(tmp_path, [], f"lora_target_modules: '.*\\.0\\.self_attn\\.{TARGET}'\n")
     assert _adapted(tiny_family_model(TINY_DENSE_FAMILY), pattern) == {f"model.layers.0.self_attn.{TARGET}"}
 
@@ -189,17 +168,14 @@ def test_a_bare_yaml_string_is_peft_regex(tmp_path):
     ids=["one-entry", "beside-a-name", "cli"],
 )
 def test_a_regex_in_the_list_is_refused_when_parsed(argv, yaml_body, tmp_path):
-    """PEFT compares a list entry to module paths verbatim, so a regex there adapts nothing: alone the run would
-    fail at injection after the load, beside a name it would drop out unnoticed. The command line always gives a
-    list, so a regex there is refused too."""
+    """Alone, a regex fails at injection after the load; beside a name, it would drop out unnoticed."""
     with pytest.raises(ValueError, match="are regexes, but a list names modules"):
         _parse(tmp_path, argv, yaml_body)
 
 
 @pytest.mark.parametrize("character", REGEX_CHARACTERS.values(), ids=REGEX_CHARACTERS.keys())
 def test_an_entry_spelling_any_regex_character_is_refused(character, tmp_path):
-    """No module path spells the character, so an entry carrying it matches nothing; each entry carries one such
-    character alone, so a character dropped from the refusal fails its own case."""
+    """Each entry carries one character alone, so a character dropped from the refusal fails its own case."""
     entry = f"{TARGET}{character}"
     assert sum(entry.count(other) for other in REGEX_CHARACTERS.values()) == 1, "premise: one regex character"
 

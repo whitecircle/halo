@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""The PP stage loader's missing-shard gate for per-expert fusion tasks.
-
-Per-expert checkpoint keys never ride through the plan list (they map to no fused model key), so the
-plan-level missing-shard gate cannot see them. Ungated, a wrong-topology per-node resume of
-a per-expert-layout checkpoint dies rank-local in the fuser's ``safe_open`` between two collectives,
-stranding the other stages until the NCCL watchdog. :func:`_missing_fusion_shards_reason` routes that
-verdict through ``reject_across_ranks`` instead.
-
-Run: ``python tests/cpu/parallelism/test_pp_missing_shard_gates.py`` (or ``pytest -m cpu``).
-"""
+"""The PP stage loader's missing-shard gate for per-expert fusion tasks. Those keys skip the plan list, so a
+wrong-topology resume dies rank-local in ``safe_open`` between collectives, stranding other stages."""
 
 import pytest
 

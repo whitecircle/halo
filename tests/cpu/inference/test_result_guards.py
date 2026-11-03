@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""An all-failed inference run must exit non-zero, on every script that writes a batch of results.
-
-Unguarded, the script here would reach the end of a totally failed run and report success:
-
-* ``reward_model/score.py`` cannot guard on ``if not rewards``: ``rewards`` is pre-seeded from
-  the rows a previous run already wrote, so one resumed row makes the list truthy and the guard can
-  only ever fire on a cold start — the run least likely to be silently misconfigured. The count
-  that decides whether THIS run produced anything is the growth, not the length.
-
-Run: pytest tests/cpu/inference/test_result_guards.py
-"""
+"""An all-failed inference run must exit non-zero. ``reward_model/score.py`` pre-seeds ``rewards`` from rows a
+previous run wrote, so the guard counts the growth and not the length."""
 
 import asyncio
 import json
@@ -23,12 +14,8 @@ from openai.types.chat import ChatCompletionMessage
 from halo.entrypoints import reward_scoring
 from scripts.inference.reward_model import score as score_script
 
-# --- score: reward-model scoring ------------------------------------------------------------------
-
 
 class _DeadClient:
-    """API client whose every generation call fails, as a wrong --model or dead endpoint does."""
-
     def __init__(self):
         async def _create(**_kwargs):
             raise RuntimeError("simulated endpoint failure")
@@ -43,8 +30,7 @@ def _prepare_score(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, client):
     df = pd.DataFrame({"id": prompt_ids, "prompt": [[{"role": "user", "content": f"q{i}"}] for i in prompt_ids]})
 
     monkeypatch.setattr(reward_scoring, "load_prompts_dataframe", lambda args: df)
-    # Both endpoints are opened, and the batch is scored, through the shared module — that is where
-    # the stubs go, or the script would boot a real client and load a real reward model.
+    # Both endpoints and the batch go through the shared module, so the stubs go there.
     monkeypatch.setattr(reward_scoring, "build_openai_client", lambda *a, **k: client)
     monkeypatch.setattr(reward_scoring, "load_reward_model", lambda *a, **k: (None, None, None))
     # The reward head is never reached on the failure paths; on the success path it stands in for it.
@@ -77,7 +63,6 @@ def _resumed(row_id: int, reward: float = 0.5):
 
 
 def test_score_raises_when_every_pending_row_failed(monkeypatch, tmp_path):
-    """Cold run against a dead endpoint: nothing scored, so the run is a failure."""
     _prepare_score(monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[], client=_DeadClient())
 
     with pytest.raises(RuntimeError, match="No usable result"):
@@ -85,9 +70,8 @@ def test_score_raises_when_every_pending_row_failed(monkeypatch, tmp_path):
 
 
 def test_score_resumed_rows_do_not_satisfy_the_guard(monkeypatch, tmp_path):
-    """THE regression: the resumed rows are already in `rewards`, so a length check passes and the
-    run reports the PREVIOUS run's rows as its own output. Every pending row failed here — a resume
-    is not exempt from the guard just because an earlier run left something behind."""
+    """The resumed rows are already in ``rewards``, so a length check would report the previous run's rows as this
+    run's output."""
     _prepare_score(monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[_resumed(1)], client=_DeadClient())
 
     with pytest.raises(RuntimeError, match="No usable result"):
@@ -95,15 +79,12 @@ def test_score_resumed_rows_do_not_satisfy_the_guard(monkeypatch, tmp_path):
 
 
 def test_score_all_rows_already_processed_is_not_a_failure(monkeypatch, tmp_path):
-    """Nothing pending means nothing to produce — a completed run re-run must stay a success."""
     _prepare_score(monkeypatch, tmp_path, prompt_ids=[1], resumed_rows=[_resumed(1)], client=_DeadClient())
 
     asyncio.run(score_script.main())
 
 
 class _LiveClient:
-    """API client that answers every generation call."""
-
     def __init__(self):
         async def _create(**_kwargs):
             message = ChatCompletionMessage(role="assistant", content="hi")
@@ -113,7 +94,6 @@ class _LiveClient:
 
 
 def test_score_one_scored_row_is_the_other_side_of_the_boundary(monkeypatch, tmp_path):
-    """The guard keys on producing NOTHING, so a resume that scores its pending rows still passes."""
     output_path = _prepare_score(
         monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[_resumed(1)], client=_LiveClient()
     )

@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``finalize_loaded_model`` buffer-recompute tests (halo/model_loading/buffer_repair.py) — CPU-only.
-
-transformers 5 pops ``rope_theta``/``partial_rotary_factor`` off the config top level into
-``config.rope_parameters``; a recompute that reads ``getattr(config, "rope_theta", 10000.0)``
-silently rebuilds RoPE with the wrong base for every theta != 10000 model (Qwen3 1e6, LFM2 1e6,
-GLM-4.7). This pins the default-rope recompute to the module's own rope_parameters-aware math.
-
-Run: python tests/cpu/model_loading/test_buffer_repair.py
-"""
+"""``finalize_loaded_model`` buffer recompute (halo/model_loading/buffer_repair.py). transformers 5 moves
+``rope_theta`` into ``rope_parameters``, so a ``getattr`` default rebuilds RoPE wrong."""
 
 import logging
 
@@ -39,7 +32,7 @@ def _model_with_rotary(theta: float) -> tuple[nn.Module, Qwen3RotaryEmbedding, t
 
 def test_recompute_preserves_nondefault_theta():
     model, rotary, reference = _model_with_rotary(theta=1_000_000.0)
-    rotary.inv_freq.zero_()  # simulate the bf16/meta corruption the fixer repairs
+    rotary.inv_freq.zero_()  # Simulates the bf16/meta corruption the fixer repairs.
     finalize_loaded_model(model)
     assert torch.allclose(rotary.inv_freq, reference), (
         f"inv_freq rebuilt with wrong rope base: got {rotary.inv_freq[1].item():.6f}, "
@@ -56,11 +49,8 @@ def test_recompute_default_theta():
 
 
 def test_per_layer_type_recompute_matches_model_init():
-    """Gemma4 registers ``head_dim`` per-layer (256 sliding / 512 global, transformers 5.20
-    heterogeneity): the recompute must size each layer type's table off the layer-type-resolved
-    config view, exactly as the module's own ``__init__`` does. A raw-config read raises
-    ``AmbiguousGlobalPerLayerAttributeError`` on the sliding leg, and the proportional (global) leg
-    sized off any single global field rebuilds a wrong-length table."""
+    """Gemma4 registers ``head_dim`` per layer, so a raw-config read raises
+    ``AmbiguousGlobalPerLayerAttributeError`` and a single global field sizes a wrong table."""
     cfg = Gemma4TextConfig(
         num_hidden_layers=6,
         hidden_size=64,
@@ -73,10 +63,10 @@ def test_per_layer_type_recompute_matches_model_init():
     model = Gemma4TextModel(cfg)
     rotary = model.rotary_emb
     reference = {name: buf.clone() for name, buf in rotary.named_buffers() if "inv_freq" in name}
-    # Heterogeneity is live: the two layer types size different tables (head_dim 512 vs 256).
+    # The two layer types size different tables (head_dim 512 vs 256).
     assert reference["full_attention_inv_freq"].shape != reference["sliding_attention_inv_freq"].shape
     for name in reference:
-        getattr(rotary, name).zero_()  # simulate the bf16/meta corruption the fixer repairs
+        getattr(rotary, name).zero_()
 
     finalize_loaded_model(model)
 
@@ -87,9 +77,7 @@ def test_per_layer_type_recompute_matches_model_init():
 
 
 def test_vision_rotary_recompute_matches_model_init():
-    """Gemma 4's vision rotary sizes ``inv_freq`` off ``head_dim // 2`` (one table per spatial axis);
-    the generic recompute reaches that formula through the module's own
-    ``compute_default_rope_parameters``, so the rebuilt table must equal the one ``__init__`` built."""
+    """Sized off ``head_dim // 2``, reached through the module's own ``compute_default_rope_parameters``."""
     rotary = Gemma4VisionRotaryEmbedding(Gemma4VisionConfig())
     reference = rotary.inv_freq.clone()
     model = nn.Module()
@@ -105,9 +93,7 @@ def test_vision_rotary_recompute_matches_model_init():
 
 @pytest.mark.parametrize("embedding_cls", [Gemma4TextScaledWordEmbedding, Gemma3TextScaledWordEmbedding])
 def test_scaled_embedding_scale_is_rebuilt_from_its_scalar(embedding_cls):
-    """Every Gemma-lineage scaled embedding keeps ``embed_scale`` as a non-persistent buffer beside the
-    ``scalar_embed_scale`` it was built from; the load leaves the buffer uninitialized, and a zero one
-    multiplies every input embedding by zero."""
+    """A zero ``embed_scale`` multiplies every input embedding by zero."""
     embedding = embedding_cls(16, 8, padding_idx=0, embed_scale=8**0.5)
     embedding.embed_scale.zero_()
     model = nn.Module()
@@ -119,8 +105,7 @@ def test_scaled_embedding_scale_is_rebuilt_from_its_scalar(embedding_cls):
 
 
 def test_recompute_preserves_declared_persistence():
-    """A remote-code family may declare ``inv_freq`` PERSISTENT (shipped in its checkpoints);
-    forcing ``persistent=False`` on the recompute silently drops the key from every save."""
+    """Forcing ``persistent=False`` silently drops a remote-code family's key from every save."""
     model, rotary, reference = _model_with_rotary(theta=10_000.0)
     rotary.register_buffer("inv_freq", rotary.inv_freq.clone(), persistent=True)
     rotary.inv_freq.zero_()
@@ -144,9 +129,7 @@ def _tiny_tied_lm() -> nn.Module:
 
 
 def test_finalize_keeps_a_loaded_distinct_head():
-    """transformers 5 honours a checkpoint that ships a DISTINCT ``lm_head.weight`` even under
-    ``tie_word_embeddings: true``; an unconditional ``tie_weights()`` in the finalize seam would
-    silently overwrite it with the embedding on every non-lazy load path."""
+    """An unconditional ``tie_weights()`` would silently overwrite a checkpoint's distinct ``lm_head.weight``."""
     model = _tiny_tied_lm()
     distinct = torch.randn_like(model.get_input_embeddings().weight)
     model.set_output_embeddings(nn.Linear(16, 32, bias=False))
@@ -161,8 +144,7 @@ def test_finalize_keeps_a_loaded_distinct_head():
 
 
 def test_finalize_still_ties_a_meta_shadow_head():
-    """The lazy loaders leave the tied shadow (``lm_head.weight``) on meta until tying — the case
-    the finalize re-tie exists for. Skipping it here would strand the head on meta."""
+    """The case the finalize re-tie exists for."""
     model = _tiny_tied_lm()
     head = model.get_output_embeddings()
     head.weight = nn.Parameter(torch.empty_like(head.weight, device="meta"))
@@ -176,7 +158,7 @@ def test_finalize_still_ties_a_meta_shadow_head():
 
 
 class _UnknownRotary(nn.Module):
-    """A rotary layout the fixer does not recognize — no ``inv_freq``, no per-layer-type mapping."""
+    """No ``inv_freq``, no per-layer-type mapping."""
 
 
 def _model_with_unknown_rotaries(count: int) -> nn.Module:
@@ -187,9 +169,8 @@ def _model_with_unknown_rotaries(count: int) -> nn.Module:
 
 
 def test_per_module_repair_is_not_logged_at_info(caplog):
-    """One INFO per rotary module per RANK, carrying ``inv_freq.min()/.max()``, costs twice: a
-    92-layer model at 512 ranks buries the run's real diagnostics, and every message forces a device
-    sync on the load path. The per-model summary is what survives."""
+    """A 92-layer model at 512 ranks buries the real diagnostics, and each message forces a device sync on the load
+    path."""
     caplog.set_level(logging.INFO, logger=buffer_repair.__name__)
     model, rotary, _reference = _model_with_rotary(theta=1_000_000.0)
     rotary.inv_freq.zero_()
@@ -202,11 +183,9 @@ def test_per_module_repair_is_not_logged_at_info(caplog):
 
 
 def test_unrecognized_rotary_warns_once_per_class(caplog, monkeypatch):
-    """The unhandled layout is a property of the FAMILY: one line says everything one-per-layer
-    would, and this logger reaches every rank."""
+    """A property of the family, and this logger reaches every rank."""
     caplog.set_level(logging.WARNING, logger=buffer_repair.__name__)
-    # A fresh set per arm, restored afterwards: clearing the module's own would leave a later test
-    # in this worker silently un-warned.
+    # Clearing the module's own set would leave a later test silently un-warned.
     monkeypatch.setattr(buffer_repair, "_warned_unfixed", set())
 
     finalize_loaded_model(_model_with_unknown_rotaries(4))
@@ -221,8 +200,6 @@ def test_unrecognized_rotary_warns_once_per_class(caplog, monkeypatch):
 
 
 class _ConfiglessSlopeAttention(nn.Module):
-    """The Bailing slope shape with no config to read ``num_hidden_layers`` from."""
-
     def __init__(self):
         super().__init__()
         self.num_heads = 4
@@ -231,14 +208,10 @@ class _ConfiglessSlopeAttention(nn.Module):
 
 
 class _ConfiglessLayerTypeRotary(nn.Module):
-    """A per-layer-type rotary with no config to size its tables from."""
-
     rope_init_fns = {"full_attention": None}
 
 
 class _ConfiglessSingleRotary(nn.Module):
-    """A single-``inv_freq`` rotary with no config to size its table from."""
-
     def __init__(self):
         super().__init__()
         self.register_buffer("inv_freq", torch.empty(4), persistent=False)
@@ -254,8 +227,7 @@ class _ConfiglessSingleRotary(nn.Module):
     ids=["alibi_slope", "per_layer_type_rope", "single_inv_freq_rope"],
 )
 def test_a_claimed_but_unfixable_buffer_warns(module, caplog, monkeypatch):
-    """A fixer that claims a module it cannot rebuild leaves the load's uninitialized values in
-    place; the one line naming the class is the only trace of it."""
+    """The one line naming the class is the only trace of the uninitialized values."""
     caplog.set_level(logging.WARNING, logger=buffer_repair.__name__)
     monkeypatch.setattr(buffer_repair, "_warned_unfixed", set())
     model = nn.Module()

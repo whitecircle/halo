@@ -1,16 +1,7 @@
 #!/usr/bin/env python
-"""The shared fixed test batch and the synthetic datasets must not move with the calendar.
-
-gpt-oss's harmony template stamps ``strftime_now("%Y-%m-%d")`` into its system message, so an
-unpinned :func:`tests.common.ep_reference.fixed_chat_batch` tokenizes to different ids — and a
-different loss — on every new day, silently re-deriving the EP/TP correctness thresholds that are
-measured against it (at 2025-01-01 the rotated-expert control drops below ``control_min_loss_shift``).
-The :mod:`tests.common.datasets` generators feed suites that hold one layout's loss to another's, and
-an unpinned render moves that drift with the date too. Both shadow the template's clock with
-:data:`CHAT_TEMPLATE_NOW`; these tests fail the moment that pin stops reaching a renderer.
-
-Run: python tests/cpu/conventions/test_fixed_batch_date_pin.py
-"""
+"""The shared fixed test batch and the synthetic datasets must not move with the calendar. gpt-oss's template stamps
+``strftime_now`` into its system message, so an unpinned render changes ids and loss daily and re-derives the
+EP/TP thresholds measured against it."""
 
 from datetime import datetime
 

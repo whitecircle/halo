@@ -1,9 +1,6 @@
-"""Relative-reward shaping for group-based RL (RLRR, Niu et al., arXiv:2601.23058).
-
-Intra-group rankings replace the group-mean/std advantage: ``hrr`` (Eq. 3) adds a bounded rank correction
-to the binary rule reward, ``prr`` (Eq. 4) maps rank to ``[0, 1]``. Ranks re-rank hierarchically on
-``(correctness, length-bin, raw-reward)`` (Eq. 6); numpy over one group, configured by ``RLRRConfig``.
-"""
+"""RLRR (Niu et al., arXiv:2601.23058): intra-group rankings replace the group-mean/std advantage. ``hrr`` (Eq. 3) adds
+a bounded rank correction to the binary rule reward, ``prr`` (Eq. 4) maps rank to ``[0, 1]``; ranks re-rank on
+``(correctness, length-bin, raw-reward)`` (Eq. 6)."""
 
 from __future__ import annotations
 
@@ -38,11 +35,8 @@ def hierarchical_ranks(
     lengths: ArrayLike | None,
     config: RLRRConfig,
 ) -> np.ndarray:
-    """Intra-group ranks via hierarchical re-ranking (Eq. 6).
-
-    Lexicographic sort key (ascending, smallest = best): correctness, then length bin
-    ``floor(len / λ)`` (``+inf`` for incorrect), then raw reward.
-    """
+    """Eq. 6, smallest key best: correctness, then length bin ``floor(len / λ)`` (``+inf`` for incorrect), then raw
+    reward."""
     n = len(rewards)
     keys: list[tuple] = []
     for i in range(n):
@@ -52,7 +46,6 @@ def hierarchical_ranks(
             length_bin = math.floor(lengths[i] / config.lam) if is_correct else math.inf
         else:
             length_bin = 0.0
-        # Negate reward so higher reward -> smaller key -> better rank.
         keys.append((correctness_key, length_bin, -float(rewards[i])))
     return dense_ranks(keys)
 
@@ -77,13 +70,8 @@ def relative_advantages(
     lengths: ArrayLike | None = None,
     valid: BoolArrayLike | None = None,
 ) -> np.ndarray:
-    """RLRR advantages ``(G,)`` of one group's scalar ``rewards``.
-
-    Correctness is ``rewards >= config.correctness_threshold``, also HRR's binary rule score (Eq. 3).
-    ``lengths`` feed the length re-ranking (Eq. 6). ``valid`` (True = a real response) ranks and centres
-    the real responses alone: a placeholder carries a sentinel, not a score, so it would move ``r_max`` and
-    the mean of every sibling. Placeholders return 0.
-    """
+    """``valid`` ranks and centres the real responses alone: a placeholder's sentinel would move ``r_max`` and every
+    sibling's mean; placeholders return 0."""
     rewards_arr = np.asarray(rewards, dtype=np.float64)
     n = len(rewards_arr)
     if n == 0:
@@ -126,12 +114,8 @@ def relative_advantages_grouped(
     lengths: ArrayLike | None = None,
     valid: BoolArrayLike | None = None,
 ) -> np.ndarray:
-    """Apply :func:`relative_advantages` to a flat batch of contiguous groups.
-
-    ``rewards`` is laid out as ``num_prompts`` consecutive blocks of
-    ``group_size`` responses (the standard GRPO rollout layout). Returns a flat
-    advantage array of the same length. ``valid`` is per response, sliced per group.
-    """
+    """``rewards`` is ``num_prompts`` consecutive blocks of ``group_size`` responses, the standard GRPO rollout
+    layout."""
     rewards_arr = np.asarray(rewards, dtype=np.float64)
     total = len(rewards_arr)
     if group_size <= 0 or total % group_size != 0:

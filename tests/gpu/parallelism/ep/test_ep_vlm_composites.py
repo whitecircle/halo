@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""Multimodal MoE composites at EP2 against the replicated composite, on a real processor's image batch.
+"""Multimodal MoE composites at EP2 against the replicated composite, on the released processor's image batch.
 
-The production classes wrap a vision tower beside the MoE text backbone (``Qwen3_5MoeForConditionalGeneration``,
-``Gemma4ForConditionalGeneration``); EP patching must find the MoE blocks under the wrapper and leave the tower a
-replicated module, and an image batch, built by the released checkpoint's own processor so its pixels, grids and
-placeholder count are the ones the model takes, must train: the EP loss equals the undistributed composite's, the
-vision tower's gradient is live and matches the reference's by direction and norm, and the batch with its pixels
-zeroed scores a different loss, so the images reach it at all. The model is the tiny roster composite
-(``TINY_MOE_VLM_FAMILIES``) at the processor's vocabulary, the same seeded weights on every rank and in both runs.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_vlm_composites.py --family qwen3_5_moe
+The batch with its pixels zeroed must score a different loss, so the images reach it at all.
 """
 
 import argparse
@@ -32,8 +24,8 @@ from tests.common.tolerances import TOL
 
 SEED = 42
 IMAGE_SIDE = 64
-# Each composite's released processor, and the text-config fields its tiny tower needs at that processor's
-# vocabulary (Gemma 4's per-layer input table embeds the same ids as the main one).
+# Each released processor, and the text fields its tiny tower needs (Gemma 4's per-layer input table embeds the same
+# ids as the main one).
 FAMILIES = {
     "qwen3_5_moe": (QWEN3_6_MOE_35B, lambda vocab: {}),
     "gemma4": (GEMMA4_26B_A4B, lambda vocab: {"vocab_size_per_layer_input": vocab}),
@@ -45,8 +37,7 @@ ARGS = parser.parse_args()
 
 
 def _image_batch(processor, device) -> tuple[dict[str, torch.Tensor], int]:
-    """One chat turn about a fixed random image through the processor, labels masked at the image placeholders;
-    returns the batch and the image token id."""
+    """Labels masked at the image placeholders; returns the batch and the image token id."""
     image = Image.fromarray((np.random.RandomState(SEED).rand(IMAGE_SIDE, IMAGE_SIDE, 3) * 255).astype("uint8"))
     messages = [
         {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Describe the image."}]},
@@ -63,7 +54,6 @@ def _image_batch(processor, device) -> tuple[dict[str, torch.Tensor], int]:
 
 
 def _build(processor, image_token_id: int, device):
-    """The seeded tiny composite at the processor's vocabulary, identical on every rank and in both runs."""
     vocab = padded_vocab_size(processor.tokenizer)
     torch.manual_seed(SEED)
     model = tiny_family_model(
@@ -75,7 +65,7 @@ def _build(processor, image_token_id: int, device):
 
 
 def _vision_tower(model):
-    """The composite's vision tower: ``visual`` on the Qwen VL wrappers, ``vision_tower`` elsewhere."""
+    """``visual`` on the Qwen VL wrappers, ``vision_tower`` elsewhere."""
     backbone = model.model
     return backbone.visual if hasattr(backbone, "visual") else backbone.vision_tower
 

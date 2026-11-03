@@ -1,24 +1,9 @@
 #!/usr/bin/env python
-"""Per-rank optimizer shard save after an eval-only forward (2 GPUs).
+"""Per-rank optimizer shard save after an eval-only forward, the production end-of-training order.
 
-With ``eval_strategy: steps`` transformers' flow callback forces a final evaluation at
-``max_steps`` and ``_maybe_log_save_evaluate`` runs it BEFORE the end-of-training save — so the
-production save sequence is eval → save. An eval-only forward has no backward to reshard FSDP2
-(and ``reshard_after_forward=False``, the toolkit default, skips the post-forward reshard), which
-leaves the transient UNSHARDED plain params registered on the modules; ``get_optimizer_state_dict``
-maps optimizer params to FQNs by identity against ``named_parameters()`` while the optimizer holds
-the sharded DTensors, so an unresharded save leaves every FSDP2 param unmapped and skips the shard
-save with ``KeyError: 0`` — a checkpoint with no optimizer state, exit 0. The save path reshards
-first; this test pins that on the exact sequence.
-
-``--mode fsdp``  tiny dense Qwen3, plain FSDP2 — the mechanism is family-agnostic.
-``--mode ep``    tiny Qwen3.5-MoE composite (ForConditionalGeneration), ep_size=2 — the hardest
-                 shape: FSDP2 DTensors + FSDP-ignored plain expert tensors + AdamWBF16's split
-                 param groups.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_optimizer_shard_save_after_eval.py --mode fsdp
+An eval-only forward has no backward to reshard FSDP2, leaving transient plain params registered.
+``get_optimizer_state_dict`` maps by identity while the optimizer holds DTensors, so an unresharded save skips the
+shard with ``KeyError: 0``: a checkpoint with no optimizer state, exit 0.
 """
 
 import argparse
@@ -52,15 +37,14 @@ SEED = 42
 MAX_STEPS = 2
 BATCH_SIZE = 2
 MAX_SEQ_LENGTH = 256
-# Larger than MAX_STEPS so no mid-run eval fires: the only evaluation is the END-of-training one the
-# flow callback forces (max_steps % eval_steps != 0), reproducing the production eval → save order.
+# Larger than MAX_STEPS: the only evaluation is the end-of-training one the flow callback forces, reproducing eval then
+# save.
 EVAL_STEPS = 100
-# The composite's vision tower, as small as it loads: text-only batches never run it.
+# As small as it loads: text-only batches never run it.
 TINY_VISION_CONFIG = {"hidden_size": 64, "intermediate_size": 128, "depth": 2, "num_heads": 2}
 
 
 def _build_tiny_checkpoint(mode: str, target_dir: str) -> None:
-    """Rank 0: random-init tiny model + Qwen tokenizer saved as a loadable HF checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B, trust_remote_code=True)
     torch.manual_seed(SEED)
     if mode == "ep":
@@ -76,7 +60,7 @@ def _build_tiny_checkpoint(mode: str, target_dir: str) -> None:
 
 
 def _shard_covers_optimizer(ckpt_dir: str, rank: int, optimizer) -> tuple[bool, str]:
-    """This rank's shard holds FQN-keyed state for EVERY optimizer param — not just some."""
+    """FQN-keyed state for every optimizer param, not just some."""
     shard_path = os.path.join(ckpt_dir, OPTIMIZER_SHARD_FILE.format(rank=rank))
     if not os.path.exists(shard_path):
         return False, f"missing {os.path.basename(shard_path)}"
@@ -124,7 +108,7 @@ def run(ctx):
         per_device_train_batch_size=BATCH_SIZE,
         learning_rate=1e-4,
         bf16=True,
-        optim="adamw_torch_fused",  # auto-replaced by AdamWBF16 — the production optimizer
+        optim="adamw_torch_fused",  # Auto-replaced by AdamWBF16, the production optimizer.
         logging_steps=1,
         save_strategy="steps",
         save_steps=MAX_STEPS,

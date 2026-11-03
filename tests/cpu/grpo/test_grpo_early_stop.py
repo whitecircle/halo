@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: the GRPO early stop, shared by the online and environmental trainers.
-
-A condition ends training once it breaches on ``early_stop_patience`` readings in a row: entropy out of
-its band (either side), the trainer-vs-sampler log-prob gap above its limit (each trainer names the
-metric it logs, signed or absolute), or, in env GRPO, every update skipped by the trust-region breaker.
-A healthy reading resets the streak, a log without the reading (a step reusing its generation round)
-leaves it, eval logs never count, and nothing is armed unless a condition is set.
-
-    python tests/cpu/grpo/test_grpo_early_stop.py
-"""
+"""The GRPO early stop, shared by the online and environmental trainers. A condition ends training once it breaches on
+``early_stop_patience`` readings in a row; a log without the reading leaves the streak, and eval logs never count."""
 
 import ast
 import dataclasses
@@ -33,7 +25,7 @@ from tests.common.repo import REPO_ROOT
 
 
 def _run(config: EarlyStopConfig, steps: list[dict], gap_key: str = LOGRATIO_MEAN_KEY) -> int | None:
-    """Feed logged steps to the callback; the 1-based step at which it ended training, or None."""
+    """The 1-based step at which the callback ended training, or None."""
     callback, control, state = GRPOEarlyStopCallback(config, gap_key), TrainerControl(), TrainerState()
     for i, logs in enumerate(steps, 1):
         state.global_step = i
@@ -65,9 +57,8 @@ def test_the_stop_step_is_neither_saved_nor_evaluated():
 
 
 def test_steps_that_reuse_a_round_neither_break_nor_extend_a_streak():
-    """The gap and the breaker's verdict are logged once per generation round; under ``num_iterations: 2``
-    every other logged step carries only the entropy. Read as healthy, those steps would reset the streak
-    and the stop could never fire."""
+    """Under ``num_iterations: 2`` every other logged step carries only the entropy. Read as healthy, those steps would
+    reset the streak and the stop could never fire."""
     config = EarlyStopConfig(logratio_gap=0.005, on_skipped_updates=True, patience=3)
     round_step, reuse_step = _step(logratio=-0.05, skipped=1.0), {"entropy": 0.24}
     assert _run(config, [round_step, reuse_step] * 4) == 5
@@ -88,9 +79,6 @@ def test_an_epoch_end_after_the_stop_saves_and_evaluates_nothing():
 
 
 class _StoppableTrainer:
-    """Trains one logged step per entry of ``logs`` under the stop, the way the HF loop feeds it, toward a plan
-    of ``max_steps``."""
-
     def __init__(self, logs: list[dict], max_steps: int | None = None):
         self.callback_handler = types.SimpleNamespace(callbacks=[GRPOEarlyStopCallback(BAND, LOGRATIO_MEAN_KEY)])
         self.state = TrainerState(max_steps=len(logs) if max_steps is None else max_steps)
@@ -126,9 +114,9 @@ _RUNTIME = types.SimpleNamespace(
 
 
 def test_a_stopped_run_exits_non_zero_after_its_cleanup_and_any_other_returns():
-    """Exiting 0, a stopped run reads as finished to torchrun and a scheduler, and a chained stage would start
-    from its output; the EP buffers are released first either way. A run that ends short of its plan without
-    a stop (a ``no_duplicates`` sampler yields fewer batches than its length) trained all its data."""
+    """Exiting 0, a stopped run reads as finished to torchrun and a scheduler, and a chained stage would start from its
+    output. A run short of its plan without a stop (a ``no_duplicates`` sampler yields fewer batches than its length)
+    trained all its data."""
     stopped = _StoppableTrainer([_step(0.5)] * 5)
     with pytest.raises(EarlyStopExit) as exited:
         run_trainer(stopped, _RUNTIME, method_name="GRPO")
@@ -141,7 +129,7 @@ def test_a_stopped_run_exits_non_zero_after_its_cleanup_and_any_other_returns():
 
 
 class _AnyMethodsStop(StopsTrainingEarly):
-    """A stop callback of some other method: the runner reads the marker, not one family's class."""
+    """The runner reads the marker, never one family's class."""
 
     stopped = True
 
@@ -189,7 +177,6 @@ def test_eval_logs_never_count():
 
 
 def test_conditions_keep_separate_streaks():
-    """Entropy and the gap alternate out of range: neither holds two steps in a row."""
     config = EarlyStopConfig(entropy_band=(0.15, 0.35), logratio_gap=0.005, patience=2)
     assert _run(config, [_step(0.4), _step(logratio=-0.01), _step(0.4), _step(logratio=-0.01)]) is None
 
@@ -206,8 +193,8 @@ def test_the_env_config_adds_the_breaker_condition_to_the_shared_ones():
 
 
 def test_online_args_carry_the_shared_conditions_and_no_breaker_one():
-    """Every shared field reaches the config at a non-default value, so a dropped one cannot pass by
-    matching its default; the breaker condition is env-only, since only that trainer skips updates."""
+    """Each field is set to a non-default value, so a dropped one cannot pass by matching its default. The breaker
+    condition is env-only, since only that trainer skips updates."""
     assert "early_stop_on_skipped_updates" not in {f.name for f in dataclasses.fields(OnlineGRPOScriptArguments)}
     args = OnlineGRPOScriptArguments(
         early_stop_entropy_band=[0.2, 0.6], early_stop_logratio_gap=0.01, early_stop_patience=5
@@ -216,8 +203,7 @@ def test_online_args_carry_the_shared_conditions_and_no_breaker_one():
 
 
 def test_the_online_script_hands_both_knobs_to_the_trainer():
-    """The shared knobs parse on the online args; a script that drops them from the trainer call leaves
-    a run that looks configured and trains without them."""
+    """A script that drops them from the trainer call leaves a run that looks configured and trains without them."""
     tree = ast.parse((REPO_ROOT / "scripts/training/grpo/online.py").read_text())
     call = next(
         node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "trainer_cls"

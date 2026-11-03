@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""DeepSeek-V4 packed-document isolation on the dense (eager) path — the family's only backend.
-
-Two independent mechanisms, pinned separately:
-
-1. The packed mask. ``masking_utils`` builds the packed mask only when ``past_key_values is None``,
-   so an unconditional ``DynamicCache`` in ``DeepseekV4Model.forward`` runs every packed row as ONE
-   dense causal sequence. transformers >= 5.14 makes that cache conditional on ``use_cache``, which the
-   training path always runs with ``False`` (``TrainingArguments.use_cache`` defaults False and
-   ``Trainer.__init__`` writes it into ``model.config``; TRL's SFT ``compute_loss`` also forces the
-   kwarg).
-2. The KV compressor. ``compressed_sparse_attention`` / ``heavily_compressed_attention`` layers pool
-   KV over windows cut at fixed row indices and judge their causality by position, so they cross
-   packed boundaries BY CONSTRUCTION even under a correct packed mask. This is the mechanism behind
-   the collator factory's refusal of DSv4 ``packing`` / ``padding_free``
-   (``reject_compressed_kv_rows``).
-
-    python tests/cpu/models/test_deepseek_v4_packed_isolation.py
-"""
+"""DeepSeek-V4 packed-document isolation on the dense (eager) path, the family's only backend.
+The masked layers need ``use_cache=False``; the KV compressors cross documents by construction."""
 
 import pytest
 import torch
@@ -28,13 +12,12 @@ from tests.common.models import TINY_DSV4_CONFIG
 SEED = 1234
 
 # Expert-batch composition noise (doc A's tokens change each expert's grouped-GEMM batch, which
-# reorders fp32 reductions for doc B's tokens). Leaks read ~1e-1, five orders above.
+# reorders fp32 reductions for doc B's tokens). Leaks read ~1e-1, four orders above.
 NOISE_BOUND = 1e-5
 
 
 def _drift(layer_types: list[str], use_cache: bool, lens: tuple[int, int] = (6, 6)) -> float:
-    """Doc B's max logit drift when doc A's content changes (doc A precedes doc B, so causality
-    alone never explains a drift — only state crossing the boundary does)."""
+    """Doc B's max logit drift when doc A's content changes, which only state crossing the boundary explains."""
     torch.manual_seed(SEED)
     config = DeepseekV4Config(**{**TINY_DSV4_CONFIG, "layer_types": layer_types})
     model = DeepseekV4ForCausalLM(config).eval()
@@ -53,8 +36,7 @@ def _drift(layer_types: list[str], use_cache: bool, lens: tuple[int, int] = (6, 
 
 
 def test_masked_attention_isolates_on_the_training_path():
-    """use_cache=False — the invariant every trainer forward carries — must isolate the masked
-    attention layers (the conditional-cache fix, transformers >= 5.14)."""
+    """Every trainer forward carries ``use_cache=False``, which isolates masked attention since transformers 5.14."""
     drift = _drift(["sliding_attention"] * 3, use_cache=False)
     assert drift < NOISE_BOUND, (
         f"packed documents attend across each other ({drift:.2e}) with use_cache=False — the "
@@ -64,24 +46,20 @@ def test_masked_attention_isolates_on_the_training_path():
 
 
 def test_cache_still_suppresses_the_packed_mask():
-    """The mechanism pin: a live cache disables packed-mask synthesis, so isolation rests entirely
-    on use_cache=False reaching the forward. If this ever nears zero, transformers builds packed
-    masks alongside a cache and the invariant above stops being load-bearing — re-examine both."""
+    """A live cache disables the packed mask in ``masking_utils``, so isolation rests on ``use_cache=False``.
+    If this nears zero, transformers builds packed masks alongside a cache and the test above is moot."""
     assert _drift(["sliding_attention"] * 3, use_cache=True) > 1e-3
 
 
 def test_compressed_attention_crosses_documents_by_construction():
-    """The compressor pin: one ``compressed_sparse_attention`` layer leaks regardless of the packed
-    mask. If this ever nears zero, upstream made the compressor document-aware — re-examine the
-    DSv4 packing refusal and the per-family isolation matrix in agent-docs/data/collators.md."""
+    """One CSA layer leaks under a correct packed mask, since its KV windows are cut at fixed row indices.
+    If this nears zero, re-examine the packing refusal and the isolation matrix in agent-docs/data/collators.md."""
     layer_types = ["sliding_attention", "compressed_sparse_attention", "sliding_attention"]
     assert _drift(layer_types, use_cache=False) > 1e-3
 
 
 def test_heavily_compressed_attention_crosses_documents_by_construction():
-    """Same pin for HCA — the config default alternates CSA and HCA, so ~half a real stack is HCA.
-    Documents must be longer than the compress rate (16) or the compressor degenerates to zero
-    windows and the probe reads vacuously isolated."""
+    """Documents must outlast the compress rate (16), or the compressor has no windows and the probe reads isolated."""
     layer_types = ["sliding_attention", "heavily_compressed_attention", "sliding_attention"]
     assert _drift(layer_types, use_cache=False, lens=(160, 160)) > 1e-3
 

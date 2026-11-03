@@ -43,7 +43,6 @@ from halo.weight_sync.registry import resolve_weight_sync_client
 
 
 def _resolve_environment_spec(environment_config, environment_cls, environment_kwargs) -> tuple[Any, dict]:
-    """``(environment spec, env config dict)`` of a registry config or a custom ``EnvironmentBase`` class."""
     if environment_config is not None:
         return environment_config.environment_type, environment_config.to_env_config()
     if environment_cls is not None:
@@ -81,8 +80,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     DistributedTrainerMixin,
     GRPOTrainer,
 ):
-    """Async environmental GRPO with Expert/Tensor Parallelism, its environment given as ``environment_config``
-    or ``environment_cls`` + ``environment_kwargs``."""
+    """Its environment is given as ``environment_config`` or ``environment_cls`` + ``environment_kwargs``."""
 
     PP_REFUSAL = (
         "inherits online GRPO's cross-stage engine weight-sync and rollout-phase forward blockers, and "
@@ -147,15 +145,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._resolve_length_ordered_rows()
 
     def _configure_rollout_state(self) -> None:
-        """The rollout, row and objective state the async config sets, refusing a knob that would go unread and a
-        prefetch whose syncs would abort a turn past its retries on an engine whose pause drops the turns in flight."""
         cfg = self.async_config
         self._rollout_backend = cfg.rollout_backend
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
         self._reasoning_end_ids = self._resolve_reasoning_end_ids()
         self._forced_close_ids = self._resolve_forced_close_ids(self._reasoning_end_ids)
         self._rows_over_cap = 0
-        # An eval round is the whole eval set; TRL's one-generation-batch buffer would keep its tail only.
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
         reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
@@ -177,7 +172,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._cleanup_async_components()
 
     def training_step(self, model, inputs, num_items_in_batch=None):
-        """Sync the engines' weights before this round generates, then train; disarm routing replay after."""
         # Gated on the attempt stamp, not the synced one: the cadence gate declines most steps, and
         # re-entering the path on every microbatch of a declined step costs a collective and a barrier.
         if self.state.global_step > 0 and self.state.global_step != self._last_sync_attempt_step:
@@ -194,14 +188,13 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     def _generate_and_score_completions(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
-        """The round's batch, the TP/ETP leader's on every group rank: ranks sample apart, and compute_loss
-        expects DTensor-consistent inputs."""
+        """The TP/ETP leader's batch on every group rank: ranks sample apart, and compute_loss expects
+        DTensor-consistent inputs."""
         return self._broadcast_tensors_from_tp_leader(self._collect_and_score_rollouts(inputs))
 
     def _collect_and_score_rollouts(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
-        """Roll the round's rows out through the Ray actors (or take the prefetched round) and build its batch."""
         device = self.accelerator.device
         mode = "eval" if not self.model.training else "train"
         # Rows past the split's own are never rolled out: they enter the batch as inert padding.
@@ -242,8 +235,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         return result
 
     def _extract_prompts_and_contexts(self, inputs: list[dict]) -> tuple[list[str], list[dict | None]]:
-        """Each row's task text for the environment, which builds the messages, and its other columns as the
-        rollout context; an unusable prompt is recorded for the caller's fence."""
+        """The task text for the environment, which builds the messages, and the other columns as rollout context; an
+        unusable prompt is recorded for the caller's fence."""
         prompts = []
         contexts = []
         for inp in inputs:
@@ -260,9 +253,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         return prompts, contexts
 
     def _stamp_group_efforts(self, prompts: list[str], contexts: list[dict | None]) -> None:
-        """One reasoning-effort draw per generation group (consecutive rows), stamped into every member's rollout
-        context: a per-episode draw would enter the advantage, which compares siblings under one conditioning.
-        Evaluation draws a group's level from its problem (:func:`stable_reasoning_effort`)."""
+        """One draw per generation group, since a per-episode draw would enter the advantage, which compares siblings
+        under one conditioning. Evaluation draws a group's level from its problem."""
         group = (self.num_generations if self.model.training else self.num_generations_eval) or 1
         if len(contexts) % group != 0:
             self._batch_errors.record(
@@ -284,8 +276,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                 contexts[i] = ctx
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """Arm the routing-replay mask for this microbatch's gradient forward, then defer to TRL. It stays armed
-        through the backward, whose reentrant-GC recompute reads it; :meth:`training_step` disarms."""
+        """The routing mask stays armed through the backward, whose reentrant-GC recompute reads it;
+        :meth:`training_step` disarms."""
         if self._routing_injector is not None and model.training and isinstance(inputs, dict):
             self._arm_loss_forward_replay(inputs)
         return super().compute_loss(
@@ -293,7 +285,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         )
 
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
-        """Add the routing-replay flip rate and the cumulative rollout and prefetch counters to ``logs``."""
         mode = "eval" if not self.model.training else "train"
         # World reductions, gated on the config and the mode alone.
         if self._routing_injector is not None and mode == "train":
@@ -307,9 +298,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         super().log(logs, start_time)
 
     def _loss_logits_width(self) -> LogitsWidth:
-        """A per-turn row completes within one turn's cap, a whole-trajectory row runs to the row cap; one logit
-        past the completion is kept for the next-token shift. Per turn this is the usual row, not a bound: a
-        trajectory that lost its captured ids falls back to one whole-trajectory row."""
+        """A per-turn row completes within one turn's cap, a whole-trajectory row runs to the row cap; one logit past
+        the completion is kept for the shift. Per turn this is no bound, as a trajectory that lost its ids falls back
+        to one whole row."""
         cfg = self.async_config
         if cfg.train_on_sampled_tokens:
             return LogitsWidth(cfg.rollout_max_tokens + 1, "rollout_max_tokens")

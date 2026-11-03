@@ -1,12 +1,5 @@
-"""The CP and selective-TP refusals a module tree answers run on a meta-device shell before any weight is read, and
-reach the verdicts the CP wrap and the TP sharding reach on the loaded model.
-
-Every tiny MoE family goes through ``load_distributed_model`` with everything before the gate real: the config is
-the family's own, the attention resolves on a Blackwell or a Hopper host, and the tokenizer load right after the
-gate ends the run. A family the gate admits reaches the tokenizer; one it refuses never does.
-
-Run: ``python tests/cpu/parallelism/test_preload_structure_gate.py`` (or ``pytest -m cpu``).
-"""
+"""The CP and selective-TP refusals a module tree answers run on a meta shell before any weight is read, matching the
+verdicts on the loaded model. The tokenizer load right after the gate ends the run."""
 
 from __future__ import annotations
 
@@ -32,7 +25,7 @@ from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 ROSTER = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
-# The arch each host's detection resolves, as (is_blackwell, is_hopper, detected backend).
+# As (is_blackwell, is_hopper, detected backend).
 HOSTS = {
     "blackwell": (True, False, "flash_attention_4"),
     "hopper": (False, True, "flash_attention_3"),
@@ -45,7 +38,7 @@ class _PastTheGate(Exception):
 
 
 class _UnbuildableFromConfig:
-    """A model class whose config-only build fails, as one reading a parameter value in ``__init__`` would."""
+    """As one reading a parameter value in ``__init__`` would."""
 
     @classmethod
     def from_config(cls, _config, **_kwargs):
@@ -62,8 +55,7 @@ def _weight_read(*_args, **_kwargs):
 
 @functools.cache
 def _materialized(name: str, attn_implementation: str | None = None):
-    """``name``'s tiny model, built at ``attn_implementation`` when given: remote code may pick its attention
-    class by the label (Ling 2.0's flash class)."""
+    """Remote code may pick its attention class by the label (Ling 2.0's flash class)."""
     if attn_implementation is None:
         return tiny_family_model(ROSTER[name])
     with _host("hopper"):
@@ -72,8 +64,7 @@ def _materialized(name: str, attn_implementation: str | None = None):
 
 @contextlib.contextmanager
 def _host(host: str):
-    """``host``'s attention resolution, and a model build that takes its flash label: transformers refuses one
-    whose kernel this CPU box cannot import, which the shell, built on meta, never calls."""
+    """transformers refuses a flash label this CPU box cannot import, which the meta shell never calls."""
     blackwell, hopper, detected = HOSTS[host]
     with (
         patch.object(selection, "_detect_attention_impl", lambda: detected),
@@ -85,8 +76,7 @@ def _host(host: str):
 
 
 def _gate_outcome(name: str, tmp_path, host: str = "hopper", **pc_fields) -> str | None:
-    """The refusal message ``load_distributed_model`` raises for family ``name`` under ``pc_fields``, or ``None``
-    when the run gets past the gate; asserts it never reaches a weight read."""
+    """Asserts it never reaches a weight read."""
     family = ROSTER[name]
     config = copy.deepcopy(_materialized(name).config)
     env = {k: v for k, v in os.environ.items() if k not in _ACCELERATE_VARS}
@@ -99,8 +89,7 @@ def _gate_outcome(name: str, tmp_path, host: str = "hopper", **pc_fields) -> str
         patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=_tokenizer_load)),
         patch.object(model_loading, "_dispatch_model_loading", _weight_read),
-        # The family patches install process-wide (Mistral4's position_ids plumbing, FA4's varlen seqlen) and
-        # would outlive this test; on CPU they hand the label back unchanged, and the gate reads only the label.
+        # They install process-wide and would outlive this test; the gate reads only the label.
         patch.object(model_loading, "apply_family_patches", lambda _config, attn_implementation: attn_implementation),
     ):
         try:
@@ -128,8 +117,6 @@ def _post_load_outcome(check, *args) -> str | None:
 @pytest.mark.parametrize("host", HOSTS)
 @pytest.mark.parametrize("name", ROSTER)
 def test_cp_refuses_a_family_before_its_load_exactly_where_the_roster_says_ulysses_cannot_run(name, host, tmp_path):
-    """The tiny roster's ``ulysses_cp`` is what the CP GPU suites expect of a family; the gate must refuse exactly
-    those families, with the message the CP wrap gives the loaded model, on either host's default attention."""
     refusal = _gate_outcome(name, tmp_path, host, cp_size=2)
     assert (refusal is None) == ROSTER[name].ulysses_cp, f"{name} on {host}: {refusal or 'admitted'}"
     if refusal is not None:
@@ -139,8 +126,7 @@ def test_cp_refuses_a_family_before_its_load_exactly_where_the_roster_says_ulyss
 
 @pytest.mark.parametrize("name", ROSTER)
 def test_tp_refuses_a_family_before_its_load_with_the_loaded_models_verdict(name, tmp_path):
-    """Selective TP on the shell refuses what sharding the loaded model would refuse, before the whole-model load.
-    A remote-code model is loaded at the label the gate's host resolves."""
+    """A remote-code model is loaded at the label the gate's host resolves."""
     label = HOSTS["hopper"][2] if ROSTER[name].trust_remote_code else None
     assert _gate_outcome(name, tmp_path, tp_size=2) == _post_load_outcome(
         reject_unshardable_tp_model, _materialized(name, label), 2
@@ -148,7 +134,7 @@ def test_tp_refuses_a_family_before_its_load_with_the_loaded_models_verdict(name
 
 
 def test_both_tp_verdicts_occur_on_the_roster(tmp_path):
-    """Anti-vacuity: the roster holds families selective TP shards and families it refuses."""
+    """Anti-vacuity: the roster holds families of both verdicts."""
     verdicts = {_post_load_outcome(reject_unshardable_tp_model, _materialized(name), 2) is None for name in ROSTER}
     assert verdicts == {True, False}
 
@@ -157,7 +143,7 @@ def test_both_tp_verdicts_occur_on_the_roster(tmp_path):
     "pc_fields", [{"ep_size": 2, "cp_size": 2}, {"ep_size": 2, "tp_size": 2}], ids=["ep_cp", "ep_tp"]
 )
 def test_the_gate_runs_before_the_expert_parallel_loads(pc_fields, tmp_path):
-    """EP+CP and EP+TP reach the gate too, ahead of the lazy EP stream and DeepEP setup."""
+    """Ahead of the lazy EP stream and DeepEP setup."""
     refusal = _gate_outcome("laguna", tmp_path, **pc_fields)
     assert refusal is not None and "'laguna'" in refusal
     assert _gate_outcome("qwen3_moe", tmp_path, **pc_fields) is None
@@ -169,8 +155,7 @@ def test_the_gate_runs_before_the_expert_parallel_loads(pc_fields, tmp_path):
     ids=["cp", "tp"],
 )
 def test_an_unbuildable_shell_names_the_structure_check_and_no_lazy_load_setting(pc_fields, mode, tmp_path):
-    """The gate builds its shell whatever ``ep_lazy_loading`` says, so a failed build names the check that needed
-    it, and nothing along the exception chain offers a lazy-load setting that would not get past it."""
+    """The gate builds its shell whatever ``ep_lazy_loading`` says."""
     with pytest.raises(RuntimeError) as raised:
         reject_unsupported_structure(
             make_parallelism_config(world_size=2, gpus_per_node=2, **pc_fields),

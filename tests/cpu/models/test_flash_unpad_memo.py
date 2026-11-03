@@ -1,9 +1,5 @@
-"""``patch_transformers_flash_unpad_memo``: a padded batch on a flash backend derives its unpad set once per mask
-kind per forward, at any depth, and its checkpoint recompute derives none, with logits and gradients bitwise equal
-to transformers' per-layer derivation.
-
-transformers' own flash dispatch runs on CPU reference kernels; every host read made outside them is counted.
-"""
+"""``patch_transformers_flash_unpad_memo``: a padded batch on a flash backend derives its unpad set once per mask kind
+per forward and none on checkpoint recompute, with logits and gradients bitwise equal to transformers' derivation."""
 
 import inspect
 from dataclasses import dataclass
@@ -35,25 +31,20 @@ _FLASH_STATE = (
 _SEQ = 24
 # family -> (tiny family, the mask kinds its layers read: Gemma 2 alternates sliding and full attention)
 _FAMILIES = {"qwen3": (TINY_DENSE_FAMILY, 1), "gemma2": (TINY_DENSE_ATTENTION_FAMILIES["gemma2"], 2)}
-# The reads one derivation makes (the nonzero and the max length's item), and the all-ones check transformers'
-# flash mask makes once per mask kind.
+# Reads per derivation (the nonzero, the max length's item) and the flash mask's all-ones check per mask kind.
 _DERIVATION_READS = 2
 _MASK_CHECK_READS = 1
 
 
 @dataclass
 class FlashPath:
-    """The reference kernels bound into transformers' flash path, and how many unpad sets it has derived."""
-
     kernels: ReferenceFlash
     derivations: int = 0
 
 
 @pytest.fixture
 def flash_path(monkeypatch) -> FlashPath:
-    """CPU reference kernels bound where transformers' flash path caches its loaded ones, with the path's padding
-    helpers, and its unpad derivation counted beneath any memo installed later; every global the path and the
-    memo rebind is restored afterwards."""
+    """Reference kernels bound into transformers' flash path, its unpad derivation counted beneath any later memo."""
     for name in _FLASH_STATE:
         monkeypatch.setattr(flash_utils, name, getattr(flash_utils, name))
     path = FlashPath(ReferenceFlash())
@@ -95,9 +86,7 @@ class Step:
 
 
 def _step(path: FlashPath, family, layers: int, *, reentrant: bool) -> Step:
-    """One checkpointed training step of ``family``'s tiny model at ``layers`` depth on a right-padded batch, through
-    transformers' flash path: its logits and gradients, the forward's host reads, and the unpad sets the forward and
-    the backward's recompute derived."""
+    """One checkpointed training step on a right-padded batch, through transformers' flash path."""
     torch.manual_seed(1234)
     model = tiny_family_model(family, overrides={"num_hidden_layers": layers}).train()
     model.config._attn_implementation = FA2
@@ -122,9 +111,7 @@ def _step(path: FlashPath, family, layers: int, *, reentrant: bool) -> Step:
 @pytest.mark.parametrize("reentrant", [True, False], ids=["reentrant", "non_reentrant"])
 @pytest.mark.parametrize("family", list(_FAMILIES))
 def test_a_padded_forward_derives_its_unpad_set_once_per_mask_at_any_depth(flash_path, family, reentrant):
-    """With the memo, each mask kind costs one derivation and one all-ones check per forward whatever the depth, and
-    the recompute derives nothing; without it, every attention layer derives the set again, forward and recompute
-    (the negative control). Logits and gradients are bitwise equal either way."""
+    """Without the memo every attention layer derives the set again, forward and recompute (the negative control)."""
     tiny, mask_kinds = _FAMILIES[family]
     unpatched = {layers: _step(flash_path, tiny, layers, reentrant=reentrant) for layers in (2, 4)}
     patch_transformers_flash_unpad_memo()
@@ -141,8 +128,7 @@ def test_a_padded_forward_derives_its_unpad_set_once_per_mask_at_any_depth(flash
 
 
 def test_an_in_place_write_to_the_mask_re_derives_the_set(flash_path):
-    """The memo is keyed on the mask's version counter: a mask written in place after a derivation gets the set
-    of its new contents. A memo keyed on the tensor alone returns the stale set (the negative control)."""
+    """The memo is keyed on the mask's version counter. One keyed on the tensor alone returns the stale set."""
     original = flash_utils._get_unpad_data
     patch_transformers_flash_unpad_memo()
     mask = torch.ones(2, 8, dtype=torch.bool)
@@ -157,8 +143,7 @@ def test_an_in_place_write_to_the_mask_re_derives_the_set(flash_path):
 
 
 def test_an_inference_tensor_derives_on_every_call(flash_path):
-    """An inference tensor keeps no version counter to key a memo on, so its set is derived on every call, equal to
-    transformers' own."""
+    """An inference tensor keeps no version counter to key a memo on."""
     original = flash_utils._get_unpad_data
     patch_transformers_flash_unpad_memo()
     with torch.inference_mode():
@@ -170,8 +155,7 @@ def test_an_inference_tensor_derives_on_every_call(flash_path):
 
 
 def test_the_patch_refuses_a_path_that_no_longer_reads_the_module_global(flash_path, monkeypatch):
-    """If transformers' ``_upad_input`` stops calling the module-level ``_get_unpad_data``, the replacement would never
-    run: the install raises instead of leaving every layer deriving the set unnoticed."""
+    """If ``_upad_input`` stops calling the module-level ``_get_unpad_data``, the replacement would never run."""
 
     def upad_input_elsewhere(query_layer, key_layer, value_layer, attention_mask, query_length, unpad_input_func):
         return unpad_input_func(query_layer, attention_mask)
@@ -186,8 +170,6 @@ def test_the_patch_refuses_a_path_that_no_longer_reads_the_module_global(flash_p
     [("flash_attention_2", True), ("flash_attention_3", True), ("flash_attention_4", True), ("sdpa", False)],
 )
 def test_every_flash_load_installs_the_memo(flash_path, monkeypatch, attn_implementation, installs):
-    """``apply_family_patches`` runs before every policy, frozen and trainer-path build, so each flash backend's load
-    takes the memo and no other backend's does."""
     monkeypatch.setattr(model_preparation, "patch_transformers_flash_varlen_int_seqlen", lambda: None)
     model_preparation.apply_family_patches(tiny_family_model(TINY_DENSE_FAMILY).config, attn_implementation)
     assert getattr(flash_utils._get_unpad_data, "_halo_unpad_memo", False) is installs

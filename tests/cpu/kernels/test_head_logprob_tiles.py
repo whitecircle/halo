@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the chunked head's compiled tiles against the same tile functions run eagerly.
-
-On CUDA each tile's math after its GEMM runs compiled (``halo/kernels/head_logprobs.py``); the head's CPU
-tests against the full-logits path (``tests/cpu/grpo/test_chunked_grpo_logprobs.py``) run those functions
-eagerly. Compiling them here, on inductor's CPU backend, checks what the compile can change: log-probs,
-entropy and every gradient on each head path, scalars a symbolic-float graph must not freeze at their first
-value, and one graph per direction for every tile, row count and vocabulary. Nothing a run meets mid-way
-adds one: not a longer batch than the first, a tile one row or one column wide, targets sliced out of a
-wider batch, a caller's autocast, an expanded upstream gradient, nor a frozen reference's bf16 bias after the
-policy's trainable fp32 one.
-
-    python tests/cpu/kernels/test_head_logprob_tiles.py
-"""
+"""The chunked head's compiled tiles (``halo/kernels/head_logprobs.py``) against the same functions run eagerly, on
+inductor's CPU backend. Nothing a run meets mid-way may add a graph."""
 
 import pytest
 import torch
@@ -21,15 +10,12 @@ from torch._dynamo.utils import counters
 from halo.kernels import head_logprobs
 
 HIDDEN = 16
-# Tiles crossed in both loops, each with a ragged last tile; no tile is one row or one column wide, a
-# size dynamo specializes.
+# No tile is one row or one column wide, a size dynamo specializes.
 SEQ_TILE, VOCAB_TILE = 16, 64
 ROWS, VOCAB = 40, 3 * VOCAB_TILE + 35
-# Sweeps ending on a one-row tile (and one of a single row), and on a one-column tile.
 DEGENERATE_SHAPES = ((2 * SEQ_TILE + 1, VOCAB), (1, VOCAB), (ROWS, 3 * VOCAB_TILE + 1))
 
-# Gemma 2/3's head is a softcap without bias or logit scale; "every_term" sets each head transform term at
-# a scale where it moves the log-probs by whole nats.
+# Gemma 2/3's head is a softcap without bias or logit scale; "every_term" moves the log-probs by whole nats.
 HEAD_PATHS = {
     "plain": {"bias": False, "temperature": 1.0, "logit_scale": None, "softcap": None, "entropy": False},
     "gemma_softcap": {"bias": False, "temperature": 0.8, "logit_scale": None, "softcap": 1.5, "entropy": True},
@@ -53,7 +39,7 @@ def _inputs(rows, vocab, seed):
     weight = torch.randn(vocab, HIDDEN, generator=generator) * 0.3
     bias = torch.randn(vocab, generator=generator) * 0.2
     targets = torch.randint(0, vocab, (rows,), generator=generator)
-    targets[::7] = -100  # a target in no tile scores against log Z alone
+    targets[::7] = -100  # A target in no tile scores against log Z alone.
     upstream = torch.randn(rows, generator=generator)
     return hidden, weight, bias, targets, upstream
 
@@ -70,9 +56,8 @@ def _sweep(
     expand_upstream=False,
     frozen_bias=False,
 ):
-    """``(logps, entropy, grad hidden, grad weight, grad bias)`` of one forward+backward; ``expand_upstream``
-    backpropagates ``logps.sum()``, whose gradient reaches the kernel expanded (stride 0), and ``frozen_bias``
-    takes the bias as a frozen reference carries it, bf16 and untrained (no bias gradient)."""
+    """``expand_upstream``'s gradient reaches the kernel expanded (stride 0); ``frozen_bias`` takes the bias bf16
+    and untrained."""
     monkeypatch.setattr(head_logprobs, "_COMPILED_DEVICE_TYPES", frozenset({"cpu"}) if compiled else frozenset())
     hidden, weight, bias_value, targets, upstream = inputs
     leaves = [hidden.clone().requires_grad_(True), weight.clone().requires_grad_(True)]
@@ -113,8 +98,7 @@ def test_compiled_tiles_match_the_eager_tiles_on_every_head_path(monkeypatch, sm
 
 
 def test_one_graph_serves_new_rows_vocabularies_and_scalar_values(monkeypatch, small_tiles):
-    # Python-float scalars trace as symbolic inputs: a new value must reach the kernel, not recompile it,
-    # and not be served from the first value's graph.
+    # A new value must reach the kernel, not recompile it, and not be served from the first value's graph.
     path = HEAD_PATHS["every_term"]
     _sweep(monkeypatch, True, _inputs(ROWS, VOCAB, seed=1), **path)
     assert counters["stats"]["unique_graphs"] == 2
@@ -130,8 +114,7 @@ def test_one_graph_serves_new_rows_vocabularies_and_scalar_values(monkeypatch, s
 
 
 def test_nothing_a_run_meets_mid_way_compiles_a_graph(monkeypatch, small_tiles):
-    # Each case can arrive at a data-dependent step on one rank, where a compile stalls that rank alone. The first
-    # sweep fits in one sequence tile, as a short first batch does, so every later row count is new to the graphs.
+    # Each can arrive at a data-dependent step on one rank, where a compile stalls that rank alone.
     path = HEAD_PATHS["every_term"]
     _sweep(monkeypatch, True, _inputs(SEQ_TILE - 6, VOCAB, seed=1), **path)
     assert counters["stats"]["unique_graphs"] == 2
@@ -141,7 +124,7 @@ def test_nothing_a_run_meets_mid_way_compiles_a_graph(monkeypatch, small_tiles):
             _assert_same(_sweep(monkeypatch, True, inputs, **path), _sweep(monkeypatch, False, inputs, **path))
 
         inputs = _inputs(ROWS, VOCAB, seed=8)
-        # Targets sliced out of a wider batch, as one row's completion ids are: a view of another tensor.
+        # A view of another tensor, as one row's completion ids are.
         batch = torch.zeros(3, ROWS + 9, dtype=torch.long)
         batch[1, -ROWS:] = inputs[3]
         row_view = (*inputs[:3], batch[1:2, -ROWS:], inputs[4])

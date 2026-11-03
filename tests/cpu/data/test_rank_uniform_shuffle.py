@@ -1,15 +1,6 @@
-"""Every rank of one data-parallel split draws the same shuffle, whatever its own RNG went through.
-
-accelerate shards ONE permutation by batch index across the data-parallel ranks, and TP/CP/ETP
-siblings and pipeline peers replay their replica's rows, so all of them must draw the same
-permutation. Once training starts the ranks' global torch RNGs no longer agree — a pipeline stage
-builds other layers than its peers, an EP rank other experts — so any shuffle drawn from that RNG
-splits the ranks: HF's group-by-length train sampler always does, and so does a ``RandomSampler`` on a
-one-process loader (``data_parallel_size == 1``) with ``use_seedable_sampler: false``. Proven on a real
-4-rank gloo group with each rank's RNG deliberately consumed differently before the first epoch.
-
-    python tests/cpu/data/test_rank_uniform_shuffle.py
-"""
+"""Every rank of one data-parallel split draws the same shuffle, whatever its own RNG went through: accelerate
+shards one permutation by batch index, and siblings replay their replica's rows. Proven on a real 4-rank gloo
+group with each rank's RNG consumed differently before the first epoch."""
 
 import datetime
 import json

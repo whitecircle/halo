@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""ZAYA1-8B Expert Parallelism (EP) end-to-end smoke test.
-
-Verifies the EP path on ZAYA1-8B with DeepEP all-to-all expert routing:
-  1. ``load_distributed_model(expert_parallel_size=N)`` rewires every
-     ``ZayaSparseMoeBlock`` to ``EPZayaMoELayer`` and slices the fused
-     experts across ``N`` ranks.
-  2. The expert weights now have ``num_experts / N`` along dim 0 on each rank.
-  3. A short DistributedSFTTrainer run executes forward + backward + a
-     gradient-accumulation step under FSDP2 (DP=1) + EP=N with grouped GEMM,
-     logging a finite loss every step. Each step sees a different sample, so the
-     loss trend is not asserted.
-
-Run (2 GPUs, EP=2):
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_zaya_ep.py
-"""
+"""ZAYA1-8B under EP on DeepEP: experts sliced across ranks and a finite loss each step. Samples differ, so no loss
+trend is asserted."""
 
 import torch
 from trl import SFTConfig
@@ -33,11 +20,9 @@ MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_EP_STEPS", 4)
 SEQ = env_int("HALO_TEST_ZAYA_EP_SEQ", 512)
 LR = 5e-6
-# Zaya refuses gradient checkpointing everywhere (``apply_zaya_patches`` clears
-# ``supports_gradient_checkpointing`` at load): the recompute faults in cuDNN on the CCA Conv1d
-# pair, and per-layer GC re-wraps the cross-layer EDA state with a fresh grad_fn, whose recompute
-# graph the autograd engine processes polynomially in the number of checkpointed layers. Set
-# HALO_TEST_ZAYA_GC=1 only to assert the refusal fires.
+# Zaya refuses gradient checkpointing: the recompute faults in cuDNN on the CCA Conv1d pair, and per-layer GC re-wraps
+# the EDA state with a fresh grad_fn, whose recompute graph autograd processes polynomially in the layer count.
+# HALO_TEST_ZAYA_GC=1 asserts the refusal.
 GC_DEFAULT = False
 
 
@@ -54,10 +39,8 @@ def run(ctx):
     log(f"  Steps: {MAX_STEPS}, Batch: 1, Seq: {SEQ}")
     log("=" * 70)
 
-    # ── Load model with EP ─────────────────────────────────────────
     log("\n[1/4] Loading ZAYA1-8B under EP...")
-    # The hub checkpoint stores experts fused ([E, 2M, H] under ``mlp.experts``), which the lazy
-    # safetensors loader slices per rank directly — the production default path.
+    # The hub stores experts fused ([E, 2M, H] under ``mlp.experts``), which the lazy loader slices per rank directly.
     pc = ParallelismConfig(ep_size=world, use_grouped_gemm=True)
     model, tok = load_distributed_model(
         model_name_or_path=MODEL,
@@ -70,31 +53,26 @@ def run(ctx):
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    # ── Verify EP layers were installed and weights are sharded ────
     ep_layers = [m for m in model.modules() if isinstance(m, EPZayaMoELayer)]
     assert ep_layers, "no EP layers were installed on the Zaya model"
     first = ep_layers[0]
-    # ZAYA1-8B has 80 layers, 40 odd-index MLP layers → 40 EP layers.
+    # 80 layers, 40 odd-index MLP layers: 40 EP layers.
     log(f"  EPZayaMoELayer count: {len(ep_layers)}")
     log(f"  Local experts per layer: {first.experts_per_rank} (of {first.num_experts} total)")
     gate_up_shape = tuple(first.gate_up_proj.shape)
     log(f"  gate_up_proj shape: {gate_up_shape}  (E_local, H, 2M)")
     log(f"  down_proj    shape: {tuple(first.down_proj.shape)}      (E_local, M, H)")
     checks["experts_sliced_ep_way"] = gate_up_shape[0] == first.experts_per_rank == first.num_experts // world
-    # The gate owns the "+1" discard slot and masks it (prob 0, index 0) before the wrapper
-    # dispatches, so the wrapper's expert count must EXCLUDE it — a dispatched index of
-    # ``num_experts`` would run past the last expert.
+    # The gate owns the "+1" discard slot and masks it before dispatch, so the wrapper's expert count must exclude it:
+    # a dispatched index of ``num_experts`` would run past the last expert.
     gate = first.gate
     checks["router_carries_the_discard_slot"] = gate.num_router_classes == first.num_experts + 1
-    # Bias-update balancing rides the gate's native balancing_biases buffer.
     checks["balancing_biases_cover_every_router_class"] = gate.balancing_biases.shape[0] == gate.num_router_classes
 
-    # ── Dataset ────────────────────────────────────────────────────
     log("\n[2/4] Creating synthetic SFT dataset...")
     train_ds = create_sft_dataset(16, tok, seed=42)
     log(f"  {len(train_ds)} samples")
 
-    # ── Trainer ────────────────────────────────────────────────────
     log("\n[3/4] Configuring DistributedSFTTrainer (EP + grouped GEMM + GC)...")
     cfg = SFTConfig(
         output_dir=ctx.output_dir,
@@ -107,12 +85,8 @@ def run(ctx):
         gradient_checkpointing_kwargs={
             "use_reentrant": env_flag("HALO_TEST_ZAYA_GC_REENTRANT", True),
         },
-        # Set True so Halo's _deferred_liger_kernel flow defers TRL's
-        # re-application during __init__ then restores the flag — this
-        # makes TRL's compute_loss take its Liger path (skip entropy,
-        # read outputs.token_accuracy) which is required when FLCE is on
-        # (FLCE swaps the lm_head + CE path; outputs.logits is a
-        # placeholder, not the full [B*S, V] tensor TRL needs for entropy).
+        # The mixin defers TRL's re-application and restores the flag, so TRL's compute_loss takes its Liger path:
+        # under FLCE outputs.logits is a placeholder, not the [B*S, V] tensor TRL needs for entropy.
         use_liger_kernel=True,
         logging_steps=1,
         save_strategy="no",
@@ -135,7 +109,6 @@ def run(ctx):
     log(f"  Trainer: {type(trainer).__name__}")
     log(f"  Parallelism: {pc.mode_string}")
 
-    # ── Train ──────────────────────────────────────────────────────
     log(f"\n[4/4] Training {MAX_STEPS} steps...")
     result = trainer.train()
     log(f"  HBM peak: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")

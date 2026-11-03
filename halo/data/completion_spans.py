@@ -1,5 +1,5 @@
-"""Completion spans: the marker-to-terminator span search, the named span policies every completion-only
-path selects, the completion-only labels built over them, and the refusal of a setup they would train nothing in."""
+"""Completion spans: the marker-to-terminator search, the named span policies, the labels built over them, and the
+refusal of a setup that would train nothing."""
 
 import warnings
 from collections.abc import Callable
@@ -37,7 +37,6 @@ def find_terminator_positions(
     token_ids: list[int] | torch.Tensor,
     eos_token_ids: frozenset[int],
 ) -> list[int]:
-    """Positions of every assistant-turn terminator (any id in ``eos_token_ids``) in the sequence."""
     seq = token_ids.tolist() if isinstance(token_ids, torch.Tensor) else token_ids
     return [i for i, token in enumerate(seq) if token in eos_token_ids]
 
@@ -64,8 +63,7 @@ def filter_eos_after_responses(response_starts: list[int], eos_positions: list[i
 
 
 def _find_response_starts(sequence: list[int], response_token_ids: list[int]) -> list[int]:
-    """Indices where ``response_token_ids`` occurs as a contiguous run in ``sequence``, slicing only at
-    first-token hits."""
+    """Where ``response_token_ids`` occurs contiguously, slicing only at first-token hits."""
     first = response_token_ids[0]
     template_len = len(response_token_ids)
     return [
@@ -82,9 +80,8 @@ def _scan_completion_spans_sequential(
     include_marker: bool,
     eos_fallback_to_end: bool,
 ) -> tuple[list[int], list[int]]:
-    """One left-to-right marker-to-terminator scan (the self-distill policy): each span runs to the first
-    terminator after its marker, consuming markers in between; a terminator-less span ends at the last
-    position under ``eos_fallback_to_end``, else is a ``-1`` no-op span."""
+    """One scan (the self-distill policy): each span runs to the first terminator after its marker, consuming markers
+    in between; a terminator-less span ends at the last position under ``eos_fallback_to_end``, else no-ops."""
     starts: list[int] = []
     ends: list[int] = []
     n, m = len(sequence), len(response_token_ids)
@@ -117,15 +114,12 @@ def resolve_completion_spans(
     include_marker: bool = True,
     bound_by_next_start: bool = True,
 ) -> tuple[list[int], list[int]]:
-    """``(response_starts, eos_ends)`` of the assistant completions in ``sequence`` (``input_ids``: labels
-    lose the turn-ending EOS where pad == eos), each end the inclusive terminator or ``-1`` for a no-op span.
+    """``(response_starts, eos_ends)``, each end the inclusive terminator or ``-1`` for a no-op span. Search
+    ``input_ids``: labels lose the turn-ending EOS where pad == eos.
 
-    The policy kwargs default to :data:`COLLATOR_SPAN_POLICY`. ``include_marker`` starts a span at the
-    response template or after it. ``bound_by_next_start`` requires the terminator before the next marker
-    (else ``-1``, never a later turn's EOS), and its ``eos_fallback_to_end`` applies only to a sequence with
-    no terminator at all; without it one sequential scan runs each span to the first terminator after its
-    marker, falling back per span. ``train_on_last_assistant_only`` keeps only the final span.
-    """
+    ``include_marker`` starts a span at the template or after it. ``bound_by_next_start`` requires the terminator
+    before the next marker, and its ``eos_fallback_to_end`` applies only to a sequence with no terminator at all;
+    without it one sequential scan falls back per span. ``train_on_last_assistant_only`` keeps only the final span."""
     if not bound_by_next_start:
         response_starts, eos_ends = _scan_completion_spans_sequential(
             sequence, response_token_ids, eos_token_ids, include_marker, eos_fallback_to_end
@@ -153,11 +147,8 @@ def warn_completion_span_miss(
     matched_marker: bool,
     row_label: str,
 ) -> None:
-    """Warn that a sequence trains no tokens because completion-only masking found no usable span.
-
-    A wrong ``assistant_message_template`` misses on every row, zeroing the loss with no other signal.
-    The decode is bounded on both axes, since a full 32k-token decode per row would dominate the step.
-    """
+    """Warn that a sequence trains no tokens: a wrong ``assistant_message_template`` misses on every row, zeroing the
+    loss with no other signal. The decode is bounded on both axes, as 32k tokens per row would dominate the step."""
     if matched_marker:
         problem = f"Response key `{response_prompt_template}` matched but no completion span has a terminator in"
         hint = (
@@ -195,8 +186,7 @@ def resolve_spans_or_warn(
     tokenizer: PreTrainedTokenizerBase | None,
     row_label: str,
 ) -> tuple[list[int], list[int]] | None:
-    """Spans of one sequence, or ``None`` (the fully masked verdict) after warning that it has no usable one;
-    the warning tells a marker that did not match from a span that did not close."""
+    """Spans, or ``None`` (fully masked) after warning, which tells an unmatched marker from an unclosed span."""
     response_starts, eos_ends = resolve_completion_spans(
         sequence,
         response_token_ids,
@@ -220,14 +210,9 @@ def resolve_spans_or_warn(
 
 
 def build_span_labels(values, input_ids, spans: tuple[list[int], list[int]] | None, *, restore_end: bool = False):
-    """``values`` inside each completion span, the ignore index elsewhere (everywhere when ``spans`` is
-    ``None``, :func:`resolve_spans_or_warn`'s miss); a tensor for a tensor, a list for a list.
-
-    The one completion-only label rule. ``values`` is ``input_ids`` when every span token trains, or labels
-    the caller already masked (pad-valued tokens, document starts, baked spans) when those must stay masked;
-    ``restore_end`` then trains each span's closing token from ``input_ids`` regardless, since pad == eos
-    masks the stop signal along with the pads.
-    """
+    """``values`` inside each span, the ignore index elsewhere (everywhere when ``spans`` is ``None``). ``values`` is
+    ``input_ids`` when every span token trains, or labels already masked when those must stay masked; ``restore_end``
+    then trains each closing token from ``input_ids``, since pad == eos masks the stop signal too."""
     if isinstance(values, torch.Tensor):
         labels = torch.full_like(values, LABEL_IGNORE_INDEX)
     else:
@@ -240,8 +225,7 @@ def build_span_labels(values, input_ids, spans: tuple[list[int], list[int]] | No
 
 
 def _real_token_bounds(row: torch.Tensor, attention_mask_row: torch.Tensor | None) -> tuple[int, int]:
-    """``[lo, hi)`` of ``row``'s real tokens by its mask (either padding side), the whole row without one and
-    ``(0, 0)`` when all pad."""
+    """``[lo, hi)`` of real tokens by the mask (either padding side); the whole row without one, ``(0, 0)`` all pad."""
     if attention_mask_row is None:
         return 0, row.shape[0]
     real = attention_mask_row.nonzero().flatten()
@@ -261,15 +245,11 @@ def mask_batch_to_completion_spans(
     attention_mask: torch.Tensor | None = None,
     extra_ignore_token_ids: tuple[int, ...] = (),
 ) -> dict[str, Any]:
-    """Completion-only mask every row of ``batch['labels']``, training each span's tokens from ``input_ids``
-    (:func:`build_span_labels`), so the turn-ending EOS trains even where pad == eos masked it in labels.
-
-    The padded collator, the offline label bake and :func:`build_completion_only_labels` land here.
-    ``span_policy`` defaults to :data:`COLLATOR_SPAN_POLICY` (no end-of-sequence fallback, which would train
-    pad on padded rows). ``attention_mask`` confines the span search to each row's real tokens, so
-    :data:`SELF_DISTILL_SPAN_POLICY`'s fallback cannot run a terminator-less span into the padding.
-    ``extra_ignore_token_ids`` (e.g. image tokens) are masked after the refill, which would restore them.
-    """
+    """Completion-only mask every row, training each span's tokens from ``input_ids`` so the turn-ending EOS trains
+    even where pad == eos masked it. ``span_policy`` defaults to :data:`COLLATOR_SPAN_POLICY` (no end-of-sequence
+    fallback, which would train pad on padded rows). ``attention_mask`` confines the search to real tokens, so the
+    self-distill fallback cannot run into padding. ``extra_ignore_token_ids`` (image tokens) are masked after the
+    refill, which would restore them."""
     policy = COLLATOR_SPAN_POLICY if span_policy is None else span_policy
     for i in range(batch["labels"].shape[0]):
         input_ids = batch["input_ids"][i]
@@ -306,14 +286,9 @@ def build_completion_only_labels(
     eos_token_ids: frozenset[int] | None = None,
     span_policy: dict[str, bool] | None = None,
 ) -> torch.Tensor:
-    """Loss labels from ``input_ids``: pad and ``extra_ignore_token_ids`` (image tokens) masked, and with
-    ``train_on_completions_only`` everything outside the completions, under ``span_policy``
-    (:data:`SELF_DISTILL_SPAN_POLICY` by default).
-
-    Shared by the text and VLM collators so student and teacher branches select the same tokens. Callers
-    holding an ``attention_mask`` must pass it: the fallback masks ``== pad_token_id``, erasing real EOS
-    tokens where pad == eos. ``eos_token_ids`` defaults to the tokenizer's eos alone.
-    """
+    """Labels from ``input_ids``: pad and ``extra_ignore_token_ids`` masked, and with ``train_on_completions_only``
+    everything outside completions. Shared by text and VLM collators so both branches select the same tokens. Callers
+    with an ``attention_mask`` must pass it: the fallback masks ``== pad_token_id``, erasing real EOS at pad == eos."""
     reject_missing_response_marker(response_prompt_template, train_on_completions_only, "completion-only labels")
     labels = input_ids.clone()
     if attention_mask is not None:
@@ -343,7 +318,6 @@ def build_completion_only_labels(
 
 
 def _label_span_policy(span_policy: dict[str, bool] | None) -> dict[str, bool]:
-    """The policy :func:`build_completion_only_labels` masks under: ``span_policy``, or the self-distill one."""
     return SELF_DISTILL_SPAN_POLICY if span_policy is None else span_policy
 
 
@@ -356,10 +330,9 @@ def reject_untrainable_completions(
     span_policy: dict[str, bool] | None,
     subject: str,
 ) -> None:
-    """Refuse completion-only labels that would train no token of ``probe_conversation`` as ``render`` renders it,
-    as :func:`build_completion_only_labels` masks it under ``span_policy``: a marker the template never emits, or no
-    assistant turn ending in one of ``eos_token_ids``, as with a template borrowed from another family until
-    ``eos_token`` names the token it closes a turn with."""
+    """Refuse completion-only labels that would train no token of ``probe_conversation``: a marker the template never
+    emits, or no assistant turn ending in ``eos_token_ids``, as with a template borrowed from another family until
+    ``eos_token`` names its closing token."""
     response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
     for text in verify_marker_renders(render, (probe_conversation,), response_prompt_template):
         input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
@@ -376,5 +349,4 @@ def reject_untrainable_completions(
 
 
 def completion_labels(input_ids: torch.Tensor, completion_mask: torch.Tensor) -> torch.Tensor:
-    """Labels that score the completion only: token ids where ``completion_mask`` is set, ignore elsewhere."""
     return torch.where(completion_mask.bool(), input_ids, LABEL_IGNORE_INDEX)

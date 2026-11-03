@@ -37,31 +37,28 @@ logger = logging.getLogger(__name__)
 
 
 class _BreakerOptimizerSkipCallback(TrainerCallback):
-    """Skips the optimizer step while the trust-region breaker is tripped, at the one hook between gradient
-    clipping and ``optimizer.step``; weak, since the trainer owns the handler that owns this."""
+    """Skips the optimizer step while the breaker is tripped, at the one hook between clipping and ``optimizer.step``;
+    weak, since the trainer owns the handler that owns this."""
 
     def __init__(self, trainer):
         self._trainer = weakref.ref(trainer)
 
     def on_pre_optimizer_step(self, args, state, control, **kwargs):
-        """Set every gradient to ``None``, which makes an optimizer skip the parameter (a zero gradient still
-        steps Adam on momentum). The flag stays up for every optimizer step the round feeds."""
+        """``None`` grads make an optimizer skip the parameter; a zero gradient still steps Adam on momentum."""
         trainer = self._trainer()
         if trainer is not None and trainer._breaker_tripped_this_step:
             trainer.optimizer.zero_grad(set_to_none=True)
 
 
 def resolve_rescore_concurrency(per_server: int, world_size: int) -> int:
-    """The re-score requests one rank keeps in flight on each server: its share of ``per_server``, at least one."""
     return max(1, per_server // world_size)
 
 
 def _masked_fraction_counts(
     ratio: torch.Tensor, corrected: torch.Tensor, traj_row_ids: torch.Tensor, num_trajectories: int
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """The trust-region breaker's two ``(masked, total)`` counts: the IS-corrected trajectories whose every
-    corrected token had its ratio zeroed, and the corrected tokens zeroed. Padding and dummy rows
-    (``traj_row_ids`` -1) count in neither."""
+    """``(masked, total)`` counts: IS-corrected trajectories whose every corrected token had its ratio zeroed, and
+    corrected tokens zeroed. Padding and dummy rows count in neither."""
     rows_valid = traj_row_ids >= 0
     corrected_tokens = corrected & rows_valid.unsqueeze(1)
     masked_tokens = corrected_tokens & (ratio <= 0)
@@ -76,18 +73,13 @@ def _masked_fraction_counts(
 
 
 class ImportanceSamplingMixin:
-    """The engine-to-trainer importance ratio, its mask stages and the trust-region breaker."""
-
     def _arm_update_breaker(self) -> None:
-        """Take ``skip_update_masked_frac`` and, with it set, attach the hook that acts on the breaker's
-        per-round verdict (:meth:`_update_breaker_tripped`)."""
         self._breaker_tripped_this_step = False
         if self.async_config.skip_update_masked_frac is not None:
             self.add_callback(_BreakerOptimizerSkipCallback(self))
 
     def _configure_importance_sampling(self) -> None:
-        """The importance-sampling correction the config asks for, scored at the sampling temperature, refusing
-        every stage it would leave inert."""
+        """Scored at the sampling temperature; refuses every stage it would leave inert."""
         cfg = self.async_config
         # Score log-probs at the engine's sampling temperature, or the IS ratio picks up a systematic bias.
         if self.temperature != cfg.rollout_temperature:
@@ -131,11 +123,8 @@ class ImportanceSamplingMixin:
             self.use_vllm = True
 
     def _rescore_rows_on_engine(self, rows: list[TurnRow], turns_per_traj: list[int]) -> list[torch.Tensor | None]:
-        """Every sampled row's completion re-scored on the rollout engine under this step's weights, a
-        trajectory's rows on one server so its turns share the prefix cache; ``None`` where a row carries no
-        sampling log-probs or its request failed. Never raises: a rank-local raise would desync the collectives
-        that follow, so a miss is reported and its row reads the trainer's log-ratio.
-        """
+        """A trajectory's rows go to one server so its turns share the prefix cache. Never raises: a rank-local raise
+        would desync the following collectives, so a miss reads the trainer's log-ratio."""
         clients = self._engine_rescore_clients
         if not clients:
             raise RuntimeError(
@@ -185,10 +174,8 @@ class ImportanceSamplingMixin:
         rows: BatchRows,
         engine_logps: list[torch.Tensor | None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """``(ratio, logps_diff, corrected_mask, traj_row_ids)``: the rollout-vs-trainer importance ratio after its
-        mask stages, all-ones with the rest ``None`` when the correction is off. ``logps_diff`` is what the mask
-        stages read, the engine's diff on re-scored rows under ``isr_engine_reference``; the weight itself is
-        always trainer-vs-sampling."""
+        """All-ones with the rest ``None`` when the correction is off. ``logps_diff`` is what the mask stages read, the
+        engine's diff on re-scored rows under ``isr_engine_reference``; the weight is always trainer-vs-sampling."""
         importance_sampling_ratio = torch.ones_like(step.completion_mask, dtype=torch.float32)
         corrected_mask = None
         logps_diff = None
@@ -234,8 +221,6 @@ class ImportanceSamplingMixin:
         corrected_mask: torch.Tensor,
         engine_logps: list[torch.Tensor | None],
     ) -> torch.Tensor:
-        """The log-ratio the mask stages read under ``isr_engine_reference``: the engine's current-vs-sampling
-        diff on every re-scored row, the trainer diff elsewhere (:func:`select_mask_logratio`)."""
         scored_logps = torch.zeros_like(step.sampling_logps)
         for i, scored in enumerate(engine_logps):
             if scored is not None:
@@ -249,8 +234,7 @@ class ImportanceSamplingMixin:
         return logps_diff
 
     def _zero_forced_closes(self, ratio: torch.Tensor, step: StepRows) -> torch.Tensor:
-        """``ratio`` with every reasoning close the engine forced at a thinking cap set to 0, so none trains with
-        its episode's advantage."""
+        """So no forced close trains with its episode's advantage."""
         ratio, forced = zero_engine_forced_closes(
             ratio,
             step.sampling_logps,
@@ -265,8 +249,7 @@ class ImportanceSamplingMixin:
         return ratio
 
     def _apply_opsm_stage(self, scores: StepScores, advantages: torch.Tensor) -> StepScores:
-        """``scores`` with the OPSM stage on their IS ratio, where it is configured: it masks negative-advantage
-        trajectories only, so it runs once the per-row ``advantages`` exist."""
+        """OPSM masks negative-advantage trajectories only, so it runs once the per-row ``advantages`` exist."""
         delta = self._is_mask_config.opsm_delta
         if delta is not None and scores.corrected_mask is not None:
             ratio, opsm_masked = apply_opsm(
@@ -282,8 +265,7 @@ class ImportanceSamplingMixin:
         corrected_mask: torch.Tensor,
         loss_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """The drop-narrowed corrected mask the trust-region breaker reads; also records the step's
-        IS-correction coverage and surviving-ratio metrics."""
+        """The drop-narrowed corrected mask the breaker reads; also records coverage and surviving-ratio metrics."""
         # corrected_mask predates the drop narrowing; intersect so coverage cannot exceed 1.
         eff_corrected = corrected_mask & loss_mask
         world = self._world_metrics
@@ -307,10 +289,9 @@ class ImportanceSamplingMixin:
         num_trajectories: int,
         mode: str,
     ) -> bool:
-        """Whether the trust-region breaker (``skip_update_masked_frac``) trips: the GLOBAL share of fully masked
-        corrected trajectories or of masked corrected tokens is over the threshold, so the survivors are a
-        selection-biased sample that would amplify the drift. On a trip the caller zeroes both advantage sets
-        and every optimizer step of the round is skipped; the next sync re-anchors the rollouts."""
+        """Trips when the GLOBAL share of fully masked corrected trajectories or masked corrected tokens is over the
+        threshold: the survivors are a selection-biased sample that would amplify the drift. The round's optimizer
+        steps are then skipped."""
         threshold = self.async_config.skip_update_masked_frac
         if threshold is None or mode != "train" or traj_row_ids is None:
             return False

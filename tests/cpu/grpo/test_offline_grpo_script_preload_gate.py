@@ -1,11 +1,5 @@
-"""The offline GRPO script refuses splits a run-start reference sweep cannot use before the model load.
-
-The trainer refuses a pre-sharded dataset (and every other split its sweep cannot read) at
-construction, which follows the policy load: minutes on a large model, on every rank. The script
-loads its raw splits first and runs the same refusal before ``load_model_and_tokenizer``.
-
-    python tests/cpu/grpo/test_offline_grpo_script_preload_gate.py
-"""
+"""The offline GRPO script refuses splits a run-start reference sweep cannot use before the model load, since the
+trainer's own refusal follows the policy load, minutes on a large model on every rank."""
 
 from types import SimpleNamespace
 
@@ -23,7 +17,7 @@ PartialState(cpu=True)
 
 
 class _ModelLoadReached(Exception):
-    """Raised by the stand-in model load: the script got past every pre-load gate."""
+    """Raised by the stand-in model load, past every pre-load gate."""
 
 
 def _run_script(monkeypatch, tmp_path, *, presharded: bool, kl_beta: float, use_peft: bool = False) -> None:
@@ -56,7 +50,7 @@ def test_a_presharded_run_start_sweep_is_refused_before_the_model_load(monkeypat
     ("kl_beta", "use_peft"), [(0.0, False), (0.2, True)], ids=["no_kl_reference", "adapters_off_reference"]
 )
 def test_runs_without_a_run_start_sweep_load_a_presharded_dataset(monkeypatch, tmp_path, kl_beta, use_peft):
-    """Anti-over-refusal: no KL term, or a PEFT policy scored with its adapters off, sweeps nothing."""
+    """No KL term, or a PEFT policy scored with its adapters off, sweeps nothing."""
     with pytest.raises(_ModelLoadReached):
         _run_script(monkeypatch, tmp_path, presharded=True, kl_beta=kl_beta, use_peft=use_peft)
 

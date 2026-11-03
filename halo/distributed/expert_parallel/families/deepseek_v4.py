@@ -11,13 +11,9 @@ from halo.models.moe.family_specs import DEEPSEEK_V4
 
 
 class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
-    """EP layer for DeepSeek-V4 fused experts (``DeepseekV4SparseMoeBlock``) using DeepEP.
-
-    Fused routed experts with the clamped-SwiGLU combine, a replicated shared expert, and two router variants
-    adopted whole as ``gate`` (so ``e_score_correction_bias`` / ``tid2eid`` stay checkpointable): top-k layers
-    select on ``scores + e_score_correction_bias`` and gate on the unbiased scores, hash layers select via the
-    frozen ``tid2eid[input_ids]`` lookup, which needs the block's ``input_ids``.
-    """
+    """EP layer for ``DeepseekV4SparseMoeBlock``. Two router variants adopted whole as ``gate``, so
+    ``e_score_correction_bias`` / ``tid2eid`` stay checkpointable: top-k layers select on the biased scores and gate on
+    the unbiased ones; hash layers select via the frozen ``tid2eid[input_ids]`` lookup."""
 
     HF_MODULE_NAMES = ("DeepseekV4SparseMoeBlock",)
     FAMILY = DEEPSEEK_V4
@@ -29,8 +25,6 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
-        """Top-k plus the router variant and its scoring: hash layers route off the frozen
-        ``tid2eid`` table, top-k layers off ``score_fn`` over the gate's logits."""
         super()._adopt_routing(original_layer)
         self.is_hash = bool(getattr(original_layer, "is_hash", False))
         self.routed_scaling_factor = getattr(self.gate, "routed_scaling_factor", 1.0)
@@ -48,9 +42,7 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
                 )
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
-        """Read ``act_fn`` and ``limit`` off ``DeepseekV4Experts`` as attributes, not with defaults: a substituted
-        default rescales the clamped SwiGLU on every expert. The clamp is latched into the base combine seam, so the
-        construction summary names the callable that runs."""
+        """Attribute reads: a substituted default for ``act_fn`` or ``limit`` rescales the clamp on every expert."""
         self.act_fn = experts.act_fn
         self.limit = float(experts.limit)
         self._fused_glu_mul = resolve_clamped_glu_mul(self.act_fn, self.limit, clamp_activated=False)
@@ -59,8 +51,7 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
         return (f"is_hash={self.is_hash}",)
 
     def enable_bias_balancing(self) -> bool:
-        """Only top-k layers create the bias state: a balancing bias cannot shift the frozen
-        ``tid2eid`` selection a hash layer uses."""
+        """Top-k layers only: a balancing bias cannot shift a hash layer's frozen ``tid2eid`` selection."""
         if self.is_hash:
             return False
         return super().enable_bias_balancing()
@@ -68,8 +59,7 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
     def _route_hidden_states(
         self, flat: torch.Tensor, input_ids: torch.Tensor | None = None, **kwargs
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Selection per the router variant (hash lookup or biased top-k), gated on the unbiased scores and always
-        renormalized."""
+        """Select by hash lookup or biased top-k; gate on the unbiased scores, always renormalized."""
         scores = self.score_fn(self._linear_router_logits(flat).float())
         if not self.is_hash:
             indices = self._select_topk_on_scores(scores)

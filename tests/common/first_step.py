@@ -1,20 +1,6 @@
-"""A run's first optimizer step, recorded off the trainer and scored by a reference trainer.
-
-A parallel mode that miscounts its objective (a CP loss every rank's all-reduce hands in full, then
-rescaled by ``cp_size``) still trains to finite losses and passes every smoke check. The value has to
-be compared. :func:`train_recording_first_step` runs ``trainer.train()`` and records what the first
-optimizer step consumed, off the trainer's own seams: each microbatch ``compute_loss`` saw with the
-loss it returned, the logged step loss, the gradients handed to the optimizer, and every backward that
-reached PyTorch's c10d autograd fallback. :func:`score_first_step` runs those microbatches through a
-reference trainer on the initial weights as the training step would; :func:`first_step_checks`,
-:func:`first_step_gradient_checks` and :func:`dense_gradient_checks` compare the two.
-:func:`parameter_gradient_checks` grades one backward against a reference per parameter.
-
-Gradients are compared whole on every trainable parameter whatever holds it (an FSDP2 or TP DTensor, a
-TP hand-sliced shard, a plain replica), as the trainer's clip seam has finalized it. The routers and
-experts an EP layer holds as plain tensors are FSDP-ignored and live in the layer's own EP or expert-TP
-layout, so they are left out; :mod:`tests.common.routed_first_step` compares them.
-"""
+"""A run's first optimizer step, recorded off the trainer and scored by a reference trainer. A mis-scaled objective
+still trains to finite losses, so the value has to be compared. Routers and experts an EP layer holds plain are left
+out; :mod:`tests.common.routed_first_step` compares them."""
 
 import contextlib
 import dataclasses
@@ -37,11 +23,9 @@ from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 from tests.common.training_checks import step_losses
 
-# What PyTorch warns when a backward passes through a collective with no autograd kernel (an in-place
-# ``dist.all_reduce`` on a grad-carrying tensor): the gradient goes through as the identity.
+# PyTorch's warning when a backward crosses a collective with no autograd kernel: the gradient passes as the identity.
 AUTOGRAD_FALLBACK_WARNING = "autograd kernel was not registered"
-# A routed MoE block's router and routed-expert parameters, whose gradients a near-tie top-k flip moves (the CP
-# gradients block of tests/common/tolerances.py).
+# Parameters whose gradients a near-tie top-k flip moves (the CP gradients block of tolerances.py).
 ROUTING_DEPENDENT_PARAM = re.compile(r"\.mlp\.(?:router|gate)\.[^.]+$|\.mlp\.experts\.")
 
 
@@ -57,18 +41,12 @@ class FirstStep:
 
 
 def _plain_routed_param_ids(model) -> set[int]:
-    """Ids of the router and expert parameters ``model``'s EP layers hold as plain tensors."""
     return {id(param) for param in routed_parameters(ep_layers(model)) if not isinstance(param, DTensor)}
 
 
 def _step_grads(model) -> dict[str, torch.Tensor]:
-    """Every trainable parameter's gradient, whole and in fp32 on the host, save the routed ones an EP layer holds
-    plain. Collective.
-
-    A DTensor's is unsharded, a TP hand-sliced one's gathered over the TP group along its slice dim, and any other
-    plain one is a replica (the norms, embedding and head under TP at DP 1). Selected by the parameter rather than
-    its gradient, so every rank reaches the same collectives in the same order.
-    """
+    """Every trainable gradient, whole in fp32 on the host, save the routed ones an EP layer holds plain. Collective.
+    Selected by parameter rather than gradient, so every rank reaches the same collectives in the same order."""
     routed = _plain_routed_param_ids(model)
     sliced = hand_sliced_dims(model)
     tp_mesh = model_tp_mesh(model)
@@ -103,7 +81,7 @@ class _FirstStepRecorder(TrainerCallback):
         compute_loss = trainer.compute_loss
 
         def recording_compute_loss(model, inputs, *args, **kwargs):
-            # Training microbatches only: an evaluation pass reaches compute_loss with the model in eval mode.
+            # An evaluation pass reaches compute_loss too, with the model in eval mode.
             recording = model.training and len(record.batches) < microbatches
             if recording:
                 record.batches.append({key: _host_copy(value) for key, value in inputs.items()})
@@ -122,7 +100,6 @@ class _FirstStepRecorder(TrainerCallback):
 
 @contextlib.contextmanager
 def recording_autograd_fallbacks(sink: list[str]):
-    """Append every c10d autograd-fallback warning raised inside to ``sink``; other warnings show as usual."""
     with warnings.catch_warnings():
         show = warnings.showwarning
 
@@ -138,10 +115,7 @@ def recording_autograd_fallbacks(sink: list[str]):
 
 
 def train_recording_first_step(trainer, *, gradients: bool = True):
-    """``trainer.train()``, returning its result and the :class:`FirstStep` it took.
-
-    ``gradients`` records the step's gradients too, each gathered whole onto the host.
-    """
+    """``trainer.train()``, returning its result and the :class:`FirstStep` it took."""
     record = FirstStep()
     _FirstStepRecorder(trainer, record, gradients=gradients)
     with recording_autograd_fallbacks(record.autograd_fallbacks):
@@ -151,15 +125,9 @@ def train_recording_first_step(trainer, *, gradients: bool = True):
 
 
 def score_first_step(trainer, record: FirstStep) -> FirstStep:
-    """``trainer``'s own first step on ``record``'s microbatches. Collective.
-
-    Mirrors the training step outside the loop: ``compute_loss`` under the trainer's loss context and,
-    when ``record`` carries gradients, each loss divided by the microbatch count, backpropagated through
-    the accelerator with its FSDP2 post-backward completed, and finalized by the clip seam HF runs before
-    the optimizer step. The result carries
-    the losses, the step loss HF would log and those gradients. Only a trainer whose loss is its own
-    mean is mirrored: HF skips the division when it normalizes by the batch's item count instead.
-    """
+    """``trainer``'s own first step on ``record``'s microbatches, mirroring the training step outside the loop.
+    Collective. Only a trainer whose loss is its own mean is mirrored: HF skips the division when it normalizes by item
+    count."""
     if trainer.model_accepts_loss_kwargs:
         raise ValueError(
             f"{type(trainer).__name__} normalizes its loss by the batch's item count, a step score_first_step "
@@ -180,7 +148,6 @@ def score_first_step(trainer, record: FirstStep) -> FirstStep:
         grad_norm = trainer._clip_grad_norm(trainer.model) if trainer.args.max_grad_norm > 0 else None
         trainer._get_grad_norm(trainer.model, grad_norm=grad_norm)
         scored.grads = _step_grads(trainer.model)
-    # HF logs the world mean of the per-rank step losses.
     scored.logged_loss = world_mean(sum(scored.losses) / len(scored.losses), trainer.accelerator.device)
     return scored
 
@@ -193,12 +160,9 @@ def _relative_error(got: float, want: float) -> float:
 def first_step_checks(
     record: FirstStep, reference: FirstStep, *, miscount_factor: int, loss_rtol: float
 ) -> tuple[dict[str, bool], dict[str, float]]:
-    """The loss checks on ``record``'s step against ``reference``'s, and the metrics behind them.
-
-    Losses are compared relative to ``max(1, |reference|)``. ``miscount_factor`` is the factor a
-    miscounted objective carries (the parallel axis size): the bound has to resolve a loss scaled by
-    it, or a match says nothing. Also fails a backward that reached the c10d autograd fallback.
-    """
+    """Loss checks on ``record``'s step against ``reference``'s; also fails a backward that reached the c10d autograd
+    fallback. ``miscount_factor`` is the parallel axis size: the bound has to resolve a loss scaled by it, or a match
+    says nothing."""
     loss_error = max_or_nan(
         _relative_error(got, want) for got, want in zip(record.losses, reference.losses, strict=True)
     )
@@ -226,11 +190,8 @@ def first_step_checks(
 
 
 def _gradient_agreement(got: dict[str, torch.Tensor], want: dict[str, torch.Tensor]) -> tuple[float, float]:
-    """(cosine, norm ratio) of two gradients taken as one vector each over ``want``'s parameters, in fp64.
-
-    Accumulated per parameter rather than over a concatenation, which would hold a second full copy of
-    the model's gradient on the host. NaN when either side is non-finite, zero or missing a parameter.
-    """
+    """(cosine, norm ratio) over ``want``'s parameters in fp64, per parameter to avoid a second host copy; NaN if
+    non-finite, zero or missing."""
     if not want or want.keys() - got.keys():
         return math.nan, math.nan
     dot = got_sq = want_sq = 0.0
@@ -251,12 +212,8 @@ def first_step_gradient_checks(
     cosine_min: float = TOL.cp_grad_cosine_min,
     norm_rtol: float = TOL.cp_grad_norm_rtol,
 ) -> tuple[dict[str, bool], dict[str, float]]:
-    """The gradient checks on ``record``'s step against ``reference``'s, and the metrics behind them.
-
-    The gradient is judged as one vector, by direction and by norm: a mis-scaled reduction keeps the
-    direction and a mis-routed one keeps the norm. Per parameter, bf16 noise on the small norm-weight
-    gradients is too large to gate on.
-    """
+    """Gradient checks as one vector: a mis-scaled reduction keeps the direction, a mis-routed one keeps the norm. Per
+    parameter, bf16 noise on small norm-weight gradients is too large to gate on."""
     cosine, norm_ratio = _gradient_agreement(record.grads, reference.grads)
     checks = {
         "step1_grads_cover_the_reference_params": bool(reference.grads)
@@ -272,10 +229,8 @@ def first_step_gradient_checks(
 
 
 def dense_gradient_checks(record: FirstStep, reference: FirstStep) -> tuple[dict[str, bool], dict[str, float]]:
-    """:func:`first_step_gradient_checks` over the parameters both steps captured, after checking that ``record``
-    covers every reference parameter outside :data:`ROUTING_DEPENDENT_PARAM`, so the comparison cannot pass on an
-    empty set. The routing-dependent ones are :mod:`tests.common.routed_first_step`'s: a run's EP layers hold them
-    plain, which the capture leaves out, or under the layer's own names."""
+    """:func:`first_step_gradient_checks` over shared parameters, after checking ``record`` covers every non-routing
+    reference parameter."""
     dense = {name for name in reference.grads if not ROUTING_DEPENDENT_PARAM.search(name)}
     covered = dense <= record.grads.keys()
     shared = [name for name in reference.grads if name in record.grads]
@@ -294,16 +249,10 @@ def parameter_gradient_checks(
     cosine_min: float = TOL.cp_grad_cosine_min,
     norm_rtol: float = TOL.cp_grad_norm_rtol,
 ) -> tuple[bool, dict[str, float]]:
-    """Whether ``got`` matches ``want`` parameter by parameter, and the metrics behind the verdict.
-
-    The whole gradient holds its direction to ``cosine_min`` and its norm to ``norm_rtol``, and the
-    :data:`ROUTING_DEPENDENT_PARAM` parameters hold the direction as one vector. Each parameter also holds its
-    own: ``cosine_min`` in a model without routed experts; in a routed one a router or expert parameter
-    :attr:`TOL.grad_direction_cosine_min` and any other :attr:`TOL.cp_routed_grad_cosine_min`. An expert zero on
-    either side is skipped, since a flipped pick can route a token to an expert the other pass never used; a
-    router never is, so a router left without a gradient fails. ``want``'s parameters missing from ``got`` are
-    the caller's coverage check.
-    """
+    """Whether ``got`` matches ``want`` parameter by parameter, and the metrics behind the verdict. Whole direction and
+    norm, the routing-dependent group as one vector, then each parameter's own bar. An expert zero on either side is
+    skipped, since a flipped pick can route to an expert the other pass never used; a router without a gradient
+    fails."""
     shared = [name for name in want if name in got]
     routed = [name for name in shared if ROUTING_DEPENDENT_PARAM.search(name)]
     finite = all(bool(torch.isfinite(got[name]).all()) for name in shared)

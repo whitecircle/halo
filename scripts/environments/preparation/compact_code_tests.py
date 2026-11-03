@@ -1,23 +1,11 @@
 #!/usr/bin/env python
-"""Compact a bulky test-suite corpus into one row per problem, capped, for ``prepare_code_dataset.py``.
+"""Compact a bulky test-suite corpus (HardTests' encoded suites, open-r1/codeforces' generated tests) into one capped
+row per problem, for ``prepare_code_dataset.py --tests_table``.
 
-Two sources: HardTests' encoded suites (``sigcp/hardtests_tests``, one row per problem, tests
-base64-zlib-pickled) and open-r1/codeforces' generated tests (``generated_tests/*.parquet``, one row
-per test, one shard per contest). Both are hundreds of gigabytes; the output is a directory of
-parquet parts with ``key``, ``tests`` (a JSON list of ``{input, output}``) and ``checker``, read back
-by ``prepare_code_dataset.py --tests_table``.
-
-Caps keep a problem's payload trainable: at most ``--max_tests`` tests within ``--max_test_bytes``
-each, of which up to ``--max_large_tests`` may reach ``--max_large_bytes`` so the suite keeps a
-maximum-size input for time-limit discrimination. Order is preserved: HardTests' groups are taken as
-LLM-written samples, then adversarial, then random, then special inputs; open-r1's generated tests
-already come hardest-first. A part is named after its source shard and stamped with the caps that
-built it, so an interrupted run resumes and a run with other caps rebuilds.
-
-    python scripts/environments/preparation/compact_code_tests.py --source hardtests \\
-        --input_dir "$HF_HOME/hub/datasets--sigcp--hardtests_tests/snapshots/<rev>/data" \\
-        --output_dir "$HALO_DATA_ROOT/hardtests-tests-compact"
-"""
+Caps keep a payload trainable: ``--max_tests`` tests within ``--max_test_bytes``, of which ``--max_large_tests`` may
+reach ``--max_large_bytes``, keeping a maximum-size input for time-limit discrimination. Order is preserved (HardTests:
+LLM-written, adversarial, random, special; open-r1 comes hardest-first). A part is named after its source shard and
+stamped with its caps, so an interrupted run resumes and a run with other caps rebuilds."""
 
 import argparse
 

@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
-"""A rank-gated write must fail every rank when it fails on one, proven on a real group.
-
-Every checkpoint writer is one rank doing I/O while all ranks wait at a fence. A fence that only
-releases the peers leaves the writer's failure on the writer: ENOSPC, EIO or a stale NFS handle on one
-node raises there while its peers carry on into the next collective and sit in it until the NCCL
-watchdog fires, with no diagnostic in their logs. ``barrier_on_exit`` therefore joins the failure where
-the barrier stood (one all-reduce on every rank, so collective order is unchanged): every rank raises,
-the writer its own exception and its peers a ``RuntimeError`` naming the failing rank and the cause.
-``fs_aware_makedirs`` and the attention warm-up fence are built on it.
-
-Usage:
-    python tests/cpu/runtime/test_barrier_fencing.py
-"""
+"""A rank-gated write failing on one rank fails every rank, on a real group: ``barrier_on_exit`` joins the failure
+where the barrier stood. Otherwise peers sit in the next collective until the NCCL watchdog, with no diagnostic."""
 
 import datetime
 import json
@@ -29,24 +18,23 @@ from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 FAILING_RANK = 1
-# A rank that returned instead of joining would reach the next fence alone; fail on it rather than stall.
+# A rank that returned instead of joining would reach the next fence alone.
 PG_TIMEOUT = datetime.timedelta(seconds=30)
 ENOSPC = "No space left on device"
 JIT_FAILURE = "FA4 JIT compile failed"
-# Created as a regular file, so a directory under it cannot be made.
+# A regular file, so a directory under it cannot be made.
 BLOCKING_FILE = "not_a_directory"
 
 
 def test_the_writers_own_exception_propagates():
-    """Joining must not swallow or re-type the failure: a truncated checkpoint is not a success, and
-    callers match on the writer's exception type."""
+    """Callers match on the writer's exception type."""
     with pytest.raises(OSError, match=ENOSPC):
         with barrier_on_exit("Writing scheduler.pt"):
             raise OSError(28, ENOSPC)
 
 
 def test_the_join_runs_after_the_body(monkeypatch):
-    """Ordering is load-bearing: a fence before the write would publish a half-written checkpoint."""
+    """A fence before the write would publish a half-written checkpoint."""
     order = []
     monkeypatch.setattr(consensus, "reject_across_ranks", lambda reason, what: order.append(("join", reason, what)))
     with barrier_on_exit("Writing scheduler.pt"):
@@ -55,10 +43,9 @@ def test_the_join_runs_after_the_body(monkeypatch):
 
 
 def test_the_fence_is_inert_without_a_process_group():
-    """Single-process runs (and these tests) call the same writers; the fence must stay inert."""
     assert not ranks.dist.is_initialized()
     with barrier_on_exit("Writing scheduler.pt"):
-        pass  # reaching here without raising IS the assertion
+        pass  # Reaching here without raising is the assertion.
 
 
 def _fa4_compile_failing_on_one_rank(_model, *, dtype) -> None:
@@ -72,15 +59,14 @@ def _no_flex_compile(_model, *, dtype) -> None:
 
 
 def _fence_outcomes(rank: int, tmp_dir: str) -> None:
-    """Drive each fence with a failure on :data:`FAILING_RANK` only, recording what every rank saw; a
-    clean fence last proves the ranks are still in step after three joined failures."""
+    """A clean fence last proves the ranks are still in step after three joined failures."""
     outcomes: dict[str, str] = {}
 
     def record(name, fence) -> None:
         try:
             fence()
             outcomes[name] = "returned"
-        except BaseException as exc:  # recorded per rank: the outcome on every rank is the subject
+        except BaseException as exc:  # Recorded per rank: the outcome on every rank is the subject.
             outcomes[name] = f"{type(exc).__name__}: {exc}"
 
     def failing_write() -> None:
@@ -92,7 +78,7 @@ def _fence_outcomes(rank: int, tmp_dir: str) -> None:
         with barrier_on_exit("Writing scheduler.pt"):
             pass
 
-    # Global rank 0 is the shared-filesystem writer, so here the failure sits on the other rank.
+    # Global rank 0 is the shared-filesystem writer, so the failure sits on the other rank.
     record("fs_aware_makedirs", lambda: fs_aware_makedirs(os.path.join(tmp_dir, BLOCKING_FILE, "cache")))
     record("barrier_on_exit", failing_write)
     whole_model.warm_fa4_kernels = _fa4_compile_failing_on_one_rank
@@ -120,8 +106,6 @@ def outcomes(tmp_path_factory) -> list[dict[str, str]]:
     ],
 )
 def test_one_ranks_failure_raises_on_every_rank_naming_it(outcomes, fence, failing_rank, writer_error, cause):
-    """The failing rank raises its own exception; its peer, which did nothing wrong, raises too, naming
-    the failing rank and the cause instead of returning into the next collective."""
     failing, peer = outcomes[failing_rank][fence], outcomes[1 - failing_rank][fence]
     assert failing.startswith(f"{writer_error}:") and cause in failing, failing
     assert peer.startswith("RuntimeError:"), f"the peer of a failed {fence} saw: {peer}"
@@ -129,7 +113,7 @@ def test_one_ranks_failure_raises_on_every_rank_naming_it(outcomes, fence, faili
 
 
 def test_a_clean_fence_raises_on_nobody(outcomes):
-    """The join must not be a raise-always, and the ranks are still in step after the joined failures."""
+    """The join must not raise always."""
     assert [rank_outcomes["clean"] for rank_outcomes in outcomes] == ["returned"] * WORLD_SIZE
 
 

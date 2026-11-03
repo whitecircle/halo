@@ -1,17 +1,8 @@
 #!/usr/bin/env python
 """SMPO padding-free on the CUDA kernels keeps each flattened document's mixer state its own.
 
-The production path of the CPU test (``tests/cpu/trainers/test_smpo_padding_free_segments.py``): a
-real ``SMPOTrainer`` built with ``padding_free`` on bf16 flash attention, whose forward
-hands ``seq_idx`` to the ``causal_conv1d`` kernel (LFM2 ShortConv, the GatedDeltaNet conv) and
-``cu_seq_lens_*`` to the ``fla`` chunked delta rule and flash attention; dense Qwen3 gets no marker
-and relies on flash attention deriving the boundaries from ``position_ids``. Every document's mean
-log-prob from the flattened row must match the same document run alone, and each leak control —
-the row rerun with markers withheld — must drift far outside that tolerance.
-
-Single GPU::
-
-    torchrun --nproc_per_node=1 tests/gpu/trainers/preference/test_smpo_padding_free_segments.py
+Each document's mean log-prob matches the document run alone; each leak control withholds markers and must drift far
+outside the tolerance.
 """
 
 from types import SimpleNamespace
@@ -32,8 +23,8 @@ from tests.common.segment_isolation import (
     tiny_model,
 )
 
-# bf16 rounding differs between the varlen and dense kernels: the isolated rows land at ~1e-2 on this
-# batch, while a row missing a marker its family reads drifts by ~1.
+# bf16 rounding differs between varlen and dense kernels: isolated rows land at ~1e-2, a row missing its marker drifts
+# by ~1.
 ISOLATION_TOL = 5e-2
 LEAK_FLOOR = 0.3
 

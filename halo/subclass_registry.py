@@ -29,11 +29,8 @@ def iter_subclasses(base_cls: type[_T]) -> list[type[_T]]:
 
 
 def build_class_claim_map(base_cls: type[_T], kind: str, *, attr: str = "HF_MODULE_NAMES") -> dict[str, type[_T]]:
-    """Claimed key → claiming class over ``base_cls``'s subclass tree, reading each class's own ``attr``
-    tuple (an inherited one is not a second claim). ``kind`` names the key in the error.
-
-    Raises ``ValueError`` when two classes claim one key, which would make the resolution order-dependent.
-    """
+    """Claimed key → claiming class over the subclass tree, reading each class's own ``attr`` (an inherited one is no
+    second claim). Two classes claiming one key raises, since resolution would be order-dependent."""
     mapping: dict[str, type[_T]] = {}
     for cls in iter_subclasses(base_cls):
         for key in vars(cls).get(attr, ()):
@@ -50,12 +47,8 @@ def swap_registered_modules(
     *,
     descend_into_match: bool,
 ) -> list[tuple[str, nn.Module]]:
-    """Put ``build(path, child, cls)`` in place of every module whose class name ``class_map`` claims;
-    return ``(dotted path, replacement)`` per swap, in walk order.
-
-    ``descend_into_match`` also walks a matched child's subtree, the original child's rather than the
-    replacement's, so a wrapper holding the module it replaced does not match its own claim.
-    """
+    """Swap ``build(path, child, cls)`` in for every module ``class_map`` claims; return ``(path, replacement)`` per
+    swap. ``descend_into_match`` walks the original child's subtree, so a wrapper does not match its own claim."""
     swapped: list[tuple[str, nn.Module]] = []
 
     def walk(module: nn.Module, path: str) -> None:

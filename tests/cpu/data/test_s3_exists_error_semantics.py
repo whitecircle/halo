@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""``S3Client.exists`` must not swallow every ``ClientError``.
-
-Expired credentials or a 403 answering "does not exist" makes an overwrite check pass, a load
-report the dataset missing, and a delete claim there was nothing there. Only an authoritative
-absence may read as False; a ``NoSuchBucket`` is authoritative about the bucket, not the key.
-
-Run: python tests/cpu/data/test_s3_exists_error_semantics.py
-"""
+"""``S3Client.exists`` does not swallow every ``ClientError``: expired credentials read as absent would pass an
+overwrite check and make a delete claim nothing was there. Only an authoritative absence reads as False."""
 
 from unittest.mock import MagicMock
 
@@ -27,20 +21,17 @@ def _client_raising(code: str) -> S3Client:
 
 
 def test_exists_reraises_a_credentials_error():
-    """A 403/expired-SSO listing failure must raise, not report 'does not exist'."""
     with pytest.raises(ClientError):
         _client_raising("AccessDenied").exists("some/dataset")
 
 
 def test_exists_returns_false_on_an_authoritative_absence():
-    """A missing key is a real answer: False."""
     assert _client_raising("NoSuchKey").exists("some/dataset") is False
 
 
 def test_exists_names_a_missing_bucket_rather_than_an_absent_key():
-    """``NoSuchBucket`` is authoritative about the BUCKET, not the key. Read as "does not exist" it
-    reaches the operator as ``Dataset not found: s3://…``, sending them after a key in a bucket that
-    is not there — a misspelled bucket or the wrong region."""
+    """Authoritative about the bucket, not the key; read as absent it sends the operator after a key in a bucket
+    that is not there."""
     with pytest.raises(FileNotFoundError, match="test-bucket"):
         _client_raising("NoSuchBucket").exists("some/dataset")
 

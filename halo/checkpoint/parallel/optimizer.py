@@ -1,5 +1,4 @@
-"""Per-rank optimizer-state shards: :class:`OptimizerShardStore` writes them with their ``optimizer_meta.pt``
-and restores them behind its gates."""
+"""Per-rank optimizer-state shards: :class:`OptimizerShardStore` writes them with their meta and gates the restore."""
 
 from __future__ import annotations
 
@@ -53,8 +52,7 @@ logger = logging.getLogger(__name__)
 
 
 def _tracked_fqns(osd) -> set[str]:
-    """The param FQNs a saved shard's ``param_groups`` say the saving optimizer tracked: the one key space
-    that survives both halves of a deduplicated save, which strips ``state`` only."""
+    """The param FQNs a shard's ``param_groups`` tracked, the one key space surviving a deduplicated save."""
     shard = osd if isinstance(osd, dict) else {}
     return {
         fqn
@@ -66,9 +64,8 @@ def _tracked_fqns(osd) -> set[str]:
 
 
 def _reimpose_group_settings(param_groups: list[dict], settings: list[dict]) -> str | None:
-    """Write this run's ``settings`` back over the param groups ``set_optimizer_state_dict`` rebuilt; why a
-    group was left on the shard's values (a drifted group count), or None. Restores every pair it can
-    either way, so a caller already unwinding another error keeps it."""
+    """Write this run's ``settings`` over the rebuilt param groups; returns why a group kept the shard's values (a
+    drifted group count), or None. Restores every pair it can, so a caller unwinding another error keeps it."""
     for group, live in zip(param_groups, settings, strict=False):
         group.update(live)
     if len(param_groups) == len(settings):
@@ -87,9 +84,9 @@ def _concurrent_node_ranks(max_concurrent: int | None) -> int:
 
 
 def _warn_if_low_host_ram(optimizer, doing: str, max_concurrent: int | None) -> None:
-    """Warn, never raise, when host RAM is below an upper bound on the optimizer-state host copies this node holds
-    at once: this rank's (two moments per param, a DTensor at its local shard) times the ranks the node's load
-    throttle admits together (``max_concurrent``). Running out is an opaque OOM kill mid-checkpoint."""
+    """Warn, never raise, when host RAM is below an upper bound on this node's optimizer-state host copies (two moments
+    per param, a DTensor at its local shard, times the ranks the throttle admits); running out is an opaque OOM
+    kill."""
     available = available_host_ram_bytes()
     if optimizer is None or available is None:
         return
@@ -109,8 +106,7 @@ def _warn_if_low_host_ram(optimizer, doing: str, max_concurrent: int | None) -> 
 
 
 def _reject_unsharded_resume_over_optimizer_shards(checkpoint: str | None) -> None:
-    """COLLECTIVE (rank 0's probe). Refuse per-rank shards on a non-sharded resume, whose base loader would
-    silently restore no optimizer state."""
+    """COLLECTIVE (rank 0's probe). Refuse per-rank shards on a non-sharded resume, whose base loader restores none."""
     if checkpoint is None:
         return
     if rank0_verdict(
@@ -130,10 +126,9 @@ def _reject_unsharded_resume_over_optimizer_shards(checkpoint: str | None) -> No
 
 
 def expert_replica_writer(model) -> tuple[int, frozenset[str]]:
-    """``(rank whose shard carries the replicated expert state, the FQNs it carries)``; ``(this rank, empty)``
-    when nothing is replicated. Multi-group EP's groups are DP replicas whose FSDP-ignored experts hold
-    bit-identical moments, so the replica group's lowest rank writes them for its peers.
-    """
+    """``(rank whose shard carries the replicated expert state, its FQNs)``; ``(this rank, empty)`` when nothing is
+    replicated. Multi-group EP's groups are DP replicas with bit-identical expert moments, so the group's lowest rank
+    writes them."""
     ep_layers = named_ep_layers(model)
     ep_config = ep_layers[0][1].ep_config if ep_layers else None
     if ep_config is None or ep_config.experts_fsdp_managed or not ep_config.needs_expert_grad_sync:
@@ -147,8 +142,7 @@ def expert_replica_writer(model) -> tuple[int, frozenset[str]]:
 
 
 class OptimizerShardStore:
-    """Per-rank optimizer-state shards: the sharded save and the gated resume (:attr:`writes_shards` modes);
-    every other mode keeps the base Trainer's ``optimizer.pt``."""
+    """The sharded save and gated resume (:attr:`writes_shards` modes); other modes keep the base ``optimizer.pt``."""
 
     def __init__(self, ctx: CheckpointLoadContext):
         self.ctx = ctx
@@ -157,23 +151,20 @@ class OptimizerShardStore:
 
     @property
     def writes_shards(self) -> bool:
-        """Whether this run keeps its optimizer state as per-rank shards: mixin-managed FSDP2, and pure TP,
-        whose base ``optimizer.pt`` would load rank 0's state into every TP rank."""
+        """Mixin-managed FSDP2, and pure TP, whose base ``optimizer.pt`` would load rank 0's state into every rank."""
         return self.ctx.fsdp_wrapped or self.ctx.parallelism_config.is_tp_mode
 
     def save(self, output_dir: str) -> None:
-        """COLLECTIVE. Write this rank's optimizer view to its shard, a node's ranks a batch at a time as the
-        restore reads them (``max_concurrent_loading``), and ``optimizer_meta.pt`` once every shard is on disk. Any
-        rank's failure raises on every rank: the caller rotates the previous checkpoint away only after a save
-        that returned."""
+        """COLLECTIVE. Write this rank's shard, a node's ranks a batch at a time, and the meta once every shard is on
+        disk. Any rank's failure raises on every rank, since the caller rotates the previous checkpoint away after a
+        save that returned."""
         ctx = self.ctx
         max_concurrent = getattr(ctx.parallelism_config, "max_concurrent_loading", None)
         # A rank leaving early while its peers block on the closing barrier() hangs the job.
         try:
             _warn_if_low_host_ram(ctx.optimizer, "the cpu_offload of the shard save", max_concurrent)
-            # Deferred: a raise on one rank would take it to the closing barrier() while its peers vouch for an
-            # incomplete set with the meta. The node's ranks enter the throttle in turn, so nothing in it may
-            # be a collective.
+            # Deferred, since a raise on one rank would take it to the closing barrier() while its peers vouch for an
+            # incomplete set with the meta. Ranks enter the throttle in turn, so nothing in it may be a collective.
             guard = DeferredRankFailure(f"optimizer shard save to {output_dir}")
             with joined_node_load(f"Writing the per-rank optimizer shards to {output_dir}", max_concurrent):
                 guard.run(partial(self._write_shard, output_dir))
@@ -200,12 +191,8 @@ class OptimizerShardStore:
             barrier()
 
     def _write_shard(self, output_dir: str) -> None:
-        """This rank's optimizer view, offloaded to host memory, written to its shard without the replicated expert
-        state it does not write (:meth:`_drop_replicated_state`); the host copy is freed on return. Rank-local.
-
-        Raises:
-            RuntimeError: this rank holds no optimizer, or its state cannot be produced under the live sharding.
-        """
+        """This rank's optimizer view, offloaded to host, written without the replicated expert state it does not
+        write. Rank-local; raises when it holds no optimizer or cannot produce state under the live sharding."""
         ctx = self.ctx
         if ctx.optimizer is None:
             raise RuntimeError("This rank holds no optimizer to save.")
@@ -225,8 +212,8 @@ class OptimizerShardStore:
         torch.save(osd, os.path.join(output_dir, optimizer_shard_filename(get_global_rank())))
 
     def _drop_replicated_state(self, osd) -> None:
-        """Strip the replicated expert moments (``state`` only) from every shard but their writer's; skipped,
-        warned, on a non-shared output filesystem, where a follower could not read the writer's shard."""
+        """Strip replicated expert moments (``state`` only) from every shard but their writer's; skipped, with a
+        warning, on a non-shared output filesystem, where a follower could not read the writer's shard."""
         writer_rank, keys = expert_replica_writer(self.model)
         state = osd.get("state") if isinstance(osd, dict) else None
         if not keys or not isinstance(state, dict):
@@ -246,13 +233,10 @@ class OptimizerShardStore:
             state.pop(key, None)
 
     def load(self, checkpoint: str | None) -> None:
-        """COLLECTIVE. Restore the optimizer state and the LR scheduler on resume.
-
-        A fingerprint mismatch or no shards anywhere warm-restarts; a meta without fingerprint and misplaced
-        or torn shards raise; state that provably exists but cannot be restored (a failed read or apply, an
-        interrupted save, a base ``optimizer.pt`` with no shards) raises unless ``allow_optimizer_warm_restart``.
-        Under PP every warm restart raises once any shard is present. Each verdict is consensus'd.
-        """
+        """COLLECTIVE. Restore the optimizer state and LR scheduler on resume, each verdict consensus'd. A fingerprint
+        mismatch or no shards warm-restarts; a meta without fingerprint and misplaced or torn shards raise; state that
+        exists but cannot be restored raises unless ``allow_optimizer_warm_restart``. Under PP every warm restart
+        raises once any shard is present."""
         if not self.writes_shards or checkpoint is None:
             return self._resume_unsharded(checkpoint)
         shard_path = os.path.join(checkpoint, optimizer_shard_filename(get_global_rank()))
@@ -269,11 +253,10 @@ class OptimizerShardStore:
         self._apply_restored_state(checkpoint, osd, pp_strict=pp_strict)
 
     def _resume_unsharded(self, checkpoint: str | None) -> None:
-        """Hand a non-sharded resume to the base Trainer's ``optimizer.pt`` path, refusing a checkpoint whose
-        per-rank shards it cannot read."""
+        """Hand a non-sharded resume to the base Trainer, refusing per-rank shards it cannot read."""
         _reject_unsharded_resume_over_optimizer_shards(checkpoint)
         self.ctx.super_load_optimizer_and_scheduler(checkpoint)
-        # The base Trainer restores scheduler.pt only alongside an optimizer file. Rank 0's verdict:
+        # The base Trainer restores scheduler.pt only alongside an optimizer file. Rank 0's verdict, since
         # restore_lr_scheduler is collective.
         optimizer_file_present = checkpoint is not None and any(
             os.path.isfile(os.path.join(checkpoint, name)) for name in OPTIMIZER_STATE_FILES
@@ -362,8 +345,8 @@ class OptimizerShardStore:
         return True
 
     def _refuse_unless_opted_in(self, checkpoint: str, failure: str, consequence: str, *, pp_strict: bool) -> None:
-        """Raise ``failure`` with its consequence and remedy, or warm-restart under ``allow_optimizer_warm_restart``
-        (outside PP): the state provably exists, so dropping it is opt-in. Reached from a consensus'd verdict."""
+        """Raise ``failure``, or warm-restart under ``allow_optimizer_warm_restart`` (outside PP), since the state
+        provably exists and dropping it is opt-in. Reached from a consensus'd verdict."""
         remedy = (
             "delete every optimizer_shard_*.pt and optimizer_meta.pt to explicitly accept an optimizer warm restart"
             if pp_strict
@@ -380,15 +363,14 @@ class OptimizerShardStore:
         )
 
     def _strict_or_warm_restart(self, checkpoint: str, *, strict: bool, strict_msg: str, warm_msg: str) -> None:
-        """A failed gate's outcome: raise when ``strict``, warm-restart otherwise. Reached from a consensus'd
-        verdict, so the collectives inside :meth:`_warm_restart` stay in step."""
+        """Raise when ``strict``, else warm-restart. Reached from a consensus'd verdict, so :meth:`_warm_restart`'s
+        collectives stay in step."""
         if strict:
             raise RuntimeError(strict_msg)
         self._warm_restart(checkpoint, warm_msg)
 
     def _warm_restart(self, checkpoint: str, msg: str) -> None:
-        """COLLECTIVE. Drop the optimizer state on every rank; the structure-independent LR schedule still
-        restores."""
+        """COLLECTIVE. Drop the optimizer state on every rank; the structure-independent LR schedule still restores."""
         self._discard_optimizer_state()
         if is_global_main_process():
             logger.warning(msg)
@@ -396,8 +378,8 @@ class OptimizerShardStore:
         barrier()
 
     def _discard_optimizer_state(self) -> None:
-        """Clear the moments and gradients a ``set_optimizer_state_dict`` attempt materialized: its zero-LR init
-        step leaves even a failed attempt fully zeroed, Muon's nested scalar optimizer included."""
+        """Clear what a ``set_optimizer_state_dict`` attempt materialized; its zero-LR init step leaves even a failed
+        attempt fully zeroed, Muon's nested scalar optimizer included."""
         optimizer = self.ctx.optimizer
         if optimizer is None:
             return
@@ -470,9 +452,8 @@ class OptimizerShardStore:
         )
 
     def _read_local_state(self, checkpoint: str, shard_path: str) -> tuple[object | None, str | None]:
-        """COLLECTIVE. This rank's optimizer state (its own shard plus the replica writer's) and why it could
-        not be read, under the node's load throttle (:func:`~halo.runtime.load_coordination.joined_node_load`):
-        both reads land in host RAM, and every follower of a replica group opens the writer's file."""
+        """COLLECTIVE. This rank's state (own shard plus the replica writer's) and why it could not be read, under the
+        node's load throttle, since every follower of a replica group opens the writer's file."""
         max_concurrent = getattr(self.ctx.parallelism_config, "max_concurrent_loading", None)
         _warn_if_low_host_ram(self.ctx.optimizer, f"restoring {os.path.basename(shard_path)}", max_concurrent)
         with joined_node_load(f"Reading the per-rank optimizer shards from {checkpoint}", max_concurrent):
@@ -484,21 +465,17 @@ class OptimizerShardStore:
         return osd, failure
 
     def _read_shard(self, shard_path: str) -> tuple[object | None, str | None]:
-        """An optimizer shard, or why it could not be read (a crash mid-save leaves a truncated one).
-        Rank-local; the caller joins it."""
+        """An optimizer shard, or why it could not be read (a crash truncates one). Rank-local; the caller joins it."""
         try:
             return torch.load(shard_path, map_location="cpu", weights_only=False), None
         except Exception as e:
             return None, f"Unreadable optimizer shard {shard_path}: {type(e).__name__}: {e}"
 
     def _merge_replicated_state(self, checkpoint: str, osd) -> str | None:
-        """Fold the replica writer's expert moments into this rank's shard; why it could not, or None. Rank-local:
-        a failure rides the shard-read verdict. A shard tracking replicated FQNs and holding state for none of
-        them was deduplicated (the save strips them all at once), an empty state included: the save's
-        ``get_optimizer_state_dict`` zero-initializes a never-stepped optimizer, so only a stateless one writes
-        none. Merging none of the tracked FQNs from a writer that holds state means the writer spells them
-        differently, which would resume every expert param at zero moments.
-        """
+        """Fold the replica writer's expert moments into this rank's shard; why it could not, or None. Rank-local; a
+        failure rides the shard-read verdict. A shard tracking replicated FQNs with state for none was deduplicated,
+        since only a stateless optimizer saves no state. Merging none from a writer holding state means it spells them
+        differently, which would resume every expert param at zero moments."""
         writer_rank, keys = expert_replica_writer(self.model)
         state = osd.get("state") if isinstance(osd, dict) else None
         if writer_rank == get_global_rank() or not isinstance(state, dict):
@@ -533,8 +510,7 @@ class OptimizerShardStore:
     def _settle_restore_failure(
         self, checkpoint: str, local_failure: str | None, what: str, *, pp_strict: bool
     ) -> bool:
-        """COLLECTIVE. Whether ``what`` failed on any rank; when it did, every rank raises, or warm-restarts under
-        the opt-in (:meth:`_refuse_unless_opted_in`)."""
+        """COLLECTIVE. Whether ``what`` failed on any rank; if so all raise, or warm-restart under the opt-in."""
         failure = gathered_failure_summary(gather_rank_reasons(local_failure), what)
         if failure is None:
             return False
@@ -549,8 +525,7 @@ class OptimizerShardStore:
         return True
 
     def _apply_restored_state(self, checkpoint: str, osd, *, pp_strict: bool) -> None:
-        """COLLECTIVE. Write the read state into the live optimizer once every rank's covers its trainable
-        params, then restore the LR scheduler."""
+        """COLLECTIVE. Write the read state once every rank's covers its trainable params, then the scheduler."""
         # Trainable FQNs the shard restores nothing for, which strict=False would quietly reinitialize. Tracked
         # but stateless params (never received a gradient) and an empty state (a stateless optimizer) are legitimate.
         shard = osd if isinstance(osd, dict) else {}
@@ -584,8 +559,7 @@ class OptimizerShardStore:
         barrier()
 
     def _apply_shard_state(self, osd) -> None:
-        """COLLECTIVE (DTensor). Write this rank's shard into the live optimizer; the caller defers a raise to
-        its gathered verdict."""
+        """COLLECTIVE (DTensor). Write this rank's shard into the live optimizer; the caller defers a raise."""
         # strict=False: params that require grad but never accrue one (GptOss sinks) are absent.
         options = StateDictOptions(full_state_dict=False, broadcast_from_rank0=False, strict=False)
         # Hyperparameters belong to this run: the restore rebuilds param_groups from the shard and can

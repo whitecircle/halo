@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the EP checkpoint scope — the frame-local cache EP's recompute replays from.
-
-A second DeepEP dispatch during recompute reuses the same ``ElasticBuffer`` and invalidates the
-handle the original forward's backward node holds, so the replay cache is load-bearing for
-correctness, not just speed. These tests pin the properties it rests on: the pass counter is
-the recompute signal (grad mode is NOT — non-reentrant checkpointing enables grad on both passes),
-concurrent frames (pipeline microbatches in flight) never see each other's slots, a recompute
-that diverges from its forward fails loud, and the recompute releases its slots: the reentrant
-checkpoint keeps every scope until the loss is dropped, so a layer's cache held past its own backward
-stays alive through every other layer's.
-
-Run: ``pytest tests/cpu/parallelism/test_ep_checkpoint_scope.py``.
-"""
+"""The EP checkpoint scope EP's recompute replays from. A second dispatch invalidates the backward node's handle;
+the pass counter is the signal, as non-reentrant enables grad on both passes."""
 
 import functools
 import gc
@@ -32,7 +21,7 @@ LAYERS, TOKENS, HIDDEN = 6, 16, 8
 
 
 class _Owner:
-    """Stand-in for an EP MoE layer (slots are keyed by identity)."""
+    """Slots are keyed by identity."""
 
 
 def test_first_pass_is_not_recompute_second_is():
@@ -46,8 +35,6 @@ def test_first_pass_is_not_recompute_second_is():
 
 
 def test_recompute_signal_is_independent_of_grad_mode():
-    # Non-reentrant checkpointing runs BOTH passes with grad enabled; the reentrant original forward
-    # runs under no_grad. Neither may change the answer.
     scope = RecomputeScope()
     with torch.enable_grad(), scope:
         assert not scope.is_recompute
@@ -116,12 +103,11 @@ def test_scope_pops_even_when_the_body_raises():
 
 
 def test_scoped_checkpoint_func_wraps_both_passes():
-    # The wrapper must give the original call and every re-invocation of the same callable one scope.
     seen = []
 
     def fake_checkpoint(function, *args, **kwargs):
-        function(*args, **kwargs)  # original forward
-        return function(*args, **kwargs)  # recompute
+        function(*args, **kwargs)
+        return function(*args, **kwargs)
 
     def body():
         scope = active_recompute_scope()
@@ -151,8 +137,7 @@ def test_the_recompute_releases_its_slots():
 
 
 class _CachingLayer(nn.Module):
-    """Caches a fresh tensor in its scope slot on the first pass and replays it in the recompute, as the DeepEP
-    dispatch keeps its receive buffer; records which layers' caches are alive when its own backward runs."""
+    """As the DeepEP dispatch keeps its receive buffer; records which caches are alive at its own backward."""
 
     def __init__(self, index: int, caches: list, alive_at_backward: list):
         super().__init__()
@@ -187,8 +172,8 @@ def _alive(caches: list) -> list[int]:
 
 
 def test_a_reentrant_layers_cache_dies_with_its_recompute():
-    """Under the reentrant checkpoint EP, CP and every MoE run, each layer's replay cache is released once its
-    recompute exits, before the backward reaches the layers below; none outlives ``loss.backward()``."""
+    """The reentrant checkpoint keeps every scope until the loss drops, so a cache held past its own backward stays
+    through every other layer's."""
     caches, alive_at_backward = [], []
     layers = [_CachingLayer(index, caches, alive_at_backward) for index in range(LAYERS)]
     run = scoped_checkpoint_func(functools.partial(checkpoint, use_reentrant=True))

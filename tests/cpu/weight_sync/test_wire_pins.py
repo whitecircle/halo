@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""The weight-sync bootstraps' wire contracts. vLLM's is pinned against the weight-sync wire golden: the
-rendezvous store rank 0 builds, the one write that publishes its NCCL unique id, the id the communicator
-then initializes with, and the class the vLLM image's shim must answer for. SGLang's rendezvous store is
-pinned directly: the options its group forms on.
-
-Run: python tests/cpu/weight_sync/test_wire_pins.py
-"""
+"""The weight-sync bootstraps' wire contracts. vLLM's is pinned against a golden: the store rank 0 builds, the write
+publishing its NCCL unique id, and the class the image's shim answers for. SGLang's store is pinned directly."""
 
 import json
 import os
@@ -45,8 +40,7 @@ def test_the_bootstrap_matches_the_wire_golden(record):
 
 
 def test_rank_0_publishes_the_id_once_under_the_first_broadcast_key(record):
-    """The engine's workers read ``broadcast_from/0/0`` and unpickle it; a second write or another key
-    leaves them waiting on a key nothing writes."""
+    """The engine's workers read ``broadcast_from/0/0`` and unpickle it; another key leaves them waiting forever."""
     [[operation, key, value]] = record["store_writes"]
     assert (operation, key) == ("set", "broadcast_from/0/0")
     published = pickle.loads(bytes.fromhex(value))
@@ -63,8 +57,7 @@ def test_the_store_blocks_until_the_engine_joined(record):
 
 
 def test_the_vllm_image_shims_the_module_the_id_pickles_from():
-    """The image writes a shim module re-exporting vLLM's own ``ncclUniqueId`` at the trainer's module path,
-    creates every package above it, and its build check asserts that the two classes are one."""
+    """The shim re-exports vLLM's ``ncclUniqueId`` at the trainer's module path; the build check asserts one class."""
     dockerfile = VLLM_DOCKERFILE.read_text(encoding="utf-8")
     module = GOLDEN["unique_id_class"]["module"]
     assert module == ncclUniqueId.__module__
@@ -82,9 +75,7 @@ def test_the_vllm_image_shims_the_module_the_id_pickles_from():
 
 
 def test_the_sglang_store_does_not_wait_for_the_engine(monkeypatch):
-    """SGLang's engine dials in only once it has the join request, which the client sends while the store
-    is being built; the master must return without waiting for its workers, serve on the listener the
-    engine was told to dial, and share the group's formation deadline."""
+    """SGLang's engine dials in only once it has the join request, sent while the store is being built."""
     built: list[tuple[dict, int]] = []
 
     def recording_store(**kwargs):

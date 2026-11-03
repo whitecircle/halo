@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""Gradient-checkpoint recompute replays EP's dispatch and combine through a live dispatcher.
-
-A recompute that dispatched again would reuse the DeepEP buffer the forward's backward node still
-names and corrupt every gradient without raising, so an EP layer caches its first pass's dispatch and
-combine in the checkpoint frame's scope and the recompute replays them. Here every MoE family that
-supports checkpointing runs its tiny model with each dispatcher live over a loopback transport that
-stands in for DeepEP: a one-rank EP group owning every expert, so each transport op is the identity,
-and every op is logged with the handle it ran on. Under reentrant and non-reentrant checkpointing
-installed by ``enable_scoped_gradient_checkpointing``:
-
-- each layer dispatches and combines once per microbatch, its backward ops run on that dispatch's
-  handle, and the recompute runs in the forward's scope;
-- two microbatches in flight, as under 1F1B, each replay their own frame;
-- the gradients equal those of the same model unchecked;
-- the recompute's expert compute gets the receive counts the forward's dispatch reported;
-- checkpointing installed without the EP scopes raises, naming the family's layer class.
-
-``tests/gpu/parallelism/ep/test_ep_replay_cache.py`` runs the replay on real DeepEP dispatch.
-
-Run: python tests/cpu/parallelism/test_ep_gc_replay.py
-"""
+"""Gradient-checkpoint recompute replays EP's dispatch and combine through a live dispatcher. A second dispatch
+reuses the buffer the backward node names and corrupts gradients silently."""
 
 import re
 import weakref
@@ -46,10 +27,8 @@ CHECKPOINTED_FAMILIES = tuple(
 
 
 class LoopbackBackend(DeepEPBackend):
-    """DeepEP's transport ops on a one-rank EP group owning every expert: every token returns to the
-    rank that sent it, so each op is the identity. Each op is appended to ``log`` as
-    ``(op, dispatcher, handle)``, each dispatch hands out a handle of its own, and the receive counts each
-    dispatch reports are kept in ``counts``."""
+    """Every token returns to the rank that sent it, so each op is the identity; each is logged as ``(op,
+    dispatcher, handle)``."""
 
     def __init__(self, dispatcher: ep_dispatcher.DeepEPDispatcher, log: list):
         super().__init__(dispatcher)
@@ -82,14 +61,13 @@ class LoopbackBackend(DeepEPBackend):
 
 @pytest.fixture(autouse=True)
 def loopback_transport(monkeypatch):
-    """DeepEP's index dtype without the native extension, and a live-dispatcher registry of the test's own."""
+    """DeepEP's index dtype without the native extension."""
     monkeypatch.setattr(ep_dispatcher, "deep_ep", lambda: SimpleNamespace(topk_idx_t=torch.int64))
     monkeypatch.setattr(ep_dispatcher, "_live_dispatchers", weakref.WeakValueDictionary())
 
 
 def _live_model(name: str, log: list, *, use_reentrant: bool | None) -> torch.nn.Module:
-    """``name``'s seeded tiny model in training mode, EP-patched with every dispatcher live over a
-    :class:`LoopbackBackend` logging to ``log``, checkpointed in the given mode (``None``: unchecked)."""
+    """``use_reentrant=None`` is unchecked."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES[name]).train()
     apply_ep_layers(model, single_process_ep_config())
@@ -113,7 +91,6 @@ def _loss(model: torch.nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
 
 
 def _ops_by_layer(model: torch.nn.Module, log: list) -> dict[str, list[tuple[str, str]]]:
-    """Each EP layer's logged transport ops, in call order, as ``(op, handle)``."""
     path_of = {layer.dispatcher: path for path, layer in named_ep_layers(model)}
     ops = {path: [] for path in path_of.values()}
     for op, dispatcher, handle in log:
@@ -122,7 +99,7 @@ def _ops_by_layer(model: torch.nn.Module, log: list) -> dict[str, list[tuple[str
 
 
 def _record_passes(model: torch.nn.Module) -> dict[str, list]:
-    """Per EP layer, the ``(checkpoint scope, is recompute)`` of every forward pass it enters."""
+    """``(checkpoint scope, is recompute)`` of every forward pass."""
     passes = defaultdict(list)
     for path, layer in named_ep_layers(model):
 
@@ -171,8 +148,7 @@ def test_the_recompute_replays_the_forwards_dispatch_and_combine(name, mode):
 @pytest.mark.parametrize("mode", CHECKPOINT_MODES)
 @pytest.mark.parametrize("name", CHECKPOINTED_FAMILIES)
 def test_the_recompute_replays_the_forwards_receive_counts(name, mode, monkeypatch):
-    """The grouped sort sizes its compaction off the dispatch's host-side counts, so the recompute's expert
-    compute must get the very counts the forward's dispatch reported, not None and not a second dispatch's."""
+    """The grouped sort sizes its compaction off these host-side counts."""
     model = _live_model(name, [], use_reentrant=CHECKPOINT_MODES[mode])
     seen = defaultdict(list)
     compute = EPMoELayerBase._compute_experts

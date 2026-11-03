@@ -1,37 +1,6 @@
-"""Every first-party import, patch target, attribute chain, dotted name and repo-root path outside the
-docs resolves.
-
-ruff does not resolve imports, and the GPU scripts, the ``scripts/`` tools and the image builds reach
-modules no CPU test imports, so a moved module or a renamed symbol would surface only when that file
-next runs. This sweep resolves them statically, through the index the docs gate checks markdown with
-(:class:`scripts.docs.references.RepoIndex`):
-
-* each import of a first-party package in the Python under ``halo/``, ``scripts/``, ``tests/`` (the GPU
-  scripts included), ``docker/`` and ``.github/``, from the module that defines what it takes: one that
-  only re-binds the name by an import of its own is a second path, which would keep a moved symbol
-  reachable through its old home;
-* each ``patch`` / ``monkeypatch.setattr`` / ``delattr`` target, down to the attribute unless
-  ``create=True`` / ``raising=False`` lets it be absent, and each assignment to an attribute of such an
-  owner (a hand-rolled patch): a dotted string, or an object-form owner bound at module level by an import
-  or a ``load_script_module`` / ``import_module`` call. A module's own top-level name must be one a
-  function reads when it runs, one of that module or, outside the tests, one reading it through the module
-  object; patching a name that is only bound, or read only at import, intercepts nothing, and the test
-  passes vacuously;
-* each attribute chain on such an owner (``sdpa_flex_sliding._SAVED_BYTES_PER_SCORE``) where no
-  local name hides it. It must exist, but may name a binding the module only imports: that binding is
-  what a patch replaces and restores through the module;
-* each dotted name and repo-root path any other string literal or comment names: ``caplog`` loggers,
-  ``sys.modules`` keys, ``import_module`` arguments, docstring roles, doc pages and their headings in
-  messages; an f-string counts where it formats a module-level string constant;
-* the same names and paths in every other text file of those trees (the GPU benchmark runners, the
-  ``docker/`` patches, the workflows), the image builds, the ``Makefile``, ``pyproject.toml``,
-  ``.env.example``, ``.pre-commit-config.yaml``, ``.devcontainer/`` and the recipes under ``examples/``
-  and ``launcher-configs/``.
-
-A part after a class must be an attribute its first-party hierarchy defines, or one the index lists for
-a third-party base, so a renamed method fails under ``nn.Module`` or a TRL trainer too. Standard
-library and pytest only: nothing it checks is imported.
-"""
+"""Every first-party import, patch target, attribute chain, dotted name and repo-root path outside the docs
+resolves, read statically through the docs gate's index (:class:`scripts.docs.references.RepoIndex`). An import
+comes from the defining module, and a patch of a module's own name must intercept a run-time read."""
 
 import ast
 import io
@@ -104,7 +73,6 @@ def _python_files(root: Path) -> list[Path]:
 
 
 def _is_text(path: Path) -> bool:
-    """A file that decodes as UTF-8; a font or an image names nothing."""
     try:
         path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -182,7 +150,6 @@ def _run_time_loads(tree: ast.Module) -> list[str]:
 
 @cache
 def _function_reads(source: Path) -> frozenset[str]:
-    """The module-level names the functions of the module at ``source`` read when they run."""
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     return frozenset(loaded.partition(".")[0] for loaded in _run_time_loads(tree))
 
@@ -320,7 +287,6 @@ def _findings(path: Path) -> list[Finding]:
 
 
 def test_the_sweep_sees_every_kind_of_reference():
-    """Anti-vacuity: a file list or an extractor that silently stops matching would pass every file below."""
     swept = {str(path.relative_to(REPO_ROOT)) for path in _FILES}
     assert {
         "Dockerfile",
@@ -556,12 +522,9 @@ def test_each_kind_of_stale_reference_is_reported(tmp_path):
 
 
 def test_an_import_through_a_reexport_and_a_patch_nothing_reads_are_reported(tmp_path):
-    """An import from a module that only re-binds the name fails, as does a patch of a module's own name, by a
-    patch call or by assignment, that no function reads when it runs: one read only at import time, here or
-    through the module object elsewhere, only by a test, under a local that hides it, or nowhere. A
-    defining-module import, a submodule import, a name a function reads (``global`` included, beside a nested
-    function or comprehension binding the same name, or through the module object from another module), a
-    class attribute and ``patch.dict`` pass."""
+    """An import from a module that only re-binds the name fails, as does a patch of a module's own name that no
+    function reads when it runs. A defining-module import, a submodule import, a name a function reads, a class
+    attribute and ``patch.dict`` pass."""
     sample = {
         "$pkg/__init__.py": "",
         "$pkg/sub/__init__.py": "",

@@ -1,39 +1,8 @@
 #!/usr/bin/env python
-"""
-ep_size==1 vLLM weight-sync correctness: the EP expert gather must run even though
-``has_ep_group`` is False.
+"""ep_size==1 vLLM weight sync: the EP expert gather runs even though ``has_ep_group`` is False.
 
-At ep_size==1 the MoE is still EP-wrapped (``needs_ep_layers`` is True for the grouped-GEMM
-path) but ``has_ep_group`` is False (``ep_group_size == 1``). ``gather_and_send_weights`` must not gate
-the EP expert reshape on ``has_ep_group``: gating it there drops the ep1 experts onto the DENSE path,
-which forwards them to vLLM in the EP-internal layout — transposed ``gate_up_proj [E,H,2M]`` or, on the
-GptOss grouped-GEMM path, the de-interleaved ``gate_proj_gmm`` / ``up_proj_gmm`` attributes. vLLM's
-fused loader rejects those names/shapes, stops consuming the NCCL stream, and the producer hangs in
-``packed_broadcast_producer`` — the ep1 online/environmental-GRPO weight-sync hang.
-
-This test drives the real ``gather_and_send_weights`` through a recording sender and asserts the
-expert weights are forwarded under the vLLM-expected checkpoint names/shapes:
-
-  1. ``...experts.gate_up_proj`` and ``...experts.down_proj`` appear once per MoE layer.
-  2. No EP-internal attribute name leaks (``gate_proj_gmm`` / ``up_proj_gmm`` / a bare
-     ``...experts.gate_proj`` raw weight) — the exact thing that hangs vLLM.
-  3. The gathered expert tensors are 3D ``[num_local_experts, ...]`` (full grouped weight).
-  4. Dense params (``lm_head`` / embeddings) are still forwarded — the dense path still runs.
-
-(``fsdp_shard_ep1_experts=True`` DTensor experts materialize through the same gather —
-``test_ep1_knob_weight_sync.py`` pins that path under ZeRO-2 and ZeRO-3.)
-
-A gather that skips the ep1 experts fails (1)/(2): the names come out as the internal ``_gmm``
-attributes.
-
-Run with 1 or 2 GPUs (ep1 needs no EP collective, so 1 suffices; 2 exercises the DP path):
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_ep1_weight_sync_names.py
-
-Requirements:
-    - 1x (or 2x) GPU with >=80GB memory
-    - DeepEP installed
-    - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
+Gating it on ``has_ep_group`` sends ep1 experts down the dense path in the EP-internal layout. vLLM's fused loader
+rejects those names, stops consuming the NCCL stream, and the producer hangs in ``packed_broadcast_producer``.
 """
 
 import torch
@@ -52,7 +21,7 @@ from tests.common.weight_sync import RecordingSender
 
 MODEL_NAME = GPT_OSS_20B
 
-# EP-internal attribute names that must NEVER reach vLLM (the gather must reshape them away).
+# Must never reach vLLM.
 FORBIDDEN_NAME_SUBSTRINGS = ("gate_proj_gmm", "up_proj_gmm")
 
 
@@ -74,7 +43,7 @@ def run(ctx):
     log(f"  EP layers (ep_size=1): {n_ep_layers}, num_local_experts={num_experts}")
     assert n_ep_layers > 0, "model was not EP-wrapped at ep_size=1 — grouped-GEMM EP layers missing"
 
-    # All ranks run the gather (collective at ep>1; a pure copy here). Only rank 0 records.
+    # COLLECTIVE at ep>1; a pure copy here. Only rank 0 records.
     recorder = RecordingSender() if ctx.rank == 0 else None
     gather_and_send_weights(model, recorder)
     ctx.barrier()
@@ -85,8 +54,8 @@ def run(ctx):
         gate_up = [param for param in recorder.params if param.name.endswith("experts.gate_up_proj")]
         down = [param for param in recorder.params if param.name.endswith("experts.down_proj")]
         forbidden = [n for n in names if any(sub in n for sub in FORBIDDEN_NAME_SUBSTRINGS)]
-        # A bare per-expert-less raw ``...experts.gate_proj``/``up_proj`` (NOT the unfused
-        # per-expert ``experts.N.gate_proj.weight``) would also be an internal leak.
+        # A raw ``...experts.gate_proj``/``up_proj``, unlike per-expert ``experts.N.gate_proj.weight``, is an internal
+        # leak too.
         raw_split = [n for n in names if n.endswith(("experts.gate_proj", "experts.up_proj"))]
 
         log(f"  forwarded params: {len(names)}  gate_up_proj: {len(gate_up)}  down_proj: {len(down)}")
@@ -102,8 +71,7 @@ def run(ctx):
         checks["expert_weights_materialized"] = all(not p.is_dtensor for p in gate_up + down)
         checks["dense_params_forwarded"] = any("lm_head" in n or "embed" in n for n in names)
 
-    # (fsdp_shard_ep1_experts=True is the FSDP-sharded-expert path — exercised by
-    # test_ep1_knob_weight_sync.py, which needs the real FSDP2 wrapping this name test omits.)
+    # test_ep1_knob_weight_sync.py covers fsdp_shard_ep1_experts=True, which needs the FSDP2 wrapping this test omits.
     del model
     cleanup_memory()
 

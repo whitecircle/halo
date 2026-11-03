@@ -1,5 +1,4 @@
-"""Routing for EP MoE layers: the router probe and its input at the router weight's dtype, biased top-k selection,
-gate weights and their renormalization, and the routing-replay override."""
+"""Routing for EP MoE layers: router probe and input dtype, biased top-k, gate weights, routing-replay override."""
 
 from __future__ import annotations
 
@@ -63,16 +62,13 @@ class EPRoutingMixin:
         raise AttributeError(f"Cannot determine top_k from {type(layer).__name__}")
 
     def _live_router_module(self) -> nn.Module | None:
-        """The router resolved by name now, so a PEFT ``modules_to_save`` copy is the one returned; None for
-        an external router."""
+        """Resolved by name now, so a PEFT ``modules_to_save`` copy is the one returned; None if external."""
         return getattr(self, self._ROUTER_ATTR) if self._ROUTER_ATTR else None
 
     @property
     def _fp32_router_input(self) -> bool:
-        """Whether the router input is upcast to match an fp32 router weight: under ``fp32_router``, while the live
-        router still holds its fp32 master at this forward. Read off the weight, not ``experts_fsdp_managed``: an
-        FSDP2 group unshards the router at its bf16 ``param_dtype``, but nothing wraps a one-rank job's model or an
-        unwrapped copy."""
+        """Whether the router input is upcast to match a live fp32 router weight. Read off the weight, since an FSDP2
+        group unshards the router at its bf16 ``param_dtype``, but nothing wraps a one-rank job's model."""
         if not self.fp32_router:
             return False
         router = self._live_router_module()
@@ -80,18 +76,15 @@ class EPRoutingMixin:
         return weight is not None and weight.dtype == torch.float32
 
     def _router_input(self, hidden: torch.Tensor) -> torch.Tensor:
-        """``hidden`` at the router's dtype (see :attr:`_fp32_router_input`)."""
         return hidden.float() if self._fp32_router_input else hidden
 
     def _linear_router_logits(self, flat: torch.Tensor) -> torch.Tensor:
-        """The router's logits as a bare projection over its weight, autocast off so the matmul runs at the input
-        dtype, for a router whose own forward cannot be called because it selects too."""
+        """The router's logits as a bare projection, autocast off so the matmul runs at the input dtype, for a router
+        whose own forward also selects."""
         with torch.amp.autocast("cuda", enabled=False):
             return F.linear(self._router_input(flat), self.gate.weight)
 
     def _upcast_router_to_fp32(self) -> None:
-        """Upcast the router (a module or a bare parameter) under ``fp32_router``; an external router stays
-        bf16."""
         if not self.fp32_router:
             return
         if self._ROUTER_ATTR is None:
@@ -125,7 +118,6 @@ class EPRoutingMixin:
         return weights.to(router_logits.dtype)
 
     def _renormalize_topk_weights(self, weights: torch.Tensor) -> torch.Tensor:
-        """``weights`` over their top-k sum plus the family's :attr:`_TOPK_WEIGHT_NORM_EPS`."""
         return weights / (weights.sum(dim=-1, keepdim=True) + self._TOPK_WEIGHT_NORM_EPS)
 
     def _replay_router_choice(
@@ -147,10 +139,9 @@ class EPRoutingMixin:
         bias reproduces the unbalanced route."""
         bias = self._balancing_bias(logits)
         if bias is None:
-            # Native-adoption mode (GptOss ``router.bias``): the bias already sits inside the
-            # logits, so select on the raw logits as the served router does. Not on softmax probs:
-            # monotonicity holds in exact arithmetic, but a large logit gap underflows the losing
-            # probs to exact 0.0 and top-k then breaks the tie differently than the logit order.
+            # Native-adoption mode (GptOss ``router.bias``): the bias is inside the logits, so select on raw logits as
+            # the served router does. A large logit gap underflows the losing softmax probs to exact 0.0, and top-k
+            # then breaks the tie differently than the logit order.
             _, indices = torch.topk(logits.detach(), self.top_k, dim=-1)
         else:
             probs = F.softmax(logits.float(), dim=-1)

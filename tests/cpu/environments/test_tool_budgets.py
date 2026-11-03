@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""Per-tool episode budgets and effort profiles are protocol- and base-level features.
-
-Every native or ReAct env can cap calls per tool per episode (``tool_budgets``): the protocol admits
-a call — binds its arguments, checks the episode's cap, counts it — before the handler runs, so a call
-the handler could never run or one past the cap is refused as a tool error without spending the
-budget, and a one-call cap cannot be double-spent by two calls in one turn. Under the native protocol a
-turn whose every call was refused ran nothing: it is flagged untrainable like a turn of unknown tools; a call
-to a tool a cap of 0 disables is an error but no refusal.
-Every env binds an
-effort profile at reset: the thinking budget is the base key; a task adds its own through
-``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``. A refusal states the fact, never the cap:
-what an episode may do is the chat template's and the engine's to control, not a number the model reads.
-
-Run: python tests/cpu/environments/test_tool_budgets.py  (or pytest)
-"""
+"""Per-tool episode budgets and effort profiles at the protocol and base level. A call is admitted (arguments bound,
+cap checked, counted) before the handler runs, so a refused one spends nothing and a one-call cap cannot be
+double-spent. A refusal states the fact, never the cap."""
 
 import asyncio
 import json
@@ -158,9 +146,8 @@ def test_an_enum_argument_outside_the_schema_is_refused_unspent():
     ids=["missing-argument", "undeclared-argument", "list-for-a-string"],
 )
 def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers(call):
-    """A call whose arguments do not bind ran nothing and spent nothing: a turn of nothing else is flagged
-    like one that named no tool, so it is never rewarded, and the well-formed turn after it trains as any
-    turn. Its reply and its tool-error price are the ones it always had."""
+    """A call whose arguments do not bind ran nothing: a turn of nothing else is flagged like one naming no tool,
+    never rewarded, and the next turn trains."""
     env = NativeToolUseEnvironment(tool_registry=_registry(), tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     step = _step(env, ids, call)
@@ -174,8 +161,7 @@ def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers(ca
 
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
 def test_a_turn_of_only_calls_past_their_budget_is_flagged(cls):
-    """A call refused over its tool's episode cap ran nothing: a turn of nothing else is flagged untrainable,
-    the refusal text and price unchanged."""
+    """Refused over its cap it ran nothing, so a turn of nothing else is flagged; text and price unchanged."""
     env = cls(tool_registry=_registry(), tool_budgets={"echo": 1}, tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     assert _flags(_step(env, ids, _call("a", "echo", code="x")).trajectory) == [False]
@@ -188,8 +174,7 @@ def test_a_turn_of_only_calls_past_their_budget_is_flagged(cls):
 
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
 def test_a_turn_of_only_calls_to_a_disabled_tool_is_an_error_and_not_flagged(cls):
-    """A cap of 0 disables the tool: a call to it gets the spent-budget reply and price, but the run offered no
-    budget to lose, so it is no refusal: the turn stays unflagged and trainable."""
+    """A cap of 0 disables the tool: the run offered no budget to lose, so the turn stays unflagged."""
     env = cls(tool_registry=_registry(), tool_budgets={"echo": 0}, tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     step = _step(env, ids, _call("a", "echo", code="x"), _call("b", "echo", code="y"))
@@ -230,9 +215,6 @@ def test_react_budget_refuses_past_the_cap():
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
     with pytest.raises(ValueError, match="tool_budgets"):
         ReActEnvironment(tool_registry=_registry(), tool_budgets={"nope": 1})
-
-
-# --- effort profiles on the base ---
 
 
 def test_base_profiles_bind_the_thinking_budget_per_level():

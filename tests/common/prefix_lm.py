@@ -1,5 +1,5 @@
-"""A tiny real PaliGemma (processor, configs, read-a-digit rows, the VLM collator over them) for the prefix-LM
-attention tests: a word-level tokenizer and a 28-pixel SigLIP tower, built offline with no hub checkpoint."""
+"""A tiny real PaliGemma for the prefix-LM attention tests, built offline with a word-level tokenizer and a 28-pixel
+SigLIP tower."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _CHAT_TEMPLATE = (
     "{% else %}{{ p['text'] }} {% endif %}{% endfor %}<eos> {% endfor %}"
 )
 _WORDS = "user assistant What digit is shown ? The . 0 1 2 3 4 5 6 7 8 9".split()
-# Image placeholder tokens each image expands to: (28 // 14) ** 2 patches of the tiny tower.
+# (28 // 14) ** 2 patches of the tiny tower.
 _IMAGE_SEQ_LENGTH = 4
 
 
@@ -35,8 +35,8 @@ def tiny_paligemma_processor() -> PaliGemmaProcessor:
 
 
 def tiny_paligemma_config(processor: PaliGemmaProcessor, *, text_model_type: str = "gemma") -> PaliGemmaConfig:
-    """PaliGemma (``gemma``) or PaliGemma 2 (``gemma2``, softcapped) over ``processor``'s vocabulary, leaving
-    ``use_bidirectional_attention`` unset as every published checkpoint does."""
+    """PaliGemma or softcapped PaliGemma 2, leaving ``use_bidirectional_attention`` unset as every published checkpoint
+    does."""
     tokenizer = processor.tokenizer
     extra = GEMMA2_SOFTCAPS if text_model_type == "gemma2" else {}
     text_config = {
@@ -60,7 +60,7 @@ def tiny_paligemma_config(processor: PaliGemmaProcessor, *, text_model_type: str
 
 
 def digit_row(digit: int = 3) -> dict:
-    """A mapped VLM row (``history``/``images``): one image turn asking for the digit, and the answer."""
+    """A mapped VLM row: one image turn asking for the digit, and the answer."""
     conversation = [
         {
             "role": "user",
@@ -76,7 +76,6 @@ def digit_row(digit: int = 3) -> dict:
 
 
 def text_row(digit: int = 3) -> dict:
-    """A mapped VLM row with no image."""
     history, images = extract_conversation_images(
         [
             {"role": "user", "content": "What digit is shown ?"},
@@ -87,7 +86,7 @@ def text_row(digit: int = 3) -> dict:
 
 
 def paligemma_collator(processor, model_config, *, completions_only: bool, cls=VLMDataCollator, **kwargs):
-    """``cls`` (the SFT VLM collator by default) over ``processor``; ``completions_only`` trains the answer alone."""
+    """``cls`` over ``processor``; ``completions_only`` trains the answer alone."""
     return cls(
         processor,
         processor.tokenizer,

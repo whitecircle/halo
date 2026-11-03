@@ -1,11 +1,6 @@
-"""No string in the package or in a ``scripts/`` tool names a file of the package by path.
-
-An error, a warning or a field help names the symbol its reader acts on (``DECODER_LAYER_LIST_ATTRS``,
-``LigerFamilySpec``), which a move leaves valid where a path would go stale, spelled from the repo root
-(``halo/models/peft_adapters.py``) or from the package's (``models/peft_adapters.py``) alike. Docstrings are
-documentation, not messages, and stay out of the sweep; a ``scripts/`` tool a user runs is named by its path
-on purpose.
-"""
+"""No string in the package or in a ``scripts/`` tool names a file of the package by path: a message names the
+symbol its reader acts on, which a move leaves valid. Docstrings stay out of the sweep, and a ``scripts/`` tool
+is named by its path on purpose."""
 
 import ast
 import re
@@ -68,7 +63,6 @@ def _package_paths(module: Path, index: RepoIndex) -> list[tuple[int, str]]:
 
 
 def test_the_sweep_reads_the_messages():
-    """Anti-vacuity: the sweep reaches the package, the tools and the strings in them."""
     assert len(_PACKAGE_MODULES) > 300, f"the sweep sees only {len(_PACKAGE_MODULES)} modules of {PACKAGE}/"
     assert len(_SCRIPT_MODULES) > 50, f"the sweep sees only {len(_SCRIPT_MODULES)} modules of scripts/"
     messages = sum(len(_messages(module)) for module in _MODULES)
@@ -88,10 +82,9 @@ def test_no_message_names_a_package_file_by_path():
 
 
 def test_a_message_path_is_found_wherever_the_string_is_built(tmp_path):
-    """A package path in a message, an f-string or a constant an f-string formats is reported once per string,
-    spelled from the repo root or from the package's; one in a docstring of any kind or a comment is not, nor
-    a path under ``scripts/``, one naming no file of the package, one ending a longer path, or a bare
-    ``__init__.py``."""
+    """A path in a message, an f-string or a formatted constant is reported once per string, from either root; a
+    docstring, a comment, a ``scripts/`` path, a non-file, a longer path's tail and a bare ``__init__.py`` are
+    not."""
     write_sample_tree(
         tmp_path,
         {

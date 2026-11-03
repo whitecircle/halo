@@ -1,27 +1,9 @@
 #!/usr/bin/env python
-"""PP+EP gradient equivalence vs the unsplit model (pp2 × ep2 on 4 GPUs).
+"""PP+EP gradient equivalence against the unsplit model (pp2 x ep2), on two references over the same weights.
 
-The pipeline schedule + EP-aware stage FSDP + the deferred post-backward sweep must together
-reproduce the unsplit model's gradients: FSDP reduce-scatter covers the stage's non-expert
-DTensors, the sweep DP-averages the FSDP-ignored routers over the stage block and applies the
-expert DP divide (the DeepEP combine already summed each expert's grad over the EP group == the
-stage's DP replicas), and the EP-aware clip aggregates the norm over dispatch group + pipeline
-chain. Two unsplit references on the same bf16-rounded weights carry the checks:
-
-  * an fp32 raw-HF reference anchors the absolute scale — per-replica loss, router grad
-    norm-ratio + cosine, and the clip norm (flip-tolerant bands: fp32-vs-bf16 hidden states flip
-    a few near-tied top-k picks, which no gate on data-dependent routing can avoid)
-  * a bf16 ep1-wrapper twin (identical routing decisions and grouped-mm kernels) carries the
-    tight per-expert gate: local shards gathered over the dispatch group vs the twin's per-expert
-    grads — every expert of every kept layer covered (anti-vacuity counted)
-  * router grads additionally bit-identical across each stage's ranks (the sweep's AVG collective)
-  * the installed clip returns one identical norm on all 4 ranks
-  * a second step proves kept-layer dispatch still works after the dropped-layer dispatcher
-    destroy in _split_pipeline_stage
-
-Topology: 4 GPUs as 2 simulated NVLink domains of 2 (pp2 crosses the domain edge, ep2 fills a
-stage). ``--gc`` re-runs the same equivalence with activation checkpointing on the stage.
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py [--gc]
+An fp32 raw-HF reference anchors the scale in flip-tolerant bands, since fp32-vs-bf16 hidden states flip near-tied
+picks. A bf16 ep1 twin, with identical routing, carries the tight per-expert gate. A second step proves dispatch
+survives the dropped-layer destroy.
 """
 
 import sys
@@ -35,28 +17,25 @@ from tests.common.harness import gpu_test_main
 
 PP_SIZE = 2
 EP_SIZE = 2
-GLOBAL_BATCH = 4  # 2 DP replicas × per-device batch 2 (2 microbatches of 1)
+GLOBAL_BATCH = 4  # 2 DP replicas x per-device batch 2 (2 microbatches of 1).
 PER_DEVICE_BATCH = 2
 DP_SIZE = 2
 N_MICROBATCHES = 2
 
-# --gc: same equivalence with non-reentrant activation checkpointing on the stage. The recompute
-# must replay each checkpoint frame's DeepEP dispatch/combine instead of issuing a second one (a
-# second dispatch reuses the ElasticBuffer and invalidates the handle the original forward's
-# backward node holds), and must not re-count expert load. Both are gated below.
+# --gc: the recompute must replay each checkpoint frame's DeepEP dispatch and combine: a second dispatch reuses the
+# ElasticBuffer and invalidates the handle the original backward node holds. It must also not re-count expert load.
 USE_GC = False
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_ep_vs_unsplit")
 def run(ctx):
-    torch.set_float32_matmul_precision("highest")  # keep the fp32 reference an actual fp32 reference
+    torch.set_float32_matmul_precision("highest")  # Keeps the fp32 reference an actual fp32 reference.
     checks, metrics = {}, {}
 
     rows, labels = ppeq.build_ragged_batch(GLOBAL_BATCH)
     reference = ppeq.fp32_reference(rows, labels, ctx.device, DP_SIZE)
     twin = ppeq.bf16_twin_reference(ctx, rows, labels)
 
-    # ── PP+EP path through the real trainer ─────────────────────────────────────────────────────
     config = ParallelismConfig(
         world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, ep_size=EP_SIZE
     )
@@ -83,7 +62,7 @@ def run(ctx):
     if USE_GC:
         checks["gc_is_non_reentrant"] = trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is False
         gc_calls = ppeq.count_checkpoint_calls(stage)
-        # Expert-load accounting is only observable with the balancing counters live.
+        # Only observable with the balancing counters live.
         for _name, module in ep_modules:
             module.enable_bias_balancing()
 
@@ -91,7 +70,7 @@ def run(ctx):
     batch = ppeq.dp_slice_batch(rows, labels, dp_rank, PER_DEVICE_BATCH)
 
     loss = trainer.training_step(trainer.model, dict(batch))
-    clip_norm = trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)  # runs sweep + norm, no scaling
+    clip_norm = trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)  # Runs sweep + norm, no scaling.
 
     c, m = ppeq.check_loss_vs_reference(loss, reference, dp_rank)
     checks.update(c)
@@ -113,8 +92,7 @@ def run(ctx):
         c, m = ppeq.check_gc_engaged(stage, gc_calls, N_MICROBATCHES)
         checks.update(c)
         metrics.update(m)
-        # Every local token counted once per top-k slot: the recompute re-runs the router on the
-        # same tokens, so an unrecognised recompute doubles this.
+        # The recompute re-runs the router on the same tokens, so an unrecognized recompute doubles this.
         c, m = ppeq.check_expert_load_counts(
             stage,
             ep_modules,

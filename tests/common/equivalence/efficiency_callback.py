@@ -1,9 +1,6 @@
-"""Efficiency harness: what the ``EfficiencyCallback`` reports, compared between two commits (``make
-verify-efficiency BASE=<sha>``) into ``evidence/efficiency_callback-<head sha>.json``. Each tree drives its own
-callback over its own roster of tiny family, parallel shape (real EP, TP and FSDP2 wraps and pipeline stage cuts
-on torch's fake process group) and scenario, through the same scripted steps on a scripted B300 and clock; the
-logs dicts, package records and snapshot row of the cases both trees run are compared by value.
-"""
+"""Efficiency harness: what ``EfficiencyCallback`` reports, compared between two commits (``make verify-efficiency
+BASE=<sha>``). Each tree drives its own callback through the same scripted steps on a scripted B300 and clock; the
+cases both run are compared by value."""
 
 from __future__ import annotations
 
@@ -62,7 +59,7 @@ MOE_FAMILIES: dict[str, TinyFamily] = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMIL
 FAMILIES = {**DENSE_FAMILIES, **MOE_FAMILIES}
 REPRESENTATIVE_FAMILIES = ("qwen3", "qwen3_moe", "gpt_oss")
 SCENARIO_FAMILY = "qwen3_moe"
-# The top-level package whose records a case captures, wherever the callback's own modules live in it.
+# Whose records a case captures, wherever the callback's own modules live in it.
 PACKAGE = EfficiencyCallback.__module__.partition(".")[0]
 SEED = 0
 WARMUP_STEPS = 1
@@ -71,14 +68,13 @@ GRADIENT_ACCUMULATION = 2
 MAX_LENGTH = 1024
 FULL_MODEL_PARAMS = 5e8
 STEP_SECONDS = (2.5e-6, 3.1e-6, 2.7e-6, 2.9e-6, 3.3e-6)
-# Tokens one rank's step carries; HF's counter advances by them times the world size.
+# HF's counter advances by these times the world size.
 STEP_TOKENS = (3500, 3200, 3900, 3700, 3600)
-# A step whose counted delta no length bound allows, for the outlier scenario, and the step it lands on.
+# A step whose counted delta no length bound allows, and the step it lands on.
 OUTLIER_TOKENS = 10**6
 OUTLIER_STEP = 3
 STEP_DOCUMENTS = ((1024, 1024, 900, 552), (800, 800, 800, 800), (1024, 1024, 1024, 828), (2000, 1700), (3600,))
-# Host time before each step begins (its batch's fetch), which the step carries from the previous step's end, and
-# the tick the negative control moves the last step by.
+# Host time before each step begins, carried from the previous step's end, and the negative control's tick.
 BATCH_FETCH_SECONDS = 4e-7
 CLOCK_TICK = 1e-7
 PERTURBED_STEP = len(STEP_SECONDS) - 1
@@ -92,8 +88,8 @@ ModelEdit = Literal["family", "lora", "unreadable_top_k", "single_expert", "no_t
 
 @dataclass(frozen=True)
 class Shape:
-    """A parallel layout as ``rank`` of ``world_size`` on nodes of ``gpus_per_node`` ranks (one node when unset):
-    the ``ParallelismConfig`` fields and whether FSDP2 shards the parameters the EP layers leave to it."""
+    """A parallel layout as ``rank`` of ``world_size``: its ``ParallelismConfig`` fields and whether FSDP2 shards what
+    the EP layers leave."""
 
     world_size: int
     fields: dict = field(default_factory=dict)
@@ -113,12 +109,11 @@ SHAPES = {
     "cp2": Shape(2, {"cp_size": 2}),
     "ep2_cp2": Shape(2, {"ep_size": 2, "cp_size": 2}),
     "ep2_tp2": Shape(2, {"ep_size": 2, "tp_size": 2}),
-    # ep_size 1: FSDP2 shards the experts too (fsdp_shard_ep1_experts), so every parameter is a DTensor.
+    # ep_size 1: FSDP2 shards the experts too, so every parameter is a DTensor.
     "fsdp2": Shape(2, fsdp=True),
     # The EP layers stay plain rank-local tensors beside DTensor peers.
     "ep2_fsdp2": Shape(2, {"ep_size": 2}, fsdp=True),
-    # A stage must be a whole NVLink domain of two ranks or more, so two stages take two two-rank nodes, and
-    # rank 2 is the first rank of the last stage.
+    # A stage must be a whole NVLink domain of two ranks or more, so two stages take two two-rank nodes.
     "pp2_first": Shape(4, {"pp_size": 2}, gpus_per_node=2),
     "pp2_last": Shape(4, {"pp_size": 2}, gpus_per_node=2, rank=2),
     "ep2_pp2_first": Shape(4, {"ep_size": 2, "pp_size": 2}, gpus_per_node=2),
@@ -131,8 +126,7 @@ DENSE_SHAPES = ("single", "tp2", "cp2", "fsdp2", "pp2_first", "pp2_last")
 
 @dataclass(frozen=True)
 class Scenario:
-    """What a case changes from the defaults: the device, the precision, the callback's options, when the
-    model reaches it, the token and attention feeds, and an edit to the model."""
+    """What a case changes from the defaults."""
 
     device: str | None = "b300"
     bf16: bool = True
@@ -224,8 +218,8 @@ class _ScriptedEvent:
 
 
 class ScriptedDevice:
-    """The CUDA calls the callback makes, answered by a GPU of the scenario's name, and the host clock: its
-    readings are set by the driver per hook, not advanced per call."""
+    """The CUDA calls the callback makes, answered by a GPU of the scenario's name; the driver sets clock readings per
+    hook."""
 
     def __init__(self, name: str | None):
         self.name = name
@@ -262,8 +256,7 @@ class ScriptedDevice:
 
 
 class AttentionWork:
-    """The per-step attention work a trainer measures, here the documents :data:`STEP_DOCUMENTS` scripts, costed
-    through the layout the callback hands back."""
+    """The per-step attention work a trainer measures, costed through the layout the callback hands back."""
 
     def __init__(self):
         self.layout = None
@@ -288,7 +281,7 @@ class _PackageRecords(logging.Handler):
 
 @contextlib.contextmanager
 def captured_records() -> Iterator[list[list[str]]]:
-    """Every INFO-and-above record logged under :data:`PACKAGE` while inside, in place of the root handlers."""
+    """Every INFO-and-above record under :data:`PACKAGE` while inside, in place of the root handlers."""
     root = logging.getLogger()
     handler = _PackageRecords()
     handlers, level = root.handlers[:], root.level
@@ -300,7 +293,7 @@ def captured_records() -> Iterator[list[list[str]]]:
 
 
 def _apply_tensor_parallelism(model: torch.nn.Module, family: str, parallelism) -> None:
-    """The TP sharding the loaders apply: attention-only on a MoE family, transformers' own plan on a dense one."""
+    """The TP sharding the loaders apply: attention-only on MoE, transformers' own plan on dense."""
     mesh = build_dp_tp_mesh(parallelism.tp_size, parallelism.data_parallel_size, device_type="cpu")
     if family in MOE_FAMILIES:
         apply_tp_to_attention_only(model, mesh)
@@ -362,8 +355,7 @@ def _training_args(scenario: Scenario, output_dir: str) -> transformers.Training
         report_to=[],
     )
     if scenario.tf32:
-        # Set after construction: the arguments refuse tf32 on a host without an Ampere GPU, and the callback
-        # reads only the flag.
+        # After construction: the arguments refuse tf32 with no Ampere GPU, and the callback reads only the flag.
         args.tf32 = True
     return args
 
@@ -376,7 +368,6 @@ def _step_tokens(scenario: Scenario, step: int, world_size: int) -> int:
 
 
 def run_case(case: EfficiencyCase, scratch: str, *, perturb: bool = False) -> dict:
-    """Drive the callback through one case and return what it reported."""
     shape, scenario = SHAPES[case.shape], SCENARIOS[case.scenario]
     with fake_process_group(shape.rank, shape.world_size):
         parallelism = make_parallelism_config(
@@ -438,7 +429,6 @@ def produce(output: Path, cases, *, perturb: bool = False) -> None:
 
 
 def read_reports(root: Path) -> dict[str, dict]:
-    """Every case report under ``root``, by case path."""
     return {
         str(path.relative_to(root).with_suffix("")): json.loads(path.read_text(encoding="utf-8"))
         for path in sorted(root.rglob("*.json"))
@@ -446,15 +436,12 @@ def read_reports(root: Path) -> dict[str, dict]:
 
 
 def raised_reports(reports: dict[str, dict]) -> dict[str, dict]:
-    """The reports among ``reports`` whose case raised, by case path, with what it raised."""
     return {path: report[RAISED] for path, report in reports.items() if RAISED in report}
 
 
 def assess(reports: dict[str, dict[str, dict]], accept=()) -> tuple[str, dict]:
-    """The verdict on the ``base``, ``head`` and ``control`` reports and its findings. Only the cases both trees
-    ran are compared; one only the head ran is listed as new and one only the base ran as dropped. It fails on a
-    delta outside the cases ``accept`` names, on any head raise, and on a control report that matches its base
-    one or raised."""
+    """The verdict and findings on the three reports; only cases both trees ran are compared. Fails on a delta outside
+    ``accept``, any head raise, or a control report that matches its base or raised."""
     base, head, control = reports["base"], reports["head"], reports["control"]
     shared = base.keys() & head.keys()
     compared = compare_outputs({path: base[path] for path in shared}, {path: head[path] for path in shared})
@@ -474,8 +461,7 @@ def assess(reports: dict[str, dict[str, dict]], accept=()) -> tuple[str, dict]:
 
 
 def _produce_in(tree: Path, output: Path, case_paths: list[str] | None, *, perturb: bool = False) -> dict[str, dict]:
-    """Run ``tree``'s own producer over ``case_paths`` (that tree's whole roster when ``None``) and read back
-    its reports."""
+    """Run ``tree``'s own producer over ``case_paths`` (its whole roster when None) and read back its reports."""
     args = ["--produce", str(output), *(["--cases", *case_paths] if case_paths else [])]
     run_in_tree(tree, __spec__.name, *args, *(["--perturb"] if perturb else []))
     return read_reports(output)

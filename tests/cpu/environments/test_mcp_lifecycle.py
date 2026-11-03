@@ -1,23 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the NativeMCPClientEnvironment connection lifecycle (no mcp package needed).
-
-The MCP SDK's transport/session contexts hold anyio cancel scopes, which must be entered and exited
-by the SAME task. These tests stub the transport and session to pin the lifecycle contract:
-
-- one connection-owner task enters AND exits both contexts (task affinity);
-- a failure mid-connect (``initialize`` raising) unwinds the already-entered transport, so a partial
-  connect never leaks a half-initialized session or the server subprocess;
-- the sync ``close()`` hook (what ``EnvironmentActor.shutdown`` calls) actually drives disconnect —
-  a no-op there leaks the ClientSession and the stdio subprocess on every rollout shutdown;
-- a start cancelled mid-connect (the episode deadline) unwinds the server it was starting;
-- ``scratch_allowlist`` (the filesystem preset) gives a server a fresh directory as its allowlist, kept across a
-  respawn and removed when the server stops, and ``episode_scratch`` scopes it: each episode gets a server of
-  its own over its own directory, so concurrent episodes (a GRPO group's siblings) share no files, while
-  without it one server and directory serve the environment. A server that takes no directory refuses the
-  scope instead of being handed an argument it rejects.
-
-Run: python tests/cpu/environments/test_mcp_lifecycle.py  (or pytest)
-"""
+"""The NativeMCPClientEnvironment connection lifecycle, with the transport and session stubbed. The SDK's contexts
+hold anyio cancel scopes, which one task must enter and exit; a failed or cancelled connect unwinds; ``close()``
+drives disconnect; and ``episode_scratch`` gives each episode a server over its own directory."""
 
 import asyncio
 import importlib
@@ -125,10 +109,8 @@ def _stub_client_session(monkeypatch):
 
 
 async def test_the_session_bounds_every_request_it_makes(monkeypatch):
-    """A ClientSession built without ``read_timeout_seconds`` runs ``anyio.fail_after(None)``, so a
-    server that ACKs and never answers parks the episode for the whole ``episode_timeout`` and takes
-    its rollout worker with it — over stdio there is no socket timeout underneath either. The
-    deadline must also sit BELOW the episode deadline, or it can never fire first."""
+    """Without ``read_timeout_seconds``, a server that ACKs and never answers parks the episode for the whole
+    ``episode_timeout``. The deadline must sit below the episode deadline, or it can never fire first."""
     seen: dict = {}
     env = _StubMCPEnv()
 
@@ -154,14 +136,13 @@ async def test_connect_discovers_tools_and_disconnect_unwinds_in_owner_task():
     assert env.stub_session.exited and env.stub_transport.exited
     assert env._server.session is None and not env._connected
     assert env.registry.get("stub_tool") is None
-    # anyio cancel-scope contract: enter and exit happened in the SAME task.
+    # anyio cancel-scope contract: enter and exit happened in the same task.
     assert env.stub_transport.enter_task is env.stub_transport.exit_task
     assert env.stub_transport.enter_task is not asyncio.current_task()  # owned by the connection task
 
 
 async def test_failed_connect_unwinds_partial_state():
-    """initialize() raising mid-connect must exit the already-entered transport and leave the env
-    fully disconnected: a split enter leaves _session half-initialized and the transport open."""
+    """A split enter leaves _session half-initialized and the transport open."""
     env = _StubMCPEnv(fail_initialize=True)
     with pytest.raises(RuntimeError, match="initialize failed"):
         await env.connect()
@@ -172,9 +153,7 @@ async def test_failed_connect_unwinds_partial_state():
 
 
 async def test_a_start_cancelled_mid_connect_leaves_no_server_running():
-    """The episode deadline cancels a tool call whose first use is still starting the server: the owner task, and
-    the server subprocess its transport holds, must unwind with it rather than run for the actor's lifetime
-    outside every stop."""
+    """The owner task and the server subprocess must unwind with the cancel, not run for the actor's lifetime."""
     env = _StubMCPEnv(initialize_gate=asyncio.Event(), scratch_allowlist=True)
     start = asyncio.create_task(env.connect())
     await asyncio.wait_for(env.stub_session.initializing.wait(), timeout=5)
@@ -192,8 +171,7 @@ async def test_a_start_cancelled_mid_connect_leaves_no_server_running():
 
 
 async def test_sync_close_from_running_loop_drives_disconnect():
-    """close() called on the owning loop (EnvironmentActor.shutdown's env.close()) cannot block that
-    loop, so it schedules disconnect; the scheduled task must actually unwind the connection."""
+    """close() on the owning loop cannot block it, so it schedules disconnect, which must unwind the connection."""
     env = _StubMCPEnv()
     await env.connect()
 
@@ -213,9 +191,8 @@ async def test_disconnect_is_idempotent():
 
 
 def test_close_after_asyncio_run_unwound_the_connection_warns_nothing(caplog):
-    """A CLI eval drives its episodes under ``asyncio.run``, which cancels the connection task, and so
-    unwinds the session and the transport, before the script calls ``close()``: a warning that the
-    connection was left open is false on every such run."""
+    """``asyncio.run`` cancels the connection task before the script calls ``close()``, so a left-open warning is
+    false on every CLI eval."""
     env = _StubMCPEnv()
     asyncio.run(env.connect())
     assert env.stub_session.exited and env.stub_transport.exited
@@ -263,9 +240,8 @@ async def test_a_failing_mcp_tool_is_logged_once_by_the_protocol(caplog):
 
 
 async def test_an_mcp_property_without_a_declared_type_takes_any_value():
-    """A property typed through ``anyOf`` (an int-or-null) declares no top-level ``type``: the schema
-    shown to the engine carries none, and ``3`` and ``null`` both reach the server as sent. Only a
-    declared ``string`` is held to one, so a list there is refused before the server is called."""
+    """A property typed through ``anyOf`` declares no top-level ``type``; ``3`` and ``null`` both reach the server,
+    and only a declared ``string`` is held to one."""
     env = _StubMCPEnv()
     input_schema = {
         "properties": {
@@ -303,8 +279,7 @@ async def test_an_mcp_property_without_a_declared_type_takes_any_value():
 
 
 async def test_episode_scratch_gives_each_episode_its_own_server_and_directory():
-    """Concurrent episodes on one environment (a GRPO group's siblings) must not see each other's files: each
-    episode's calls reach a server of its own over a fresh directory, stopped and removed with the episode."""
+    """Each episode's calls reach a server of its own over a fresh directory, stopped and removed with the episode."""
     env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=True)
     ids, _ = await env.reset_async(["task a", "task b"])
     call = {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}}
@@ -357,8 +332,8 @@ async def test_an_environment_scoped_scratch_allowlist_is_one_server_over_its_ow
 
 
 async def test_a_respawned_episode_server_keeps_the_episodes_directory():
-    """A server that died mid-episode is respawned by the episode's next call over the same directory, so the
-    files the episode wrote before the crash are still there and the first directory is not orphaned."""
+    """A respawned server keeps the directory, so files written before the crash are still there and it is not
+    orphaned."""
     env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=True)
     ids, _ = await env.reset_async(["task"])
     call = {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}}
@@ -434,9 +409,8 @@ class _MemoryServerSession(_StubSession):
 
 
 async def test_the_memory_preset_gives_each_episode_its_own_graph(monkeypatch, tmp_path):
-    """Two concurrent episodes (a GRPO group's siblings) must not read each other's memory: each episode's
-    server keeps its graph in a file of its own scratch directory, removed with the episode, never in the one
-    file the package keeps for every episode and run on the host."""
+    """Each episode's server keeps its graph in its own scratch directory, never in the one file the package keeps
+    for the host."""
     default_file = tmp_path / "package-memory.jsonl"
     default_file.touch()
     spawned = []
@@ -514,21 +488,15 @@ def test_a_scratch_file_refuses_a_server_env_that_sets_it():
         )
 
 
-# Factory credential forwarding: MCP_SERVERS[...]["env"] must reach the server
-
-
 def test_factory_forwards_declared_server_env(monkeypatch):
-    """A key-requiring server (brave_search declares BRAVE_API_KEY) must get its credential from the
-    process environment: dropping the declared ``env`` list launches the server without
-    credentials."""
+    """Dropping the declared ``env`` list launches the server without credentials."""
     monkeypatch.setenv("BRAVE_API_KEY", "sekrit")
     env = build_mcp_environment("brave_search")
     assert env.server_env == {"BRAVE_API_KEY": "sekrit"}
 
 
 def test_factory_missing_required_env_fails_at_construction(monkeypatch):
-    """A missing declared credential must fail loud at environment construction, not surface as an
-    opaque tool failure on the first call."""
+    """Fails loud at construction, not as an opaque tool failure on the first call."""
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     with pytest.raises(ValueError, match="BRAVE_API_KEY"):
         build_mcp_environment("brave_search")
@@ -548,12 +516,8 @@ def test_factory_no_declared_env_passes_none():
 
 
 def test_sse_transport_is_registry_selectable_and_needs_a_url(monkeypatch):
-    """A remote MCP server is reached by URL, so it names no stdio preset.
-
-    ``mcp_server`` selects a command to spawn; ``transport="sse"`` spawns nothing. Resolving both
-    would build an env whose preset (and its credential resolution) is silently dead, so the two are
-    mutually exclusive and the registry picks the transport from the config.
-    """
+    """``mcp_server`` selects a command to spawn and ``transport="sse"`` spawns nothing, so the two are mutually
+    exclusive."""
     mcp_module = importlib.import_module("halo.environments.protocols.mcp")
     monkeypatch.setattr(mcp_module, "sse_client", lambda url: ("sse-ctx", url))
 
@@ -566,23 +530,19 @@ def test_sse_transport_is_registry_selectable_and_needs_a_url(monkeypatch):
 
 
 def test_sse_config_refuses_a_stdio_preset(monkeypatch):
-    """Anti-vacuity for the branch above: an sse config that also names a preset must fail loudly
-    rather than build an env that ignores half its own configuration."""
     with pytest.raises(ValueError, match="spawns nothing"):
         build_environment("mcp", {"mcp_server": "filesystem", "transport": "sse", "server_url": "http://x/sse"})
 
 
 def test_stdio_is_still_the_default_transport_and_preset():
-    """The default path stays the keyless filesystem preset over stdio."""
     env = build_environment("mcp", {})
     assert (env.transport, env.server_command) == ("stdio", "npx")
     assert env.server_url is None
 
 
 def test_stdio_transport_merges_credentials_over_sdk_default_env(monkeypatch):
-    """The MCP SDK passes ``env`` verbatim when set — a credentials-only dict would drop PATH and
-    break the server spawn. The stdio transport must merge our vars OVER the SDK defaults, and pass
-    None (SDK default environment) when no vars are set."""
+    """The SDK passes ``env`` verbatim when set, so a credentials-only dict would drop PATH; vars merge over the SDK
+    defaults, and None when none are set."""
     captured = []
 
     class _Params:

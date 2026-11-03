@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""The optimizer-shard save offloads and writes under the node's load throttle, as the resume reads.
-
-A sharded save copies each rank's optimizer state to host RAM (``cpu_offload``) and keeps it until its shard is
-written. Unthrottled, a node holds ``local_world_size`` copies at once; the throttle admits
-``max_concurrent_loading`` ranks at a time, so a node holds that many. The low-RAM warning estimates the copies the
-node holds together, not one rank's.
-
-Two ranks, real gloo, ``max_concurrent_loading=1``: each rank's host copy, from the offload to the end of its
-shard write, must not overlap the other's, and a rank that cannot produce its state still fails the save on every
-rank, joined over the store after the throttle.
-
-    python tests/cpu/checkpoint/test_optimizer_shard_save_throttle.py
-"""
+"""The optimizer-shard save offloads and writes under the node's load throttle, as the resume reads. Unthrottled, a
+node holds ``local_world_size`` host copies; the low-RAM warning estimates what the node holds together."""
 
 from __future__ import annotations
 
@@ -32,7 +21,7 @@ from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import make_parallelism_config
 
 WORLD_SIZE = 2
-# How long each rank's host copy lives; long enough that two concurrent copies overlap unmistakably.
+# Long enough that two concurrent copies overlap unmistakably.
 HOLD_SECONDS = 0.4
 PG_TIMEOUT_SEC = 60
 
@@ -47,7 +36,6 @@ def _store(rank: int, max_concurrent_loading: int = 1) -> OptimizerShardStore:
 
 
 def _hold_windows(rank: int, tmp_dir: str) -> None:
-    """Save once, recording when this rank's host copy came to exist and when its shard write ended."""
     window = []
 
     def offload(*_args, **_kwargs):
@@ -111,7 +99,7 @@ def test_a_rank_that_cannot_produce_its_state_fails_the_save_on_every_rank(tmp_p
 
 
 class _OneGigabyteOfMoments:
-    """A parameter's data the warning sizes at 1 GB of optimizer state: two moments of 125M fp32 elements."""
+    """Sized at 1 GB of optimizer state: two moments of 125M fp32 elements."""
 
     def numel(self) -> int:
         return 125_000_000
@@ -126,7 +114,7 @@ class _OneGigabyteOfMoments:
     ids=["below-one-copy", "below-the-admitted-copies", "above-them"],
 )
 def test_the_low_ram_warning_counts_the_ranks_admitted_together(monkeypatch, caplog, available_gb, warns):
-    """1 GB copies on an 8-rank node at ``max_concurrent_loading=2``: the node holds two at once."""
+    """At ``max_concurrent_loading=2`` the node holds two at once."""
     parameter = types.SimpleNamespace(data=_OneGigabyteOfMoments())
     optimizer = types.SimpleNamespace(param_groups=[{"params": [parameter]}])
     monkeypatch.setattr(optimizer_mod, "get_local_world_size", lambda: 8)

@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""Parity between ``AsyncRolloutConfig`` (the env-GRPO YAML surface) and the ``RolloutConfig`` it
-builds for the Ray rollout actors.
-
-``AsyncRolloutConfig.get_rollout_config`` copies every same-named (or ``rollout_``-prefixed) field
-under a mirrored name; this pins that every RolloutConfig field is reachable and that each copy happens.
-The other fields are DERIVED from different knobs, and ``capture_token_ids``' default does not agree:
-off in a hand-built config, on through the YAML path. Those derivations are pinned below.
-
-Run: pytest tests/cpu/config/test_rollout_config_mirror.py
-"""
+"""Parity between ``AsyncRolloutConfig`` and the ``RolloutConfig`` it builds for the Ray actors: every field is
+reachable and each copy happens. ``capture_token_ids``' default does not agree on purpose: off in a hand-built
+config, on through the YAML path."""
 
 from dataclasses import fields
 
@@ -17,8 +10,7 @@ import pytest
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.rollout_config import RolloutConfig
 
-# RolloutConfig field -> the AsyncRolloutConfig field that supplies it, read from the builder's own
-# mapping rather than restated: the map has to exist exactly once to be worth testing.
+# RolloutConfig field -> the AsyncRolloutConfig field supplying it, read from the builder's own mapping.
 _FORWARDED = AsyncRolloutConfig.rollout_field_sources()
 
 # The fields get_rollout_config computes instead of copying, each named with what it computes from.
@@ -29,9 +21,8 @@ _DERIVED = {
     "reasoning_end_token_id": "rollout_reasoning_end_token, resolved to an id by the caller that owns the tokenizer",
 }
 
-# A non-default value per mirrored knob. Applied one at a time (an sglang backend and a thinking
-# budget are mutually exclusive), so a knob that stops being copied cannot pass by leaving the
-# RolloutConfig default in place — which is the value the YAML was overriding.
+# A non-default value per mirrored knob, applied one at a time (an sglang backend and a thinking budget are mutually
+# exclusive), so a dropped copy cannot pass on the RolloutConfig default.
 _NON_DEFAULT_VALUES = {
     "rollout_backend": "sglang",
     "rollout_temperature": 0.3,
@@ -53,9 +44,8 @@ _NON_DEFAULT_VALUES = {
 
 
 def test_every_rollout_field_is_either_mirrored_or_derived():
-    """``rollout_field_sources`` pairs the two declarations by name, so a RolloutConfig field the
-    YAML surface does not spell falls out of the map silently. Unless it is one of the derived
-    three, that is a request field no config can reach and no rollout ever sets."""
+    """A field the YAML surface does not spell falls out of the map silently; unless derived, no config can reach
+    it."""
     unreachable = {f.name for f in fields(RolloutConfig)} - set(_FORWARDED) - set(_DERIVED)
     assert unreachable == set(), (
         f"{sorted(unreachable)} are RolloutConfig fields with no AsyncRolloutConfig knob: declare "
@@ -65,9 +55,7 @@ def test_every_rollout_field_is_either_mirrored_or_derived():
 
 @pytest.mark.parametrize(("rollout_field", "async_field"), sorted(_FORWARDED.items()))
 def test_every_mirrored_knob_reaches_the_built_rollout_config(rollout_field, async_field):
-    """Matching defaults only prove the two declarations agree; this proves the copy happens. The
-    actors read nothing but the built RolloutConfig, so a knob that stops being copied is one the
-    YAML sets and every rollout ignores."""
+    """Matching defaults only prove the two declarations agree. The actors read nothing but the built RolloutConfig."""
     requested = _NON_DEFAULT_VALUES[async_field]
 
     built = AsyncRolloutConfig(**{async_field: requested}).get_rollout_config()
@@ -85,17 +73,14 @@ def test_the_non_default_table_covers_every_mirrored_knob():
 
 @pytest.mark.parametrize("sampled_tokens", [True, False])
 def test_capture_token_ids_follows_train_on_sampled_tokens(sampled_tokens):
-    """The knob is the only thing that turns id capture on, and the actors read only the derived
-    field: a broken derivation trains env-GRPO on a re-tokenized re-render of every turn — the exact
-    mismatch ``train_on_sampled_tokens`` exists to eliminate — with nothing in the logs saying so."""
+    """A broken derivation trains env-GRPO on a re-tokenized re-render of every turn, with nothing in the logs."""
     built = AsyncRolloutConfig(train_on_sampled_tokens=sampled_tokens).get_rollout_config()
     assert built.capture_token_ids is sampled_tokens
 
 
 def test_reasoning_end_token_id_is_the_id_the_caller_resolved():
-    """The marker is a string knob on the YAML surface and an id on the wire, so no name pairing can
-    carry it: the caller that owns the tokenizer resolves it and the builder passes it through
-    untouched (the per-turn reasoning count ``episode/thinking_cap_turns`` reads stops at it)."""
+    """A string knob on the YAML surface and an id on the wire: the caller owning the tokenizer resolves it and the
+    builder passes it through."""
     config = AsyncRolloutConfig(rollout_max_thinking_tokens=8192)
     assert config.get_rollout_config(reasoning_end_token_id=7).reasoning_end_token_id == 7
     assert config.get_rollout_config().reasoning_end_token_id is None
@@ -103,9 +88,7 @@ def test_reasoning_end_token_id_is_the_id_the_caller_resolved():
 
 
 def test_the_yaml_path_captures_token_ids_where_a_hand_built_config_does_not():
-    """The one place the two sides legitimately disagree, pinned so it stays a decision. Linking the
-    two defaults would change what every hand-built RolloutConfig sends to the server; if that is
-    wanted, flip the default here and correct the note on the field."""
+    """Linking the two defaults would change what every hand-built RolloutConfig sends to the server."""
     assert AsyncRolloutConfig().get_rollout_config().capture_token_ids is True
     assert RolloutConfig().capture_token_ids is False
 

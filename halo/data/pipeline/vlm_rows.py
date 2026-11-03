@@ -1,5 +1,4 @@
-"""VLM row processors: hub-shape normalization, the placeholder history and images every VLM render takes, and
-the raw-VLM training map with its pinned Arrow schema and over-length filter."""
+"""VLM row processors: hub-shape normalization, the placeholder history and images, and the raw-VLM training map."""
 
 import json
 from collections.abc import Callable
@@ -22,9 +21,8 @@ _MeasuredHistory = Callable[[list[dict[str, Any]], dict[str, Any]], list[dict[st
 
 
 def normalize_vlm_conversation(conversation: list[dict[str, Any]], images: Any = None) -> list[dict[str, Any]]:
-    """New role/content messages for a hub conversation, native or in the HuggingFaceM4 ``{"user", "assistant"}``
-    pair shape (FineVision, the_cauldron, Docmatix), with a top-level ``images`` value merged in: filling the
-    image placeholders in order, else ahead of the first user turn's text."""
+    """Role/content messages for a hub conversation, also from HuggingFaceM4's ``{"user", "assistant"}`` pairs
+    (FineVision, the_cauldron, Docmatix); top-level ``images`` fill placeholders, else lead the first user text."""
     messages: list[dict[str, Any]] = []
     for turn in conversation:
         if "role" in turn:
@@ -80,9 +78,8 @@ def build_vlm_history(
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
 ) -> tuple[list[dict[str, Any]], list[Image.Image]]:
-    """One raw row's conversation to the placeholder history and PIL images every VLM render takes, shared by the
-    runtime row map and the offline tokenizer. An empty conversation passes through; ``None`` or a string that is
-    not JSON raises as a malformed column."""
+    """Shared by the runtime row map and the offline tokenizer. An empty conversation passes through; ``None`` or a
+    non-JSON string raises as a malformed column."""
     conversation = resolve_json_value(raw_conversation)
     if conversation is None or isinstance(conversation, str):
         raise ValueError(
@@ -103,8 +100,8 @@ def build_vlm_row_processor(
     tools_field: str | None = None,
     images_field: str | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """Build the VLM row map: images extracted, the conversation reshaped into history. It takes no tokenizer,
-    since the render runs later in ``VLMDataCollator``, so its output and cache key are tokenizer-independent."""
+    """Images extracted, the conversation reshaped into history. No tokenizer: the render runs later in
+    ``VLMDataCollator``, so output and cache key are tokenizer-independent."""
 
     def process_row(row: dict[str, Any]) -> dict[str, Any]:
         history, images = build_vlm_history(
@@ -126,9 +123,8 @@ def build_vlm_row_processor(
 
 
 def vlm_map_features() -> datasets.Features:
-    """The Arrow schema of :func:`build_vlm_row_processor` rows, pinned because shard-wise inference disagrees on a
-    mixed dataset (text-only ``content`` infers ``List(struct)``, image parts ``Json``, no images ``List(null)``)
-    and a multiprocess map then fails to align its shards."""
+    """Pinned because shard-wise inference disagrees on a mixed dataset (text-only ``content`` infers ``List(struct)``,
+    image parts ``Json``, no images ``List(null)``), failing a multiprocess map's shard alignment."""
     return datasets.Features(
         {
             "history": [{"role": datasets.Value("string"), "content": Json()}],
@@ -145,9 +141,8 @@ _VLM_SIGNATURE_COLUMNS = ("input_ids", "labels", "attention_mask", *vlm_map_feat
 def _filter_vlm_over_length(
     ds, processor, tokenizer, max_length: int, num_proc: int, measured_history: _MeasuredHistory | None
 ):
-    """Drop the mapped VLM rows whose rendered text alone exceeds ``max_length``, ahead of the collators that fail
-    loud on them; vision tokens stay uncounted, the collator being the exact backstop. The all-dropped refusal is
-    world-agreed, since a presharded corpus counts per rank."""
+    """Drop rows whose rendered text alone exceeds ``max_length``; vision tokens stay uncounted, the collator being the
+    exact backstop. The all-dropped refusal is world-agreed, since a presharded corpus counts per rank."""
 
     def fits(row) -> bool:
         # The collator's own render, tools included, so the filter measures the sequence it collates.
@@ -185,10 +180,8 @@ def prepare_vlm_dataset(
     desc: str = "Processing VLM dataset",
     measured_history: _MeasuredHistory | None = None,
 ):
-    """Map every split through :func:`build_vlm_row_processor`, dropping the columns outside the collator signature
-    but ``keep``, then drop the over-length rows. ``features`` pins the map's schema (:func:`vlm_map_features`
-    unless ``keep`` is set); ``measured_history`` must be a module-level function or a partial of one, which the
-    filter's cache key fingerprints."""
+    """Map every split, dropping columns outside the collator signature but ``keep``, then over-length rows.
+    ``measured_history`` must be a module-level function or a partial of one, for the filter's cache key."""
     # Before the map: the collator is built after it, so a missing marker would cost the whole tokenization.
     reject_missing_response_marker(args.assistant_message_template, args.train_on_completions_only, "VLM training")
     if args.interleaved_thinking:

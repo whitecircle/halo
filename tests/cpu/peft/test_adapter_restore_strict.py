@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""An adapter resume copies nothing until every rank has matched the file to the live adapters, key for key at the
-saved shapes.
-
-``restore_adapters`` copies a checkpoint's adapters into a model whose base stays as built: an EP/CP rebuild, or the
-adapter-only checkpoint of a PEFT run. A file short of a tensor would resume it from initialization, a saved tensor no
-live one takes would be dropped, a changed ``lora_r`` fails part-way through the copies, and a rank raising alone
-leaves its peers in the next collective. Pinned on a mixed run (PEFT attention adapters with a ``modules_to_save``
-head carrying a persistent buffer, beside native expert LoRA), its adapter written by the real saver: each defect
-raises naming the keys with every live tensor unchanged, the complete file restores bit-equal, and of two gloo ranks
-(one EP group of two) only one of which reads a short file, both raise before either copies.
-
-    python tests/cpu/peft/test_adapter_restore_strict.py
-"""
+"""An adapter resume copies nothing until every rank has matched the file to the live adapters, key and shape.
+A rank raising alone would leave its peers in the next collective."""
 
 import json
 import os
@@ -60,9 +49,8 @@ class _ExpertLoraLayer(StubEPLayerBase):
 
 
 def _mixed_model(*, r: int = 4, ep_rank: int = 0, ep_size: int = 1, expert_r: int = SPEC.r, seed: int | None = None):
-    """The tiny Qwen3 with PEFT LoRA on ``q_proj``/``v_proj``, ``lm_head`` in ``modules_to_save`` beside a persistent
-    buffer, and native expert LoRA in layer 0's MLP; every trainable value drawn from ``seed`` (left at init when
-    None)."""
+    """Tiny Qwen3: PEFT LoRA on ``q_proj``/``v_proj``, ``lm_head`` in ``modules_to_save`` with a persistent buffer, and
+    native expert LoRA in layer 0's MLP; trainable values drawn from ``seed``, left at init when None."""
     torch.manual_seed(0)
     base = tiny_family_model(TINY_DENSE_FAMILY, overrides={"num_hidden_layers": 2})
     base.lm_head.register_buffer("balancing_bias", torch.zeros(base.config.vocab_size))
@@ -92,8 +80,7 @@ def _expert_slice(full: torch.Tensor, ep_rank: int, ep_size: int) -> torch.Tenso
 
 
 def _live(model) -> list[tuple[str, torch.Tensor]]:
-    """Every tensor the run trains or the adapter carries: the trainable parameters and the ``modules_to_save``
-    copy's persistent buffer."""
+    """The trainable parameters and the ``modules_to_save`` copy's persistent buffer."""
     params = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
     return params + [(name, buffer) for name, buffer in persistent_buffers(model) if ".modules_to_save." in name]
 

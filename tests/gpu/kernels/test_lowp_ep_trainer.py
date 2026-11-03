@@ -1,23 +1,14 @@
 #!/usr/bin/env python
-"""Low-precision EP expert weights are re-quantized after every fused AdamWBF16 step, through the trainer.
+"""Low-precision EP expert weights re-quantize after every fused AdamWBF16 step, through the trainer.
 
-Under EP the expert banks are FSDP-ignored plain parameters, so ``expert_gemm`` quantizes them through
-``cached_fake_quant``, keyed on ``weight._version``: once per optimizer step, reused across the microbatches of a
-step. AdamWBF16's fused kernel writes the weights through raw pointers ATen never sees, and only its explicit
-``increment_version`` advances the key; without it the cache serves the step-0 quantization for the whole run.
-On a tiny Qwen3-MoE at EP2, under ``lowp_precision`` fp8 and mxfp4, ``TOTAL_STEPS`` steps:
-
-  * every EP layer's expert weights advance their version counter at every step, on every rank;
-  * the run's losses equal those of the same run with the weight cache off (``HALO_LOWP_WEIGHT_CACHE=0``), which
-    quantizes the live weight on every forward: a stale cache trains on old weights from step 2 on.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/kernels/test_lowp_ep_trainer.py --precision fp8
+``cached_fake_quant`` keys on ``weight._version``. The fused kernel writes through raw pointers ATen never sees, so
+only ``increment_version`` advances the key; without it the cache serves the step-0 quantization for the whole run.
 """
 
 import argparse
 import os
 
-# Eager quantization, numerically identical to the compiled path, without a per-rank compile warm-up.
+# Numerically identical to the compiled path, without a per-rank compile warm-up.
 os.environ.setdefault("HALO_LOWP_COMPILE", "0")
 
 import torch
@@ -41,8 +32,8 @@ from tests.common.training_checks import step_losses
 
 SEED = 42
 TOTAL_STEPS = 3
-# Two arms of one deterministic run that quantize the same weights agree up to bf16 reduction noise; a stale step-0
-# quantization trains on weights one or more steps old and moves the loss by far more.
+# Two arms quantizing the same weights agree up to bf16 reduction noise; a stale step-0 quantization moves the loss by
+# far more.
 LOSS_RTOL = 1e-3
 
 parser = argparse.ArgumentParser()
@@ -51,8 +42,6 @@ ARGS = parser.parse_args()
 
 
 class _ExpertVersions(TrainerCallback):
-    """Each EP layer's expert weight version counters at the start of every optimizer step."""
-
     def __init__(self, model):
         self.weights = [param for layer in ep_layers(model) for _, param in layer.expert_named_params()]
         self.per_step: list[list[int]] = []

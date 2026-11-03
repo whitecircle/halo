@@ -1,26 +1,5 @@
-"""The pad-token id a pooled head reads back: tokenizer → model config → pooled position.
-
-``GenericForSequenceClassification.forward`` — which every reward / classification head in the roster
-inherits — pools each row at the last token whose id differs from
-``config.get_text_config().pad_token_id``, and refuses any batch larger than one while that id is
-``None``. Two properties of the setup seam follow, and the tests here pin both — plus the cost that
-comes with them, that the recorded id is serialized and binds ``nn.Embedding.padding_idx`` on the
-next load:
-
-  * the id the collator pads with must be RECORDED on the model whatever settled it, not only when
-    something changed the tokenizer's pad token. A checkpoint that ships no ``pad_token_id`` paired
-    with a tokenizer that already has a pad token (Qwen3 / Qwen3.5 reward and classification bases,
-    with no ``pad_token:`` in the YAML) changes nothing at all, so a change-driven sync writes
-    nothing and the head raises at the first training step. Including a pad token that IS eos
-    (DeepSeek-V4): withholding that one would not avert the ``padding_idx`` binding it costs, because
-    ``Trainer.train``'s ``align_special_tokens`` records it with no pad-vs-eos test of its own — it
-    would only delay the agreement past trainer construction.
-  * these heads carry NO ``generation_config``: transformers attaches one only where
-    ``can_generate()`` is true, so on a pooled head a bare attribute read raises ``AttributeError``
-    out of ``nn.Module.__getattr__``.
-
-    python tests/cpu/model_loading/test_pad_token_sync.py
-"""
+"""The pad-token id a pooled head reads back. ``GenericForSequenceClassification.forward`` pools at the last non-pad
+token and refuses a batch over one while the id is ``None``."""
 
 import logging
 
@@ -37,14 +16,11 @@ from halo.trainers.parallelism.pipeline_rules import require_pooling_pad_id
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN4_EXP_CONFIG
 
 MAX_LENGTH = 128
-# Arbitrary but distinct in-vocab ids for the stub tokenizer's special tokens.
 SPECIAL_TOKEN_IDS = {"<pad>": 3, "<eos>": 2, "<other_pad>": 5}
 
 
 class _Tokenizer:
-    """A tokenizer stand-in for the setup seam: assigning a special token moves its id with it, and a
-    token has an id only once it is IN the vocabulary — which is what makes the seam's ordering
-    observable, since every id below is read back rather than assigned."""
+    """A token has an id only once it is in the vocabulary, which makes the seam's ordering observable."""
 
     def __init__(self, pad_token: str | None = "<pad>"):
         self.model_max_length = int(1e30)
@@ -59,7 +35,7 @@ class _Tokenizer:
         return max(self.vocab.values()) + 1
 
     def add_special_tokens(self, tokens: dict[str, list[str]], replace_extra_special_tokens: bool = True) -> None:
-        """Mirrors transformers, whose default REPLACES the extra-special list."""
+        """Mirrors transformers, whose default replaces the extra-special list."""
         requested = tokens["additional_special_tokens"]
         for token in requested:
             self.vocab.setdefault(token, len(self))
@@ -82,15 +58,9 @@ class _Tokenizer:
 
 
 def _seq_cls_model(num_labels: int = 2) -> Qwen3ForSequenceClassification:
-    """A real pooled head, built from a config so nothing is downloaded.
-
-    ``TINY_QWEN3_CONFIG`` declares no ``pad_token_id`` — the checkpoint shape this file is about.
-    """
+    """``TINY_QWEN3_CONFIG`` declares no ``pad_token_id``, the checkpoint shape this file is about."""
     torch.manual_seed(0)
     return Qwen3ForSequenceClassification(Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=num_labels))
-
-
-# sync_special_token_id against a head that cannot generate
 
 
 def test_a_pooled_head_carries_no_generation_config():
@@ -107,18 +77,14 @@ def test_sync_records_the_id_on_a_head_without_a_generation_config():
 
 
 def test_sync_still_writes_the_generation_config_when_the_head_has_one():
-    """The guard may not cost the causal path its write — generation pads with this id."""
+    """Generation pads with this id."""
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     sync_special_token_id(model, "pad_token_id", SPECIAL_TOKEN_IDS["<pad>"])
     assert model.generation_config.pad_token_id == SPECIAL_TOKEN_IDS["<pad>"]
 
 
-# configure_run_tokenizer — the production entry point
-
-
 def test_setup_records_the_pad_id_the_tokenizer_already_had():
-    """Nothing changes here, and the id still has to land: this is the shipped reward / classification
-    configs' exact case."""
+    """Nothing changes, and the id still has to land: the shipped reward and classification configs' case."""
     model = _seq_cls_model()
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded
@@ -140,13 +106,8 @@ def test_setup_records_a_pad_token_the_args_changed():
 
 
 def test_a_pad_token_the_args_ADD_is_recorded_too():
-    """The way out the pooled-head raise names has to actually work.
-
-    ``--added_special_tokens`` grows the vocabulary and ``--pad_token`` names one of the tokens in it,
-    so the addition has to happen first: read the other way round, the id does not exist yet, the
-    tokenizer ends up padding with one the model config never recorded, and the head raises again —
-    naming the recipe that just failed.
-    """
+    """The addition has to happen first: read the other way, the model config never records the id and the head
+    raises again."""
     model = _seq_cls_model()
     args = CommonScriptArguments(pad_token="<new_pad>", added_special_tokens=["<new_pad>"])
     tokenizer = configure_run_tokenizer(
@@ -159,11 +120,8 @@ def test_a_pad_token_the_args_ADD_is_recorded_too():
 
 
 def test_an_eos_token_the_args_ADD_is_not_recorded_as_None():
-    """The same ordering, with a sharper failure than a missing write.
-
-    ``eos_token_id`` is recorded unconditionally on change, so an id read before the token exists
-    writes ``None`` OVER the model's real eos — leaving generation with no terminator at all.
-    """
+    """Read before the token exists, the id writes ``None`` over the model's real eos, leaving generation with no
+    terminator."""
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     args = CommonScriptArguments(eos_token="<new_eos>", added_special_tokens=["<new_eos>"])
     tokenizer = configure_run_tokenizer(
@@ -176,14 +134,8 @@ def test_an_eos_token_the_args_ADD_is_not_recorded_as_None():
 
 
 def test_the_second_setup_call_records_the_ids_on_its_own_model():
-    """A preference or distillation script runs this seam once per model against ONE tokenizer.
-
-    Guarding the eos/bos writes on the tokenizer having CHANGED breaks that: the first call (the
-    reference) moves the token and records it, and the second (the policy) finds the token already
-    equal to the request and skips the model write entirely. The policy then trains and exports with
-    the checkpoint's eos while the reference it is scored against carries the run's — a terminator
-    mismatch between the two legs of every logratio, and in the exported config.
-    """
+    """Guarding on the tokenizer having changed skips the second model's write, a terminator mismatch across every
+    logratio and the export."""
     tokenizer = _Tokenizer()
     args = CommonScriptArguments(eos_token="<other_pad>", bos_token="<pad>")
     reference = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
@@ -199,9 +151,8 @@ def test_the_second_setup_call_records_the_ids_on_its_own_model():
 
 
 def test_an_eos_change_a_built_module_cannot_follow_is_refused():
-    """Qwen3.8-Flash-Next's n-gram embedding copies ``eos_token_id`` at build and restarts its history after it,
-    while every export records the run's id: a served copy would restart at another token than the trained model.
-    An eos the copy already holds, and a model holding no copy, record it as before."""
+    """Qwen3.8-Flash-Next's n-gram embedding copies ``eos_token_id`` at build, so a served copy would restart at
+    another token."""
     flash_next = Qwen4ExpForCausalLM(Qwen4ExpTextConfig(**TINY_QWEN4_EXP_CONFIG))
     copied = TINY_QWEN4_EXP_CONFIG["eos_token_id"]
     with pytest.raises(ValueError, match="Qwen4ExpTextNGramEmbedding"):
@@ -237,13 +188,8 @@ def test_an_eos_change_a_built_module_cannot_follow_is_refused():
 
 
 def test_setup_records_the_eos_fallback_too():
-    """A tokenizer that pads with eos still has its id recorded, because declining averts nothing.
-
-    ``Trainer.train`` calls transformers' ``align_special_tokens``, which writes the tokenizer's pad
-    id onto the config with no pad-vs-eos test, so the id — and the ``padding_idx`` binding it costs
-    on the next load — reaches the checkpoint either way. Skipping it here would only leave the
-    pooled heads refusing a batch until the first ``train()`` call.
-    """
+    """``Trainer.train``'s ``align_special_tokens`` writes the pad id anyway, so skipping here would only delay
+    agreement to ``train()``."""
     model = _seq_cls_model()
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(),
@@ -257,8 +203,7 @@ def test_setup_records_the_eos_fallback_too():
 
 
 def test_transformers_own_alignment_records_an_eos_pad_regardless():
-    """The premise of the test above, pinned upstream: were this to gain a pad-vs-eos gate, declining
-    to record the id here would become a real choice again rather than a delay."""
+    """The premise above, pinned upstream: a pad-vs-eos gate there would make declining a real choice."""
     model = _seq_cls_model()
     tokenizer = _Tokenizer(pad_token=None)
     tokenizer.pad_token = tokenizer.eos_token
@@ -269,8 +214,8 @@ def test_transformers_own_alignment_records_an_eos_pad_regardless():
 
 
 def test_an_eos_pad_states_the_cost_it_carries(caplog):
-    """Recording is right, but silence is not: from the next load on, the eos row's input-embedding
-    gradient is masked, so the line has to name both the cost and the way out."""
+    """From the next load on, the eos row's input-embedding gradient is masked, so the line names the cost and the
+    way out."""
     model = _seq_cls_model()
     with caplog.at_level(logging.INFO, logger="halo.model_loading.tokenizer_setup"):
         configure_run_tokenizer(
@@ -288,7 +233,7 @@ def test_an_eos_pad_states_the_cost_it_carries(caplog):
 
 
 def test_a_real_pad_token_says_nothing_about_eos(caplog):
-    """Anti-noise, and the control for the test above: the ordinary case must not emit that line."""
+    """Control for the test above."""
     model = _seq_cls_model()
     with caplog.at_level(logging.INFO, logger="halo.model_loading.tokenizer_setup"):
         configure_run_tokenizer(
@@ -299,9 +244,8 @@ def test_a_real_pad_token_says_nothing_about_eos(caplog):
 
 
 def test_a_borrowed_eos_still_satisfies_the_pp_pooling_seam():
-    """Pipeline parallelism pools in the loss rather than the model, so it reads the id back from the
-    config; the two must agree, and an eos-padding tokenizer is no exception — with nothing recorded
-    the seam would refuse a run that pools perfectly well on the id it pads with."""
+    """PP pools in the loss and reads the id from the config, so an eos-padding tokenizer must still satisfy the
+    seam."""
     model = _seq_cls_model()
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(),
@@ -314,8 +258,7 @@ def test_a_borrowed_eos_still_satisfies_the_pp_pooling_seam():
 
 
 def test_a_config_with_no_pad_id_at_all_still_raises_at_the_pp_seam():
-    """The raise the seam cannot pre-empt: nothing settled a pad token, so pooling would score every
-    row at the last filler token at a finite loss. The message has to name the way out."""
+    """Pooling would score every row at the last filler token at a finite loss."""
     model = _seq_cls_model()
     with pytest.raises(ValueError, match="--added_special_tokens"):
         require_pooling_pad_id(model.config, None)
@@ -335,9 +278,7 @@ def test_setup_is_a_no_op_where_the_ids_already_agree():
 
 
 def test_recording_the_id_cannot_retro_affect_the_embedding():
-    """``nn.Embedding``'s ``padding_idx`` is bound in ``__init__`` from the config's value at LOAD
-    time, so a post-load write moves the pooling rule and nothing else *for this run*. Were it
-    re-read per forward, an id recorded here would start zeroing a real token's embedding gradient."""
+    """``padding_idx`` binds in ``__init__`` at load, so a post-load write moves only the pooling rule for this run."""
     model = _seq_cls_model()
     assert model.model.embed_tokens.padding_idx is None
 
@@ -350,14 +291,8 @@ def test_recording_the_id_cannot_retro_affect_the_embedding():
 
 
 def test_the_recorded_id_binds_padding_idx_on_the_next_load(tmp_path):
-    """The durable half, pinned because it is this seam's real cost rather than a side note.
-
-    The id is serialized, so a checkpoint exported from a base that shipped none while its tokenizer
-    carries a pad token of its own — the whole Qwen3 family — comes back with ``padding_idx`` bound,
-    and from then on that row's INPUT-embedding gradient is masked. The weights themselves are
-    untouched and the output side still trains, which is exactly what ``padding_idx`` means; it is
-    pinned here so the cost is a chosen one.
-    """
+    """The durable cost: the id is serialized, and that row's input-embedding gradient is masked from then on. The
+    output side still trains."""
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded
@@ -377,16 +312,9 @@ def test_the_recorded_id_binds_padding_idx_on_the_next_load(tmp_path):
     assert grad[5].abs().sum() > 0, "a content row's gradient must be unaffected"
 
 
-# What the id is FOR: the pooled position of a padded batch
-
-
 def test_padded_batch_pools_at_the_last_content_token():
-    """End to end, at the batch size the head refuses without the id.
-
-    The padded row's pooled logits must equal the same row forwarded alone, and must NOT equal the
-    logits at the final (padded) column — the control, without which a pin that pooled on padding
-    could still pass.
-    """
+    """Compared to the same row alone and to the padded column's logits, the control for a pin that pooled on
+    padding."""
     model = _seq_cls_model().eval()
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded

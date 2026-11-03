@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""
-Tests for ClassificationTrainer derive_class_weights global-count aggregation.
-
-With a pre-sharded dataset every DP rank holds a different shard; class weights must be
-derived from the world-summed label counts, not the local shard, or ranks silently train
-with divergent loss weighting. These tests simulate two ranks by faking the distributed
-primitives inside halo.trainers.reward.classification and assert both ranks produce
-IDENTICAL weights equal to the global-count-derived ("balanced") weights.
-
-Run: python tests/cpu/trainers/test_classification_class_weights.py
-"""
+"""``balanced_class_weights`` across DP ranks.
+With a pre-sharded dataset, local-shard weights would silently diverge across ranks, hence world-summed counts."""
 
 import contextlib
 from collections.abc import Iterator
@@ -28,12 +19,7 @@ _MODULE = "halo.trainers.reward.classification_loss"
 
 
 class _FakeDist:
-    """Fake of the collectives balanced_class_weights issues.
-
-    Emulates one rank of a world where ``other_ranks_labels`` are the label shards held
-    by the OTHER ranks: ``rank_max`` over the count-vector length, SUM all-reduce over
-    the padded counts.
-    """
+    """``balanced_class_weights``'s collectives, as seen by one rank of a world holding ``other_ranks_labels``."""
 
     class ReduceOp:
         SUM = "sum"
@@ -58,7 +44,6 @@ class _FakeDist:
 
 @contextlib.contextmanager
 def _fake_world(other_ranks_labels: list[list[int]]) -> Iterator[None]:
-    """One simulated rank of a world whose other ranks hold ``other_ranks_labels``."""
     fake = _FakeDist(other_ranks_labels)
     with (
         patch(f"{_MODULE}.dist", fake),
@@ -69,19 +54,15 @@ def _fake_world(other_ranks_labels: list[list[int]]) -> Iterator[None]:
 
 
 def _weights_on_rank(rank_labels: list[int], other_ranks_labels: list[list[int]], model=None) -> torch.Tensor:
-    """Run balanced_class_weights as one simulated rank of a fake world."""
     with _fake_world(other_ranks_labels):
         return balanced_class_weights({"labels": rank_labels}, model)
 
 
 def _local_weights(labels: list[int], model=None) -> torch.Tensor:
-    """Run balanced_class_weights with distributed NOT initialized (single-process path)."""
     return balanced_class_weights({"labels": labels}, model)
 
 
-# Two DP shards with deliberately different label distributions AND different local max
-# labels (rank0 never sees class 2), so per-shard derivation gives divergent weights and
-# divergent count-vector lengths.
+# Label distributions and local max labels differ (rank0 never sees class 2), so per-shard weights and lengths diverge.
 RANK0_LABELS = [0, 0, 0, 1]
 RANK1_LABELS = [1, 1, 2, 2]
 # Global: counts [3, 3, 2], n_samples 8, 3 present classes -> balanced 8 / (3 * count).
@@ -89,20 +70,17 @@ GLOBAL_WEIGHTS = torch.tensor([8 / 9, 8 / 9, 8 / 6], dtype=torch.float32)
 
 
 def test_presharded_ranks_produce_identical_global_weights():
-    """Both simulated ranks must derive the same weights, equal to the global-count weights."""
     weights_rank0 = _weights_on_rank(RANK0_LABELS, [RANK1_LABELS])
     weights_rank1 = _weights_on_rank(RANK1_LABELS, [RANK0_LABELS])
 
     assert torch.equal(weights_rank0, weights_rank1), f"rank divergence: {weights_rank0} vs {weights_rank1}"
     assert torch.allclose(weights_rank0, GLOBAL_WEIGHTS, atol=1e-6), weights_rank0
 
-    # Sanity that the assertion above is not vacuous: a per-shard derivation (local labels only)
-    # yields DIFFERENT weights, so this test fails if the global gather is dropped.
+    # A per-shard derivation gives different weights, so this fails if the global gather is dropped.
     assert not torch.allclose(_local_weights(RANK0_LABELS + [2]), GLOBAL_WEIGHTS, atol=1e-6)
 
 
 def test_build_classification_loss_uses_global_counts():
-    """The production path (build_classification_loss) must weight the cross-entropy by global counts."""
     args = SimpleNamespace(
         loss_type="cross_entropy", class_weights=None, derive_class_weights=True, label_smoothing=0.0
     )
@@ -117,18 +95,13 @@ def test_build_classification_loss_uses_global_counts():
 
 
 def test_world_reduce_is_scale_invariant_for_tp_siblings():
-    """TP siblings hold the SAME DP shard; the world sum double-counts it uniformly.
-
-    Balanced weights are invariant to a uniform count scale, so the world-group reduce
-    must give exactly the single-copy weights.
-    """
+    """TP siblings hold the same shard, so the world sum double-counts it uniformly and balanced weights don't move."""
     labels = [0, 0, 1, 2, 2, 2]
-    tp2_weights = _weights_on_rank(labels, [labels])  # sibling contributes identical counts
+    tp2_weights = _weights_on_rank(labels, [labels])
     assert torch.allclose(tp2_weights, _local_weights(labels), atol=1e-6), tp2_weights
 
 
 def test_non_distributed_path_matches_sklearn_balanced():
-    """Without torch.distributed, weights must match sklearn's 'balanced' derivation."""
     labels = [0, 0, 0, 0, 1, 2, 2]
     expected = compute_class_weight("balanced", classes=np.unique(labels), y=np.asarray(labels))
     weights = _local_weights(labels)
@@ -136,7 +109,6 @@ def test_non_distributed_path_matches_sklearn_balanced():
 
 
 def test_absent_class_gets_unit_weight_with_model_num_labels():
-    """Classes in [0, num_labels) absent from the global train set keep weight 1.0."""
     model = SimpleNamespace(config=SimpleNamespace(num_labels=4))
     weights = _weights_on_rank(RANK0_LABELS, [RANK1_LABELS], model=model)
     assert weights.numel() == 4
@@ -145,26 +117,20 @@ def test_absent_class_gets_unit_weight_with_model_num_labels():
 
 
 def test_label_beyond_num_labels_raises():
-    """A train label >= model num_labels must fail loud, not scatter out of range."""
+    """Such a label would scatter out of range."""
     model = SimpleNamespace(config=SimpleNamespace(num_labels=3))
     with pytest.raises(ValueError, match="num_labels"):
         _local_weights([0, 1, 5], model=model)
 
 
 def test_empty_labels_raise():
-    """An empty labels column must fail loud instead of returning an empty weight vector."""
     with pytest.raises(ValueError, match="empty"):
         balanced_class_weights({"labels": np.array([], dtype=np.int64)}, None)
 
 
 def test_resolves_singular_label_column_from_script_dataset():
-    """The classification script's ``tokenize_classification_row`` emits a ``label`` column (singular), while the
-    trainer's own _tokenize fallback emits ``labels`` — derive_class_weights must accept either.
-
-    Hardcoding ``train_dataset["labels"]`` raises ``Column 'labels' doesn't exist`` at trainer
-    construction on a script-produced Dataset. Uses a real HF Dataset (not the {"labels": ...} dict
-    the other tests feed) so the column name is load-bearing.
-    """
+    """``tokenize_classification_row`` emits ``label``, the ``_tokenize`` fallback ``labels``; both must work.
+    A real HF Dataset makes the column name matter."""
     ds = Dataset.from_dict({"input_ids": [[1], [2], [3], [4]], "label": [0, 0, 0, 1]})
     weights = balanced_class_weights(ds, None)
     # counts [3, 1], n=4, 2 present -> balanced 4/(2*count) = [2/3, 2].

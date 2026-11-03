@@ -1,4 +1,4 @@
-"""``GenerateExamplesCallback`` — sample generations at eval time, parallelism-aware."""
+"""Sample generations at eval time, parallelism-aware."""
 
 import logging
 import random
@@ -30,8 +30,7 @@ from halo.runtime.ranks import get_global_rank, get_global_world_size, is_global
 
 logger = logging.getLogger(__name__)
 
-# A constant, not the run seed: every rank draws the sample independently, and differing seeds would
-# make ranks generate from different prompts and gather mismatched rows.
+# A constant: every rank draws the sample independently, and differing seeds would gather mismatched rows.
 _SAMPLE_SEED = 42
 # Prompts are tail-truncated in the log table, so a long-context prompt does not crowd out the completion.
 _MAX_PRINTED_PROMPT_CHARS = 200
@@ -46,13 +45,8 @@ def _pretty_print_dataframe(df):
 
 
 def _generation_skip_reason(model) -> str | None:
-    """Why ``model`` cannot ``generate()`` here, or None.
-
-    The CP wrapper is searched for in the whole tree: under ``use_peft`` it sits inside
-    ``PeftModel.base_model.model`` and PEFT delegates ``generate`` to it. A TP shard is a DTensor on a
-    mesh naming a ``tp`` dim (HF ``tp_plan`` and toolkit attention-only TP alike); ``_tp_plan`` is
-    populated on every load, TP or not, so it is no signal.
-    """
+    """Why ``model`` cannot ``generate()`` here, or None. The CP wrapper is searched in the whole tree, since PEFT
+    delegates ``generate`` to it. A TP shard is a DTensor on a mesh naming a ``tp`` dim; ``_tp_plan`` is no signal."""
     if isinstance(model, PipelineStageModule):
         return (
             "a pipeline-parallel stage holds only part of the model and cannot generate. "
@@ -66,12 +60,8 @@ def _generation_skip_reason(model) -> str | None:
 
 
 def _uses_collective_forward(model) -> bool:
-    """Whether every rank must join the forward: FSDP, EP layers or DTensor parameters.
-
-    FSDP is read off the ``_is_fsdp_managed_module`` stamp it puts on every module it manages; a
-    DTensor check alone would miss FSDP2 under ``reshard_after_forward=False``, which leaves plain
-    tensors.
-    """
+    """Whether every rank must join the forward. FSDP is read off its ``_is_fsdp_managed_module`` stamp, since a
+    DTensor check would miss FSDP2 under ``reshard_after_forward=False``, which leaves plain tensors."""
     return (
         hasattr(model, "_is_fsdp_managed_module")
         or bool(named_ep_layers(model))
@@ -81,11 +71,8 @@ def _uses_collective_forward(model) -> bool:
 
 @contextmanager
 def _gradient_checkpointing_disabled(model):
-    """Gradient checkpointing off for the block, then back on for exactly the modules that had it.
-
-    Switching it back on everywhere would enable it on layers a partially checkpointed model
-    deliberately left off, changing memory and step time for the rest of training.
-    """
+    """Gradient checkpointing off for the block, then back on only for the modules that had it: a partially
+    checkpointed model left the others off deliberately."""
     enabled = [module for module in model.modules() if getattr(module, "gradient_checkpointing", False)]
     for module in enabled:
         module.gradient_checkpointing = False
@@ -97,12 +84,8 @@ def _gradient_checkpointing_disabled(model):
 
 
 class GenerateExamplesCallback(TrainerCallback):
-    """Generate text examples from a tokenized dataset during evaluation and log them.
-
-    ``logger_backend`` (``'clearml'`` or ``'wandb'``) receives the table; any other value only prints
-    the sample to the log. DDP splits the samples across ranks (gathered on rank 0); FSDP and EP
-    generate on all ranks together; PP, CP and TP are skipped (incompatible with generate).
-    """
+    """Log generations at evaluation: ``logger_backend`` (``'clearml'``, ``'wandb'``) receives the table, else print
+    only. DDP splits samples across ranks; FSDP and EP generate on all ranks together; PP, CP and TP are skipped."""
 
     def __init__(
         self,
@@ -124,12 +107,8 @@ class GenerateExamplesCallback(TrainerCallback):
 
     @classmethod
     def from_config(cls, args, training_config, generate_dataset, tokenizer) -> "GenerateExamplesCallback | None":
-        """Build the callback from script args, or ``None`` when it cannot run.
-
-        ``None`` unless ``args.generate_eval_examples`` is set and ``generate_dataset`` carries
-        tokenized ``input_ids``: generation replays the tokenized prompt, so an untokenized or absent
-        generate split (the VLM path, for instance) cannot be generated from.
-        """
+        """``None`` unless ``args.generate_eval_examples`` is set and ``generate_dataset`` carries tokenized
+        ``input_ids``, since generation replays the tokenized prompt."""
         if not args.generate_eval_examples:
             return None
         if generate_dataset is None or "input_ids" not in generate_dataset.column_names:
@@ -145,8 +124,7 @@ class GenerateExamplesCallback(TrainerCallback):
         model = kwargs["model"]
         model.eval()
 
-        # The peel must drop torch.compile's OptimizedModule too: a compiled root would hide a PP stage
-        # from the root isinstance check and run generate() on a partial model.
+        # Must also drop torch.compile's OptimizedModule: a compiled root hides a PP stage, generating on part of it.
         unwrapped = unwrap_framework_wrappers(model)
 
         reason = _generation_skip_reason(unwrapped)
@@ -183,11 +161,8 @@ class GenerateExamplesCallback(TrainerCallback):
             _pretty_print_dataframe(combined_df.sample(n_print, random_state=_SAMPLE_SEED))
 
     def _generate_all_ranks(self, model) -> list[dict]:
-        """Generate every sample on every rank, between barriers.
-
-        Forced greedy: a collective forward requires every rank to run the same number of decode
-        steps, and sampling would diverge ranks on EOS timing and hang the job.
-        """
+        """Forced greedy, between barriers: sampling would diverge ranks on EOS timing, and a collective forward needs
+        every rank to run the same number of decode steps."""
         barrier()
         records = [
             self._generate_single(model, example, greedy=True)
@@ -204,8 +179,7 @@ class GenerateExamplesCallback(TrainerCallback):
         local_records = []
         for index in range(rank, len(self.samples), world_size):
             example = self.samples[index]
-            # A per-example failure must not skip the collective all_gather_object below, which
-            # would hang the peers.
+            # A per-example failure must not skip the collective all_gather_object below and hang the peers.
             try:
                 record = self._generate_single(model, example)
             except Exception as e:

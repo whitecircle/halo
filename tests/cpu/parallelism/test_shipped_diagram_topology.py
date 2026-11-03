@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: every topology a shipped diagram depicts must be one ``ParallelismConfig`` accepts.
-
-The EP diagrams are what a user copies a launch from, so a drawing of a shape the toolkit rejects at
-config time costs a whole multi-node allocation before the error appears. The generator declares
-its shapes in ``TOPOLOGIES`` and formats each subtitle from them; the literal is read out of the
-source (via ``ast``, so nothing is drawn) and replayed through the real validator.
-
-Run: ``python tests/cpu/parallelism/test_shipped_diagram_topology.py`` (or ``pytest -m cpu``).
-"""
+"""Every topology a shipped diagram depicts is one ``ParallelismConfig`` accepts. The ``TOPOLOGIES`` literal is read
+via ``ast``, since the module renders both figures at import."""
 
 from __future__ import annotations
 
@@ -27,8 +20,7 @@ def _source() -> str:
 
 
 def _topologies() -> dict[str, dict[str, int | str]]:
-    """The ``TOPOLOGIES`` literal, without importing the module (it renders both figures at import
-    and would overwrite the tracked PNGs)."""
+    """Importing would overwrite the tracked PNGs."""
     for node in ast.walk(ast.parse(_source())):
         if isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "TOPOLOGIES" for t in node.targets
@@ -38,8 +30,7 @@ def _topologies() -> dict[str, dict[str, int | str]]:
 
 
 def test_generator_declares_a_topology_per_figure_and_titles_from_it():
-    """Anti-vacuity: a subtitle typed by hand instead of formatted from the literal would let the
-    drawing drift from the shape this test validates."""
+    """A hand-typed subtitle would let the drawing drift from the validated shape."""
     topologies = _topologies()
     assert set(topologies) == set(_FIGURES), sorted(topologies)
     source = _source()

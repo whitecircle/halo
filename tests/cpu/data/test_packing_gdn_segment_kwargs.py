@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""GatedDeltaNet families get segment kwargs from the packing collator.
-
-``Qwen3_5(Moe)GatedDeltaNet`` and Qwen3-Next's linear-attention layers read ``seq_idx`` (their
-causal conv) and ``cu_seq_lens_q`` (the chunked delta rule) from forward kwargs; nothing derives
-them model-side, so without emission packed documents mix inside those layers while attention is
-correctly isolated. The factory switches the emission on for those families only — and refuses a
-multi-document run outright when the wheels that select the segment-aware kernels
-(``causal_conv1d``, ``fla``) are absent, because transformers' torch fallbacks read neither marker.
-
-    python tests/cpu/data/test_packing_gdn_segment_kwargs.py
-"""
+"""GatedDeltaNet families get segment kwargs from the packing collator: their layers read ``seq_idx`` and
+``cu_seq_lens_q`` from forward kwargs, and nothing derives them model-side. A multi-document run is refused when
+``causal_conv1d`` or ``fla`` is absent, since transformers' torch fallbacks read neither marker."""
 
 import importlib.util
 from unittest.mock import MagicMock
@@ -45,13 +37,8 @@ def make_tokenizer() -> MagicMock:
 
 
 def _backends(monkeypatch, missing: tuple[str, ...] = ()) -> None:
-    """Force transformers' GDN fast-path predicates, ``missing`` reading as unavailable.
-
-    The real predicates (``is_causal_conv1d_available`` / ``is_flash_linear_attention_available``)
-    also require a CUDA-capable torch, so on a CPU test host both read as "fallback" — the allowed
-    cases have to force them on, and the refusal cases pick one off. This is how an environment
-    without them — a bare pip install, a slim CI image, a CPU box — reaches the factory.
-    """
+    """Force transformers' GDN fast-path predicates, ``missing`` reading as unavailable. The real ones also require
+    a CUDA-capable torch, so on a CPU host both read as fallback."""
     patched = tuple((name, (lambda ok=(name not in missing): ok)) for name, _ in GDN_SEGMENT_AWARE_BACKENDS)
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", patched)
 
@@ -73,8 +60,7 @@ def test_factory_emits_segment_kwargs_for_gdn_families(monkeypatch):
     assert torch.equal(batch["cu_seq_lens_q"], batch["cu_seq_lens_k"])
     assert batch["max_length_q"] == 3 and batch["max_length_k"] == 3
 
-    # The boundaries must agree with what flash attention would re-derive from position_ids —
-    # disagreement would silently change attention itself, not just the delta rule.
+    # The boundaries must agree with what flash attention re-derives from position_ids, or attention itself changes.
     positions = batch["position_ids"][0]
     starts = (positions == 0).nonzero(as_tuple=True)[0].tolist()
     assert batch["cu_seq_lens_q"].tolist() == [*starts, positions.numel()]
@@ -109,10 +95,8 @@ def test_other_families_get_no_segment_kwargs():
 
 @pytest.mark.parametrize("missing", ["causal_conv1d", "fla>=0.2.2"])
 def test_packing_refused_when_a_segment_aware_wheel_is_missing(monkeypatch, missing):
-    """Isolation here is not a property of the collator: transformers picks the segment-aware conv and
-    delta-rule kernels on those imports, and its torch fallbacks drop ``seq_idx`` / ``cu_seq_lens_q``
-    without a word. Emitting the markers into a fallback that ignores them trains on cross-document
-    conv and recurrent state, so the run must be refused rather than silently wrong."""
+    """transformers picks the segment-aware kernels on those imports, and its torch fallbacks drop the markers
+    without a word, training on cross-document conv and recurrent state."""
     _backends(monkeypatch, missing=(missing,))
     config = Qwen3NextConfig(num_hidden_layers=1)
     config._attn_implementation = "flash_attention_2"
@@ -125,7 +109,7 @@ def test_packing_refused_when_a_segment_aware_wheel_is_missing(monkeypatch, miss
 
 
 def test_padding_free_refused_when_a_wheel_is_missing(monkeypatch):
-    """padding_free puts several documents in one row too — same exposure, same refusal."""
+    """padding_free puts several documents in one row too."""
     _backends(monkeypatch, missing=("fla>=0.2.2",))
     config = Qwen3NextConfig(num_hidden_layers=1)
     config._attn_implementation = "flash_attention_2"
@@ -134,8 +118,8 @@ def test_padding_free_refused_when_a_wheel_is_missing(monkeypatch):
 
 
 def test_packing_allowed_when_both_wheels_are_importable(monkeypatch):
-    """Anti-vacuity: with the backends available packing still builds, and the image really ships the
-    wheels (the predicates additionally require CUDA, which a CPU test host does not have)."""
+    """With the backends available packing builds, and the image ships the wheels (the predicates also require
+    CUDA)."""
     assert all(importlib.util.find_spec(wheel) is not None for wheel in ("causal_conv1d", "fla")), (
         "this image is missing a GDN wheel — the refusal above would not be provably caused by hiding it"
     )
@@ -160,7 +144,7 @@ def test_other_families_are_not_gated_on_the_gdn_wheels(monkeypatch):
 
 
 def test_unpacked_gdn_run_is_not_gated(monkeypatch):
-    """One document per row has no boundary to cross — the wheels are irrelevant there."""
+    """One document per row has no boundary to cross."""
     _backends(monkeypatch, missing=tuple(name for name, _ in GDN_SEGMENT_AWARE_BACKENDS))
     config = Qwen3NextConfig(num_hidden_layers=1)
     config._attn_implementation = "flash_attention_2"

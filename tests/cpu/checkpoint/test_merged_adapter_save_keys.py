@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""The merged EP save must write BASE-model key names.
-
-``merge_expert_lora_on_save`` routes a LoRA run's save through ``save_ep_gathered_checkpoint``, which walks a
-PEFT-wrapped module tree. Three things have to happen to every key or the resulting checkpoint is
-silently wrong rather than broken:
-
-  * the ``base_model.model.`` prefix and ``.base_layer`` infix PEFT introduces must come off, or
-    ``from_pretrained`` matches nothing and leaves those weights randomly initialised;
-  * adapter tensors must be dropped — the save folds their delta into the base weight as it writes
-    it, so writing them too would apply it twice on a PEFT-aware reload;
-  * a ``modules_to_save`` pair must collapse to the TRAINED copy, not the frozen ``original_module``
-    one. Reachable under EP via ``lora_modules_to_save: [router]``, which the EP layer's own gather
-    walks.
-
-Run: pytest tests/cpu/checkpoint/test_merged_adapter_save_keys.py
-"""
+"""The merged EP save writes base-model key names, or the checkpoint is silently wrong.
+``lora_modules_to_save: [router]`` makes the trained-copy collapse reachable under EP."""
 
 from __future__ import annotations
 
@@ -42,18 +28,17 @@ class _TinyLM(nn.Module):
 
 
 def test_lora_wrapped_base_weight_gets_its_plain_name():
-    """``q_proj.base_layer.weight`` is what a LoRA-wrapped Linear calls its frozen weight."""
     assert _remap()(f"{LAYER}.self_attn.q_proj.base_layer.weight") == "model.layers.0.self_attn.q_proj.weight"
 
 
 def test_adapter_tensors_are_dropped():
-    """Their delta is already inside the base weight; writing them repeats it on a PEFT reload."""
+    """Their delta is in the base weight; writing them repeats it on a PEFT reload."""
     for suffix in ("lora_A.default.weight", "lora_B.default.weight"):
         assert _remap()(f"{LAYER}.self_attn.q_proj.{suffix}") is None
 
 
 def test_modules_to_save_pair_collapses_to_the_trained_copy():
-    """The frozen half drops; the trained half takes the base name — so exactly one key is written."""
+    """Exactly one key is written."""
     trained = _remap()(f"{LAYER}.mlp.gate.modules_to_save.default.weight")
     frozen = _remap()(f"{LAYER}.mlp.gate.original_module.weight")
     assert trained == "model.layers.0.mlp.gate.weight"
@@ -61,13 +46,11 @@ def test_modules_to_save_pair_collapses_to_the_trained_copy():
 
 
 def test_cp_and_peft_corrections_compose():
-    """EP+CP+LoRA: the Ulysses wrapper level and the PEFT levels must both come off the same key."""
     key = f"{LAYER}.self_attn.original_attention.q_proj.base_layer.weight"
     assert _remap(cp=True)(key) == "model.layers.0.self_attn.q_proj.weight"
 
 
 def test_non_peft_keys_are_untouched():
-    """The non-adapter save path must be byte-for-byte unchanged by the PEFT seam."""
     remap = _remap(peft=False)
     assert remap("model.layers.0.mlp.experts.gate_up_proj") == "model.layers.0.mlp.experts.gate_up_proj"
     # `lora_` appears inside the native grouped adapter attrs; without a peft_prefix nothing is dropped.

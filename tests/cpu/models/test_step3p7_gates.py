@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""CPU gates for Step-3.7-Flash (``step3p7``): parallelism, attention, loading and balancing verdicts.
-
-Step-3.7-Flash is a composite VLM (``Step3p7ForConditionalGeneration``, no CausalLM sibling) whose
-45-layer text tower interleaves full and sliding attention on a period-4 pattern with PER-LAYER
-head counts (64 full / 96 sliding via ``per_layer_config``), gates every head's attention output
-through a sigmoid ``g_proj``, declares ``_supports_flash_attn = False``, and strips the aux-loss
-fields (``router_aux_loss_coef`` / ``output_router_logits``) from its config entirely. Each fact
-closes a toolkit path that must refuse LOUDLY at config time — and the per-layer head counts make
-the bare ``config.num_attention_heads`` read RAISE, so every reachable consumer must resolve heads
-through the per-layer-aware seam instead.
-
-    python tests/cpu/models/test_step3p7_gates.py
-"""
+"""Step-3.7-Flash (``step3p7``) parallelism, attention, loading and balancing verdicts. Its per-layer head counts make
+the bare ``config.num_attention_heads`` read raise, so every consumer resolves heads through the per-layer seam."""
 
 import pytest
 import torch
@@ -45,8 +34,7 @@ from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_f
 from halo.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
 from tests.common.distributed import fake_process_group_mesh
 
-# The real checkpoint's shape at divisibility floors: period-4 layer_types (full, sliding x3),
-# HETEROGENEOUS head counts (4 full / 6 sliding, mirroring the hub's 64/96), dense + sparse MLPs.
+# The real checkpoint's shape at divisibility floors: head counts 4 full / 6 sliding mirror the hub's 64/96.
 _PERIOD = ["full_attention", "sliding_attention", "sliding_attention", "sliding_attention"]
 TINY_STEP3P7_TEXT_CONFIG = {
     "vocab_size": 64,
@@ -83,22 +71,16 @@ def _composite_config() -> Step3p7Config:
 
 
 class _ConfigOnlyShell(nn.Module):
-    """A module tree with no recognisable layers — the meta-init shape CP validates config-first."""
+    """No recognisable layers: the meta-init shape CP validates config-first."""
 
     def __init__(self, config):
         super().__init__()
         self.config = config
 
 
-# Attention resolution
-
-
 def test_attention_resolution_lands_on_sdpa():
-    """``Step3p7ForConditionalGeneration._supports_flash_attn = False`` — resolved through the
-    ImageTextToText mapping, since no CausalLM sibling exists — must divert every flash request to
-    sdpa at resolve time; returning flash defers the failure to transformers' model build, after
-    the whole checkpoint has been fetched. Not the FA4 backward refusal: this one derives from the class
-    flag and covers FA2/FA3 too."""
+    """``_supports_flash_attn = False`` diverts every flash request to sdpa at resolve time. Returning flash would
+    defer the failure to transformers' model build, after the whole checkpoint has been fetched."""
     assert supports_fa4_backward(_composite_config()) is True
     expected = {
         None: "sdpa",
@@ -114,35 +96,23 @@ def test_attention_resolution_lands_on_sdpa():
         assert resolved == backend, requested
 
 
-# Context parallelism
-
-
 def test_cp_wrapper_lookup_refuses_step3p7():
-    """No Ulysses wrapper claims ``Step3p7Attention`` (per-layer head counts, per-head sigmoid
-    ``g_proj`` gate applied after the attention output, sliding masks), and the family has no
-    linear-attention layers so the ``layer_types`` gate stays silent — the wrapper lookup itself is
-    the refusal, and it must fire loudly instead of leaving layers unwrapped."""
+    """No Ulysses wrapper claims ``Step3p7Attention`` (per-layer head counts, ``g_proj`` gate, sliding masks). The
+    family has no linear-attention layers, so the ``layer_types`` gate stays silent and the wrapper lookup refuses."""
     assert "Step3p7Attention" not in ULYSSES_ATTENTION_MAP
     with pytest.raises(CPConfigError, match="does not appear to use a supported attention module"):
         reject_unsupported_ulysses_model(_tiny_text_model(), 2)
 
 
 def test_cp_config_only_shell_hits_the_same_refusal():
-    """A meta-init shell (no instantiated modules) must be refused by the same lookup — the
-    config-only ``layer_types`` gate matches nothing here (no ``linear_attention`` entries), so the
-    wrapper scan is what stands between step3p7 and a silent unwrapped CP run."""
+    """The config-only ``layer_types`` gate matches nothing here, so the wrapper scan stops a silent CP run."""
     with pytest.raises(CPConfigError, match="does not appear to use a supported attention module"):
         reject_unsupported_ulysses_model(_ConfigOnlyShell(_composite_config()), 2)
 
 
-# Tensor parallelism
-
-
 def test_tp_shards_zero_layers_and_raises():
-    """``Step3p7Attention`` is not in TP_SHARDABLE_ATTENTION_CLASSES (per-layer head counts break
-    the uniform q/k/v plan), so selective TP must reach the zero-sharded-layers raise — which also
-    requires the head-divisibility preamble to survive the per-layer-heterogeneous config instead
-    of dying on the ambiguous ``num_attention_heads`` read."""
+    """Per-layer head counts break the uniform q/k/v plan. The head-divisibility preamble must also survive the
+    per-layer config to reach this raise."""
     assert "Step3p7Attention" not in TP_SHARDABLE_ATTENTION_CLASSES
     model = _tiny_text_model()
     with fake_process_group_mesh(rank=0, world_size=2) as mesh:
@@ -151,10 +121,8 @@ def test_tp_shards_zero_layers_and_raises():
 
 
 def test_tp_head_divisibility_checks_every_per_layer_head_count():
-    """The gate reads heads through the per-layer seam (the bare attribute raises transformers'
-    AmbiguousGlobalPerLayerAttributeError) and must check EVERY declared value: 4 and 6 both split
-    2-ways, but tp4 must be rejected on the sliding layers' 6 even though the full layers' 4
-    divides."""
+    """The bare attribute raises transformers' AmbiguousGlobalPerLayerAttributeError. 4 and 6 both split 2-ways, but
+    tp4 must fail on the sliding layers' 6."""
     config = _tiny_text_config()
     validate_tp_head_divisibility(config, 1)
     validate_tp_head_divisibility(config, 2)
@@ -162,14 +130,9 @@ def test_tp_head_divisibility_checks_every_per_layer_head_count():
         validate_tp_head_divisibility(config, 4)
 
 
-# Pipeline parallelism
-
-
 def test_pp_accepts_a_loaded_step3p7_text_model():
-    """Registered on the stock forward: the decoder threads hidden states only (no cross-layer
-    streams), the embeddings are untied, and a freshly constructed model declares no MTP tail
-    (``num_nextn_predict_layers`` stays 0 — the registered spelling — because transformers drops
-    the checkpoint's MTP layers at load), so the contiguous split must accept it."""
+    """The decoder threads hidden states only, the embeddings are untied, and transformers drops the checkpoint's MTP
+    layers at load, so the contiguous split must accept it."""
     spec = PP_SPEC_MAP["Step3p7TextModel"]
     assert spec.validated and spec.refusal is None and spec.stream_forward is None
     assert "num_nextn_predict_layers" in MTP_LAYER_COUNT_FIELDS
@@ -179,19 +142,15 @@ def test_pp_accepts_a_loaded_step3p7_text_model():
 
 
 def test_pp_partition_respects_the_layer_types_period():
-    """``layer_types_period`` must read the period-4 pattern off the text config, and the
-    head-weighted rebalance must move whole periods only — the same weights cut mid-period when the
-    period is not enforced."""
+    """The same weights cut mid-period when the period is not enforced."""
     assert layer_types_period(_tiny_text_config()) == 4
     assert compute_layer_partition(8, 2, head_layer_equivalents=2.0, boundary_period=1) == [(0, 5), (5, 8)]
     assert compute_layer_partition(8, 2, head_layer_equivalents=2.0, boundary_period=4) == [(0, 4), (4, 8)]
 
 
 def test_pp_rebase_gate_judges_shift_invariance_on_the_real_truncated_pattern():
-    """The real checkpoint holds 45 layers: 11 whole periods plus one trailing full-attention layer
-    (the 48-entry hub list minus the 3-layer MTP pad). The stage gate compares suffix to prefix, so
-    a whole-period offset passes even though 45 is not a period multiple — the manual ``pp_split``
-    path — while any other offset would swap sliding and full masks and must refuse."""
+    """The real 45 layers are 11 whole periods plus one trailing full-attention layer (the 48-entry hub list minus the
+    3-layer MTP pad). A whole-period offset passes even so; any other would swap sliding and full masks."""
     config = Step3p7TextConfig(
         **{
             **TINY_STEP3P7_TEXT_CONFIG,
@@ -207,14 +166,8 @@ def test_pp_rebase_gate_judges_shift_invariance_on_the_real_truncated_pattern():
         validate_partition(shell, [(0, 23), (23, 45)])
 
 
-# Balancing config-field registries
-
-
 def test_balancing_registries_resolve_on_the_real_config():
-    """The router registries must resolve step3p7's spellings on the text config AND through the
-    composite wrapper — ``num_experts_per_tok`` directly, the expert count through the
-    ``num_local_experts``/``moe_num_experts`` attribute_map entries onto ``n_routed_experts``,
-    ``moe_intermediate_size`` directly. A miss silently classifies the model as dense."""
+    """A miss silently classifies the model as dense."""
     assert Step3p7TextConfig.attribute_map.get("moe_num_experts") == "n_routed_experts"
     assert Step3p7TextConfig.attribute_map.get("moe_top_k") == "num_experts_per_tok"
     for config in (Step3p7TextConfig(), Step3p7Config()):
@@ -228,11 +181,8 @@ def test_balancing_registries_resolve_on_the_real_config():
 
 
 def test_balancing_auto_resolves_none_and_an_explicit_aux_loss_warns_and_stays_off():
-    """Plain HF tree: no native ``balancing_biases`` buffer, no EP layers, and a forward that never
-    takes ``output_router_logits`` — so ``auto`` resolves to ``none``; like Gemma 4, plain-tree
-    step3p7 has no balancing route. An EXPLICIT ``aux_loss`` still has to survive the family
-    stripping ``router_aux_loss_coef`` from its config entirely: the no-usable-coefficient branch
-    stamps router logits forced-off and leaves them off, instead of crashing on the absent field."""
+    """No native bias buffer, no EP layers and a forward that never takes ``output_router_logits``, so like Gemma 4 the
+    plain tree has no route. An explicit ``aux_loss`` must survive the config having no ``router_aux_loss_coef``."""
     model = _tiny_text_model()
     with pytest.raises(AttributeError):
         _ = model.config.router_aux_loss_coef
@@ -242,13 +192,8 @@ def test_balancing_auto_resolves_none_and_an_explicit_aux_loss_warns_and_stays_o
     assert not getattr(model.config, "output_router_logits", False)
 
 
-# Per-layer head heterogeneity
-
-
 def test_per_layer_head_reads_resolve_through_the_registry_seam():
-    """``config.num_attention_heads`` RAISES on this family (a RuntimeError the getattr default
-    does not swallow), so every reachable consumer must read heads through ``get_config_field``'s
-    per-layer resolution; the homogeneous fields keep resolving directly."""
+    """A RuntimeError the getattr default does not swallow, so consumers read heads through ``get_config_field``."""
     config = _tiny_text_config()
     with pytest.raises(RuntimeError):
         _ = config.num_attention_heads
@@ -258,19 +203,13 @@ def test_per_layer_head_reads_resolve_through_the_registry_seam():
 
 
 def test_sink_reconstruction_is_family_gated_before_the_head_read():
-    """``neutralized_gpt_oss_sinks`` runs on every gathered save and RL weight sync; reading the
-    head count before the family gate would raise on step3p7's ambiguous ``num_attention_heads``. A
-    non-sinks model must come back empty without touching that field."""
+    """``neutralized_gpt_oss_sinks`` runs on every gathered save and RL weight sync; a head read before the family gate
+    would raise here."""
     assert neutralized_gpt_oss_sinks(_tiny_text_model()) == {}
 
 
-# VLM classification
-
-
 def test_vlm_probe_classifies_step3p7():
-    """The composite config declares multimodality (ImageTextToText mapping + ``vision_config``
-    sub-config) and the bare text config does not; the checkpoint-level probe must answer from the
-    config, not the name heuristic."""
+    """The checkpoint-level probe answers from the config over the name heuristic."""
     assert config_declares_multimodality(Step3p7Config()) is True
     assert config_declares_multimodality(Step3p7TextConfig()) is False
     assert is_vlm_model("stepfun-ai/Step-3.7-Flash", config=Step3p7Config()) is True

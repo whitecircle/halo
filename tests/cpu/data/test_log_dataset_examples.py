@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""
-Tests for log_dataset_examples decoded-sample dumping.
-
-On-disk decoded-sample writing is opt-in via the ``write_decoded_samples`` flag
-(wired from the ``log_decoded_samples`` YAML field on CommonScriptArguments). It
-is off by default so ordinary training runs do not emit sample files. These tests
-cover the gate, file naming, the input_ids skip, the no-tokenizer skip,
-DatasetDict handling, the FS-aware writer gate (the same one ``run.log``
-uses, so a non-shared filesystem gets the samples on every node), and the config
-default.
-
-Run: python tests/cpu/data/test_log_dataset_examples.py
-"""
+"""``log_dataset_examples``' opt-in decoded-sample dump (``write_decoded_samples``): the gate, file naming, the
+skips, DatasetDict handling and the FS-aware writer gate."""
 
 import os
 import tempfile
@@ -25,7 +14,7 @@ from halo.entrypoints.data_setup import log_dataset_examples
 
 
 class FakeTokenizer:
-    """Offline stand-in — log_dataset_examples only calls .decode()."""
+    """Offline stand-in: log_dataset_examples only calls .decode()."""
 
     def decode(self, input_ids, skip_special_tokens=False):
         assert skip_special_tokens is False, "decoded samples must keep special tokens"
@@ -92,8 +81,6 @@ def test_skips_dataset_without_input_ids():
 
 
 def test_no_tokenizer_no_write():
-    """Enabled with an output_dir but no tokenizer: there is nothing to decode with, so the dump
-    must be skipped rather than written from raw ids."""
     with tempfile.TemporaryDirectory() as d:
         log_dataset_examples({"train": _ids_dataset()}, output_dir=d, write_decoded_samples=True)
         assert not os.path.exists(os.path.join(d, "log")), "a missing tokenizer must not produce a sample dump"
@@ -107,7 +94,7 @@ def test_datasetdict_uses_first_split():
 
 
 def test_off_the_fs_save_rank_no_write():
-    """A rank that is not the FS-aware save rank writes nothing — else N ranks stampede one path."""
+    """Otherwise N ranks stampede one path."""
     original = data_setup.is_fs_save_rank
     data_setup.is_fs_save_rank = lambda: False
     try:
@@ -121,12 +108,8 @@ def test_off_the_fs_save_rank_no_write():
 
 
 def test_non_main_fs_save_rank_still_writes():
-    """The write gate is the FS-aware save rank, NOT global rank 0.
-
-    Under ``DIST_SHARED_FILESYSTEM=0`` each node's local main is the save rank and owns that node's
-    ``<output_dir>/log/`` (where ``run.log`` is also teed). Gating the sample dump on global rank 0
-    instead leaves every other node's log dir without the samples it is supposed to sit beside.
-    """
+    """Under ``DIST_SHARED_FILESYSTEM=0`` each node's local main owns that node's ``<output_dir>/log/``; gating on
+    global rank 0 leaves other nodes without the samples."""
     original_main, original_save = data_setup.is_global_main_process, data_setup.is_fs_save_rank
     data_setup.is_global_main_process = lambda: False
     data_setup.is_fs_save_rank = lambda: True

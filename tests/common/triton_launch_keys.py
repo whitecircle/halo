@@ -1,7 +1,5 @@
-"""The Triton specialization of each launch of interpreted kernels: under ``TRITON_INTERPRET=1`` a kernel runs on CPU,
-and a launch's key is what the compiled kernel's binder makes of the same arguments, so a CPU test compares the
-binaries two launches would run on a GPU without one.
-"""
+"""The Triton specialization of each launch under ``TRITON_INTERPRET=1``, so a CPU test compares the binaries two
+launches would run on a GPU."""
 
 from __future__ import annotations
 
@@ -20,8 +18,8 @@ _KEY_TARGET = GPUTarget("cuda", 100, 32)
 
 @contextmanager
 def recorded_launch_keys(kernels: Sequence[InterpretedFunction]) -> Iterator[list[tuple[str, list[str], tuple]]]:
-    """A list that collects ``(kernel name, parameter names, specialization key)`` for each launch of ``kernels`` while
-    active. Raises unless the kernels run under ``TRITON_INTERPRET=1``."""
+    """Collects ``(kernel name, parameter names, specialization key)`` per launch while active. Raises unless under
+    ``TRITON_INTERPRET=1``."""
     if not all(isinstance(kernel, InterpretedFunction) for kernel in kernels):
         raise RuntimeError("launch keys are read from kernels run under TRITON_INTERPRET=1")
     backend = make_backend(_KEY_TARGET)
@@ -33,7 +31,6 @@ def recorded_launch_keys(kernels: Sequence[InterpretedFunction]) -> Iterator[lis
 
 
 def moved_arguments(names: list[str], key: tuple, reference: tuple) -> list[str]:
-    """The parameters of ``names`` whose specialization differs between ``key`` and ``reference``."""
     return [arg for arg, a, b in zip(names, key, reference, strict=True) if a != b]
 
 

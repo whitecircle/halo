@@ -1,7 +1,6 @@
-"""The length-ordered deal of a generation round's rows into its micro-batches. Under ZeRO-3 or an EP dispatch the
-ranks forward their rows in lock-step, so each row costs the longest row its peers run beside it; the deal ranks
-every rank's rows longest first and spreads them over the micro-batches alike, so the ``i``-th longest rows of all
-ranks run together. Only the order changes, and only objectives that read no micro-batch composition are admitted."""
+"""The length-ordered deal of a generation round's rows into its micro-batches. Under ZeRO-3 or an EP dispatch each row
+costs the longest row its peers run beside it, so the ``i``-th longest rows of all ranks run together. Only the order
+changes, and only objectives that read no micro-batch composition are admitted."""
 
 import contextlib
 import logging
@@ -14,16 +13,14 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# The TRL loss types this trainer accepts whose loss over a generation round is the same however its rows fall
-# into the round's equal-sized micro-batches: a row mean, a fixed-width or a round-global normalizer. bnpo is
-# not one, as it divides each micro-batch by that micro-batch's own token count.
+# TRL loss types whose round loss is the same however rows fall into equal-sized micro-batches: a row mean, a
+# fixed-width or a round-global normalizer. bnpo is not one, as it divides each micro-batch by its own token count.
 MICROBATCH_INVARIANT_LOSS_TYPES = ("grpo", "sapo", "dr_grpo", "dapo", "cispo", "luspo")
 
 
 def length_deal_order(lengths: torch.Tensor, chunks: int) -> torch.Tensor:
-    """The deal of ``len(lengths)`` rows into ``chunks`` equal contiguous micro-batches: rows ranked longest first
-    (ties by index), the ``i``-th to micro-batch ``i % chunks`` at slot ``i // chunks``. Returns the CPU index
-    tensor whose ``p``-th entry is the row placed at position ``p``."""
+    """Rows ranked longest first (ties by index), the ``i``-th to micro-batch ``i % chunks`` at slot ``i // chunks``.
+    Returns the CPU index tensor whose ``p``-th entry is the row at position ``p``."""
     rows = lengths.numel()
     if chunks < 1 or rows % chunks:
         raise ValueError(f"Cannot deal {rows} rows into {chunks} equal micro-batches.")
@@ -35,8 +32,7 @@ def length_deal_order(lengths: torch.Tensor, chunks: int) -> torch.Tensor:
 
 
 def permute_rows(batch: dict, order: torch.Tensor) -> dict:
-    """``batch`` with every row-aligned value taken in ``order``, the way TRL's ``shuffle_sequence_dict`` permutes
-    a generation batch: ``None`` and 0-dim tensors pass through, lists are reindexed."""
+    """Like TRL's ``shuffle_sequence_dict``: ``None`` and 0-dim tensors pass through, lists are reindexed."""
 
     def permute(value):
         if value is None or (isinstance(value, torch.Tensor) and value.ndim == 0):
@@ -49,9 +45,8 @@ def permute_rows(batch: dict, order: torch.Tensor) -> dict:
 
 
 class LengthOrderedRowsMixin:
-    """Deals each training round's rows by length in place of TRL's buffer shuffle, and orders the round's no-grad
-    forwards the same way; ``length_ordered_microbatches`` resolves once, at construction. Mixed in ahead of
-    ``GenerationRoundMixin``, whose ``_prepare_inputs`` re-syncs the TP group after TRL's."""
+    """Deals each training round's rows by length in place of TRL's buffer shuffle, and orders the no-grad forwards
+    alike. Mixed in ahead of ``GenerationRoundMixin``, whose ``_prepare_inputs`` re-syncs the TP group after TRL's."""
 
     _orders_rows_by_length = False
 
@@ -71,7 +66,6 @@ class LengthOrderedRowsMixin:
             )
 
     def _length_order_blocker(self) -> str | None:
-        """Why the deal cannot run on this config, ``None`` when it can."""
         args = self.args
         if self._misaligned_accumulation:
             return (
@@ -124,8 +118,7 @@ class LengthOrderedRowsMixin:
             trl_grpo_trainer.shuffle_sequence_dict = shuffle
 
     def _no_grad_row_order(self, attention_mask: torch.Tensor, mode: str) -> torch.Tensor | None:
-        """The deal of a train round's rows by the lengths its no-grad forwards run, on the mask's device;
-        ``None`` when the deal is off or in eval, where rows keep their batch order."""
+        """On the mask's device; ``None`` when the deal is off or in eval, where rows keep their batch order."""
         if not self._orders_rows_by_length or mode != "train":
             return None
         return length_deal_order(attention_mask.sum(dim=1), self.args.steps_per_generation).to(attention_mask.device)

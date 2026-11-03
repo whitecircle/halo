@@ -1,9 +1,5 @@
-"""Data-parallel-aware train, eval and test loaders for TP/CP/ETP/PP and pre-sharded datasets.
-
-The base ``Trainer`` shards by world size, wrong when model-parallel siblings need identical slices or the
-dataset is pre-sharded per DP rank; this passes the DP size/rank to ``prepare_data_loader``, equalizes
-pre-sharded lengths and stamps the epoch on the running loader.
-"""
+"""Data-parallel-aware train, eval and test loaders. The base ``Trainer`` shards by world size, wrong when
+model-parallel siblings need identical slices or a dataset is pre-sharded per DP rank."""
 
 from __future__ import annotations
 
@@ -33,13 +29,12 @@ from halo.trainers.trainer_rules import (
 
 logger = logging.getLogger(__name__)
 
-# "absent from the instance __dict__", distinct from a legitimately stored ``None``.
+# Absent from the instance __dict__, distinct from a stored ``None``.
 _UNSET = object()
 
 
 def find_batch_sampler_shard(loader) -> BatchSamplerShard | None:
-    """The ``BatchSamplerShard`` accelerate planted under ``loader`` (as ``batch_sampler``, or as ``sampler``
-    over a caller's batch sampler); ``None`` for a one-process loader or an iterable dataset."""
+    """The ``BatchSamplerShard`` under ``loader``; ``None`` for a one-process loader or an iterable dataset."""
     for candidate in (getattr(loader, "batch_sampler", None), getattr(loader, "sampler", None)):
         if isinstance(candidate, BatchSamplerShard):
             return candidate
@@ -47,9 +42,8 @@ def find_batch_sampler_shard(loader) -> BatchSamplerShard | None:
 
 
 def dp_representative_ranks(dp_rank_by_global_rank: Sequence[int]) -> list[int]:
-    """Global ranks whose chunks make a world gather one chunk per DP rank, in DP-rank order: the first
-    holder of each DP rank, since its TP/CP/ETP siblings contribute byte-identical duplicates. That turns
-    the world-order concatenation back into the dataset order a DP-sharded loader produced."""
+    """Global ranks that make a world gather one chunk per DP rank, in DP-rank order: the first holder of each DP rank,
+    since its TP/CP/ETP siblings contribute byte-identical duplicates."""
     first_holder: dict[int, int] = {}
     for global_rank, dp_rank in enumerate(dp_rank_by_global_rank):
         first_holder.setdefault(dp_rank, global_rank)
@@ -70,8 +64,8 @@ def _select_gathered_chunks(tensor: torch.Tensor, keep: Sequence[int], world_siz
 
 @contextlib.contextmanager
 def _instance_override(obj, name: str, value):
-    """Shadow ``obj.name`` with ``value`` for the block, then restore exactly what ``obj``'s instance
-    ``__dict__`` held: the earlier instance attribute, or none, so the class attribute shows again."""
+    """Shadow ``obj.name`` for the block, then restore what the instance ``__dict__`` held, so a class attribute shows
+    again."""
     saved = obj.__dict__.get(name, _UNSET)
     setattr(obj, name, value)
     try:
@@ -85,8 +79,7 @@ def _instance_override(obj, name: str, value):
 
 @contextlib.contextmanager
 def dp_scoped_gather(accelerator, keep: Sequence[int], world_size: int):
-    """Bind ``accelerator.gather`` to keep one chunk per DP rank for the block. The gather stays a world
-    collective; only its result is cut back to the chunks a DP-sharded loader produced."""
+    """Bind ``accelerator.gather`` to keep one chunk per DP rank; the gather stays a world collective."""
     original = accelerator.gather
 
     def _gather(input_data):
@@ -99,13 +92,8 @@ def dp_scoped_gather(accelerator, keep: Sequence[int], world_size: int):
 
 
 def set_sampler_epoch(dataloader: DataLoader, epoch: int) -> int:
-    """Set ``epoch`` on every sampler under ``dataloader``; returns how many took it.
-
-    accelerate probes for the epoch-seeded sampler at fixed depths, and a mid-epoch resume's
-    ``SkipBatchSampler`` adds a level a dispatching loader (or any chain accelerate did not re-plant)
-    falls out of, so the resumed epoch would redraw epoch 0's permutation. Walking ``.batch_sampler``
-    and ``.sampler`` finds the sampler at whatever depth the wrappers leave it.
-    """
+    """Set ``epoch`` on every sampler under ``dataloader``; returns how many took it. accelerate probes at fixed
+    depths, and a mid-epoch resume's ``SkipBatchSampler`` adds a level that would redraw epoch 0's permutation."""
     pending = [dataloader]
     visited = {id(dataloader)}
     applied = 0
@@ -125,32 +113,23 @@ def set_sampler_epoch(dataloader: DataLoader, epoch: int) -> int:
 
 
 def resolve_data_seed(args) -> int:
-    """The seed a run's data order derives from: ``data_seed`` when set, else ``seed`` (HF's convention)."""
     return args.data_seed if args.data_seed is not None else args.seed
 
 
 def uses_dp_sharded_loader(parallelism_config, dataset_presharded: bool) -> bool:
-    """True when DP < world_size (TP/CP/ETP/PP) or the dataset is pre-sharded per DP rank.
-
-    EP alone keeps the base flow (EP is orthogonal to DP) unless pre-sharded, where accelerate's
-    re-sharding would drop most of a disjoint slice. accelerate shards by GLOBAL rank, which would hand
-    the stages of one pipeline chain different rows, so the last stage would score another row set's labels.
-    """
+    """True when DP < world_size (TP/CP/ETP/PP) or pre-sharded. accelerate shards by GLOBAL rank, so the last stage of
+    a pipeline chain would score another row set's labels, and re-sharding drops most of a pre-sharded slice."""
     return parallelism_config.non_dp_replication_factor > 1 or dataset_presharded
 
 
 class DataParallelLoaderMixin:
-    """Train, eval and test loaders sharded over the data-parallel replicas. Mixed into the trainer."""
-
     def dp_shard_geometry(self) -> tuple[int, int]:
-        """``(size, rank)`` for splitting a dataset across DP replicas; ``(1, 0)`` for a pre-sharded one,
-        already this rank's disjoint slice."""
+        """``(size, rank)`` across DP replicas; ``(1, 0)`` for a pre-sharded dataset, already this rank's slice."""
         if self._dataset_presharded:
             return 1, 0
         return self.parallelism_config.data_parallel_size, self.parallelism_config.get_data_parallel_rank()
 
     def get_train_dataloader(self) -> DataLoader:
-        """The train loader, sharded over the DP replicas where the run shares batches across ranks."""
         if not self._needs_custom_dataloader():
             return super().get_train_dataloader()
 
@@ -174,7 +153,7 @@ class DataParallelLoaderMixin:
             params["sampler"] = self._get_train_sampler()
             params.setdefault("drop_last", self.args.dataloader_drop_last)
             if self.args.dataloader_num_workers > 0:
-                # Seed by DP rank, not global rank: TP/CP siblings must not desync on a stochastic transform.
+                # Seed by DP rank so TP/CP siblings don't desync on a stochastic transform.
                 params["worker_init_fn"] = partial(
                     seed_worker,
                     num_workers=self.args.dataloader_num_workers,
@@ -184,11 +163,10 @@ class DataParallelLoaderMixin:
         return self._prepare_dataloader(DataLoader(train_dataset, **params))
 
     def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:
-        """The eval loader, sharded over the DP replicas where the run shares batches across ranks."""
         if not self._needs_custom_dataloader():
             with self._eval_batch_size_as(self._eval_loader_batch_size()):
                 return super().get_eval_dataloader(eval_dataset=eval_dataset)
-        # Whether the caller named a split, decided before the cache resolves it to a dataset.
+        # Read before the cache resolves it to a dataset.
         caller_supplied = eval_dataset is not None
 
         def build(dataset):
@@ -202,7 +180,7 @@ class DataParallelLoaderMixin:
         return self._cached_eval_dataloader(eval_dataset, build)
 
     def get_test_dataloader(self, test_dataset) -> DataLoader:
-        """The ``predict()`` loader, DP-sharded like the eval one (HF sizes it ``eval_batch_size``)."""
+        """DP-sharded like the eval loader; HF sizes ``predict()`` by ``eval_batch_size``."""
         if not self._needs_custom_dataloader():
             return super().get_test_dataloader(test_dataset)
         if self._dataset_presharded:
@@ -211,13 +189,8 @@ class DataParallelLoaderMixin:
 
     @contextlib.contextmanager
     def data_parallel_sweep(self):
-        """COLLECTIVE. Pin a third-party accelerate sweep, its loader and its gather, to the DP axis.
-
-        A sweep that prepares its own loader and reassembles the per-rank results with
-        ``accelerator.gather`` (TRL's ``precompute_ref_log_probs``) keys both on the global rank, handing
-        TP/CP/ETP siblings different rows and carrying one duplicate per sibling. Routing the loader
-        through ``_prepare_dataloader`` and keeping one chunk per DP rank restores the dataset order.
-        """
+        """COLLECTIVE. Pin a third-party accelerate sweep (TRL's ``precompute_ref_log_probs``) to the DP axis: keyed on
+        the global rank, its loader splits siblings' rows and its gather carries duplicates."""
         accelerator = self.accelerator
         dp_rank_by_global_rank = self._data_parallel_rank_by_global_rank()
 
@@ -233,8 +206,7 @@ class DataParallelLoaderMixin:
             yield
 
     def _set_signature_columns_if_needed(self):
-        """Union the collator's ``required_dataset_columns`` into HF's signature-column set, so a collator
-        input that is no model-forward parameter (packing's ``seq_lengths``) survives column pruning."""
+        """Keep a collator's ``required_dataset_columns`` (packing's ``seq_lengths``) through column pruning."""
         super()._set_signature_columns_if_needed()
         if self._signature_columns:
             for column in getattr(getattr(self, "data_collator", None), "required_dataset_columns", ()):
@@ -242,25 +214,22 @@ class DataParallelLoaderMixin:
                     self._signature_columns.append(column)
 
     def _run_epoch(self, model, epoch, train_dataloader, *args, **kwargs):
-        """Stamp ``epoch`` onto the loader's whole sampler chain (:func:`set_sampler_epoch`), which the base's
-        own probes can miss on a resumed chain, then run the base's epoch unchanged."""
+        """Stamp ``epoch`` onto the whole sampler chain, which the base's own probes can miss on a resumed chain."""
         set_sampler_epoch(train_dataloader, epoch)
         return super()._run_epoch(model, epoch, train_dataloader, *args, **kwargs)
 
     def _needs_custom_dataloader(self) -> bool:
-        """:func:`uses_dp_sharded_loader` for this trainer's run."""
         return uses_dp_sharded_loader(self.parallelism_config, self._dataset_presharded)
 
     def _equalize_presharded_length(self, dataset, split: str = "train"):
-        """COLLECTIVE. Truncate a pre-sharded dataset to the global-minimum length, global rank 0 warning of the
-        largest drop any rank takes."""
+        """COLLECTIVE. Truncate a pre-sharded dataset to the global-minimum length, warning of the largest drop."""
         if not is_multi_rank_run():
             return dataset
         try:
             n = len(dataset)
         except TypeError:
             return dataset  # IterableDataset
-        # One all-reduce for both extremes: the MAX of the negated length is the MIN.
+        # One all-reduce for both: the MAX of the negated length is the MIN.
         max_len, negated_min_len = rank_max([n, -n])
         min_len = -negated_min_len
         if min_len == 0:
@@ -292,8 +261,8 @@ class DataParallelLoaderMixin:
         return dataset.select(range(min_len)) if min_len < n else dataset
 
     def _loader_params(self, dataset, batch_size: int, description: str) -> tuple[Any, dict]:
-        """Column-pruned dataset plus the ``DataLoader`` kwargs the train, eval and test paths share (HF
-        ``_get_dataloader``'s); sampler, ``drop_last`` and worker seeding stay with each caller."""
+        """Column-pruned dataset plus the ``DataLoader`` kwargs the train, eval and test paths share; sampler,
+        ``drop_last`` and worker seeding stay with each caller."""
         collator = self.data_collator
         # Pruning reads column_names, which only datasets.Dataset has.
         if isinstance(dataset, datasets.Dataset):
@@ -314,21 +283,17 @@ class DataParallelLoaderMixin:
         return dataset, params
 
     def _loader_collate_fn(self, collator):
-        """The collate function a loader batches with: ``collator``, under CP behind :class:`LeftPaddingGuard`, which
-        refuses a left-padded batch on the host before it moves to the device."""
+        """Under CP, :class:`LeftPaddingGuard` refuses a left-padded batch on the host before it moves to the
+        device."""
         return LeftPaddingGuard(collator) if self.parallelism_config.is_cp_mode else collator
 
     def _train_loader_batch_size(self) -> int:
-        """Rows one train-loader fetch returns. GRPO overrides it to draw a whole generation round."""
+        """GRPO overrides this to draw a whole generation round."""
         return self._train_batch_size
 
     def _get_train_sampler(self, *args, **kwargs):
-        """The base's train sampler, given a generator seeded with the run's data seed where its slot is empty.
-
-        An empty slot shuffles off the rank's own torch RNG, which pipeline stages and EP ranks consume
-        differently, while every rank of one DP split must draw the same permutation; accelerate's seedable
-        sampler restores that by itself, but never wraps HF's group-by-length sampler.
-        """
+        """An empty generator slot shuffles off the rank's own torch RNG, which pipeline stages and EP ranks consume
+        differently, and accelerate's seedable sampler never wraps HF's group-by-length sampler."""
         sampler = super()._get_train_sampler(*args, **kwargs)
         if getattr(sampler, "generator", _UNSET) is None:
             sampler.generator = torch.Generator().manual_seed(resolve_data_seed(self.args))
@@ -337,13 +302,8 @@ class DataParallelLoaderMixin:
     def _prepare_dataloader(
         self, dataloader: DataLoader, *, num_processes: int | None = None, process_index: int | None = None
     ) -> DataLoader:
-        """Prepare ``dataloader`` sharded over the DP replicas; ``num_processes``/``process_index`` override
-        the geometry (offline GRPO's self-sharding sampler passes 1/0 for device placement only).
-
-        accelerate's dispatching loader (its default for an iterable dataset) slices rank 0's batches by
-        GLOBAL rank, handing TP/CP/ETP siblings and pipeline peers different rows, so a loader sharded
-        fewer ways than the world never dispatches: an iterable dataset is sharded by DP rank instead.
-        """
+        """accelerate's dispatching loader slices rank 0's batches by GLOBAL rank, handing siblings and pipeline peers
+        different rows, so a loader sharded fewer ways than the world never dispatches."""
         if getattr(dataloader, "_is_accelerate_prepared", False):
             return dataloader
 
@@ -381,8 +341,8 @@ class DataParallelLoaderMixin:
 
     @contextlib.contextmanager
     def _eval_batch_size_as(self, rows: int):
-        """Present ``rows`` as the per-device eval batch while the base ``Trainer`` builds a loader, whose
-        builder takes no batch-size argument; every other reader sees the configured value."""
+        """Present ``rows`` as the per-device eval batch while the base ``Trainer`` builds a loader; its builder takes
+        no batch size."""
         per_device = self.args.per_device_eval_batch_size
         self.args.per_device_eval_batch_size = rows
         try:
@@ -391,18 +351,13 @@ class DataParallelLoaderMixin:
             self.args.per_device_eval_batch_size = per_device
 
     def _eval_loader_batch_size(self) -> int:
-        """Rows one eval-loader fetch returns. Env-GRPO overrides it — it draws a whole rollout round."""
+        """Env-GRPO overrides this to draw a whole rollout round."""
         return self.args.eval_batch_size
 
     def _cached_eval_dataloader(self, eval_dataset, build, key: str | None = None) -> DataLoader:
-        """Resolve the eval split, then hand it to ``build``, or reuse the prepared loader already built.
-
-        The persistent-worker cache holds the PREPARED loader: rebuilding one per ``evaluate()`` leaks a
-        worker pool. The key is the split name, so a hit is the same on every rank and ``build`` (which
-        issues collectives) stays in lockstep. An explicit ``key`` may be process-local (a fingerprint a
-        non-picklable transform randomized), so it hits only when every rank holds it; a rank that held it
-        keeps its own loader, since one replaced in the cache would keep its worker pool alive.
-        """
+        """Rebuilding per ``evaluate()`` leaks a worker pool. A split-name key hits alike on every rank, keeping
+        ``build``'s collectives in lockstep; an explicit ``key`` may be process-local, so it hits only when every rank
+        holds it."""
         if eval_dataset is None and self.eval_dataset is None:
             raise ValueError("Evaluation requires an eval_dataset.")
 
@@ -423,8 +378,8 @@ class DataParallelLoaderMixin:
         return prepared
 
     def _dp_eval_loader(self, dataset, batch_size: int, description: str) -> DataLoader:
-        """The eval sampler's DP-sharded, prepared loader over ``dataset``, for the eval and test paths. An
-        iterable split has no length to count its final round's padding by, so this warns."""
+        """The DP-sharded, prepared eval loader; warns on an iterable split, which has no length to count padding
+        by."""
         dataset, params = self._loader_params(dataset, batch_size, description)
         if not isinstance(dataset, torch.utils.data.IterableDataset):
             params["sampler"] = self._get_eval_sampler(dataset)

@@ -20,8 +20,6 @@ from halo.data.deduplication import (
 # Four orthogonal unit rows, each repeated once: rows i and i + 4 are exact duplicates.
 DUPLICATED_BASIS = np.concatenate([np.eye(4, dtype=np.float32)] * 2)
 
-# _normalize_embeddings
-
 
 def test_normalize_unit_vectors_unchanged():
     emb = np.array([[1.0, 0.0], [0.0, 1.0]])
@@ -47,9 +45,6 @@ def test_normalize_is_idempotent():
     np.testing.assert_allclose(once, twice, atol=1e-6)
 
 
-# _shuffle_matrix_with_mapping
-
-
 def test_shuffle_recoverable_via_mapping():
     rng = np.random.RandomState(7)
     matrix = rng.randn(20, 4)
@@ -63,8 +58,8 @@ def test_shuffle_mapping_is_a_permutation():
 
 
 def test_shuffle_default_rng_is_reproducible_across_calls():
-    # The default generator is seeded from DEDUP_SHUFFLE_SEED, NOT numpy's global RNG: the shuffle
-    # decides which member of a near-duplicate group dedup keeps, so two runs must keep the same rows.
+    # The default generator is seeded from DEDUP_SHUFFLE_SEED, not numpy's global RNG: the shuffle decides which member
+    # of a near-duplicate group dedup keeps, so two runs must keep the same rows.
     matrix = np.arange(50).reshape(10, 5)
     _, m1 = _shuffle_matrix_with_mapping(matrix)
     _, m2 = _shuffle_matrix_with_mapping(matrix)
@@ -72,9 +67,8 @@ def test_shuffle_default_rng_is_reproducible_across_calls():
 
 
 def test_shuffle_threaded_rng_permutes_differently_each_step():
-    # deduplicate_embeddings threads ONE generator through its steps: each step must permute
-    # differently (that is what re-batches near-duplicates across batch boundaries) while the run as a
-    # whole replays from the seed. A step that re-seeded per call would repeat one permutation.
+    # deduplicate_embeddings threads one generator through its steps: each step permutes differently, re-batching
+    # near-duplicates across batch boundaries, while the run replays from the seed.
     matrix = np.arange(200).reshape(40, 5)
     rng = np.random.default_rng(DEDUP_SHUFFLE_SEED)
     mappings = [_shuffle_matrix_with_mapping(matrix, rng)[1] for _ in range(4)]
@@ -86,24 +80,20 @@ def test_shuffle_threaded_rng_permutes_differently_each_step():
         np.testing.assert_array_equal(_shuffle_matrix_with_mapping(matrix, replay_rng)[1], mapping, err_msg=f"{step=}")
 
 
-# deduplicate_blocks / deduplicate_embeddings
-
-
 def test_single_pass_keeps_the_first_row_of_each_duplicate_group():
     survivors = deduplicate_blocks(DUPLICATED_BASIS, max_workers=1, batch_size=8, similarity_threshold=0.9)
     assert sorted(survivors.tolist()) == [0, 1, 2, 3]
 
 
 def test_single_pass_returns_global_indices_and_dedups_within_a_batch_only():
-    # Duplicates sit in different batches here, so every row survives — under its GLOBAL index.
+    # Duplicates sit in different batches here, so every row survives, under its global index.
     survivors = deduplicate_blocks(DUPLICATED_BASIS, max_workers=2, batch_size=4, similarity_threshold=0.9)
     assert sorted(survivors.tolist()) == list(range(8))
 
 
 def test_survivors_come_back_in_batch_order_whatever_order_the_batches_finish(monkeypatch):
-    """The next pass shuffles the survivors with the seeded generator and the script selects rows in
-    this order, so a thread-completion order would make a seeded run keep different rows. The batches
-    are made to finish last-first here."""
+    """The next pass shuffles the survivors with the seeded generator, so a thread-completion order would make a
+    seeded run keep different rows."""
     real_single = deduplication._deduplicate_block
 
     def last_batch_finishes_first(batch, similarity_threshold):
@@ -125,8 +115,7 @@ def test_multistep_maps_survivors_back_to_the_input_rows():
 
 
 def test_unset_max_workers_reads_the_usable_cpu_count_at_call_time(monkeypatch):
-    """The default follows available_cpu_count when the pass runs, so a container CPU quota caps the threads,
-    not the host count frozen at import."""
+    """A container CPU quota caps the threads, not the host count frozen at import."""
     seen = []
     real_executor = deduplication.ThreadPoolExecutor
 
@@ -140,12 +129,8 @@ def test_unset_max_workers_reads_the_usable_cpu_count_at_call_time(monkeypatch):
     assert seen == [3, 3]
 
 
-# load_dataset_from_path
-
-
 def test_the_row_sample_is_drawn_with_the_runs_fixed_seed(monkeypatch, tmp_path):
-    """``--sample_size`` decides which rows are deduplicated at all, so it is drawn with the seed the passes use:
-    two runs over one file read the same rows, and the sample follows that seed rather than a literal of its own."""
+    """``--sample_size`` decides which rows are deduplicated at all, so it follows the seed the passes use."""
     data = tmp_path / "rows.jsonl"
     data.write_text("".join(json.dumps({"text": f"row {i}"}) + "\n" for i in range(64)))
     monkeypatch.setattr(deduplication, "DEDUP_SHUFFLE_SEED", 7)

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Composition contract of ``DistributedTrainerMixin``: which sub-mixin owns what, and where its
-zero-arg ``super()`` calls land.
-
-Two invariants the split into concern modules depends on, both silent when broken:
-
-* every method the trainers and tests reach as ``DistributedTrainerMixin.<name>`` resolves through
-  the MRO to the sub-mixin that owns it (a typo in the bases tuple drops it);
-* the HF overrides' zero-arg ``super()`` calls reach the **base Trainer**, not a sibling mixin: a base
-  declaring ``save_model``, ``evaluate`` or ``_inner_training_loop`` between the two would silently
-  intercept it.
-
-Run: python tests/cpu/trainers/test_mixin_composition.py
-"""
+"""``DistributedTrainerMixin``'s composition: which sub-mixin owns what, and where its zero-arg ``super()`` calls land.
+Both are silent when broken: a typo in the bases tuple drops a method, and a base in between intercepts ``super()``."""
 
 import pytest
 
@@ -25,8 +14,7 @@ from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
 from halo.trainers.step_guard import NonFiniteStepGuardMixin
 
-# name -> the sub-mixin that must own it. Each is reached off ``DistributedTrainerMixin`` by a
-# trainer, a test or a strategy, so an owner change must stay MRO-visible from the composed class.
+# name -> the sub-mixin that must own it, so an owner change stays MRO-visible from the composed class.
 _OWNERSHIP = {
     AcceleratorMixin: (
         "_configure_fp32_output_conversion",
@@ -142,7 +130,7 @@ _SUPER_DELEGATED = {
 
 
 class _BaseTrainer:
-    """Stands in for ``transformers.Trainer`` — the intended target of every ``super()`` above."""
+    """Stands in for ``transformers.Trainer``, the target of every ``super()`` above."""
 
     def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
         return "base"
@@ -227,11 +215,7 @@ def test_super_calls_reach_the_base_trainer():
 
 
 def test_sibling_mixins_declare_no_overlapping_methods():
-    """One concern each: two bases defining the same method make resolution depend on base order.
-
-    Read off the composed class rather than listed here, so a sub-mixin added to the bases tuple is
-    covered on arrival — a hand-maintained list silently stops checking the one it omits.
-    """
+    """Two bases defining one method would make resolution depend on base order."""
     bases = DistributedTrainerMixin.__bases__
     assert len(bases) >= 6, f"only {len(bases)} sub-mixins discovered — the derivation lost the bases tuple"
     seen: dict[str, str] = {}

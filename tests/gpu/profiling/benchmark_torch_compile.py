@@ -1,27 +1,9 @@
 #!/usr/bin/env python
-"""
-Benchmark: one cell of the Liger kernels x torch.compile 2x2 matrix for EP MoE SFT.
+"""One cell of the Liger x torch.compile 2x2 matrix for EP MoE SFT.
 
-    neither       - No Liger, no compile (true baseline)
-    liger_only    - Liger kernels enabled
-    compile_only  - torch.compile enabled
-    liger_compile - Both Liger + compile
-
-Each process runs exactly one mode: Liger patches the model classes process-wide, so a second
-mode in the same process would inherit the first one's kernels. Loop over the modes in the shell:
-
-    for mode in neither liger_only compile_only liger_compile; do
-      torchrun --nproc_per_node=2 tests/gpu/profiling/benchmark_torch_compile.py \
-          --model qwen3-30b-a3b --ep 2 --seq 16384 --steps 20 --warmup 5 --mode "$mode"
-    done
-
-A compiled cell recompiles for dynamic shapes when a rank first meets a second sequence length,
-within the first few steps; keep --warmup past it, or the recompile lands in the average. The
-trainer's step logs carry a cumulative train_runtime for every step, warmup included.
-
-Requirements:
-    - DeepEP; the Qwen3-30B-A3B seq-16384 example above peaks at 127-173 GiB per GPU
-    - The --model checkpoint (auto-downloaded)
+Liger patches model classes process-wide, so each process runs one mode; loop over them in the shell. A compiled cell
+recompiles when a rank first meets a second sequence length, so keep --warmup past it. Qwen3-30B-A3B at seq 16384 peaks
+at 127-173 GiB per GPU.
 """
 
 import argparse
@@ -54,8 +36,6 @@ from tests.common.models import DEFAULT_MODEL, MODEL_CONFIGS
 from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
 
-# Constants
-
 # mode -> (Liger, torch.compile)
 MODES = {
     "neither": (False, False),
@@ -70,30 +50,13 @@ BATCH_SIZE = 1
 LEARNING_RATE = 2e-5
 
 
-# Dataset
-
-
 def create_synthetic_sft_dataset(
     tokenizer,
     seq_len: int,
     num_samples: int = NUM_SAMPLES,
     seed: int = SEED,
 ) -> Dataset:
-    """Create synthetic math SFT dataset with chat-templated text.
-
-    Generates single-turn math conversations, applies the tokenizer's chat
-    template, and returns {"text": ...} records. Completions are padded with
-    filler text to approximate the target sequence length.
-
-    Args:
-        tokenizer: HuggingFace tokenizer for chat template application.
-        seq_len: Target sequence length.
-        num_samples: Number of samples to generate.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        Dataset with "text" column containing chat-templated conversations.
-    """
+    """Single-turn math conversations, chat-templated, with completions padded by filler toward ``seq_len``."""
     random.seed(seed)
 
     templates = [
@@ -119,7 +82,6 @@ def create_synthetic_sft_dataset(
         },
     ]
 
-    # Estimate tokens per word for filler padding
     filler_sentence = " The quick brown fox jumps over the lazy dog."
     filler_tokens_estimate = len(tokenizer.encode(filler_sentence))
     filler_words = len(filler_sentence.split())
@@ -141,7 +103,6 @@ def create_synthetic_sft_dataset(
         instruction = template["instruction"].format(a=a, b=b, result=result)
         response = template["response"].format(a=a, b=b, result=result)
 
-        # Pad response to approximate target seq_len
         base_messages = [
             {"role": "user", "content": instruction},
             {"role": "assistant", "content": response},
@@ -180,19 +141,14 @@ def create_synthetic_sft_dataset(
     return Dataset.from_list(data)
 
 
-# Benchmark Logic
-
-
 def run_benchmark(
     args: argparse.Namespace, model_name: str, full_params: float, tokenizer, dataset: Dataset, output_dir: str
 ) -> None:
-    """Load the model for ``args.mode``, train ``args.steps`` steps and report the EfficiencyCallback metrics."""
     use_liger, use_compile = MODES[args.mode]
     cell = f"{args.mode}_{args.compile_mode}" if use_compile else args.mode
     log(f"  Cell: {cell} (Liger {'ON' if use_liger else 'OFF'})")
     parallelism_config = ParallelismConfig(ep_size=args.ep)
 
-    # Liger is applied pre-loading by load_distributed_model.
     model, _ = load_distributed_model(
         model_name_or_path=model_name,
         parallelism_config=parallelism_config,
@@ -221,15 +177,15 @@ def run_benchmark(
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,
-        # HF turns torch_compile on whenever a backend or mode is set, so an eager mode passes neither;
-        # DistributedTrainerMixin applies the compile after FSDP wrapping.
+        # HF turns torch_compile on whenever a backend or mode is set, so an eager mode passes neither; the mixin
+        # compiles after FSDP wrapping.
         **(
             {"torch_compile": True, "torch_compile_backend": "inductor", "torch_compile_mode": args.compile_mode}
             if use_compile
             else {}
         ),
     )
-    # Disable TRL's internal Liger re-application
+    # Disables TRL's Liger re-application.
     sft_config.use_liger_kernel = False
 
     efficiency_callback = EfficiencyCallback(
@@ -259,9 +215,6 @@ def run_benchmark(
     emit_benchmark(f"compile_{cell}_{args.model}_ep{args.ep}_s{args.seq}", efficiency_callback)
     log(f"  Total Time:     {train_elapsed:.1f}s")
     trainer.cleanup_ep()
-
-
-# Main
 
 
 def main() -> int:

@@ -1,10 +1,6 @@
-"""The shape grid the process-group goldens run over: every shape :class:`ParallelismConfig` accepts
-with a pipeline stage of at most :data:`STAGE_WIDTH_LIMIT` ranks, at every NVLink domain dividing
-the stage, plus the same sweep at the :data:`PRODUCTION_WORLDS` on 8-GPU nodes and NVL72 racks.
-
-A grid golden (:class:`GridGolden`) stores a digest of each shape's record, plus the full record of a
-few literal shapes so a reviewer can read them and a failure reads as a diff.
-"""
+"""The shape grid the process-group goldens run over: every accepted shape up to :data:`STAGE_WIDTH_LIMIT` ranks, at
+every NVLink domain. A golden stores each shape's digest, plus a few literal shapes in full so a failure reads as a
+diff."""
 
 from __future__ import annotations
 
@@ -28,13 +24,13 @@ PRODUCTION_WORLDS = (64, 72, 128, 144, 256)
 PRODUCTION_DOMAINS = ((8, 8), (72, 4))
 DIGEST_HEX_CHARS = 16
 
-# Allowlist axis -> the ParallelismConfig field sizing it, in AXES order; _accepted checks it against the config.
+# Allowlist axis -> the ParallelismConfig field sizing it; _accepted checks it against the config.
 AXIS_FIELDS = MappingProxyType({a.name: a.size_field for a in AXES})
 
 
 @dataclasses.dataclass(frozen=True)
 class LayoutShape:
-    """One grid point; the fields are the ``ParallelismConfig`` constructor arguments it sets."""
+    """One grid point; the fields are the ``ParallelismConfig`` arguments it sets."""
 
     world_size: int
     nvlink_domain_size: int
@@ -52,13 +48,12 @@ class LayoutShape:
 
     @property
     def axes(self) -> frozenset[str]:
-        """The allowlist axes this shape turns on."""
         return frozenset(axis for axis, field in AXIS_FIELDS.items() if getattr(self, field) > 1)
 
     @property
     def key(self) -> str:
-        """``w<world> d<domain> n<node>``, each active axis with its size, and the EP scope where an EP
-        group spans more than one rank, e.g. ``w16 d8 n8 pp2 ep4 node``."""
+        """``w<world> d<domain> n<node>``, each active axis with its size, and the EP scope for a multi-rank group:
+        ``w16 d8 n8 pp2 ep4 node``."""
         parts = [f"w{self.world_size}", f"d{self.nvlink_domain_size}", f"n{self.gpus_per_node}"]
         parts += [f"{axis}{getattr(self, AXIS_FIELDS[axis])}" for axis in AXIS_FIELDS if axis in self.axes]
         if self.ep_group_size > 1:
@@ -66,7 +61,6 @@ class LayoutShape:
         return " ".join(parts)
 
     def config_as_rank(self, rank: int) -> ParallelismConfig:
-        """The ``ParallelismConfig`` global rank ``rank`` of this job builds."""
         return make_parallelism_config(rank=rank, **dataclasses.asdict(self))
 
 
@@ -75,8 +69,8 @@ def _divisors(value: int) -> list[int]:
 
 
 def _shapes_on(world_size: int, nvlink_domain_size: int, gpus_per_node: int, pp_size: int) -> Iterator[LayoutShape]:
-    """Every allowlisted axis assignment over the divisors of the stage width, under both EP scopes
-    where an EP group spans more than one rank."""
+    """Every allowlisted axis assignment over the stage width's divisors, under both EP scopes where a group spans
+    several ranks."""
     sizes = [d for d in _divisors(world_size // pp_size) if d > 1]
     for axes in sorted(sorted(axis_set, key=list(AXIS_FIELDS).index) for axis_set in SUPPORTED_AXIS_SETS):
         if ("pp" in axes) != (pp_size > 1):
@@ -116,7 +110,7 @@ def _accepted(shape: LayoutShape) -> bool:
 
 @functools.cache
 def layout_shapes() -> tuple[LayoutShape, ...]:
-    """The grid: every distinct candidate ``ParallelismConfig`` accepts, in generation order."""
+    """Every distinct candidate ``ParallelismConfig`` accepts, in generation order."""
     return tuple(shape for shape in dict.fromkeys(_candidate_shapes()) if _accepted(shape))
 
 
@@ -125,7 +119,6 @@ def _canonical_json(record: dict) -> str:
 
 
 def record_digest(record: dict) -> str:
-    """The digest a grid golden stores for a shape's ``record``."""
     return hashlib.sha256(_canonical_json(record).encode()).hexdigest()[:DIGEST_HEX_CHARS]
 
 
@@ -137,8 +130,8 @@ def _json_object_lines(name: str, rows: dict[str, str]) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class GridGolden:
-    """A golden over the grid, committed at ``path``: ``record`` maps a shape to what today's code builds
-    for it, as JSON-native values, and ``literal_shapes`` are the shapes stored in full."""
+    """A golden over the grid at ``path``: ``record`` maps a shape to JSON-native values, and ``literal_shapes`` are
+    stored in full."""
 
     path: Path
     record: Callable[[LayoutShape], dict]
@@ -149,7 +142,7 @@ class GridGolden:
         return self.path.stem
 
     def render(self) -> str:
-        """The golden file: the literal shapes' records, then every grid shape's digest in grid order."""
+        """The literal shapes' records, then every shape's digest in grid order."""
         records = {shape: self.record(shape) for shape in layout_shapes()}
         literal = {shape.key: _canonical_json(records[shape]) for shape in self.literal_shapes}
         digests = {shape.key: json.dumps(record_digest(shape_record)) for shape, shape_record in records.items()}

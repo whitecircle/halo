@@ -1,14 +1,5 @@
-"""CPU tests for SDPA on GptOss (a sinks model) when sinks are reset for fine-tuning.
-
-GptOss sets ``_supports_sdpa = False`` because SDPA computes the softmax internally and can't add the
-per-head sink logit. But fine-tuning resets sinks to dtype min (``_reset_gpt_oss_sinks``), so the
-dropped sink column contributes ``exp(dtype_min) == 0`` — SDPA then matches eager/flex exactly (the
-same reasoning that makes FA2 valid). ``validate_attn_implementation`` keeps an explicit ``sdpa``
-request for GptOss ONLY under a neutralized ``SinksPolicy``; with live sinks every sink-dropping impl
-(sdpa, FA2) raises — silent fallback would still drop the sinks. Non-sinks models are unaffected.
-
-    python tests/cpu/models/test_gptoss_sdpa.py
-"""
+"""SDPA on GptOss when sinks are reset for fine-tuning.
+A reset sink column contributes ``exp(dtype_min) == 0``, so SDPA matches eager; over live sinks it must raise."""
 
 import functools
 import sys
@@ -76,9 +67,8 @@ def test_sdpa_kept_for_gptoss_when_sinks_reset():
 
 
 def test_sink_dropping_impls_rejected_for_gptoss_without_reset():
-    """Live (unreset) sinks: sdpa and FA2 silently drop the real sink column — measured ~-3 nats of
-    logprob shift on gpt-oss-20b. Must raise, never silently fall back (a fallback to FA2 drops the
-    sinks just the same); the sink-carrying impls (eager, flex) stay allowed."""
+    """sdpa and FA2 drop the real sink column, measured ~-3 nats of logprob shift on gpt-oss-20b.
+    Must raise: a fallback to FA2 drops the sinks just the same."""
     with pytest.raises(ValueError, match="sink"):
         validate_attn_implementation(_gptoss(), "sdpa", SinksPolicy.LIVE)
     with pytest.raises(ValueError, match="sink"):
@@ -88,8 +78,7 @@ def test_sink_dropping_impls_rejected_for_gptoss_without_reset():
 
 
 # A tiny GptOss built in a fresh interpreter after importing ``module`` (empty: transformers alone), then the label
-# transformers' own check settles each flash request on. The kernel import and the device check are stubbed, so the
-# label decision is all that runs.
+# transformers' own check settles on. The kernel import and the device check are stubbed.
 _FLASH_LABEL_PROBE = """
 import importlib
 if {module!r}:
@@ -118,22 +107,18 @@ def _flash_labels(module: str) -> list[str]:
     ],
 )
 def test_a_gptoss_flash_label_stays_on_the_local_build_wherever_the_toolkit_builds_one(module):
-    """transformers swaps a GptOss FA2/FA3 label for the kernel-hub vllm-flash-attn3, whose ``kernels`` package the
-    image does not ship. The reward scorer, the adapter merge and the sentence-transformers backbone build with the
-    user's label and no validator, and every verified load goes through ``checkpoint_coverage``, so importing any of
-    them must drop the swap for every build in the process."""
+    """transformers swaps a GptOss FA2/FA3 label for hub vllm-flash-attn3, whose ``kernels`` package the image lacks.
+    These builds take the user's label with no validator, so importing any of them must drop the swap process-wide."""
     assert _flash_labels(module) == ["flash_attention_2", "flash_attention_3"]
 
 
 def test_transformers_alone_swaps_a_gptoss_flash_label_for_the_hub_kernel():
-    """The probe's control: without a toolkit import the swap happens, so the cases above read the toolkit's doing."""
     assert _flash_labels("") == ["kernels-community/vllm-flash-attn3"] * 2
 
 
 def _labelled_gptoss(model_class, attn_implementation: str, sinks: str):
-    """A tiny fp32 GptOss as a build under ``attn_implementation`` leaves it, its sinks ``live``, ``neutralized``
-    (``dtype.min``), ``neutralized_bf16`` (bf16's minimum, a bf16 save read at fp32) or ``removed`` (``None``, the
-    FA2 reset). Built eager: no flash kernel runs on CPU."""
+    """``neutralized`` sinks hold ``dtype.min``, ``neutralized_bf16`` bf16's minimum (a bf16 save read at fp32),
+    and ``removed`` sinks are ``None`` (the FA2 reset). Built eager: no flash kernel runs on CPU."""
     model = model_class(GptOssConfig(**_TINY_GPTOSS, num_labels=1, pad_token_id=0))
     model.config._attn_implementation = attn_implementation
     values = {
@@ -175,8 +160,7 @@ def test_a_built_gptoss_that_drops_its_live_sinks_is_refused(attn_implementation
 
 @pytest.mark.parametrize(("policy", "refused"), [(SinksPolicy.LIVE, True), (SinksPolicy.NEUTRALIZED, False)])
 def test_the_run_policies_refuse_a_backend_that_drops_the_sinks_the_policy_keeps(policy, refused):
-    """The policies every loader applies end in the check, so a build no validator chose a backend for (the
-    sentence-transformers backbone on a pinned FA2) cannot keep live sinks it drops."""
+    """The sentence-transformers backbone on a pinned FA2 has no validator, so these policies must end in the check."""
     model = _labelled_gptoss(GptOssForCausalLM, "flash_attention_2", "live")
     apply = functools.partial(
         apply_run_model_policies, model, model.config, sinks_policy=policy, attn_implementation="flash_attention_2"
@@ -193,8 +177,7 @@ def test_the_run_policies_refuse_a_backend_that_drops_the_sinks_the_policy_keeps
 def test_the_reward_scorer_refuses_a_flash_label_over_a_checkpoint_with_live_sinks(
     monkeypatch, tmp_path, sinks, refused
 ):
-    """The scorer applies no sinks policy: a GptOss reward model trained with live sinks keeps them in its checkpoint,
-    and ``--rm_attn_implementation flash_attention_2`` would drop them from every score."""
+    """The scorer applies no sinks policy, so ``--rm_attn_implementation flash_attention_2`` would drop them."""
     tokenizer = word_level_tokenizer(("a", "b"))
     tokenizer.chat_template = CONTENT_ONLY_CHAT_TEMPLATE
     _labelled_gptoss(GptOssForSequenceClassification, "eager", sinks).save_pretrained(tmp_path)
@@ -225,47 +208,36 @@ def test_the_reward_scorer_refuses_a_flash_label_over_a_checkpoint_with_live_sin
 
 def test_install_sdpa_for_reset_sinks_is_idempotent():
     cfg = _gptoss()
-    install_sdpa_for_reset_sinks(cfg)  # ensure flipped
-    assert install_sdpa_for_reset_sinks(cfg) is False  # already enabled → no-op
+    install_sdpa_for_reset_sinks(cfg)
+    assert install_sdpa_for_reset_sinks(cfg) is False
     assert AutoModelForCausalLM._model_mapping[GptOssConfig]._supports_sdpa is True
 
 
 def test_non_sinks_model_sdpa_passthrough():
-    # A non-sinks model keeps sdpa regardless of the sinks policy (the gate only affects sinks models).
     assert validate_attn_implementation(_llama(), "sdpa", SinksPolicy.LIVE) == "sdpa"
 
 
 def test_sinks_reset_state_is_per_config_instance():
-    """Sinks state must be per-config, not on the config CLASS: class-level state leaks across loads
-    in one process, the last-validated load silently overwriting every other GptOssConfig's — a
-    reset-sinks reference load then disarms the live-sinks guard the policy load established."""
+    """Class-level state leaks across loads: a reset-sinks reference would disarm the policy's live-sinks guard."""
     live = _gptoss()
     with pytest.raises(ValueError, match="sink"):
         validate_attn_implementation(live, "sdpa", SinksPolicy.LIVE)
     reset = _gptoss()
     assert validate_attn_implementation(reset, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
 
-    # State lives on each instance, never on the shared class.
     assert "_halo_sinks_reset" not in type(live).__dict__
     assert live._halo_sinks_reset is False
     assert reset._halo_sinks_reset is True
 
-    # Re-validation contexts (EP/CP/lazy loaders pass no sinks_policy) enforce per-instance state:
-    # the live-sinks config still raises even though a reset-sinks config validated after it.
+    # EP/CP/lazy loaders pass no sinks_policy: the live config still raises after a reset config validated.
     with pytest.raises(ValueError, match="sink"):
         validate_attn_implementation(live, "sdpa")
     assert validate_attn_implementation(reset, "sdpa") == "sdpa"
 
 
 def test_a_fresh_config_inherits_no_sdpa_approval():
-    """The sdpa escape hatch must be recorded where the refusal it overrides is — on the config
-    INSTANCE, never on the model CLASS.
-
-    A class-level flag is flipped for the whole process by one reset-sinks load, so any later
-    re-validation with nothing of its own to go on (EP/CP/lazy loaders pass no ``sinks_policy``, and
-    a loader that built its own config carries no record) reads that stale approval and accepts sdpa
-    for a model whose sinks were never reset. sdpa drops the sink column from the softmax silently.
-    """
+    """A class-level flag flipped by one reset-sinks load would let a later re-validation (EP/CP/lazy loaders pass no
+    ``sinks_policy``) accept sdpa for a model whose sinks were never reset, silently dropping the sink column."""
     approved = _gptoss()
     assert validate_attn_implementation(approved, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
 
@@ -280,11 +252,7 @@ def test_a_fresh_config_inherits_no_sdpa_approval():
 
 
 def _fake_fa3_module(name: str, *, with_s_aux: bool) -> types.ModuleType:
-    """A stand-in FA3 build whose VARLEN entry point does or does not accept the sink argument.
-
-    Only the varlen function is defined: it is the one transformers inspects, so a probe that read
-    the dense twin instead would find nothing here and report every build sink-less.
-    """
+    """Only the varlen function exists: a probe reading the dense twin would report every build sink-less."""
     mod = types.ModuleType(name)
     if with_s_aux:
 
@@ -301,9 +269,7 @@ def _fake_fa3_module(name: str, *, with_s_aux: bool) -> types.ModuleType:
 
 
 def test_fa3_sink_probe_prefers_flash_attn_interface(monkeypatch):
-    """transformers dispatches flash_attention_3 via ``flash_attn_interface``; when both modules are
-    installed, the sink capability must be read from the kernel actually dispatched — a coexisting
-    sink-capable ``flash_attn_3`` build must not mask a sink-less interface build (or vice versa)."""
+    """The capability must be read from the kernel transformers dispatches, not a coexisting ``flash_attn_3`` build."""
     monkeypatch.setitem(
         sys.modules, "flash_attn_interface", _fake_fa3_module("flash_attn_interface", with_s_aux=False)
     )
@@ -315,7 +281,7 @@ def test_fa3_sink_probe_prefers_flash_attn_interface(monkeypatch):
 
 
 def test_fa3_sink_probe_falls_back_to_flash_attn_3(monkeypatch):
-    # A None sys.modules entry makes the import raise ImportError → the legacy module is probed.
+    # A None sys.modules entry makes the import raise, so the legacy module is probed.
     monkeypatch.setitem(sys.modules, "flash_attn_interface", None)
     monkeypatch.setitem(sys.modules, "flash_attn_3", _fake_fa3_module("flash_attn_3", with_s_aux=True))
     assert _attn_impl_handles_sinks("flash_attention_3") is True
@@ -324,8 +290,7 @@ def test_fa3_sink_probe_falls_back_to_flash_attn_3(monkeypatch):
 
 
 def test_a_live_sinks_request_for_an_uninstalled_flash_build_says_it_is_not_installed(monkeypatch):
-    """An FA3 recipe on a host with no FA3 build (the Blackwell image, a Hopper FA4 recipe) must name the missing
-    build, not claim the kernel drops sinks: an installed FA3 build exposing ``s_aux`` would carry them."""
+    """It must name the missing build: an installed FA3 build exposing ``s_aux`` would carry the sinks."""
     monkeypatch.setitem(sys.modules, "flash_attn_interface", None)
     monkeypatch.setitem(sys.modules, "flash_attn_3", None)
     with pytest.raises(ValueError, match="'flash_attention_3' is not installed") as refusal:
@@ -340,8 +305,7 @@ def test_a_live_sinks_request_for_an_uninstalled_flash_build_says_it_is_not_inst
 
 
 def test_the_sdpa_flip_stops_at_pretrained_model(monkeypatch):
-    """The flip clears a family's own ``_supports_sdpa = False`` up the MRO and never the base default on
-    ``PreTrainedModel``, which would admit sdpa for every architecture loaded later in the process."""
+    """Clearing the ``PreTrainedModel`` default would admit sdpa for every architecture loaded later in the process."""
 
     class FamilyBase(PreTrainedModel):
         _supports_sdpa = False
@@ -352,7 +316,7 @@ def test_the_sdpa_flip_stops_at_pretrained_model(monkeypatch):
     monkeypatch.setattr(
         gpt_oss_sinks, "AutoModelForCausalLM", types.SimpleNamespace(_model_mapping={GptOssConfig: FamilyForCausalLM})
     )
-    assert PreTrainedModel.__dict__["_supports_sdpa"] is False  # premise: the base default the flip must keep
+    assert PreTrainedModel.__dict__["_supports_sdpa"] is False  # the base default the flip must keep
     assert install_sdpa_for_reset_sinks(_gptoss()) is True
     assert FamilyBase._supports_sdpa is True
     assert PreTrainedModel.__dict__["_supports_sdpa"] is False
@@ -377,9 +341,7 @@ def _ref_load_stubs(checkpoint: str, attn_implementation: str | None = None):
     )
     model_config = ModelArguments(model_name_or_path=checkpoint, attn_implementation=attn_implementation)
     training_config = types.SimpleNamespace()  # no bf16/fp16 flags → fp32 reference
-    # Every ``<special>_token_id`` accompanies its token: ``PreTrainedTokenizerBase.__getattr__``
-    # resolves them, so no real tokenizer can carry one without the other, and the setup seam the
-    # loader runs records the pad id on the model.
+    # Every ``<special>_token_id`` accompanies its token, as ``PreTrainedTokenizerBase.__getattr__`` resolves them.
     tokenizer = types.SimpleNamespace(
         eos_token="<e>",
         eos_token_id=1,
@@ -393,9 +355,7 @@ def _ref_load_stubs(checkpoint: str, attn_implementation: str | None = None):
 
 
 def test_reference_model_load_applies_sink_reset(tiny_gptoss_checkpoint):
-    """The DPO/KTO full-finetune reference must go through the same attn validation + sink handling as
-    the policy: with reset sinks the default sdpa is validated (GptOss natively rejects it) and the
-    reference's sinks are neutralized to dtype min, matching the policy forward."""
+    """With reset sinks the default sdpa is validated (GptOss natively rejects it) and sinks go to dtype min."""
     args, model_config, training_config, parallelism_config, tokenizer = _ref_load_stubs(tiny_gptoss_checkpoint)
     model_ref = load_reference_model_for_preference(
         args,
@@ -413,13 +373,7 @@ def test_reference_model_load_applies_sink_reset(tiny_gptoss_checkpoint):
 
 
 def test_reference_model_load_rejects_sink_dropping_impl_with_live_sinks(tiny_gptoss_checkpoint):
-    """An EXPLICIT sink-dropping impl must still raise under ``reset_sinks=False`` (on-policy RL).
-
-    The reference resolves its backend through the same ``resolve_attn_implementation`` as the policy,
-    so the *unset* case is not pinned to sdpa — it lands on a sink-carrying impl (covered by
-    the test below). What must never happen is a user-requested sdpa/FA2 silently dropping live sink
-    mass: every reference logprob would shift by nats against the served policy.
-    """
+    """A requested sdpa or FA2 dropping live sinks would shift every reference logprob by nats against the policy."""
     args, model_config, training_config, parallelism_config, tokenizer = _ref_load_stubs(
         tiny_gptoss_checkpoint, attn_implementation="sdpa"
     )
@@ -438,13 +392,7 @@ def test_reference_model_load_rejects_sink_dropping_impl_with_live_sinks(tiny_gp
 
 
 def test_reference_model_auto_resolves_to_a_sink_carrying_impl(tiny_gptoss_checkpoint):
-    """With no explicit request, live sinks must resolve to an impl that CARRIES them.
-
-    Pinning the reference to ``sdpa`` while the policy auto-detects (FA4 on Blackwell) runs the two
-    legs of every logratio on different kernels; both read one resolver instead. The property that
-    matters is the outcome: whatever it picks must carry the sink column, since the model is loaded
-    with live sinks.
-    """
+    """Pinned to ``sdpa`` while the policy auto-detects, the legs of every logratio would run on different kernels."""
     args, model_config, training_config, parallelism_config, tokenizer = _ref_load_stubs(tiny_gptoss_checkpoint)
     model_ref = load_reference_model_for_preference(
         args,
@@ -483,11 +431,7 @@ def test_reference_model_load_freezes_live_sinks(tiny_gptoss_checkpoint):
 
 
 def test_toolkit_run_state_never_reaches_the_exported_config():
-    """``_halo_*`` stamps describe THIS RUN, not the artifact, and transformers serializes every
-    instance attribute — so an exported ``config.json`` would ship them to the hub and to every
-    serving engine. They are written run-scoped, so the export-ready window strips them and the
-    run keeps reading them afterwards.
-    """
+    """``_halo_*`` stamps describe the run, but transformers writes every instance attribute to ``config.json``."""
     cfg = _gptoss()
     validate_attn_implementation(cfg, "sdpa", SinksPolicy.NEUTRALIZED)
     set_config_field_run_scoped(cfg, LIGER_APPLIED_CONFIG_ATTR, {"rope": True})

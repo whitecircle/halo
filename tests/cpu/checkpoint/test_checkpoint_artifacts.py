@@ -1,8 +1,5 @@
 """The checkpoint artifact harness finds nothing between two runs of today's savers, every case saves what its mode
-owes at the dtypes it owes, and each seeded change to a saver shows up as a delta.
-
-Run: python tests/cpu/checkpoint/test_checkpoint_artifacts.py
-"""
+owes, and a seeded saver change shows up as a delta."""
 
 import json
 
@@ -35,12 +32,12 @@ MODULE = produce.__module__
 DENSE_EXPORT = ArtifactCase("qwen3", "fsdp2", "fp32", training=False)
 DENSE_TRAINING = ArtifactCase("qwen3", "fsdp2", "fp32", training=True)
 DENSE_BF16_TRAINING = ArtifactCase("qwen3", "fsdp2", "bf16", training=True)
-# A family whose hub names differ from its module tree: the export reverts them per streamed chunk.
+# Its hub names differ from its module tree, reverted per streamed chunk.
 VENDOR_NAMESPACE_EXPORT = ArtifactCase("deepseek_v4", "ep", "fp32", training=False)
-# A tied-embedding family under the CP saver and under the FSDP2 one.
+# Under the CP saver and under the FSDP2 one.
 TIED_CP_EXPORT = ArtifactCase("cohere2_moe", "cp", "bf16", training=False)
 TIED_FSDP2_EXPORT = ArtifactCase("cohere2_moe", "fsdp2", "bf16", training=False)
-# A bf16 run's training checkpoint keeps the fp32 router master beside its bf16 weights.
+# A bf16 run's training checkpoint keeps the fp32 router master.
 ROUTER = "model.layers.0.mlp.gate.weight"
 EMBEDDING = "model.embed_tokens.weight"
 
@@ -62,9 +59,7 @@ def test_the_roster_runs_every_family_in_every_mode_at_every_dtype():
 
 
 def test_every_case_saves_what_its_mode_owes(tmp_path):
-    """Weights in every case, the optimizer shard with its meta in exactly the full-weight training checkpoints,
-    and a bf16 training checkpoint's fp32 router beside its bf16 weights. One test over the whole roster, which
-    takes a minute and a half to save."""
+    """One test over the whole roster, which takes a minute and a half to save."""
     roster = _produced(tmp_path, ARTIFACT_CASES)
     assert raised_cases(roster) == {}
     shards = {"optimizer_shard_00000.pt", "optimizer_meta.pt"}
@@ -82,8 +77,7 @@ def test_every_case_saves_what_its_mode_owes(tmp_path):
 
 
 def test_a_cp_save_of_a_tied_family_writes_the_fsdp2_key_set(tmp_path):
-    """The CP wrapper's ``state_dict()`` names the tied embedding twice over one storage, which safetensors
-    refuses; the save writes it once, as the FSDP2 walk does, and ``from_pretrained`` re-ties the head."""
+    """``state_dict()`` names the tied embedding twice over one storage, which safetensors refuses."""
     roster = _produced(tmp_path, [TIED_CP_EXPORT, TIED_FSDP2_EXPORT])
 
     assert raised_cases(roster) == {}
@@ -93,8 +87,7 @@ def test_a_cp_save_of_a_tied_family_writes_the_fsdp2_key_set(tmp_path):
 
 
 def test_two_producer_processes_match(tmp_path):
-    """Base against base: each tree's producer runs in its own process, as ``make verify-artifacts`` runs
-    them, so nothing a process draws afresh (a string hash seed, an object id) may reach an artifact."""
+    """So nothing a process draws afresh (a string hash seed, an object id) may reach an artifact."""
     outputs = [tmp_path / "first", tmp_path / "second"]
     for output in outputs:
         run_in_tree(REPO_ROOT, MODULE, "--produce", str(output), "--families", *SAMPLE_FAMILIES, env=PRODUCER_ENV)
@@ -176,7 +169,7 @@ def test_a_staged_file_readable_by_its_owner_only_is_a_mode_delta(monkeypatch, t
 
     deltas = compare_outputs(baseline, _produced(tmp_path / "mutated", [DENSE_TRAINING]))
 
-    # The safetensors files take the mode a staged probe file gets (apply_umask_mode).
+    # The mode a staged probe file gets (apply_umask_mode).
     weights = [
         path for path in baseline if path.startswith(f"{DENSE_TRAINING.path}/") and path.endswith(".safetensors")
     ]

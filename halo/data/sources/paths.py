@@ -1,7 +1,5 @@
-"""Dataset path classification: which of S3 / HuggingFace Hub / local a source or destination spells,
-the on-disk names that verdict depends on, which split of a source holds its held-out rows, and the
-refusals of a source missing one or spelled ambiguously. String rules plus that one directory probe, so a
-caller classifies a path without importing an S3 stack it never calls."""
+"""Dataset path classification: which of S3, Hub or local a source or destination spells, its held-out split, and the
+refusals of a source missing one or spelled ambiguously. String rules plus one directory probe, no S3 stack."""
 
 import os
 from collections.abc import Mapping
@@ -18,29 +16,23 @@ DATA_FILE_BUILDERS = {
 # The preprocessed-dataset stamp ``push_folder`` deletes first and uploads last, so a torn upload reads as none.
 METADATA_FILE = "metadata.json"
 
-# The split pair every trainer reads (``ds["train"]``, ``ds["test"]``): what a loader renders and
-# checks, and what a preprocessed artifact writes.
+# The split pair every trainer reads, what a loader renders and a preprocessed artifact writes.
 TRAIN_TEST_SPLITS = ("train", "test")
 
-# A source's held-out split, in lookup order: one that ships no ``test`` split evaluates on (and
-# bakes as ``test``) its ``validation`` split.
+# In lookup order: a source with no ``test`` split evaluates on (and bakes as ``test``) its ``validation`` split.
 EVAL_SPLIT_NAMES = ("test", "validation")
 
 
 def data_file_builder(path: str) -> str | None:
-    """The ``datasets`` builder that reads ``path`` as a data file (:data:`DATA_FILE_BUILDERS`), or
-    ``None`` when its extension names none."""
     return next((builder for ext, builder in DATA_FILE_BUILDERS.items() if path.endswith(ext)), None)
 
 
 def eval_split_name(splits) -> str | None:
-    """The split of ``splits`` that holds the source's held-out rows, first in :data:`EVAL_SPLIT_NAMES`."""
     return next((name for name in EVAL_SPLIT_NAMES if name in splits), None)
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
-    """``(bucket, key)`` of an ``s3://bucket/key`` URI, the key's trailing slashes stripped; raises on a
-    malformed one."""
+    """``(bucket, key)``, the key's trailing slashes stripped; raises on a malformed URI."""
     if not uri.startswith("s3://"):
         raise ValueError(
             f"Invalid S3 URI: '{uri}'. S3 URIs must start with 's3://'. Example: s3://bucket-name/path/to/dataset"
@@ -62,14 +54,13 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
 
 
 def s3_object_key(prefix: str, *parts: str) -> str:
-    """The S3 key of ``parts`` under a dataset's key ``prefix``: one spelling for every read of its control files,
-    which the launch-wide read of ``share_s3_control_files`` serves only on an exact match."""
+    """One spelling for every read of control files, which ``share_s3_control_files`` serves only on an exact match."""
     return "/".join((prefix.rstrip("/"), *parts))
 
 
 def parse_dataset_source(path: str) -> tuple[str, str | None, str]:
-    """``(source_type, bucket_or_none, key_or_path)`` of a dataset path, ``source_type`` one of 's3',
-    'hf_hub' (a bare "org/dataset": one slash, no dot-prefixed part) and 'local' (everything else)."""
+    """``(source_type, bucket_or_none, key_or_path)``: 's3', 'hf_hub' (a bare "org/dataset": one slash, no dot-prefixed
+    part) or 'local'."""
     if path.startswith("s3://"):
         return ("s3", *parse_s3_uri(path))
     if path.startswith("file://"):
@@ -87,22 +78,20 @@ def parse_dataset_source(path: str) -> tuple[str, str | None, str]:
 
 
 def parse_hub_spec(path: str) -> tuple[str, str | None, str | None]:
-    """``(repo_id, config, split)`` of a Hub dataset spec ``org/name[:config][@split]``."""
+    """``org/name[:config][@split]`` as ``(repo_id, config, split)``."""
     repo_id, split = path.rsplit("@", 1) if "@" in path else (path, None)
     repo_id, config = repo_id.rsplit(":", 1) if ":" in repo_id else (repo_id, None)
     return repo_id, config, split
 
 
 def hub_repo_id(path: str) -> str:
-    """The bare ``org/name`` of a Hub dataset spec, dropping the ``:config`` / ``@split`` suffixes
-    the loader accepts. Hub file APIs address the repo, not a split of it."""
+    """Hub file APIs address the repo, not a split of it."""
     return parse_hub_spec(path)[0]
 
 
 def reject_ambiguous_hub_source(path: str) -> None:
-    """Refuse a Hub-shaped source (:func:`parse_dataset_source`) that also names a local directory: either reading
-    is a guess, and the wrong one fails far from the cause (the Hub builder reads a ``save_to_disk`` tree's
-    sidecar files as rows)."""
+    """Refuse a Hub-shaped source that also names a local directory: either reading is a guess, and the wrong one fails
+    far from the cause (the Hub builder reads a ``save_to_disk`` tree's sidecars as rows)."""
     if parse_dataset_source(path)[0] == "hf_hub" and os.path.isdir(directory := hub_repo_id(path)):
         raise ValueError(
             f"Dataset path '{path}' is spelled as a HuggingFace Hub id, but a local directory of that name "
@@ -126,8 +115,7 @@ def parse_dataset_destination(path: str) -> tuple[str, str | None, str]:
 
 
 def reject_partial_splits(ds: Mapping, path: str) -> None:
-    """Fail loud on a partial DatasetDict: sharded/preprocessed loads skip missing splits, and the
-    trainers index ``ds["test"]`` unconditionally — a bare ``KeyError`` far from the cause."""
+    """Sharded/preprocessed loads skip missing splits, and ``ds["test"]`` in a trainer is a distant ``KeyError``."""
     missing = [split for split in TRAIN_TEST_SPLITS if split not in ds]
     if missing:
         raise ValueError(

@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""CPU gates for GLM-5 (``glm5_next``): parallelism, attention, collator and loading refusals.
-
-GLM-5.3-Flash interleaves 34 KDA linear-attention layers (causal Conv1d + recurrent delta-rule
-scan) with 11 DeepSeek-sparse-attention layers (MLA + indexer), threads a 4x-widened
-hyper-connection residual stream through every layer, declares ``_supports_flash_attn = False``,
-and ships only the composite ``Glm5NextForConditionalGeneration`` — no CausalLM sibling. Each of
-those facts closes a toolkit path, and each closure must refuse LOUDLY at config time; the silent
-alternative is cross-rank state corruption (CP), a replicated model on a sharded mesh (TP), or a
-crash deep inside transformers (flash, text_only). PP is the exception: the widened stream IS the
-stage boundary under ``GLM5_NEXT_PP`` (tests/cpu/parallelism/test_pp_hyper_connection_stages.py),
-and only the generic gates (MTP metadata, tie) still apply here.
-
-    python tests/cpu/models/test_glm5_next_gates.py
-"""
+"""GLM-5 (``glm5_next``) parallelism, attention, collator and loading gates.
+Each refuses at config time; otherwise CP corrupts state, TP replicates on a sharded mesh and flash crashes late."""
 
 from unittest.mock import MagicMock
 
@@ -45,8 +33,7 @@ from halo.models.attention.selection import (
 from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from tests.common.distributed import fake_process_group_mesh
 
-# One layer of each block type, MLA/indexer/KDA widths shrunk to the divisibility floors
-# (index_topk must divide by index_kpool).
+# One layer of each block type, widths shrunk to the divisibility floors (index_topk must divide by index_kpool).
 TINY_GLM5_NEXT_TEXT_CONFIG = {
     "vocab_size": 64,
     "hidden_size": 32,
@@ -81,27 +68,21 @@ def _tiny_text_model() -> Glm5NextTextModel:
 
 
 class _ConfigOnlyShell(nn.Module):
-    """A module tree with no recognisable layers — the meta-init shape CP validates config-first."""
+    """The meta-init shape CP validates config-first."""
 
     def __init__(self, config):
         super().__init__()
         self.config = config
 
 
-# Context parallelism — both refusal paths
-
-
 def test_cp_module_scan_refuses_the_kda_layer():
-    """The instantiated tree must be refused by the module scan itself, naming the KDA class —
-    the scan runs before the config gate and before any attention-class probing."""
+    """The scan runs before the config gate and before any attention-class probing."""
     assert "Glm5NextTextLinearAttention" in _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
     with pytest.raises(CPConfigError, match="instantiates 'Glm5NextTextLinearAttention'"):
         reject_unsupported_ulysses_model(_tiny_text_model(), 2)
 
 
 def test_cp_config_only_gate_refuses_a_meta_init_shell():
-    """Without instantiated modules the ``layer_types`` gate must still refuse, counting the
-    linear-attention layers and naming the sequence-axis mechanism."""
     config = Glm5NextConfig(text_config=dict(TINY_GLM5_NEXT_TEXT_CONFIG))
     with pytest.raises(CPConfigError) as excinfo:
         reject_unsupported_ulysses_model(_ConfigOnlyShell(config), 2)
@@ -111,8 +92,6 @@ def test_cp_config_only_gate_refuses_a_meta_init_shell():
 
 
 def test_cp_config_only_gate_is_family_agnostic():
-    """Any family declaring ``linear_attention`` layer types is refused by the same config-only gate."""
-
     class _Config:
         model_type = "qwen3_5_moe"
         layer_types = ["linear_attention", "full_attention"]
@@ -121,15 +100,9 @@ def test_cp_config_only_gate_is_family_agnostic():
         reject_unsupported_ulysses_model(_ConfigOnlyShell(_Config()), 2)
 
 
-# Pipeline parallelism
-
-
 def test_pp_accepts_the_family_including_the_hub_mtp_metadata_field():
-    """``GLM5_NEXT_PP`` carries the widened-stream boundary (its own suite:
-    tests/cpu/parallelism/test_pp_hyper_connection_stages.py), so the family passes structural
-    validation — including with the hub config's metadata-only ``num_nextn_predict_layers: 1``
-    (layer 45, dropped at load via ``_keys_to_ignore_on_load_unexpected``): the MTP gate judges the
-    BUILT tree, and this one holds exactly ``num_hidden_layers`` layers."""
+    """The MTP gate judges the built tree, which holds exactly ``num_hidden_layers`` layers here.
+    The hub's ``num_nextn_predict_layers: 1`` is metadata: ``_keys_to_ignore_on_load_unexpected`` drops layer 45."""
     spec = PP_SPEC_MAP["Glm5NextTextModel"]
     assert spec.refusal is None
     assert "num_nextn_predict_layers" in MTP_LAYER_COUNT_FIELDS
@@ -139,13 +112,8 @@ def test_pp_accepts_the_family_including_the_hub_mtp_metadata_field():
     reject_unsupported_pp_model(model, "none")
 
 
-# Tensor parallelism
-
-
 def test_tp_shards_zero_layers_and_raises():
-    """Neither attention class may enter TP_SHARDABLE_ATTENTION_CLASSES (the indexer and KDA make
-    the q/k/v plan unsound), so selective TP must hit the zero-sharded-layers raise instead of
-    leaving every weight replicated on a mesh that assumes sharding."""
+    """The indexer and KDA make the q/k/v plan unsound, so selective TP must raise instead of replicating."""
     assert "Glm5NextTextAttention" not in TP_SHARDABLE_ATTENTION_CLASSES
     assert "Glm5NextTextLinearAttention" not in TP_SHARDABLE_ATTENTION_CLASSES
     model = _tiny_text_model()
@@ -154,16 +122,10 @@ def test_tp_shards_zero_layers_and_raises():
             apply_tp_to_attention_only(model, mesh)
 
 
-# Attention resolution
-
-
 def test_attention_resolution_lands_on_sdpa():
-    """``Glm5NextForConditionalGeneration._supports_flash_attn = False`` — the resolver must divert
-    every flash request to sdpa itself; returning flash defers the failure to transformers' model
-    build, after the whole checkpoint has been fetched. Not FA4's own refusals, though its 256-wide
-    latent attention is one FA4 does not train: they bind only a class that runs a flash label, so an
-    FA4 request reaches the class flag, which covers FA2/FA3 too, with no FA2 build needed."""
-    assert not declares_flash_attention(Glm5NextConfig())  # premise
+    """Returning flash would defer the failure to transformers' model build, after the whole checkpoint is fetched.
+    FA4's own refusals bind only a class that runs a flash label, so an FA4 request reaches the class flag too."""
+    assert not declares_flash_attention(Glm5NextConfig())
     expected = {
         None: "sdpa",
         "flash_attention_4": "sdpa",
@@ -179,13 +141,9 @@ def test_attention_resolution_lands_on_sdpa():
 
 
 def test_attention_flash_gate_reads_the_class_flag_not_a_family_list():
-    """The same derivation must refuse flash for every family whose class declares it unsupported
-    (DeepSeek-V4: no sdpa either, so it lands on eager) and keep it for one that does not."""
+    """DeepSeek-V4 has no sdpa either, so it lands on eager."""
     assert validate_attn_implementation(DeepseekV4Config(), "flash_attention_2") == "eager"
     assert validate_attn_implementation(Qwen3Config(), "flash_attention_2") == "flash_attention_2"
-
-
-# Packing: both layer types cross a flat packed row on the dense backends, the only ones the family runs
 
 
 def _tokenizer() -> MagicMock:
@@ -198,10 +156,9 @@ def _tokenizer() -> MagicMock:
 
 @pytest.mark.parametrize("attn_impl", ["sdpa", "eager"])
 def test_dsa_layers_leak_across_a_packed_row_on_a_dense_backend(attn_impl):
-    """Defect pin: the forward hands its DSA (``indexed_attention``) layers only the 2D padding mask, so a
-    packed row runs there as one causal sequence and doc B moves when doc A changes. A DSA-only stack keeps the
-    KDA layers' own crossing out of the reading. If the drift ever reads 0, upstream fed ``position_ids`` into
-    the mask: clear ``GLM5_NEXT.dense_packing_leaks`` and retire this pin."""
+    """The forward hands its DSA layers only the 2D padding mask, so a packed row runs as one causal sequence.
+    A DSA-only stack keeps the KDA layers' own crossing out of the reading.
+    At drift 0 upstream fixed the mask: clear ``GLM5_NEXT.dense_packing_leaks`` and retire this pin."""
     torch.manual_seed(0)
     config = Glm5NextTextConfig(
         **{
@@ -240,8 +197,7 @@ def test_dsa_layers_leak_across_a_packed_row_on_a_dense_backend(attn_impl):
     ids=["composite", "text"],
 )
 def test_flat_packing_is_refused_on_every_backend_the_family_runs(build, attn_impl, allow_crossing):
-    """Upstream declares no flash support, so every backend GLM-5 Next resolves to is dense, and there the DSA
-    layers leak (above) whatever the linear-attention opt-in admits: flat packing is refused."""
+    """No flash support upstream, so every backend is dense, where the DSA layers leak whatever the opt-in admits."""
     config = build()
     config._attn_implementation = attn_impl
     with pytest.raises(
@@ -256,14 +212,8 @@ def test_flat_packing_is_refused_on_every_backend_the_family_runs(build, attn_im
         )
 
 
-# Balancing config-field registries
-
-
 def test_balancing_registries_resolve_on_the_real_config():
-    """The router registries must resolve GLM-5's spellings on the text config AND through the
-    composite wrapper: ``num_experts_per_tok`` directly, the expert count via the
-    ``num_local_experts``→``n_routed_experts`` attribute_map, ``moe_intermediate_size`` directly.
-    A miss silently classifies the model as dense (no EP wrapping, no balancing, no MoE metrics)."""
+    """A miss silently classifies the model as dense: no EP wrapping, no balancing, no MoE metrics."""
     assert Glm5NextTextConfig.attribute_map.get("num_local_experts") == "n_routed_experts"
     for config in (Glm5NextTextConfig(), Glm5NextConfig()):
         assert resolve_router_topk(config) == 8

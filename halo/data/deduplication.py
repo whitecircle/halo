@@ -1,6 +1,5 @@
-"""Semantic deduplication of a corpus: mean-pooled sentence embeddings + FAISS similarity search, and the run
-behind ``scripts/inference/deduplicate_dataset.py`` — the input dataset, the embedding model, the passes and the
-deduplicated output."""
+"""Semantic deduplication of a corpus (mean-pooled sentence embeddings + FAISS similarity search), behind
+``scripts/inference/deduplicate_dataset.py``."""
 
 import argparse
 import logging
@@ -23,12 +22,10 @@ from halo.model_loading.finalization import finalize_loaded_model
 
 logger = logging.getLogger(__name__)
 
-# Fixed default seed of the row sample and the pass shuffles: they decide WHICH rows are read and which member
-# of a near-duplicate group survives, so an unseeded global RNG would make two runs over identical data keep
-# different rows.
+# These decide which rows are read and which member of a near-duplicate group survives, so an unseeded RNG would make
+# two runs over identical data keep different rows.
 DEDUP_SHUFFLE_SEED = 42
 
-# ``--output_format`` -> how the deduplicated dataset is written.
 OUTPUT_WRITERS: dict[str, Callable[[Dataset, str], object]] = {
     "jsonl": lambda dataset, path: dataset.to_json(path, lines=True),
     "json": lambda dataset, path: dataset.to_json(path, lines=False),
@@ -38,12 +35,8 @@ OUTPUT_WRITERS: dict[str, Callable[[Dataset, str], object]] = {
 
 
 def _shuffle_matrix_with_mapping(matrix: np.ndarray, rng: np.random.Generator | None = None):
-    """Row-shuffle ``matrix``, returning it alongside the permutation that produced it.
-
-    ``rng`` threads a caller's generator through — :func:`deduplicate_embeddings` advances
-    ONE generator across its steps, so each step shuffles differently while the whole run stays
-    reproducible. ``None`` builds a generator seeded with :data:`DEDUP_SHUFFLE_SEED`.
-    """
+    """Row-shuffle ``matrix``, returning the permutation too. :func:`deduplicate_embeddings` threads one generator
+    across its steps, so each shuffles differently while the run stays reproducible."""
     generator = rng if rng is not None else np.random.default_rng(DEDUP_SHUFFLE_SEED)
     permuted_indices = generator.permutation(matrix.shape[0])
     shuffled_matrix = matrix[permuted_indices]
@@ -57,7 +50,7 @@ def _normalize_embeddings(embeddings: np.array):
 
 
 def embed_texts(texts, batch_size, model, tokenizer, device, normalize=True):
-    """Mean-pooled (over the attention mask) last hidden states of ``texts``, row-normalized by default."""
+    """Mean-pooled over the attention mask, row-normalized by default."""
     embeddings = []
     texts = list(texts)
 
@@ -78,8 +71,7 @@ def embed_texts(texts, batch_size, model, tokenizer, device, normalize=True):
 
 
 def _deduplicate_block(embeddings: np.ndarray, similarity_threshold: float) -> np.ndarray:
-    """Indices of the rows of ``embeddings`` that survive: each kept row drops every neighbor above
-    ``similarity_threshold``."""
+    """Surviving row indices: each kept row drops every neighbor above ``similarity_threshold``."""
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
 
@@ -112,13 +104,8 @@ def deduplicate_blocks(
     similarity_threshold: float,
     max_workers: int | None = None,
 ) -> np.ndarray:
-    """Indices of the rows that survive deduplication within each ``batch_size`` block of ``embeddings``,
-    in batch order, searched on ``max_workers`` threads (every CPU the process may use when unset).
-
-    Batch order, not completion order: the next multistep pass shuffles the survivors with the seeded
-    generator, and the run selects the output rows in this order, so an order set by which thread
-    finished first would make a seeded run keep different rows.
-    """
+    """Survivors within each ``batch_size`` block, in batch order: the next pass shuffles them with the seeded
+    generator, and an order set by which thread finished first would make a seeded run keep different rows."""
     starts = range(0, embeddings.shape[0], batch_size)
     with ThreadPoolExecutor(max_workers=max_workers or available_cpu_count()) as executor:
         futures = [
@@ -142,10 +129,8 @@ def deduplicate_embeddings(
     max_workers: int | None = None,
     seed: int = DEDUP_SHUFFLE_SEED,
 ) -> tuple[np.ndarray, list[int]]:
-    """Indices of the surviving rows of ``embeddings`` after ``steps_count`` reshuffled passes of
-    :func:`deduplicate_blocks`, and the row count before and after each pass."""
-    # One generator for the whole run: the steps must shuffle differently (that is what re-batches
-    # near-duplicates across batch boundaries) while the run as a whole stays reproducible.
+    """Surviving rows after ``steps_count`` reshuffled passes, and the row count before and after each pass."""
+    # One generator: the steps must shuffle differently to re-batch near-duplicates, while the run stays reproducible.
     rng = np.random.default_rng(seed)
     surviving_indices = np.arange(len(embeddings))
     progress_embeddings = embeddings
@@ -169,8 +154,7 @@ def deduplicate_embeddings(
 
 
 def resolve_device(device_arg: str) -> torch.device:
-    """The torch device ``--device`` names: ``auto`` is CUDA when a GPU is visible, else CPU; any other value
-    goes to :class:`torch.device` as given."""
+    """``auto`` is CUDA when a GPU is visible, else CPU; any other value goes to :class:`torch.device`."""
     if device_arg == "auto":
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -192,8 +176,7 @@ def load_dataset_from_path(
     dataset_split: str,
     sample_size: int | None,
 ) -> Dataset:
-    """Load the input split from any dataset source (:func:`~halo.data.sources.loading.load_dataset_split`), with
-    ``text_field`` checked and an optional seeded sample of ``sample_size`` rows."""
+    """Load the input split with ``text_field`` checked and an optional seeded sample of ``sample_size`` rows."""
     logger.info(f"Loading dataset from: {input_path}")
     dataset = load_dataset_split(input_path, split=dataset_split, config=dataset_config)
 
@@ -219,17 +202,14 @@ def compute_embeddings(
     save_path: str | None,
     trust_remote_code: bool,
 ) -> np.ndarray:
-    """Compute embeddings for a list of texts."""
     logger.info(f"Computing embeddings using model: {model_name}")
     logger.info(f"Processing {len(texts)} texts with batch size {batch_size}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code)
-    # Gated like every other tool's model load: an embedding checkpoint whose tensors are
-    # randomly initialized still returns vectors, and the dedup decisions look ordinary.
+    # Gated: an embedding checkpoint with random tensors still returns vectors, and the dedup decisions look ordinary.
     model = from_pretrained_verified(AutoModel, model_name, trust_remote_code=trust_remote_code)
     model.to(device)
-    # Non-persistent buffers come back uninitialized on transformers 5; unrepaired, the embeddings
-    # behind the dedup decisions are computed with a dead RoPE. Run once the tensors are placed.
+    # Non-persistent buffers come back uninitialized on transformers 5, leaving a dead RoPE. Run after placement.
     finalize_loaded_model(model)
     model.eval()
     tokenizer.model_max_length = max_length
@@ -257,8 +237,7 @@ def select_unique_rows(
     steps: int,
     max_workers: int | None,
 ) -> np.ndarray:
-    """The rows of ``embeddings`` that survive: one pass of :func:`deduplicate_blocks`, or ``steps`` reshuffled
-    passes of :func:`deduplicate_embeddings`, with the sizes before and after each pass logged."""
+    """One pass of :func:`deduplicate_blocks`, or ``steps`` reshuffled passes of :func:`deduplicate_embeddings`."""
     logger.info(f"Starting deduplication with threshold {similarity_threshold}")
     logger.info(f"Input embeddings shape: {embeddings.shape}")
 
@@ -312,15 +291,13 @@ def save_deduplicated_dataset(
     output_format: str = "jsonl",
     additional_fields: list[str] | None = None,
 ) -> None:
-    """Save the deduplicated dataset."""
     logger.info(f"Saving deduplicated dataset to: {output_path}")
 
     deduplicated_dataset = dataset.select(unique_indices.tolist())
 
     if additional_fields is not None:
         columns_to_keep = set(additional_fields)
-        # A name that matches no column is a typo; dropping it would write an output missing the
-        # column the caller asked to keep, undetected until something downstream reads it.
+        # A name matching no column is a typo; dropping it would silently lose a column the caller asked to keep.
         unknown = sorted(columns_to_keep - set(deduplicated_dataset.column_names))
         if unknown:
             raise ValueError(
@@ -342,7 +319,7 @@ def save_deduplicated_dataset(
 
 
 def run_deduplication(args: argparse.Namespace) -> int:
-    """Deduplicate ``--dataset`` on ``--text_field`` into ``--output_path``, returning the process exit code."""
+    """Returns the process exit code."""
     logger.info("Starting dataset deduplication")
     logger.info(f"Arguments: {vars(args)}")
 
@@ -400,8 +377,7 @@ def run_deduplication(args: argparse.Namespace) -> int:
                 additional_fields=args.additional_fields,
             )
     except Exception:
-        # One handler for the whole pipeline: every stage logs before it can fail, so the preceding
-        # log line names the stage and this puts the traceback in the file log beside the output.
+        # One handler for the pipeline: every stage logs before it can fail, so the preceding line names the stage.
         logger.exception("Dataset deduplication failed")
         return 1
 

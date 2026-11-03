@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""``resolve_checkpoint_source``, the checkpoint tools' ``--model_id`` resolver, reads the Hub cache alone offline.
-
-A call that may fetch lists a pinned commit's files through the Hub unless the cache holds that listing,
-which a cache an older huggingface_hub filled lacks; offline that raises although the cache holds the whole
-snapshot. Online the call still fetches, without the vendor weight dumps no tool reads.
-
-    python tests/cpu/checkpoint/test_checkpoint_source_offline.py
-"""
+"""``resolve_checkpoint_source`` reads the Hub cache alone offline, since a fetching call lists a pinned commit through
+the Hub and raises. Online it still fetches, without the vendor weight dumps no tool reads."""
 
 import json
 from pathlib import Path
@@ -23,7 +17,7 @@ COMMIT = "c" * 40
 
 
 def _stage_snapshot(cache: Path) -> Path:
-    """A complete snapshot of :data:`COMMIT` with its ref and no tree listing."""
+    """With its ref and no tree listing."""
     storage = cache / f"models--{REPO.replace('/', '--')}"
     (storage / "refs").mkdir(parents=True)
     (storage / "refs" / "main").write_text(COMMIT)
@@ -52,8 +46,7 @@ def test_online_the_resolver_may_fetch(monkeypatch):
 
 
 def test_a_hub_fetch_leaves_the_vendor_weight_dumps_behind(monkeypatch):
-    """gpt-oss ships its weights again under ``original/`` and ``metal/``; every tool reads the top-level shards
-    and the aux copy drops the dumps, so fetching them downloads the model three times over for nothing."""
+    """Fetching gpt-oss's ``original/`` and ``metal/`` downloads the model three times over for nothing."""
     calls = []
     monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
     monkeypatch.setattr(offline_export, "snapshot_download", lambda repo, **kwargs: calls.append(kwargs) or "dir")

@@ -1,17 +1,8 @@
 #!/usr/bin/env python
-"""
-Benchmark: AdamWBF16 (stochastic rounding) vs adamw_torch_fused on gpt-oss-20b.
+"""AdamWBF16 vs adamw_torch_fused on gpt-oss-20b: step time, peak memory and stale weight percentage.
 
-Measures optimizer step time, peak GPU memory, and stale weight percentage
-on the actual 20.7B MoE model (32 experts, 24 layers).
-
-Single GPU can't fit full 20.91B params + optimizer states (~168 GB needed),
-so we freeze the first N layers to keep trainable params within memory.
-The optimizer processes the same parameter shapes/sizes as real training.
-
-Usage (single GPU, no torchrun needed):
-    CUDA_VISIBLE_DEVICES=4 python tests/gpu/optimizers/bench_adamw_bf16.py
-    CUDA_VISIBLE_DEVICES=4 python tests/gpu/optimizers/bench_adamw_bf16.py --freeze-layers 12
+One GPU can't fit 20.91B params + optimizer states (~168 GB), so the first N layers freeze; the optimizer still sees
+real shapes.
 """
 
 import argparse
@@ -25,11 +16,10 @@ from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.common.models import GPT_OSS_20B
 
 MODEL_PATH = GPT_OSS_20B
-FREEZE_LAYERS = 8  # Freeze first N layers to fit in single-GPU memory
+FREEZE_LAYERS = 8  # Fits single-GPU memory.
 
 
 def set_random_gradients(model):
-    """Set random gradients on all trainable parameters (in-place reuse)."""
     for p in model.parameters():
         if p.requires_grad:
             if p.grad is None:
@@ -39,7 +29,6 @@ def set_random_gradients(model):
 
 
 def count_stale_subset(model, old_data, param_names):
-    """Count stale % on a subset of named parameters."""
     stale = total = 0
     for name, p in model.named_parameters():
         if name in param_names and p.requires_grad:
@@ -49,19 +38,15 @@ def count_stale_subset(model, old_data, param_names):
 
 
 def benchmark_step(model, optimizer, num_warmup=3, num_steps=10):
-    """Benchmark optimizer step time (ms)."""
-    # Create persistent gradients
     set_random_gradients(model)
 
-    # Initialize optimizer states
     optimizer.step()
 
-    # Warmup (reuse same grads — fine for timing, not for correctness)
+    # Reusing grads is fine for timing, not for correctness.
     for _ in range(num_warmup):
         optimizer.step()
     torch.cuda.synchronize()
 
-    # Timed runs
     times = []
     for _ in range(num_steps):
         torch.cuda.synchronize()
@@ -74,8 +59,7 @@ def benchmark_step(model, optimizer, num_warmup=3, num_steps=10):
 
 
 def stale_check(model, optimizer, sample_layer_idx):
-    """Check stale % on a single layer's params (memory-safe)."""
-    # Pick params from one layer to snapshot (avoids cloning all 14B params)
+    # One layer's params, avoiding cloning all 14B.
     prefix = f"model.layers.{sample_layer_idx}."
     target_names = set()
     old_data = {}
@@ -107,7 +91,6 @@ def main():
     print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     print(f"PyTorch: {torch.__version__}")
 
-    # Load model
     print(f"\nLoading model from {args.model}...")
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
@@ -120,7 +103,6 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total params: {total_params / 1e9:.2f}B")
 
-    # Freeze first N layers to fit optimizer states in memory
     frozen_count = 0
     for name, p in model.named_parameters():
         for i in range(args.freeze_layers):
@@ -133,7 +115,7 @@ def main():
     print(f"Frozen first {args.freeze_layers} layers: {frozen_count / 1e9:.2f}B params")
     print(f"Trainable params: {trainable_params / 1e9:.2f}B")
 
-    # Memory estimate: weights (all, bf16) + grads (trainable, bf16) + states (trainable, 2*bf16)
+    # Weights (all, bf16) + grads (trainable, bf16) + states (trainable, 2*bf16).
     est_mem = total_params * 2 + trainable_params * 6
     print(
         f"Estimated memory: {est_mem / 1e9:.1f} GB "
@@ -144,10 +126,9 @@ def main():
     mem_after_load = torch.cuda.max_memory_allocated() / 1e9
     print(f"GPU memory after load: {mem_after_load:.1f} GB")
 
-    # Layer to use for stale % check (first trainable layer)
+    # First trainable layer.
     sample_layer = args.freeze_layers
 
-    # ─── Benchmark 1: adamw_torch_fused ─────────────────────────────
     print(f"\n{'=' * 60}")
     print("Benchmark: adamw_torch_fused (baseline)")
     print(f"{'=' * 60}")
@@ -159,14 +140,11 @@ def main():
         fused=True,
     )
 
-    # Stale check on a single layer
     stale_fused, stale_nparams = stale_check(model, opt_fused, sample_layer)
 
-    # Benchmark step time
     times_fused = benchmark_step(model, opt_fused, args.warmup, args.steps)
     mem_fused = torch.cuda.max_memory_allocated() / 1e9
 
-    # Check state dtype
     sample_state = next(iter(opt_fused.state.values()))
     state_dtype = sample_state["exp_avg"].dtype
 
@@ -179,14 +157,12 @@ def main():
     print(f"  State dtype:        {state_dtype}")
     print(f"  Stale % (layer {sample_layer}, {stale_nparams} params): {stale_fused * 100:.1f}%")
 
-    # Cleanup
     del opt_fused, sample_state
     for p in model.parameters():
         p.grad = None
     gc.collect()
     torch.cuda.empty_cache()
 
-    # ─── Benchmark 2: AdamWBF16 ────────────────────────────────────
     print(f"\n{'=' * 60}")
     print("Benchmark: AdamWBF16 (stochastic rounding)")
     print(f"{'=' * 60}")
@@ -197,14 +173,11 @@ def main():
         lr=1e-4,
     )
 
-    # Stale check on same layer
     stale_sr, _ = stale_check(model, opt_sr, sample_layer)
 
-    # Benchmark step time
     times_sr = benchmark_step(model, opt_sr, args.warmup, args.steps)
     mem_sr = torch.cuda.max_memory_allocated() / 1e9
 
-    # Check state dtype
     sample_state = next(iter(opt_sr.state.values()))
     state_dtype_sr = sample_state["exp_avg"].dtype
 
@@ -217,7 +190,6 @@ def main():
     print(f"  State dtype:        {state_dtype_sr}")
     print(f"  Stale % (layer {sample_layer}): {stale_sr * 100:.1f}%")
 
-    # ─── Summary ────────────────────────────────────────────────────
     print(f"\n{'=' * 60}")
     print("Summary")
     print(f"{'=' * 60}")
@@ -236,7 +208,6 @@ def main():
     print(f"  {'Stale % (layer)':<22} {stale_fused * 100:>11.1f}% {stale_sr * 100:>11.1f}%")
     print()
 
-    # Extrapolate to full model
     full_step_fused = median_fused * (total_params / trainable_params)
     full_step_sr = median_sr * (total_params / trainable_params)
     print("  Extrapolated full-model step time:")
@@ -253,7 +224,6 @@ def main():
     else:
         print(f"  RESULT: High overhead ({overhead_pct:.0f}%) - optimization needed")
 
-    # ─── Per-step timing detail ─────────────────────────────────────
     print(f"\n{'=' * 60}")
     print("Per-step timing (ms)")
     print(f"{'=' * 60}")

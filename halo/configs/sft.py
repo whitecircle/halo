@@ -1,5 +1,4 @@
-"""Script arguments for supervised fine-tuning, the conversation-rendering fields it shares with teacher
-distillation and the tree-packing options."""
+"""SFT script arguments, the conversation-rendering fields it shares with teacher distillation, and tree packing."""
 
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
@@ -15,8 +14,6 @@ from halo.models.attention.tree_plan import FullAttentionForm
 
 @dataclass
 class ConversationRenderArguments:
-    """Chat-template rendering knobs shared by conversation-rendering trainers (SFT, distillation)."""
-
     conversation_field: str | None = field(
         default="prompt", metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."}
     )

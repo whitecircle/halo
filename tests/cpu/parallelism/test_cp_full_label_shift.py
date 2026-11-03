@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """``cp_shift_against_full_labels``: the CP ranks' shifted chunks tile the unsplit causal shift.
-
-The CP wrapper's loss, SMPO's CP forward and SFT's CP metrics all pair a rank's local logits with the
-full pre-split labels through this one helper. Concatenated over the ranks, the ``(logit, label)``
-pairs must be exactly the unsplit ``logits[:, :-1]`` / ``labels[:, 1:]`` pairs: every non-final rank
-keeps its last logit, supervised by the next chunk's first label, and only the final rank drops one.
-
-    python tests/cpu/parallelism/test_cp_full_label_shift.py
-"""
+Every non-final rank keeps its last logit, supervised by the next chunk's first label."""
 
 import pytest
 import torch

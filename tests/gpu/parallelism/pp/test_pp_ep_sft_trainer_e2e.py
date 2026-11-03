@@ -1,21 +1,9 @@
 #!/usr/bin/env python
-"""End-to-end PP+EP through the real DistributedSFTTrainer (pp2 × ep2, gpt-oss tiny MoE).
+"""End-to-end PP+EP through the real DistributedSFTTrainer (pp2 x ep2, tiny gpt-oss MoE), on bias-update balancing and
+the EP-aware PP save.
 
-Exercises the full trainer stack on a MoE model: EP patching before the ctor, the split with the
-threaded ``moe_balancing`` knob, the EP-aware stage FSDP wrap, the schedule-driven step with the
-deferred EP grad sweep, bias-update balancing with a stage-scoped counter reduce, and the EP-aware
-PP save (family gather under global names). It fails when any of those seams breaks:
-
-  * losses not finite / not identical across ranks / not decreasing (dead grads or desync)
-  * balancing biases zero (counters never recorded / reduce misrouted) or unequal across a
-    stage's ranks (reduce_group not injected)
-  * reload key-set drift (the EP gather naming — gpt-oss re-interleave, 2D biases — vs
-    from_pretrained's expectations)
-  * router_balancing_biases.pt missing global (unsplit-model) names for any of the 8 layers
-  * the aux-loss + live-coefficient config not raising at construction (the severed-path gate)
-
-Topology: 4 GPUs as 2 simulated NVLink domains of 2. Run:
-    torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep_sft_trainer_e2e.py
+Aux-loss balancing with a live coefficient must raise at construction: a PP stage severs the aux-loss add, silently
+unbalancing experts.
 """
 
 import sys
@@ -57,7 +45,7 @@ def build_args(output_dir: str) -> SFTConfig:
         per_device_train_batch_size=4,
         max_length=SEQ_LEN,
         bf16=True,
-        gradient_checkpointing=True,  # TRL's default; exercises the stage's non-reentrant GC + EP dispatch replay
+        gradient_checkpointing=True,  # TRL's default; exercises the stage's non-reentrant GC + EP dispatch replay.
     )
 
 
@@ -95,7 +83,6 @@ def run(ctx):
     grad_norms = [e["grad_norm"] for e in trainer.state.log_history if "grad_norm" in e]
     checks["grad_norm_logged_finite"] = bool(grad_norms) and bool(torch.isfinite(torch.tensor(grad_norms)).all())
 
-    # ── balancing biases: nonzero after training, identical across the stage's ranks ────────────
     stage = trainer._top_level_model()
     biases = {
         name: module.balancing_biases.detach().clone()
@@ -109,14 +96,11 @@ def run(ctx):
     dist.all_gather(stage_gathered, flat, group=trainer._pp_stage_group)
     checks["balancing_biases_identical_across_stage"] = all(torch.equal(flat, g) for g in stage_gathered)
 
-    # ── loss probe on the final weights: one more pipeline step (no optimizer update follows), so
-    # the reloaded full model must reproduce this rank's per-replica loss on the same batch. This
-    # is the value check on the EP gather — a save that permutes experts or swaps layers under each
-    # other's global names keeps the key set intact but cannot reproduce the loss.
+    # One more pipeline step with no update, so the reload must reproduce this loss. A save permuting experts or
+    # swapping layers keeps the key set intact but can't reproduce it.
     probe_batch, probe_loss = probe_step(trainer, rows, 4)
     metrics["probe_loss"] = float(probe_loss)
 
-    # ── save: EP gather under global names, reload into the unsplit class ───────────────────────
     save_dir = shared_output_dir(ctx)
     trainer.model.config.pad_token_id, trainer.model.config.eos_token_id = 0, 1
     trainer.save_model(save_dir)
@@ -147,8 +131,7 @@ def run(ctx):
             log(f"[reload] FAILED: {exc!r}")
             reload_ok = False
         try:
-            # Value check: the reloaded model on this rank's probe batch must reproduce the probe
-            # loss the pipeline computed on the final weights (grouped-mm EP vs dense HF experts).
+            # Grouped-mm EP vs dense HF experts on this rank's probe batch.
             values_ok = reload_reproduces_probe_loss(
                 reloaded.to(ctx.device).to(torch.bfloat16),
                 probe_batch,
@@ -169,8 +152,7 @@ def run(ctx):
         except Exception as exc:
             log(f"[biases file] FAILED: {exc!r}")
             biases_file_ok = False
-    # Bias values: the saved file must hold this run's actual biases — compare the stage's own
-    # (globally renamed) biases against the file on every stage's first rank.
+    # The file must hold this run's biases, compared on every stage's first rank.
     bias_values_ok = True
     if trainer.parallelism_config.stage_local_rank == 0:
         saved_biases = torch.load(f"{save_dir}/router_balancing_biases.pt", weights_only=False)
@@ -192,8 +174,6 @@ def run(ctx):
     checks["reloaded_model_reproduces_probe_loss"] = bool(flags[2].item())
     checks["saved_bias_values_match_in_memory"] = bias_values_ok
 
-    # ── negative: aux-loss balancing with a live coefficient must be rejected at construction ───
-    # (a PP stage severs the *ForCausalLM aux-loss add — silently unbalanced experts otherwise).
     expect_construction_error(
         DistributedSFTTrainer,
         "aux_loss_pp_rejected_at_construction",

@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""Tests for RLRR relative-reward shaping (arXiv:2601.23058).
-
-Run: python tests/cpu/grpo/test_relative_rewards.py
-"""
+"""RLRR relative-reward shaping (arXiv:2601.23058)."""
 
 import math
 
@@ -30,7 +27,7 @@ def test_dense_ranks_ties_share_rank():
     keys = [(0,), (0,), (1,)]
     ranks = dense_ranks(keys)
     assert list(ranks) == [1, 1, 2], list(ranks)
-    assert ranks.max() == 2  # number of distinct keys
+    assert ranks.max() == 2
 
 
 def test_rerank_correct_outranks_incorrect():
@@ -48,7 +45,6 @@ def test_rerank_shorter_correct_ranks_higher():
 
 def test_rerank_reward_breaks_remaining_ties():
     cfg = RLRRConfig(lam=1000.0)
-    # same length bin -> reward is the only remaining key
     ranks = hierarchical_ranks(rewards=[0.2, 0.9], correct=[True, True], lengths=[10, 10], config=cfg)
     assert ranks[1] < ranks[0], ranks
 
@@ -114,14 +110,13 @@ def test_all_correct_group_still_has_signal():
     adv = relative_advantages(
         [1.0, 1.0, 1.0],
         cfg,
-        lengths=[10, 300, 600],  # distinct length bins -> distinct ranks
+        lengths=[10, 300, 600],
     )
     assert adv.std() > 0, adv
     assert adv[0] > adv[1] > adv[2], adv
 
 
 def test_truly_identical_group_zero_advantage():
-    # Tied rank must stay at zero advantage — the flip side of the test above (no fabricated signal).
     cfg = RLRRConfig(mode="hrr", lam=100.0, correctness_clip=False)
     adv = relative_advantages([1.0, 1.0, 1.0], cfg, lengths=[10, 10, 10])
     assert np.allclose(adv, 0.0), adv
@@ -163,7 +158,6 @@ def test_std_normalize_scales():
 
 def test_correctness_from_threshold():
     cfg = RLRRConfig(mode="hrr", correctness_threshold=0.5, correctness_clip=True)
-    # No explicit `correct` labels: the first two must be inferred correct from the 0.5 threshold.
     adv = relative_advantages([0.9, 0.8, 0.2, 0.1], cfg)
     adv = np.asarray(adv)
     assert (adv[:2] >= -1e-3 - 1e-12).all(), adv

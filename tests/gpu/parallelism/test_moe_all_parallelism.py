@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""One parallelism mode of a tiny Mistral4 or Cohere2 MoE checkpoint on 8 GPUs: it engages the mode, runs forward and
-backward with every rank agreeing, and under EP survives a gathered save and reload.
-
-    torchrun --nproc_per_node=8 tests/gpu/parallelism/test_moe_all_parallelism.py --family cohere2_moe --mode ep --ep 8
-"""
+"""One parallelism mode of a tiny Mistral4 or Cohere2 MoE on 8 GPUs: it engages, runs with every rank agreeing, and
+under EP survives a gathered save and reload."""
 
 import argparse
 import math
@@ -35,16 +32,15 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, copy_release_tokenizer, 
 from tests.common.tolerances import TOL
 
 SEED = 0
-# The gathered save reloads to the same eval logits: random-init cross-entropy sits at ln(vocab) whatever the experts
-# hold, so only the logits tell a correct gather from a zeroed one.
+# Random-init cross-entropy sits at ln(vocab) whatever the experts hold, so only logits tell a correct gather from a
+# zeroed one.
 RELOAD_LOGIT_TOL = 1e-2
 
 
 @dataclass(frozen=True)
 class MatrixFamily:
-    """``release`` names the tokenizer the checkpoint carries, ``overrides`` the 8-way geometry (heads, experts and
-    layers that tp8, cp8, ep8 and etp4 divide), ``attn_implementation`` the backend outside CP, which needs flash, and
-    ``ulysses_attention`` the attention class CP installs."""
+    """``overrides`` is the 8-way geometry that tp8, cp8, ep8 and etp4 divide; ``attn_implementation`` the backend
+    outside CP, which needs flash."""
 
     release: str
     attn_implementation: str
@@ -75,8 +71,8 @@ FAMILIES = {
 
 
 def _cohere2_moe_checks(model, layers: list, pc: ParallelismConfig) -> dict[str, bool]:
-    """The "average" shared-expert combination halves the sum, and CP's attention applies RoPE on the sliding layers
-    alone, as the interleave does."""
+    """The "average" shared-expert combination halves the sum, and CP's attention applies RoPE on sliding layers
+    alone."""
     checks = {"average_combination_scaled": all(layer._output_scale == 0.5 for layer in layers)}
     if pc.is_cp_mode:
         wrappers = [m for m in model.modules() if type(m).__name__ == FAMILIES["cohere2_moe"].ulysses_attention]
@@ -90,8 +86,8 @@ FAMILY_CHECKS = {"cohere2_moe": _cohere2_moe_checks}
 
 
 def _mode_checks(model, pc: ParallelismConfig, args, family: MatrixFamily) -> dict[str, bool]:
-    """The mode engaged: the EP layers exist in every mode (grouped GEMM installs them at ``ep_size`` 1), so the
-    shard widths, the Ulysses attention, the TP DTensors and the Liger norm are what prove it."""
+    """EP layers exist in every mode (grouped GEMM installs them at ``ep_size`` 1), so shard widths, Ulysses attention,
+    TP DTensors and the Liger norm prove it."""
     layers = ep_layers(model)
     attention = Counter(type(m).__name__ for m in model.modules() if "Attention" in type(m).__name__)
     log(f"  {len(layers)} EP layers, attention classes {dict(attention)}")
@@ -110,7 +106,7 @@ def _mode_checks(model, pc: ParallelismConfig, args, family: MatrixFamily) -> di
         # Selective TP keeps the attention class and turns its projections into DTensors.
         checks["tp_engaged"] = any(isinstance(p.data, DTensor) for p in model.parameters())
     if args.liger:
-        # Patched by subclassing the family's own norm and binding Liger's forward, so the name stays.
+        # Patched by subclassing the family's norm and binding Liger's forward, so the name stays.
         norm = type(model.model.norm)
         checks["liger_rmsnorm_patched"] = (
             getattr(norm, "_halo_liger_patched_role", None) == "rms_norm" and norm.forward is LigerRMSNorm.forward
@@ -121,7 +117,7 @@ def _mode_checks(model, pc: ParallelismConfig, args, family: MatrixFamily) -> di
 
 
 def _reload_checks(model, tokenizer, pc, reload_dir: str, batch, load) -> dict[str, bool]:
-    """COLLECTIVE. The gathered EP save reloads through ``load`` (under ``pc``) to the same eval logits on ``batch``."""
+    """COLLECTIVE. The gathered EP save reloads through ``load`` to the same eval logits."""
     save_dir = Path(reload_dir)
     dist.barrier()
     if dist.get_rank() == 0:
@@ -174,7 +170,6 @@ def run(ctx):
         ctx.on_teardown(lambda: cleanup_dirs(reload_dir))
     ctx.barrier()
 
-    # All ranks load at once: the tiny model fits easily.
     pc = ParallelismConfig(
         ep_size=args.ep, cp_size=args.cp, tp_size=args.tp, expert_tp_size=args.etp, max_concurrent_loading=0
     )
@@ -189,7 +184,7 @@ def run(ctx):
     model, tokenizer = load(model_name_or_path=ckpt_dir, use_liger_kernel=args.liger)
     checks = _mode_checks(model, pc, args, family)
 
-    # The full sequence on every mode: CP's wrapper shards it itself.
+    # CP's wrapper shards the full sequence itself.
     batch = random_token_batch(model.config.vocab_size, batch=2, seq=64, device=ctx.device)
     model.train()
     loss = model(input_ids=batch[0], labels=batch[1], use_cache=False).loss
@@ -197,14 +192,14 @@ def run(ctx):
     log(f"  loss {loss.item():.6f}, cross-rank spread {spread:.3e}")
     checks["loss_finite"] = bool(torch.isfinite(loss))
     if pc.is_cp_mode:
-        # Each CP rank scores its own sequence chunk; the spread is inf when any rank's loss is not finite.
+        # Each CP rank scores its own chunk; the spread is inf when any rank's loss is not finite.
         checks["losses_finite_across_ranks"] = math.isfinite(spread)
     else:
         checks["losses_consistent_across_ranks"] = TOL.identical_batch_ranks_agree(spread)
     loss.backward()
     layers = ep_layers(model)
     if layers:
-        # Zero means no router signal reached the gate: present but useless.
+        # Zero means no router signal reached the gate.
         gate_grad = layers[0].gate.weight.grad
         checks["ep_router_grad_present"] = (
             gate_grad is not None and bool(torch.isfinite(gate_grad).all()) and gate_grad.norm().item() > 0.0

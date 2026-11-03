@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 REFERENCE_SCAN_ROWS = 256
 _DIGEST_CHUNK_VALUES = 1 << 22
 _IDENTITY_SCHEMA = {"num_rows": int, "token_digests": Mapping, "settings": Mapping}
-# The settings key recording the dtype a split's reference log-probs were computed in: a split scored
-# at another precision carries that precision's rounding and is never reused.
+# Settings key for the dtype a split's reference log-probs were computed in; another precision's rounding is never
+# reused.
 LOGPROB_PRECISION_KEY = "logprob_precision"
 # Every complete checkpoint of a run carries the same run-start reference scores.
 PREVIOUS_CHECKPOINT_RECOVERY = (
@@ -50,12 +50,8 @@ def is_token_type(arrow_type: pa.DataType) -> bool:
 
 
 def token_digest(dataset: Dataset, column: str) -> str:
-    """Hash ordered row lengths and int64 values, independent of Arrow batches and integer width.
-
-    Dataset fingerprints can hash trainer state through TRL's tokenize map and become random when
-    it cannot be pickled. Reference identity must depend on token content, not that fingerprint.
-    Separate length and value hashes keep batching and chunk boundaries out of the digest.
-    """
+    """Hash ordered row lengths and int64 values, independent of Arrow batches and integer width. Dataset fingerprints
+    can hash trainer state through TRL's tokenize map and turn random when it cannot be pickled."""
     lengths, values = hashlib.sha256(), hashlib.sha256()
     for batch in dataset.select_columns([column]).with_format("arrow").iter(batch_size=REFERENCE_SCAN_ROWS):
         array = batch.column(column).combine_chunks()
@@ -73,14 +69,12 @@ def token_digest(dataset: Dataset, column: str) -> str:
 
 
 def is_reference_entry(entry: object) -> bool:
-    """Whether a saved split carries every identity field, each of its type."""
     return isinstance(entry, Mapping) and all(
         isinstance(entry.get(key), value_type) for key, value_type in _IDENTITY_SCHEMA.items()
     )
 
 
 def reference_regeneration_steps(checkpoint: str) -> str:
-    """How to give ``checkpoint`` a reference file computed from the run's original starting model."""
     # Outside the run's own output_dir, whose rotation could otherwise delete this checkpoint.
     scratch = f"{os.path.dirname(os.path.abspath(checkpoint))}-reference-recovery"
     return (
@@ -93,11 +87,8 @@ def reference_regeneration_steps(checkpoint: str) -> str:
 
 
 class ReferenceLogpsMixin:
-    """Shared frozen-reference lifecycle; subclasses own the score payload and the sweep.
-
-    Place this mixin before DistributedTrainerMixin in the trainer's bases so its checkpoint hook
-    overrides CheckpointingMixin's empty default and the reference rides every checkpoint.
-    """
+    """Shared frozen-reference lifecycle; subclasses own the score payload and the sweep. Place before
+    DistributedTrainerMixin so its checkpoint hook overrides CheckpointingMixin's empty default."""
 
     # Settings beyond the data, chat template and tokenizer that change this trainer's digested token
     # columns, named as causes when a saved split's digests do not match.
@@ -227,10 +218,7 @@ class ReferenceLogpsMixin:
         """Optional rank-consistency check after all local payload validation has succeeded."""
 
     def _reference_mismatch_refusal(self, name: str, entry: object, identity: Mapping, mismatch: str) -> str:
-        """The refusal of a saved split that does not match, where a sweep would score trained weights.
-
-        Total over a malformed ``entry``: every rank that sees a mismatch must reach the verdict.
-        """
+        """Total over a malformed ``entry``, since every rank that sees a mismatch must reach the verdict."""
         return (
             f"{self._reference_saved_path} does not belong to this '{name}' dataset: {mismatch}. "
             "Each saved value is its own row's reference, so attaching it to different data would "
@@ -257,11 +245,8 @@ class ReferenceLogpsMixin:
         return {**self._resumed_reference_logps, **self._reference_logps_by_split}
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
-        """Commit references before CheckpointingMixin can rotate the previous complete checkpoint.
-
-        This hook must precede the checkpointing default in the trainer's MRO. Its cooperative
-        super() preserves other sidecars, and every rank joins the filesystem-aware writers.
-        """
+        """Commit references before CheckpointingMixin can rotate the previous complete checkpoint; must precede its
+        default in the MRO. Every rank joins the filesystem-aware writers."""
         super()._persist_trainer_sidecars(checkpoint_dir)
         names = sorted(set(self._resumed_reference_logps) | set(self._reference_logps_by_split))
         present = rank_consensus(bool(names))

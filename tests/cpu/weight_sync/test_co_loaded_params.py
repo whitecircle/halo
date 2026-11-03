@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the co-load groups a weight-sync client declares.
-
-SGLang's MLA loaders fuse ``q_a_proj`` and ``kv_a_proj_with_mqa`` from a cache local to one
-``load_weights`` call, so a half arriving in a request without the other is dropped without error;
-every request is one chunk, and the chunk boundary falls wherever the byte budget fills. What is
-pinned: a group a boundary would split waits whole for the next chunk; a buffer holding nothing but
-such members sends nothing; a group the sync never completes refuses the close rather than closing
-over a dropped half; and the groups are scoped to the modules the model declares, since the engine
-fuses nothing where a half does not exist.
-
-    python tests/cpu/weight_sync/test_co_loaded_params.py
-"""
+"""SGLang's MLA loaders fuse ``q_a_proj`` and ``kv_a_proj_with_mqa`` from a cache local to one ``load_weights`` call,
+so a half arriving without the other is dropped without error, and a chunk boundary must never split a pair."""
 
 import pytest
 import torch
@@ -62,7 +52,6 @@ def test_split_holds_only_the_members_of_an_incomplete_group():
 
 
 def test_a_suffix_claims_a_name_only_at_a_module_boundary():
-    """``xself_attn.q_a_proj.weight`` is another module's tensor and must not join layer 0's group."""
     chunk = [("model.layers.0.xself_attn.q_a_proj.weight", _param()), (_layer(0, "q_a_proj"), _param())]
     sendable, held = split_co_loaded(chunk, GROUPS)
     assert _names(sendable) == ["model.layers.0.xself_attn.q_a_proj.weight"]
@@ -71,7 +60,6 @@ def test_a_suffix_claims_a_name_only_at_a_module_boundary():
 
 @pytest.fixture
 def streamed(monkeypatch) -> tuple[SGLangWeightSyncClient, Wire]:
-    """An SGLang client on a recording wire, with the chunk budget shrunk to two params."""
     monkeypatch.setattr(base_module, "WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
     wire = Wire()
     return wire.attach(offline_client(SGLangWeightSyncClient)), wire
@@ -84,8 +72,7 @@ def test_a_pair_the_budget_would_split_moves_whole_into_the_next_chunk(streamed)
 
 
 def test_without_the_group_the_budget_cuts_between_the_halves(streamed):
-    """The budget alone cuts between the halves, so the regrouping in ``_GROUPED_CHUNKS`` is the co-load
-    group's doing."""
+    """The control: the regrouping in ``_GROUPED_CHUNKS`` is the co-load group's doing."""
     client, wire = streamed
     client.scope_co_load_groups([])
     push(client, _mla_payload())
@@ -112,8 +99,7 @@ def test_the_close_refuses_a_pair_the_sync_never_completed(streamed):
 
 
 def test_groups_are_scoped_to_the_modules_the_model_declares():
-    """An MLA block without ``q_lora_rank`` has no ``q_a_proj``: the engine fuses nothing there, so the
-    surviving half must travel on its own rather than wait for a partner that never comes."""
+    """An MLA block without ``q_lora_rank`` has no ``q_a_proj``, so the surviving half must not wait for a partner."""
     without_q_a = ["model.layers.0.self_attn.kv_a_proj_with_mqa", "model.layers.0.self_attn.q_b_proj"]
     assert declared_co_load_groups(SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS, without_q_a) == (
         ("self_attn.kv_a_proj_with_mqa.weight",),

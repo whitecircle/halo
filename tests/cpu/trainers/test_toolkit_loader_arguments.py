@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """The toolkit's DP-sharded train, eval and test loaders take HF's DataLoader arguments.
-
-HF's ``_get_dataloader`` passes ``multiprocessing_context``, ``prefetch_factor`` and ``in_order`` on
-every split. The toolkit's builders share one parameter set (``_loader_params``); without the first
-and the last in it, a run setting ``dataloader_multiprocessing_context: spawn`` or
-``dataloader_in_order: false`` gets neither once TP/CP/ETP/PP or a pre-sharded dataset puts it on
-the toolkit's loader. The pin: each of the three builders hands the configured values to its loader,
-and HF's process-sharded batch sampler is refused there.
-
-    python tests/cpu/trainers/test_toolkit_loader_arguments.py
-"""
+Without them in ``_loader_params``, ``dataloader_in_order: false`` and a multiprocessing context would be dropped."""
 
 from types import SimpleNamespace
 
@@ -22,8 +13,7 @@ _ROWS = list(range(8))
 
 
 def _host() -> DataParallelLoaderMixin:
-    """A TP-style rank on the toolkit's loader path; the prepare step is the identity, so the built
-    ``DataLoader`` is what the assertions read."""
+    """A TP-style rank on the toolkit's loader path; the prepare step is the identity."""
     host = object.__new__(DataParallelLoaderMixin)
     host.parallelism_config = SimpleNamespace(
         non_dp_replication_factor=2, is_cp_mode=False, is_pp_mode=False, get_data_parallel_rank=lambda: 0
@@ -68,8 +58,7 @@ def test_every_split_takes_hfs_worker_arguments(build):
 
 
 def test_a_process_sharded_batch_sampler_is_refused():
-    """HF's ``batch_rebalance`` sampler shards batches by global process: under TP/CP the ranks that
-    share a batch would each draw different rows."""
+    """HF's ``batch_rebalance`` sampler shards by global process, so ranks sharing a batch draw different rows."""
     host = _host()
     host.args.train_sampling_strategy = "batch_rebalance"
     with pytest.raises(ValueError, match="batch_rebalance"):

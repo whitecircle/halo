@@ -1,8 +1,5 @@
-"""The last pipeline stage's losses: the loss value a runner is built with, and the causal-LM CE.
-
-``torch.distributed.pipelining`` calls the loss once per microbatch and sums nothing itself, so every
-loss here returns a sum, which the runner divides by the whole step's normalizer.
-"""
+"""The last pipeline stage's losses. ``torch.distributed.pipelining`` calls the loss once per microbatch and sums
+nothing, so every loss returns a sum the runner divides by the whole step's normalizer."""
 
 from __future__ import annotations
 
@@ -26,8 +23,7 @@ FusedHeadLossFn = Callable[[nn.Module, HeadTransform, torch.Tensor, torch.Tensor
 def _head_ce_sum_chunk(
     head: nn.Module, head_transform: HeadTransform, chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor
 ) -> torch.Tensor:
-    """One token chunk projected through the family's head path, its CE summed: the unit the
-    checkpoint recomputes."""
+    """One token chunk's CE through the family's head path: the unit the checkpoint recomputes."""
     return cross_entropy_sum(head_transform.project(head, chunk_hidden), chunk_labels)
 
 
@@ -44,14 +40,10 @@ def causal_lm_token_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Te
 def fused_causal_lm_token_loss(
     head: nn.Module, head_transform: HeadTransform, hidden_states: torch.Tensor, labels: torch.Tensor
 ) -> torch.Tensor:
-    """:func:`causal_lm_token_loss` with the head folded in, so no ``[mb, S, V]`` logits plane is built.
-
-    Head projection and CE run together over one token chunk at a time under a non-reentrant
-    checkpoint, so neither the logits nor their gradient exist whole. The loss and the activation
-    gradients match the unfused path exactly; the head weight's gradient is reassociated into one
-    partial GEMM per chunk (rounding noise in fp32, ~1e-2 relative in bf16). Chunks are sized from the
-    head's full width, which a vocabulary truncation only narrows.
-    """
+    """:func:`causal_lm_token_loss` with the head folded in, so no ``[mb, S, V]`` logits plane is built. Head and CE
+    run per token chunk under a non-reentrant checkpoint, sized from the head's full width. The loss and activation
+    gradients match the unfused path exactly; the head weight's gradient is reassociated per chunk (rounding noise in
+    fp32, ~1e-2 relative in bf16)."""
     vocab_size = getattr(head, "out_features", None)
     if vocab_size is None:
         raise TypeError(

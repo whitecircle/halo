@@ -1,35 +1,9 @@
 #!/usr/bin/env python
-"""
-SMPO with EP+CP (EP=2, CP=2) on GptOss-20B MoE: step 1's loss is the unsplit sequence's loss.
+"""SMPO with EP=2, CP=2 on GptOss-20B: step 1's loss equals an EP-only trainer's, on the initial weights.
 
-EP distributes the MoE experts across the GPUs while CP splits every sequence via Ulysses attention.
-Each CP rank all-reduces its chunk's partial log-prob and NLL sums. An in-place ``dist.all_reduce``
-there reaches autograd only through PyTorch's c10d fallback (identity backward, a warning), and a
-loss multiplied by ``cp_size`` to make up the gradient logs ``cp_size`` times the true loss. Step 1's
-microbatches, as ``compute_loss`` saw them, are scored again by an EP-only (CP=1)
-SMPOTrainer on the initial weights, and
-
-  1. each microbatch loss and the logged step-1 loss equal the reference's;
-  2. no backward reached the c10d autograd fallback;
-
-besides the smoke checks: every step runs, and the losses and logged gradient norms are finite.
-
-The step-1 gradient is not compared: CP needs GptOss's attention sinks neutralized, and without them
-this model's gradient does not survive a change of layout (EP2 against EP1 without CP, eager attention:
-median per-parameter cosine 0.26, against 0.99 with the sinks live; the same layout twice agrees to
-0.9999). tests/gpu/trainers/preference/test_smpo_cp.py pins the CP gradient on a dense model.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_ep_cp.py
-
-Requirements:
-    - 2x GPUs with >=80GB memory each
-    - DeepEP installed
-    - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
-
-Note:
-    The max_length and max_prompt_length must be divisible by cp_size=2.
+An in-place ``dist.all_reduce`` reaches autograd only through c10d's fallback. The gradient isn't compared: CP needs
+the sinks neutralized, and without them it doesn't survive a layout change (median cosine 0.26, against 0.99 with sinks
+live).
 """
 
 import torch
@@ -53,7 +27,7 @@ EP_SIZE = 2
 CP_SIZE = 2
 NUM_TRAIN_SAMPLES = 64
 NUM_EVAL_SAMPLES = 16
-# both lengths must be divisible by cp_size
+# Both lengths must be divisible by cp_size.
 MAX_LENGTH = 4096
 MAX_PROMPT_LENGTH = 2048
 NUM_TRAIN_STEPS = 5
@@ -61,9 +35,8 @@ BATCH_SIZE = 1
 GRADIENT_ACCUMULATION = 2
 LEARNING_RATE = 5e-6
 SEED = 42
-# Step 1 against the EP-only trainer, relative. With the sinks neutralized the two layouts' losses drift
-# apart: measured over two seeds, a microbatch loss by up to 16% and the logged step loss by up to 8%. A
-# loss counted once per CP rank is 100% off.
+# With the sinks neutralized the layouts' losses drift: measured over two seeds, a microbatch by up to 16% and the
+# logged step by up to 8%. A loss counted once per CP rank is 100% off.
 LOSS_RTOL = 0.4
 
 
@@ -76,7 +49,7 @@ def _smpo_config(output_dir: str) -> SMPOConfig:
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # already applied by load_distributed_model
+        use_liger_kernel=False,  # Already applied by load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",
@@ -102,7 +75,6 @@ def _load_model(parallelism_config: ParallelismConfig, attn_implementation: str)
 
 
 def _train_ep_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep, str]:
-    """Train under EP+CP; return the smoke checks, the recorded first step and the attention kernel."""
     train_dataset = create_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_preference_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 100)
     log(f"Train dataset: {len(train_dataset)} samples, eval dataset: {len(eval_dataset)} samples")
@@ -137,7 +109,6 @@ def _train_ep_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep
 
 
 def _score_reference(output_dir: str, tokenizer, first_step: FirstStep, attn_implementation: str) -> FirstStep:
-    """Score the recorded first step with an EP-only (CP=1) trainer on the initial weights."""
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
     trainer = SMPOTrainer(
         model=_load_model(parallelism_config, attn_implementation),
@@ -151,7 +122,6 @@ def _score_reference(output_dir: str, tokenizer, first_step: FirstStep, attn_imp
 
 
 def run(ctx) -> dict:
-    """Run SMPO trainer test with EP+CP (EP=2, CP=2)."""
     log(f"\n{'=' * 70}")
     log("SMPO EP+CP TEST: EP=2 + CP=2 with GptOss-20B")
     log(f"{'=' * 70}")

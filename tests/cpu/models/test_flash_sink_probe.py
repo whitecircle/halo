@@ -1,21 +1,5 @@
 """What the flash-attention probes ask the kernel, and what the FA4 warm-up compiles.
-
-Two decisions in ``attention/selection.py`` are read off a flash kernel's signature, and both must ask
-the VARLEN entry point rather than the DENSE one:
-
-  * the sink-capability probe. transformers builds its whole per-argument capability map
-    (``_process_flash_kwargs_fn``) by inspecting ``_flash_varlen_fn`` and then applies that map to
-    the dense call as well, so the VARLEN signature is what decides whether ``s_aux`` /
-    ``learnable_sink`` reaches the kernel — and it drops the tensor with no warning when it does not.
-    A dense-signature probe can therefore approve a backend that silently drops the sinks a
-    ``reset_sinks: false`` run keeps live, which is nats of logprob against the served policy.
-  * the pre-compile warm-up, whose whole job is that no rank meets a first-use JIT compile after the
-    others have moved on. The dense and varlen kernels compile separately and a packed /
-    padding-free batch dispatches the varlen one, so warming only the dense kernel leaves the shape
-    production actually runs cold — the deadlock the warm-up exists to prevent.
-
-    python tests/cpu/models/test_flash_sink_probe.py
-"""
+Both must ask the varlen entry point: transformers maps capabilities off it, and packed batches dispatch it."""
 
 from __future__ import annotations
 
@@ -35,32 +19,24 @@ from halo.models.attention.backend_setup import warm_fa4_kernels
 from halo.models.attention.selection import FLASH_SINK_PARAM_NAMES, _attn_impl_handles_sinks, flash_kernel
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 
-# The probed entry point must stay the one transformers reads
-
 
 def test_transformers_still_keys_capability_off_the_varlen_function():
-    """Drift pin. If a transformers upgrade builds the capability map from the dense function
-    instead, this fails and ``flash_kernel`` has to be re-pointed with it — otherwise the probe
-    would quietly answer a question the library no longer asks."""
+    """If an upgrade builds the capability map from the dense function, ``flash_kernel`` must be re-pointed with it."""
     source = inspect.getsource(flash_utils.lazy_import_flash_attention)
     assert "_lazy_define_process_function(_flash_varlen_fn)" in source, source
 
 
 def test_the_probe_returns_the_function_transformers_would_bind():
-    """Identity, not just spelling: the probe and transformers must reach the same object for the
-    installed FA4 build."""
     cute = pytest.importorskip("flash_attn.cute")
     assert flash_kernel("flash_attention_4") is cute.flash_attn_varlen_func
 
 
 def test_the_sink_argument_names_match_transformers_alias_table():
-    """transformers accepts the sink tensor under ``s_aux`` or its own alternative-name entry; the
-    probe must test exactly those two, or a kernel exposing only one spelling is misread."""
+    """The probe must test exactly these two, or a kernel exposing only one spelling is misread."""
     assert set(FLASH_SINK_PARAM_NAMES) == {"s_aux", flash_utils._flash_api_alternative_names["s_aux"]}
 
 
 def _fake_cute_module(*, dense_sink: bool, varlen_sink: bool) -> types.ModuleType:
-    """A stand-in ``flash_attn.cute`` whose dense and varlen signatures disagree about the sink."""
     mod = types.ModuleType("flash_attn.cute")
 
     if dense_sink:
@@ -92,8 +68,7 @@ def _fake_cute_module(*, dense_sink: bool, varlen_sink: bool) -> types.ModuleTyp
     ids=["dense-only-sink-is-not-support", "varlen-sink-is-support"],
 )
 def test_the_sink_probe_reads_the_varlen_signature(monkeypatch, dense_sink, varlen_sink, handles):
-    """A build whose dense function takes the sink and whose varlen function does not must report
-    NO sink support: transformers would never pass the tensor, for either shape."""
+    """A dense-only sink is no support: transformers would never pass the tensor, for either shape."""
     monkeypatch.setitem(
         sys.modules, "flash_attn.cute", _fake_cute_module(dense_sink=dense_sink, varlen_sink=varlen_sink)
     )
@@ -105,12 +80,7 @@ def test_an_absent_build_reports_no_sink_support(monkeypatch):
     assert _attn_impl_handles_sinks("flash_attention_4") is False
 
 
-# The FA4 warm-up
-
-
 class _RecordingCute(types.ModuleType):
-    """``flash_attn.cute`` whose two entry points record their inputs and stay differentiable."""
-
     def __init__(self):
         super().__init__("flash_attn.cute")
         self.calls: list[dict] = []
@@ -136,7 +106,6 @@ def _fa4_model() -> LlamaForCausalLM:
 
 @pytest.fixture
 def warmed(monkeypatch):
-    """Run the warm-up against a recording kernel on CPU, with a world of 2 faked."""
     cute = _RecordingCute()
     monkeypatch.setitem(sys.modules, "flash_attn.cute", cute)
     monkeypatch.setattr(warmup_mod, "get_global_world_size", lambda: 2)
@@ -145,8 +114,8 @@ def warmed(monkeypatch):
 
 
 def test_the_warmup_compiles_both_entry_points(warmed):
-    """Warming only the dense kernel leaves the varlen one to JIT-compile mid-forward on the first
-    packed step — one rank stalls ~10s while its peers run ahead into the next collective."""
+    """Warming only the dense kernel leaves the varlen one to JIT-compile on the first packed step.
+    One rank stalls ~10s while its peers run ahead into the next collective."""
     warm_fa4_kernels(_fa4_model(), dtype=torch.bfloat16, device=torch.device("cpu"))
     assert [call["entry"] for call in warmed.calls] == ["dense", "varlen"]
 
@@ -158,8 +127,7 @@ def test_the_warmup_compiles_both_entry_points(warmed):
 
 
 def test_the_warmup_compiles_the_runs_dtype(warmed):
-    """The kernel is keyed by dtype: a hardcoded bf16 warm-up under an fp16 run compiles a kernel
-    the run never calls and leaves the one it does call cold — the deadlock, plus the compile."""
+    """The kernel is keyed by dtype: a hardcoded bf16 warm-up under an fp16 run leaves the one it calls cold."""
     warm_fa4_kernels(_fa4_model(), dtype=torch.float16, device=torch.device("cpu"))
     assert warmed.calls
     for call in warmed.calls:
@@ -172,10 +140,9 @@ def test_the_warmup_compiles_the_runs_dtype(warmed):
     ids=["glm-4.7-flash-256", "qk-wider-than-v"],
 )
 def test_the_warmup_compiles_the_mla_head_widths(warmed, qk_nope_head_dim, qk_rope_head_dim, v_head_dim):
-    """The kernel is keyed by the q/k and v widths. MLA's ``head_dim`` is only its RoPE slice (GLM-4.7-Flash: 64
-    against 256-wide q/k/v), so a warm-up sized off it leaves the run's kernel to JIT-compile on every rank during
-    the first step, outside the fence. transformers' flash path pads a narrower value up to the q/k width, so that
-    is the value width the run's kernel sees."""
+    """MLA's ``head_dim`` is only its RoPE slice (GLM-4.7-Flash: 64 against 256-wide q/k/v).
+    Sized off it, the run's kernel compiles on every rank in the first step, outside the fence.
+    transformers' flash path pads a narrower value up to the q/k width, so that is the value width the kernel sees."""
     config = Glm4MoeLiteConfig(
         **{
             **TINY_GLM4_MOE_LITE_CONFIG,
@@ -204,7 +171,6 @@ def test_the_warmup_stays_inert_for_another_backend(warmed):
 
 
 def _recorded_fences(monkeypatch) -> list[str]:
-    """The fences the warm-up enters, by the failure description each joins under."""
     fences: list[str] = []
 
     @contextlib.contextmanager
@@ -224,14 +190,8 @@ def _recorded_fences(monkeypatch) -> list[str]:
     ],
 )
 def test_every_rank_reaches_the_fence_whatever_it_resolved(monkeypatch, warmed, mutate, case):
-    """The fence is world-wide, so it cannot sit behind a PER-RANK verdict.
-
-    The backend a rank resolves is its own (auto-detection, an FA4 build present on some nodes only,
-    a composite config that keeps the field elsewhere), and a rank returning before the fence
-    leaves every peer that DID warm sitting in it — the same desync the warm-up exists to prevent,
-    moved from the JIT to the fence. Hence the fence sits at the distributed caller, above every
-    per-rank verdict the compile itself takes.
-    """
+    """The fence is world-wide, but each rank resolves its own backend (auto-detection, FA4 on some nodes only).
+    A rank returning early leaves peers that warmed stuck in it, so the fence sits above every per-rank verdict."""
     fences = _recorded_fences(monkeypatch)
 
     model = _fa4_model()
@@ -243,7 +203,7 @@ def test_every_rank_reaches_the_fence_whatever_it_resolved(monkeypatch, warmed, 
 
 
 def test_a_single_process_run_does_not_fence(monkeypatch, warmed):
-    """Anti-vacuity: world==1 is the one verdict every rank shares, so it may skip the fence."""
+    """world==1 is the one verdict every rank shares, so it may skip the fence."""
     fences = _recorded_fences(monkeypatch)
     monkeypatch.setattr(warmup_mod, "get_global_world_size", lambda: 1)
 

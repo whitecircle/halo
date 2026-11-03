@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Gathered saves of a model holding an external table: Qwen3.8-Flash-Next's host n-gram table.
-
-Every gathered saver streams through ``stream_gathered_checkpoint``, which writes the table's parts as table-only
-files under the hub's ``ngram_embedding.shard_*`` keys beside the streamed weights and the index: the save reloads
-in stock transformers into the logits the trainer's model computes (both under transformers' own forwards), carries
-``split_ngram_parts`` and no run-scoped stamp, and a later save links the earlier one's table files rather than
-writing them again. The release's multimodal layout, loaded text-only as the recipes load it, exports the text
-layout. The sharded EP save, which ``merge_ep_shards.py`` could not complete, and transformers' ``save_pretrained``,
-whose state dict holds no table, are refused; a family without a table saves byte for byte as before.
-
-    python tests/cpu/checkpoint/test_qwen4_exp_table_export.py
-"""
+"""Gathered saves of a model holding an external table, Qwen3.8-Flash-Next's host n-gram table, written as table-only
+files. A later save links the earlier one's files; the sharded EP save and ``save_pretrained`` are refused."""
 
 from __future__ import annotations
 
@@ -67,7 +57,6 @@ def source(tmp_path) -> str:
 
 
 def _trained(model: torch.nn.Module) -> torch.nn.Module:
-    """Move every trainable tensor off its loaded value, as a step would."""
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.add_(
@@ -77,8 +66,7 @@ def _trained(model: torch.nn.Module) -> torch.nn.Module:
 
 
 def _logits(model: torch.nn.Module, ids: torch.Tensor) -> torch.Tensor:
-    """``model``'s logits under transformers' own forwards, as a stock process reloading a save computes them,
-    whichever forwards this process installed."""
+    """Under transformers' own forwards, whichever forwards this process installed."""
     with torch.no_grad(), transformers_forwards():
         return model.eval()(input_ids=ids, use_cache=False).logits
 
@@ -93,7 +81,6 @@ def _table_files(directory: str) -> dict[str, str]:
 
 
 def _assert_reloads_into(directory: str, expected_logits: torch.Tensor, dtype: torch.dtype) -> None:
-    """A stock ``from_pretrained`` of the save loads every tensor and computes ``expected_logits`` exactly."""
     reloaded, info = AutoModelForCausalLM.from_pretrained(directory, dtype=dtype, output_loading_info=True)
     assert loading_problems(info) == {}
     assert torch.equal(_logits(reloaded, _ids()), expected_logits)
@@ -118,7 +105,7 @@ def test_the_gathered_save_writes_the_table_and_reloads_into_the_trained_model(s
 
 def test_the_ep_gathered_save_writes_the_table(source, tmp_path):
     model = _trained(load_host_table_model(source, dtype=torch.bfloat16))
-    # The family's own block: the EP layer's expert compute rounds differently in bf16.
+    # The EP layer's expert compute rounds differently in bf16.
     expected = _logits(model, _ids())
     apply_ep_layers(model, single_process_ep_config())
     out = str(tmp_path / "out")
@@ -130,8 +117,7 @@ def test_the_ep_gathered_save_writes_the_table(source, tmp_path):
 
 
 def test_a_later_save_links_the_table_files_of_the_last(source, tmp_path):
-    """The first save writes the table off the release's mixed files; each later one links the last save's
-    table-only files, and a model attached from such a save links them on its first save."""
+    """A model attached from such a save links them on its first save."""
     model = load_host_table_model(source, dtype=torch.bfloat16)
     first, second, third = (str(tmp_path / name) for name in ("first", "second", "third"))
     save_fsdp2_checkpoint(save_context(model), first)
@@ -172,10 +158,7 @@ def test_a_save_where_links_are_refused_copies_the_table(source, tmp_path, monke
 
 
 def test_the_release_layout_loads_text_only_and_exports_the_text_layout(tmp_path):
-    """The release stores the text tower under ``model.language_model.*`` beside a vision tower; the recipes load
-    it through the text-only class, eagerly or lazily under EP (EP layers on before the attach), and the attach
-    reads the table off those keys. Both gathered saves are the text-only layout, which a stock text class reloads
-    into the eager model's logits."""
+    """Under EP the layers go on before the attach, which reads the table off ``model.language_model.*``."""
     source = str(tmp_path / "release")
     torch.manual_seed(0)
     composite = tiny_family_model(TINY_MOE_VLM_FAMILIES["qwen4_exp"]).to(torch.bfloat16)
@@ -214,8 +197,7 @@ def test_the_release_layout_loads_text_only_and_exports_the_text_layout(tmp_path
 
 
 def test_save_pretrained_refuses_a_model_holding_the_table(source, tmp_path):
-    """A direct ``save_pretrained`` writes the state dict alone; the trainer's saves route around it
-    (``tests/cpu/trainers/test_qwen4_exp_trainer_saves.py``)."""
+    """The trainer's saves route around it (``tests/cpu/trainers/test_qwen4_exp_trainer_saves.py``)."""
     model = load_host_table_model(source, dtype=torch.bfloat16)
     with pytest.raises(RuntimeError, match="external tables"):
         model.save_pretrained(str(tmp_path / "out"))
@@ -237,7 +219,6 @@ def test_a_sharded_ep_save_is_refused(source):
 
 @pytest.mark.parametrize("max_shard_size", ["5GB", "200KB"])
 def test_a_family_without_a_table_saves_byte_for_byte_as_before(tmp_path, monkeypatch, max_shard_size):
-    """The seam finds no table on another family, so its single-file or sharded save is unchanged."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"]).to(torch.bfloat16)
     with_seam, without_seam = tmp_path / "with", tmp_path / "without"

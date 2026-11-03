@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""GPU tests for the grouped-GEMM dispatch (bf16 correctness + precision dispatch).
-
-Validates:
-- bf16 ``expert_gemm`` matches a per-expert reference loop, for EP-like (few experts)
-  and non-EP-like (many experts) group counts, including a variable-token routing.
-- low-precision ``expert_gemm`` (mxfp8 / nvfp4) uses the SIMULATED fake-quant path by default
-  (the native DeepGEMM kernel is opt-in and net-slower than bf16, so never auto-selected), producing
-  the expected block-scaled error vs bf16 with finite grads flowing to the bf16 masters.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_expert_gemm.py
-"""
+"""Grouped-GEMM dispatch: bf16 matches a per-expert loop, and mxfp8 / nvfp4 take the simulated fake-quant path by
+default."""
 
 import torch
 
@@ -59,14 +50,8 @@ def test_bf16_grouped_backward():
 
 
 def test_simulated_lowprecision_matches_format_error():
-    """SIMULATED mxfp8/nvfp4 produce the expected block-scaled error vs bf16, with finite grads
-    flowing to the bf16 masters (the mixed-precision contract: bf16 master, low-precision compute).
-
-    Banded like test_deepgemm.py: the LOWER bound is what makes the assertion mean anything — a
-    regression routing MXFP8/NVFP4 to the plain bf16 path scores rel ~ 0 and would sail under any
-    upper tolerance. Measured rel at this shape is ~0.038 (mxfp8) / ~0.134 (nvfp4), stable to the
-    4th decimal across seeds, so the bounds carry a wide margin on both sides.
-    """
+    """Banded: routing low precision to plain bf16 scores rel ~ 0 and passes any upper tolerance. Measured ~0.038
+    (mxfp8) / ~0.134 (nvfp4), stable to the 4th decimal across seeds."""
     torch.manual_seed(0)
     E, M, K, N = 8, 256, 2880, 2880
     bands = {"mxfp8": (0.01, 0.08), "nvfp4": (0.04, 0.25)}
@@ -74,7 +59,7 @@ def test_simulated_lowprecision_matches_format_error():
         x = (torch.randn(E * M, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
         w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.02).requires_grad_(True)
         offs = torch.arange(M, E * M + 1, M, device=DEV, dtype=torch.int32)
-        out = expert_gemm(x, w, offs=offs, quant_format=prec)  # fine-grained shape -> simulated fake-quant
+        out = expert_gemm(x, w, offs=offs, quant_format=prec)  # Fine-grained shape: simulated fake-quant.
         (out * torch.randn_like(out)).sum().backward()
         ref = _reference(x.detach(), w.detach(), offs).float()
         rel = fro_rel_err(out.detach(), ref)
@@ -93,8 +78,8 @@ def test_dispatch_contract():
     w = torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.02
     offs = torch.arange(M, E * M + 1, M, device=DEV, dtype=torch.int32)
 
-    # bf16 always works; low precision (mxfp8 / nvfp4) at this fine-grained shape routes to the SIMULATED
-    # fake-quant path (the DeepGEMM gate needs wide experts + large tokens/expert, so it stays off here).
+    # At this fine-grained shape low precision routes to the simulated path; the DeepGEMM gate needs wide experts and
+    # large tokens/expert.
     assert expert_gemm(x, w, offs=offs).shape == (E * M, N)
     for prec in ("mxfp8", "nvfp4"):
         out = expert_gemm(x, w, offs=offs, quant_format=prec)

@@ -1,11 +1,5 @@
 #!/usr/bin/env python
-"""The engine rosters spell shared facts once: the Step-3 spellings come off the family spec,
-the two Bailing gaps off one table both clients quote, and the release off each client's
-``ENGINE_RELEASE``; the DeepSeek-V4 fact names the per-expert keys the spec declares, and only vLLM declares
-a thinking budget it cannot enforce.
-
-    python tests/cpu/weight_sync/test_unservable_roster_derivation.py
-"""
+"""The engine rosters spell shared facts once: the Step-3 spellings, the Bailing gaps and each ``ENGINE_RELEASE``."""
 
 import pytest
 
@@ -36,8 +30,8 @@ def test_both_clients_quote_the_shared_bailing_gaps_for_their_own_release():
 @pytest.mark.parametrize("roster", ["UNSERVABLE_MODEL_TYPES", "UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES"])
 @pytest.mark.parametrize("client", _CLIENTS, ids=lambda client: client.BACKEND_KEY)
 def test_every_roster_fact_names_the_release_its_client_declares(client, roster):
-    """Each fact describes one pinned server, so each one quotes ``ENGINE_RELEASE``, the value the stack
-    version gate holds to the image pin; a release spelled by hand inside one fact drifts on a bump."""
+    """A release spelled by hand inside one fact drifts on a bump; the stack version gate holds ``ENGINE_RELEASE`` to
+    the image pin."""
     assert client.ENGINE_RELEASE.startswith(f"{client.BACKEND_NAME} ")
     stale = {
         model_type: fact for model_type, fact in getattr(client, roster).items() if client.ENGINE_RELEASE not in fact
@@ -46,24 +40,22 @@ def test_every_roster_fact_names_the_release_its_client_declares(client, roster)
 
 
 def test_vllm_alone_cannot_enforce_a_mistral4_thinking_budget():
-    """vLLM serves Mistral 4 with its mistral_common tokenizer, which encodes the budget markers as plain text;
-    the SGLang path enforces no budget through those markers, so it declares none."""
+    """vLLM's mistral_common tokenizer encodes the budget markers as plain text; the SGLang path enforces none."""
     assert set(VLLMWeightSyncClient.UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES) == {"mistral4"}
     assert not SGLangWeightSyncClient.UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES
 
 
 @pytest.mark.parametrize("client", _CLIENTS, ids=lambda client: client.BACKEND_KEY)
 def test_the_deepseek_v4_fact_names_the_per_expert_keys_against_the_fused_gather(client):
-    """Both pinned loaders map the release's per-expert names, which the spec declares, while the gather emits the
-    fused pair; a fact naming another layout sends a reader after a gap the engine no longer has."""
+    """Both pinned loaders map the per-expert names while the gather emits the fused pair; a fact naming another layout
+    sends a reader after a gap the engine does not have."""
     fact = client.UNSERVABLE_MODEL_TYPES["deepseek_v4"]
     assert all(key in fact for key in DEEPSEEK_V4.expert_layout.per_expert_keys), fact
     assert "fused pair" in fact
 
 
 def test_vllm_alone_drops_the_laguna_balancing_bias():
-    """vLLM's Laguna loader skips the exported balancing bias; the run warning names the dropping engine by
-    its ``ENGINE_RELEASE``, read off this roster."""
+    """The run warning names the dropping engine by its ``ENGINE_RELEASE``, read off this roster."""
     assert {"laguna"} == VLLMWeightSyncClient.DROPPED_BALANCING_BIAS_MODEL_TYPES
     assert frozenset() == SGLangWeightSyncClient.DROPPED_BALANCING_BIAS_MODEL_TYPES
 

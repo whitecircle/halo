@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""GRPO step metrics read the tokens and the ranks they describe.
-
-* ``kl_clamp_frac`` counts the k3 cap over the loss mask the KL term is averaged on (TRL's ``kl``:
-  completion mask times tool mask, after the drops), on both on-policy trainers: a cap biting on
-  padding or on a tool-output token is no KL the loss trains, so it is in neither side of the ratio.
-* ``sampling/forced_close_frac`` is over the tokens that carry sampling log-probs: a fallback row
-  without them can never hold a forced close, and its tool tokens only dilute the share.
-* ``routing/replay_flip_rate`` and the ``async/prefetch_*`` counters are world totals, a rank with no
-  count of its own sending zeros, read on a real 2-rank gloo group.
-
-    python tests/cpu/grpo/test_grpo_metric_reads.py
-"""
+"""GRPO step metrics read the tokens and the ranks they describe: ``kl_clamp_frac`` the KL term's loss mask,
+``sampling/forced_close_frac`` the tokens with sampling log-probs. Routing and prefetch counters are world totals."""
 
 import datetime
 import json
@@ -64,8 +54,7 @@ _FORCED_CLOSE = 77
 
 
 def _eval_build(rows: list[TurnRow], *, beta: float, is_correction: bool, policy: torch.Tensor):
-    """The real eval-mode batch build over ``rows``, the policy's log-probs ``policy`` and a reference over
-    the cap on the tokens ``_OVER_THE_CAP`` marks; returns the host whose metrics it logged."""
+    """The real eval-mode batch build; returns the host whose metrics it logged."""
     host = batch_host(
         rows,
         policy,
@@ -87,8 +76,7 @@ def test_env_kl_clamp_frac_reads_the_loss_tokens():
 
 
 def test_env_forced_close_frac_reads_the_tokens_with_sampling_logprobs():
-    """Row 0 is a sampled turn of four tokens whose last is a forced close (sampling log-prob 0); row 1 a
-    fallback re-render of four tool and assistant tokens with no sampling log-probs."""
+    """Row 1 is a fallback re-render with no sampling log-probs, which can never hold a forced close."""
     rows = [
         row([6, 7, 8, _FORCED_CLOSE], sampling=[-1.0, -1.0, -1.0, 0.0]),
         row([9, 10, 11, 12], loss_mask=[1, 0, 0, 1]),

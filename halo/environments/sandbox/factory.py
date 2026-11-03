@@ -13,7 +13,6 @@ from halo.log import warn_once
 
 logger = logging.getLogger(__name__)
 
-# ``warn_once`` scope for the unisolated-backend warning: one line per backend class per process.
 _unisolated_warned: set[Hashable] = set()
 
 
@@ -22,15 +21,10 @@ def build_sandbox(
     url: str | None = None,
     **kwargs,
 ) -> SandboxExecutor:
-    """A :class:`SandboxExecutor` for ``backend`` (``local``, ``bubblewrap`` or ``remote``; default
-    ``HALO_SANDBOX_BACKEND``, then ``local``), ``url`` the remote endpoint (default ``HALO_SANDBOX_URL``), ``kwargs``
-    forwarded to the backend.
-    """
     backend = (backend or env_str("HALO_SANDBOX_BACKEND") or "local").lower()
     url = url or env_str("HALO_SANDBOX_URL")
     if backend != "remote" and url:
-        # A url is only meaningful for the remote backend. Ignoring it would run model-generated code
-        # inside the training container while the caller expects an isolated sandbox service.
+        # Ignoring a url would run model-generated code in the training container, not the expected sandbox service.
         raise ValueError(
             f"A sandbox url is set ({url!r}) but the backend is {backend!r}, which executes code "
             f"locally — the url would be ignored and untrusted code would run in this container. "
@@ -49,10 +43,8 @@ def build_sandbox(
 
 
 def warn_if_unisolated(sandbox: SandboxExecutor, consumer: str) -> None:
-    """Warn once per process when ``consumer`` runs model-written code on a backend that does not confine it
-    (:attr:`SandboxExecutor.isolated` False): the program reaches the host's filesystem or network, where a policy can
-    rewrite what grades it, and on ``local`` the grader's launch environment, secrets included.
-    """
+    """Warn when ``consumer`` runs model-written code on a backend that does not confine it: the program reaches the
+    host's filesystem or network, where a policy can rewrite what grades it."""
     if sandbox.isolated:
         return
     warn_once(

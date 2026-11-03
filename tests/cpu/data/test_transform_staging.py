@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""A coordinated whole-dataset transform stages its intermediate maps beside the published copy.
-
-``coordinated_dataset_transform`` runs TRL's preparation with HF's map cache off. ``datasets`` then
-writes every map over an on-disk input into one process-lifetime ``$TMPDIR/hf_datasets-*`` directory
-and keeps each intermediate there until the process exits — on the root filesystem when a run moved
-only ``HF_DATASETS_CACHE`` to the large volume. Proven with real ``datasets`` maps over an on-disk
-source, on success and on a failing transform: no map writes under ``TMPDIR``, every map writes one
-staging directory inside ``HF_DATASETS_CACHE``, and nothing but the published copy survives.
-
-    python tests/cpu/data/test_transform_staging.py
-"""
+"""``coordinated_dataset_transform`` stages its intermediate maps beside the published copy. With HF's map cache
+off, ``datasets`` writes each into one process-lifetime ``$TMPDIR/hf_datasets-*`` directory, on the root
+filesystem when only ``HF_DATASETS_CACHE`` moved."""
 
 import os
 

@@ -69,8 +69,7 @@ def test_reordered_subset_and_duplicate_rows_reuse_exact_original_scores(tmp_pat
 
 
 def test_reevaluating_the_same_rows_reuses_their_scores_without_storing_them_again(tmp_path):
-    """Evaluation scores stay on disk for the launch, so the same rows evaluated again (a fresh object,
-    as a periodic callback builds) must reuse them rather than add another copy per call."""
+    """Evaluation scores stay on disk for the launch, so each evaluation of the same rows would add another copy."""
     trainer = _Trainer(tmp_path)
     trainer.evaluate(_dataset().select([2, 0]))
     caches = _cache_directories(tmp_path)
@@ -239,8 +238,7 @@ def _ranked_original_reference_branch(rank, root):
 
 
 def test_rows_missing_on_one_rank_send_every_rank_through_the_original_reference(tmp_path):
-    """Only rank 1 lacks stored scores for these rows. The sweep and the stored-score reuse enter
-    different collectives, so a rank-local choice strands the ranks in mismatched ones."""
+    """The sweep and the stored-score reuse enter different collectives, so a rank-local choice strands the ranks."""
     run_gloo_ranks(_ranked_original_reference_branch, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=30))
 
 

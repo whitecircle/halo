@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""Per-family Liger coverage — the roster is covered, and every declared role is EXACTLY equivalent.
-
-Three failures this file exists to catch, none of which shows up in a loss curve:
-
-* a family silently losing its applier (a spec deleted, a model_type renamed) — the run then trains
-  unfused, which only dispatch's warning would say;
-* a family's own module drifting away from what the declared kernel computes — a clamp, a trained
-  output scale, a gated or grouped norm, a partial rotary. Liger would still "apply", and the model
-  would compute something else;
-* a spec picking the wrong Liger variant — ``offset``/``casting_mode`` are what make LigerRMSNorm
-  reproduce a llama-style norm or a Gemma-style one, and the wrong pick is a silent numerics change.
-
-The numeric checks compare each family's OWN forward against a pure-torch statement of Liger's
-parameterized semantics, so they run on CPU (Liger's kernels are Triton-only) and never patch
-anything — the GPU suite checks the kernels themselves.
-
-    pytest -m cpu tests/cpu/model_loading/test_liger_family_coverage.py
-"""
+"""Per-family Liger coverage: the roster is covered and every declared role is exactly equivalent. Compares each
+family's own forward to pure-torch Liger semantics, so it runs on CPU; the GPU suite checks the kernels."""
 
 from __future__ import annotations
 
@@ -46,12 +30,10 @@ from tests.common.repo import probe_findings
 NATIVE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.modeling_module]
 REMOTE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.remote_classes]
 
-# Every snapshot's modeling files in the hub cache, read from huggingface_hub so an HF_HOME redirect
-# (every run in this repo sets one) is followed rather than guessed. Not the dynamic-module cache: the
-# CPU tier gives each test process an empty one (tests/cpu/conftest.py).
+# Read from huggingface_hub so an HF_HOME redirect is followed; the CPU tier gives each test process an empty
+# dynamic-module cache.
 _HUB_MODELING_FILES = "models--*/snapshots/*/modeling_*.py"
 
-# The llama-style RMSNorm body `casting_mode="llama", offset=0.0` reproduces exactly.
 _LLAMA_RMS_NORM_BODY = (
     "hidden_states.to(torch.float32)",
     "hidden_states.pow(2).mean(-1, keepdim=True)",
@@ -59,11 +41,8 @@ _LLAMA_RMS_NORM_BODY = (
     "return self.weight * hidden_states.to(input_dtype)",
 )
 
-# Multimodal wrappers carry no decoder classes of their own; dispatch resolves them through
-# `text_config.model_type`, and the wrapper's text tower may be either sibling (LFM-2 VL and
-# Cohere2-Vision both default to the DENSE one, `mistral3` wraps `mistral` or `mistral4`), or the wrapper
-# runs its own head where the tower's spec fuses the loss (Qwen3.8-Flash-Next), so pinning the wrapper to a
-# spec would be wrong.
+# Wrappers carry no decoder classes; their text tower may be either sibling, or the wrapper runs its own head
+# (Qwen3.8-Flash-Next), so pinning one to a spec would be wrong.
 RESOLVED_THROUGH_TEXT_CONFIG = {
     "gemma4": "gemma4_text",
     "lfm2_vl": "lfm2",
@@ -72,22 +51,19 @@ RESOLVED_THROUGH_TEXT_CONFIG = {
     "qwen4_exp": "qwen4_exp_text",
 }
 
-# Norm classes that compute Liger's function on CPU yet must stay undeclared, with the reason: the
-# sweep below would otherwise report each as a coverage gap.
+# Norm classes that compute Liger's function yet must stay undeclared; the sweep would otherwise report each as a gap.
 UNDECLARABLE_NORMS = {
-    # No parity test covers the swap. The loaders cast the fp32-pinned weight to the run dtype, where
-    # the eager norm returns the input dtype as Liger's kernel does.
+    # No parity test covers the swap. The loaders cast the fp32-pinned weight to the run dtype, where the eager norm
+    # returns the input dtype as Liger's kernel does.
     "deepseek_v4": {"DeepseekV4RMSNorm"},
 }
 
-# The canonical GLU body a `glu_mlp` entry promises: `down_proj(act_fn(gate_proj(x)) * up_proj(x))`.
-# Anything else in the forward — a clamp bound, a trained output scale, differently named
-# projections — means the fused kernel would not compute what the family computes.
+# A clamp, trained output scale or differently named projection means the fused kernel would not compute what the
+# family computes.
 CANONICAL_GLU_ATTRIBUTES = {"down_proj", "act_fn", "gate_proj", "up_proj"}
 
 
 def _roster_model_types() -> set[str]:
-    """Every ``model_type`` the toolkit's EP layer registry claims — the MoE half of the roster."""
     return set(moe_model_types())
 
 
@@ -100,12 +76,8 @@ def _forward_ast(cls: type) -> ast.FunctionDef:
 
 
 def _cached_remote_sources(spec) -> list[str]:
-    """Every hub-cached modeling file defining all of ``spec.remote_classes``; skips when none is cached.
-
-    These modules cannot be imported standalone (they relative-import their sibling configuration),
-    and a revision bump is the one thing that can move them under a pinned toolkit, so their checks
-    read the source.
-    """
+    """These modules relative-import their sibling configuration, so they cannot be imported standalone and their
+    checks read the source."""
     sources = []
     for path in Path(HF_HUB_CACHE).glob(_HUB_MODELING_FILES):
         source = path.read_text(encoding="utf-8")
@@ -122,7 +94,6 @@ def _remote_forward_ast(source: str, class_name: str) -> ast.FunctionDef:
 
 
 def _attributes_between_head_and_loss(forward: ast.FunctionDef, name: str) -> set[str]:
-    """The ``self.*`` attributes a head's forward touches after ``lm_head`` and before ``loss_function``."""
     body = forward.body
     head = next(i for i, stmt in enumerate(body) if "lm_head" in _self_attributes(stmt))
     loss = next(i for i, stmt in enumerate(body) if "loss_function" in _self_attributes(stmt))
@@ -131,7 +102,6 @@ def _attributes_between_head_and_loss(forward: ast.FunctionDef, name: str) -> se
 
 
 def _liger_rms_norm_reference(x, weight, eps, offset, casting_mode):
-    """LigerRMSNorm's semantics in plain torch, selected by the two parameters a spec chooses."""
     normed = x.float() * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + eps)
     if casting_mode == "gemma":
         return (normed * (offset + weight.float())).type_as(x)
@@ -140,7 +110,6 @@ def _liger_rms_norm_reference(x, weight, eps, offset, casting_mode):
 
 @pytest.mark.parametrize("model_type", sorted(_roster_model_types()))
 def test_every_roster_family_resolves_an_applier(model_type):
-    """A supported family with no applier trains fully unfused — the regression this pins."""
     if model_type in RESOLVED_THROUGH_TEXT_CONFIG:
         text_type = RESOLVED_THROUGH_TEXT_CONFIG[model_type]
         assert liger_applier(text_type) is not None, (
@@ -154,13 +123,8 @@ def test_every_roster_family_resolves_an_applier(model_type):
 
 @pytest.mark.parametrize("spec", LIGER_FAMILY_SPECS, ids=lambda s: s.model_types[0])
 def test_a_listed_wrapper_can_only_wrap_the_family_it_is_listed_under(spec):
-    """A composite wrapper's text tower must be the spec's own family, or the spec must not list it.
-
-    Dispatch resolves a listed model type directly and never consults its text config, so a
-    wrapper pinned to the wrong sibling patches classes the loaded model never instantiates and
-    reports every kernel as applied: ``mistral3`` wraps ``mistral`` (Mistral Small 3.x) as readily as
-    ``mistral4``, which is why it must resolve through the text config instead.
-    """
+    """A wrapper pinned to the wrong sibling patches classes the model never instantiates and reports every kernel
+    as applied."""
     for model_type in spec.model_types:
         config_cls = CONFIG_MAPPING.get(model_type)
         if config_cls is None or "text_config" not in (getattr(config_cls, "sub_configs", None) or {}):
@@ -176,15 +140,7 @@ def test_a_listed_wrapper_can_only_wrap_the_family_it_is_listed_under(spec):
     "spec", [s for s in NATIVE_SPECS if not s.delegates_to_upstream], ids=lambda s: s.model_types[0]
 )
 def test_no_liger_expressible_norm_is_left_undeclared(spec):
-    """Every weighted norm in the family's module that computes Liger's function must be declared.
-
-    The declared-norm check above proves a listed norm is right; this is the converse — a class that
-    IS the llama- or Gemma-style body but is missing from the spec trains unfused with no warning
-    (``Cohere2MoeRMSNorm``, live whenever ``rms_norm_eps`` is set, is the shape). Weightless, gated
-    and grouped norms are skipped by construction: they cannot take the probe's ``(dim, eps)`` shape or
-    carry no ``weight``. A norm that matches yet must stay off the list is named in
-    ``UNDECLARABLE_NORMS`` with its reason.
-    """
+    """A class that is the llama- or Gemma-style body but is missing from the spec trains unfused with no warning."""
     module = importlib.import_module(spec.modeling_module)
     torch.manual_seed(0)
     x = torch.randn(3, 5, 16, dtype=torch.bfloat16)
@@ -194,7 +150,6 @@ def test_no_liger_expressible_norm_is_left_undeclared(spec):
             continue
         try:
             norm = cls(16, 1e-5).to(torch.bfloat16)
-        # A grouped norm takes its group size second (``Qwen4ExpTextRMSNorm``) and refuses the probe's eps.
         except (TypeError, ValueError):
             continue
         weight = getattr(norm, "weight", None)
@@ -216,7 +171,7 @@ def test_no_liger_expressible_norm_is_left_undeclared(spec):
 
 @pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda s: s.model_types[0])
 def test_every_declared_class_exists(spec):
-    """A transformers bump that renames a class must fail here, not at model load on a GPU node."""
+    """A transformers bump that renames a class must fail here, before model load on a GPU node."""
     module = importlib.import_module(spec.modeling_module)
     for name in spec.rms_norm + spec.gated_rms_norm + spec.glu_mlp + spec.causal_lm:
         assert isinstance(getattr(module, name, None), type), f"{spec.modeling_module} defines no class {name!r}"
@@ -225,13 +180,8 @@ def test_every_declared_class_exists(spec):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda s: s.model_types[0])
 def test_declared_norms_are_what_the_chosen_liger_variant_computes(spec, dtype):
-    """The family's own forward must equal LigerRMSNorm under the spec's ``offset``/``casting_mode``.
-
-    This is the assertion that separates a llama-style norm from a Gemma-style ``(1 + w)`` one, and
-    that rejects a weightless, grouped or gated norm listed by mistake. **bf16 is what pins
-    ``casting_mode``**: the two modes differ only in whether the weight multiply happens before or
-    after the cast back, so in fp32 they are bit-identical and the parameter would go unchecked.
-    """
+    """bf16 pins ``casting_mode``: the modes differ only in whether the multiply precedes the cast back, so in fp32
+    they are bit-identical."""
     module = importlib.import_module(spec.modeling_module)
     torch.manual_seed(0)
     x = torch.randn(3, 5, 16, dtype=dtype)
@@ -249,11 +199,8 @@ def test_declared_norms_are_what_the_chosen_liger_variant_computes(spec, dtype):
 
 @pytest.mark.parametrize("spec", REMOTE_SPECS, ids=lambda s: s.model_types[0])
 def test_declared_remote_norms_are_llama_style(spec):
-    """Same assertion for the ``trust_remote_code`` modules, read off the modeling files the hub cache holds.
-
-    The check is on the source: the fp32-upcast, weight-multiply body that ``casting_mode="llama",
-    offset=0.0`` reproduces — and NOT the grouped variant sitting next to it in the same file.
-    """
+    """Checks the source for the fp32-upcast, weight-multiply body; the grouped variant sits next to it in the same
+    file."""
     sources = _cached_remote_sources(spec)
     assert spec.rms_norm_casting_mode == "llama" and spec.rms_norm_offset == 0.0
     for source in sources:
@@ -264,11 +211,7 @@ def test_declared_remote_norms_are_llama_style(spec):
 
 
 def test_the_norm_check_rejects_the_wrong_liger_variant():
-    """Anti-vacuity: the parameters have to matter, or the test above passes on any norm.
-
-    Step-3.7's Gemma-style norm scales by ``1 + w``; asserting it against the llama parameterization
-    (offset 0) must fail, and Laguna's llama-style norm against Gemma's (offset 1) likewise.
-    """
+    """Anti-vacuity: the parameters have to matter, or the test above passes on any norm."""
     step = importlib.import_module("transformers.models.step3p7.modeling_step3p7").Step3p7RMSNorm(16, 1e-5)
     laguna = importlib.import_module("transformers.models.laguna.modeling_laguna").LagunaRMSNorm(16, 1e-5)
     step.weight.data.normal_()
@@ -277,8 +220,7 @@ def test_the_norm_check_rejects_the_wrong_liger_variant():
     assert not torch.allclose(step(x), _liger_rms_norm_reference(x, step.weight, 1e-5, 0.0, "llama"))
     assert not torch.allclose(laguna(x), _liger_rms_norm_reference(x, laguna.weight, 1e-5, 1.0, "gemma"))
 
-    # ...and that `casting_mode` alone is discriminating, which only bf16 shows: swapping just the
-    # mode (same offset) must change the result, or the fp32 case above pins offset and nothing else.
+    # Only bf16 shows ``casting_mode`` is discriminating; otherwise the fp32 case pins offset and nothing else.
     step_bf16 = importlib.import_module("transformers.models.step3p7.modeling_step3p7").Step3p7RMSNorm(16, 1e-5)
     step_bf16.weight.data.normal_()
     step_bf16 = step_bf16.to(torch.bfloat16)
@@ -290,17 +232,9 @@ def test_the_norm_check_rejects_the_wrong_liger_variant():
 
 @pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.rms_norm], ids=lambda s: s.model_types[0])
 def test_no_norm_output_is_a_direct_operand_of_an_addition(spec):
-    """Liger's llama-mode RMSNorm backward writes dX INTO the incoming dY buffer (``in_place=True``).
-
-    ``AddBackward`` hands the SAME gradient object to both of its inputs, so a sandwich norm —
-    ``residual + post_norm(x)`` — would have its sibling branch's gradient overwritten in place.
-    Silent, and invisible in the loss. Every family here is pre-norm (the norm output feeds a
-    sublayer, never an add), which is what makes ``in_place=True`` safe; a transformers bump adding a
-    post-norm must fail here and switch that family to ``in_place=False``.
-
-    Deliberately conservative: it flags ANY ``self.*norm*(...)`` call in an addition, declared or not.
-    A false positive costs one extra backward buffer, a false negative costs correctness.
-    """
+    """Liger's llama-mode backward writes dX into the incoming dY buffer, and ``AddBackward`` hands one gradient
+    object to both inputs, so a post-norm silently overwrites its sibling's gradient.
+    A transformers bump adding a post-norm must fail here and switch that family to ``in_place=False``."""
     if spec.rms_norm_casting_mode == "gemma":
         pytest.skip("the gemma casting mode already uses in_place=False")
     module = importlib.import_module(spec.modeling_module)
@@ -327,13 +261,7 @@ def test_no_norm_output_is_a_direct_operand_of_an_addition(spec):
 
 @pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.gated_rms_norm], ids=lambda s: s.model_types[0])
 def test_declared_gated_norms_expose_what_the_fused_kernel_reads(spec):
-    """The bridge to ``fla``'s kernel is four attributes; a class missing one is a load-time crash.
-
-    It reads ``weight``, ``bias``, ``activation`` and ``eps``. The family spells the epsilon
-    ``variance_epsilon`` and registers no bias, so the patch bridges both — but ``activation`` is
-    passed through as the family's OWN, which is what makes the fused gate provably the eager one.
-    The numerics live in the GPU suite; this pins the contract that lets it run at all.
-    """
+    """The bridge reads ``weight``, ``bias``, ``activation`` and ``eps``; a class missing one is a load-time crash."""
     module = importlib.import_module(spec.modeling_module)
     for name in spec.gated_rms_norm:
         norm = getattr(module, name)(16, 1e-5)
@@ -342,18 +270,14 @@ def test_declared_gated_norms_expose_what_the_fused_kernel_reads(spec):
         assert getattr(norm, "bias", None) is None, f"{name} carries a bias the eager norm never applies"
         assert getattr(norm, "activation", None), f"{name} declares no activation for the fused gate"
         assert getattr(norm, "variance_epsilon", getattr(norm, "eps", None)) is not None
-        # The real bridge, not a restatement of it: it also refuses a gate `fla`'s kernel does not
-        # implement, which that kernel would otherwise answer by applying no gate at all.
+        # The real bridge also refuses a gate `fla`'s kernel does not implement, which that kernel answers by applying
+        # no gate at all.
         _bridge_gated_norm(norm)
 
 
 def test_a_grouped_gated_norm_is_never_declared():
-    """Anti-vacuity for the role: the shape that must stay OFF the list is the grouped one.
-
-    Bailing's ``*GroupRMSNorm`` gates the same way but reduces over ``hidden_size //
-    group_norm_size``, so a kernel normalizing the last dim would reduce the wrong axis and still
-    return the right shape. It is the reason the role is a separate spec field rather than a flag.
-    """
+    """Bailing's ``*GroupRMSNorm`` reduces over ``hidden_size // group_norm_size``, so a last-dim kernel reduces the
+    wrong axis and returns the right shape."""
     declared = {name for spec in LIGER_FAMILY_SPECS for name in spec.gated_rms_norm}
     assert declared, "no family declares a gated norm — this check would pass on an empty set"
     assert not [name for name in declared if "Group" in name], f"a grouped gated norm is declared: {declared}"
@@ -361,13 +285,8 @@ def test_a_grouped_gated_norm_is_never_declared():
 
 @pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda s: s.model_types[0])
 def test_declared_glu_mlps_are_the_canonical_gated_body(spec):
-    """A declared GLU MLP must touch nothing but the three projections and its activation.
-
-    The traps on this roster are all extra terms: Inkling multiplies the output by a trained
-    ``global_scale``, GLM-5 Next and Step-3.7 clamp at a ``swiglu_limit``, LFM-2 projects through
-    ``w1``/``w3``/``w2`` with no ``act_fn`` at all. Each would be silently dropped or missed by the
-    fused forward, which is why none of them is declared.
-    """
+    """Inkling's ``global_scale``, the ``swiglu_limit`` clamps and LFM-2's ``w1``/``w3``/``w2`` would be dropped or
+    missed by the fused forward."""
     module = importlib.import_module(spec.modeling_module)
     for name in spec.glu_mlp:
         attributes = _self_attributes(_forward_ast(getattr(module, name)))
@@ -379,7 +298,6 @@ def test_declared_glu_mlps_are_the_canonical_gated_body(spec):
 
 @pytest.mark.parametrize("spec", [s for s in REMOTE_SPECS if s.glu_mlp], ids=lambda s: s.model_types[0])
 def test_declared_remote_glu_mlps_are_the_canonical_gated_body(spec):
-    """Same assertion for the ``trust_remote_code`` modules, read off the modeling files the hub cache holds."""
     for source in _cached_remote_sources(spec):
         for name in spec.glu_mlp:
             attributes = _self_attributes(_remote_forward_ast(source, name))
@@ -390,11 +308,11 @@ def test_declared_remote_glu_mlps_are_the_canonical_gated_body(spec):
 
 
 def test_the_glu_check_rejects_a_scaled_or_clamped_body():
-    """Anti-vacuity: the three MLPs deliberately left undeclared must all fail the same check."""
+    """Anti-vacuity: the three MLPs left undeclared must all fail the same check."""
     undeclared = {
-        "transformers.models.inkling.modeling_inkling": "InklingMLP",  # * global_scale
-        "transformers.models.glm5_next.modeling_glm5_next": "Glm5NextTextMLP",  # clamp(swiglu_limit)
-        "transformers.models.lfm2.modeling_lfm2": "Lfm2MLP",  # w1 / w3 / w2, hardcoded F.silu
+        "transformers.models.inkling.modeling_inkling": "InklingMLP",
+        "transformers.models.glm5_next.modeling_glm5_next": "Glm5NextTextMLP",
+        "transformers.models.lfm2.modeling_lfm2": "Lfm2MLP",
     }
     for module_path, name in undeclared.items():
         cls = getattr(importlib.import_module(module_path), name)
@@ -405,10 +323,7 @@ def test_the_glu_check_rejects_a_scaled_or_clamped_body():
 
 
 def _declared_head_attributes(spec, head_class_name: str) -> set[str]:
-    """``{"logit_scale"}`` where the family's ``HeadTransformSpec`` declares a logit scale for its default config.
-
-    Specs resolve by class name, so a bare class of that name stands in for the native or remote head.
-    """
+    """Specs resolve by class name, so a bare class of that name stands in for the native or remote head."""
     head_class = type(head_class_name, (), {})
     transform = resolve_head_transform_spec(head_class).transform(CONFIG_MAPPING[spec.model_types[0]]())
     return {"logit_scale"} if transform.logit_scale is not None else set()
@@ -416,13 +331,7 @@ def _declared_head_attributes(spec, head_class_name: str) -> set[str]:
 
 @pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.causal_lm], ids=lambda s: s.model_types[0])
 def test_declared_heads_do_nothing_the_fused_loss_would_drop(spec):
-    """Between ``lm_head`` and the loss, a declared head may touch only its declared logit scale.
-
-    The fused loss replaces both calls, so anything applied in between vanishes: Cohere's
-    ``logit_scale`` (declared on its ``HeadTransformSpec``, and folded onto the hidden states),
-    Inkling's ``/logits_mup_width_multiplier`` and ``unpadded_vocab_size`` truncation (a cut the fused
-    loss refuses, which is why Inkling ships no fused head).
-    """
+    """The fused loss replaces both calls, so anything applied in between vanishes."""
     module = importlib.import_module(spec.modeling_module)
     for name in spec.causal_lm:
         allowed = _declared_head_attributes(spec, name)
@@ -435,7 +344,6 @@ def test_declared_heads_do_nothing_the_fused_loss_would_drop(spec):
 
 @pytest.mark.parametrize("spec", [s for s in REMOTE_SPECS if s.causal_lm], ids=lambda s: s.model_types[0])
 def test_declared_remote_heads_do_nothing_the_fused_loss_would_drop(spec):
-    """Same assertion for the ``trust_remote_code`` modules, read off the modeling files the hub cache holds."""
     for source in _cached_remote_sources(spec):
         for name in spec.causal_lm:
             allowed = _declared_head_attributes(spec, name)
@@ -447,15 +355,8 @@ def test_declared_remote_heads_do_nothing_the_fused_loss_would_drop(spec):
 
 
 def test_the_fused_head_does_not_declare_output_router_logits():
-    """Declaring it would silently disable router balancing on families whose own head lacks it.
-
-    ``honors_router_logits_flag`` decides whether a family's aux loss can reach the loss by
-    looking for that parameter on ``type(model).forward``. Liger patches the forward at model load,
-    balancing resolves later — so a declared parameter makes the resolver believe a family that
-    never consults the flag honors it. For GLM-4.7-Flash (fused head on by default) that signal is
-    the ONLY one routing ``moe_balancing: auto`` to ``bias_update``; losing it falls through to
-    ``aux_loss``, which its config carries no ``router_aux_loss_coef`` for — no balancing at all.
-    """
+    """The resolver reads that parameter off ``type(model).forward``; declaring it would route GLM-4.7-Flash to
+    ``aux_loss``, which it has no coefficient for, so no balancing at all."""
     parameters = inspect.signature(build_lce_forward()).parameters
     assert "output_router_logits" not in parameters, (
         "the fused forward declares output_router_logits; take it from **kwargs instead, or every "
@@ -465,8 +366,6 @@ def test_the_fused_head_does_not_declare_output_router_logits():
 
 
 def test_the_router_logits_probe_really_keys_on_that_parameter_name():
-    """Anti-vacuity for the check above: the probe must be sensitive to the declaration."""
-
     class _Declares(torch.nn.Module):
         def forward(self, output_router_logits=None, **kwargs):
             """A head that consults the flag."""
@@ -480,7 +379,6 @@ def test_the_router_logits_probe_really_keys_on_that_parameter_name():
 
 
 def test_the_head_check_rejects_inklings_rescaled_head():
-    """Anti-vacuity: Inkling's head is the shape the check must reject, and it is undeclared."""
     cls = importlib.import_module("transformers.models.inkling.modeling_inkling").InklingForCausalLM
     between = _attributes_between_head_and_loss(_forward_ast(cls), cls.__name__)
     assert between, "InklingForCausalLM no longer rescales/truncates its logits — re-check the exclusion"
@@ -488,17 +386,8 @@ def test_the_head_check_rejects_inklings_rescaled_head():
 
 
 def test_the_fused_head_reproduces_the_family_head_bit_for_bit():
-    """The generic head, driven down its unfused branch, must equal the family's own head exactly.
-
-    ``skip_logits=False`` takes the branch that needs no Triton, which is the whole wiring the fused
-    branch shares: the ``logits_to_keep`` slice, the ``logit_scale`` fold, and the ``loss_function``
-    call. Any drift there — a dropped scale, a wrong ``vocab_size``, a mis-shifted label — shows up
-    as a non-zero delta on a tiny random model. Cohere2 MoE carries the scale (0.0625); GLM-4.7-Flash
-    is the plain shape; Qwen3.8-Flash-Next adds the router aux loss in its head.
-
-    Subprocess: installing the forward rebinds the upstream classes for the rest of the process, and
-    a later test in the session building one of these families would take the fused branch on CPU.
-    """
+    """``skip_logits=False`` needs no Triton and shares the fused branch's wiring, so any drift shows as a non-zero
+    delta. Subprocess: installing the forward rebinds the upstream classes for the rest of the process."""
     script = """
 import inspect, sys, torch
 from transformers import AutoModelForCausalLM
@@ -548,18 +437,14 @@ print("FAILURES:" + "|".join(failures))
 
 @pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.rope], ids=lambda s: s.model_types[0])
 def test_rope_is_only_declared_where_the_rotary_is_ligers(spec):
-    """Liger's rotary rotates the FULL head_dim over concatenated halves.
-
-    Every other rotary on the roster — partial (``rotary_dim`` split), GPT-J interleaved (``::2``),
-    per-layer-type — is a different function that the kernel would compute wrongly and silently.
-    """
+    """Liger's rotary rotates the full head_dim; partial, GPT-J interleaved and per-layer-type rotaries compute a
+    different function."""
     family_rope = importlib.import_module(spec.modeling_module).apply_rotary_pos_emb
     source = inspect.getsource(family_rope)
     assert "rotary_dim" not in source, f"{spec.model_types[0]} gained a partial rotary; rope must go back off"
     assert "::2" not in source, f"{spec.model_types[0]} gained an interleaved rotary; rope must go back off"
 
-    # Gemma 4's rotary takes ONE tensor at a time; substituting Liger's would be a TypeError at the
-    # first forward, so the leading positional parameters must line up.
+    # Gemma 4's rotary takes one tensor at a time; substituting Liger's would be a TypeError at the first forward.
     parameters = list(inspect.signature(family_rope).parameters)
     assert (
         parameters[:4] == list(inspect.signature(liger_rotary_pos_emb).parameters)[:4] == ["q", "k", "cos", "sin"]
@@ -571,11 +456,8 @@ def test_rope_is_only_declared_where_the_rotary_is_ligers(spec):
 
 @pytest.mark.parametrize("spec", LIGER_FAMILY_SPECS, ids=lambda s: s.model_types[0])
 def test_the_applier_offers_only_the_roles_the_spec_fills(spec):
-    """An offered role the spec cannot serve would be accepted and then do nothing at all.
-
-    A delegating spec offers UPSTREAM's roles instead — dropping one would silently refuse a kernel
-    the family had before the spec existed, and adding one would offer a knob nothing reads.
-    """
+    """An offered role the spec cannot serve would be accepted and do nothing; a delegating spec offers upstream's
+    roles instead."""
     parameters = set(inspect.signature(liger_applier(spec.model_types[0])).parameters)
     if spec.delegates_to_upstream:
         upstream = set(inspect.signature(MODEL_TYPE_TO_APPLY_LIGER_FN[spec.model_types[0]]).parameters)
@@ -587,12 +469,8 @@ def test_the_applier_offers_only_the_roles_the_spec_fills(spec):
 
 
 def test_the_fused_head_forwards_the_router_flag_where_the_head_adds_no_aux_loss():
-    """A family whose head only forwards ``output_router_logits`` must pass it through, not refuse it.
-
-    The refusal exists for heads that add the router aux loss after the projection the fused loss
-    replaces (DeepSeek-V4, Laguna). Zaya's head forwards the flag and adds nothing, so refusing it
-    would fail the run the moment router-load metrics ask for the logits.
-    """
+    """Zaya's head adds no aux loss, so refusing the flag would fail the run when router-load metrics ask for the
+    logits."""
     calls = []
 
     class _Backbone:
@@ -624,8 +502,7 @@ def test_the_fused_head_forwards_the_router_flag_where_the_head_adds_no_aux_loss
         "qwen4_exp_text",
     }
 
-    # A caller's explicit False over a config True is the family head's own behaviour: no refusal,
-    # and the backbone — which would otherwise resolve the omitted flag from the config — gets it.
+    # The backbone would otherwise resolve the omitted flag from the config.
     head.config.output_router_logits = True
     build_lce_forward(router_aux_loss_in_head=True)(
         head, input_ids=torch.zeros(1, 2, dtype=torch.long), output_router_logits=False

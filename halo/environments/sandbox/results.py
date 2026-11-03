@@ -7,35 +7,27 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# The shell's exit code for a command it could not exec: on a build step, a missing compiler (a backend
-# failure), never a verdict on the source.
+# A command the shell could not exec: on a build step, a missing compiler (a backend failure), not a verdict.
 COMMAND_NOT_FOUND_RETURNCODE = 127
 
 
 class SandboxFault(RuntimeError):
-    """A tool call ended on its sandbox rather than on a verdict about the program: the protocols catch
-    it ahead of any other exception and book it by its class."""
+    """A tool call ended on its sandbox rather than on a verdict about the program; the protocols book it by class."""
 
 
 class SandboxInfraError(SandboxFault):
-    """A sandbox run was lost to a backend/transport failure (remote HTTP error, missing compiler), not a verdict on
-    the program: raised by a backend or the REPL layer so the outage reaches the tool layer by type, where the call is
-    booked unpriced and the episode leaves the GRPO group baseline instead of pricing the fault as the policy's.
-    """
+    """Lost to a backend or transport failure: the call is booked unpriced and the episode leaves the GRPO group
+    baseline instead of pricing the fault as the policy's."""
 
 
 class SandboxAgentFault(SandboxFault):
-    """The program broke its own sandbox beyond safe repair: it put a link or a file in its working directory's place
-    (only the ``local`` backend's unconfined program can). The fault is the policy's, never :class:`SandboxInfraError`,
-    which would let an episode void itself out of the baseline: grading judges it a runtime error, and the episode ends
-    uncompleted, inside the baseline.
-    """
+    """The program put a link or file in its working directory's place (only ``local``'s unconfined program can). The
+    policy's fault: an infra error would let an episode void itself out of the baseline, so grading judges it a runtime
+    error and the episode ends uncompleted, inside the baseline."""
 
 
 @dataclass
 class SandboxResult:
-    """Outcome of one program execution, uniform across backends."""
-
     stdout: str = ""
     stderr: str = ""
     returncode: int | None = None
@@ -51,7 +43,6 @@ class SandboxResult:
 
     @property
     def ok(self) -> bool:
-        """True only when the program built and ran to completion with a zero exit code."""
         return (
             self.returncode == 0
             and not self.timed_out
@@ -62,24 +53,20 @@ class SandboxResult:
 
 
 def compile_limit_verdict(message: str) -> SandboxResult:
-    """A build killed at its compile limit: the source's verdict (an ``#include`` bomb, a template
-    blow-up), judged like a compiler rejection and never as a backend failure, which would let a
+    """The source's verdict (an ``#include`` bomb, a template blow-up), never a backend failure, which would let a
     program void its own episode."""
     return SandboxResult(stderr=message, compile_failed=True)
 
 
 def compile_failure_verdict(stderr: str, stdout: str, returncode: int) -> SandboxResult:
-    """A build the compiler rejected: the source's verdict, its diagnostics read off stderr (gcc/g++), else
-    off stdout for a toolchain that reports there."""
+    """Diagnostics read off stderr (gcc/g++), else stdout for a toolchain that reports there."""
     diagnostics = stderr.strip() or stdout.strip() or "compilation failed"
     return SandboxResult(stderr=diagnostics, returncode=returncode, compile_failed=True)
 
 
 def run_reporting_faults(run: Callable[..., SandboxResult], code: str, **kwargs) -> SandboxResult:
-    """``run(code, **kwargs)`` (an executor's or an open session's), an exception it raises reported as
-    ``SandboxResult(error=...)``: grading depends on a lost run being an ``error`` result, since an escaping exception
-    would grade the episode 0 as a wrong program with the infra-outage guard never firing.
-    """
+    """An exception becomes ``SandboxResult(error=...)``: an escaping one would grade the episode 0 as a wrong program
+    with the infra-outage guard never firing."""
     try:
         return run(code, **kwargs)
     except Exception as exc:  # anything raised on the grading side is infra, not a verdict

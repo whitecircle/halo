@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """The parallel loader's embedding pipeline keeps the checkpoint's own pipeline or refuses it, never drops it.
-
-sentence-transformers' own load keeps a checkpoint's whole pipeline and aligns its pooling and normalization to the
-config. The parallel loader (EP, TP, the grouped-GEMM EP layers at ``expert_parallel_size`` 1) builds its own
-backbone, so it rebuilds the rest from the checkpoint's files: each Pooling from its saved config, a Normalize, the
-backbone module's settings and the model-level prompts and similarity, aligned to the config the same way. A module
-it does not rebuild (a ``Dense`` head) and dropping the checkpoint's Normalize are refused before any weight loads.
-A bare backbone takes the pooling and normalization the config describes.
-
-    python tests/cpu/models/test_embedding_source_pipeline.py
-"""
+A module it does not rebuild (a ``Dense`` head) and a dropped Normalize are refused before any weight loads."""
 
 import json
 import logging
@@ -40,8 +31,7 @@ def backbone_config():
 
 
 def _checkpoint(path: Path, config, modules: list | None, *, settings: dict | None = None) -> str:
-    """A checkpoint of ``config``'s backbone and, unless ``modules`` is None, a sentence-transformers pipeline of
-    ``modules`` after it, spelled as hub checkpoints spell their ``modules.json`` types."""
+    """Spells ``modules`` as hub checkpoints spell their ``modules.json`` types; ``None`` writes no pipeline."""
     config.save_pretrained(path)
     if modules is not None:
         entries = [{"idx": 0, "name": "0", "path": "", "type": "sentence_transformers.models.Transformer"}]
@@ -62,9 +52,6 @@ def _checkpoint(path: Path, config, modules: list | None, *, settings: dict | No
 
 
 def _assemble(monkeypatch, tmp_path, checkpoint: str, config, loads: list, **embedding) -> SentenceTransformer:
-    """``_assemble_preloaded_pipeline`` over ``checkpoint``, its backbone load stubbed with ``config``'s and recorded in
-    ``loads``."""
-
     def load(*_args, **_kwargs):
         loads.append(checkpoint)
         return AutoModel.from_config(config), word_level_tokenizer()
@@ -165,7 +152,7 @@ def test_a_bare_backbone_takes_the_configured_pipeline_without_warnings(
 
 
 def test_the_trainers_pipeline_config_rebuilds_unchanged(monkeypatch, tmp_path, backbone_config):
-    """A checkpoint the embedding trainer saved, as a resume reloads it: the module types its writer spells."""
+    """A checkpoint the embedding trainer saved, as a resume reloads it."""
     checkpoint = tmp_path / "ckpt"
     checkpoint.mkdir()
     backbone_config.save_pretrained(checkpoint)

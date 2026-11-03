@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Qwen3-Next family contract: registration, the ``norm_topk_prob``-aware biased route, the hub per-expert
-export, the lazy EP load, balancing resolution and the CP and TP refusals (the PP refusal is a row of
-``tests/cpu/parallelism/test_pp_stage_split.py``).
-
-``Qwen3NextSparseMoeBlock`` is Qwen3.5-MoE's block parameter for parameter; only its router renormalizes the
-top-k weights under a configurable ``norm_topk_prob``. The EP layer reuses Qwen3.5's, overriding its
-``_biased_route`` hook to re-derive every gate weight from that flag; the biased-route rows below pin both values of
-the flag and Qwen3.5's own always-renormalizing route through the same hook. The routing-replay rows live in
-``tests/cpu/grpo/test_routing_replay.py``, the ep1 forward and input-gradient parity in
-``tests/cpu/parallelism/test_ep_vs_reference_equivalence_cpu.py``.
-
-    python tests/cpu/models/test_qwen3_next_support.py
-"""
+"""Qwen3-Next family contract. ``Qwen3NextSparseMoeBlock`` is Qwen3.5-MoE's block parameter for parameter, except its
+router renormalizes under ``norm_topk_prob``, so the EP layer overrides the ``_biased_route`` hook."""
 
 from __future__ import annotations
 
@@ -73,15 +62,14 @@ def _tiny_model(**overrides) -> PreTrainedModel:
 def _wrapped_block(
     config: PretrainedConfig, layer_class: type[EPQwen3_5MoELayer] = EPQwen3NextMoELayer
 ) -> tuple[torch.nn.Module, EPQwen3_5MoELayer]:
-    """``(untouched reference block, EP layer around an identical copy)``, fp32, non-trivial weights."""
+    """``(untouched reference block, EP layer around an identical copy)``."""
     block = _build(config).model.layers[0].mlp
     for parameter in block.parameters():
         torch.nn.init.normal_(parameter, std=0.2)
     return copy.deepcopy(block), layer_class(block, single_process_ep_config(E)).cpu()
 
 
-# The block's router renormalizes always (Qwen3.5) or per ``norm_topk_prob`` (Qwen3-Next); each family's
-# ``_biased_route`` must gate as its own router does.
+# The router renormalizes always (Qwen3.5) or per ``norm_topk_prob`` (Qwen3-Next); ``_biased_route`` must match it.
 ROUTER_CASES = [
     pytest.param(lambda: Qwen3_5MoeTextConfig(**TINY_QWEN35_MOE_CONFIG), EPQwen3_5MoELayer, id="qwen3_5_moe"),
     pytest.param(lambda: _config(norm_topk_prob=True), EPQwen3NextMoELayer, id="qwen3_next-norm_topk_prob"),
@@ -111,16 +99,13 @@ def test_registrations():
 
 
 def test_the_fa4_head_dim_256_verdict_reads_the_head_widths():
-    """The released geometry's 256-wide heads (``Qwen3NextConfig()``) run FA4's dedicated head_dim-256 kernel and
-    the tiny model's 32-wide ones do not: the verdict reads the widths, so the family's spec decides nothing."""
     assert uses_fa4_dedicated_head_dim(Qwen3NextConfig())
     assert not uses_fa4_dedicated_head_dim(_config())
 
 
 @pytest.mark.parametrize(("make_config", "layer_class"), ROUTER_CASES)
 def test_a_zero_balancing_bias_reproduces_the_router(make_config, layer_class):
-    """With the transient bias at zero, selection and gate weights are the router's own under each family's
-    renormalization rule; Qwen3.5's unconditional one would mis-gate a ``norm_topk_prob: false`` router."""
+    """Qwen3.5's unconditional renormalization would mis-gate a ``norm_topk_prob: false`` router."""
     _block, layer = _wrapped_block(make_config(), layer_class)
     assert layer.enable_bias_balancing() is True
     assert is_transient_balancing_router(layer)
@@ -146,8 +131,6 @@ def test_the_biased_layer_forward_matches_the_block_at_zero_bias(make_config, la
 
 
 def test_a_balancing_bias_moves_selection_only():
-    """A large bias forces an expert into every selection; the gate weights stay the unbiased router softmax at the
-    chosen indices, renormalized per the router's own flag."""
     _block, layer = _wrapped_block(_config(norm_topk_prob=False))
     layer.enable_bias_balancing()
     hidden = torch.randn(TOKENS, H, generator=torch.Generator().manual_seed(5))
@@ -163,8 +146,8 @@ def test_a_balancing_bias_moves_selection_only():
 
 
 def test_balancing_auto_resolves_aux_loss_and_bias_update_has_no_slot():
-    """The forward honours ``output_router_logits`` through the real router, so ``auto`` keeps the aux loss; no
-    checkpoint slot exists for a routing bias, so only the explicit transient side-buffer can carry one."""
+    """The forward honours ``output_router_logits``, so ``auto`` keeps the aux loss. No checkpoint slot exists for a
+    routing bias, so only the explicit transient side-buffer can carry one."""
     model = _tiny_model()
     layers = _wrap_every_block(model)
     assert resolve_balancing_mode("auto", model, is_moe=True) == "aux_loss"
@@ -173,8 +156,7 @@ def test_balancing_auto_resolves_aux_loss_and_bias_update_has_no_slot():
 
 
 def test_the_gathered_export_is_the_hub_checkpoint_layout(tmp_path):
-    """The gather writes exactly the per-expert keys and values ``save_pretrained`` writes for the stock model,
-    which is the layout the Qwen3-Next hub checkpoints and both rollout engines' loaders read."""
+    """The layout the Qwen3-Next hub checkpoints and both rollout engines' loaders read."""
     model = _tiny_model()
     model.save_pretrained(tmp_path, safe_serialization=True)
     saved = {}
@@ -193,8 +175,7 @@ def test_the_gathered_export_is_the_hub_checkpoint_layout(tmp_path):
 
 @pytest.mark.parametrize("ep_size", [1, 2])
 def test_the_lazy_ep_load_matches_from_pretrained(tmp_path, monkeypatch, ep_size):
-    """The lazy EP loader fuses the hub's per-expert keys into each rank's expert slice bit for bit against
-    ``from_pretrained`` (EP patching stubbed: it needs DeepEP and process groups)."""
+    """EP patching is stubbed: it needs DeepEP and process groups."""
     _tiny_model().to(torch.bfloat16).save_pretrained(tmp_path)
     weight_map = resolve_checkpoint_weights(str(tmp_path)).weight_map
     assert any(".mlp.experts.0.gate_proj." in key for key in weight_map), "premise: per-expert hub keys"
@@ -227,8 +208,7 @@ def test_context_parallelism_is_refused_on_the_gated_deltanet_layers():
 
 
 def test_tensor_parallelism_is_refused_on_the_unplanned_attention():
-    """``Qwen3NextAttention`` is no class the selective attention-TP plan shards, so a TP run would shard
-    nothing; refused before any weight loads."""
+    """``Qwen3NextAttention`` is no class the selective attention-TP plan shards, so a TP run would shard nothing."""
     with pytest.raises(ValueError, match="shards ZERO attention layers"):
         reject_unshardable_tp_model(_tiny_model(), tp_size=2)
 

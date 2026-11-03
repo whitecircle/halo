@@ -190,8 +190,7 @@ def test_a_module_move_with_its_imports_rewritten_passes(repo):
 
 
 def test_a_package_moved_whole_passes_with_its_directory_named_in_a_message(repo):
-    """Every file of the core package moves to ``base/``, and the lookup error names the package's directory,
-    which no file rename spells."""
+    """The lookup error names the package's directory, which no file rename spells."""
     base = _commit(repo, BASE_TREE)
     core = [path for path in BASE_TREE if path.startswith("$pkg/core/")]
     moved = {
@@ -215,9 +214,8 @@ def test_a_package_moved_whole_passes_with_its_directory_named_in_a_message(repo
 
 
 def test_a_definition_carved_into_another_module_passes_and_lists_the_patch_to_review(repo):
-    """``scaled`` and a library-built constant move to the helpers whole and the registry imports ``scaled``
-    back: the definitions pair by name, the constant's build is no import-time effect, and the test's patch of
-    ``registry.scaled`` now replaces only the registry's binding."""
+    """The definitions pair by name, the constant's build is no import-time effect, and the test's patch of
+    ``registry.scaled`` replaces only the registry's binding."""
     base = _commit(repo, BASE_TREE)
     scaled = "def scaled(value):\n    return scale(value) * 2\n"
     units = 'UNITS = frozenset({"cm", "mm"})\n'
@@ -244,8 +242,8 @@ def test_a_definition_carved_into_another_module_passes_and_lists_the_patch_to_r
 
 
 def test_a_carve_of_library_decorated_definitions_passes(repo):
-    """A dataclass and a cached function move whole: a library's decorator is no import-time effect of the module
-    holding it, so both modules' ordered side effects still match."""
+    """A library's decorator is no import-time effect of the module holding it, so both modules' ordered side
+    effects still match."""
     decorated = dedent('''
         @dataclasses.dataclass(frozen=True)
         class Spec:
@@ -274,8 +272,7 @@ def test_a_carve_of_library_decorated_definitions_passes(repo):
 
 
 def test_a_carve_into_a_new_module_passes_once_its_additions_are_declared(repo):
-    """``lookup`` moves to a new module with a docstring and a logger of its own: those two are additions, which
-    the change must declare."""
+    """``lookup`` brings a docstring and a logger of its own, which the change must declare as additions."""
     base = _commit(repo, BASE_TREE)
     header = '"""Widget lookup."""\n\nimport logging\n\nfrom $pkg.core.registry import REGISTRY\n\n'
     finder = f"{header}logger = logging.getLogger(__name__)\n\n\n{LOOKUP.rstrip()}\n"
@@ -370,8 +367,8 @@ def test_a_docstring_change_passes_when_docstrings_are_ignored(repo):
 
 
 def test_a_declared_golden_may_change_and_an_undeclared_one_may_not(repo):
-    """The registry module moves and a golden names it, so the golden changes with the move: declared, the move
-    passes; undeclared, it fails; declared but unchanged, the stale declaration fails."""
+    """The golden names the moved module: declared, the move passes; undeclared, it fails; declared but unchanged,
+    the stale declaration fails."""
     golden = {"widgets": ["Widget", "Gadget"], "module": "$pkg.core.registry"}
     base = _commit(repo, {**BASE_TREE, GOLDEN: json.dumps(golden) + "\n"})
     moved = {
@@ -397,8 +394,7 @@ def test_a_declared_golden_may_change_and_an_undeclared_one_may_not(repo):
 
 
 def test_a_golden_stale_against_head_code_fails_its_generator_check(repo):
-    """At base the generator renders what the golden holds; a head registering one widget fewer leaves the golden
-    byte-identical but stale against head's own code."""
+    """A head registering one widget fewer leaves the golden byte-identical but stale against its own code."""
     base = _commit(repo, BASE_TREE)
     assert verify_move(repo, base, base, check_goldens=True)["goldens"]["generator_checks"] == {"order.json": "pass"}
 
@@ -499,7 +495,6 @@ def test_the_real_tree_passes_against_itself():
 
 
 def _moved_paths(old: str, new: str) -> dict[str, str]:
-    """Each file the move of ``old`` to ``new`` renames, by repo path."""
     if old.endswith(".py"):
         return {old: new}
     return {
@@ -518,8 +513,8 @@ def _moved_paths(old: str, new: str) -> dict[str, str]:
     ],
 )
 def test_a_real_move_with_every_reference_rewritten_passes(tmp_path, old, new):
-    """The module or package moves, and every import, patch string, dotted name and path naming it follows: the
-    canonical spelling absorbs all of it, a message naming the package's directory included."""
+    """Every import, patch string, dotted name and path naming the module follows it, and the canonical spelling
+    absorbs all of it."""
     for top in (*Checkout.read(REPO_ROOT).packages, "scripts", "tests"):
         shutil.copytree(REPO_ROOT / top, tmp_path / top, ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy(REPO_ROOT / "pyproject.toml", tmp_path)

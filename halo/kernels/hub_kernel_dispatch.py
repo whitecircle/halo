@@ -1,9 +1,6 @@
-"""Repair of transformers' ``use_kernel_func_from_hub_with_fallback``: route each call by its first
-tensor's device (upstream calls the CUDA-only package on CPU too), and import the mapped submodule chain
-ahead of upstream, which turns any failure of that import into a silent capture of the ~10x slower torch
-body: a broken kernel package raises instead. Installed by the ``halo`` package init, which re-decorates
-through it what modules imported earlier already bound.
-"""
+"""Repair of transformers' ``use_kernel_func_from_hub_with_fallback``: route each call by its first tensor's device
+(upstream calls the CUDA-only package on CPU too), and import the mapped submodule chain ahead of upstream, which turns
+any failure of that import into a silent capture of the ~10x slower torch body."""
 
 import functools
 import importlib
@@ -29,8 +26,8 @@ _warned_torch_captures: set[tuple[str, str]] = set()
 
 
 def _segmented_conv1d(torch_function, hidden_states, *args, **kwargs):
-    """Run the torch conv fallback per packed document: it swallows ``seq_idx`` and would carry left
-    context across documents. The conv is causal and depthwise, so this matches the CUDA kernel exactly."""
+    """Per packed document, as the torch conv swallows ``seq_idx`` and would carry left context across documents. The
+    conv is causal and depthwise, so this matches the CUDA kernel exactly."""
     seq_idx = kwargs.pop("seq_idx", None)
     if seq_idx is None:
         return torch_function(hidden_states, *args, **kwargs)
@@ -46,10 +43,8 @@ def _segmented_conv1d(torch_function, hidden_states, *args, **kwargs):
 
 
 def _segmented_chunk_gated_delta_rule(torch_function, query, key, value, **kwargs):
-    """Run the torch chunked delta rule per packed document: it swallows ``cu_seqlens`` and would carry
-    recurrent state across documents. Each document starts from a fresh state, or from its own row of
-    ``initial_state``, which then holds one state per document as the CUDA kernel takes it. The bounds are
-    read from ``cu_seqlens_cpu``, the kernel's host copy of them, where the caller passes one."""
+    """Per packed document, as the torch delta rule swallows ``cu_seqlens`` and would carry recurrent state across
+    documents. ``initial_state`` holds one state per document, as the CUDA kernel takes it."""
     cu_seqlens, cu_seqlens_cpu = kwargs.pop("cu_seqlens", None), kwargs.pop("cu_seqlens_cpu", None)
     if cu_seqlens is None:
         return torch_function(query, key, value, **kwargs)
@@ -86,20 +81,18 @@ _CPU_FALLBACK_FIXUPS = {
 
 
 def _import_mapped_chain(func_name: str, package: str, internal_path: str | None) -> None:
-    """Import the mapped submodule chain ahead of upstream, which swallows any failure of that import: a missing
-    module (package absent, chain renamed) is left to upstream's fallback and the capture check, any other error
-    is a broken kernel package and propagates."""
+    """A missing module is left to upstream's fallback and the capture check; any other error propagates."""
     chain = getattr(hub_kernels, "_KERNELS_INTERNAL_PATH_MAPPINGS", {}).get(func_name, internal_path)
     if not chain:
         return
     try:
         importlib.import_module(f"{package}.{chain}")
     except ModuleNotFoundError:
-        return  # absent package or renamed chain: the capture check reports the fallback
+        return
 
 
 def _capture_fell_back(dispatched, torch_function) -> bool | None:
-    """Whether upstream's decoration captured the torch body, best effort; None when unreadable."""
+    """Best effort; None when unreadable."""
     fn = dispatched
     for _ in range(4):
         if fn is None:
@@ -131,10 +124,8 @@ def _warn_if_torch_captured(dispatched, torch_function, func_name: str, package:
 
 
 def _redecorate_earlier_captures(original_factory, factory) -> None:
-    """Re-decorate through ``factory`` each module global ``original_factory`` returned before the install. A modeling
-    module decorates at its own import, so one imported ahead of ``halo`` (by a module whose third-party imports sort
-    above its ``halo`` ones, or by liger's model patches) would keep the CUDA-only package for every call. One
-    re-decoration per capture keeps a name imported from another module the same function as its source."""
+    """A modeling module decorates at its own import, so one imported ahead of ``halo`` would keep the CUDA-only
+    package for every call. One re-decoration per capture keeps an imported name the same function as its source."""
     capture_code = original_factory(_CAPTURE_PROBE, _CAPTURE_PROBE)(lambda: None).__code__
     redecorated = {}
     for module in list(sys.modules.values()):
@@ -150,7 +141,6 @@ def _redecorate_earlier_captures(original_factory, factory) -> None:
 
 
 def ensure_device_aware_kernel_dispatch() -> None:
-    """Install the repaired factory in ``hub_kernels`` and any materialized re-export, once."""
     if getattr(hub_kernels, _PATCHED_FLAG, False):
         return
     original_factory = hub_kernels.use_kernel_func_from_hub_with_fallback

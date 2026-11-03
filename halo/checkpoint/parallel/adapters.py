@@ -1,8 +1,5 @@
-"""PEFT and native expert-LoRA adapters: their saves, and the restore that resumes them.
-
-EP and CP rebuild a resumed model with zero-init adapters, so the trained ones reload through :func:`restore_adapters`,
-which writes DTensors through :func:`~halo.runtime.dtensor.copy_full_tensor` and maps a CP save's keys, respelled for a
-non-CP reload (:func:`~halo.models.unwrapping.plain_adapter_key`), back onto the live CP-wrapped names."""
+"""PEFT and native expert-LoRA adapters: their saves and the restore that resumes them. EP and CP rebuild a resumed
+model with zero-init adapters, so the trained ones reload through :func:`restore_adapters`."""
 
 from __future__ import annotations
 
@@ -64,27 +61,21 @@ logger = logging.getLogger(__name__)
 
 
 def _is_adapter_relevant(name: str) -> bool:
-    # Superset of every param name PEFT may serialize into an adapter file: LoRA tensors,
-    # modules_to_save clones, and the embed/lm_head pair save_embedding_layers can add.
+    # Superset of what PEFT may serialize: LoRA tensors, modules_to_save clones, the embed/lm_head pair.
     return any(marker in name for marker in ("lora_", "modules_to_save", "embed", "lm_head"))
 
 
 def _saves_embedding_layers(peft_model: PeftModel) -> bool | str:
-    """PEFT's ``save_embedding_layers`` for every selection of ``peft_model``'s adapter tensors, a save's and the resume's
-    alike: ``True`` once the run grew its vocabulary (:func:`~halo.model_loading.tokenizer_setup.vocabulary_grown`),
-    whose added rows no base checkpoint holds. PEFT's ``"auto"`` tells a grown vocabulary only by reading the base
-    config again, which it skips offline or without the Hub and which a composite config, holding ``vocab_size`` on
-    its text config alone, defeats; it still decides a vocabulary the run left alone."""
+    """``True`` once the run grew its vocabulary, whose added rows no base checkpoint holds; else PEFT's ``"auto"``,
+    which tells a grown vocabulary only by re-reading the base config, skipped offline and defeated by a composite
+    config."""
     return True if vocabulary_grown(peft_model) else "auto"
 
 
 def gather_adapter_state(peft_model: PeftModel) -> dict:
-    """COLLECTIVE: the PEFT adapter state, resolving only the adapter-relevant params and persistent buffers.
-
-    Resolving every parameter would retain the frozen base on every rank. The buffers ride along because
-    a ``modules_to_save`` clone serializes its whole state dict: a router carrying a balancing buffer
-    would otherwise KeyError PEFT's key lookup at the first save.
-    """
+    """COLLECTIVE: the PEFT adapter state, resolving only adapter-relevant params, since all of them would retain the
+    frozen base on every rank. Buffers ride along because a ``modules_to_save`` clone with a balancing buffer would
+    otherwise KeyError PEFT's key lookup at the first save."""
     full_state = {
         name: full_cpu_tensor(t.data)
         for name, t in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
@@ -96,13 +87,9 @@ def gather_adapter_state(peft_model: PeftModel) -> dict:
 
 
 def _cp_normalized_config(peft_config):
-    """The adapter config as a non-CP model reads it: module paths respelled like the keys.
-
-    ``exclude_modules``, and ``target_modules`` once ``all-linear`` made PEFT rewrite it to full paths,
-    spell the CP-wrapped tree; a plain reload would match none of them, injecting into the very module
-    an exclusion named and finding no target. A copy is returned, so the live config keeps the wrapped
-    spelling; suffix names (``q_proj``) pass through unchanged.
-    """
+    """The adapter config with module paths respelled like the keys; ``exclude_modules`` and a rewritten
+    ``target_modules`` spell the CP-wrapped tree, which a plain reload would never match. A copy, so the live config
+    keeps the wrapped spelling."""
     config = None
     for field in ("exclude_modules", "target_modules"):
         paths = getattr(peft_config, field, None)
@@ -120,8 +107,8 @@ def _cp_normalized_config(peft_config):
 
 
 def _backfill_base_model_name(peft_model: PeftModel) -> None:
-    """Recover ``base_model_name_or_path`` from the inner PreTrainedModel: ``get_peft_model`` reads it off
-    the wrapped module's own ``__dict__``, which under CP is the wrapper's and has none."""
+    """Recover ``base_model_name_or_path``, which ``get_peft_model`` reads off the wrapped module's ``__dict__``; under
+    CP that is the wrapper's and has none."""
     name_or_path = getattr(base_transformers_model(peft_model), "name_or_path", None)
     if not name_or_path:
         return
@@ -131,9 +118,8 @@ def _backfill_base_model_name(peft_model: PeftModel) -> None:
 
 
 def _adapter_file_state(ctx: CheckpointContext, state: dict) -> dict:
-    """The adapter tensors a hand-written adapter file holds: at the save dtype for an export, so an
-    fp32-master run (``fp32_experts`` / ``fp32_non_ep_params``) does not write a 2x adapter; at the
-    live dtype for a training checkpoint, whose fp32 adapters must resume unrounded."""
+    """The save dtype for an export, so an fp32-master run does not write a 2x adapter; the live dtype for a training
+    checkpoint, whose fp32 adapters must resume unrounded."""
     if ctx.training_checkpoint:
         return state
     cast = adapter_save_dtype_caster()
@@ -141,13 +127,9 @@ def _adapter_file_state(ctx: CheckpointContext, state: dict) -> dict:
 
 
 def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: write the PeftModel's adapters, then their training provenance and model card.
-
-    PEFT's own ``save_pretrained`` writes them unless it cannot: FSDP2-sharded DTensor adapters are
-    resolved first (a collective every rank enters), a CP run's keys and config are respelled for a
-    non-CP reload, and a mixed run's native expert adapters join the attention ones in one file whose
-    config stock PEFT refuses. Only the save rank writes.
-    """
+    """COLLECTIVE: write the PeftModel's adapters, provenance and model card; only the save rank writes. PEFT's own
+    ``save_pretrained`` does it unless DTensor adapters need resolving, a CP run's keys need respelling for a non-CP
+    reload, or a mixed run's expert adapters join the attention ones in one file stock PEFT refuses."""
     peft_model = find_peft_model(ctx.model)
     _backfill_base_model_name(peft_model)
     peft_config = peft_model.peft_config["default"]
@@ -166,9 +148,8 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
         state = {plain_adapter_key(key): tensor for key, tensor in state.items()}
         peft_config = _cp_normalized_config(peft_config)
     if mixed:
-        # unwrap_toolkit_wrappers stops at the PeftModel, so under CP the expert keys keep the wrapper's
-        # 'model.' level; resume applies them through the same unwrap of the same root shape
-        # (restore_adapters), so the keys round-trip.
+        # unwrap_toolkit_wrappers stops at the PeftModel, so under CP the expert keys keep the wrapper's 'model.'
+        # level; restore_adapters applies them through the same unwrap, so the keys round-trip.
         expert_state = gather_expert_lora_adapters(unwrap_toolkit_wrappers(ctx.model), retain=ctx.is_save_rank)
         saved = (
             f"PEFT + EP expert adapters to {output_dir} ({len(state)} attention + {len(expert_state)} expert tensors)"
@@ -196,24 +177,19 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
                 write_adapter_file(_adapter_file_state(ctx, {**state, **expert_state}), output_dir)
             logger.info(f"Saved {saved}")
             write_training_provenance(ctx.model, output_dir)
-            # The hand-written branches write no card, and PEFT's own save_pretrained rebuilds the card's
-            # tags from the base model's model_tags, which only an apply_run_model_policies load carries.
+            # The hand-written branches write no card, and PEFT rebuilds the tags from ``model_tags``, which only an
+            # apply_run_model_policies load carries.
             tag_model_card(output_dir)
         # Released inside the fence, so the barrier is not held under the state's footprint.
         del state, expert_state
 
 
 def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: gather the native EP grouped-LoRA adapters and write them as a standalone adapter
-    checkpoint, without the frozen base, which a reload pairs them with (:func:`load_expert_lora_adapters`).
-
-    The adapters go to the save dtype, or keep their live one in a training checkpoint, whose fp32
-    adapters must resume unrounded.
-    """
+    """COLLECTIVE: write the native EP grouped-LoRA adapters as a standalone checkpoint without the frozen base, at the
+    save dtype or, in a training checkpoint whose fp32 adapters must resume unrounded, the live one."""
     model = unwrap_toolkit_wrappers(ctx.model)  # a wrapper walk would prefix every adapter key
     fs_aware_makedirs(output_dir)
-    # Collective on every rank; only the writer keeps the result (else one host holds
-    # local_ranks copies of the whole adapter set).
+    # Collective on every rank; only the writer keeps the result, else one host holds local_ranks copies.
     adapters = gather_expert_lora_adapters(model, retain=ctx.is_save_rank)
     spec = getattr(ctx.parallelism_config, "expert_lora", None)
     base_name = getattr(ctx.model.config, "_name_or_path", None)
@@ -231,17 +207,10 @@ def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
 
 
 def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
-    """COLLECTIVE: write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters beside its merged weights.
-
-    The merged weights serve but cannot resume: the bf16 fold loses part of the delta, and the
-    optimizer state belongs to the adapters. They go to :data:`~halo.checkpoint.format.RESUME_ADAPTER_DIR`
-    through the non-merged save's adapter writer at their live dtype, then each save rank marks its
-    own complete copy; with older markers removed before the save began
-    (:func:`~halo.checkpoint.parallel.completeness.prepare_checkpoint_rewrite`), a failed adapter write
-    leaves no marker.
-    """
-    # Rank-uniform, and a no-op when sharded: a forward's transient unsharded params predate the
-    # last optimizer step, like every writer's.
+    """COLLECTIVE: write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters beside its merged weights,
+    which serve but cannot resume, since the bf16 fold loses part of the delta and the optimizer state belongs to the
+    adapters. Older markers are removed before the save begins, so a failed adapter write leaves no marker."""
+    # Rank-uniform, and a no-op when sharded; a forward's transient unsharded params predate the last optimizer step.
     reshard_fsdp2_modules(ctx.model)
     adapter_dir = os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
     save_adapters = save_peft_adapters if find_peft_model(ctx.model) is not None else save_expert_lora_adapters
@@ -252,10 +221,8 @@ def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
 def read_adapter_across_ranks(
     adapter_dir: str, *, checkpoint: str, what: str, attention: dict | None, expert: dict | None = None
 ) -> tuple[dict | None, str | None]:
-    """COLLECTIVE. The adapter tensors under ``adapter_dir`` and the file read, read on every rank, or
-    ``(None, None)`` when no rank holds one; refused on every rank, under the read's ``what``, when any
-    rank's live ``attention`` / ``expert`` config holds another LoRA scaling (:func:`lora_scaling_mismatch`).
-    """
+    """COLLECTIVE. The adapter tensors and file read under ``adapter_dir``, or ``(None, None)`` when no rank holds one;
+    refused on every rank when any rank's live config holds another LoRA scaling."""
     state, path = consensus_read(
         adapter_weight_paths(adapter_dir), read_adapter_file, what=what, checkpoint=checkpoint
     )
@@ -265,9 +232,8 @@ def read_adapter_across_ranks(
 
 
 def saved_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
-    """The live tensor behind every key a PEFT save of ``peft_model`` writes: PEFT's own selection over the model's
-    parameters (a tie under each of its names) and persistent buffers, as its ``state_dict()`` holds them. An FSDP2
-    DTensor stays as it is, so its ``shape`` is the saved full one."""
+    """The live tensor behind every key a PEFT save writes (a tie under each of its names); an FSDP2 DTensor stays as
+    it is, so its ``shape`` is the saved full one."""
     live = dict(itertools.chain(peft_model.named_parameters(remove_duplicate=False), persistent_buffers(peft_model)))
     return get_peft_model_state_dict(
         peft_model, state_dict=live, save_embedding_layers=_saves_embedding_layers(peft_model)
@@ -275,8 +241,8 @@ def saved_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
 
 
 def _with_tied_aliases(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> dict:
-    """``attn_state`` with each live key it lacks taken from a key it holds for the same live tensor: a gathered save
-    writes one name per tied tensor (a resized tied embedding's ``lm_head``), where PEFT's selection names each."""
+    """``attn_state`` with each live key it lacks taken from a key it holds for the same tensor, since a gathered save
+    writes one name per tied tensor (a resized tied embedding's ``lm_head``)."""
     held: dict[int, str] = {}
     for key in sorted(attn_state):
         if key in saved_tensors:
@@ -292,13 +258,10 @@ def _with_tied_aliases(saved_tensors: dict[str, torch.Tensor], attn_state: dict)
 def _without_unsaved_grown_rows(
     peft_model: PeftModel, saved_tensors: dict[str, torch.Tensor], attn_state: dict, checkpoint: str
 ) -> dict[str, torch.Tensor]:
-    """COLLECTIVE when the run grew its vocabulary. ``saved_tensors`` without the frozen embedding and head tensors of
-    a grown vocabulary that no key of ``attn_state`` holds (under a tied name either): an adapter saved before
-    adapter saves carried them, whose run kept them frozen at their mean-resize init, which this run's grow drew
-    again. Their live values stand, with a warning.
-
-    The keys left out are agreed across ranks, since each kept key is a copy, and a DTensor copy a mesh collective.
-    """
+    """COLLECTIVE when the run grew its vocabulary. ``saved_tensors`` without the frozen embedding and head tensors no
+    key of ``attn_state`` holds, from an adapter saved before saves carried them; their live values stand, with a
+    warning. The keys left out are agreed across ranks, since each kept key is a copy and a DTensor copy a mesh
+    collective."""
     if not vocabulary_grown(peft_model):
         return saved_tensors
     model = base_transformers_model(peft_model)
@@ -331,12 +294,9 @@ def _without_unsaved_grown_rows(
 
 
 def _load_peft_adapter_state(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> None:
-    """Copy each saved attention-adapter tensor into the live tensor behind its key in ``saved_tensors``
-    (:func:`saved_adapter_tensors`), a tied tensor once.
-
-    An FSDP2 DTensor target takes ``distribute_tensor``, a mesh collective, so the keys go in sorted order: a
-    dict's own order is its file's, and the adapter file can differ per rank on a non-shared filesystem.
-    """
+    """Copy each saved attention tensor into its live tensor, a tied tensor once. Sorted, because a DTensor target's
+    ``distribute_tensor`` is a mesh collective and the file's own order can differ per rank on a non-shared
+    filesystem."""
     copied: set[int] = set()
     with torch.no_grad():
         for key, value in sorted(attn_state.items()):
@@ -347,8 +307,7 @@ def _load_peft_adapter_state(saved_tensors: dict[str, torch.Tensor], attn_state:
 
 
 def _attention_adapter_mismatch(saved_tensors: dict | None, attn_state: dict, checkpoint: str) -> str | None:
-    """Why ``attn_state`` does not restore the live adapters, ``modules_to_save`` and persistent buffers a save
-    selects (``saved_tensors``, None without a PeftModel) one for one at the saved shapes, or None."""
+    """Why ``attn_state`` does not restore ``saved_tensors`` (None without a PeftModel) one for one, or None."""
     if saved_tensors is None:
         if not attn_state:
             return None
@@ -367,28 +326,16 @@ def _attention_adapter_mismatch(saved_tensors: dict | None, attn_state: dict, ch
 
 
 def remap_cp_adapter_keys_to_live(state: dict, live_keys: Iterable[str]) -> dict:
-    """Map CP-normalized adapter keys back onto ``live_keys``, the keys a save of the live CP-wrapped PeftModel
-    selects (:func:`saved_adapter_tensors`).
-
-    The saver writes :func:`~halo.models.unwrapping.plain_adapter_key` of each of those keys, for a non-CP reload; on
-    resume the model is CP-wrapped again, so its keys carry ``.original_attention.`` / extra ``model.`` paths. A key
-    the selection does not produce passes through, for the restore's layout check to name.
-    """
+    """Map CP-normalized adapter keys back onto ``live_keys``, which carry ``.original_attention.`` / extra ``model.``
+    paths on a CP-wrapped resume. An unknown key passes through for the restore's layout check to name."""
     normalized_to_live = {plain_adapter_key(key): key for key in live_keys}
     return {normalized_to_live.get(key, key): value for key, value in state.items()}
 
 
 def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
-    """COLLECTIVE. Restore LoRA adapters onto a model whose base weights stay as built: an EP/CP rebuild, or the
-    adapter-only checkpoint of a PEFT run.
-
-    Handles native EP expert adapters (sliced per rank by :func:`load_expert_lora_adapters`) and PEFT attention
-    adapters, copied into the live tensors at their dtype (DTensors through
-    :func:`~halo.runtime.dtensor.copy_full_tensor`). Refuses, on every rank and before any tensor is copied, an
-    adapter whose recorded LoRA scaling differs from the live run's (:func:`lora_scaling_mismatch`) and one that does
-    not match the live adapters key for key at the saved shapes. Returns the adapter file restored from, or ``None``
-    when ``checkpoint`` holds none on any rank (a no-op); rank-uniform either way.
-    """
+    """COLLECTIVE. Restore LoRA adapters onto a model whose base weights stay as built (an EP/CP rebuild, or a PEFT
+    run's adapter-only checkpoint). Refuses on every rank, before any copy, another LoRA scaling and a key or shape
+    mismatch. Returns the adapter file restored from, or ``None`` when no rank holds one; rank-uniform either way."""
     unwrapped = unwrap_framework_wrappers(model)
     peft_model = find_peft_model(unwrapped)
     expert_spec = next(
@@ -413,7 +360,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
     if saved_tensors is not None:
         attn_state = _with_tied_aliases(saved_tensors, attn_state)
         saved_tensors = _without_unsaved_grown_rows(peft_model, saved_tensors, attn_state, checkpoint)
-    # Joined before the expert load, whose own join precedes its first copy: neither population writes until both
+    # Joined before the expert load, whose own join precedes its first copy, so neither population writes until both
     # have matched on every rank.
     reject_across_ranks(
         _attention_adapter_mismatch(saved_tensors, attn_state, checkpoint), f"PEFT adapter resume from {checkpoint}"

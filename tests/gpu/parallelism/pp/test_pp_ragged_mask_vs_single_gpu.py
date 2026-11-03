@@ -1,24 +1,9 @@
 #!/usr/bin/env python
 """PP equivalence with real padding masks, sliding-window layers, and per-impl attention paths.
 
-The base equivalence gate (test_pp_vs_single_gpu.py) passes no attention mask, so transformers'
-whole mask machinery — 4D mask construction from ``inputs_embeds`` on mid stages, sliding vs full
-selection by enumerate position, FA varlen unpadding — is dead code there. Production PP always has
-mask zeros (the fixed-shape collator pads with 0), so this test drives ragged right-padded batches
-through a tiny Qwen3 with an alternating sliding/full ``layer_types`` pattern, or a tiny Qwen3.5
-hybrid, and compares loss + every gradient against the unsplit model under the same attention
-implementation.
-
-Modes (manifest ``args_matrix``):
-    (none)                      eager, fp32 — exact gate
-    --attn sdpa                 SDPA, fp32 — exact gate (mask content decides the all-ones skip)
-    --positions                 eager, fp32, explicit position_ids — proves kwarg chunking stays
-                                row-aligned with the batch split
-    --attn flash_attention_4    FA4, bf16 — varlen unpad path, loose gate; skips off Blackwell
-    --family qwen3_5            Qwen3.5 hybrid GatedDeltaNet (period-4 layer_types), eager, fp32 —
-                                exact gate, the recurrent decay params under their own bound
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ragged_mask_vs_single_gpu.py
+The base gate passes no mask, so mask construction on mid stages, sliding vs full selection and FA varlen unpadding are
+dead code there. ``--positions`` proves kwarg chunking stays row-aligned with the batch split. The FA4 row skips off
+Blackwell.
 """
 
 import sys
@@ -41,14 +26,12 @@ SEQ_LEN = 32
 
 ATTN_IMPL = "eager"
 EXPLICIT_POSITIONS = False
-# qwen3: sliding/full alternation through Qwen3ForCausalLM. qwen3_5: the hybrid GatedDeltaNet
-# family — period-4 L,L,L,F layer_types, partial interleaved mrope, linear-attn conv state — the
-# strongest "does the generic split really inherit a family's own machinery" probe.
+# qwen3_5: period-4 L,L,L,F layer_types, partial interleaved mrope and linear-attn conv state, the strongest probe of
+# whether the generic split inherits a family's own machinery.
 FAMILY = "qwen3"
 
-# Sliding/full alternation makes the enumerate-position mask selection load-bearing: a rebase bug
-# hands sliding layers a full mask (or vice versa) and the grads diverge. head_dim 64 so the FA4
-# mode runs a supported kernel shape.
+# A rebase bug hands sliding layers a full mask (or vice versa) and the grads diverge. head_dim 64 so FA4 runs a
+# supported shape.
 SLIDING_OVERRIDES = {
     "head_dim": 64,
     "use_sliding_window": True,
@@ -61,12 +44,9 @@ def _dtype() -> torch.dtype:
     return torch.bfloat16 if ATTN_IMPL == "flash_attention_4" else torch.float32
 
 
-# The recurrent decay parameter of a linear-attention family (Qwen3.5 GatedDeltaNet ``A_log``) is
-# ill-conditioned by construction: its gradient flows through an exponentiated cumulative product over
-# the whole sequence scan, so reordering that accumulation — which is exactly what splitting a batch
-# into microbatches does — moves it far more than any ordinary weight. Measured over repeated runs:
-# every other parameter in the stage lands at ~1e-4 while A_log on the deepest layers sits at
-# 1.7e-3..3.4e-3, the loss staying exact to 6.8e-8. Hence its own bound, not a blanket loosening.
+# Qwen3.5's ``A_log`` is ill-conditioned: its gradient flows through an exponentiated cumulative product over the
+# sequence, so microbatching moves it far more than any ordinary weight. Measured: other parameters ~1e-4, A_log on the
+# deepest layers 1.7e-3..3.4e-3, the loss exact to 6.8e-8. Hence its own bound.
 DECAY_GRAD_TOL = 1e-2
 
 _DECAY_PARAM_SUFFIXES = ("A_log", "dt_bias")
@@ -82,12 +62,11 @@ def build_model(device):
 
 
 def build_batch(device, vocab_size):
-    """Ragged true lengths right-padded to SEQ_LEN: mask zeros + -100 labels on every pad."""
     g = torch.Generator(device="cpu").manual_seed(99)
     input_ids = torch.randint(4, vocab_size, (GLOBAL_BATCH, SEQ_LEN), generator=g)
     attention_mask = torch.zeros(GLOBAL_BATCH, SEQ_LEN, dtype=torch.long)
     for i in range(GLOBAL_BATCH):
-        true_len = 10 + 2 * i  # 10..24 — every row shorter than SEQ_LEN, all lengths distinct
+        true_len = 10 + 2 * i  # Every row shorter than SEQ_LEN, all lengths distinct.
         attention_mask[i, :true_len] = 1
         input_ids[i, true_len:] = 0
     labels = input_ids.masked_fill(attention_mask == 0, -100)
@@ -105,7 +84,6 @@ def run(ctx):
     input_ids, labels, attention_mask, position_ids = build_batch(device, TINY_QWEN3_CONFIG["vocab_size"])
     global_count = (labels[:, 1:] != -100).sum().float()
 
-    # Baseline: unsplit model, full batch, same attention implementation and dtype.
     model = build_model(device)
     # fla autotunes per batch size, so the full batch and its microbatches would run on separately timed picks.
     pin_fla_autotune_first_fit(ctx)
@@ -121,8 +99,7 @@ def run(ctx):
     groups = ppeq.build_stage_groups(config)
     stage_module, runner, _ = ppeq.build_runner_stage(build_model(device), config, groups, device, n_microbatches)
 
-    # Ragged rows make DP replicas hold unequal counts — the exact case the rank-local default
-    # normalizer gets wrong. Pass the trainer's G/dp so per-replica losses average to S_total/G.
+    # Ragged rows make DP replicas hold unequal counts, which the rank-local default normalizer gets wrong; pass G/dp.
     dp_rank = config.get_data_parallel_rank()
     local_bs = GLOBAL_BATCH // config.data_parallel_size
     sl = slice(dp_rank * local_bs, (dp_rank + 1) * local_bs)
@@ -134,7 +111,7 @@ def run(ctx):
         num_items_in_batch=global_count / config.data_parallel_size,
     )
 
-    # (loss_rel, grad_rel): exact in fp32; bf16 kernels get the EP-test-style loose gate.
+    # Exact in fp32; bf16 kernels get the EP-test-style loose gate.
     loss_tol, grad_tol = (1e-2, 3e-2) if _dtype() == torch.bfloat16 else (1e-4, 2e-3)
     checks, metrics = ppeq.check_loss_vs_baseline(loss, ref_loss, config, groups, loss_tol)
 
@@ -146,8 +123,7 @@ def run(ctx):
     worst_name = max(rest, key=rest.get, default=None)
     decay_name = max(decay, key=decay.get, default=None)
     worst_err, decay_err = rest.get(worst_name, 0.0), decay.get(decay_name, 0.0)
-    # log_all, not log: the per-stage worst offender is exactly what a failure needs, and only
-    # rank 0 reporting it makes another stage's mismatch undiagnosable.
+    # log_all: with only rank 0 reporting, another stage's mismatch is undiagnosable.
     log_all(
         f"[rank {ctx.rank} stage {config.pp_rank}] checked={len(errors)} worst={worst_err:.3e} @ {worst_name}"
         + (f" | decay {decay_err:.3e} @ {decay_name}" if decay_name else "")
@@ -159,8 +135,7 @@ def run(ctx):
     metrics["worst_grad_rel_err"] = worst_err
     metrics["worst_decay_grad_rel_err"] = decay_err
 
-    # The mask must have actually carried zeros into the stage — otherwise this run silently
-    # degenerated to the unmasked gate.
+    # Otherwise this run silently degenerated to the unmasked gate.
     checks["mask_has_padding"] = bool((attention_mask[sl] == 0).any().item())
     checks["every_stage_has_params"] = world_min(len(errors), device) > 0
     return {"checks": checks, "metrics": metrics}

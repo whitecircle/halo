@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for :class:`BalancingBiasCallback`: zero-load warning, summary gate, lazy counter.
-
-All-zero expert-load counters make the DeepSeek-V3 sign update ``sign(0-0)=0`` — a silent no-op
-every step. The callback must WARN ONCE at the first bias update when the (all-reduced) counters
-are entirely zero, and stay silent when real load was recorded.
-
-Run: ``python tests/cpu/callbacks/test_balancing_bias_callback.py``
-"""
+""":class:`BalancingBiasCallback`: zero-load warning, summary gate, lazy counter.
+All-zero counters make the DeepSeek-V3 sign update ``sign(0-0)=0``, a silent no-op every step."""
 
 from __future__ import annotations
 
@@ -52,9 +46,7 @@ def test_warns_once_on_all_zero_counters_at_first_update():
     callback = BalancingBiasCallback()
     warnings = _capture_warnings(lambda: _step(callback, model))
     assert any("ZERO" in w for w in warnings), f"no zero-counter warning emitted: {warnings}"
-    # Sign update with zero counters is a no-op — biases must stay zero.
     assert torch.equal(model.routers[0].balancing_biases, torch.zeros(4))
-    # Warn-once: a second all-zero step stays silent (tied to the first update).
     model.routers[0].expert_load_counter = torch.zeros(4)
     warnings2 = _capture_warnings(lambda: _step(callback, model))
     assert not any("ZERO" in w for w in warnings2), f"zero-counter warning repeated: {warnings2}"
@@ -70,10 +62,7 @@ def test_no_warning_with_real_load_and_bias_moves():
 
 
 def test_metric_summary_derives_on_the_first_step_and_every_nth():
-    """The bias update runs every step; the moe/* summary only on the first and every Nth.
-
-    Slot 0 carries the lowest load, so each update raises its bias by one ``update_rate`` step.
-    """
+    """Slot 0 carries the lowest load, so each update raises its bias by one ``update_rate`` step."""
     model = _Model([_Router(counts=[1, 2, 3, 4])])
     callback = BalancingBiasCallback(log_every_n_steps=3)
     derived, slot0_bias = [], []
@@ -90,7 +79,6 @@ def test_metric_summary_derives_on_the_first_step_and_every_nth():
 
 
 def test_missing_counter_is_created_at_the_bias_width():
-    """A router that recorded nothing gets an fp32 zero counter of its bias width; the step is a no-op."""
     router = _Router(counts=None, num_experts=5)
     _step(BalancingBiasCallback(), _Model([router]))
     assert router.expert_load_counter.dtype == torch.float32

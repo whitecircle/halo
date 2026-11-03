@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""The SDPG self-distillation collators (halo/data/collators/self_distill.py and the VLM sibling).
-
-OPD pairs the k-th supervised token of the student branch with the k-th of the hinted teacher
-branch, so both must supervise the same tokens in the same order while the teacher sequence is
-longer by the hint; a row breaking that raises at prep, world-uniform, rather than distilling across
-shifted tokens. The text path encodes each row once at prep and collation only pads, to the batch the
-whole-batch collation built. Confidence weights divide by ONE dataset normalizer, so they weight rows at
-any batch size. A real tokenizer is needed for chat templating; tests skip when one is not cached.
-
-Run: pytest tests/cpu/data/test_self_distill_collator.py
-"""
+"""The SDPG self-distillation collators. OPD pairs the k-th supervised token of student and teacher branches, so a
+row breaking that raises at prep, world-uniform. The text path encodes each row once at prep, and confidence
+weights divide by one dataset normalizer. Tests skip when a real tokenizer is not cached."""
 
 import types
 from functools import partial
@@ -164,8 +156,8 @@ def _whole_batch_collation(collator, rows):
 
 @pytest.mark.parametrize("padding_side", ["right", "left"])
 def test_collating_rows_encoded_at_prep_builds_the_whole_batch_collation(padding_side, monkeypatch):
-    """Collation pads the rows ``encode_row`` produced, rendering nothing, into the batch the whole-batch
-    collation of the raw rows builds, on either padding side."""
+    """Collation renders nothing and pads ``encode_row``'s rows into the batch the whole-batch collation builds, on
+    either padding side."""
     tokenizer = _tokenizer()
     tokenizer.padding_side = padding_side
     collator = _collator(tokenizer)
@@ -185,8 +177,7 @@ def test_collating_rows_encoded_at_prep_builds_the_whole_batch_collation(padding
 
 
 def test_the_text_encoding_keeps_only_the_encoded_columns(tmp_path, monkeypatch):
-    """The map stores each row's token ids and labels and the columns asked to be kept, not a copy of the
-    raw row: every column it leaves in place is written to its cache file on every node."""
+    """Every column the map leaves in place is written to its cache file on every node."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
     script = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_encode")
     rows = [_row(payload="x" * 4096, confidence=0.5), _row("capital of France?", "Paris", payload="y", confidence=1.0)]
@@ -212,8 +203,7 @@ def test_no_teacher_branch_is_built_with_the_opd_term_off():
 
 @pytest.mark.parametrize("max_length", [8, None], ids=["student-over", "teacher-over"])
 def test_an_over_length_branch_raises_by_name_instead_of_truncating(max_length):
-    """Truncating one branch would cut response tokens the other keeps; the raise names the branch so
-    the budget is raised for the hint, and the audit raises it at prep."""
+    """Truncating one branch would cut response tokens the other keeps; the raise names the branch."""
     tokenizer = _tokenizer()
     hint = " here is a sufficiently long privileged hint: answer={answer}"
     if max_length is None:
@@ -230,7 +220,7 @@ def _confidence_split(values):
 
 
 def test_confidence_weights_divide_by_the_dataset_mean_at_any_batch_size():
-    """A per-batch mean is 1.0 at batch size 1 — the weighting every shipped recipe would run as a no-op."""
+    """A per-batch mean is 1.0 at batch size 1, a no-op on every shipped recipe."""
     tokenizer = _tokenizer()
     normalizer = confidence_normalizer(_confidence_split([1.0, 0.5, 0.0]), None, "confidence", 2.0)
     assert normalizer == pytest.approx((1.0 + 0.25) / 3)
@@ -343,9 +333,8 @@ def _vlm_script_args(**overrides):
 
 @pytest.mark.parametrize("hint_template", [" hint {answer}", None], ids=["opd-on", "opd-off"])
 def test_the_script_runs_the_vlm_audit_at_prep(hint_template, tmp_path, monkeypatch):
-    """The VLM builder must hand every row to the collator's audit before training: here the labels
-    reach into the prompt, so the hinted branch supervises other tokens, and the build itself raises.
-    With the OPD term off no teacher branch exists, so the same rows build."""
+    """The labels here reach into the prompt, so the hinted branch supervises other tokens and the build raises.
+    With the OPD term off the same rows build."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
     script = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_vlm_audit")
     ds = DatasetDict({"train": Dataset.from_list([_row("What digit?", "7")])})
@@ -367,8 +356,7 @@ def test_the_script_runs_the_vlm_audit_at_prep(hint_template, tmp_path, monkeypa
 
 
 def test_the_vlm_length_filter_measures_the_hinted_teacher_branch():
-    """The teacher branch is the longer one; a row only its hint pushes over would otherwise raise in
-    one rank's collator and hang the peers."""
+    """A row only its hint pushes over would otherwise raise in one rank's collator and hang the peers."""
     rows = {
         "history": [[{"role": "user", "content": "q q"}, {"role": "assistant", "content": "a"}]] * 2,
         "tools_json": [None, None],
@@ -383,7 +371,6 @@ def test_the_vlm_length_filter_measures_the_hinted_teacher_branch():
 
 
 def _render(tok, **collator_kwargs) -> str:
-    """Decode the student branch of a one-row batch — what the model actually sees."""
     row = _row(
         tools=[
             {
@@ -397,8 +384,7 @@ def _render(tok, **collator_kwargs) -> str:
 
 
 def test_system_prompt_reaches_the_rendered_conversation():
-    """The knob parses on the self-distillation script (SFTScriptArguments); rendering without it
-    would train the model on a prompt shape it is never served with."""
+    """Rendering without it would train the model on a prompt shape it is never served with."""
     tok = _tokenizer()
     assert "BE TERSE" not in _render(tok)
     assert "BE TERSE" in _render(tok, system_prompt="BE TERSE")

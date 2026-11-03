@@ -1,4 +1,5 @@
-"""Which optimizer a trainer run builds: AdamWBF16, a toolkit-named optimizer, the tensor-type-grouped build, or stock."""
+"""Which optimizer a trainer run builds: AdamWBF16, a toolkit-named optimizer, the tensor-type-grouped build, or
+stock."""
 
 import logging
 
@@ -19,8 +20,7 @@ register_custom_optimizers()
 
 
 def resolve_bf16_optimizer(explicit: bool | None, config, training_args, *, replicated_ddp: bool) -> bool:
-    """Whether the run uses AdamWBF16: the ctor kwarg (tests construct trainers directly), else the config's,
-    else auto-enabled under ``bf16`` on the default stock AdamW, so an explicit choice such as ``adamw_bnb_8bit``
+    """The ctor kwarg wins, then the config; else auto-enabled under ``bf16`` on stock AdamW, so an explicit ``optim``
     stands."""
     if explicit is None:
         explicit = config.bf16_optimizer

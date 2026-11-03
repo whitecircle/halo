@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for prefix-LM (PaliGemma) training attention: no trained token attends to a later token, the image
-and prompt keep PaliGemma's bidirectional prefix, and no backend that cannot carry that mask is selected.
-
-transformers sets PaliGemma's ``use_bidirectional_attention`` whenever a checkpoint leaves it unset, so its decoder
-is non-causal wherever no mask is materialized, and the processor marks no suffix in a rendered conversation. A
-trained answer that sees its own next tokens fits to a plausible loss and nothing downstream says so.
-
-Run: ``python tests/cpu/models/test_prefix_lm_attention.py`` (or ``pytest -m cpu``).
-"""
+"""Prefix-LM (PaliGemma) training attention. transformers builds its decoder non-causal wherever no mask is
+materialized, and a trained answer that sees its own next tokens fits to a plausible loss with nothing saying so."""
 
 from __future__ import annotations
 
@@ -51,7 +44,6 @@ def _tiny(text_model_type: str = "gemma"):
 
 
 def _training_model(config, attn_implementation: str):
-    """A random-init PaliGemma on ``attn_implementation`` after the run policies every training load applies."""
     torch.manual_seed(0)
     model = PaliGemmaForConditionalGeneration._from_config(config, attn_implementation=attn_implementation).eval()
     apply_run_model_policies(
@@ -68,7 +60,6 @@ def _logits(model, batch: dict, **overrides) -> torch.Tensor:
 
 
 def _movement(model, batch: dict, position: int, **overrides) -> torch.Tensor:
-    """Per-position max logit change when token ``position`` is swapped, under ``overrides``."""
     swapped = batch["input_ids"].clone()
     swapped[0, position] = _SWAP_IN
     before = _logits(model, batch, **overrides)
@@ -81,9 +72,8 @@ _BACKENDS = [("gemma", EAGER), ("gemma", SDPA), ("gemma2", EAGER), ("gemma2", FL
 
 @pytest.mark.parametrize(("text_model_type", "backend"), _BACKENDS, ids=[f"{t}-{b}" for t, b in _BACKENDS])
 def test_no_trained_token_attends_to_a_later_token(text_model_type, backend):
-    """The SFT batch on every backend the selector can pick for the family: swapping the second-to-last answer token
-    moves no earlier logit, while swapping a prompt token still moves an earlier prefix position (PaliGemma's
-    bidirectional prefix is kept, not flattened to causal)."""
+    """Every backend the selector can pick for the family. A prompt-token swap still moves an earlier prefix position,
+    so PaliGemma's bidirectional prefix is kept."""
     processor, config = _tiny(text_model_type)
     batch = paligemma_collator(processor, config, completions_only=True)([digit_row()])
     model = _training_model(config, backend)
@@ -93,14 +83,13 @@ def test_no_trained_token_attends_to_a_later_token(text_model_type, backend):
     assert _movement(model, batch, length - 2)[: length - 2].max() == 0
     prompt_token = start - 2
     assert _movement(model, batch, prompt_token)[1] > _REACHED, "the prefix lost its bidirectional attention"
-    # Anti-vacuity: the processor's all-zero token_type_ids put the answer in the prefix, and the probe sees it.
+    # The processor's all-zero token_type_ids put the answer in the prefix, and the probe sees it.
     all_prefix = torch.zeros_like(batch["token_type_ids"])
     assert _movement(model, batch, length - 2, token_type_ids=all_prefix)[start : length - 2].max() > _REACHED
 
 
 @pytest.mark.parametrize("backend", [EAGER, SDPA])
 def test_a_batch_without_token_type_ids_scores_causally(backend):
-    """A text row (no ``token_type_ids``, no padding) after the training policies: no position sees a later one."""
     processor, config = _tiny()
     batch = paligemma_collator(processor, config, completions_only=False)([digit_row()])
     batch["token_type_ids"] = None
@@ -109,8 +98,7 @@ def test_a_batch_without_token_type_ids_scores_causally(backend):
 
 
 def test_the_untouched_sdpa_decoder_is_bidirectional():
-    """Anti-vacuity for the causal default: transformers builds PaliGemma's decoder non-causal, so an unpadded SDPA
-    batch without ``token_type_ids`` reaches later tokens until the training policies run."""
+    """transformers builds the decoder non-causal, so this batch reaches later tokens until the policies run."""
     processor, config = _tiny()
     batch = paligemma_collator(processor, config, completions_only=False)([digit_row()])
     torch.manual_seed(0)
@@ -129,8 +117,7 @@ def test_the_causal_default_reaches_the_decoder_only():
 
 
 def test_a_bidirectional_decoder_of_another_family_is_left_alone():
-    """Anti-vacuity: the default is keyed on the prefix-LM family, not on ``use_bidirectional_attention``, which an
-    encoder-style Gemma sets on purpose."""
+    """The default is keyed on the prefix-LM family; an encoder-style Gemma sets the flag on purpose."""
     config = GemmaConfig(
         vocab_size=64,
         hidden_size=32,
@@ -174,8 +161,7 @@ _MASK_CARRIER = {"gemma": SDPA, "gemma2": FLEX}
 @pytest.mark.parametrize("request_", [None, *_FLASH, SDPA], ids=lambda r: str(r))
 @pytest.mark.parametrize("text_model_type", ["gemma", "gemma2"])
 def test_a_prefix_lm_never_resolves_to_a_flash_kernel(text_model_type, request_, arch):
-    """Auto-detected or pinned: no flash kernel reads ``token_type_ids``, and PaliGemma's decoder is built
-    non-causal, so a flash run would train every answer bidirectionally."""
+    """No flash kernel reads ``token_type_ids``, so a flash run would train every answer bidirectionally."""
     _, config = _tiny(text_model_type)
     with _on(arch), patch.object(attention_mod.logger, "warning"):
         assert _resolve(config, request_) == _MASK_CARRIER[text_model_type]
@@ -196,7 +182,6 @@ def test_the_flash_demotion_names_the_prefix_lm():
 
 
 def test_a_multimodal_gemma_that_is_no_prefix_lm_keeps_flash():
-    """Anti-vacuity: the refusal is keyed on the prefix-LM family, so Gemma 3's VLM keeps its flash pick."""
     with _on("hopper"), patch.object(attention_mod.logger, "warning"):
         assert _resolve(Gemma3Config(), None) in _FLASH
 

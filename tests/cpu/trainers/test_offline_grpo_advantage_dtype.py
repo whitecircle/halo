@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """Offline-GRPO group advantages: each method's map, the clip, and integral reward columns.
-
-Each ``advantage_method`` is pinned to its own values on an asymmetric group, where no two methods
-agree, and the result to the [-10, 10] clip. Verifiable rewards are commonly 0/1 integers.
-``np.array`` on such a list keeps an int64 dtype, the degenerate-group branches return
-``np.zeros_like`` (still int64), and the in-place best-completion emphasis multiply then raises
-``UFuncTypeError`` inside ``datasets.map`` — where the traceback points at the map worker, not the
-reward column.
-"""
+0/1 integer rewards stay int64, so the in-place emphasis multiply raises ``UFuncTypeError`` inside ``datasets.map``."""
 
 import statistics
 
@@ -39,7 +32,7 @@ def test_each_method_maps_an_asymmetric_group_to_its_own_advantages(method):
 
 
 def test_advantages_are_clipped_to_ten_either_way():
-    """An outlier on each side of a tight interquartile range: 400 interquartile ranges out, clipped."""
+    """An outlier on each side of a tight interquartile range, 400 ranges out."""
     rewards = [-100.0, 0.0, 0.1, 0.2, 0.3, 100.0]
     assert compute_group_advantages(rewards, "robust", best_completion_emphasis=0.0) == pytest.approx(
         [-10.0, -0.6, -0.2, 0.2, 0.6, 10.0]
@@ -49,7 +42,6 @@ def test_advantages_are_clipped_to_ten_either_way():
 @pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("rewards", [[1, 1, 1], [0, 0, 0], [0, 1, 1, 0], [1, 0, 0, 0]])
 def test_integer_rewards_with_best_completion_emphasis(method, rewards):
-    """Integral rewards + emphasis must not raise, and must return floats."""
     advantages = compute_group_advantages(rewards, method, best_completion_emphasis=1.5)
     assert len(advantages) == len(rewards)
     assert all(isinstance(a, float) for a in advantages)
@@ -57,14 +49,12 @@ def test_integer_rewards_with_best_completion_emphasis(method, rewards):
 
 @pytest.mark.parametrize("method", METHODS)
 def test_integer_and_float_rewards_agree(method):
-    """The int and float spellings of the same rewards must give identical advantages."""
     as_int = compute_group_advantages([0, 1, 1, 0], method, best_completion_emphasis=1.5)
     as_float = compute_group_advantages([0.0, 1.0, 1.0, 0.0], method, best_completion_emphasis=1.5)
     assert as_int == pytest.approx(as_float)
 
 
 def test_degenerate_integer_group_emphasis_is_inert():
-    """An all-equal integer group has zero advantages; the emphasis multiply must leave them zero."""
     for method in ("minmax", "robust"):
         assert compute_group_advantages([1, 1, 1], method, best_completion_emphasis=3.0) == pytest.approx(
             [0.0, 0.0, 0.0]
@@ -72,7 +62,6 @@ def test_degenerate_integer_group_emphasis_is_inert():
 
 
 def test_emphasis_still_scales_the_best_completion():
-    """Handling integer rewards must not disable the emphasis on a group that does have spread."""
     plain = compute_group_advantages([0, 0, 1], "minmax", best_completion_emphasis=0.0)
     emphasized = compute_group_advantages([0, 0, 1], "minmax", best_completion_emphasis=2.0)
     best = plain.index(max(plain))
@@ -80,13 +69,8 @@ def test_emphasis_still_scales_the_best_completion():
 
 
 def test_offline_z_norm_matches_the_torch_group_z_norm():
-    """The two GRPO z-norms must agree numerically.
-
-    ``np.std`` defaults to ``ddof=0`` while ``Tensor.std()`` is ``correction=1``, so an implicit
-    default makes offline's divisor smaller by ``sqrt((n-1)/n)`` — ~6% at n=8, inside the
-    ``num_generations`` range GRPO runs at — and the same rewards train at different advantage scales
-    depending on which trainer read them. The epsilon must be the same shared constant too.
-    """
+    """``np.std`` defaults to ``ddof=0``, ``Tensor.std()`` to ``correction=1``: an implicit default is ~6% off at n=8.
+    The same rewards would train at different advantage scales depending on the trainer."""
     rewards = [0.0, 0.25, 0.75, 1.0, 0.5, 0.0, 1.0, 0.5]
 
     offline = compute_group_advantages(rewards, "z_norm", best_completion_emphasis=0.0)
@@ -100,13 +84,8 @@ def test_offline_z_norm_matches_the_torch_group_z_norm():
 
 
 def test_auto_emphasis_scales_by_the_population_std_under_every_method():
-    """The torch-parity correction belongs to the z_norm DIVISOR only.
-
-    ``best_completion_emphasis="auto"`` multiplies the best row under every advantage method, and
-    ``group_relative_advantages`` has no emphasis term to agree with — so an ``ddof=1`` std here would
-    move the advantages of ``minmax``/``quantile_*``/``robust`` runs that never opted into the
-    alignment (+6.9% on the std at ``num_generations=8``, applied to the best completion only).
-    """
+    """The torch-parity correction belongs to the z_norm divisor only.
+    ``ddof=1`` here would move runs that never opted in: +6.9% on the std at ``num_generations=8``, best row only."""
     rewards = [0.0, 1.0]  # population std 0.5; the sample std would be 0.7071
     expected_factor = 3.0 + 2.0 * 0.5 / 1.5
 
@@ -120,21 +99,13 @@ def test_auto_emphasis_scales_by_the_population_std_under_every_method():
 
 @pytest.mark.parametrize("method", METHODS)
 def test_single_completion_group_has_zero_advantage(method):
-    """A one-completion group has no spread, so every method must return exactly ``[0.0]``.
-
-    No method carries a hand-written ``n == 1`` case — the general rank/IQR branches produce
-    this. A regression that divides by ``n - 1`` or by a zero IQR would surface here as NaN.
-    """
+    """No method has an ``n == 1`` case; dividing by ``n - 1`` or a zero IQR would surface here as NaN."""
     assert compute_group_advantages([0.5], method, best_completion_emphasis=3.0) == [0.0]
 
 
 @pytest.mark.parametrize("method", ["minmax", "quantile_uniform", "robust"])
 def test_two_completion_group_spans_the_full_range(method):
-    """A two-completion group maps loser to -1 and winner to +1 exactly, in either order.
-
-    ``quantile_uniform`` reaches this through the general ``(rank - 1) / (n - 1)`` scale rather than
-    an ``n == 2`` special case, so the equality is what pins the two as interchangeable.
-    """
+    """``quantile_uniform`` gets there through ``(rank - 1) / (n - 1)``, with no ``n == 2`` special case."""
     assert compute_group_advantages([0.0, 1.0], method, best_completion_emphasis=0.0) == [-1.0, 1.0]
     assert compute_group_advantages([1.0, 0.0], method, best_completion_emphasis=0.0) == [1.0, -1.0]
 
@@ -153,12 +124,7 @@ def test_two_completion_normal_methods_are_symmetric():
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize("group", [1, 2, 3])
 def test_non_finite_rewards_are_refused(method, bad, group):
-    """A NaN/Inf reward must fail loud rather than be absorbed.
-
-    Unrefused, it is absorbed into a ``0.0``/``±1`` advantage in one- and two-completion groups while
-    already NaN-ing the batch at three — so the same bad row trains as an average completion or
-    poisons every sibling's gradient depending only on how many completions it happens to have.
-    """
+    """Unrefused, a bad row trains as an average completion or poisons its siblings' gradients, by group size."""
     rewards = [0.0, 1.0, 0.5][: group - 1] + [bad]
     with pytest.raises(ValueError, match="Non-finite reward"):
         compute_group_advantages(rewards, method, best_completion_emphasis=0.0)
@@ -167,7 +133,7 @@ def test_non_finite_rewards_are_refused(method, bad, group):
 @pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("emphasis", [0.0, 0.5, 1.0])
 def test_emphasis_at_or_below_one_is_inert(method, emphasis):
-    """Any emphasis ≤ 1 leaves the advantages untouched — ``0.0`` is not special-cased to ``1.0``."""
+    """``0.0`` is not special-cased to ``1.0``."""
     rewards = [0.0, 0.25, 1.0, 1.0]
     assert compute_group_advantages(rewards, method, emphasis) == compute_group_advantages(rewards, method, 1.0)
 

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""``state.total_flos`` is the world sum of every rank's FLOPs estimate, with no collective of its own on a logged
-step.
-
-HF's ``store_flos`` all-gathers ``current_flos`` and reads it back each time it is called, and a logged step calls
-it right before the log, whose own all-reduce sums the token counters anyway. The trainer folds the count into that
-all-reduce on a logged step and keeps the standalone sum for a save and the end of training, which write
-``trainer_state.json`` and the train metrics. Two gloo ranks train a tiny SFT model with a save off the logging
-cadence, recording every rank's per-micro-batch estimate and the collectives each ``store_flos`` call issues.
-
-    python tests/cpu/trainers/test_total_flos_sum.py
-"""
+"""``state.total_flos`` is the world sum of every rank's FLOPs estimate, with no collective of its own on a log step.
+The count folds into the log's all-reduce; a save and the end of training keep the standalone sum."""
 
 import datetime
 import json

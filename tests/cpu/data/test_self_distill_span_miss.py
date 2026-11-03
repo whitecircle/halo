@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""Completion-span misses in the self-distill label builder: warn, never crash, never train pad.
-
-``build_completion_only_labels`` is shared by the SDPG text collator and by every VLM collator
-(:class:`~halo.data.collators.vlm.VLMDataCollator` passes the COLLATOR span policy through
-``span_policy``). Two defects, both silent or fatal at collate time:
-
-1. Under a policy that bounds a turn by the next marker start with no end-of-sequence fallback —
-   exactly the VLM collator's — a row whose assistant turn carries no terminator resolves to marker
-   starts and NO ends. Pairing them with ``zip(..., strict=True)`` raises ``ValueError`` on a
-   legitimate row, and at collate time that is rank-local: the peers sit in the step's collectives
-   until the NCCL watchdog.
-2. A row that resolves to no span at all is all-masked with no signal — a zero-loss row, which is
-   how a wrong ``assistant_message_template`` burns a whole run unnoticed.
-
-Run: pytest tests/cpu/data/test_self_distill_span_miss.py
-"""
+"""Completion-span misses in the self-distill label builder warn, and never crash or train pad. A row with marker
+starts and no ends under the collator policy would raise in ``zip(..., strict=True)`` at collate time,
+rank-local, hanging the peers; a row with no span is a silent zero-loss row."""
 
 import warnings
 
@@ -59,7 +46,6 @@ def _labels(row: list[int], span_policy) -> torch.Tensor:
 
 
 def test_terminatorless_row_under_collator_policy_warns_instead_of_crashing():
-    """Marker present, terminator absent, collator policy → masked row + a warning, not a raise."""
     # The precondition a strict zip crashes on, pinned so this test cannot stop covering it: under this
     # policy the row resolves to a start with NO paired end.
     starts, ends = resolve_completion_spans([5, 7, 7, 9], MARKER_IDS, frozenset({EOS_ID}), **COLLATOR_POLICY)
@@ -80,8 +66,7 @@ def test_missing_marker_warns_instead_of_training_zero_tokens_silently():
 
 
 def test_terminatorless_row_still_trains_under_the_self_distill_fallback():
-    """The default (self-distill) policy falls back to end-of-sequence, so the SAME row keeps its
-    completion — the miss guard must not mask rows that resolve fine."""
+    """The default policy falls back to end-of-sequence, so the same row keeps its completion."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # a warning here would mean the guard fired on a good row
         labels = _labels([5, 7, 7, 9], None)
@@ -90,7 +75,6 @@ def test_terminatorless_row_still_trains_under_the_self_distill_fallback():
 
 
 def test_terminated_row_under_collator_policy_keeps_its_span():
-    """The early-out must not change a row that DOES terminate: it stays masked span-wise."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         labels = _labels([5, 7, 7, 9, EOS_ID], COLLATOR_POLICY)

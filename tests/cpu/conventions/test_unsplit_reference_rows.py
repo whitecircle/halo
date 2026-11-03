@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""``run_unsplit_reference``'s per-row forwards, the reference the pipeline packed rows are scored against, score a
-packed row as its documents alone: each row runs without a KV cache, as the SFT trainer and a pipeline stage run a
-training row, since transformers reads restarting positions as documents only where no cache is live.
-
-    python tests/cpu/conventions/test_unsplit_reference_rows.py
-"""
+"""``run_unsplit_reference``'s per-row forwards score a packed row as its documents alone: each row runs without a
+KV cache, since transformers reads restarting positions as documents only where no cache is live."""
 
 import pytest
 import torch
@@ -64,8 +60,7 @@ def test_a_packed_row_scores_as_its_documents_alone():
 
 
 def test_a_live_cache_crosses_the_documents():
-    """Negative control: the same row under a live cache attends and carries state across its documents, so the
-    comparison above can fail."""
+    """The same row under a live cache crosses its documents, so the comparison above can fail."""
     model = _model()
     input_ids, labels, markers = _packed_row(model)
     expected = _documents_alone(model, input_ids, labels)

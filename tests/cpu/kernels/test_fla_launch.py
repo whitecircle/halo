@@ -1,19 +1,5 @@
-"""FLA's launch options, set by ``finalize_loaded_model`` through one seam (``apply_fla_launch_options``).
-
-The delta rule's state kernel autotunes over ``num_warps=2`` configs only on Blackwell: its ``num_warps=4`` configs
-give run-to-run different, partly wrong outputs on sm_10x, and the stock autotuner picks them at Qwen3.5/3.6 shapes.
-These fail if the seam stops restricting the kernel on Blackwell, starts restricting it on another architecture, or
-leaves an already-picked ``num_warps=4`` config in the autotuner's cache. The GPU behaviour itself is pinned by
-``tests/gpu/kernels/test_fla_blackwell_autotune.py``.
-
-Under ``HALO_FLA_FIXED_NB`` FLA's norm kernels launch at a fixed ``NB``, tune on the real one, and compute the same.
-The compiled code for ``NB=1`` and ``NB=3`` is compared for Hopper and Blackwell targets (compiled on the CPU, never
-launched), with a used constexpr as the control that must change it. The launch path runs FLA's real launchers on CPU
-tensors with Triton's launch and benchmark stubbed, so the ``NB`` each launch carries and each tuning key are read
-directly. These fail if the wrapper stops fixing ``NB`` (keyword or positional, launch or warm-up), hides the real
-``NB`` from a callable grid or from tuning, wraps a kernel whose body reads ``NB``, if a kernel leaves the table, or if
-``finalize_loaded_model`` stops applying it.
-"""
+"""FLA's launch options through ``apply_fla_launch_options``. ``num_warps=4`` configs give run-to-run different,
+partly wrong outputs on sm_10x, and the stock autotuner picks them at Qwen3.5/3.6 shapes."""
 
 from types import ModuleType
 
@@ -37,7 +23,7 @@ _STATE_KERNEL = "chunk_gated_delta_rule_fwd_kernel_h_blockdim64"
 # Rows past two 65,536 boundaries: FLA launches these with NB=3.
 _ROWS = 2 * 65536 + 1
 _D = 16
-# One value for every constexpr the table's kernels declare; BT is the autotuned one the control varies.
+# BT is the autotuned one the control varies.
 _CONSTEXPRS = {
     "D": 128,
     "BD": 128,
@@ -53,7 +39,7 @@ _CONSTEXPRS = {
     "RECOMPUTE_OUTPUT": False,
 }
 _SCALARS = {"eps": "fp32", "T": "i32", "BS": "i32"}
-# Spelled out rather than read from the table, so a kernel dropped from it fails the launch checks.
+# Spelled out, so a kernel dropped from the table fails the launch checks.
 _KERNELS = {
     l2norm: ("l2norm_fwd_kernel", "l2norm_bwd_kernel"),
     fused_norm_gate: ("layer_norm_gated_fwd_kernel", "layer_norm_gated_bwd_kernel"),
@@ -85,7 +71,6 @@ def _fixed(kernel) -> bool:
 
 
 def _table_of(kernel) -> dict[ModuleType, tuple[str, ...]]:
-    """A one-kernel table: ``kernel`` as the only entry of a module of its own."""
     module = ModuleType("halo_test_fla_module")
     module.kernel = kernel
     return {module: ("kernel",)}
@@ -93,7 +78,7 @@ def _table_of(kernel) -> dict[ModuleType, tuple[str, ...]]:
 
 @pytest.fixture
 def gpu(monkeypatch):
-    """Pretend to run on a GPU of the given major capability, and restore the state kernel's configs and cache."""
+    """Restores the state kernel's configs and cache."""
     autotuner = _state_autotuner()
     configs, cache = list(autotuner.configs), dict(autotuner.cache)
     monkeypatch.delenv(FIXED_NB_FLAG, raising=False)
@@ -108,7 +93,7 @@ def gpu(monkeypatch):
 
 @pytest.fixture
 def restored(monkeypatch):
-    """Undo the norm kernels' wrapping and any tuning picks after each test: they are FLA's process-wide objects."""
+    """FLA's process-wide objects."""
     for _, kernel in _registered():
         tuner = triton_autotuner(kernel)
         monkeypatch.setattr(tuner, "fn", tuner.fn)
@@ -119,7 +104,7 @@ def restored(monkeypatch):
 
 @pytest.fixture
 def launches(restored):
-    """Stub Triton's launch and benchmark: record each launch's kernel and ``NB``, compile and run nothing."""
+    """Records each launch's kernel and ``NB``, compiling and running nothing."""
     recorded = []
 
     def run(self, *args, grid, warmup, **kwargs):
@@ -134,7 +119,7 @@ def launches(restored):
 
 
 def test_the_locked_fla_offers_num_warps_4_here():
-    """Non-vacuity guard: without ``num_warps=4`` configs to drop, the restriction tests below would prove nothing."""
+    """Non-vacuity: without ``num_warps=4`` configs to drop, the restriction tests prove nothing."""
     assert 4 in _warps()
 
 
@@ -206,7 +191,6 @@ def test_one_call_sets_both_options_on_blackwell_with_the_flag(gpu, restored):
 
 
 def _launch_all():
-    """Each table kernel once, through FLA's own launchers, on ``_ROWS`` rows."""
     x, g, dy = (torch.randn(_ROWS, _D) for _ in range(3))
     weight = torch.ones(_D)
     y, rstd = l2norm.l2norm_fwd(x)

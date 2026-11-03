@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CPU test for the parameter split :func:`halo.optimizers.muon.muon_optimizer_from_args` reports.
-
-The token embedding and output head are 2D yet routed to Muon's internal scalar AdamW, so a summary
-counted by ``ndim`` reports them under Newton-Schulz. The logged split must match the routing the
-built optimizer actually holds.
-
-Run: pytest tests/cpu/optimizers/test_muon_build_summary.py
-"""
+"""The parameter split :func:`halo.optimizers.muon.muon_optimizer_from_args` reports matches the routing the optimizer
+holds. Embedding and head are 2D yet routed to AdamW, so a split by ``ndim`` misreports them."""
 
 import logging
 
@@ -22,8 +16,6 @@ _HIDDEN = 1024
 
 
 class _TinyModel(nn.Module):
-    """A Muon-routed hidden matrix beside a 2D embedding and head of the same order of size."""
-
     def __init__(self):
         super().__init__()
         self.embed_tokens = nn.Embedding(_VOCAB, _HIDDEN, dtype=torch.bfloat16)

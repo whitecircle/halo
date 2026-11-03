@@ -1,15 +1,5 @@
-"""CPU test for the embedding save's LoRA fold (``folded_backbone_chunks``).
-
-The embedding script injects LoRA in place (the model stays a SentenceTransformer, not a PeftModel),
-so the save must fold the adapters into the base weights — otherwise the checkpoint carries
-``base_layer``/``lora_*`` keys that reload as random base weights. The save folds each tensor out of
-place with the weight sync's fold (``halo.models.peft_adapters.lora_folded``); this checks what the save
-gets from it: the plain module's names and nothing else, PEFT's own merge for every target kind and
-variant the fold covers (a linear, an embedding with its transposed delta, a conv; DoRA and
-``lora_bias``), and a live model left untouched.
-
-Run: python tests/cpu/peft/test_embedding_lora_merge.py
-"""
+"""The embedding save's LoRA fold (``folded_backbone_chunks``).
+The model stays a SentenceTransformer; unfolded ``base_layer``/``lora_*`` keys would reload as random base weights."""
 
 import copy
 
@@ -28,8 +18,7 @@ LORA_ALPHA = 8
 
 
 class _Encoder(nn.Module):
-    """An input embedding, a projection and a conv, plus a persistent buffer. ``VOCAB != HIDDEN``, so an
-    embedding delta folded untransposed cannot match its base."""
+    """``VOCAB != HIDDEN``, so an embedding delta folded untransposed cannot match its base."""
 
     def __init__(self):
         super().__init__()
@@ -44,8 +33,7 @@ def _folded(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _trained_adapters(**lora) -> nn.Module:
-    """``_Encoder`` with LoRA injected in place and every adapter tensor random, as after training
-    (PEFT zero-inits one factor of each pair, which would make any fold look right)."""
+    """Every adapter tensor random: PEFT zero-inits one factor of each pair, which would make any fold look right."""
     torch.manual_seed(0)
     config = {"target_modules": ["embed", "proj", "conv"], **lora}
     model = inject_adapter_in_model(LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, **config), _Encoder())

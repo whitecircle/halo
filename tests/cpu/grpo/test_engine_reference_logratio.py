@@ -1,7 +1,5 @@
-"""``isr_engine_reference``: the mask stages read the engine's current-vs-sampling log-ratio on
-re-scored rows (pure staleness), the trainer diff elsewhere; the re-score fans a trajectory's rows out
-to one server, never raises, and is refused at construction where it could not mean what it says, and
-at startup against an engine whose prompt log-probs depend on how the prefill was batched."""
+"""``isr_engine_reference``: the mask stages read the engine's log-ratio on re-scored rows, the trainer diff elsewhere.
+Also the re-score's routing and failure handling, its construction gate and its startup probe."""
 
 import ast
 import inspect
@@ -34,14 +32,13 @@ ENV_SCRIPT = REPO_ROOT / "scripts/training/grpo/environmental.py"
 
 
 def _pair(stats: dict, key: str) -> tuple[float, float]:
-    """A diagnostic's ``(numerator, denominator)`` read off the device, where the stage leaves both."""
     assert all(isinstance(v, torch.Tensor) for v in stats[key]), "the pair must stay on device for one read"
     return tuple(float(v) for v in stats[key])
 
 
 def test_mask_logratio_reads_the_engine_diff_only_on_rescored_rows():
     sampling = torch.tensor([[-1.0, -2.0, 0.0], [-1.0, -1.0, -1.0]])
-    recompute = sampling + torch.tensor([[-0.05, -0.05, 0.0], [-0.05, -0.05, -0.05]])  # a −0.05 "numerics" floor
+    recompute = sampling + torch.tensor([[-0.05, -0.05, 0.0], [-0.05, -0.05, -0.05]])  # a −0.05 numerics floor
     engine_now = sampling + torch.tensor([[0.01, -0.01, 0.0], [0.0, 0.0, 0.0]])  # ±0.01 of real staleness
     corrected = torch.tensor([[True, True, False], [True, True, True]])  # the third token of row 0 is sampler-certain
     trainer_diff = (recompute - sampling) * corrected
@@ -81,7 +78,7 @@ class _FakeClient:
 
 
 class _ThreadRecordingClient(_FakeClient):
-    """Records the worker thread of every request: a ``ThreadPoolExecutor`` names its threads after the pool."""
+    """A ``ThreadPoolExecutor`` names its threads after the pool."""
 
     def __init__(self):
         super().__init__()
@@ -115,8 +112,7 @@ def _rescore_host(clients):
 
 
 def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
-    """The weight-sync client exists on the main process only; the re-score runs on every rank, so
-    its clients come from the server URLs, score-only (no communicator), one per server."""
+    """The weight-sync client exists on the main process only, and the re-score runs on every rank."""
     built = []
 
     class _Scorer:
@@ -194,8 +190,7 @@ def test_rescore_reports_partial_failures_and_never_raises():
     ("failing", "level", "silent"), [((True, False), "warning", "error"), ((True,), "error", "warning")]
 )
 def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, failing, level, silent):
-    """Each rank re-scores its own rows, so a failure is rank-local: guarded to the main process, a dead route
-    on rank 3 would never print."""
+    """Guarded to the main process, a dead route on rank 3 would never print."""
     recorder = mock.MagicMock()
     monkeypatch.setattr(importance_sampling, "logger", recorder)
     monkeypatch.setattr(importance_sampling, "get_global_rank", lambda: 3)
@@ -210,15 +205,14 @@ def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, fail
 
 @pytest.mark.parametrize(("world_size", "per_rank"), [(1, 128), (8, 16), (64, 2), (1024, 1)])
 def test_the_rescore_load_on_a_server_is_bounded_whatever_the_world_size(world_size, per_rank):
-    """Every rank re-scores its own rows on the same servers, so a fixed per-rank width puts world × width requests
-    in flight on a server; each rank keeps its share of the per-server budget there, and one request at the least."""
+    """A fixed per-rank width would put world × width requests in flight on a server; each rank keeps its share of the
+    budget, one request at the least."""
     assert importance_sampling.resolve_rescore_concurrency(128, world_size) == per_rank
     assert per_rank * world_size <= max(128, world_size)
 
 
 def test_each_server_takes_its_requests_through_a_pool_of_this_ranks_share(monkeypatch):
-    """Every rank maps its first trajectories to server 0, so one pool sized for every server would let a rank put
-    all of its width on that one; a pool per server caps each server at this rank's share."""
+    """Every rank maps its first trajectories to server 0, so one shared pool could put all of a rank's width there."""
     widths = []
     real_pool = importance_sampling.ThreadPoolExecutor
 
@@ -243,7 +237,7 @@ def test_each_server_takes_its_requests_through_a_pool_of_this_ranks_share(monke
 
 
 def test_a_rescore_before_the_components_started_raises():
-    """Every request would otherwise fail as a miss and the step train on the trainer's reference, quietly."""
+    """Every request would otherwise miss and the step would quietly train on the trainer's reference."""
     rescore, _host = _rescore_host(None)
     prompts, completions = _rows()
     with pytest.raises(RuntimeError, match="before the rollout components started"):
@@ -262,7 +256,6 @@ def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
 
 
 def _gate(client_cls, *, is_correction=True, **sampler) -> None:
-    """The gate over a rollout config at the identity sampler, with ``sampler`` overriding its knobs."""
     config = AsyncRolloutConfig(**{"rollout_temperature": 1.0, "rollout_top_p": 1.0, **sampler})
     reject_unsupported_engine_reference(client_cls, config, is_correction)
 
@@ -300,7 +293,7 @@ def test_both_engines_declare_the_rescore():
 
 
 def _word_tokenizer(text):
-    """One id per whitespace-separated word, clear of the low special-token range."""
+    """One id per word, clear of the low special-token range."""
     return {"input_ids": [100 + int(word) for word in text.split()]}
 
 
@@ -314,7 +307,6 @@ def prefill_server(client_cls):
 
 
 def _scored_lengths(server: FakeEngineServer) -> list[int]:
-    """Token count of every prefill-log-prob request the server answered, in order, on either engine's route."""
     return [
         len(body["prompt"] if path == "/v1/completions" else body["input_ids"])
         for path, body in server.posted
@@ -334,10 +326,9 @@ _ENGINES = pytest.mark.parametrize("client_cls", [VLLMClient, SGLangWeightSyncCl
 def test_prompt_logprob_probe_refuses_an_engine_whose_graph_prefills_are_garbage(
     prefill_server, client_cls, shift, capture_tokens
 ):
-    """vLLM's V1 runner under MTP (measured on 0.26.0) returns garbage prompt log-probs whenever the prefill
-    replays a captured graph. The probe's prefixes do while its whole sequence does not, so their shared
-    positions disagree; a capture range raised past the whole sequence corrupts it too, and its mean NLL gives
-    it away. Either way the run is refused with the cause and the remedies."""
+    """vLLM's V1 runner under MTP (measured on 0.26.0) returns garbage prompt log-probs when the prefill replays a
+    captured graph. The probe's prefixes do and its whole sequence does not, so their positions disagree; a capture
+    range past the whole sequence corrupts it too, and its mean NLL gives it away."""
     prefill_server.graph_prefill_shift = shift
     prefill_server.graph_capture_tokens = capture_tokens
     with pytest.raises(ValueError, match="speculative decoding") as raised:
@@ -347,9 +338,8 @@ def test_prompt_logprob_probe_refuses_an_engine_whose_graph_prefills_are_garbage
 
 @_ENGINES
 def test_prompt_logprob_probe_accepts_batch_shape_noise(prefill_server, client_cls):
-    """A shift within bf16 batch-shape noise passes, once the probe has scored a whole sequence that prefills
-    eagerly and prefixes of it that each replay a graph; the gap it measures is that shift alone, so each
-    prefix position is compared with the same position of the whole."""
+    """The whole sequence prefills eagerly and each prefix replays a graph, so the gap is the shift alone; each prefix
+    position is compared with the same position of the whole."""
     prefill_server.graph_prefill_shift = -0.5
     verify_engine_prompt_logprobs([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
     whole, *prefixes = _scored_lengths(prefill_server)
@@ -361,11 +351,9 @@ def test_prompt_logprob_probe_accepts_batch_shape_noise(prefill_server, client_c
 
 
 class _NoisyLowProbabilityEngine:
-    """Scores every tenth position of a sequence, from the fourth, as a low-probability token (-10) and the rest
-    confidently (-0.05). A prefix short enough to prefill as a graph moves the low-probability positions by
-    ``noise`` nats and the confident ones by 0.1, the bf16 noise Gemma 4 shows on every engine, and every
-    position by ``shift``, as the drafter overwrite does. ``poison`` maps ``(graph, position)`` to a value
-    replacing that score."""
+    """Every tenth position from the fourth scores -10, the rest -0.05. A graph prefill moves the low-probability
+    positions by ``noise`` and the rest by 0.1 (Gemma 4's bf16 noise on every engine), and all of them by ``shift``, as
+    the drafter overwrite does. ``poison`` maps ``(graph, position)`` to a replacement score."""
 
     def __init__(self, *, noise: float, shift: float = 0.0, poison: dict[tuple[bool, int], float] | None = None):
         self.noise, self.shift, self.poison = noise, shift, poison or {}
@@ -387,9 +375,8 @@ class _NoisyLowProbabilityEngine:
 
 @pytest.mark.parametrize(("shift", "gap"), [(0.0, 0.1), (-8.0, 8.1)], ids=["bf16-noise", "drafter-overwrite"])
 def test_prompt_logprob_probe_judges_the_gap_where_the_model_is_confident(monkeypatch, shift, gap):
-    """bf16 noise moves a prefix's low-probability positions by several nats (Gemma 4 on vLLM, SGLang and the
-    trainer alike), while the drafter overwrite moves every position by 8-22, so only the positions the whole
-    scores above -1.0 count: the noise passes, the overwrite is refused with its cause."""
+    """bf16 noise moves a prefix's low-probability positions by several nats (Gemma 4 on vLLM, SGLang and the trainer
+    alike); the drafter overwrite moves every position by 8-22. Only positions the whole scores above -1.0 count."""
     engine = _NoisyLowProbabilityEngine(noise=4.0, shift=shift)
     assert _probe_prompt_logprobs(engine, list(range(1100)))[1] == pytest.approx(gap)
 
@@ -415,17 +402,15 @@ def test_prompt_logprob_probe_judges_the_gap_where_the_model_is_confident(monkey
     ids=["prefix-confident-nan", "prefix-low-probability-nan", "prefix-low-probability-inf", "whole-nan"],
 )
 def test_prompt_logprob_probe_reads_a_non_finite_position_as_an_infinite_gap(poison):
-    """``max`` keeps whichever operand it met first when the other is NaN, so a NaN behind a finite gap
-    would otherwise vanish from the verdict; nor may the confidence floor drop one, at a position the whole
-    scores low or in the whole itself."""
+    """``max`` keeps whichever operand it met first when the other is NaN, so a NaN behind a finite gap would vanish
+    from the verdict. The confidence floor must not drop one either."""
     _, gap, _ = _probe_prompt_logprobs(_NoisyLowProbabilityEngine(noise=4.0, poison=poison), list(range(1100)))
     assert gap == math.inf
 
 
 @_ENGINES
 def test_a_preflight_request_never_retries_a_read_past_its_timeout(prefill_server, client_cls):
-    """Every rank waits on rank 0's probes: a stalled server must cost one timeout per request, where the
-    client's own session would retry the read five times."""
+    """Every rank waits on rank 0's probes, and the client's own session would retry a stalled read five times."""
     url = prefill_server.url
     retry = engine_preflight._probe_server(
         client_cls, url, lambda client: client._session.get_adapter(url).max_retries, None, "probe"
@@ -434,7 +419,7 @@ def test_a_preflight_request_never_retries_a_read_past_its_timeout(prefill_serve
 
 
 def test_the_env_script_runs_the_prompt_logprob_probe_under_isr_engine_reference():
-    """The probe guards the re-score only, so the script gates it on the knob that turns the re-score on."""
+    """The probe guards the re-score only."""
     guards = [
         ast.unparse(node.test)
         for node in ast.walk(ast.parse(ENV_SCRIPT.read_text()))

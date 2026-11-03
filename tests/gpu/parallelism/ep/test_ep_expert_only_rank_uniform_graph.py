@@ -53,10 +53,10 @@ EP_SIZE = 2
 BATCH, SEQ = 2, 48
 SEED = 1234
 LORA_R, LORA_ALPHA = 8, 16
-# Random adapters (B is zero at init, which would leave every A gradient zero and uninformative).
+# B is zero at init, which would leave every A gradient zero.
 ADAPTER_STD = 0.05
-# The ep2 and ep1 forwards run the same bf16 math apart from DeepEP's combine; a wrong routing or a
-# dropped layer moves the mean token loss by far more.
+# The ep2 and ep1 forwards run the same bf16 math apart from DeepEP's combine; a wrong routing moves the mean by far
+# more.
 LOSS_ATOL = 2e-2
 
 _DEEPEP_NODES = ("DeepEPDispatchFunctionBackward", "DeepEPCombineFunctionBackward")
@@ -65,12 +65,8 @@ _SEAM = EPMoELayerBase._dispatch_compute_combine
 
 @contextlib.contextmanager
 def forced_routing(starved_layers: set[int]):
-    """Replace every EP layer's selection at the dispatch seam.
-
-    A starved layer sends token ``t``'s ``k``-th pick to expert ``(t + k) % (E / EP_SIZE)``, all owned by
-    rank 0 at ep2; any other layer uses ``(t + k) % E``, which reaches every rank. The reference at ep1
-    gets the same ids. Gate weights stay the router's own: selection is not differentiable.
-    """
+    """A starved layer sends token ``t``'s ``k``-th pick to expert ``(t + k) % (E / EP_SIZE)``, all on rank 0 at ep2;
+    any other uses ``(t + k) % E``. Gate weights stay the router's own: selection is not differentiable."""
 
     def seam(self, flat, experts, weights, input_dtype):
         span = self.num_experts // EP_SIZE if self.test_layer_index in starved_layers else self.num_experts
@@ -104,7 +100,6 @@ def graph_signature(loss: torch.Tensor) -> list[int]:
 
 
 def build_models(family: str, device):
-    """The ep2 model and its ep1 reference: same base weights, same adapter values, adapters alone trainable."""
     torch.manual_seed(SEED)
     base = tiny_family_model(TINY_MOE_FAMILIES[family]).to(torch.bfloat16)
     reference = copy.deepcopy(base)
@@ -128,8 +123,8 @@ def build_models(family: str, device):
 
 
 def score_adapter_grads(model, reference, name: str, checks: dict, metrics: dict) -> tuple[int, int]:
-    """Each local adapter gradient against its reference slice; a bank the reference routes nothing to
-    must hold no gradient at all. Returns the (active, idle) adapter-tensor counts."""
+    """A bank the reference routes nothing to must hold no gradient. Returns the (active, idle) adapter-tensor
+    counts."""
     pairs, idle_clean, idle = {}, [], 0
     for index, (layer, ref_layer) in enumerate(zip(ep_layers(model), ep_layers(reference), strict=True)):
         for attr in sorted(layer._expert_lora_attrs):
@@ -171,7 +166,7 @@ def run_scenario(ctx, model, reference, batches, name: str, starved: set[int], c
 
     checks[f"{name}_loss_matches_reference"] = abs(loss.item() - ref_losses[ctx.rank].item()) < LOSS_ATOL
     active, idle = score_adapter_grads(model, reference, name, checks, metrics)
-    # The scenario's premise: rank 0's experts receive tokens, and rank 1's idle wherever starved.
+    # The premise: rank 0's experts receive tokens, and rank 1's idle wherever starved.
     checks[f"{name}_routing_premise"] = active > 0 if ctx.rank == 0 else idle > 0
     return signature.tolist()
 
@@ -187,8 +182,8 @@ def run(ctx):
     model, reference = build_models(family, ctx.device)
     layers = ep_layers(model)
     ep_config = layers[0].ep_config
-    # The comparison assumes the single-group regime: the sweep's /world expert divide makes the ep2 gradient
-    # the gradient of the mean of both ranks' losses, which is what the reference differentiates.
+    # The sweep's /world expert divide makes the ep2 gradient that of the mean of both ranks' losses, which the
+    # reference differentiates.
     checks["single_group_sweep_regime"] = (
         ep_config.runs_post_backward_sweep
         and not ep_config.sweep_reduces_across_replicas

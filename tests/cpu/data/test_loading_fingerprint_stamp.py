@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
-"""load_datasets' forced-fingerprint stamp: DP identity for sharded loads + content sensitivity.
-
-Two contracts pinned here:
-1. Presharded DP cache collision — equal-length per-rank shards stamping IDENTICAL forced
-   fingerprints collide every downstream coordinated_map/filter cache, and non-writer ranks then
-   load rank 0's mapped shard (all DP ranks silently training on one slice).
-2. Content-free stamp — a key built only from path/sizes/config keeps serving the stale mapped
-   cache when a dataset is re-pushed with the same shapes.
-
-Usage:
-    python tests/cpu/data/test_loading_fingerprint_stamp.py
-"""
+"""load_datasets' forced-fingerprint stamp. Equal-length per-rank shards with identical fingerprints collide every
+downstream coordinated cache, so all DP ranks train on rank 0's slice; a content-free key keeps serving a stale
+cache after a same-shape re-push."""
 
 import os
 import shutil
@@ -56,15 +47,12 @@ def _map_fn(example):
 
 
 def test_presharded_ranks_get_distinct_cache_keys():
-    """Disjoint equal-length shards on two simulated DP ranks must produce DIFFERENT forced
-    fingerprints/cache keys — identical keys made every rank load rank 0's mapped shard."""
     tmp = tempfile.mkdtemp()
     try:
         _make_sharded_dataset(tmp)
         ds0 = _load(tmp, rank=0, size=2)
         ds1 = _load(tmp, rank=1, size=2)
 
-        # Preconditions: equal lengths, disjoint content (the collision-triggering shape).
         assert len(ds0["train"]) == len(ds1["train"]) == 50
         assert set(ds0["train"]["x"]).isdisjoint(ds1["train"]["x"])
 
@@ -73,13 +61,11 @@ def test_presharded_ranks_get_distinct_cache_keys():
         )
         assert getattr(ds0["train"], CACHE_KEY_ATTR) != getattr(ds1["train"], CACHE_KEY_ATTR)
 
-        # End-to-end: the downstream coordinated_map cache file names must differ per rank.
         name0 = map_cache_file_name("map", _map_fn, ds0["train"], "tokenizing", {})
         name1 = map_cache_file_name("map", _map_fn, ds1["train"], "tokenizing", {})
         assert name0 != name1, "identical cache names collide: rank 1 would load rank 0's mapped shard"
 
-        # Simulate the coordinated flow: each rank maps to its own deterministic cache file and
-        # must get back ITS OWN slice.
+        # Each rank maps to its own deterministic cache file and must get back its own slice.
         out0 = ds0["train"].map(_map_fn, cache_file_name=os.path.join(_CACHE_DIR, name0), load_from_cache_file=True)
         out1 = ds1["train"].map(_map_fn, cache_file_name=os.path.join(_CACHE_DIR, name1), load_from_cache_file=True)
         assert out0["y"] == [x * 2 for x in ds0["train"]["x"]]
@@ -89,8 +75,7 @@ def test_presharded_ranks_get_distinct_cache_keys():
 
 
 def test_replicated_load_keeps_shared_cache_key():
-    """Non-sharded (replicated) loads must keep the SAME key across DP ranks — the single-writer
-    coordinated cache depends on all ranks agreeing on one file."""
+    """The single-writer coordinated cache depends on all ranks agreeing on one file."""
     tmp = tempfile.mkdtemp()
     try:
         path = os.path.join(tmp, "replicated")
@@ -110,8 +95,6 @@ def test_replicated_load_keeps_shared_cache_key():
 
 
 def test_same_shape_different_content_changes_cache_key():
-    """Re-pushing a dataset with identical shapes but different content must change the forced
-    fingerprint — a content-free stamp served the stale mapped cache after every same-shape re-push."""
     tmp = tempfile.mkdtemp()
     try:
         path = os.path.join(tmp, "ds")
@@ -128,7 +111,6 @@ def test_same_shape_different_content_changes_cache_key():
 
         _save(0)
         key_a = getattr(_load(path, rank=0, size=1)["train"], CACHE_KEY_ATTR)
-        # Stability: reloading the SAME content keeps the key (the shared cache still hits).
         assert getattr(_load(path, rank=0, size=1)["train"], CACHE_KEY_ATTR) == key_a
 
         _save(1)  # same shapes, different content

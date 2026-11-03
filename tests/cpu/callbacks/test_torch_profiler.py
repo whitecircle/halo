@@ -1,13 +1,5 @@
 #!/usr/bin/env python
-"""CPU correctness tests for TorchProfilerCallback.
-
-Drives the callback through the HF Trainer callback lifecycle (on_train_begin →
-on_step_end x N → on_train_end) with real torch.profiler activity and asserts it
-builds its profiler from its own settings and schedule, writes a chrome-trace
-artifact, and no-ops on non-selected ranks.
-
-Run: python tests/cpu/callbacks/test_torch_profiler.py
-"""
+"""TorchProfilerCallback through the HF callback lifecycle, with real torch.profiler activity."""
 
 import os
 import tempfile
@@ -22,7 +14,6 @@ from halo.diagnostics.profiling import build_profiler
 
 
 def _drive(cb, n_steps):
-    """Run the callback through a fake training loop with real compute per step."""
     args = SimpleNamespace(process_index=0, local_process_index=0)
     state = SimpleNamespace(global_step=0, is_world_process_zero=True)
     control = SimpleNamespace()
@@ -36,7 +27,6 @@ def _drive(cb, n_steps):
 
 
 def test_profiler_writes_trace_artifact():
-    """A full wait->warmup->active cycle writes at least one trace artifact."""
     with tempfile.TemporaryDirectory() as d:
         cb = TorchProfilerCallback(
             output_dir=d,
@@ -57,7 +47,6 @@ def test_profiler_writes_trace_artifact():
 
 
 def test_profiler_is_built_from_the_callbacks_settings(tmp_path, monkeypatch):
-    """Every setting the callback holds reaches build_profiler, including its step schedule."""
     built: list[tuple[str, dict[str, object]]] = []
 
     def recording_build_profiler(output_dir, **settings):
@@ -103,7 +92,6 @@ def test_profiler_is_built_from_the_callbacks_settings(tmp_path, monkeypatch):
 
 
 def test_profiler_inactive_rank_is_noop():
-    """rank spec excluding this rank => no profiler, no artifacts."""
     with tempfile.TemporaryDirectory() as d:
         cb = TorchProfilerCallback(output_dir=d, wait=1, warmup=1, active=1, ranks="3")
         _drive(cb, n_steps=4)
@@ -113,7 +101,6 @@ def test_profiler_inactive_rank_is_noop():
 
 
 def test_profiler_no_active_window_no_crash():
-    """Fewer steps than wait+warmup+active completes cleanly (no crash, cleaned up)."""
     with tempfile.TemporaryDirectory() as d:
         cb = TorchProfilerCallback(
             output_dir=d, wait=5, warmup=2, active=3, ranks="0", export_memory_timeline=False, memory_snapshot=False

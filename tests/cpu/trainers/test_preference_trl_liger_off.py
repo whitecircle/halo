@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """DPO and KTO switch TRL's ``use_liger_kernel`` off before the distributed setup reads it.
-
-On TRL 1.14 the flag selects TRL's chunked log-prob path, which refuses the router aux loss the
-trainers hand TRL under an aux balancing mode (a ValueError in TRL's constructor) and scores through
-the output embedding without the family's head transform; under FSDP2 the mixin's Liger-loss guard
-would also refuse it, finding none of TRL's 1.6 loss objects. The flag must already be off when
-``_init_distributed_config`` runs, whether the config arrives by keyword or positionally.
-
-    python tests/cpu/trainers/test_preference_trl_liger_off.py
-"""
+On TRL 1.14 the flag selects a chunked log-prob path that refuses the router aux loss and skips the head transform."""
 
 import types
 

@@ -1,24 +1,9 @@
 #!/usr/bin/env python
-"""
-Test: checkpoint + RESUME restore for native expert-LoRA under EP=2 (GptOss-20B).
+"""Resume restores native expert LoRA under EP=2: EP rebuilds zero-init adapters, so a miss silently continues
+untrained.
 
-EP rebuilds the model in __init__ with freshly zero-initialized adapters, so resume MUST restore the
-trained adapter weights from the checkpoint (peft.restore_adapters) or training silently
-continues from the untrained adapter. This trains a model, writes a checkpoint, then CORRUPTS the
-live adapters + LR scheduler (standing in for a fresh process) and drives the trainer's actual resume
-hooks to verify:
-
-  1. Adapters restored EXACTLY — `_load_from_checkpoint` reloads the saved grouped A/B (vs the
-     corrupted/zeroed state), per-rank-sliced across the EP group.
-  2. LR scheduler restored — `_load_optimizer_and_scheduler` puts the scheduler back at the saved step.
-
-(The two phases share one model load: a second EP model in the same process leaves the first model's
-EP process groups live and deadlocks DeepEP. The corrupt-then-restore drives the same resume code
-paths a fresh process would.)
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_ep_experts_resume.py
+Both phases share one model load, since a second EP model in one process deadlocks DeepEP on the first's live process
+groups.
 """
 
 import os
@@ -51,7 +36,6 @@ SEED = 42
 
 
 def _zero_live_adapters(model):
-    """Stand in for a fresh process: wipe the live adapters so restore has something to fix."""
     for module in ep_layers(model):
         for attr in module._expert_lora_attrs:
             getattr(module, f"{attr}_lora_A").data.zero_()
@@ -61,8 +45,8 @@ def _zero_live_adapters(model):
 def run(ctx) -> dict:
     log(f"\n{'=' * 70}\n  Expert-LoRA checkpoint + RESUME restore (EP=2, GptOss-20B)\n{'=' * 70}")
 
-    # EP writes the gathered adapter to ONE directory, so every rank must share rank 0's output_dir
-    # (as a real shared FS does) — else rank>0 has no adapter file and its restore goes untested.
+    # EP writes the gathered adapter to one directory; on a per-rank dir, rank>0 has no adapter file and its restore
+    # goes untested.
     shared_out = [ctx.output_dir]
     torch.distributed.broadcast_object_list(shared_out, src=0)
     output_dir = shared_out[0]
@@ -127,12 +111,11 @@ def run(ctx) -> dict:
     corrupted = gather_expert_lora_adapters(unwrapped)
     corrupt_differs = any(not torch.equal(adapters_saved[k].cpu(), corrupted[k].cpu()) for k in adapters_saved)
 
-    trainer._load_from_checkpoint(checkpoint)  # load_resume_weights -> restore_adapters
+    trainer._load_from_checkpoint(checkpoint)  # load_resume_weights -> restore_adapters.
     trainer._load_optimizer_and_scheduler(checkpoint)
     restored = gather_expert_lora_adapters(unwrapped)
 
-    # Resume's source of truth is the checkpoint FILE; comparing to the post-train gather instead
-    # would conflate the save's bf16 cast (~1e-2 at these magnitudes) with the restore.
+    # The post-train gather would conflate the save's bf16 cast (~1e-2 at these magnitudes) with the restore.
     saved_file = load_file(os.path.join(checkpoint, "adapter_model.safetensors"))
     file_match = [k for k in restored if not torch.equal(restored[k].cpu(), saved_file[k].to(restored[k].dtype).cpu())]
     restored_nonzero = sum(1 for v in restored.values() if v.abs().sum().item() > 0)
@@ -145,8 +128,8 @@ def run(ctx) -> dict:
         f"restored_nonzero={restored_nonzero}; close_to_trained(bf16 tol)={close_to_trained}"
     )
 
-    # `restored vs file` is logged, not gated (bf16<->fp32 round-trips break bit-exactness);
-    # per-key closeness is: a no-op restore leaves zeros, a wrong expert slice fails allclose.
+    # Logged, not gated: bf16<->fp32 round-trips break bit-exactness. A no-op restore leaves zeros, a wrong slice fails
+    # allclose.
     checks = {
         "corrupt_zeroed_adapters": corrupt_differs,
         "all_adapters_restored_nonzero": restored_nonzero == len(restored),

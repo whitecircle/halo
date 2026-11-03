@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: every save path finalizes ``config.json`` the same way.
-
-The EP/CP/TP writers run rewrites transformers does not — the live ``model_type`` restored for the
-vendor classes that declare none (Bailing/Ling), and the source repo's own schema for the families
-whose serving engines have no config class (Step-3.x). The base (single-GPU / DDP / accelerate-FSDP)
-save path owes the same ones: dropping any of them ships, for a model trained without parallelism, a
-directory the merge tools and the pinned server cannot read — and nothing at train time says so.
-These tests fail if that path drops any of them.
-
-    python tests/cpu/trainers/test_base_save_config_finalization.py
-"""
+"""Every save path finalizes ``config.json`` alike: live ``model_type`` (Bailing/Ling), source schema (Step-3.x).
+Dropping either ships a directory the merge tools and the pinned server cannot read, with no error at train time."""
 
 import json
 import types
@@ -28,15 +19,13 @@ SOURCE_SCHEMA_FAMILY = "step3p7"
 
 
 def _written_config(tmp_path: Path, payload: dict) -> Path:
-    """What ``save_pretrained`` leaves behind — the state the finalizer has to repair."""
     path = tmp_path / CONFIG_NAME
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
 def test_a_family_less_written_config_gets_the_live_model_type_back(tmp_path):
-    """Bailing/Ling declare no class-level ``model_type``, so ``to_dict`` omits it entirely and every
-    model-type-keyed reader downstream (shard merge, hub renames) sees no family."""
+    """Bailing/Ling declare no class-level ``model_type``, so ``to_dict`` omits it and its readers see no family."""
     path = _written_config(tmp_path, {"hidden_size": 8})
 
     finalize_exported_config(types.SimpleNamespace(model_type=BAILING), str(tmp_path), source=None)
@@ -45,7 +34,6 @@ def test_a_family_less_written_config_gets_the_live_model_type_back(tmp_path):
 
 
 def test_an_existing_model_type_is_left_alone(tmp_path):
-    """Anti-overreach: the restore must not overwrite a family transformers did serialize."""
     path = _written_config(tmp_path, {"model_type": "qwen3", "hidden_size": 8})
 
     finalize_exported_config(types.SimpleNamespace(model_type=BAILING), str(tmp_path), source=None)
@@ -54,7 +42,7 @@ def test_an_existing_model_type_is_left_alone(tmp_path):
 
 
 def test_a_family_less_live_config_warns_rather_than_writing_a_wrong_family(tmp_path, caplog):
-    """Nothing correct to write — but a silent pass would leave a checkpoint no tool can key."""
+    """A silent pass would leave a checkpoint no tool can key."""
     with caplog.at_level("WARNING"):
         finalize_exported_config(types.SimpleNamespace(model_type=""), str(tmp_path), source=None)
 
@@ -62,8 +50,7 @@ def test_a_family_less_live_config_warns_rather_than_writing_a_wrong_family(tmp_
 
 
 def test_the_source_schema_step_engages_only_for_the_families_that_declare_it(tmp_path, caplog):
-    """Step-3.x has no config class in the pinned server; without a source to carry, the export is
-    unservable and must say so. Every other family must not be touched by that step at all."""
+    """Step-3.x has no config class in the pinned server, so an export without a source is unservable and must warn."""
     assert find_moe_family_spec(SOURCE_SCHEMA_FAMILY).exports_source_config_schema, "the family spec moved"
     assert find_moe_family_spec("qwen3") is None
     _written_config(tmp_path, {"model_type": SOURCE_SCHEMA_FAMILY})
@@ -82,8 +69,6 @@ def test_the_source_schema_step_engages_only_for_the_families_that_declare_it(tm
 
 
 class _BaseTrainer:
-    """Stands in for ``transformers.Trainer``: writes the config the way its ``save_model`` does."""
-
     def __init__(self):
         self.saved_to = None
 
@@ -93,12 +78,10 @@ class _BaseTrainer:
 
 
 class _Trainer(CheckpointingMixin, _BaseTrainer):
-    """The real mixin over a fake base — the base branch of ``save_model`` is what is under test."""
-
     def __init__(self, output_dir):
         super().__init__()
         self.args = types.SimpleNamespace(output_dir=output_dir, should_save=True)
-        # A real Module: the base path's save wrappers unwrap the model the base Trainer writes.
+        # A real Module: the base path's save wrappers unwrap it.
         self.model = torch.nn.Module()
         self.model.config = types.SimpleNamespace(model_type=BAILING)
         self.model._name_or_path = ""
@@ -114,8 +97,6 @@ class _Trainer(CheckpointingMixin, _BaseTrainer):
 
 
 def test_the_base_save_path_finalizes_the_config_it_just_wrote(tmp_path, monkeypatch):
-    """The wiring, end to end: no parallelism strategy claims the save, so the base Trainer writes —
-    and the mixin owes that directory the same rewrites the parallel writers apply."""
     module = "halo.trainers.checkpointing"
     # False = no parallelism strategy claimed the write, so the base Trainer's save runs.
     monkeypatch.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)

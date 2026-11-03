@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Test DistributedTrainerMixin's num_unmasked_output_tokens_seen machinery in isolation.
-
-Exercises ``_extract_output_token_count`` (which batches carry a token-level loss mask) and the
-two-phase counter — ``_accumulate_unmasked_output_tokens`` folds each micro-batch's count into an
-ON-DEVICE running tensor with no collective, and ``_drain_token_counts`` does the cross-rank sum (with
-the pending input tokens and FLOPs) + TP/ETP/CP de-duplication once per log — against a fake trainer ``self``
-(no GPU / dist init), its peers standing in through a patched ``world_sums``.
-
-Run: python tests/cpu/trainers/test_unmasked_output_tokens_metric.py
-"""
+"""``num_unmasked_output_tokens_seen`` machinery on a fake trainer, with peers through a patched ``world_sums``.
+Each micro-batch folds with no collective; ``_drain_token_counts`` sums and de-duplicates once per log."""
 
 import types
 from collections import UserDict
@@ -39,8 +31,7 @@ def _fake_self(*, training=True, num_processes=1, data_parallel_size=1, unsummed
 
 
 def _peers(monkeypatch, *peer_values):
-    """Make the drain's all-reduce add each peer's ``[input tokens, loss tokens, FLOPs]`` to this rank's; returns the
-    list of local values each call sent."""
+    """The drain's all-reduce adds each peer's ``[input tokens, loss tokens, FLOPs]``; returns what each call sent."""
     sent = []
 
     def world_sums(values):
@@ -67,7 +58,6 @@ class _LogHost(DistributedTrainerMixin, _RecordingBase):
 
 
 def _fake_log_self(*, training=True, global_step=5, cumulative=None):
-    """A ``log`` host with all parallelism modes off (single-GPU)."""
     me = object.__new__(_LogHost)
     me.state = types.SimpleNamespace(global_step=global_step, num_input_tokens_seen=0, total_flos=0.0)
     me.current_flos = 0.0
@@ -186,7 +176,7 @@ def test_drain_dedups_replicated_ranks(monkeypatch):
 
 
 def test_drain_sums_distinct_dp_ranks(monkeypatch):
-    # Pure DP: distinct batches, non_dp_factor=1 → the counts sum.
+    # Pure DP: distinct batches, non_dp_factor=1, so the counts sum.
     _peers(monkeypatch, [0, 3, 0])
     me = _fake_self(num_processes=2, data_parallel_size=2)
     _accumulate(me, torch.tensor(5))
@@ -195,8 +185,7 @@ def test_drain_sums_distinct_dp_ranks(monkeypatch):
 
 
 def test_drain_sums_the_input_tokens_and_flops_in_the_same_all_reduce(monkeypatch):
-    """HF's input-token count (its ``"all"`` mode) and its FLOPs estimate, neither divided (HF counts every rank's
-    batch), land in the trainer state from the same collective, and the pending counts reset."""
+    """HF's input-token count and FLOPs estimate, undivided (HF counts every rank's batch), share one collective."""
     sent = _peers(monkeypatch, [40, 3, 7.0e9])
     me = _fake_self(num_processes=2, data_parallel_size=2, unsummed_input_tokens=24, current_flos=5.0e9)
     _accumulate(me, torch.tensor(5))
@@ -279,13 +268,7 @@ def test_emit_skips_before_first_step():
 
 
 def test_non_dp_replication_factor_matches_the_ranks_sharing_a_batch():
-    """The de-duplication divisor the token counters use, derived once on the config.
-
-    Both call sites (``_drain_token_counts`` and SFT's ``compute_loss``) read the property
-    instead of recomputing ``num_processes // data_parallel_size`` by hand. It must equal
-    ``pp_size * max(tp, cp, expert_tp)`` — the ranks that see the SAME batch — on every axis
-    combination, with EP orthogonal to DP.
-    """
+    """Must equal ``pp_size * max(tp, cp, expert_tp)``, the ranks that see the same batch, on every axis mix."""
 
     def _config(**kwargs):
         return ParallelismConfig(world_size=8, gpus_per_node=8, nvlink_domain_size=8, **kwargs)

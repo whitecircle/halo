@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""The RLVR script arguments' RLRR block: declared once, validated at parse time, inert values refused.
-
-* The ``rlrr_*`` fields are DERIVED from :class:`RLRRConfig` — same type, default and help under the
-  YAML spelling ``rlrr_arg_name`` gives — so a tunable added to the config reaches the CLI and the
-  two rosters cannot drift.
-* Every RLRR invariant (the clip band, positive finite τ/λ, finite band and threshold) fails when
-  the args are built — the parse step — gate on or off, instead of inside the trainer after the model
-  load.
-* ``rlrr_*`` values without ``use_rlrr`` and ``sdpg_*`` / ``opd_positive_advantage_only`` values
-  without ``use_sdpg`` are refused by the script rather than silently ignored.
-
-    python tests/cpu/grpo/test_online_rlrr_args.py
-"""
+"""The RLVR script's RLRR block: derived from ``RLRRConfig`` so the rosters cannot drift, validated when the args are
+built, gate on or off, and ``rlrr_*`` / ``sdpg_*`` values beside a closed gate refused instead of ignored."""
 
 import ast
 import dataclasses
@@ -45,7 +34,6 @@ def _script_fields() -> dict[str, dataclasses.Field]:
 
 
 def test_every_rlrr_script_field_is_derived_from_the_config_field():
-    """Type, default and help all come from RLRRConfig; the only thing the script adds is the spelling."""
     script = _script_fields()
     for config_field in dataclasses.fields(RLRRConfig):
         arg = script[rlrr_arg_name(config_field.name)]
@@ -66,7 +54,7 @@ def test_forwarded_config_equals_the_explicit_one():
 
 
 def test_the_parser_surfaces_the_derived_fields_with_their_choices():
-    """A make_dataclass field must reach the parser like a hand-written one: parsed, and its Literal gated."""
+    """A make_dataclass field must reach the parser like a hand-written one."""
     parser = HaloArgumentParser((OnlineGRPOScriptArguments,))
     (args,) = parser.parse_dict({"use_rlrr": True, "rlrr_mode": "prr", "rlrr_lambda": 64.0})
     assert args.build_rlrr_config() == RLRRConfig(mode="prr", lam=64.0)
@@ -102,9 +90,6 @@ def test_an_inverted_band_fails_on_the_cli_override_path(tmp_path):
         parser.parse_dict(parser.load_values([str(yaml_path), "--rlrr_xi_neg=1.0"]))
 
 
-# --- Tunables set beside a closed gate are refused, not ignored ---
-
-
 def test_rlrr_tunables_without_the_gate_are_refused_by_the_default_comparing_guard():
     reject_non_default_args("RLVR Online GRPO with use_rlrr off", OnlineGRPOScriptArguments(), *RLRRArguments.TUNABLES)
     with pytest.raises(ValueError, match=r"\['rlrr_tau'\]"):
@@ -123,7 +108,7 @@ def test_sdpg_tunables_cover_the_shared_block_plus_the_rlvr_only_gate():
         "sdpg_beta_decay_steps",
         "opd_positive_advantage_only",
     }
-    # opd_positive_advantage_only defaults to True: only the default-comparing form can guard it.
+    # opd_positive_advantage_only defaults to True, so only the default-comparing form can guard it.
     with pytest.raises(ValueError, match=r"\['opd_positive_advantage_only'\]"):
         reject_non_default_args(
             "RLVR Online GRPO with use_sdpg off",

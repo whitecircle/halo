@@ -1,5 +1,4 @@
-"""EP checkpoint saves: every expert gathered into one HF-standard checkpoint, or per-rank expert shards
-that ``merge_ep_shards.py`` merges into one."""
+"""EP checkpoint saves: experts gathered into one HF checkpoint, or per-rank shards ``merge_ep_shards.py`` merges."""
 
 import gc
 import itertools
@@ -48,11 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[[str], str | None]:
-    """Live parameter name → its name in the checkpoint, or ``None`` for a tensor the checkpoint drops.
-
-    Strips the CP attention prefix and, with ``peft_prefix`` (a merged save), the PEFT spelling,
-    dropping the folded adapters. Name-based, hence rank-uniform: the drop gates a collective.
-    """
+    """Live name → checkpoint name, or ``None`` for a dropped tensor; name-based, as the drop gates a collective."""
 
     def remap(key: str) -> str | None:
         if peft_prefix is not None:
@@ -68,8 +63,8 @@ def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[
 def _resolve_and_cast(
     items: Iterable[tuple[str, torch.Tensor]], cast: Callable[[str, torch.Tensor], torch.Tensor], *, retain: bool
 ) -> dict[str, torch.Tensor]:
-    """COLLECTIVE: :func:`gather_full_tensors`, each tensor cast as it lands, so the retaining rank never
-    holds the replicated half at an fp32 master's width."""
+    """COLLECTIVE: :func:`gather_full_tensors`, casting each as it lands, so the retaining rank never holds the
+    replicated half at an fp32 master's width."""
     return {key: cast(key, t) for item in items for key, t in gather_full_tensors([item], retain=retain).items()}
 
 
@@ -83,12 +78,8 @@ def _ep_gathered_chunks(
     retain: bool,
     merge_lora: bool,
 ) -> Iterator[dict[str, torch.Tensor]]:
-    """COLLECTIVE: the gathered EP save's chunks, live-named — the non-expert tensors, then one chunk per
-    EP layer's gather.
-
-    Every rank enters each resolve and gather; only ``retain`` keeps the host copies. The walk is
-    name-based, so dropping an adapter param skips its collective on every rank alike.
-    """
+    """COLLECTIVE: the non-expert tensors, then one chunk per EP layer's gather, live-named. Only ``retain`` keeps the
+    host copies; the walk is name-based, so dropping an adapter skips its collective on every rank alike."""
     # Anchored prefixes: an unanchored substring test could over-match a sibling param and drop it.
     ep_prefixes = tuple(f"{path}." for path, _ in ep_layers)
     # One tensor at a time; a folded DTensor's delta is a collective every rank enters.
@@ -98,8 +89,7 @@ def _ep_gathered_chunks(
         if not name.startswith(ep_prefixes) and remap(name) is not None
     )
     state = _resolve_and_cast(params, cast, retain=retain)
-    # Same filter as the params: a modules_to_save copy duplicates its module's buffers, and the frozen
-    # `original_module` side must not reach the checkpoint.
+    # A modules_to_save copy duplicates its module's buffers, and the frozen `original_module` side must not be saved.
     buffers = (
         (name, buf) for name, buf in persistent_buffers(model, exclude_prefixes=ep_prefixes) if remap(name) is not None
     )
@@ -122,13 +112,9 @@ def _ep_chunk_normalizer(
     remap: Callable[[str], str | None],
     cast: Callable[[str, torch.Tensor], torch.Tensor],
 ) -> Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]]:
-    """The gathered EP save's per-chunk ``normalize``: save-dtype cast, LoRA/CP respell, hub-namespace revert.
-
-    The cast keys on the live name, the spelling the caster's keep-sets use; on the non-expert tensors
-    the walk already cast, it is a no-op. A ``None`` from ``remap`` is a tensor the checkpoint must not
-    carry — a folded LoRA adapter, or the frozen ``original_module`` half of a ``modules_to_save`` pair —
-    never an expert weight.
-    """
+    """Per-chunk ``normalize``: save-dtype cast on the live name (a no-op on tensors the walk cast), LoRA/CP respell,
+    hub revert. A ``None`` from ``remap`` is a folded adapter or an ``original_module`` half, never an expert
+    weight."""
     export = partial(revert_conversions, model, conversions=export_conversions(model))
 
     def normalize(chunk: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -138,22 +124,18 @@ def _ep_chunk_normalizer(
 
 
 def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: EP / EP+TP / EP+CP / EP+ETP, every expert gathered into one HF-standard checkpoint and
-    streamed a layer at a time, since a fine-grained MoE holds nearly all its parameters in the experts.
-
-    A merged save folds the expert deltas inside each family's gather and the attention adapters into
-    each base tensor as it is written, out of place. The CP wrapper is unwrapped first: its
-    ``named_modules()`` paths would classify every expert param as non-EP.
-    """
+    """COLLECTIVE: EP / EP+TP / EP+CP / EP+ETP, every expert gathered into one HF checkpoint, streamed a layer at a
+    time. A merged save folds expert deltas inside each family's gather and attention adapters out of place as written.
+    The CP wrapper is unwrapped first, since its ``named_modules()`` paths would classify every expert param as
+    non-EP."""
     model = unwrap_toolkit_wrappers(ctx.model)
     peft_prefix = lora_folds = None
     if is_peft_model(model):
         peft_prefix = model.prefix
         # Structural, so a layer the fold cannot reproduce raises on every rank before any gather.
         lora_folds = lora_fold_targets(model)
-        # A PeftModel wraps outside the CP wrapper and unwrap_toolkit_wrappers stops at it, so under EP+CP
-        # every key would carry an extra `model.` the CP remap does not strip. LoRA layers stay in the tree;
-        # peft_prefix normalizes their infixes.
+        # A PeftModel wraps outside the CP wrapper and unwrap_toolkit_wrappers stops at it, so under EP+CP every key
+        # would carry an extra `model.` the CP remap does not strip; peft_prefix normalizes the LoRA infixes.
         model = base_transformers_model(model)
     fs_aware_makedirs(output_dir)
     ep_layers = named_ep_layers(model)
@@ -182,8 +164,7 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
 
 
 def _reject_unmergeable_hub_keys(model: torch.nn.Module) -> None:
-    """Refuse a family the merge cannot transform to the hub layout, or a load whose namespace conversions the
-    merge's key-by-key stream cannot revert."""
+    """Refuse a family or load whose conversions the merge's key-by-key stream cannot revert to the hub layout."""
     model_type = getattr(getattr(model, "config", None), "model_type", "") or ""
     spec = find_moe_family_spec(model_type)
     if spec is None:
@@ -194,10 +175,8 @@ def _reject_unmergeable_hub_keys(model: torch.nn.Module) -> None:
             f"per-rank shards could never be merged into a loadable checkpoint. Supported model types: "
             f"{', '.join(sorted(moe_model_types()))}. Use save_sharded_ep=False (gathered) instead."
         )
-    # A load that also renamed the namespace (a SigLIP tower's ``vision_model`` level, a vendor
-    # namespace) or converted a tensor outside the per-expert merges would merge into a layout no hub or
-    # engine uses. Name-only, so rank-uniform; read off the plain transformers tree, whose names the
-    # checkpoint carries.
+    # A renamed namespace (SigLIP's ``vision_model`` level, a vendor namespace) or a tensor converted outside the
+    # per-expert merges would merge into a layout no hub or engine uses. Name-only, so rank-uniform.
     base = base_transformers_model(model)
     renamings, converters = reversed_export_transforms(export_conversions(base))
     stuck = []
@@ -219,8 +198,7 @@ def _reject_unmergeable_hub_keys(model: torch.nn.Module) -> None:
 
 
 def _reject_unmergeable_ep_topology(ep_cfg, world_size: int) -> None:
-    """Refuse an expert layout the merge cannot reassemble: expert TP, several EP groups, or shards scattered
-    over nodes' local disks."""
+    """Refuse expert TP, several EP groups, or shards scattered over nodes' local disks."""
     expert_tp_size = ep_cfg.expert_tp_size
     if expert_tp_size > 1:
         raise ValueError(
@@ -256,14 +234,9 @@ def _reject_unmergeable_ep_topology(ep_cfg, world_size: int) -> None:
 def reject_unmergeable_ep_sharded_save(
     model: torch.nn.Module, world_size: int | None = None, merge_expert_lora_on_save: bool = False
 ) -> None:
-    """Refuse a ``save_sharded_ep=True`` run whose per-rank shards ``merge_ep_shards.py`` could not merge.
-
-    Called at construction, so an unsupported shape raises before training, and again by a save of a
-    model with EP layers.
-    Sharded EP keys each shard by global rank and the merge needs every shard co-located; it streams key
-    by key with no model behind it, picking the HF-layout transform through the same resolver and
-    applying only the family's ``export_key_renames`` (``MoEFamilySpec.to_hub_key``).
-    """
+    """Refuse a ``save_sharded_ep=True`` run whose per-rank shards ``merge_ep_shards.py`` could not merge; runs at
+    construction and again on save. The merge streams key by key with no model behind it, applying only the family's
+    ``export_key_renames``, and needs every shard co-located."""
     if merge_expert_lora_on_save:
         raise ValueError(
             "merge_expert_lora_on_save=True is incompatible with save_sharded_ep=True: "
@@ -272,8 +245,7 @@ def reject_unmergeable_ep_sharded_save(
         )
     ep_layers = named_ep_layers(model)
     if not ep_layers:
-        # Accepting the flag on a run that can never shard would write ordinary gathered checkpoints
-        # while a planned merge_ep_shards.py step waits for shards that never exist.
+        # Accepting the flag would write gathered checkpoints while a planned merge waits for shards that never exist.
         raise ValueError(
             "save_sharded_ep=True, but this run has no EP MoE layers (dense model, or a MoE without "
             "EP layers — e.g. accelerate launch with use_grouped_gemm=false): every save would be "
@@ -306,22 +278,19 @@ def reject_unmergeable_ep_sharded_save(
             f"(gathered), which writes the tables."
         )
     _reject_unmergeable_hub_keys(model)
-    # Attribute access, not getattr with a default: on anything but a finalized EPConfig the guards
-    # below must raise rather than pass, or the sharded save merges to duplicated/missing experts.
+    # Attribute access, since on anything but a finalized EPConfig a default would pass the guards and the sharded save
+    # would merge to duplicated or missing experts.
     _reject_unmergeable_ep_topology(
         ep_layers[0][1].ep_config, get_global_world_size() if world_size is None else world_size
     )
 
 
 def _rank_shard(model: torch.nn.Module, ep_layers, rank: int, *, keep_live_dtype: bool) -> dict[str, torch.Tensor]:
-    """COLLECTIVE: what rank ``rank`` writes — its own experts under a ``.shard_<rank>`` suffix, and on
-    rank 0 every replicated tensor.
-
-    The non-expert DTensors (EP+TP) resolve on every rank even though only rank 0 keeps them; rank 0
-    rather than the FS-aware save rank, since a non-shared multi-node sharded save is refused.
-    """
+    """COLLECTIVE: this rank's experts under a ``.shard_<rank>`` suffix and, on rank 0, every replicated tensor; EP+TP
+    DTensors resolve on every rank. Rank 0 and not the FS-aware save rank, since a non-shared multi-node save is
+    refused."""
     cast = save_dtype_caster(model, keep_live_dtype=keep_live_dtype)
-    # From ``expert_named_params()``, never a substring match — that misclassifies whole families.
+    # From ``expert_named_params()``, since a substring match misclassifies whole families.
     expert_names = {f"{path}.{name}" for path, layer in ep_layers for name, _ in layer.expert_named_params()}
     shard = {
         f"{name}{EP_SHARD_KEY_INFIX}{rank}": cast(name, param.data.cpu())
@@ -343,11 +312,8 @@ def _rank_shard(model: torch.nn.Module, ep_layers, rank: int, *, keep_live_dtype
 
 
 def save_ep_sharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
-    """COLLECTIVE: EP as per-rank expert shards plus a weight-map index, made loadable by ``merge_ep_shards.py``.
-
-    Constraints are :func:`reject_unmergeable_ep_sharded_save`'s. ``max_shard_size`` bounds the shards
-    that merge writes, not these.
-    """
+    """COLLECTIVE: per-rank expert shards plus a weight-map index, made loadable by ``merge_ep_shards.py``, whose
+    shards are the ones ``max_shard_size`` bounds."""
     model = unwrap_toolkit_wrappers(ctx.model)
     fs_aware_makedirs(output_dir)
     rank, world_size = get_global_rank(), get_global_world_size()
@@ -390,8 +356,8 @@ def save_ep_sharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     )
     with barrier_on_exit(f"Writing the EP sharded checkpoint index to {output_dir}"):
         if rank == 0:
-            # The sweep matters: these shards live in HF's own model-{i}-of-{n} namespace, where a
-            # leftover gathered save is indistinguishable from a rank shard to the merge's regex.
+            # These shards share HF's model-{i}-of-{n} namespace, so the merge's regex cannot tell a leftover gathered
+            # save from a rank shard unless this sweep removes it.
             write_merged_index(output_dir, merged_map, ep_sharded_index_metadata(merged_bytes, world_size))
             # A tie broken in training must clear tie_word_embeddings, else the merge drops the lm_head.
             reconcile_tie_word_embeddings(model, shard)

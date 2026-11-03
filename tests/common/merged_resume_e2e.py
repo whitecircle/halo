@@ -1,44 +1,6 @@
-"""The ``merge_expert_lora_on_save`` serve-and-resume body the merged-resume GPU suite runs.
-
-A merge-on-save checkpoint holds merged bf16 weights for serving. Resuming from those weights builds
-the policy on a fold that lost part of the delta to bf16 rounding, re-creates the adapters fresh
-(``lora_B = 0``) and restores the adapter optimizer moments onto them: the run silently leaves its
-trajectory. So the checkpoint also carries the unmerged adapters (``resume_adapter/``) and a marker,
-and resume builds the policy from the BASE and restores the adapters onto it. On a family's tiny
-random-init MoE (:data:`~tests.common.tiny_models.TINY_MOE_FAMILIES`), with native expert LoRA alone
-or mixed with attention PEFT, on two ranks at ``ep_size`` 2 (plain per-rank experts, FSDP-ignored)
-or 1 (experts FSDP-sharded as DTensors, DP=2), with ``cp_size`` 2 under EP+CP:
-
-  1. Uninterrupted run: ``TOTAL_STEPS`` steps, merged checkpoint at ``SAVE_AT_STEP``. The save
-     leaves every parameter bit-identical (it folds each delta into the tensor it writes, out of
-     place), and the live adapters are gathered right after it (``on_save``).
-  2. The checkpoint serves: stock ``from_pretrained`` loads it with no missing, unexpected or
-     mis-shaped keys and no adapter, the expert weights of every layer whose expert adapters trained
-     (and every trained attention projection) moved off the base (it is the merge, not the base), and
-     it carries the resume adapter and its marker with no root ``adapter_config.json``. Moved, not
-     matched: the fold's values are not re-derived here.
-  3. Resume from it through the production resolver: the policy source is the BASE; after the
-     restore (``on_train_begin``) every adapter is BIT-EQUAL to the one the uninterrupted run held at
-     the save; every resumed step's loss matches the uninterrupted run's within
-     ``TOL.replayed_resume_loss_abs`` and the final adapters sit within
-     ``TOL.replayed_resume_weight_rtol`` of its. Nothing is reset between the runs: the bf16
-     optimizer keys its stochastic rounding by step and parameter name, so the resumed steps
-     round as the uninterrupted ones did. DeepEP's default dispatch hands out receive slots with
-     atomics, so the order an expert's tokens arrive in, and with it the rounding of each expert
-     adapter gradient summed over them, changes from run to run; the body builds every DeepEP buffer
-     in deterministic mode, or two identical runs could part by that rounding alone.
-  4. A kill between the base save and the resume adapter leaves the merged weights without their
-     marker. Resumed through the production resolver, that checkpoint builds the policy from its own
-     merged weights, and the resume must refuse on every rank rather than restart the adapters from
-     init under their restored optimizer moments.
-
-Under EP+CP a family Ulysses cannot run (``TinyFamily.ulysses_cp``) must instead be refused at load,
-on every rank.
-
-``--fp32-masters`` trains the adapters as fp32 masters (``fp32_experts`` for the expert adapters,
-``fp32_non_ep_params`` for the attention ones): the resume adapter is part of a training checkpoint,
-so it keeps them in fp32 and phase 3 restores them bit for bit.
-"""
+"""The ``merge_expert_lora_on_save`` serve-and-resume body. A merged bf16 checkpoint lost part of each delta to
+rounding, so it also carries the unmerged adapters and a marker, and resume builds from the base. A kill before the
+marker must be refused on every rank."""
 
 import argparse
 import os
@@ -80,9 +42,8 @@ from tests.common.tolerances import TOL
 from tests.common.training_checks import resumed_loss_deltas, snapshot_trainable, step_losses
 from tests.common.weight_sync import local_parameters, moved_parameters
 
-# The adapters mode each adapter shape loads through.
 ADAPTER_MODES = {"expert": "expert_lora", "mixed": "mixed"}
-# (ep_size, cp_size) on two ranks: the layouts merge-on-save runs under.
+# (ep_size, cp_size) on two ranks.
 LAYOUTS = ((2, 1), (1, 1), (2, 2))
 WORLD_SIZE = 2
 SEED = 42
@@ -90,15 +51,14 @@ TOTAL_STEPS = 6
 SAVE_AT_STEP = 3
 BATCH_SIZE = 2
 MAX_SEQ_LENGTH = 256
-# High enough that the adapters carry most of the run's movement within a few steps, as a LoRA
-# learning rate does.
+# High enough that the adapters carry most of the run's movement within a few steps.
 LEARNING_RATE = 2e-3
 _LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
 
 
 class _MergedResumeParser(argparse.ArgumentParser):
-    """Refuses an ``--ep-size``/``--cp-size`` pair outside :data:`LAYOUTS`, which each flag's own
-    choices cannot express."""
+    """Refuses an ``--ep-size``/``--cp-size`` pair outside :data:`LAYOUTS`, which each flag's own choices cannot
+    express."""
 
     def parse_args(self, args=None, namespace=None):
         parsed = super().parse_args(args, namespace)
@@ -108,7 +68,6 @@ class _MergedResumeParser(argparse.ArgumentParser):
 
 
 def merged_resume_parser() -> argparse.ArgumentParser:
-    """The merged-resume suite's CLI."""
     parser = _MergedResumeParser()
     parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
     parser.add_argument("--adapters", choices=sorted(ADAPTER_MODES), default="mixed")
@@ -119,17 +78,15 @@ def merged_resume_parser() -> argparse.ArgumentParser:
 
 
 def _adapter_snapshot(model) -> dict[str, torch.Tensor]:
-    """Every adapter tensor, whole and on the host at its live dtype: the grouped expert adapters
-    gathered across the EP group, and the attention PEFT adapters (``.lora_`` params) un-sharded from
-    FSDP2. Collective."""
+    """Every adapter tensor, whole and on the host at its live dtype. Collective."""
     unwrapped = unwrap(model)
     peft_adapters = {name: value for name, value in snapshot_trainable(unwrapped).items() if ".lora_" in name}
     return {**gather_expert_lora_adapters(unwrapped), **peft_adapters}
 
 
 def _parallelism_config(ep_size: int, cp_size: int, fp32_masters: bool) -> ParallelismConfig:
-    """A fresh config per phase: ``ep_config`` caches the ``EPConfig`` it builds on the config,
-    so a phase reusing another's would build its model against that phase's expert groups."""
+    """Fresh per phase: ``ep_config`` caches its ``EPConfig``, so a reused config builds against that phase's expert
+    groups."""
     return ParallelismConfig(
         ep_size=ep_size,
         cp_size=cp_size,
@@ -140,10 +97,8 @@ def _parallelism_config(ep_size: int, cp_size: int, fp32_masters: bool) -> Paral
 
 
 class _RestorePoint(RestorePointSnapshot):
-    """The restore-point snapshot with every adapter whole (:func:`_adapter_snapshot`) and, at the save,
-    this rank's parameters just after it (``parameters``) and just before it (:attr:`before_save`, the
-    last ``on_step_end`` ahead of the first save). Every rank runs callbacks, so the gathers stay
-    collective."""
+    """The restore-point snapshot with whole adapters and, at the save, this rank's parameters just after and just
+    before it. Collective."""
 
     def __init__(self, event: str, trainer):
         super().__init__(event, trainer, capture_optimizer=False)
@@ -168,7 +123,7 @@ def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
         learning_rate=LEARNING_RATE,
         lr_scheduler_type="constant",
         bf16=True,
-        # Off for every family: Zaya refuses it, and none of what this body checks depends on it.
+        # Off for every family: Zaya refuses it, and this body does not depend on it.
         gradient_checkpointing=False,
         logging_steps=1,
         save_strategy="steps" if save else "no",
@@ -184,16 +139,14 @@ def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
 
 
 def _layer_index(key: str) -> str | None:
-    """The decoder-layer index a key sits under: the one spelling the training tree, the PEFT names and
-    a reloaded checkpoint share, whatever wrapper prefix each carries."""
+    """The decoder-layer index a key sits under, the one spelling all trees share whatever their wrapper prefix."""
     match = _LAYER_INDEX_RE.search(key)
     return match.group(1) if match else None
 
 
 def _trained_adapter_sites(adapters: dict[str, torch.Tensor], attention_targets: set[str]) -> tuple[set, set]:
-    """Where training moved a ``lora_B`` off its zero init: the layer indices of the expert adapters, and
-    the ``(layer index, projection)`` pairs of the attention ones. Only these must carry a delta: an
-    adapter the batches never reach (a vision tower on text-only rows) folds nothing."""
+    """Where training moved a ``lora_B`` off zero: expert layer indices and ``(layer, projection)`` pairs. An unreached
+    adapter folds nothing."""
     experts, attention = set(), set()
     for key, value in adapters.items():
         if not bool(value.any()):
@@ -217,9 +170,8 @@ def _serving_checks(
     attention_targets: set[str],
     adapters: dict[str, torch.Tensor],
 ) -> dict:
-    """The merged checkpoint as a serving engine sees it: stock ``from_pretrained``, full coverage, no
-    adapter, the MERGED weights (every tensor a trained ``adapters`` entry folds into moved off the
-    base), and the resume state kept out of the root. Rank-local reads only."""
+    """The merged checkpoint as a serving engine sees it: stock load, full coverage, no adapter, moved weights, resume
+    state out of the root. Rank-local."""
     checks = {}
     load = {"dtype": torch.bfloat16, "trust_remote_code": family.trust_remote_code}
     model, info = family.load_class.from_pretrained(checkpoint, output_loading_info=True, **load)
@@ -228,8 +180,7 @@ def _serving_checks(
         log(f"  from_pretrained loading info: {problems}")
     checks["merged_checkpoint_loads_with_stock_from_pretrained"] = not problems
     checks["from_pretrained_loaded_no_adapter"] = not getattr(model, "_hf_peft_config_loaded", False)
-    # Compared as loaded, in the module namespace: a family's on-disk expert spelling differs between
-    # the gathered save and save_pretrained (fused vs per-expert for Cohere2 MoE).
+    # Compared as loaded: a family's on-disk expert spelling differs between the gathered save and save_pretrained.
     merged = model.state_dict()
     base = family.load_class.from_pretrained(base_dir, **load).state_dict()
     del model
@@ -260,7 +211,7 @@ def _serving_checks(
 def run_merged_resume(
     ctx, *, family: str, adapters: str, ep_size: int, cp_size: int, fp32_masters: bool = False
 ) -> dict:
-    """The four phases above for one family, adapter shape and layout; returns the harness result."""
+    """The phases for one family, adapter shape and layout; returns the harness result."""
     tiny = TINY_MOE_FAMILIES[family]
     if ep_size > 1:
         pin_deterministic_ep_dispatch()
@@ -275,8 +226,8 @@ def run_merged_resume(
     checkpoint = os.path.join(train_out, f"checkpoint-{SAVE_AT_STEP}")
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
     base_dir = shared_tiny_family_checkpoint(ctx, tiny, f"merged_resume_{family}_base", tokenizer, SEED)
-    # Read once, off the base: a merged checkpoint's index spells its attention in the family's hub
-    # namespace, which need not match the module names PEFT targets.
+    # Read once, off the base: a merged checkpoint's index spells attention in the hub namespace, not PEFT's module
+    # names.
     targets = (
         mixed_targets(list(tiny.attention_targets or attention_target_modules(base_dir)))
         if adapters == "mixed"
@@ -284,9 +235,8 @@ def run_merged_resume(
     )
 
     def make_trainer(model_source: str, phase_dir: str, *, save: bool):
-        """The production load (``split_expert_lora_targets`` → ``load_distributed_model`` →
-        ``configure_adapter_training``) and trainer, and the attention modules PEFT adapts. Ulysses CP runs the
-        auto-selected flash attention; the rest stay on eager."""
+        """The production load and trainer, and the attention modules PEFT adapts. Ulysses CP runs auto-selected flash
+        attention; the rest stay on eager."""
         parallelism_config = _parallelism_config(ep_size, cp_size, fp32_masters)
         model, tokenizer, peft_config = load_peft_model(
             ADAPTER_MODES[adapters],
@@ -338,8 +288,8 @@ def run_merged_resume(
         checks["attention_adapters_trained"] = world_all(bool(trained_attention), ctx.device)
     before = at_save.before_save
     moved = sorted(moved_parameters(before, saved.get("parameters", {})))
-    # The run a checkpoint is resumed from must be the run that wrote it: a save that nudges the
-    # frozen base (a bf16 merge -> unmerge that does not reverse) leaves every resume off by that step.
+    # A save that nudges the frozen base (a bf16 merge -> unmerge that does not reverse) leaves every resume off by
+    # that step.
     checks["save_left_every_parameter_bit_identical"] = world_all(bool(before) and not moved, ctx.device)
     log(f"  {len(before) - len(moved)}/{len(before)} local parameters bit-identical across the save {moved[:2]}")
     finish_phase(trainer)

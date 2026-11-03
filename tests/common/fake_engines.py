@@ -1,8 +1,5 @@
-"""HTTP stand-ins for the rollout engines' control planes, recording every request they receive.
-
-Each fake keeps the engine state a client's protocol depends on and acts on a request before it
-replies, as both engines' handlers do, so a scripted failure reply still leaves its state change.
-"""
+"""HTTP stand-ins for the rollout engines' control planes; each acts on a request before replying, so a scripted
+failure keeps its state change."""
 
 import json
 import re
@@ -19,10 +16,10 @@ from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.repo import REPO_ROOT
 
-# vLLM's default CUDA-graph capture ceiling on H100/H200 (1024 on B200/B300): prefills up to this many
-# tokens replay a captured graph.
+# vLLM's default CUDA-graph capture ceiling on H100/H200 (1024 on B200/B300): prefills up to this replay a captured
+# graph.
 GRAPH_CAPTURE_TOKENS = 512
-# Stamped on each request by a recorder that needs to tell a request's retries apart from new requests.
+# Tells a request's retries apart from new requests.
 CALL_ID_HEADER = "X-Halo-Call-Id"
 
 
@@ -41,18 +38,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class FakeEngineServer:
-    """One engine's routes on a loopback port, with failures scripted per path.
+    """One engine's routes on a loopback port, with failures scripted per path. ``status[path]`` answers every request;
+    ``replies[path]`` answers the next ones first. ``refuse`` answers 503 before the engine acts; ``hold`` keeps the
+    reply until :meth:`release`."""
 
-    ``status[path]`` answers every request on ``path`` with that code, and ``replies[path]`` answers the
-    next ones in order before ``status`` applies again. ``refuse`` answers 503 before the engine acts, a
-    request that never reached it. ``hold`` keeps the reply until :meth:`release`, an engine blocked in
-    the call. A route the engine does not serve answers 404.
-    """
-
-    # The client this fake answers.
     CLIENT_CLASS: type[WeightSyncClientBase]
-    # What its ``/v1/completions`` logprobs account for: vLLM's raw default, its processed mode
-    # (temperature and nucleus renormalization), or SGLang's default (temperature only).
+    # vLLM's raw default, its processed mode (temperature and nucleus renormalization), or SGLang's (temperature only).
     LOGPROBS_MODE: str
 
     def __init__(self):
@@ -60,8 +51,8 @@ class FakeEngineServer:
         # Declared on the model card only when set, as a server without one reports no context window.
         self.max_model_len: int | None = None
         self.logprobs_mode = self.LOGPROBS_MODE
-        # Added to every prefill log-prob of a request within the capture range: an engine whose prompt
-        # log-probs depend on whether the prefill replayed a graph (the V1 runner's spec-decode overwrite).
+        # An engine whose prompt log-probs depend on whether the prefill replayed a graph (the V1 runner's spec-decode
+        # overwrite).
         self.graph_prefill_shift = 0.0
         self.graph_capture_tokens = GRAPH_CAPTURE_TOKENS
         self.requests: list[str] = []
@@ -74,7 +65,6 @@ class FakeEngineServer:
         self.refuse: set[str] = set()
         self.hold: set[str] = set()
         self._released = threading.Event()
-        # Guards the records above and wakes a waiter on each arrival.
         self._lock = threading.Condition()
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self._httpd.fake = self
@@ -85,7 +75,6 @@ class FakeEngineServer:
 
     @staticmethod
     def prefill_logprob(token: int, shift: float) -> float:
-        """The log-prob this fake scores ``token`` at in a prefill, a function of the id alone."""
         return -((token % 7) + 1) / 10 + shift
 
     def prefill_shift(self, num_tokens: int) -> float:
@@ -118,8 +107,8 @@ class FakeEngineServer:
         request.wfile.write(payload)
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
-        """Act on one request and return ``(status, reply)``, or ``None`` for a route the engine lacks.
-        Called under the server's lock."""
+        """Act on one request and return ``(status, reply)``, or None for a route the engine lacks. Called under the
+        server's lock."""
         if (method, path) == ("GET", "/health"):
             return 200, {}
         if (method, path) == ("GET", "/v1/models"):
@@ -135,7 +124,6 @@ class FakeEngineServer:
         return None
 
     def _completion_logprobs(self, body: dict) -> list[float]:
-        """Top logprobs of a fixed 3-token prefill under the server's logprobs mode."""
         logits = torch.tensor([2.0, 0.0, -1.0])
         if self.logprobs_mode == "raw_logprobs":
             return torch.log_softmax(logits, dim=0).tolist()
@@ -157,7 +145,7 @@ class FakeEngineServer:
                 raise TimeoutError(f"{entry} never reached {self.url}")
 
     def received(self, call_id: str) -> int:
-        """How many requests carrying ``call_id`` in :data:`CALL_ID_HEADER` arrived: one, plus its retries."""
+        """How many requests carrying ``call_id`` arrived: one, plus its retries."""
         with self._lock:
             return self.receipts.count(call_id)
 
@@ -172,13 +160,9 @@ class FakeEngineServer:
 
 
 class FakeVLLMServer(FakeEngineServer):
-    """vLLM's weight-transfer routes: tracks whether the engine is paused and its layerwise reload open.
-
-    Its ``world_size`` workers join the trainer's rendezvous store on ``/init_weight_transfer_engine``,
-    in the background as the engine's workers do; 0 leaves the trainer a group of one. It reports the
-    release ``Dockerfile.vllm`` builds, and refuses an init or update request whose fields are not the
-    ones that release's request dataclasses declare, as the engine does.
-    """
+    """vLLM's weight-transfer routes: tracks pause and layerwise-reload state; workers join the rendezvous store in the
+    background on init. Refuses init or update requests whose fields are not the ones ``Dockerfile.vllm``'s release
+    declares, as the engine does."""
 
     CLIENT_CLASS = VLLMWeightSyncClient
     LOGPROBS_MODE = "raw_logprobs"
@@ -250,14 +234,9 @@ class FakeVLLMServer(FakeEngineServer):
 
 
 class FakeSGLangServer(FakeEngineServer):
-    """SGLang's weight-update routes: tracks whether generation is paused, the group names it holds and
-    whether a weight-update session is open.
-
-    A join under a name it already holds is rejected, as the engine registers a group by name when
-    asked to join. An update outside a session, a second begin and an end without a begin are refused,
-    as the engine refuses them. The routes that parse a request object reject a request without a JSON
-    body.
-    """
+    """SGLang's weight-update routes: tracks pause state, group names and the open session. Refuses a duplicate group
+    name, an update outside a session, a second begin, an end with no begin, and a parsed route with no JSON body, as
+    the engine does."""
 
     CLIENT_CLASS = SGLangWeightSyncClient
     LOGPROBS_MODE = "sglang_default"
@@ -310,8 +289,8 @@ class FakeSGLangServer(FakeEngineServer):
         if path == "/flush_cache":
             return 200, {}
         if path == "/generate" and body.get("return_logprob"):
-            # [logprob, token_id, text] per input token from logprob_start_len; the window's first
-            # entry is its anchor and carries None.
+            # [logprob, token_id, text] per input token from logprob_start_len; the window's first entry is its anchor
+            # and carries None.
             shift = self.prefill_shift(len(body["input_ids"]))
             ids = body["input_ids"][body["logprob_start_len"] :]
             echo = [[None, ids[0], None]] + [[self.prefill_logprob(tok, shift), tok, None] for tok in ids[1:]]
@@ -320,7 +299,6 @@ class FakeSGLangServer(FakeEngineServer):
 
 
 def fake_server_class(client_class: type[WeightSyncClientBase]) -> type[FakeEngineServer]:
-    """The fake answering ``client_class``."""
     for cls in FakeEngineServer.__subclasses__():
         if cls.CLIENT_CLASS is client_class:
             return cls

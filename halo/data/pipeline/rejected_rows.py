@@ -1,5 +1,4 @@
-"""The rows a row map emits for a dropped row, the predicate that drops them, and the report of how much of a
-corpus a filter dropped."""
+"""The rows a row map emits for a dropped row, the predicate dropping them, and the report of what a filter dropped."""
 
 import logging
 from typing import Any
@@ -15,12 +14,9 @@ _HIGH_REJECTION_WARN_FRACTION = 0.5
 
 
 def build_rejection_row(tokenizer=None, **tokenizer_kwargs) -> dict[str, list]:
-    """The typed row a tokenizing map emits for a dropped row: ``tokenizer``'s output keys (probed once), else
-    ``input_ids``/``attention_mask``, each a one-element list of the real element type.
-
-    Never ``None`` or ``[]``: a worker whose first writer batch is all rejected would infer a ``null`` column and
-    fail casting the real batches. The ``[0]`` attention mask is what :func:`is_valid_example` drops it on.
-    """
+    """The typed row a tokenizing map emits for a dropped row, each column a one-element list of the real type. Never
+    ``None`` or ``[]``: a worker whose first batch is all rejected would infer a ``null`` column and fail casting the
+    real batches. :func:`is_valid_example` drops it on the ``[0]`` attention mask."""
     if tokenizer is None:
         return {"input_ids": [0], "attention_mask": [0]}
     sample = tokenizer("sample", **tokenizer_kwargs)
@@ -28,8 +24,7 @@ def build_rejection_row(tokenizer=None, **tokenizer_kwargs) -> dict[str, list]:
 
 
 def _blank_text(content: Any) -> Any:
-    """``content`` with its text emptied, in its own shape; a non-text part would stay content-bearing, so it is
-    refused."""
+    """``content`` with its text emptied, in its own shape; a non-text part stays content-bearing, so is refused."""
     if not isinstance(content, list):
         return ""
     if any(part.get("type") != "text" for part in content):
@@ -38,16 +33,14 @@ def _blank_text(content: Any) -> Any:
 
 
 def blank_conversation(messages: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    """The rejection value of a message-list column: ``messages`` with every text blanked, or one blank user
-    turn. Keys and content shapes stay, so the Arrow struct matches the real rows'."""
+    """``messages`` with all text blanked, or one blank user turn. Keys and shapes stay, matching the Arrow struct."""
     if not messages:
         return [{"role": "user", "content": ""}]
     return [{**message, "content": _blank_text(message.get("content"))} for message in messages]
 
 
 def _is_content_bearing(value: Any) -> bool:
-    """Whether a filter-field value carries content: not ``None``, a blank string or an empty list, and a message
-    or text-part list only when some text in it is non-blank. Anything else (token ids, image parts) does."""
+    """Not ``None``, a blank string or an empty list; a message or text-part list only when some text is non-blank."""
     if value is None:
         return False
     if isinstance(value, str):
@@ -63,8 +56,7 @@ def _is_content_bearing(value: Any) -> bool:
 
 
 def is_valid_example(row: dict[str, Any], filter_field: str = "input_ids") -> bool:
-    """Whether ``row`` is a real example rather than a rejection row: a content-bearing ``filter_field`` and an
-    ``attention_mask``, where present, that is not all zero."""
+    """A content-bearing ``filter_field`` and an ``attention_mask``, where present, that is not all zero."""
     if not _is_content_bearing(row.get(filter_field)):
         return False
     mask = row.get("attention_mask")
@@ -72,15 +64,13 @@ def is_valid_example(row: dict[str, Any], filter_field: str = "input_ids") -> bo
 
 
 def dataset_total_size(dataset: Dataset | DatasetDict) -> int:
-    """The number of rows across every split."""
     if isinstance(dataset, Dataset):
         return len(dataset)
     return sum(len(ds) for ds in dataset.values())
 
 
 def report_rejected_rows(original_size: int, kept_size: int, context: str) -> None:
-    """Log, on the local main process, how much of a corpus a post-map filter dropped: a WARNING past
-    :data:`_HIGH_REJECTION_WARN_FRACTION`, where a vanishing corpus is a config bug, INFO below it."""
+    """A WARNING past :data:`_HIGH_REJECTION_WARN_FRACTION`, as a vanishing corpus is a config bug; INFO below."""
     if not is_local_main_process():
         return
     rejected = original_size - kept_size

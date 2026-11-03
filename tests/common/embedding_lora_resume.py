@@ -1,61 +1,6 @@
-"""Two-phase resume of an embedding run, shared by the embedding resume GPU scripts.
-
-The embedding script injects LoRA in place, and every save folds it into the weights it writes. Each
-training checkpoint also carries the unfolded trainable tensors (``resume_adapter/``) and the marker
-the resume classifies on, so resume builds from the base, re-injects, and restores them. The model is
-built and adapted by the script's own ``build_sentence_transformer`` + ``inject_lora``, in bf16, with
-dropout off, over each backbone family the plain data-parallel path takes (:data:`FAMILIES`), with
-the adapters on the attention projections, on the input embedding beside them, on the input
-embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
-
-  1. Uninterrupted: ``TOTAL_STEPS`` steps, checkpoint at ``SAVE_AT_STEP``; the trainable tensors are
-     gathered right after that save (``on_save``).
-  2. The checkpoint serves: stock ``SentenceTransformer`` and ``AutoModel.from_pretrained`` load it with
-     no missing or unexpected keys and it encodes; its LoRA targets hold what PEFT's own in-place
-     merge of the live adapters at the save writes, bit for bit (a target whose FSDP2 delta the save
-     contracted shard-locally, within a rounding allowance), and move every target's base; the
-     resume adapter holds those live tensors bit for bit; the root holds no adapter file or config.
-  3. Resume through the production resolver: the policy source is the base; after the restore
-     (``on_train_begin``) every trainable tensor is BIT-EQUAL to the saved one; with nothing reset
-     between the runs, the resumed losses and the final adapters match the uninterrupted run's
-     (``TOL.replayed_resume_loss_abs`` / ``TOL.replayed_resume_weight_rtol``).
-  4. The resumed run's final ``save_model`` export loads and encodes and carries no resume state.
-
-``--lora off`` is a full fine-tune of the same backbone, whose saves write the backbone's names:
-
-  1. Uninterrupted, as above, with every parameter trainable.
-  2. The checkpoint loads with stock ``AutoModel`` / ``SentenceTransformer`` and holds the live weights
-     at the save.
-  3. Resume through the production resolver. The data-parallel shapes past ep1 run ``use_grouped_gemm:
-     false``, where the resolver keeps the base, so the loader must read the checkpoint into a model that
-     does not hold it; TP, EP and the ep1 EP layers build from the checkpoint. Every parameter is
-     BIT-EQUAL to the saved one after the restore, and the losses and final weights match as above. Under
-     EP every DeepEP buffer is built in deterministic mode
-     (:func:`~tests.common.distributed.pin_deterministic_ep_dispatch`), without which the atomic receive
-     order alone parts two identical runs.
-  4. The best-model load (``_load_best_model`` onto the resumed run, trained past the checkpoint)
-     brings the checkpoint's weights back bit for bit. A model wrapped for expert compute (EP, or a
-     MoE at the default grouped GEMM under ep1 or TP) loads its base weights only at construction, and
-     TP over FSDP2 cannot invert its stacked shards: there the load must be refused, not keep the last
-     weights.
-
-Modes (:data:`MODES`): ``single`` (one process), ``fsdp`` (torchrun: mixin FSDP2, DTensor params),
-``ddp`` (what ``accelerate launch`` with a MULTI_GPU config runs: accelerate's DDP over plain
-tensors), ``presharded`` (FSDP2 over per-rank dataset slices, batched by the toolkit's loader), the FSDP2
-knobs of :data:`DP_MODES` (``zero3`` FULL_SHARD, ``hsdp`` over two simulated NVLink domains on four ranks,
-``ep1`` and ``ep1_unsharded``: a MoE on the grouped-GEMM EP layers with its experts FSDP-sharded or whole and
-FSDP-ignored, and ``ep1_single``, those layers on one process, which no FSDP2 wrap reaches), and the parallel
-shapes of :data:`PARALLEL_MODES` (``tp``, ``tpdp`` for TP over FSDP2 on four
-ranks, ``ep``, ``etp``, ``eptp``, ``epetp`` on four ranks, ``ep2dp2`` and ``ep2x2dom`` for two EP groups on four
-ranks, in one NVLink domain and one per simulated domain). Under LoRA the parallel shapes and a MoE on the ep1 EP
-layers only check that the trainer refuses the injected adapters at construction; every other shape trains a
-MoE's stock experts under LoRA. The non-default
-shapes read their layout off the model. With ``head`` a row only builds the trainer over a pipeline carrying a
-projection head after the pooling, which the sharded and parallel shapes must refuse and a single process or
-DDP accept. Every export must serve the configured pipeline (its pooling, then a Normalize). A full fine-tune with
-``gradient_checkpointing`` also checks that every trainable tensor moved, which one whose gradient a recompute
-dropped would not.
-"""
+"""Two-phase resume of an embedding run: saves fold injected LoRA, so each checkpoint also carries the unfolded tensors
+(``resume_adapter/``) and resume rebuilds from the base. ``--lora off`` is a full fine-tune; see :data:`MODES`. Under
+LoRA, parallel shapes and ep1 MoEs only check the trainer's refusal."""
 
 import os
 from dataclasses import dataclass
@@ -106,10 +51,8 @@ from tests.common.training_checks import resumed_loss_deltas, snapshot_trainable
 
 @dataclass(frozen=True)
 class Family:
-    """One backbone family: the shared registry's random-init ``tiny`` model saved as a checkpoint, or
-    (``tiny`` None) the hub sentence-transformers checkpoint ``hub``. ``targets`` are its attention
-    projections, ``embedding`` its input embedding; ``moe`` marks an EP family, whose experts the grouped-GEMM EP
-    layers take."""
+    """One backbone family: the registry's random-init ``tiny`` model saved as a checkpoint, or (``tiny`` None) the hub
+    checkpoint ``hub``."""
 
     targets: tuple[str, ...]
     embedding: str
@@ -120,15 +63,14 @@ class Family:
     moe: bool = False
 
 
-# The dense encoder ST ships, and the decoder families of the shipped examples/embedding/ recipes.
 FAMILIES = {
     "bert": Family(("query", "value"), "word_embeddings", "mean", hub=PARAPHRASE_MINILM),
     **{
         name: Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", tiny)
         for name, tiny in TINY_DENSE_FAMILIES.items()
     },
-    # FA4, the EP / TP loader's Blackwell default, does not compile the tiny heads. A CUDA load builds Gemma 4 on
-    # ``sdpa`` as the flex-sliding variant, whose FlexAttention takes heads of 16 or more.
+    # FA4, the EP/TP loader's Blackwell default, does not compile the tiny heads. A CUDA load builds Gemma 4 on
+    # ``sdpa`` as flex-sliding, whose FlexAttention takes heads of 16 or more.
     "gemma4": Family(
         ("q_proj", "v_proj"),
         "embed_tokens",
@@ -139,12 +81,10 @@ FAMILIES = {
     ),
     "gpt_oss": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", TINY_MOE_FAMILIES["gpt_oss"], moe=True),
 }
-# What ``--lora`` adapts, and how (``dora``); ``off`` is a full fine-tune.
 LORA_TARGETS = ("attention", "mixed", "embedding", "dora", "off")
 TRAIN_MODES = ("single", "fsdp", "ddp", "presharded")
-# The FSDP2 shapes past the default, adapters and full fine-tunes alike: their ParallelismConfig fields. The ep1
-# shapes put a MoE on the grouped-GEMM EP layers, which refuse injected LoRA; every other data-parallel shape keeps
-# its stock experts.
+# The FSDP2 shapes past the default. The ep1 shapes put a MoE on the grouped-GEMM EP layers, which refuse injected
+# LoRA.
 DP_MODES = {
     "zero3": {"fsdp_reshard_after_forward": True},
     "hsdp": hsdp_layout(4),
@@ -152,7 +92,7 @@ DP_MODES = {
     "ep1_unsharded": {"use_grouped_gemm": True, "fsdp_shard_ep1_experts": False},
     "ep1_single": {"use_grouped_gemm": True},
 }
-# Refused under LoRA, trained under a full fine-tune. ``tpdp`` is TP over FSDP2 (four ranks: tp 2, dp 2).
+# Refused under LoRA, trained under a full fine-tune.
 PARALLEL_MODES = {
     "tp": {"tp_size": 2},
     "tpdp": {"tp_size": 2},
@@ -174,26 +114,22 @@ TOTAL_STEPS = 6
 SAVE_AT_STEP = 3
 BATCH_SIZE = 8
 LEARNING_RATE = 1e-3
-# A fold whose delta DTensor contracts the sharded rank dim shard-locally (a ``Partial`` placement)
-# measured off PEFT's single-device merge on 9.6-9.9% of the elements the delta moves in BERT's
-# 30522-row embedding, by up to 1.9e-3 of its largest value; every other fold is bit for bit.
+# A fold whose delta DTensor contracts the sharded rank dim shard-locally measured off PEFT's merge on 9.6-9.9% of
+# moved elements in BERT's 30522-row embedding, by up to 1.9e-3 of its largest value. Every other fold is bit for bit.
 PARTIAL_FOLD_MAX_OFF_FRACTION = 0.25
 PARTIAL_FOLD_MAX_STEP = 2**-7
 # MNRL near zero would let the loss comparisons pass for any adapters.
 MIN_INFORMATIVE_LOSS = 0.5
-# How the embedding trainer's own gate refuses injected LoRA on the grouped-GEMM EP layers.
 EP_LAYERS_LORA_REFUSAL = (
     "LoRA for embedding training is not supported with Expert Parallelism (EP or expert-TP) or on the grouped-GEMM "
     "EP layers"
 )
-# What ``accelerate launch`` with a MULTI_GPU config exports; the trainer reads it to leave DDP to
-# accelerate instead of FSDP2-wrapping the model itself.
+# What ``accelerate launch`` with a MULTI_GPU config exports; the trainer then leaves DDP to accelerate.
 ACCELERATE_LAUNCH_ENV = {"ACCELERATE_MIXED_PRECISION": "bf16"}
 _SPECIAL_TOKENS = ("[PAD]", "[UNK]", "[EOS]")
 
 
 def _lora_targets(family: Family, lora: str) -> tuple[str, ...] | None:
-    """The ``lora_target_modules`` of a ``--lora`` choice; None for a full fine-tune."""
     return {
         "attention": family.targets,
         "mixed": (family.embedding, *family.targets),
@@ -204,7 +140,6 @@ def _lora_targets(family: Family, lora: str) -> tuple[str, ...] | None:
 
 
 def _model_config(family: Family, source: str, lora: str) -> ModelArguments:
-    """The script's model arguments for this row: the source, and the LoRA the ``--lora`` choice sets."""
     targets = _lora_targets(family, lora)
     return ModelArguments(
         model_name_or_path=source,
@@ -219,11 +154,10 @@ def _model_config(family: Family, source: str, lora: str) -> ModelArguments:
 
 
 def _requested_fields(family: Family, mode: str, lora: str) -> dict:
-    """The ``ParallelismConfig`` fields the row asks for."""
     if mode in PARALLEL_MODES:
         return PARALLEL_MODES[mode]
-    # A full fine-tune without EP layers keeps the resolver on the base, so its resume reads the checkpoint into a
-    # model that does not hold it; injected LoRA trains a MoE on its stock experts, since the EP layers refuse it.
+    # With no EP layers the resolver stays on the base, so the resume reads the checkpoint into a model that does not
+    # hold it. Injected LoRA trains a MoE on its stock experts, since the EP layers refuse it.
     return {"use_grouped_gemm": lora != "off" and not family.moe, **DP_MODES.get(mode, {})}
 
 
@@ -232,13 +166,12 @@ def _parallelism_config(family: Family, mode: str, lora: str) -> ParallelismConf
 
 
 def _refuses_injected_lora(family: Family, mode: str) -> bool:
-    """Whether the trainer refuses injected LoRA in this shape: under TP and EP, and on a MoE's ep1 EP layers."""
     return mode in PARALLEL_MODES or (family.moe and DP_MODES.get(mode, {}).get("use_grouped_gemm", False))
 
 
 def _pair_texts() -> tuple[list[str], list[str]]:
-    """Pairs that differ only by an index, paired through a fixed permutation, so the in-batch
-    negatives are as close as the positive and MNRL stays O(1) for the whole run."""
+    """Pairs that differ only by an index through a fixed permutation, so in-batch negatives are as close as the
+    positive and MNRL stays O(1)."""
     count = 256
     partner = torch.randperm(count, generator=torch.Generator().manual_seed(SEED)).tolist()
     anchors = [f"What is the capital of country {i}?" for i in range(count)]
@@ -267,8 +200,7 @@ def _word_tokenizer() -> PreTrainedTokenizerFast:
 
 
 def _base_source(ctx, family_name: str) -> str:
-    """The family's base checkpoint: the hub one, or its seeded tiny one at the word tokenizer's vocab,
-    which rank 0 saves for every rank."""
+    """The family's base checkpoint: the hub one, or its seeded tiny one, which rank 0 saves for every rank."""
     family = FAMILIES[family_name]
     if family.hub is not None:
         return family.hub
@@ -302,7 +234,6 @@ def _config(output_dir: str, family: Family, *, save: bool, gradient_checkpointi
 
 
 def _build(ctx, model_config: ModelArguments, config: EmbeddingConfig, parallelism_config: ParallelismConfig):
-    """The model exactly as the script builds and adapts it for this run shape."""
     source = model_config.model_name_or_path
     args = EmbeddingScriptArguments()
     context = ScriptContext(parallelism_config, ctx.local_rank, None, source, EmbeddingTrainer)
@@ -334,15 +265,13 @@ def _make_trainer(
 
 
 def backbone_prefix(model: SentenceTransformer) -> str:
-    """The prefix the SentenceTransformer's names put before its transformer backbone's own."""
     backbone = model[0].auto_model
     return next(name for name, module in model.named_modules() if module is backbone) + "."
 
 
 def _partial_fold_targets(model) -> set[str]:
-    """Backbone names of the LoRA targets whose delta is a ``Partial`` DTensor: FSDP2 shards the rank dim
-    of both factors, and DTensor contracts it shard-locally where A is wider than B is tall, so the
-    fold sums bf16 partials. Collective: every rank calls it."""
+    """Backbone names of LoRA targets whose delta is a ``Partial`` DTensor, so the fold sums bf16 partials.
+    Collective."""
     model = extract_model_from_parallel(model, recursive=True)
     prefix = backbone_prefix(model)
     partial = set()
@@ -358,8 +287,7 @@ def _partial_fold_targets(model) -> set[str]:
 
 
 class _RestorePoint(RestorePointSnapshot):
-    """The restore-point snapshot with every trainable tensor whole (``tensors``) and, at the save, the
-    LoRA targets whose delta the save contracted shard-locally (``partial_folds``)."""
+    """The restore-point snapshot with whole trainable ``tensors`` and, at the save, the ``partial_folds``."""
 
     def __init__(self, event: str, trainer: EmbeddingTrainer):
         super().__init__(event, trainer, capture_optimizer=False)
@@ -407,8 +335,8 @@ def _mode_checks(ctx, family: Family, mode: str, lora: str, trainer: EmbeddingTr
 
 
 def _loads_and_encodes(directory: str, device, pooling: str) -> dict[str, bool]:
-    """``directory`` as stock ``AutoModel`` and ``SentenceTransformer`` load it: every key, embeddings, and the
-    configured pipeline, which a save writing no pipeline config would serve as a mean-pooled bare backbone."""
+    """``directory`` as stock ``AutoModel`` and ``SentenceTransformer`` load it; a save with no pipeline config would
+    serve a mean-pooled bare backbone."""
     checks = {}
     _backbone, info = AutoModel.from_pretrained(directory, output_loading_info=True)
     problems = loading_problems(info)
@@ -429,14 +357,9 @@ def _loads_and_encodes(directory: str, device, pooling: str) -> dict[str, bool]:
 
 
 def _serves(served: torch.Tensor, expected: torch.Tensor, base: torch.Tensor, partial: bool) -> bool:
-    """Whether ``served`` is the fold PEFT's single-device merge gives, ``expected``: bit for bit, or, for
-    a ``partial`` delta (:func:`_partial_fold_targets`), off by rounding on a minority of the elements
-    either fold moves off ``base``.
-
-    The shard-local bf16 partials of such a delta round differently from one full contraction wherever
-    they cancel, so a per-element ulp bound does not hold, and a delta near half a step of the base
-    moves it in one fold only. A missing, partial or misscaled delta instead changes nearly every
-    moved element."""
+    """Whether ``served`` is PEFT's single-device merge: bit for bit, or for a ``partial`` delta off by rounding on a
+    minority of moved elements. Shard-local bf16 partials round differently wherever they cancel, so a per-element ulp
+    bound does not hold. A misscaled delta changes nearly every moved element."""
     if torch.equal(served, expected):
         return True
     if not partial or served.shape != expected.shape:
@@ -459,9 +382,7 @@ def _serving_checks(
     pooling: str,
     device,
 ) -> dict[str, bool]:
-    """The checkpoint as a server loads it, and the resume state beside it; ``embedding`` names the
-    input embedding when it is a target, ``partial_folds`` the targets whose delta the save contracted
-    shard-locally. Rank-local reads only."""
+    """The checkpoint as a server loads it, and the resume state beside it. Rank-local reads only."""
     adapter_dir = resume_adapter_dir(checkpoint)
     checks = {"checkpoint_is_marked_for_adapter_resume": adapter_dir is not None}
     adapter_file = os.path.join(adapter_dir, ADAPTER_SAFETENSORS_FILE) if adapter_dir is not None else None
@@ -476,9 +397,7 @@ def _serving_checks(
     )
     checks.update(_loads_and_encodes(checkpoint, device, pooling))
     base = AutoModel.from_pretrained(model_config.model_name_or_path, dtype=torch.bfloat16).state_dict()
-    # PEFT's own in-place merge of the live tensors at the save (the resume adapter's own are under test
-    # above), in bf16 on the run's device. TRL's LoRA builder, not the script's: its exclusion scan is
-    # collective, and this runs on rank 0 alone.
+    # TRL's LoRA builder, not the script's: its exclusion scan is collective, and this runs on rank 0 alone.
     backbone = AutoModel.from_pretrained(model_config.model_name_or_path, dtype=torch.bfloat16).to(device)
     expected = injected_lora_fold(backbone, get_peft_config(model_config), at_save, prefix)
     served = AutoModel.from_pretrained(checkpoint, dtype=torch.bfloat16).state_dict()
@@ -510,7 +429,7 @@ def _bit_equal(expected: dict[str, torch.Tensor], actual: dict[str, torch.Tensor
 
 def _refusal_row(ctx, family: Family, mode: str, lora: str, source: str, shared_dir: str) -> dict:
     """LoRA under TP / EP or on a MoE's ep1 EP layers: the script's loader for that shape, then the trainer must
-    refuse the adapters."""
+    refuse."""
     config = _config(os.path.join(shared_dir, f"refused_{mode}"), family, save=False, gradient_checkpointing=False)
     parallelism_config = _parallelism_config(family, mode, lora)
     model = _build(ctx, _model_config(family, source, lora), config, parallelism_config)
@@ -528,9 +447,8 @@ def _refusal_row(ctx, family: Family, mode: str, lora: str, source: str, shared_
 
 
 def _head_row(ctx, family: Family, mode: str, lora: str, source: str, shared_dir: str) -> dict:
-    """A projection head after the pooling, trainable under a full fine-tune and frozen beside LoRA:
-    FSDP2, TP and EP save it rank-locally and resume the backbone alone, so the trainer must refuse it
-    at construction; a single process and DDP save and resume the whole pipeline, and accept it."""
+    """A projection head after the pooling: FSDP2, TP and EP save it rank-locally and resume the backbone alone, so the
+    trainer must refuse it. A single process and DDP save and resume the whole pipeline, and accept it."""
     config = _config(os.path.join(shared_dir, f"head_{mode}"), family, save=False, gradient_checkpointing=False)
     parallelism_config = _parallelism_config(family, mode, lora)
     model = _build(ctx, _model_config(family, source, lora), config, parallelism_config)
@@ -558,8 +476,8 @@ def _head_row(ctx, family: Family, mode: str, lora: str, source: str, shared_dir
 
 
 def _loss_checks(uninterrupted: list[float], resumed: list[float], checks: dict, metrics: dict) -> None:
-    """Every resumed loss replays the uninterrupted run's; the first reads only restored state, so it is
-    reported on its own."""
+    """Every resumed loss replays the uninterrupted run's; the first reads only restored state, so it is reported on
+    its own."""
     deltas = resumed_loss_deltas(uninterrupted, resumed, save_step=SAVE_AT_STEP, total_steps=TOTAL_STEPS)
     checks["resumed_ran_remaining_steps"] = deltas is not None
     if deltas is None:
@@ -581,7 +499,6 @@ def _uninterrupted(
     *,
     gradient_checkpointing: bool,
 ):
-    """Phase 1, shared by both flows: the run, its losses and trainable tensors at the save and at the end."""
     log(f"\n[1/4] Uninterrupted {TOTAL_STEPS}-step run, checkpoint at step {SAVE_AT_STEP}...")
     trainer = _make_trainer(
         ctx, family, mode, lora, base_source, train_out, save=True, gradient_checkpointing=gradient_checkpointing
@@ -600,7 +517,7 @@ def _uninterrupted(
     trainer.train()
     losses = step_losses(trainer)
     if mode in DP_MODES or mode in PARALLEL_MODES:
-        # Read off the pipeline the trainer forwards, the module its FSDP2 wrap is rooted at.
+        # The module the FSDP2 wrap is rooted at.
         pipeline = trainer._top_level_model()
         checks |= dp_layout_checks(
             pipeline,
@@ -666,7 +583,6 @@ def _full_finetune_row(
     source = resolve_resume_weights_source(
         checkpoint, SimpleNamespace(model_name_or_path=base_source), parallelism_config
     )
-    # TP and EP build from the checkpoint, as does any model the grouped-GEMM EP layers wrap.
     rebuilds_from_checkpoint = mode in PARALLEL_MODES or bool(run.expert_weights)
     checks["policy_source_is_the_expected_one"] = source == (checkpoint if rebuilds_from_checkpoint else base_source)
     trainer = _make_trainer(
@@ -693,9 +609,8 @@ def _full_finetune_row(
 
     log(f"\n[4/4] Best-model load of {checkpoint} onto the resumed run...")
     trainer.state.best_model_checkpoint = checkpoint
-    # A model wrapped for expert compute (EP, or the default grouped GEMM on a MoE) reloads its base
-    # weights only at construction, and TP+DP's stacked shards do not invert: the loader refuses both
-    # rather than keep the last weights, as the startup gate refuses load_best_model_at_end for them.
+    # A model wrapped for expert compute reloads base weights only at construction and TP+DP's stacked shards do not
+    # invert, so the loader refuses both, as the startup gate refuses load_best_model_at_end.
     if run.expert_weights or mode == "tpdp":
         refusal = None
         try:
@@ -721,9 +636,7 @@ def _full_finetune_row(
 def run_embedding_lora_resume(
     ctx, family_name: str, mode: str, lora: str, *, head: bool, gradient_checkpointing: bool
 ) -> dict:
-    """One family x mode x ``--lora`` row, a full fine-tune with ``gradient_checkpointing`` if set, or with ``head``
-    the construction check of a projection head outside the backbone; returns the harness's ``checks`` and
-    ``metrics``."""
+    """One family x mode x ``--lora`` row; returns the harness's ``checks`` and ``metrics``."""
     if gradient_checkpointing and (head or lora != "off"):
         raise ValueError("gradient_checkpointing rows are full fine-tunes (lora 'off', no head)")
     family = FAMILIES[family_name]

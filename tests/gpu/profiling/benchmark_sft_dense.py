@@ -1,51 +1,8 @@
 #!/usr/bin/env python
-"""
-Dense model SFT MFU/TFLOPS benchmark.
+"""Dense SFT benchmark: MFU, achieved TFLOPS and tokens/sec under FSDP, CP, TP, PP, LoRA and QLoRA.
 
-Measures Model FLOPS Utilization (MFU), achieved TFLOPS, and tokens/sec
-for dense (non-MoE) models using DistributedSFTTrainer with EfficiencyCallback.
-
-Supports modes: FSDP (default), CP, TP, PP, LoRA, QLoRA.
-
-``--model`` and ``--seq`` default to the shared benchmark parser's values
-(``tests/common/benchmark_args.py``), whose default model is a MoE, so every example names a dense one.
-
-Usage:
-    # FSDP mode, Qwen3-8B, seq_len=4096, 10 steps
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10
-
-    # TP mode (tp=2) with Qwen3-8B
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10 --tp 2
-
-    # Ulysses CP mode (cp=2) with Qwen3-8B
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10 --cp 2
-
-    # PP mode (pp2 x dp4 on 8 GPUs, 8 microbatches; batch_size must be divisible by microbatches)
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 8192 --pp 2 --pp_microbatches 8 --batch_size 16
-
-    # LoRA r=64, attention-only targets
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 16384 --lora_r 64
-
-    # LoRA r=64, all linear targets
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 16384 --lora_r 64 --lora_all_linear
-
-    # QLoRA r=64 (4-bit base model), all linear targets
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 16384 --lora_r 64 --lora_all_linear --qlora
-
-    # FusedLinearCrossEntropy with QLoRA
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 32768 --lora_r 32 --lora_all_linear --qlora --fused_linear_ce
-
-    # Disable Liger kernels
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --no_liger
+``--model`` defaults to the shared parser's model, a MoE, so name a dense one. Under PP batch_size must be divisible by
+the microbatches.
 """
 
 import sys
@@ -84,8 +41,6 @@ from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
 from tests.common.sft_collator import build_sft_collator
 
-# Main Benchmark
-
 
 def main() -> int:
     configure_training_logging()
@@ -109,11 +64,9 @@ def main() -> int:
     parser.add_argument("--qlora", action="store_true", help="Enable 4-bit QLoRA (requires --lora_r > 0)")
     args = parser.parse_args()
 
-    # --- Distributed setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
 
-    # --- Resolve model config ---
     model_cfg = MODEL_CONFIGS[args.model]
     model_name = args.model_path or model_cfg["hf_name"]
     full_params = model_cfg["full_params"]
@@ -144,26 +97,21 @@ def main() -> int:
     log(f"  Collator: {collator_mode}, PEFT: {peft_str}")
     log(f"{'=' * 70}")
 
-    # Isolate HF cache
     output_dir, cache_dir = setup_cache_dirs("bench_dense", rank)
 
     try:
-        # --- Ensure model is downloaded ---
         log("\n[1/5] Ensuring model is downloaded...")
         ensure_model_downloaded(model_name, rank)
 
-        # --- Load tokenizer ---
         log("\n[2/5] Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # --- Create dataset ---
         log(f"\n[3/5] Creating dummy dataset ({args.num_samples} samples, seq={args.seq})...")
         train_dataset = create_benchmark_dataset(tokenizer, args.seq, args.num_samples)
         log(f"  Dataset created: {len(train_dataset)} samples")
 
-        # --- Build Liger config ---
         use_liger = not args.no_liger
         liger_kernel_config = None
         if getattr(args, "fused_linear_ce", False):
@@ -172,7 +120,7 @@ def main() -> int:
                 "fused_linear_cross_entropy": True,
             }
 
-        # --- SFT Config (built before model loading for Liger pre-application) ---
+        # Built before model loading for Liger pre-application.
         sft_config = SFTConfig(
             output_dir=output_dir,
             max_steps=args.steps,
@@ -197,7 +145,6 @@ def main() -> int:
         if liger_kernel_config:
             sft_config.liger_kernel_config = liger_kernel_config
 
-        # --- Build PEFT config ---
         peft_config = None
         if lora_r > 0:
             attn_targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -212,7 +159,6 @@ def main() -> int:
                 target_modules=target_modules,
             )
 
-        # --- Load model ---
         log(f"\n[4/5] Loading model ({layout}, {peft_str})...")
         log(f"  GPU memory before load: {gpu_mem_gb():.1f}GB")
 
@@ -232,11 +178,11 @@ def main() -> int:
                 use_liger_kernel=use_liger,
                 liger_kernel_config=liger_kernel_config,
             )
-            sft_config.use_liger_kernel = False  # Applied via load_distributed_model
+            sft_config.use_liger_kernel = False  # Applied via load_distributed_model.
         else:
             parallelism_config = ParallelismConfig(**pp_kwargs)
             model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-            # Apply Liger BEFORE model loading so RMSNorm/SwiGLU patches take effect
+            # Before model loading, so RMSNorm/SwiGLU patches take effect.
             if use_liger:
                 apply_liger_kernel(model_config, liger_kernel_config=liger_kernel_config)
 
@@ -256,9 +202,7 @@ def main() -> int:
             model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
             finalize_liger_after_direct_load(sft_config, use_liger, model)
 
-        # Under PP the Liger class patches are already applied (direct loading above); TRL's
-        # instance re-application would run on the pipeline stage module, so defer the flag —
-        # the same handling as the load_distributed_model branch.
+        # The Liger class patches are already applied; TRL's instance re-application would run on the stage module.
         if pp_size > 1:
             sft_config.use_liger_kernel = False
 
@@ -268,15 +212,13 @@ def main() -> int:
             log(f"  LoRA: r={lora_r}, targets={'all_linear' if lora_all_linear else 'attn_only'}, QLoRA={qlora}")
         log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
 
-        # --- Setup EfficiencyCallback ---
         efficiency_cb = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,
             num_full_model_params=full_params,
         )
 
-        # Global batch arithmetic (printed so baseline-vs-PP comparisons can assert equal
-        # tokens/step): dp = world / (pp x max(tp, cp, etp)); a whole pipeline chain is one stream.
+        # dp = world / (pp x max(tp, cp, etp)); a whole pipeline chain is one stream.
         dp_size = parallelism_config.data_parallel_size
         global_seqs = dp_size * args.batch_size * args.grad_accum
         log(
@@ -284,7 +226,6 @@ def main() -> int:
             f"= {global_seqs} seqs/step ({global_seqs * args.seq:,} tokens/step)"
         )
 
-        # --- Create trainer ---
         log("\n[5/5] Starting benchmark training...")
         trainer_kwargs = {
             "model": model,
@@ -300,7 +241,7 @@ def main() -> int:
 
         trainer = DistributedSFTTrainer(**trainer_kwargs)
 
-        # Report trainable params after trainer init (PEFT wrapping happens there)
+        # After trainer init, where PEFT wrapping happens.
         trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in trainer.model.parameters())
         log(f"  Trainable: {trainable / 1e6:.0f}M / {total / 1e6:.0f}M ({100 * trainable / total:.1f}%)")
@@ -308,7 +249,6 @@ def main() -> int:
         barrier()
         train_result = trainer.train()
 
-        # --- Report ---
         log(f"\n{'=' * 70}")
         log(f"  BENCHMARK RESULTS ({layout}, {peft_str})")
         log(f"{'=' * 70}")

@@ -1,14 +1,5 @@
 #!/usr/bin/env python
-"""Module contract of the shared fp8 → bf16 streaming converter.
-
-``DequantRules`` is the whole per-release surface: a converter declares its scale spelling, layout
-check, dequantization and passthrough sizing there and the shared driver applies them. That only
-holds while the field list is written ONCE — a helper that takes the fields as loose keyword
-arguments re-spells it, so every new rule has to be threaded through each signature and each call in
-between, and a helper reached from outside can be handed a half-set of them.
-
-Run: python tests/cpu/checkpoint/test_fp8_dequant_contract.py  (or pytest)
-"""
+"""``DequantRules`` is the whole per-release surface of the fp8 → bf16 converter, its field list written once."""
 
 import dataclasses
 import inspect
@@ -27,7 +18,7 @@ def _module_functions():
 
 
 def test_the_rule_field_list_is_spelled_once():
-    """No helper re-declares ``DequantRules``' fields as parameters — they travel on the object."""
+    """They travel on the object."""
     offenders = {
         fn.__qualname__: sorted(_RULE_FIELDS & set(inspect.signature(fn).parameters))
         for fn in _module_functions()
@@ -40,9 +31,8 @@ def test_the_rule_field_list_is_spelled_once():
 
 
 def test_only_the_release_rules_and_the_entry_point_are_public():
-    """The staged internals are private: each takes a `DequantRules` mid-conversion and assumes the
-    stage before it ran (a validated source, a not-yet-existing output dir), so an outside caller
-    reaching one directly skips the preflight or the in-place refusal."""
+    """Each internal assumes the stage before it ran, so an outside caller skips the preflight or the in-place
+    refusal."""
     public = sorted(
         name
         for name, obj in vars(fp8_dequant).items()

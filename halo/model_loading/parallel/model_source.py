@@ -1,8 +1,5 @@
-"""Where every rank reads a checkpoint from, agreed before any rank loads it, the rank-0 verdicts a lazy load takes on
-that directory, and the checkpoint config and modality verdict read ahead of a load.
-
-Each rank resolves the run's source on its own node (the directory as that node mounts it, the snapshot in the Hub
-cache its ``HF_HOME`` points at), so the world agrees on what every rank found before any of them reads a weight."""
+"""Where every rank reads a checkpoint from, agreed before any rank loads it, and the config and modality verdict read
+ahead of a load. Each rank resolves the source on its own node, so the world agrees on what every rank found."""
 
 from __future__ import annotations
 
@@ -77,7 +74,6 @@ class _SourceView(NamedTuple):
     resolved: str
     # The snapshot directory this rank reads a Hub source from; None for a local directory.
     snapshot: str | None = None
-    # The weight files that snapshot declares (:func:`_weight_files`).
     weight_files: tuple[str, ...] = ()
 
 
@@ -104,9 +100,7 @@ def _cache_remedy(fetched: bool) -> str:
 
 
 def _unresolvable_reason(model_name_or_path: str, revision: str | None, fetch_error: Exception | None) -> str:
-    """Why this rank holds no copy of the source: its own failed fetch, the input-filesystem
-    declaration that left it reading a cache nobody fetched into, or an offline hub, under which no
-    rank fetched."""
+    """Why this rank holds no copy: its failed fetch, the input-filesystem declaration, or an offline hub."""
     missing = (
         f"{model_name_or_path!r} is not a directory on {socket.gethostname()}, and this rank's Hub cache "
         f"({hub_constants.HF_HUB_CACHE}) holds no snapshot of it at revision {revision or 'main'}."
@@ -122,8 +116,7 @@ def _unresolvable_reason(model_name_or_path: str, revision: str | None, fetch_er
 
 
 def _weight_files(snapshot: str) -> tuple[str, ...]:
-    """The files a load reads the snapshot's weights from: the safetensors index and the shards it
-    names, or the single weight file (:func:`~halo.checkpoint.reading.resolve_checkpoint_weights`)."""
+    """The files a load reads a snapshot's weights from: the index and its shards, or the single weight file."""
     layout = resolve_checkpoint_weights(snapshot)
     index = (SAFETENSORS_INDEX_FILE,) if layout.index is not None else ()
     legacy = (layout.legacy_bin,) if layout.legacy_bin is not None else ()
@@ -133,10 +126,9 @@ def _weight_files(snapshot: str) -> tuple[str, ...]:
 def _resolve_on_this_rank(
     model_name_or_path: str, revision: str | None, *, fetch: bool, whole_repo: bool
 ) -> _SourceView:
-    """This rank's view of the source: a local directory, or the snapshot its Hub cache holds; only a
-    ``fetch`` rank downloads what the cache lacks. Offline it reads the cache like every other rank: a call
-    that may fetch lists a pinned commit's files through the Hub unless the cache holds that listing, and
-    offline that raises even over a complete snapshot."""
+    """A local directory or this rank's cached snapshot; only a ``fetch`` rank downloads. Offline it reads the cache
+    like every rank, as a call that may fetch lists a pinned commit through the Hub and raises even over a complete
+    snapshot."""
     if os.path.isdir(model_name_or_path):
         return _SourceView(_LOCAL_DIRECTORY)
     try:
@@ -152,12 +144,9 @@ def _resolve_on_this_rank(
 
 
 def _reject_incomplete_snapshots(model_name_or_path: str, view: _SourceView, *, fetched: bool) -> None:
-    """COLLECTIVE: fail every rank when a rank's snapshot lacks a weight file global rank 0's snapshot names.
-
-    huggingface_hub's cache-only resolution returns any snapshot folder of the commit without checking
-    its files, and the config and tokenizer reads ahead of the load leave a weightless one in every
-    node's cache.
-    """
+    """COLLECTIVE: fail every rank when a snapshot lacks a weight file rank 0's names. huggingface_hub's cache-only
+    resolution does not check files, and the config and tokenizer reads leave a weightless snapshot in every node's
+    cache."""
     required = broadcast_from_rank0(view.weight_files)
     missing = [name for name in required if not os.path.isfile(os.path.join(view.snapshot, name))]
     reason = None
@@ -174,18 +163,9 @@ def _reject_incomplete_snapshots(model_name_or_path: str, view: _SourceView, *, 
 def resolve_model_source(
     model_name_or_path: str, revision: str | None, *, tag: str, whole_repo: bool = False
 ) -> ModelSource:
-    """COLLECTIVE-EQUIVALENT (every rank, same ``tag``, equally often): fetch ``model_name_or_path``
-    main-rank-first and return the source every rank loads.
-
-    The fetch takes the repo's top-level files (:data:`HUB_SUBFOLDER_IGNORE_PATTERNS`); ``whole_repo`` is
-    for a loader that reads subfolders too (a sentence-transformers pipeline). The fetching rank is
-    scoped like :func:`~halo.runtime.filesystem.fs_aware_main_first`, and the per-rank verdicts are
-    joined over the c10d store, so a rank that cannot see the source fails the whole world naming it.
-
-    A Hub repo resolves to the one commit every rank's cache holds, with every weight file rank 0's
-    snapshot names: per-node caches staged at different times would otherwise train different weights
-    with no error. A local directory keeps ``revision``.
-    """
+    """COLLECTIVE-EQUIVALENT (every rank, same ``tag``, equally often): fetch main-rank-first and return the source
+    every rank loads. A Hub repo resolves to one commit every rank's cache holds, as caches staged apart would train
+    different weights with no error; a local directory keeps ``revision``. ``whole_repo`` fetches subfolders too."""
     fetch = is_fs_load_rank()
     failure: BaseException | None = None
     view: _SourceView | None = None
@@ -209,9 +189,8 @@ def resolve_model_source(
 
 
 def reject_ep_sharded_checkpoint(source: ModelSource) -> None:
-    """COLLECTIVE (rank 0's probe): refuse a per-rank EP-sharded checkpoint on every rank. Past here its
-    per-rank keys would match no expert pattern and surface as "never materialized" instead of "merge the
-    shards"; a torn index raises inside the probe and is joined after the broadcast."""
+    """COLLECTIVE (rank 0's probe): refuse a per-rank EP-sharded checkpoint, whose keys would otherwise match no expert
+    pattern and surface as never materialized."""
     if rank0_verdict(
         lambda: index_declares_ep_shards(read_checkpoint_index(source.local_dir, missing_ok=True)),
         f"EP checkpoint-format probe of {source.name!r}",
@@ -222,12 +201,9 @@ def reject_ep_sharded_checkpoint(source: ModelSource) -> None:
 def resolve_lazy_checkpoint(
     source: ModelSource, *, lazy_requested: bool, layout_supported: Callable[[str], bool]
 ) -> bool:
-    """COLLECTIVE: refuse an EP-sharded ``source``, then return whether every rank streams it lazily.
-
-    Rank 0 decides and broadcasts: the lazy and whole-model branches enter different collectives, and a
-    per-rank probe of a partially populated cache would split them. ``layout_supported`` is whether the
-    caller's lazy loader maps this family's layout, asked only of a directory holding safetensors.
-    """
+    """COLLECTIVE: refuse an EP-sharded ``source``, then return whether every rank streams it lazily. Rank 0 decides,
+    as the branches enter different collectives and a per-rank probe of a partially populated cache would split
+    them."""
     reject_ep_sharded_checkpoint(source)
     return broadcast_from_rank0(
         lazy_requested
@@ -253,10 +229,9 @@ def fetch_checkpoint_config(model_config: ModelArguments, *, tag: str) -> Pretra
 def _probe_checkpoint_config(
     model_name_or_path: str, revision: str | None, trust_remote_code: bool, *, local_files_only: bool
 ):
-    """The checkpoint's config for the modality verdict, ``None`` when the hub read itself fails; a
-    remote-code config under ``trust_remote_code: false`` is refused, as the model load would refuse it.
-    Only the hub read is caught: a coordination failure must not resolve to a per-rank heuristic.
-    """
+    """The config for the modality verdict, ``None`` when the hub read fails; a remote-code config under
+    ``trust_remote_code: false`` is refused. Only the hub read is caught, as a coordination failure must not become a
+    heuristic."""
     try:
         return AutoConfig.from_pretrained(
             model_name_or_path,
@@ -286,14 +261,9 @@ def _probe_checkpoint_config(
 def probe_checkpoint(
     model_name_or_path: str, revision: str | None = None, *, trust_remote_code: bool = False
 ) -> tuple[Any, bool]:
-    """The checkpoint's config and its :func:`~halo.models.modality.is_vlm_model` verdict, from one hub read.
-
-    COLLECTIVE once the process group exists: every rank enters the ``vlm_probe`` phase, main rank
-    first (the run's first hub contact), at the pinned ``revision`` under the run's own
-    ``trust_remote_code``. A ``None`` config (the hub read failed) falls back to
-    :func:`~halo.models.modality.is_vlm_name`. A verdict split across ranks raises on every rank, since
-    the ranks would otherwise build different model classes and hang in different store phases.
-    """
+    """The checkpoint's config and its modality verdict, from one hub read; COLLECTIVE once the process group exists. A
+    verdict split across ranks raises everywhere, as ranks would build different model classes and hang in different
+    store phases."""
     config = hub_metadata_main_first(
         "vlm_probe",
         lambda local_files_only: _probe_checkpoint_config(

@@ -1,9 +1,5 @@
-"""Host and accelerator facts: this rank's device, architecture predicates, GPU model detection, the
-dense Tensor-Core peak-FLOPS table, available host RAM and the CPUs this process may use.
-
-The kernel predicates read compute capability; the FLOPS table is keyed by SKU name, because peaks
-differ within one architecture.
-"""
+"""Host and accelerator facts. Kernel predicates read compute capability; the FLOPS table is keyed by SKU name, because
+peaks differ within one architecture."""
 
 import logging
 import math
@@ -15,36 +11,29 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# The cgroup mounts: v2's unified hierarchy at the root, v1's cpu controller under cpu/.
+# v2's unified hierarchy at the root, v1's cpu controller under cpu/.
 _CGROUP_ROOT = "/sys/fs/cgroup"
-# This process's cgroup in each hierarchy, one `<id>:<controllers>:<path>` line apiece (v2's has no controllers).
+# One `<id>:<controllers>:<path>` line per hierarchy (v2's has no controllers).
 _PROC_SELF_CGROUP = "/proc/self/cgroup"
 
 
 def current_device() -> torch.device:
-    """This rank's CUDA device, or CPU when CUDA is unavailable."""
     return torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
 
 
 def is_blackwell_gpu() -> bool:
-    """Whether the local CUDA device is data-center Blackwell (SM100+), the FA4 architecture.
-
-    Open-ended so a later SM keeps FA4; consumer Blackwell (SM 12.x) is not a supported target.
-    """
+    """Data-center Blackwell (SM100+), the FA4 architecture; open-ended so a later SM keeps FA4."""
     return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10
 
 
 def is_hopper_gpu() -> bool:
-    """Whether the local CUDA device is Hopper (SM90), the FA3 architecture."""
+    """Hopper (SM90), the FA3 architecture."""
     return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9
 
 
 def supports_grouped_mm() -> bool:
-    """Whether ``F.grouped_mm`` can run here: SM90+ compute capability.
-
-    A failing capability read propagates: the answer picks the expert weight layout, and a rank answering
-    differently from its peers would hang the expert all-gather.
-    """
+    """SM90+ compute capability. A failing read propagates: the answer picks the expert weight layout, and a rank
+    answering differently from its peers would hang the expert all-gather."""
     if not torch.cuda.is_available():
         return False
     major, minor = torch.cuda.get_device_capability()
@@ -53,8 +42,8 @@ def supports_grouped_mm() -> bool:
 
 @dataclass(frozen=True)
 class GpuPeak:
-    """One GPU model's dense Tensor-Core peaks by precision and the name aliases that identify it (an
-    alias matches when every token of it is in the reported name; the most specific wins)."""
+    """One GPU's dense Tensor-Core peaks by precision and its name aliases; an alias matches when every token of it is
+    in the reported name, and the most specific wins."""
 
     aliases: tuple[str, ...]
     flops: dict[str, float]
@@ -86,7 +75,7 @@ GPU_PEAK_FLOPS = {
         aliases=("GB200",),
         flops={"bf16": 2500.0e12, "fp16": 2500.0e12, "fp8": 5000.0e12, "tf32": 1250.0e12, "fp32": 80.0e12},
     ),
-    "B300": GpuPeak(  # same 148-SM die as B200; the uplift is FP4 and HBM, not bf16
+    "B300": GpuPeak(  # same 148-SM die as B200; FP4 and HBM are the uplift
         aliases=("B300",),
         flops={
             "bf16": 2250.0e12,
@@ -110,8 +99,7 @@ PEAK_KEY_BY_DTYPE = {torch.bfloat16: "bf16", torch.float16: "fp16"}
 
 
 def _classify_gpu_name(gpu_name_upper: str) -> str | None:
-    """The :data:`GPU_PEAK_FLOPS` key whose alias matches the upper-cased name, most specific first
-    (``H100 PCIE`` before ``H100``, ``GB200`` before ``B200``)."""
+    """Most specific alias first (``H100 PCIE`` before ``H100``, ``GB200`` before ``B200``)."""
     candidates = sorted(
         ((key, tuple(alias.split())) for key, entry in GPU_PEAK_FLOPS.items() for alias in entry.aliases),
         key=lambda candidate: (len(candidate[1]), sum(len(token) for token in candidate[1])),
@@ -121,7 +109,6 @@ def _classify_gpu_name(gpu_name_upper: str) -> str | None:
 
 
 def detect_gpu_model() -> str | None:
-    """Detect the GPU model name and return a key into GPU_PEAK_FLOPS."""
     if not torch.cuda.is_available():
         return None
 
@@ -143,14 +130,13 @@ def detect_gpu_model() -> str | None:
 
 
 def get_gpu_peak_flops(gpu_model: str, precision: str) -> float | None:
-    """Get peak FLOPS for the given GPU model and precision, or None when either is unknown."""
     entry = GPU_PEAK_FLOPS.get(gpu_model)
     return entry.flops.get(precision) if entry is not None else None
 
 
 def _fp32_compute_precision() -> str:
-    """The peak key fp32 matmuls run at: ``float32_matmul_precision`` routes them to Tensor Cores
-    (``high`` → TF32, ``medium`` → bf16), whose higher peak an ``"fp32"`` key would report MFU above."""
+    """``float32_matmul_precision`` routes fp32 matmuls to Tensor Cores (``high`` → TF32, ``medium`` → bf16), whose
+    higher peak an ``"fp32"`` key would report MFU above."""
     precision = torch.get_float32_matmul_precision()
     if precision == "medium":
         return "bf16"
@@ -160,14 +146,13 @@ def _fp32_compute_precision() -> str:
 
 
 def peak_precision_key(dtype: torch.dtype | None) -> str | None:
-    """The :data:`GPU_PEAK_FLOPS` precision key for a parameter dtype, or ``None`` when it has none."""
     if dtype == torch.float32:
         return _fp32_compute_precision()
     return PEAK_KEY_BY_DTYPE.get(dtype)
 
 
 def available_host_ram_bytes() -> int | None:
-    """``MemAvailable`` from ``/proc/meminfo`` in bytes, or ``None`` where it cannot be read (non-Linux)."""
+    """``MemAvailable`` in bytes, or ``None`` where it cannot be read (non-Linux)."""
     try:
         with open("/proc/meminfo") as fh:
             for line in fh:
@@ -179,8 +164,7 @@ def available_host_ram_bytes() -> int | None:
 
 
 def _read_cgroup_file(path: str) -> str | None:
-    """``path`` stripped, or ``None`` where it cannot be read (the other cgroup version, a level the mount does not
-    show, no cgroup at all)."""
+    """``path`` stripped, or ``None`` where unreadable (other cgroup version, a level the mount hides, no cgroup)."""
     try:
         with open(path) as fh:
             return fh.read().strip()
@@ -204,9 +188,8 @@ def _own_cgroup_dirs() -> list[str]:
 
 
 def _cpu_quota_at(directory: str) -> int | None:
-    """The CPUs the cgroup at ``directory`` may use, rounded up, or ``None`` without a quota there: v2's ``cpu.max``
-    (``"<quota> <period>"``, the quota ``max`` when unlimited), else v1's ``cpu.cfs_quota_us`` (``-1`` when
-    unlimited) over ``cpu.cfs_period_us``."""
+    """CPUs the cgroup at ``directory`` allows, rounded up, or ``None``: v2's ``cpu.max`` (``"<quota> <period>"``,
+    ``max`` when unlimited), else v1's ``cpu.cfs_quota_us`` (``-1`` when unlimited) over ``cpu.cfs_period_us``."""
     cpu_max = _read_cgroup_file(os.path.join(directory, "cpu.max"))
     if cpu_max is not None:
         quota, period = cpu_max.split()
@@ -219,16 +202,15 @@ def _cpu_quota_at(directory: str) -> int | None:
 
 
 def _cgroup_cpu_quota() -> int | None:
-    """The CPUs this process's cgroup CPU quotas allow, or ``None`` without one: the tightest on its own cgroup and
-    every ancestor, since a quota on a parent (a Kubernetes pod, a systemd slice) binds every cgroup below it."""
+    """The tightest quota on this process's cgroup and its ancestors, since a parent's quota (a Kubernetes pod, a
+    systemd slice) binds every cgroup below it."""
     quotas = (_cpu_quota_at(directory) for directory in _own_cgroup_dirs())
     return min((quota for quota in quotas if quota is not None), default=None)
 
 
 def available_cpu_count() -> int:
-    """The CPUs this process may use: its affinity set (a container cpuset, a NUMA binding), else the host count,
-    capped by the cgroup CPU quotas over it (``docker --cpus``, a Kubernetes CPU limit, a systemd ``CPUQuota``),
-    which affinity does not show."""
+    """Affinity set (a container cpuset, a NUMA binding), else the host count, capped by the cgroup quotas
+    (``docker --cpus``, a Kubernetes CPU limit, a systemd ``CPUQuota``), which affinity does not show."""
     count = max(1, len(os.sched_getaffinity(0))) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
     quota = _cgroup_cpu_quota()
     return count if quota is None else min(count, quota)

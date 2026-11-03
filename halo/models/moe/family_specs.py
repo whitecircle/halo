@@ -1,8 +1,4 @@
-"""Every MoE family's facts, declared once as a frozen :class:`MoEFamilySpec`.
-
-The EP layer of a family points at its spec (``FAMILY``); offline tools, config writers, weight sync and loaders
-read the same spec by ``config.model_type`` without importing the EP package.
-"""
+"""Every MoE family's facts, declared once as a frozen :class:`MoEFamilySpec` and read by ``config.model_type``."""
 
 from __future__ import annotations
 
@@ -18,12 +14,8 @@ GLU_PROJECTIONS: tuple[str, ...] = ("gate_up_proj", "gate_proj", "up_proj", "dow
 
 @dataclass(frozen=True)
 class NativeBalancingSlot:
-    """A family's checkpoint-exported balancing slot.
-
-    ``attrs`` are the dotted paths the slot answers to: the live module's and, where they differ, the hub's.
-    ``config_flag`` is the field an engine reads to decide whether to apply the tensor at all (LFM-2's
-    ``use_expert_bias``), ``None`` where the slot is unconditional.
-    """
+    """``attrs`` are the dotted paths the slot answers to, live and hub. ``config_flag`` is the field an engine reads
+    to decide whether to apply the tensor at all (LFM-2's ``use_expert_bias``)."""
 
     attrs: tuple[str, ...]
     config_flag: str | None = None
@@ -31,10 +23,9 @@ class NativeBalancingSlot:
 
 @dataclass(frozen=True, eq=False)
 class MoEFamilySpec:
-    """One MoE family's facts. Identity-compared: each family has exactly one spec constant."""
+    """Identity-compared, as each family has exactly one spec constant."""
 
-    # Every ``config.model_type`` its checkpoints ship under: the family's own first, then the composite wrappers
-    # and sibling spellings that carry it.
+    # The family's own first, then the composite wrappers and sibling spellings that carry it.
     model_types: tuple[str, ...]
     balancing_slot: NativeBalancingSlot | None = None
     # No pinned engine reads transformers' serialization of this config, so exports carry the source repo's
@@ -45,7 +36,7 @@ class MoEFamilySpec:
     expert_layout: ExpertLayout = ExpertLayout()
     # Every expert-weight attribute the EP layer may hold across its layouts (fused, separate, ETP).
     expert_weight_roots: tuple[str, ...] = GLU_PROJECTIONS
-    # Attribute spellings the HF block may hold its expert container and shared expert under, tried in order.
+    # Tried in order.
     experts_container_attrs: tuple[str, ...] = ("experts",)
     shared_expert_attrs: tuple[str, ...] = ()
     # Reduction axis of the fused expert tensors as the family writes them: -1 = ``F.linear`` ``[E, N, K]``.
@@ -56,19 +47,18 @@ class MoEFamilySpec:
     supports_fp32_non_ep_params: bool = True
     supports_routing_replay: bool = True
     supports_gradient_checkpointing: bool = True
-    # Why no online weight sync into the family's served model is validated; ``None`` where it is.
+    # Why no online weight sync into the family's served model is validated.
     weight_sync_refusal: str | None = None
-    # Why the family runs eager attention only; ``None`` where its class's declared backends all run.
+    # Why the family runs eager attention only.
     eager_only_attention: str | None = None
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
     # one causal sequence.
     dense_packing_leaks: bool = False
     # The sequence mixer its forward reaches with no segment marker, so it carries every document of a
-    # multi-document row into the next on every backend, named for the refusal; ``None`` where none does.
+    # multi-document row into the next on every backend, named for the refusal.
     unmarked_sequence_mixer: str | None = None
 
     def to_hub_key(self, key: str) -> str:
-        """``key`` with the first ``export_key_renames`` pair it contains applied once."""
         for module_spelling, hub_spelling in self.export_key_renames:
             if module_spelling in key:
                 return key.replace(module_spelling, hub_spelling, 1)
@@ -169,8 +159,7 @@ INKLING = MoEFamilySpec(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),
 )
-# GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming
-# entries by tests/cpu/parallelism/test_laguna_export_key_renames.py.
+# GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming entries.
 LAGUNA = MoEFamilySpec(
     model_types=("laguna",),
     expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, SEPARATE_GLU_PROJECTIONS),
@@ -273,18 +262,15 @@ _SPECS_BY_MODEL_TYPE = _index_by_model_type(MOE_FAMILY_SPECS)
 
 
 def find_moe_family_spec(model_type: str | None) -> MoEFamilySpec | None:
-    """The spec claiming ``model_type``, or ``None``."""
     return _SPECS_BY_MODEL_TYPE.get(model_type or "")
 
 
 def moe_model_types() -> frozenset[str]:
-    """Every ``config.model_type`` some family spec claims."""
     return frozenset(_SPECS_BY_MODEL_TYPE)
 
 
 def find_moe_family_spec_for_config(config) -> MoEFamilySpec | None:
-    """The spec claiming any level of ``config``: the wrapper's ``model_type`` first, then its text sub-config's,
-    where a multimodal checkpoint declares the MoE family."""
+    """The wrapper's ``model_type`` first, then its text sub-config's, where a multimodal checkpoint declares it."""
     for source in config_sources(config):
         if spec := find_moe_family_spec(getattr(source, "model_type", None)):
             return spec
@@ -292,46 +278,38 @@ def find_moe_family_spec_for_config(config) -> MoEFamilySpec | None:
 
 
 def wraps_experts(config, *, ep_layers_requested: bool) -> bool:
-    """Whether the run replaces this model's expert FFN with an EP layer.
-
-    ``ep_layers_requested`` is the run's intent (``ParallelismConfig.needs_ep_layers``: EP distribution or
-    grouped GEMM); only a family with a spec has a layer to put in place (Mixtral keeps the stock experts).
-    """
+    """Only a family with a spec has an EP layer to put in place (Mixtral keeps the stock experts)."""
     return ep_layers_requested and has_routed_experts(config) and find_moe_family_spec_for_config(config) is not None
 
 
 @lru_cache(maxsize=1)
 def expert_weight_roots() -> frozenset[str]:
-    """Every expert-weight attribute root a family declares."""
     return frozenset(root for spec in MOE_FAMILY_SPECS for root in spec.expert_weight_roots)
 
 
 @lru_cache(maxsize=1)
 def shared_expert_attrs() -> frozenset[str]:
-    """Every shared-expert attribute a family declares: replicated, and free to name its raw parameters like the
-    routed ones (Inkling's ``shared_experts.gate_proj``), so an expert-weight grouping leaves it out."""
+    """Replicated, and free to name raw parameters like the routed ones (Inkling's ``shared_experts.gate_proj``), so an
+    expert-weight grouping leaves it out."""
     return frozenset(attr for spec in MOE_FAMILY_SPECS for attr in spec.shared_expert_attrs)
 
 
 @lru_cache(maxsize=1)
 def experts_container_attrs() -> tuple[str, ...]:
-    """Every expert-container attribute a family declares, longest first so a matcher trying them in order never
-    shadows a longer spelling with one it contains."""
+    """Longest first, so a matcher trying them in order never shadows a longer spelling with one it contains."""
     attrs = {attr for spec in MOE_FAMILY_SPECS for attr in spec.experts_container_attrs}
     return tuple(sorted(attrs, key=lambda attr: (-len(attr), attr)))
 
 
 @lru_cache(maxsize=1)
 def per_expert_layouts() -> tuple[tuple[str, str, str], ...]:
-    """Every ``(gate, up, down)`` per-expert hub spelling a family declares, deduplicated: what a fused-to-per-expert
-    conversion may emit and what the lazy loader may fuse back."""
+    """What a fused-to-per-expert conversion may emit and what the lazy loader may fuse back."""
     return tuple(dict.fromkeys(keys for spec in MOE_FAMILY_SPECS if (keys := spec.expert_layout.per_expert_keys)))
 
 
 @lru_cache(maxsize=1)
 def per_expert_hub_model_types() -> tuple[str, ...]:
-    """The ``model_type`` spellings, sorted, whose family declares a per-expert hub spelling: what
-    ``unfuse_moe_experts.py`` may convert."""
+    """What ``unfuse_moe_experts.py`` may convert."""
     return tuple(
         sorted(mt for spec in MOE_FAMILY_SPECS if spec.expert_layout.per_expert_keys for mt in spec.model_types)
     )
@@ -339,11 +317,8 @@ def per_expert_hub_model_types() -> tuple[str, ...]:
 
 @lru_cache(maxsize=1)
 def per_expert_fusion_map() -> dict[str, tuple[str, int]]:
-    """``{"<name>.weight": (fusion_group, position)}`` over every per-expert hub spelling, halves by position.
-
-    Keyed by projection name across the roster, so two families spelling one name at different positions raise:
-    the lazy load would otherwise fuse one family's gate/up halves swapped, at identical shapes.
-    """
+    """``{"<name>.weight": (fusion_group, position)}``. Two families spelling one name at different positions raise, as
+    the lazy load would fuse one family's gate/up halves swapped, at identical shapes."""
     fusion: dict[str, tuple[str, int]] = {}
     claimed_by: dict[str, str] = {}
     for spec in MOE_FAMILY_SPECS:

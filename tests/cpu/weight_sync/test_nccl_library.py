@@ -1,10 +1,5 @@
 #!/usr/bin/env python
-"""The ctypes libnccl binding rank 0 of a vLLM weight-transfer group calls through: each library path is
-loaded and typed once, a failed call raises with NCCL's own error string, and a dtype NCCL cannot carry
-is refused before it reaches the wire.
-
-    python tests/cpu/weight_sync/test_nccl_library.py
-"""
+"""The ctypes libnccl binding rank 0 of a vLLM weight-transfer group calls through."""
 
 import pytest
 import torch
@@ -16,8 +11,6 @@ _NCCL_INVALID_ARGUMENT = 4
 
 
 class _FakeFunction:
-    """A libnccl symbol: records its calls and answers with ``result``."""
-
     def __init__(self, result=0):
         self.result = result
         self.calls: list[tuple] = []
@@ -42,7 +35,6 @@ class _FakeLibrary:
 
 @pytest.fixture
 def loaded(monkeypatch) -> list[tuple[str, _FakeLibrary]]:
-    """Every ``ctypes.CDLL`` load as ``(path, library)``, with the per-path cache emptied around the test."""
     loads: list[tuple[str, _FakeLibrary]] = []
 
     def cdll(path):

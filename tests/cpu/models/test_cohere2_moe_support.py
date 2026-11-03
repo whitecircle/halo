@@ -1,13 +1,5 @@
-"""Cohere2 MoE (Command A+) family contract: registrations, routing parity, balancing, CP rotary,
-packing isolation. The head-path logit scale is pinned with the other transform families in
-``tests/cpu/models/test_head_transform.py`` and ``tests/cpu/parallelism/test_pp_head_transform.py``.
-
-The family is native in transformers 5.14 (``cohere2_moe`` text backbone; the Command A+ checkpoint
-wraps it as ``cohere2_vision``). Its forward carries ``position_ids`` both into mask construction
-and through layer kwargs to the attention interface, so packing isolates WITHOUT a toolkit patch —
-the spy test here is the defect pin in reverse: it fails if transformers drops that plumbing, which
-is the signal to add a ``PositionIdsInjectingRegistry`` patch like Mistral4/Zaya.
-"""
+"""Cohere2 MoE (Command A+) family contract. The head-path logit scale is pinned with the other transform families in
+``tests/cpu/models/test_head_transform.py`` and ``tests/cpu/parallelism/test_pp_head_transform.py``."""
 
 from __future__ import annotations
 
@@ -72,7 +64,7 @@ def test_registrations():
     )
     assert EPCohere2MoELayer.SUPPORTS_BIAS_BALANCING
     assert EPCohere2MoELayer._supports_transient_balancing_bias
-    assert EPCohere2MoELayer.FAMILY.balancing_slot is None  # no exported slot in the family
+    assert EPCohere2MoELayer.FAMILY.balancing_slot is None
     assert not EPCohere2MoELayer.SEVERS_AUX_LOSS  # the wrapper calls the real gate module
     assert EPCohere2MoELayer.FAMILY.supports_routing_replay
     assert EPCohere2MoELayer.FAMILY.supports_gradient_checkpointing
@@ -91,8 +83,7 @@ def test_model_type_registry_resolves_both_spellings():
     [("sigmoid", True), ("sigmoid", False), ("softmax", True)],
 )
 def test_route_matches_hf_router(expert_selection_fn, norm_topk_prob):
-    """The wrapper's re-derived selection and gating must reproduce ``Cohere2MoeTopKRouter``
-    exactly: top-k on the RAW logits, activation over only the selected scores."""
+    """Top-k on the raw logits, activation over only the selected scores."""
     _block, layer = _wrapped_block(expert_selection_fn=expert_selection_fn, norm_topk_prob=norm_topk_prob)
     torch.manual_seed(3)
     hidden = torch.randn(11, TINY_COHERE2_MOE_CONFIG["hidden_size"])
@@ -116,9 +107,7 @@ def test_output_scale_follows_the_combination_strategy():
 
 
 def test_balancing_auto_resolves_none_and_transient_is_the_opt_in():
-    """No exported slot anywhere in the family: ``auto`` must land on ``none`` (never silently on an
-    unexportable bias), adoption must be impossible, and ``enable_bias_balancing`` must yield the
-    transient side-buffer that only the explicit ``bias_update_transient`` opts into."""
+    """``auto`` must not pick an unexportable bias; only ``bias_update_transient`` opts into the side-buffer."""
     model = _tiny_model()
     layer = EPCohere2MoELayer(model.model.layers[0].mlp, single_process_ep_config(E)).cpu()
     model.model.layers[0].mlp = layer
@@ -134,14 +123,12 @@ def test_balancing_auto_resolves_none_and_transient_is_the_opt_in():
 
 
 def test_balancing_bias_perturbs_selection_only():
-    """A large bias on one expert must force it into every selection while the gate weights stay the
-    unbiased activation of the selected raw scores."""
     _block, layer = _wrapped_block()
     layer.enable_bias_balancing()
 
     torch.manual_seed(5)
     logits = torch.randn(9, E)
-    logits[:, 3] = logits.min() - 10.0  # never picked naturally — the forced pick cannot be vacuous
+    logits[:, 3] = logits.min() - 10.0  # never picked naturally, so the forced pick cannot be vacuous
     natural, _ = layer.route_tokens_to_experts(logits)
     assert not (natural == 3).any()
 
@@ -155,15 +142,14 @@ def test_balancing_bias_perturbs_selection_only():
 
 
 def test_cp_rotary_matches_hf_interleaved_rope():
-    """The CP wrapper's fp32 interleaved rotary must reproduce the modeling's
-    ``apply_rotary_pos_emb`` bit-for-bit in bf16 (BSHD wrapper layout vs BHSD HF layout)."""
+    """Bit-for-bit in bf16 (BSHD wrapper layout vs BHSD HF layout)."""
     batch, seq, heads, dim = 2, 6, 4, 8
     torch.manual_seed(7)
     q = torch.randn(batch, seq, heads, dim, dtype=torch.bfloat16)
     k = torch.randn(batch, seq, heads, dim, dtype=torch.bfloat16)
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, dim, 2).float() / dim))
     freqs = torch.arange(seq).float()[:, None] * inv_freq[None, :]
-    emb = torch.repeat_interleave(freqs, 2, dim=-1).expand(batch, -1, -1)  # interleaved cos/sin
+    emb = torch.repeat_interleave(freqs, 2, dim=-1).expand(batch, -1, -1)
     cos, sin = emb.cos(), emb.sin()
 
     wrapper = object.__new__(Cohere2MoeUlyssesAttention)
@@ -185,8 +171,7 @@ def test_cp_rotary_identity_on_nope_layers():
 
 
 def test_nope_and_force_rope_flags_from_config():
-    """The attention attributes the CP wrapper's ``_use_rope`` reads: sliding layers carry the
-    window (RoPE), full layers carry None (NoPE), and ``force_rope`` stays off for sparse layers."""
+    """``_use_rope`` reads these: sliding layers carry the window (RoPE), full layers None (NoPE)."""
     model = _tiny_model()
     sliding, full = (layer.self_attn for layer in model.model.layers)
     assert sliding.sliding_window is not None
@@ -195,8 +180,7 @@ def test_nope_and_force_rope_flags_from_config():
 
 
 def test_tiny_save_load_roundtrip(tmp_path):
-    """Pins the per-expert<->fused converter the base gather relies on: a save writes per-expert
-    ``experts.{i}.*`` keys and a plain reload reproduces the logits exactly."""
+    """Pins the per-expert<->fused converter the base gather relies on."""
     model = _tiny_model()
     model.save_pretrained(tmp_path)
 
@@ -229,8 +213,6 @@ def test_finalize_recomputes_generic_rotary():
 
 
 class _SpyInterface:
-    """Records whether the attention interface received ``position_ids``, then delegates to eager."""
-
     def __init__(self):
         self.saw_position_ids: list[bool] = []
 
@@ -248,9 +230,8 @@ def _packed_inputs(doc_lens: tuple[int, ...], seed: int = 7) -> tuple[torch.Tens
 
 
 def test_attention_interface_receives_position_ids_natively():
-    """Cohere2 MoE needs NO position_ids patch: the model forward hands the tensor through layer
-    kwargs to every attention interface. If this fails, transformers dropped that plumbing and the
-    family needs the Mistral4/Zaya ``PositionIdsInjectingRegistry`` treatment."""
+    """Cohere2 MoE needs no position_ids patch. If this fails, transformers dropped that plumbing
+    and the family needs the Mistral4/Zaya ``PositionIdsInjectingRegistry`` treatment."""
     model = _tiny_model()
     input_ids, position_ids = _packed_inputs((5, 4, 3))
 
@@ -271,9 +252,6 @@ def test_attention_interface_receives_position_ids_natively():
 
 
 def test_dense_packed_isolation():
-    """On the dense (eager) path a packed row with per-document position_ids must reproduce the
-    second document's stand-alone logits; without the resets the same probe must leak, or the
-    isolation check proves nothing."""
     model = _tiny_model()
     doc = 6
     input_ids, position_ids = _packed_inputs((doc, doc))

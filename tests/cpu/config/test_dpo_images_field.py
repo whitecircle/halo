@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""DPO's ``images_field`` must reach TRL's vision route under the spelling TRL probes for.
-
-``is_vlm_run`` calls a run multimodal as soon as ``images_field`` is set, while TRL 1.14's
-``DPOTrainer`` decides its own vision branch by probing the first sample for an ``image``/``images``
-key and lists only those two among its signature columns. A hub dataset storing its images under any
-other name therefore has no way in without the alias: the knob does not parse, and parsed alone the
-column would still be pruned to text on a run the toolkit already calls multimodal.
-
-Driven through ``main()``: the point is that the alias lands BEFORE the dispatch, so the script's
-verdict and TRL's probe read the same dataset.
-
-Run: pytest tests/cpu/config/test_dpo_images_field.py
-"""
+"""DPO's ``images_field`` reaches TRL's vision route under the spelling TRL probes for. ``is_vlm_run`` calls a run
+multimodal off the field alone while TRL 1.14 probes for an ``image``/``images`` key, so the alias must land
+before the dispatch, or the column is pruned to text."""
 
 import sys
 import types
@@ -31,7 +21,7 @@ _TURNS = [{"role": "user", "content": "hi"}]
 
 
 class _TextPathReached(Exception):
-    """Raised by the stubbed preference prep — the run dispatched to the TEXT branch."""
+    """Raised by the stubbed preference prep: the run dispatched to the text branch."""
 
 
 class _VisionPathReached(Exception):
@@ -55,11 +45,8 @@ def _dataset(image_column: str | None) -> DatasetDict:
 
 
 def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
-    """Run ``preference/dpo.py:main()`` up to its data dispatch on a multimodal checkpoint.
-
-    Returns the ``{split: dataset}`` the vision branch handed on; raises ``_TextPathReached`` when
-    the run took the text branch instead, and any config-time guard error unchanged.
-    """
+    """Run ``preference/dpo.py:main()`` up to its data dispatch on a multimodal checkpoint; returns the ``{split:
+    dataset}`` the vision branch handed on, and raises ``_TextPathReached`` on the text branch."""
     module = _dpo_module()
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -93,7 +80,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(module, "load_preference_models", side_effect=load_models),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        # Both live in the shared data_setup helper the script calls — patch its globals.
+        # Both live in the shared data_setup helper the script calls, so patch its globals.
         mock.patch("halo.entrypoints.data_setup.prepare_preference_datasets", side_effect=_TextPathReached),
         mock.patch("halo.entrypoints.data_setup.log_dataset_examples", side_effect=capture),
         mock.patch("halo.entrypoints.script.install_log_tee"),
@@ -120,10 +107,8 @@ def _trl_sees_a_vision_dataset(dataset: Dataset) -> bool:
 
 
 def test_the_dispatch_and_trls_probe_agree_on_the_declared_column(tmp_path):
-    """The failure mode is a DISAGREEMENT. ``is_vlm_run`` calls the run multimodal off
-    ``images_field`` alone, so reaching the vision branch at all is the first verdict; TRL then takes
-    its own from the column names, and without the alias it reads the same rows as text and prunes
-    the images away. Both verdicts, on the one dataset the trainer receives."""
+    """``is_vlm_run`` and TRL's probe must agree on the one dataset the trainer receives; without the alias TRL
+    reads the rows as text and prunes the images."""
     reached = _run_dpo(tmp_path, _dataset("image_bytes"), "images_field: image_bytes\n")
 
     # The shared data_setup helper logs every non-None split, generate included.
@@ -135,14 +120,12 @@ def test_the_dispatch_and_trls_probe_agree_on_the_declared_column(tmp_path):
 
 
 def test_images_column_is_left_exactly_as_it_is(tmp_path):
-    """``images_field: images`` is already TRL's spelling — no rename, no copy."""
     reached = _run_dpo(tmp_path, _dataset("images"), "images_field: images\n")
 
     assert reached["train"].column_names == ["prompt", "chosen", "rejected", "images"]
 
 
 def test_text_dataset_without_the_knob_still_takes_the_text_path(tmp_path):
-    """Anti-vacuity: the alias is a no-op for the ordinary text preference run."""
     with pytest.raises(_TextPathReached):
         _run_dpo(tmp_path, _dataset(None))
 

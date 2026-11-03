@@ -1,12 +1,5 @@
 #!/usr/bin/env python
-"""Distributed offline GRPO training.
-
-Group-relative policy optimization over pre-computed completions and rewards — no live generation.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/grpo/offline.py \\
-        examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml
-"""
+"""Distributed offline GRPO: group-relative policy optimization over pre-computed completions and rewards."""
 
 from functools import partial
 
@@ -43,7 +36,6 @@ from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 
 def render_offline_grpo_row(row, tokenizer, tools_field: str | None):
-    """A row's ``prompt`` and ``completions`` message lists rendered to text (:func:`render_prompt_completions`)."""
     reject_image_content(row["prompt"], "offline GRPO field 'prompt'")
     for completion in row["completions"]:
         reject_image_content(completion, "offline GRPO field 'completions'")
@@ -67,12 +59,9 @@ def _load_kl_reference(
     peft_config,
     attn_default: str | None,
 ):
-    """The frozen KL reference the trainer cannot derive from ``policy``, or ``None`` where it can.
-
-    Full fine-tuning sweeps raw run-start scores once and restores them from each checkpoint.
-    Only native expert LoRA needs a live, unadapted base; PEFT can disable its adapters in place.
-    Load that base from the configured model, not a trained resume checkpoint.
-    """
+    """The frozen KL reference the trainer cannot derive from ``policy``, or ``None``. Full fine-tuning sweeps raw
+    run-start scores once; only native expert LoRA needs a live, unadapted base, loaded from the configured model, not
+    a trained resume checkpoint."""
     if not OfflineGRPOTrainer.requires_ref_model(policy, offline_grpo_config, context.parallelism_config, peft_config):
         return None
     return load_frozen_reference_model(
@@ -163,7 +152,7 @@ def main():
         **map_kwargs,
     )
 
-    # Only when the callback will consume it — the prep tokenizes the whole test split.
+    # Only when the callback will consume it: the prep tokenizes the whole test split.
     generate_dataset = (
         coordinated_map(
             ds["test"],

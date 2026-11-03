@@ -1,6 +1,4 @@
-"""Batch-time collation of vision-language preference rows for Bradley-Terry reward modeling: each side is
-one rendered conversation (:func:`~halo.data.pipeline.preferences.render_vlm_preference_row`), expanded
-through the processor into TRL's ``[chosen ⧺ rejected]`` layout."""
+"""Collation of vision-language preference rows for Bradley-Terry reward modeling."""
 
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -15,16 +13,9 @@ from halo.data.vlm_render import reject_over_length_vlm_batch, run_vlm_processor
 
 @dataclass
 class DataCollatorForVLMPreference(DataCollatorMixin):
-    """Collate rendered VLM preference rows into TRL's ``[chosen ⧺ rejected]`` reward batch.
-
-    One processor call covers the whole ``2 * batch_size`` row block, so ``input_ids`` /
-    ``attention_mask`` and every vision tensor come out aligned by construction. The row order is
-    load-bearing: ``RewardTrainer.compute_loss`` chunks the pooled scores in two and reads the first
-    half as chosen, so a swapped half inverts every preference without changing a shape.
-
-    Both sides of a pair render the same prompt and therefore the same images, so the per-row image
-    lists repeat once per half, matching the text block they feed.
-    """
+    """Collate into TRL's ``[chosen ⧺ rejected]`` batch. One processor call covers the whole ``2 * batch_size`` block,
+    so text and vision tensors align by construction. The order is load-bearing: ``RewardTrainer.compute_loss`` reads
+    the first half as chosen, so a swap inverts every preference without changing a shape."""
 
     processor: ProcessorMixin | None = None
     max_length: int | None = None
@@ -42,8 +33,7 @@ class DataCollatorForVLMPreference(DataCollatorMixin):
         per_row_images = [list(example.get("images") or []) for example in examples]
 
         batch = dict(run_vlm_processor(self.processor, texts, per_row_images + per_row_images, padding=True))
-        # The dataset map already drops rows whose text alone is over budget; this is the backstop
-        # for rows that image expansion pushes over it.
+        # The dataset map drops rows whose text alone is over budget; this catches rows image expansion pushes over it.
         reject_over_length_vlm_batch(batch, self.max_length, "preference batch")
         if MARGIN_COLUMN in examples[0]:
             batch[MARGIN_COLUMN] = torch.tensor([example[MARGIN_COLUMN] for example in examples], dtype=torch.float)

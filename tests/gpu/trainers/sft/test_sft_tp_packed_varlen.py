@@ -1,22 +1,8 @@
 #!/usr/bin/env python
-"""Packed SFT under TP2: each document's varlen bounds reach the TP-sharded attention on both ranks, and bind it.
+"""Packed SFT under TP2: each document's varlen bounds reach the TP-sharded attention on both ranks and bind it.
 
-The packing collator the factory builds for a flash backend hands the model the documents' cumulative lengths
-(``cu_seq_lens_q`` / ``max_length_q``), and under TP each rank's attention runs its own heads over the same packed
-row, so both ranks have to receive the same bounds. On Qwen3-0.6B at ``tp_size=2``, through
-``DistributedSFTTrainer`` with the factory's packing collator:
-
-  * every forward of the first decoder layer's attention receives ``cu_seq_lens_q`` and ``max_length_q``, the same
-    on both TP ranks, describing several documents and ending at the row's token count;
-  * on the first batch the model trained on, the logits under its own bounds repeat bit for bit, and moving one inner
-    document boundary by one token changes them: the kernel reads the bounds rather than attending across the row.
-
-The trainer is built as ``scripts/training/sft.py`` builds it: rows tokenized as the script tokenizes a rendered
-conversation and packed by its packing pass (``coordinated_pack``), so each row carries the ``seq_lengths`` the
-collator bounds its documents by, and TRL's own packing and dataset preparation turned off
-(``disable_trl_dataset_prep``). TRL's default "bfd" packing turns on its ``padding_free``, which refuses the collator.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_tp_packed_varlen.py
+Built as ``scripts/training/sft.py`` builds it, with TRL's packing off (``disable_trl_dataset_prep``): TRL's default
+"bfd" packing turns on its ``padding_free``, which refuses the collator.
 """
 
 import torch
@@ -39,14 +25,14 @@ SEED = 42
 STEPS = 2
 MAX_LENGTH = 2048
 _VARLEN_KEYS = ("cu_seq_lens_q", "max_length_q")
-# The collated model inputs the replay feeds back. transformers' flash path takes handed-over bounds only with
-# ``max_length_q/k`` beside them (host ints); without them it re-derives the bounds from ``position_ids``.
+# transformers takes handed-over bounds only with ``max_length_q/k`` beside them; without them it re-derives from
+# ``position_ids``.
 _BATCH_KEYS = ("input_ids", "position_ids", "cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k")
 
 
 def _shift_inner_boundary(batch: dict) -> dict:
-    """``batch``'s varlen set with its first inner document boundary one token later, the longest document re-read
-    so the kernel still covers every one."""
+    """The first inner document boundary one token later, the longest document re-read so the kernel still covers every
+    one."""
     shifted = batch["cu_seq_lens_q"].clone()
     shifted[1] += 1
     longest = int(shifted.diff().max())

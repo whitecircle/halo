@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""The online arm's share of the sampler-logprob preflight: a sequence-level IS mode, and VESPO's
-sequence weight in any mode, sum the per-token log-ratios, so a nucleus-renormalized reference is
-refused for them exactly as for the env trainer's geometric band.
-
-TRL's ``sequence_mask`` (its default) multiplies the sequence loss by ``exp(Σ(old − sampling))``.
-Against vLLM ``processed_logprobs`` with ``top_p < 1`` every uncertain token's sampling logprob is
-renormalized over its nucleus — lifted — so the sum drives the ratio toward 0, and ``sequence_mask``
-only zeroes ratios ABOVE the cap: the run stalls with no error. The gate is the CONSUMER ("sums
-per-token log-ratios over a sequence"), not one trainer's knob, and the RLVR script feeds it from the
-IS mode and the loss. Each refusal points each arm at the remedy it honors.
-
-    python tests/cpu/grpo/test_online_sampler_reference_gate.py
-"""
+"""The online arm's sampler-logprob preflight. A nucleus-renormalized reference lifts each token's sampling logprob,
+so a sequence-level IS mode or VESPO, which sum the log-ratios, drive the ratio to 0 and the run stalls silently."""
 
 import ast
 import re
@@ -37,7 +26,6 @@ ENV_SCRIPT = REPO_ROOT / "scripts/training/grpo/environmental.py"
 
 
 def _preflight_argument(script, name: str = "sequence_ratio_active") -> str:
-    """The source of the ``name=`` argument the script feeds the preflight, from its own AST."""
     for node in ast.walk(ast.parse(script.read_text())):
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_sampler_logprob_reference":
             for keyword in node.keywords:
@@ -70,8 +58,8 @@ def nucleus_server():
     ],
 )
 def test_the_sequence_sum_follows_the_mode_the_loss_and_the_correction_switch(correction, mode, loss_type, expected):
-    """VESPO skips TRL's per-token IS multiply and folds the log of every token's ratio into one sequence
-    weight, so it sums in either token mode TRL lets it run; with the correction off TRL hands it no ratio."""
+    """VESPO skips TRL's per-token IS multiply and folds every token's log-ratio into one sequence weight, so it sums
+    in either token mode; with the correction off TRL hands it no ratio."""
     grpo_args = types.SimpleNamespace(
         vllm_importance_sampling_correction=correction, vllm_importance_sampling_mode=mode, loss_type=loss_type
     )
@@ -79,8 +67,7 @@ def test_the_sequence_sum_follows_the_mode_the_loss_and_the_correction_switch(co
 
 
 def test_vespo_folds_every_tokens_engine_ratio_into_one_sequence_weight():
-    """The premise behind counting VESPO, read off the installed TRL: a nucleus-lifted sampling reference
-    (each token's ratio a little under 1) shrinks the whole sequence's weight with its length."""
+    """The premise behind counting VESPO: a nucleus-lifted reference shrinks the sequence's weight with its length."""
     advantages, log_ratio, mask = torch.ones(1, 1), torch.zeros(1, 64), torch.ones(1, 64)
     lifted = GRPOTrainer.get_gamma_weights(advantages, log_ratio, mask, torch.full((1, 64), 0.8))
     exact = GRPOTrainer.get_gamma_weights(advantages, log_ratio, mask, torch.ones(1, 64))
@@ -95,16 +82,15 @@ def test_a_nucleus_reference_is_refused_for_any_sequence_summing_consumer(nucleu
         )
     message = str(excinfo.value)
     assert "vllm_importance_sampling_mode" in message and "isr_geo_band" in message, message
-    # A token-level consumer takes the ratio per token: the lift cancels nothing, so it passes.
+    # A token-level consumer takes the ratio per token, so the lift cancels nothing and it passes.
     _verify_sampler_logprob_reference_on_rank0(
         VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=False
     )
 
 
 def test_both_refusals_point_each_arm_at_the_remedy_it_honors(nucleus_server):
-    """Online GRPO takes the ratio per token through TRL's mode, under any loss but VESPO. The environmental
-    correction is per token in every mode and loss its gates accept and refuses the others (``token_mask`` and
-    ``vespo`` among them), so there the remedy is dropping the ``isr_*`` stages, the only consumers that sum."""
+    """Online GRPO takes the ratio per token under any loss but VESPO. The environmental correction is per token in
+    every mode and loss its gates accept, so its remedy is to drop the ``isr_*`` stages, the only ones that sum."""
     per_arm = re.compile(
         r"on online GRPO a token_\* vllm_importance_sampling_mode with a loss_type other than vespo; on the "
         r"environmental arm[^;.]*drop isr_geo_band_min/max and isr_opsm_delta"
@@ -141,8 +127,7 @@ def test_the_collective_form_takes_the_consumer_flag(nucleus_server):
     ids=["other-failure", "refusal"],
 )
 def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error, message):
-    """Every rank raises ``ValueError``; a failure other than the preflight's own refusal keeps its type in the
-    text (``KeyError('url')`` alone reads ``'url'``), and rank 0 chains the original."""
+    """A failure other than the preflight's refusal keeps its type in the text; ``KeyError('url')`` reads ``'url'``."""
 
     def fail(*args):
         raise error
@@ -163,8 +148,7 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
 
 
 def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():
-    """The script must derive the flag from the config, not pin it: a pinned False leaves TRL's
-    default ``sequence_mask`` running against a renormalized reference unchecked."""
+    """A pinned False leaves TRL's default ``sequence_mask`` running against a renormalized reference unchecked."""
     assert _preflight_argument(RLVR_SCRIPT) == "DistributedOnlineGRPOTrainer.sums_sequence_logratio(grpo_config)"
 
 
@@ -179,10 +163,8 @@ def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():
     ids=["neither", "geo_band_only", "opsm_only", "veto_only"],
 )
 def test_the_env_script_arms_the_gate_for_every_sequence_summing_consumer(knobs, expected):
-    """OPSM sums the per-token log-ratios over a trajectory exactly as the geometric band does
-    (``apply_opsm`` thresholds ``|mean log-ratio|``), so a nucleus-renormalized reference biases it the
-    same way. The env script's flag is evaluated from its own source: an expression naming only the
-    geometric band leaves an OPSM-only run's reference unchecked."""
+    """OPSM sums the per-token log-ratios as the geometric band does (``apply_opsm`` thresholds ``|mean log-ratio|``),
+    so an expression naming only the band leaves an OPSM-only run's reference unchecked."""
     async_config = AsyncRolloutConfig(**knobs)
     assert eval(_preflight_argument(ENV_SCRIPT), {"async_config": async_config}) is expected  # noqa: S307
 
@@ -227,8 +209,7 @@ def test_each_script_feeds_the_preflight_its_own_sampler_filters(script, expecte
     ],
 )
 def test_the_isr_bounds_are_refused_at_parse(knobs, match):
-    """A bad bound fails before the model loads, and a lone upper band bound never reaches the sampler
-    preflight reading as no sequence consumer."""
+    """A lone upper band bound must not reach the sampler preflight reading as no sequence consumer."""
     with pytest.raises(ValueError, match=match):
         AsyncRolloutConfig(**knobs)
 

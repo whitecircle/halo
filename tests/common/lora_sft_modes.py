@@ -1,9 +1,5 @@
-"""The LoRA SFT rows: adapters trained on one model under one two-rank parallel shape through the
-production adapter path (:func:`~tests.common.sft_modes.run_sft_mode`), then checked on the adapters: only
-they train and every one moves, and per row a save reloads to them on a fresh unsharded base, the save
-restores onto the zeroed live adapters (the resume seam's key remap), or a 25-step run's loss falls window
-over window.
-"""
+"""The LoRA SFT rows: adapters on one model under one two-rank shape through the production path, then checked on the
+adapters."""
 
 import os
 from collections.abc import Mapping
@@ -42,8 +38,7 @@ WORLD_SIZE = 2
 
 @dataclass(frozen=True)
 class LoraModel:
-    """A checkpoint the rows train: its attention kernel, the modules LoRA targets, and its SFT arguments over
-    :data:`~tests.common.sft_modes.BASE_SFT_ARGS`."""
+    """A checkpoint the rows train: attention kernel, LoRA target modules, and SFT arguments over ``BASE_SFT_ARGS``."""
 
     name: str
     attn_implementation: str
@@ -70,8 +65,7 @@ MODELS = {
         {"learning_rate": 2e-4, "max_length": 2048},
     ),
 }
-# ``ParallelismConfig`` kwargs per mode, on WORLD_SIZE ranks. ``dp_stock_experts`` is plain data parallelism with
-# a MoE's experts left on the stock modules (no grouped-GEMM EP layers), the one MoE shape QLoRA loads under.
+# ``dp_stock_experts`` leaves a MoE's experts on the stock modules, the one MoE shape QLoRA loads under.
 MODES = {
     "ep": {"ep_size": 2},
     "ep_cp": {"ep_size": 2, "cp_size": 2},
@@ -83,9 +77,8 @@ MODES = {
 
 
 def _loss_window_checks(trainer) -> dict[str, bool]:
-    """The step losses in 5-step window means: the last below the first and none above 1.5x the first; and the
-    last step under the language-model band's ceiling, above the uniform baseline (ln of the vocabulary, about
-    12), so only a late blow-up fails it."""
+    """5-step window means: last below first, none above 1.5x first; the last step under the LM band's ceiling, so only
+    a late blow-up fails."""
     losses = step_losses(trainer)
     windows = [sum(losses[start : start + 5]) / 5 for start in range(0, len(losses) - 4, 5)]
     log(f"  5-step window means: {[f'{window:.4f}' for window in windows]}")
@@ -99,9 +92,8 @@ def _loss_window_checks(trainer) -> dict[str, bool]:
 def _saved_adapter_checks(
     trainer, save_dir: str, trained: dict[str, torch.Tensor], model_name: str
 ) -> dict[str, bool]:
-    """COLLECTIVE: save the adapters; on rank 0, the files PEFT reloads are there, every saved key is a LoRA key
-    in its portable PEFT spelling, and a fresh unsharded base (quantized as the trained one was) reloads them to
-    their trained values."""
+    """COLLECTIVE: save the adapters; on rank 0, PEFT's files exist, keys are portable LoRA keys, and a fresh base
+    reloads them to trained values."""
     trainer.save_model(save_dir)
     barrier()
     rank = trainer.args.process_index
@@ -130,9 +122,8 @@ def _saved_adapter_checks(
 
 
 def _adapter_restore_checks(trainer, save_dir: str) -> dict[str, bool]:
-    """COLLECTIVE: the resume seam onto this run's live adapters, every one zeroed first. ``restore_adapters``
-    remaps the saved (portable) keys onto the live names, CP-wrapped under CP, and each live adapter must come
-    back equal to its saved tensor."""
+    """COLLECTIVE: the resume seam onto this run's zeroed live adapters; each must come back equal to its saved
+    tensor."""
     peft_model = unwrap(trainer.model)
     with torch.no_grad():
         for _, param in adapter_param_items(peft_model):
@@ -150,16 +141,16 @@ def _adapter_restore_checks(trainer, save_dir: str) -> dict[str, bool]:
 
 
 def _params4bit_checks(model) -> dict[str, bool]:
-    """A 4-bit run still holds bitsandbytes ``Params4bit`` weights after training: a loader or wrap that
-    de-quantized them trains a plain bf16 base under adapters, which QLoRA's memory claim rests on."""
+    """A 4-bit run still holds ``Params4bit`` weights after training; a de-quantizing wrap trains a plain bf16 base,
+    breaking QLoRA's memory claim."""
     quantized = sum(1 for param in model.parameters() if type(param).__name__ == "Params4bit")
     log(f"  Params4bit weights after training: {quantized}")
     return {"params4bit_kept": quantized > 0}
 
 
 def qlora_grouped_gemm_refusal(model_name: str, attn_implementation: str) -> dict[str, bool]:
-    """The QLoRA load of a MoE on the grouped-GEMM EP layers (the default ``use_grouped_gemm``) refused before any
-    weight is read, naming the knob that admits it."""
+    """The QLoRA load of a MoE on grouped-GEMM EP layers is refused before any weight is read, naming the knob that
+    admits it."""
     try:
         load_peft_model(
             "qlora",
@@ -176,8 +167,7 @@ def qlora_grouped_gemm_refusal(model_name: str, attn_implementation: str) -> dic
 def _adapter_checks(
     trainer, *, model_name: str, save_dir: str | None, resume: bool, convergence: bool, qlora: bool
 ) -> TrainerChecks:
-    """Read the built run's adapters (only they train) and return the checks to run after training: every adapter
-    moved, and the row's own checks."""
+    """Read the built run's adapters and return the checks to run after training."""
     peft_model = unwrap(trainer.model)
     trainable, why = assert_only_adapters_trainable(peft_model)
     log(f"  Only adapters trainable: {'PASS' if trainable else 'FAIL'} ({why})")
@@ -213,11 +203,8 @@ def run_lora_sft(
     save_reload: bool = False,
     resume: bool = False,
 ) -> dict:
-    """Train ``model`` under ``mode`` with LoRA on its target modules (on a 4-bit base with ``qlora``, on the
-    ``attn`` kernel when given), check its training loss against the language-model band and return the harness
-    result. ``convergence`` runs 25 steps on 256 samples and judges the loss curve; ``save_reload`` saves and
-    reloads the adapters; ``resume`` restores that save onto the run.
-    """
+    """Train ``model`` under ``mode`` with LoRA and return the harness result; ``convergence``, ``save_reload`` and
+    ``resume`` add their checks."""
     spec = MODELS[model]
     save_dir = os.path.join(shared_output_dir(ctx), "adapter") if save_reload else None
     suite = SFTSuite(

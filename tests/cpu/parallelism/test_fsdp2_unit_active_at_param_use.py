@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""Every parameter is used inside the forward of the FSDP2 unit that owns it — across the roster.
-
-FSDP2 unshards a unit's parameters in that unit's forward pre-hook. ``apply_fsdp2_per_layer`` picks
-the units, so a parameter whose module runs *before* its unit's forward opens is still a sharded
-DTensor at the call: ``aten.embedding`` (or ``aten.mm``) then raises "got mixed torch.Tensor and
-DTensor" at the first training step. The multimodal wrappers are the shape that exposes it: their
-``<Family>Model.forward`` embeds the ids itself and only then calls ``language_model``, so the unit
-holding ``embed_tokens`` has to be that model or an ancestor — bare and under a ``PeftModel``, whose
-attribute forwarding moves what ``model.model`` names. A tied embedding is reserved for the root unit
-and hides the defect, except where PEFT's ``modules_to_save`` copies untie it again, or where a family
-carries a second embedding table (Gemma 4's per-layer inputs) that is never tied.
-
-The check is structural and family-agnostic: record the ``fully_shard`` calls, derive each
-parameter's owning unit, run one real CPU forward, and require the owning unit to be on the forward
-stack whenever a module with parameters of its own is called. A unit of several decoder layers
-(``layers_per_unit``) is open from its first layer's forward to the end of its last's. The adapters go through the production
-seam (:func:`build_peft_config`), so the towers PEFT cannot adapt are excluded exactly as in a run.
-
-Run: pytest tests/cpu/parallelism/test_fsdp2_unit_active_at_param_use.py
-"""
+"""Every parameter is used inside the forward of the FSDP2 unit that owns it, across the roster. Earlier use raises
+"got mixed torch.Tensor and DTensor"; composites embedding ids expose it."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -144,8 +126,8 @@ _SIGLIP2_VISION = {
     "num_patches": 16,
     "patch_size": 4,
 }
-# Gemma 4's towers spell the attention projections as `Gemma4ClippableLinear` containers — the shape
-# stock LoRA cannot adapt — so this case covers the exclusion seam and the unit resolution together.
+# ``Gemma4ClippableLinear`` containers, which stock LoRA cannot adapt, so this covers the exclusion seam and unit
+# resolution together.
 _GEMMA4_VISION = {
     "hidden_size": 32,
     "intermediate_size": 64,
@@ -198,12 +180,8 @@ def _qwen3_vl_composite(tied: bool) -> Qwen3VLForConditionalGeneration:
 
 
 class _Composite(nn.Module):
-    """A composite whose text stack is a whole ``*ForCausalLM`` — the transformers-4 wrapper layout.
-
-    It embeds the ids itself and enters the decoder-layer backbone one level deeper than the roster's
-    composites, so the unit owning ``embed_tokens`` has to be found by ancestry, not by a
-    ``language_model`` spelling.
-    """
+    """The transformers-4 wrapper layout, so the unit owning ``embed_tokens`` is found by ancestry rather than a
+    ``language_model`` spelling."""
 
     def __init__(self, language_model: Qwen3ForCausalLM):
         super().__init__()
@@ -305,11 +283,7 @@ _FAMILIES = {
 
 
 def _owning_units(model: nn.Module, layers_per_unit: int) -> dict[int, tuple[nn.Module, ...]]:
-    """``id(parameter) -> the modules of the fully_shard unit that manages it``, from the recorded wrap calls.
-
-    A unit manages the parameters under its modules that no earlier unit took and that the call did
-    not pass as ignored — the rule ``fully_shard`` itself applies.
-    """
+    """The rule ``fully_shard`` itself applies: parameters under its modules no earlier unit took and not ignored."""
     calls: list[tuple[tuple[nn.Module, ...], IdentityParamSet]] = []
 
     def record(module, **kwargs):
@@ -335,7 +309,6 @@ def _owning_units(model: nn.Module, layers_per_unit: int) -> dict[int, tuple[nn.
 
 
 def _params_used_outside_their_unit(model: nn.Module, owner: dict[int, tuple[nn.Module, ...]]) -> list[str]:
-    """Run one forward and name every module called while the unit owning its parameters is not open."""
     units = {id(unit): unit for unit in owner.values()}
     open_units: list[int] = []
     violations: list[str] = []
@@ -374,12 +347,7 @@ def _params_used_outside_their_unit(model: nn.Module, owner: dict[int, tuple[nn.
 
 
 def _attention_lora(model: nn.Module, modules_to_save: list[str] | None) -> nn.Module:
-    """Attention LoRA on the projection names the family's decoder layers spell, through the run's seam.
-
-    A name is taken when an ``nn.Linear`` in a decoder layer's attention carries it — what a recipe
-    lists — and is then matched over the whole tree, so a tower spelling the same name as a container
-    PEFT cannot adapt (Gemma 4) reaches :func:`build_peft_config`'s exclusion as in a run.
-    """
+    """A tower spelling the same name as a container reaches :func:`build_peft_config`'s exclusion as in a run."""
     targets = sorted(
         {
             name.rsplit(".", 1)[-1]

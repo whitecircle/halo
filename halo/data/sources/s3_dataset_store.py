@@ -1,6 +1,5 @@
-"""Dataset trees on S3: the push, the cached load and the mirrored reads of their small control files. A
-push lands whole beside the destination and is promoted gates-last, so a complete copy exists at every
-instant; a load serves the local cache and falls back to the newest sealed push when the destination is torn."""
+"""Dataset trees on S3. A push lands whole beside the destination and is promoted gates-last, so a complete copy exists
+at every instant; a load serves the local cache and falls back to the newest sealed push."""
 
 import contextlib
 import copy
@@ -38,13 +37,12 @@ _PUSH_ID_RE = re.compile(r"^[0-9a-f]{8}/")
 _DATASET_DICT_GATE = "dataset_dict.json"
 _SPLIT_GATE_BASENAME = "state.json"
 
-# The control-file reads :func:`share_control_files` made for this launch: ``(found, payload)`` by (bucket, key).
+# ``(found, payload)`` by (bucket, key), from :func:`share_control_files`.
 _shared_control_reads: dict[tuple[str, str], tuple[bool, Any]] = {}
 
 
 def read_json_from_s3(bucket: str, key: str) -> Any:
-    """A small JSON control file (``metadata.json``, ``shard_index.json``) read through s3fs on the default
-    credential chain; ``FileNotFoundError`` for an absent key, other exceptions for an unreachable S3."""
+    """Through s3fs on the default chain; ``FileNotFoundError`` for an absent key, others for an unreachable S3."""
     fs = s3fs.S3FileSystem()
     fs.invalidate_cache()  # s3fs instances are cached; a stale dircache would serve a deleted key
     with fs.open(f"{bucket}/{key}", "r") as f:
@@ -52,7 +50,6 @@ def read_json_from_s3(bucket: str, key: str) -> Any:
 
 
 def _control_json_mirror_path(bucket: str, key: str) -> str:
-    """Local mirror path for an S3 control file, under the S3 dataset cache volume."""
     return os.path.join(HALO_S3_DATASET_CACHE_DIR, "control", f"{s3_cache_key(bucket, key)}.json")
 
 
@@ -73,13 +70,9 @@ def _write_control_json_mirror(bucket: str, key: str, payload: Any) -> None:
 
 
 def read_control_json_with_cache(bucket: str, key: str) -> Any:
-    """:func:`read_json_from_s3`, mirrored locally so a warm-cache relaunch survives an S3/SSO outage.
-
-    A live read refreshes the mirror; an absent key drops it and raises, so a re-push without the file
-    cannot keep serving it; any other failure serves the mirror with a warning, or re-raises without one.
-    A key :func:`share_control_files` read for this launch is served from a copy of that read, so no caller sees
-    another's edits.
-    """
+    """Mirrored locally so a warm-cache relaunch survives an S3/SSO outage. A live read refreshes the mirror; an absent
+    key drops it and raises, so a re-push without the file cannot keep serving it; any other failure serves the mirror
+    with a warning. A key :func:`share_control_files` read is served from a copy, so no caller sees another's edits."""
     if (bucket, key) in _shared_control_reads:
         found, payload = _shared_control_reads[(bucket, key)]
         if not found:
@@ -116,9 +109,8 @@ def read_control_json_with_cache(bucket: str, key: str) -> Any:
 
 
 def share_control_files(bucket: str, keys: list[str]) -> None:
-    """COLLECTIVE: read ``keys`` (:func:`read_control_json_with_cache`) on global rank 0 alone and serve every rank's
-    later reads of them this launch from that read; each node's local rank 0 mirrors it. A key rank 0 could not
-    read (an outage its mirror could not serve) is left to every rank's own read."""
+    """COLLECTIVE: read ``keys`` on global rank 0 alone and serve every rank's later reads this launch from it. A key
+    rank 0 could not read is left to every rank's own read."""
     for key in keys:  # a key rank 0 cannot read now must not serve an earlier call's read in this process
         _shared_control_reads.pop((bucket, key), None)
     reads = {}
@@ -140,27 +132,25 @@ def share_control_files(bucket: str, keys: list[str]) -> None:
 
 
 def download_dataset_tree(client: S3Client, full_key: str, local_path: str) -> None:
-    """Download the ``save_to_disk`` tree at ``full_key`` straight into ``local_path`` and open it there, so a tree
-    missing its load gates (a torn promote) raises ``FileNotFoundError`` before any cache publishes it."""
+    """Opened in place, so a tree missing its load gates (a torn promote) raises before any cache publishes it."""
     client.download_folder(full_key, local_path)
     load_from_disk(local_path)
 
 
 def _describe(dataset: Dataset | DatasetDict) -> str:
-    """``DatasetDict (train: N rows, ...)`` or ``Dataset (N rows)``, as the transfer records name a tree."""
     if isinstance(dataset, DatasetDict):
         return f"DatasetDict ({', '.join(f'{k}: {len(v)} rows' for k, v in dataset.items())})"
     return f"Dataset ({len(dataset)} rows)"
 
 
 def _push_scan_prefix(full_key: str) -> str:
-    """Listing prefix matching every pending push of this dataset (dot-prefixed sibling names)."""
+    """Matches every pending push of this dataset (dot-prefixed sibling names)."""
     parent, _, base = full_key.rpartition("/")
     return f"{parent}/{_PUSH_INFIX}{base}-" if parent else f"{_PUSH_INFIX}{base}-"
 
 
 def _own_pending_pushes(client: S3Client, full_key: str) -> list[dict[str, Any]]:
-    """Objects of THIS dataset's pending pushes only, never a hyphen-sibling dataset's (``_PUSH_ID_RE``)."""
+    """This dataset's only, never a hyphen-sibling dataset's (``_PUSH_ID_RE``)."""
     scan_prefix = _push_scan_prefix(full_key)
     return [
         obj for obj in client.list_prefix_objects(scan_prefix) if _PUSH_ID_RE.match(obj["Key"][len(scan_prefix) :])
@@ -180,8 +170,7 @@ def _latest_complete_push(client: S3Client, full_key: str) -> str | None:
 
 
 def _delete_pending_pushes(client: S3Client, full_key: str) -> None:
-    """Remove every pending push of this dataset once a promote completed, sentinel first (listing order), so
-    a crash mid-delete leaves a tree unsealed and never recovered from."""
+    """Sentinel first (listing order), so a crash mid-delete leaves a tree unsealed and never recovered from."""
     keys = [obj["Key"] for obj in _own_pending_pushes(client, full_key)]
     client.delete_keys(keys)
     if keys:
@@ -189,10 +178,9 @@ def _delete_pending_pushes(client: S3Client, full_key: str) -> None:
 
 
 def _promote_pushed_dataset(client: S3Client, push_key: str, full_key: str) -> None:
-    """Server-side copy of a sealed push onto the destination: existing gates deleted first, the bulk in
-    parallel, the split ``state.json`` gates after it and ``dataset_dict.json`` last, so the destination is
-    always the old tree, loudly unreadable, or the new tree; stale objects go only after the gates landed.
-    """
+    """Server-side copy: existing gates deleted first, the bulk in parallel, split ``state.json`` gates after it and
+    ``dataset_dict.json`` last, so the destination is always the old tree, loudly unreadable, or the new tree; stale
+    objects go after the gates landed."""
     push_prefix = f"{push_key}/"
     new_files: dict[str, int] = {}
     for obj in client.list_prefix_objects(push_prefix):
@@ -222,7 +210,7 @@ def _promote_pushed_dataset(client: S3Client, push_key: str, full_key: str) -> N
 
     bulk = [rel for rel in new_files if rel not in gate_set]
     parallel_s3_transfer(bulk, _copy_one, desc=f"Promoting {full_key}", show_progress=False)
-    for rel in split_gates:  # sequential and gate-ordered — the parallel bulk gives no ordering
+    for rel in split_gates:  # sequential and gate-ordered: the parallel bulk gives no ordering
         _copy_one(rel)
     if _DATASET_DICT_GATE in gate_set:
         _copy_one(_DATASET_DICT_GATE)
@@ -238,13 +226,9 @@ def push_dataset(
     subfolder: str | None = None,
     overwrite: bool = True,
 ) -> str:
-    """Save a Dataset/DatasetDict to S3, returning the S3 URI: upload beside the destination, seal, promote.
-
-    Never delete-destination-first: the generation CLIs push their accumulated results here every
-    checkpoint interval, so a crash anywhere leaves a complete copy at the destination or in the sealed
-    push :func:`load_dataset` falls back to. Raises FileExistsError for an existing dataset unless
-    ``overwrite=True``. One writer per destination at a time: concurrent pushers interleave promotes.
-    """
+    """Upload beside the destination, seal, promote; never delete the destination first, since generation CLIs push
+    here every checkpoint interval and a crash must leave a complete copy. Raises FileExistsError unless ``overwrite``.
+    One writer per destination at a time: concurrent pushers interleave promotes."""
     full_key = client.full_key(key, subfolder)
     s3_uri = client.s3_uri(key, subfolder)
 
@@ -291,10 +275,9 @@ def load_dataset(
     keep_in_memory: bool | None = None,
     use_cache: bool = True,
 ) -> Dataset | DatasetDict:
-    """Load a Dataset from S3 through the local cache keyed by md5(bucket/key) (:func:`serve_cached_tree`):
-    a complete cache is served without an S3 probe and re-downloaded when its content fingerprint no longer
-    matches live S3, or always with ``use_cache=False``. A torn destination is served from the newest sealed push.
-    """
+    """Through the local cache keyed by md5(bucket/key): a complete cache is served without an S3 probe and
+    re-downloaded when its fingerprint no longer matches live S3, or always with ``use_cache=False``. A torn
+    destination is served from the newest sealed push."""
     full_key = client.full_key(key, subfolder)
     s3_uri = client.s3_uri(key, subfolder)
     cache_path = os.path.join(HALO_S3_DATASET_CACHE_DIR, s3_cache_key(client.bucket, full_key), "dataset")
@@ -346,12 +329,10 @@ def load_dataset(
 def load_dataset_from_s3_uri(
     s3_uri: str, keep_in_memory: bool | None = None, use_cache: bool = True
 ) -> Dataset | DatasetDict:
-    """:func:`load_dataset` of a full S3 URI, the recommended entry point."""
     bucket, key = parse_s3_uri(s3_uri)
     return load_dataset(S3Client(bucket=bucket), key, keep_in_memory=keep_in_memory, use_cache=use_cache)
 
 
 def push_dataset_to_s3_uri(dataset: Dataset | DatasetDict, s3_uri: str, overwrite: bool = True) -> str:
-    """:func:`push_dataset` to a full S3 URI, the recommended entry point."""
     bucket, key = parse_s3_uri(s3_uri)
     return push_dataset(S3Client(bucket=bucket), dataset, key, overwrite=overwrite)

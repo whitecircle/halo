@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""The FA4 trainable-sink rescale is exact on both kernel entry points.
-
-``install_fa4_trainable_sink_rescale`` routes grad-requiring sinks through ``out * sigmoid(lse - sink)`` on
-the sink-less kernel, not the kernel's own sink backward, for the varlen kernel (packing / padding-free /
-padded batches) and the dense one (unpadded batches). Checks: the
-install is idempotent; a frozen sink is a bit-identical passthrough; the rescaled forward and the
-returned lse match the fused kernel; all four gradients (dq, dk, dv, d_sink) match an eager sink
-reference. Fails if the kernel's lse contract, its ``dlse`` backward path, or the wrapper's dispatch
-(frozen passthrough vs trainable rescale) breaks on either entry point.
-"""
+"""The FA4 trainable-sink rescale is exact on both kernel entry points: ``out * sigmoid(lse - sink)`` on the sink-less
+kernel matches the fused kernel and an eager sink reference."""
 
 import torch
 
@@ -18,8 +10,8 @@ from tests.common.numerics import max_abs_rel_err
 from tests.common.rank_log import log
 
 H, HKV, D, S, B = 8, 2, 64, 256, 2
-FWD_REL_TOL = 2e-2  # bf16 output: two roundings (kernel out, gate multiply) vs the fused kernel's one
-GRAD_REL_TOL = 6e-2  # bf16 dq/dk/dv/d_sink vs an fp32 eager reference
+FWD_REL_TOL = 2e-2  # bf16 output: two roundings (kernel out, gate multiply) vs the fused kernel's one.
+GRAD_REL_TOL = 6e-2  # bf16 dq/dk/dv/d_sink vs an fp32 eager reference.
 
 
 def _inputs(seed, *, dense: bool):
@@ -66,8 +58,7 @@ def _check_entry_point(cute, *, dense: bool) -> dict:
         wrapped = fn(q, k, v, **kwargs, learnable_sink=sink.detach())
         direct = fused(q, k, v, **kwargs, learnable_sink=sink.detach())
     checks[f"{label}_frozen_sink_bit_identical_passthrough"] = torch.equal(wrapped[0], direct[0])
-    # The trainable branch must return what the pinned kernel returns at the default ``return_lse``
-    # (this build always hands back ``(out, lse)``); a kernel bump that changes the arity fails here.
+    # This build always returns ``(out, lse)``; a kernel bump changing the arity fails here.
     checks[f"{label}_trainable_return_arity_matches_kernel"] = isinstance(
         fn(q, k, v, **kwargs, learnable_sink=sink), tuple
     ) is isinstance(direct, tuple)

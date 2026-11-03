@@ -1,12 +1,5 @@
 #!/usr/bin/env python
-"""The FSDP2 mixed-precision policy computes in the run's dtype and reduces in fp32 on request.
-
-``mixed_precision_policy`` computes in the dtype the trainer resolves off the training args and
-reduces in fp32 under ``fp32_reduce``; the wrap asks for that whenever ``fp32_grad_reduce`` or fp32
-master weights do. Both tables are pinned here.
-
-    python tests/cpu/parallelism/test_fsdp_mixed_precision_policy.py
-"""
+"""The FSDP2 mixed-precision policy computes in the run's dtype and reduces in fp32 on request."""
 
 from unittest.mock import patch
 

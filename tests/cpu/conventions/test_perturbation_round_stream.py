@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.on_policy_e2e.perturbation_round`` counts the stream a policy's sync must carry.
-
-The on-policy GPU rows push a perturbation through the trainer's sync and guard that it moved something the
-engine must load: expert tensors for a MoE policy (zero of them means no EP layer carried any), the moved
-tensors for a dense one. Which of the two applies is read off the checkpoint's config, so a dense policy
-driven through a body written for MoE (the single-process Environmental-GRPO rows) is not failed for having
-no experts, and a MoE policy whose experts no EP layer exposes still is.
-
-Run: python tests/cpu/conventions/test_perturbation_round_stream.py
-"""
+"""``tests.common.on_policy_e2e.perturbation_round`` counts the stream a policy's sync must carry: expert tensors
+for a MoE policy, the moved tensors for a dense one, read off the checkpoint's config."""
 
 from types import SimpleNamespace
 

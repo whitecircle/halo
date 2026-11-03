@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""The lazy loaders' key plan and the resume's :class:`ModuleLayoutView` read every tiny family's checkpoint
-alike: per live name the same disk keys (the fuser's per-expert stacks included) and bitwise-equal tensors.
-
-    python tests/cpu/model_loading/test_checkpoint_keys.py
-"""
+"""The lazy loaders' key plan and the resume's :class:`ModuleLayoutView` read every tiny family's checkpoint alike."""
 
 import functools
 import os
@@ -36,12 +32,12 @@ from tests.common.tiny_models import (
 
 
 def _backbone_key(key: str) -> str | None:
-    """A backbone checkpoint's spelling: no head, no ``model.`` level."""
+    """No head, no ``model.`` level."""
     return None if key.startswith("lm_head.") else key.removeprefix("model.")
 
 
 def _mistral3_legacy_key(key: str) -> str:
-    """The pre-5.0 Mistral3 hub layout, its text model's own ``model.`` level under ``language_model.``."""
+    """The pre-5.0 Mistral3 hub layout."""
     for current, legacy in (
         ("model.language_model.", "language_model.model."),
         ("model.vision_tower.", "vision_tower."),
@@ -53,7 +49,7 @@ def _mistral3_legacy_key(key: str) -> str:
     return key
 
 
-# Case → (tiny family, the class the shell is built as where not the family's own, a key respelling).
+# Case → (tiny family, shell class where not the family's own, a key respelling).
 CASES = {
     **{name: (family, None, None) for name, family in {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}.items()},
     **{name: (family, None, None) for name, family in TINY_MOE_VLM_FAMILIES.items()},
@@ -75,8 +71,8 @@ CASES = {
     },
     "mistral3[legacy-layout]": (TINY_MOE_VLM_FAMILIES["mistral3"], None, _mistral3_legacy_key),
 }
-# The one known divergence: a backbone checkpoint's per-expert keys never reach the fused target the lazy
-# fuser looks for (it is spelled without ``model.``), so coverage refuses the load; the resume plans them.
+# A backbone checkpoint's per-expert keys never reach the lazy fuser's target (spelled without ``model.``), so coverage
+# refuses; the resume plans them.
 DIVERGENT_CASE = "qwen3_moe[backbone-keys]"
 DIVERGENT_KEYS = frozenset(
     f"layers.{layer}.mlp.experts.{expert}.{projection}.weight"
@@ -88,7 +84,7 @@ DIVERGENT_KEYS = frozenset(
 
 @dataclass(frozen=True)
 class Engines:
-    """Each engine's disk keys per live name, the lazy plans behind them, and the names whose tensors differ."""
+    """Each engine's keys per live name, the plans behind them, and the names whose tensors differ."""
 
     live: tuple[str, ...]
     lazy: dict
@@ -119,7 +115,7 @@ def engines(case: str) -> Engines:
     with tempfile.TemporaryDirectory() as directory:
         _save_checkpoint(case, directory)
         config = AutoConfig.from_pretrained(directory, trust_remote_code=family.trust_remote_code)
-        # As the loaders do before the shell: a family patch may move a tensor out of the module state.
+        # A family patch may move a tensor out of the module state.
         apply_family_patches(config, "sdpa")
         shell = instantiate_on_meta(
             directory,
@@ -144,7 +140,7 @@ def engines(case: str) -> Engines:
 
     reads, view, view_tensors, last = [], {}, {}, ()
     for name, tensor in ModuleLayoutView(shell, list(weight_map)).items(lambda key: reads.append(key) or tensors[key]):
-        # A converted group reads all its sources before its first target; its further targets read none.
+        # A converted group reads all sources before its first target.
         last = tuple(sorted(reads)) or last
         reads.clear()
         view[name], view_tensors[name] = last, tensor
@@ -179,7 +175,7 @@ def test_both_engines_read_every_live_name_alike(case):
 
 @pytest.mark.parametrize("case", ["deepseek_v4", "glm5_next", "inkling_mm_model", "step3p7"])
 def test_vendor_namespace_families_plan_converted_keys(case):
-    """Anti-vacuity: these checkpoints really are in a spelling the live tree does not carry."""
+    """Anti-vacuity: the live tree does not carry this spelling."""
     assert any(plan.disk_key != plan.model_key for plan in engines(case).plans)
 
 

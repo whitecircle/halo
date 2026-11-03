@@ -55,7 +55,7 @@ from tests.common.training_checks import step_losses, training_run_checks
 
 # Each family's text model and the backend a load with the attention unset must resolve to.
 FAMILIES = {"paligemma": ("gemma", "sdpa"), "paligemma2": ("gemma2", "flex_attention")}
-# Each layout's ranks; fsdp-gc also trains with gradient checkpointing.
+# fsdp-gc also trains with gradient checkpointing.
 LAYOUTS = {"single": 1, "fsdp-gc": 2}
 SEED = 0
 STEPS = 5
@@ -65,7 +65,6 @@ LEARNING_RATE = 1e-3
 REACHED = 1e-4
 # fp32 loss on the resolved backend against eager on the same weights and batch.
 LOSS_RTOL = 1e-4
-# The in-vocabulary word a probe swaps in.
 SWAP_IN_WORD = "The"
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -116,7 +115,6 @@ def logits(model, batch: dict, **overrides) -> torch.Tensor:
 
 
 def movement(model, batch: dict, position: int, swap_in: int, **overrides) -> torch.Tensor:
-    """Per-position max logit change when the token at ``position`` is swapped for ``swap_in``."""
     swapped = batch["input_ids"].clone()
     swapped[0, position] = swap_in
     before = logits(model, batch, **overrides)
@@ -159,8 +157,7 @@ def mask_probe_checks(path: str, batch: dict, swap_in: int, device) -> tuple[dic
 
 
 def record_forwards(model) -> tuple[list, list]:
-    """Each training forward's ``labels`` (at the model's entry) and the ``token_type_ids`` its ``PaliGemmaModel``
-    receives."""
+    """Each training forward's ``labels`` and the ``token_type_ids`` its ``PaliGemmaModel`` receives."""
     labels, token_type_ids = [], []
     model.register_forward_pre_hook(
         lambda _module, _args, kwargs: labels.append(kwargs.get("labels")), with_kwargs=True

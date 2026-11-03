@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The launch-time probe of an external backend (a judge, a reward model, an environment's own
-service): rank 0 probes, every rank raises its verdict.
-
-The online and environmental GRPO scripts probe through ``verify_backend_on_rank0`` before the
-trainer exists. A probe on every rank would hit the backend world-size times, and a rank-0 raise
-alone would leave the peers waiting in the next collective; an ``async def`` verifier whose
-coroutine is never run would pass every launch without probing anything. So both scripts reach a
-backend only through the seam: no direct ``.verify()`` / ``.verify_backend()`` call on any rank.
-
-Run: pytest tests/cpu/config/test_backend_probe.py
-"""
+"""The launch-time probe of an external backend: rank 0 probes, every rank raises its verdict. A probe on every rank
+hits the backend world-size times, and a rank-0 raise alone leaves the peers waiting in the next collective."""
 
 import ast
 
@@ -56,8 +47,7 @@ def test_an_async_verifier_is_run_to_completion():
 
 @pytest.mark.parametrize("rank0_verdict", [None, "reward term 'judge' probe failed: 401 Unauthorized"])
 def test_a_peer_rank_skips_the_probe_and_raises_rank0s_verdict(monkeypatch, rank0_verdict):
-    """Off rank 0 the probe never runs, and the broadcast verdict decides alone: the peers raise
-    rank 0's message, word for word, or return with it."""
+    """Off rank 0 the probe never runs; the peers raise rank 0's message, word for word, or return with it."""
     sent = []
 
     def broadcast(value):
@@ -81,8 +71,6 @@ def test_a_peer_rank_skips_the_probe_and_raises_rank0s_verdict(monkeypatch, rank
 
 @pytest.mark.parametrize("script", _PROBING_SCRIPTS)
 def test_the_scripts_probe_their_backends_only_through_the_rank0_seam(script):
-    """A probe called directly runs on every rank: world-size requests against the backend, and a
-    failure raised on whichever ranks saw it while the others head into the next collective."""
     tree = ast.parse((REPO_ROOT / script).read_text(encoding="utf-8"))
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
     direct = [

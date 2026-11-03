@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The GRPO trainers weigh the full-logits loss plane against free device memory at construction.
-
-Without ``use_chunked_grpo_logprobs`` the loss forward holds ``rows × width × vocab`` logits at once; on
-a large-vocabulary model with long completions that alone outgrows the device, and the run OOMs at the
-first step after rollouts were already paid for. The guard raises when the plane cannot fit, warns when
-it takes a large share, and names the remedy either way.
-
-    python tests/cpu/grpo/test_full_logits_guard.py
-"""
+"""The GRPO trainers weigh the full-logits loss plane against free device memory at construction. Without
+``use_chunked_grpo_logprobs`` it can OOM at the first step, after rollouts were already paid for."""
 
 import ast
 import inspect
@@ -113,8 +106,7 @@ def test_a_plane_taking_most_of_the_free_memory_warns(free_memory, caplog):
     ("eval_strategy", "eval_on_start"), [("steps", False), ("no", True)], ids=["eval-strategy", "eval-on-start"]
 )
 def test_an_evaluating_run_weighs_the_wider_eval_chunk(free_memory, eval_strategy, eval_on_start):
-    """The eval loss forward chunks per_device_eval_batch_size rows: 1 train row fits in 1.5 GiB, the
-    4 eval rows (2 GiB) do not, and the refusal names the eval batch as the setting to lower."""
+    """1 train row fits in 1.5 GiB, the 4 eval rows (2 GiB) do not."""
     free_memory(int(1.5 * _GIB))
     host = _host(rows=1, eval_rows=4, eval_strategy=eval_strategy, eval_on_start=eval_on_start)
     with pytest.raises(RuntimeError, match=r"lower per_device_eval_batch_size \(4\)"):

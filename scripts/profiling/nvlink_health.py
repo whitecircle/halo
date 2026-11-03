@@ -49,9 +49,8 @@ HARD_ERROR_KEYS = (
     "Symbol Errors",
 )
 
-# FEC bin N = codewords that needed N symbol corrections. Deep bins mean individual codewords are
-# consuming much of the correction budget, but a handful across ~1e13 codewords is normal link noise,
-# so depth alone is a watch signal rather than a fault.
+# FEC bin N = codewords needing N symbol corrections. A handful in deep bins across ~1e13 codewords is normal link
+# noise, so depth alone is a watch signal.
 DEEP_FEC_BIN = 3
 
 # Corrected-codeword rate above which a link deserves a physical look. Healthy links on this class
@@ -95,13 +94,8 @@ def link_speeds(gpu: int) -> dict[int, str]:
 
 
 def assess_link(counters: dict[str, int]) -> dict:
-    """Classify one link from its counters.
-
-    Only errors FEC did not absorb mean data was at risk, so those alone make a link unhealthy.
-    Pre-FEC churn (a high correction rate, or codewords reaching the deep bins) is reported as
-    ``marginal``: the link carries data correctly at full bandwidth but has less physical margin than
-    its peers, and is the usual source of nonfatal Xid 145 messages.
-    """
+    """Only errors FEC did not absorb make a link unhealthy. Pre-FEC churn (a high correction rate, deep bins) is
+    ``marginal``: the link carries data correctly but has less margin, the usual source of nonfatal Xid 145."""
     hard = {key: counters[key] for key in HARD_ERROR_KEYS if counters.get(key)}
     fec = {int(m.group(1)): v for k, v in counters.items() if (m := re.fullmatch(r"FEC Errors - (\d+)", k))}
     if not fec and not any(key in counters for key in HARD_ERROR_KEYS):
@@ -126,7 +120,6 @@ def assess_link(counters: dict[str, int]) -> dict:
 
 
 def is_active_speed(speed: str) -> bool:
-    """Whether a link's ``nvlink -s`` entry reports it up at a bandwidth."""
     return _ACTIVE_SPEED_RE.fullmatch(speed) is not None
 
 

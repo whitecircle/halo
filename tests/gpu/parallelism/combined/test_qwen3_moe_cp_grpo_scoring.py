@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""Qwen3-MoE EP8 offline-GRPO scoring: CP1 vs CP2/CP4 on identical logical rows.
-
-Tests the production scoring seam on real DeepEP and Ulysses, including EP-owned expert
-gradients and one optimizer step.
-
-Run on one NVLink-connected eight-GPU domain:
-    torchrun --nproc_per_node=8 tests/gpu/parallelism/combined/test_qwen3_moe_cp_grpo_scoring.py
-"""
+"""Qwen3-MoE EP8 offline-GRPO scoring on real DeepEP and Ulysses: CP1 vs CP2/CP4 on identical logical rows, on one
+NVLink-connected 8-GPU domain."""
 
 from types import SimpleNamespace
 
@@ -86,7 +80,7 @@ def _build_model(device, cp_size):
 
 
 def _sync_non_ep_grads(model, ep_layers):
-    # EP params: the router's in-backward hook has averaged it, and the trainer's sweep divides the experts.
+    # The router's in-backward hook has averaged it, and the trainer's sweep divides the experts.
     sweep_ep_grads(model)
     expert_ids = {id(param) for layer in ep_layers for param in layer.parameters()}
     for _name, param in model.named_parameters():

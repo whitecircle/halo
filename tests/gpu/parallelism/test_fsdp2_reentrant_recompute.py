@@ -110,7 +110,6 @@ ROW_LENGTHS = (24, 64)
 LOSS_SCALE = 256.0
 # Far above any norm here: the clip runs its EP sweep and scales by exactly 1.
 NO_CLIP = 1e9
-# Ranks and ParallelismConfig fields of each layout.
 LAYOUTS = {
     "ep1": (2, {"ep_size": 1}),
     "ep_single": (4, {"ep_size": 4}),
@@ -126,7 +125,6 @@ LORA_TARGETS = ["q_proj", "o_proj"]
 
 
 def rows_loss(model, inputs) -> torch.Tensor:
-    """Next-token cross entropy summed over the batch's rows, each row its own forward without padding."""
     loss = 0.0
     for ids, mask, labels in zip(inputs["input_ids"], inputs["attention_mask"], inputs["labels"], strict=True):
         keep = mask.bool()
@@ -143,7 +141,6 @@ class RowsTrainer(DistributedSFTTrainer):
 
 
 def make_batch(vocab: int, step: int, rank: int, device) -> dict[str, torch.Tensor]:
-    """``ROWS`` right-padded rows of different lengths, distinct per step and rank."""
     generator = torch.Generator().manual_seed(SEED + 1000 * step + rank)
     lengths = torch.randint(*ROW_LENGTHS, (ROWS,), generator=generator).tolist()
     width = max(lengths)
@@ -159,8 +156,8 @@ def full(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def expert_names(model) -> set[str]:
-    """The trainable expert parameters compared under their own name: EP rank slices and FSDP-sharded ep1 banks
-    (expert-TP banks compare by hub key, :func:`etp_expert_grads`)."""
+    """Expert parameters compared under their own name: EP rank slices and FSDP-sharded ep1 banks. Expert-TP banks
+    compare by hub key (:func:`etp_expert_grads`)."""
     names = {id(param): name for name, param in model.named_parameters()}
     return {
         names[id(param)]
@@ -172,8 +169,8 @@ def expert_names(model) -> set[str]:
 
 
 def expert_slices(model) -> dict[str, slice]:
-    """Each EP-sharded expert parameter's name and the expert range this rank holds; FSDP-sharded ep1 experts
-    are whole once gathered, and expert-TP banks compare through :func:`etp_expert_grads`: both absent."""
+    """Each EP-sharded expert's name and this rank's range. FSDP-sharded ep1 experts are whole once gathered, and
+    expert-TP banks compare through :func:`etp_expert_grads`: both absent."""
     names = {id(param): name for name, param in model.named_parameters()}
     return {
         names[id(param)]: slice(layer.expert_start, layer.expert_end)
@@ -185,7 +182,6 @@ def expert_slices(model) -> dict[str, slice]:
 
 
 def etp_layer_names(model) -> list[str]:
-    """The EP layers whose trainable expert banks expert TP splits along the FFN, in module order."""
     return [
         name
         for name, layer in named_ep_layers(model)
@@ -194,9 +190,9 @@ def etp_layer_names(model) -> list[str]:
 
 
 def etp_expert_grads(model, layer_names: list[str], device) -> dict[str, torch.Tensor]:
-    """COLLECTIVE (each layer's expert gather): the named layers' expert gradients, every expert and every
-    expert-TP shard assembled in the family's hub layout, keyed ``{layer}.{hub key}``. The same call on an
-    unwrapped ep1 model gathers nothing and only converts its layout, so the two compare key by key."""
+    """COLLECTIVE (each layer's expert gather): expert gradients in the family's hub layout, keyed ``{layer}.{hub
+    key}``. On an unwrapped ep1 model this gathers nothing and only converts the layout, so the two compare key by
+    key."""
     layers = dict(named_ep_layers(model))
     return {
         f"{name}.{key}": grad.float()
@@ -223,9 +219,8 @@ def recomputed_groups(model) -> tuple[set[int], set[int]]:
 
 
 def count_backward_forwards(model, group_ids: set[int]) -> dict[int, int]:
-    """Per group in ``group_ids`` (one-module groups), a running count of its module's forwards inside a backward:
-    the recomputes reentrant checkpointing runs there. A module whose weights are read without calling it (a router
-    weight a layer reads directly) counts none."""
+    """Per one-module group, a running count of its module's forwards inside a backward. A module whose weights are
+    read without calling it (a router weight a layer reads directly) counts none."""
     counts = dict.fromkeys(group_ids, 0)
 
     def counter(key: int):
@@ -262,8 +257,8 @@ def load_reference(checkpoint: str, dtype: torch.dtype):
 
 
 def with_policy_adapters(reference, policy, peft_config):
-    """COLLECTIVE (the policy's DTensors gathered): ``reference`` under ``peft_config``, holding the policy's
-    trainable adapter weights."""
+    """COLLECTIVE (the policy's DTensors gathered): ``reference`` under ``peft_config`` with the policy's adapter
+    weights."""
     reference = get_peft_model(reference, copy.deepcopy(peft_config))
     reference_params = dict(reference.named_parameters())
     with torch.no_grad():
@@ -274,7 +269,6 @@ def with_policy_adapters(reference, policy, peft_config):
 
 
 def load_policy(args, checkpoint: str, pc: ParallelismConfig):
-    """The policy model through the production loader, with its tokenizer and PEFT config (None: full FT)."""
     if args.adapter == "lora":
         model, tokenizer, peft_config = load_peft_model(
             "lora",
@@ -296,10 +290,9 @@ def load_policy(args, checkpoint: str, pc: ParallelismConfig):
 def reference_grads(
     reference, batches: list[list[dict]], picks: list[list[list[torch.Tensor]]] | None, etp_layers: list[str], device
 ) -> tuple[list[dict], list[list[PinnedRoute]]]:
-    """Per step, the gradient of the DP replicas' mean loss over every replica's rows, without checkpointing,
-    the expert-TP layers' banks also in their hub layout (:func:`etp_expert_grads`); None for a trainable
-    parameter no gradient reaches. With ``picks`` (per step, each replica's per-EP-layer picks over its rows), routed
-    on them, each step also reporting every EP layer's :class:`PinnedRoute`."""
+    """Per step, the gradient of the DP replicas' mean loss over every replica's rows, without checkpointing; None for
+    a parameter no gradient reaches. With ``picks``, routed on them, each step also reporting each EP layer's
+    :class:`PinnedRoute`."""
     per_step, routes = [], []
     named = [(name, param) for name, param in reference.named_parameters() if param.requires_grad]
     for step, step_batches in enumerate(batches):
@@ -319,8 +312,7 @@ def reference_grads(
 
 
 def step_pairs(step, grads, ref_grads, fp32_grads, slices, checks: dict, metrics: dict) -> dict:
-    """Each gradient with the bf16 and fp32 references' (:func:`pair_step_grads`), and the gradient-less parameters the
-    same on both sides."""
+    """Pair each gradient with the bf16 and fp32 references'; gradient-less parameters must match on both sides."""
     paired = pair_step_grads(grads, ref_grads, fp32_grads, slices)
     gradless, ref_gradless = paired.gradless, paired.reference_gradless
     checks[f"step{step}_every_parameter_has_a_reference"] = not paired.missing
@@ -343,9 +335,8 @@ def step_pairs(step, grads, ref_grads, fp32_grads, slices, checks: dict, metrics
 def record_pinned_routes(
     routes: list[list[PinnedRoute]], fp32_routes: list[list[PinnedRoute]], checks: dict, metrics: dict
 ) -> None:
-    """The policy's picks distinct and within the near-tie bar of the bf16 reference router's own, that bar under every
-    layer's gap to a token's next-best expert, and every reference router selecting the top-k of the logits these
-    read."""
+    """Picks distinct and within the near-tie bar of the bf16 reference router's own, that bar under each layer's gap
+    to a token's next-best expert, and each reference router selecting the top-k of the logits these read."""
     bf16 = [route for step_routes in routes for route in step_routes]
     fp32 = [route for step_routes in fp32_routes for route in step_routes]
     bar = TOL.router_near_tie_logit_abs
@@ -368,9 +359,7 @@ def record_pinned_routes(
 
 
 def record_scores(scored: list[dict], checks: dict, metrics: dict) -> None:
-    """Each step's direction and norm checks, every pair outside the bars logged with the numbers that excused or
-    failed it, and every parameter scored inside the bars at its best resolved step, the closest to a bar there logged
-    with its margin."""
+    """Each step's direction and norm checks; every parameter must score inside the bars at its best resolved step."""
     for step, scores in enumerate(scored):
         for name, score in scores.items():
             if not score.in_bars:
@@ -409,7 +398,7 @@ def record_scores(scored: list[dict], checks: dict, metrics: dict) -> None:
 
 
 def by_dp_replica(gathered: list[tuple]) -> dict[int, list[tuple]]:
-    """Every rank's ``(DP replica, rows, per-EP-layer picks)``, grouped by replica: its TP and expert-TP partners'."""
+    """Every rank's ``(DP replica, rows, per-EP-layer picks)``, grouped with its TP and expert-TP partners'."""
     replicas = defaultdict(list)
     for replica, rows, layer_picks in gathered:
         replicas[replica].append((rows, layer_picks))
@@ -417,7 +406,6 @@ def by_dp_replica(gathered: list[tuple]) -> dict[int, list[tuple]]:
 
 
 def partners_pick_alike(replicas: dict[int, list[tuple]]) -> bool:
-    """Whether every partner of each DP replica captured the same picks as its first."""
     return all(
         all(torch.equal(mine, theirs) for mine, theirs in zip(partners[0][1], partner[1], strict=True))
         for partners in replicas.values()
@@ -449,7 +437,6 @@ parser.add_argument("--adapter", choices=("full", "lora"), default="full")
 parser.add_argument("--reshard-after-forward", action="store_true")
 parser.add_argument("--fp32-router", action="store_true")
 ARGS = parser.parse_args()
-# Reentrant checkpointing wherever the family takes gradient checkpointing at all.
 GRADIENT_CHECKPOINTING = find_moe_family_spec(ARGS.family).supports_gradient_checkpointing
 
 
@@ -508,8 +495,7 @@ def run(ctx):
         if name in etp_layers
         for _, param in layer.expert_named_params()
     }
-    # The trainable parameters an optimizer would hold: the sharded ones, registered until a forward gathers. The
-    # expert-TP banks carry no sharding-independent name and compare through the hub-layout gather instead.
+    # Expert-TP banks carry no sharding-independent name and compare through the hub-layout gather instead.
     trainable = [
         (name, param)
         for name, param in policy.named_parameters()

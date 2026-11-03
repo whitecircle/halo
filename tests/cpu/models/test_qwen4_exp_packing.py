@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """Qwen3.8-Flash-Next's document forwards (``patch_qwen4_exp_document_forwards``) through the whole tiny model, as a
-run loads it: the family patches on its config, the n-gram table attached in host memory.
-
-A packed row's every document computes the logits it computes alone, where transformers' forwards leak it into the
-next through PLE; an unpacked row computes transformers' logits; a packed row no ``seq_idx`` marks is refused; no
-tensor grows with the square of the row; a cached call keeps transformers' forwards; the checkpoint recompute
-reproduces the plain step; and the LoRA recipe's targets all train on a packed row.
-
-    python tests/cpu/models/test_qwen4_exp_packing.py
-"""
+run loads it: the family patches on its config, the n-gram table attached in host memory."""
 
 from pathlib import Path
 
@@ -109,7 +101,7 @@ def _padded(length: int, pad: int, side: str) -> torch.Tensor:
 
 @pytest.mark.parametrize("rows", ["one-document", "right-padded", "left-padded", "left-padded-positions"])
 def test_an_unpacked_row_computes_transformers_logits(model, rows):
-    """On padded rows only the real tokens count; a padding mask makes position restarts padding, not documents."""
+    """Under a padding mask, position restarts are padding and mark no documents."""
     ids = _ids(160, batch=2)
     kwargs = {}
     if rows != "one-document":
@@ -142,7 +134,6 @@ def test_no_tensor_grows_with_the_square_of_the_row(model):
 
 
 def test_a_cached_call_keeps_transformers_forwards(model):
-    """Generation's prefill and step run transformers' own code, bit for bit."""
     ids = _ids(40)
 
     def generate_step():
@@ -176,8 +167,7 @@ def test_a_checkpointed_packed_step_matches_the_plain_step(checkpoint):
 
 
 def test_the_lora_recipe_targets_all_train_on_a_packed_row(model):
-    """Every PEFT target the recipe leaves after the expert peel adapts a module and takes a gradient through the
-    document forwards; none reaches the indexer, whose selection passes no gradient."""
+    """No target reaches the indexer, whose selection passes no gradient."""
     recipe = yaml.safe_load(Path(LORA_RECIPE).read_text())
     targets = [target for target in recipe["lora_target_modules"] if not expert_target_projections(target)]
     peft_model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=targets))
@@ -216,7 +206,7 @@ class _UnmaskedLinearModel(torch.nn.Module):
         ple_input_ids=None,
         **kwargs,
     ):
-        """The forward of a release whose mask mapping no longer has a linear-attention entry."""
+        """The forward of a release whose mask mapping has no linear-attention entry."""
         return {"indexed_attention": attention_mask}
 
 

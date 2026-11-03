@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""The GPU LoRA suites' attention targets fall back to the default pair only for a single-file
-checkpoint, never for a hub failure.
-
-``attention_target_modules`` reads the targets off the checkpoint's safetensors index. Only an
-absent index means a single-file checkpoint; a missing or gated repo or a bad revision must surface
-as itself, not as a ``q_proj``/``v_proj`` guess that PEFT later rejects as "Target modules not found"
-far from the cause.
-
-Run: pytest tests/cpu/peft/test_attention_target_fallback.py
-"""
+"""GPU LoRA suites' attention targets fall back to the default pair only for a single-file checkpoint.
+A missing or gated repo or a bad revision must surface as itself, not as PEFT's later "Target modules not found"."""
 
 import json
 
@@ -62,7 +54,7 @@ def test_index_targets_are_read_off_the_weight_map(monkeypatch, tmp_path):
 
 
 def test_a_local_checkpoint_is_read_in_place(tmp_path):
-    """A local directory is not a repo id: the hub client refuses it, so it must never reach it."""
+    """A local directory is not a repo id: the hub client refuses it."""
     single_file = tmp_path / "single"
     single_file.mkdir()
     assert adapters.attention_target_modules(str(single_file)) == ["q_proj", "v_proj"]

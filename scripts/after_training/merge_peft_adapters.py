@@ -1,23 +1,9 @@
 #!/usr/bin/env python
 """Merge a PEFT (LoRA/QLoRA) adapter into its base model, producing a standalone checkpoint.
 
-A LoRA run's output directory carries only ``adapter_model.safetensors`` + ``adapter_config.json``;
-this loads the base model, applies the adapter and saves a standard HuggingFace checkpoint. Covers
-causal-LM and sequence-classification (``--task classification``) adapters; a VLM base is detected
-from its config, and remote-code families load under ``--trust_remote_code`` (default on). ``--fp32_norms``
-writes every normalization leaf in fp32, the layout ``convert_to_bf16.py`` writes. ``--output_dir`` is
-written fresh: every ``model*.safetensors`` or index the completed save did not produce is removed
-afterwards.
-
-Usage:
-    python scripts/after_training/merge_peft_adapters.py \\
-        --adapter_dir checkpoints/sft-qwen3-4b-lora --output_dir checkpoints/sft-qwen3-4b-merged
-
-    # Reward/classification adapter; --device_map auto offloads a model too large for one GPU
-    python scripts/after_training/merge_peft_adapters.py \\
-        --adapter_dir checkpoints/reward-lora --output_dir checkpoints/reward-merged \\
-        --task classification --num_labels 1
-"""
+Covers causal-LM and sequence-classification (``--task classification``) adapters; a VLM base is detected from its
+config. ``--fp32_norms`` writes normalization leaves in fp32, the layout ``convert_to_bf16.py`` writes.
+``--output_dir`` is written fresh: any ``model*.safetensors`` or index the save did not produce is removed."""
 
 import argparse
 

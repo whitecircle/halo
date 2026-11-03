@@ -1,8 +1,5 @@
-"""Recompute scopes shared by an activation checkpoint's two passes, and the gradient-checkpointing
-enable that installs them. One :class:`RecomputeScope` per checkpoint invocation, entered by the
-original forward and by the backward recompute, makes the pass count an exact recompute signal and
-lets a layer cache first-pass results that the recompute must replay rather than recompute.
-"""
+"""Recompute scopes shared by an activation checkpoint's two passes, and the gradient-checkpointing enable that
+installs them. A scope makes the pass count an exact recompute signal and lets a layer replay first-pass results."""
 
 from __future__ import annotations
 
@@ -20,7 +17,7 @@ _local = threading.local()
 
 
 def _stack() -> list[RecomputeScope]:
-    """The active scopes on this thread (the recompute pass runs on an autograd engine thread)."""
+    """Per thread, as the recompute pass runs on an autograd engine thread."""
     stack = getattr(_local, "stack", None)
     if stack is None:
         stack = _local.stack = []
@@ -28,13 +25,9 @@ def _stack() -> list[RecomputeScope]:
 
 
 class RecomputeScope:
-    """One checkpoint invocation's replay cache, entered once per pass.
-
-    ``slot(owner, name)`` hands out that owner's cache dict for the current call, in call order
-    within the pass: the first pass creates slots, the recompute re-reads them positionally and releases
-    them as it exits. Keyed by checkpoint frame rather than by layer or grad mode: a 1F1B pipeline schedule
-    keeps several microbatches in flight, and the non-reentrant checkpoint runs both passes with grad enabled.
-    """
+    """``slot(owner, name)`` hands out that owner's cache dict in call order within the pass: the first pass creates
+    slots, the recompute re-reads them positionally. Keyed by checkpoint frame, as a 1F1B pipeline schedule keeps
+    several microbatches in flight and the non-reentrant checkpoint runs both passes with grad enabled."""
 
     __slots__ = ("_slots", "_cursors", "_pass", "grad_enabled")
 
@@ -42,18 +35,15 @@ class RecomputeScope:
         self._slots: dict[tuple[int, str], list[dict]] = {}
         self._cursors: dict[tuple[int, str], int] = {}
         self._pass = 0
-        # The outer grad mode: scopes are constructed at checkpoint invocation, before the checkpoint
-        # machinery's internal no_grad, so this distinguishes a training microbatch from a no_grad
-        # reference/eval forward through the same checkpointed block.
+        # Read before the checkpoint's internal no_grad, so this tells a training microbatch from a no_grad reference
+        # or eval forward through the same checkpointed block.
         self.grad_enabled = torch.is_grad_enabled()
 
     @property
     def is_recompute(self) -> bool:
-        """True once the body is running for the second time — the backward recompute."""
         return self._pass > 1
 
     def slot(self, owner: object, name: str) -> dict:
-        """This call's cache dict for ``owner``'s ``name`` cache."""
         key = (id(owner), name)
         index = self._cursors.get(key, 0)
         self._cursors[key] = index + 1
@@ -76,37 +66,32 @@ class RecomputeScope:
 
     def __exit__(self, *exc_info) -> bool:
         _stack().pop()
-        # The recompute is the last pass that reads the slots: the reentrant checkpoint keeps this scope until the
-        # loss is dropped, and with it every layer's replay cache, DeepEP receive buffers included.
+        # The last pass that reads the slots; the reentrant checkpoint keeps this scope until the loss is dropped, and
+        # with it every layer's replay cache, DeepEP receive buffers included.
         if self.is_recompute:
             self._slots.clear()
         return False
 
 
 def current_graph_task() -> int:
-    """The autograd graph task executing on this thread, ``-1`` outside backward."""
+    """``-1`` outside backward."""
     return torch._C._current_graph_task_id()
 
 
 def in_backward_pass() -> bool:
-    """True while an autograd graph task is executing on this thread: a training forward reaching a
-    layer here is a checkpoint recompute (the signal torch's FSDP2 uses, ``_fsdp_common.is_bw``)."""
+    """A training forward reaching a layer here is a checkpoint recompute (the signal torch's FSDP2 uses)."""
     return current_graph_task() != -1
 
 
 def active_recompute_scope() -> RecomputeScope | None:
-    """The innermost recompute scope currently executing, or None outside one."""
     stack = _stack()
     return stack[-1] if stack else None
 
 
 def counts_toward_expert_load() -> bool:
-    """Whether the current forward is the single per-microbatch pass that records expert load: inside
-    a scope, the original pass of a grad-driven invocation; outside one, a grad-enabled pass (a frozen
-    reference forward would skew the balance). The scope's outer grad mode is read rather than the live
-    one, since the reentrant checkpoint runs its original forward under ``no_grad`` and HF checkpoints a
-    ``torch.no_grad()`` forward through a train-mode model too.
-    """
+    """Inside a scope, the original pass of a grad-driven invocation; outside one, a grad-enabled pass, as a frozen
+    reference forward would skew the balance. The scope's outer grad mode is read, as the reentrant checkpoint runs its
+    original forward under ``no_grad``."""
     scope = active_recompute_scope()
     if scope is not None:
         return scope.grad_enabled and not scope.is_recompute
@@ -114,11 +99,7 @@ def counts_toward_expert_load() -> bool:
 
 
 def scoped_checkpoint_func(inner: Callable) -> Callable:
-    """Wrap an installed ``_gradient_checkpointing_func`` so both of its passes share one scope.
-
-    Wrapping the installed function rather than building a new ``checkpoint`` partial keeps the
-    checkpoint kwargs the model resolved, ``use_reentrant`` above all. Idempotent via ``_ep_scoped``.
-    """
+    """Wrapping the installed function keeps the checkpoint kwargs the model resolved, ``use_reentrant`` above all."""
     if getattr(inner, "_ep_scoped", False):
         return inner
 
@@ -137,12 +118,8 @@ def scoped_checkpoint_func(inner: Callable) -> Callable:
 
 
 def install_recompute_scopes(model) -> int:
-    """Re-point every checkpoint function in ``model`` at its scoped wrapper.
-
-    Run after the model's own ``gradient_checkpointing_enable``, which sets the attribute. Returns the
-    number of checkpoint functions now scoped, counting already-scoped ones, so a caller re-enabling GC
-    can distinguish "scopes in place" from "no checkpoint function anywhere".
-    """
+    """Run after the model's own ``gradient_checkpointing_enable``. Returns the checkpoint functions now scoped,
+    already-scoped ones included, so a caller re-enabling GC can tell scopes in place from no checkpoint function."""
     installed = 0
     for module in model.modules():
         inner = getattr(module, "_gradient_checkpointing_func", None)
@@ -157,9 +134,8 @@ def install_recompute_scopes(model) -> int:
 def _split_enable_kwargs(
     gradient_checkpointing_kwargs: dict | None, every_n_layers: int = 1, offload: bool = False
 ) -> tuple[dict | None, int, bool]:
-    """Lift ``every_n_layers`` and ``offload``, ``gradient_checkpointing_enable``'s own keywords, out of the
-    checkpoint kwargs, where they would reach ``torch.utils.checkpoint`` and fail the first recompute
-    (TRL's re-enable passes the args dict unchanged)."""
+    """Left in the checkpoint kwargs they would reach ``torch.utils.checkpoint`` and fail the first recompute (TRL's
+    re-enable passes the args dict unchanged)."""
     kwargs = dict(gradient_checkpointing_kwargs or {})
     every_n_layers = kwargs.pop("every_n_layers", every_n_layers)
     offload = kwargs.pop("offload", offload)
@@ -167,9 +143,7 @@ def _split_enable_kwargs(
 
 
 def _rescope_on_reenable(model: nn.Module) -> None:
-    """Bind the recompute scopes to the model's ``gradient_checkpointing_enable`` for every later caller:
-    a re-enable installs HF's bare checkpoint function, and online GRPO re-enables every step (TRL's
-    ``disable_gradient_checkpointing`` exit)."""
+    """A re-enable installs HF's bare checkpoint function, and online GRPO re-enables every step."""
     enable = model.gradient_checkpointing_enable
     if getattr(enable, "_ep_scoped", False):
         return
@@ -178,7 +152,7 @@ def _rescope_on_reenable(model: nn.Module) -> None:
     def enable_with_scopes(gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False):
         kwargs, every_n_layers, offload = _split_enable_kwargs(gradient_checkpointing_kwargs, every_n_layers, offload)
         result = enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers, offload=offload)
-        install_recompute_scopes(model)  # idempotent: already-scoped functions are skipped
+        install_recompute_scopes(model)
         return result
 
     enable_with_scopes._ep_scoped = True
@@ -186,13 +160,8 @@ def _rescope_on_reenable(model: nn.Module) -> None:
 
 
 def enable_scoped_gradient_checkpointing(model: nn.Module, *, gradient_checkpointing_kwargs: dict) -> None:
-    """Enable gradient checkpointing whose every invocation runs inside one :class:`RecomputeScope`.
-
-    The model's own ``gradient_checkpointing_enable`` resolves HF's policy (input-grad requirement,
-    per-module flags, ``every_n_layers``), then every installed checkpoint function is re-pointed at
-    its scoped wrapper. An EP layer replays its DeepEP dispatch/combine from the scope, because a
-    fresh all-to-all in the recompute would invalidate the handle the first pass's backward still holds.
-    """
+    """An EP layer replays its DeepEP dispatch/combine from the scope, as a fresh all-to-all in the recompute would
+    invalidate the handle the first pass's backward still holds."""
     if not hasattr(model, "gradient_checkpointing_enable"):
         raise RuntimeError(
             f"gradient_checkpointing=True but {type(model).__name__} has no "

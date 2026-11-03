@@ -1,8 +1,5 @@
-"""What an exported ``config.json`` must contain, and the one finalizer every save path ends with.
-
-transformers' serialization is not the artifact contract: a vendor class may drop ``model_type``, and a
-remote-code family may need the source repo's own schema.
-"""
+"""What an exported ``config.json`` must contain beyond transformers' serialization, and the finalizer every save path
+ends with; a vendor class may drop ``model_type``, and a remote-code family may need the source repo's own schema."""
 
 from __future__ import annotations
 
@@ -30,26 +27,20 @@ _CONFIG_KEY_ABSENT = object()
 
 
 def write_config_json(output_dir: str, payload: dict) -> None:
-    """Write ``output_dir``'s ``config.json`` in the one form every toolkit rewrite emits, so a re-export
-    diffs only where the content changed."""
+    """Write ``config.json`` in the one form every toolkit rewrite emits, so a re-export diffs only what changed."""
     with open(os.path.join(output_dir, CONFIG_NAME), "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
 
 def hf_architecture_name(model) -> str | None:
-    """The class name ``config.architectures`` should carry; ``None`` for a non-HF carrier.
-
-    Re-derived because a task-head swap invalidates the hub's class, and every ``architectures[0]``-keyed
-    consumer would serve the wrong head.
-    """
+    """The class name ``config.architectures`` should carry, or None; a task-head swap invalidates the hub's class."""
     model_class = transformers_model_class(model)
     return None if model_class is None else model_class.__name__
 
 
 def restore_model_type(config, output_dir: str) -> None:
-    """Put the live ``model_type`` back into a ``config.json`` that lost it: ``to_dict`` reads it off the
-    class, which some vendor config classes (Bailing/Ling) leave undeclared."""
+    """Restore a lost ``model_type``; ``to_dict`` reads the class, which vendors (Bailing/Ling) leave unset."""
     live = getattr(config, "model_type", "")
     if not live:
         logger.warning(
@@ -66,8 +57,7 @@ def restore_model_type(config, output_dir: str) -> None:
 
 
 def _source_config_payload(source: str) -> dict | None:
-    """The source checkpoint's own ``config.json`` when it is a servable schema, else ``None`` with a
-    warning: an unreadable source, or one without ``auto_map``, has nothing to carry."""
+    """The source's ``config.json`` if servable, else None with a warning (unreadable, or no ``auto_map``)."""
     try:
         config_file = cached_file(source, CONFIG_NAME)
         with open(str(config_file), encoding="utf-8") as handle:
@@ -95,8 +85,7 @@ def _auto_map_references(entry: str | list | tuple) -> tuple[str, ...]:
 
 
 def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None:
-    """Copy the remote-code modules ``auto_map`` names from ``source``, with the siblings they import
-    (Step-3.7's ``vision_encoder``)."""
+    """Copy the remote-code modules ``auto_map`` names, with their sibling imports (Step-3.7's ``vision_encoder``)."""
     pending = {reference.split(".")[0] for entry in auto_map.values() for reference in _auto_map_references(entry)}
     copied: set[str] = set()
     while pending:
@@ -116,8 +105,7 @@ def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None
 
 
 def _serialized_config(config, output_dir: str) -> dict:
-    """``config`` through every rewrite the writers run before the source-schema carry, as a comparable
-    dict: a skipped rewrite would read as a run-made change."""
+    """``config`` through every rewrite before the schema carry; a skipped one reads as a run-made change."""
     config.save_pretrained(output_dir)
     restore_model_type(config, output_dir)
     payload = read_checkpoint_config(output_dir)
@@ -138,11 +126,8 @@ def _config_payload_diff(expected: dict, actual: dict, path: str = "") -> dict[s
 
 
 def _apply_config_changes(source_section: dict, before: dict, after: dict, config, path: str = "") -> None:
-    """Write this run's config changes (``after`` minus ``before``) into one source-schema section, in place.
-
-    Each changed key goes in under the spelling that section already uses (the key or its
-    ``attribute_map`` alias), else under its own name. The caller re-parses the result and compares.
-    """
+    """Write this run's config changes into one source-schema section in place, under the spelling it already uses (the
+    key or its ``attribute_map`` alias), else the key's own name. The caller re-parses the result and compares."""
     aliases: dict[str, list[str]] = {}
     for alias, native in getattr(type(config), "attribute_map", {}).items():
         aliases.setdefault(native, []).append(alias)
@@ -170,12 +155,9 @@ def _apply_config_changes(source_section: dict, before: dict, after: dict, confi
 
 
 def export_source_config_schema(config, output_dir: str, *, source: str | None) -> None:
-    """Rewrite ``output_dir``'s ``config.json`` into the source checkpoint's own schema, for every family
-    declaring ``exports_source_config_schema``; a no-op elsewhere.
-
-    transformers 5.20 absorbs the vendor spellings at load and never re-emits them, so the source
-    config is carried over with this run's changes applied, plus the modules its ``auto_map`` names.
-    """
+    """Rewrite ``config.json`` into the source checkpoint's schema for families with ``exports_source_config_schema``.
+    transformers 5.20 absorbs the vendor spellings at load and never re-emits them, so the source config is carried
+    over with this run's changes applied, plus the modules its ``auto_map`` names."""
     spec = find_moe_family_spec(getattr(config, "model_type", None))
     if not (spec and spec.exports_source_config_schema):
         return
@@ -214,12 +196,9 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
 
 
 def drop_unshipped_auto_map(output_dir: str) -> None:
-    """Drop the ``auto_map`` entries of ``output_dir``'s ``config.json`` whose modules it does not carry.
-
-    transformers serializes the loaded ``auto_map`` but copies remote code only for an auto-registered
-    class, so an in-library load of a remote-code hub checkpoint (Laguna) exports a config naming a
-    module it never wrote. A ``repo--module.Class`` reference resolves from its own repo and stays.
-    """
+    """Drop ``auto_map`` entries whose modules the directory lacks; a ``repo--module.Class`` reference resolves itself.
+    transformers copies remote code only for an auto-registered class, so an in-library load (Laguna) names unwritten
+    modules."""
     payload = read_checkpoint_config(output_dir, missing_ok=True)
     auto_map = (payload or {}).get("auto_map")
     if not auto_map:
@@ -248,12 +227,8 @@ def drop_unshipped_auto_map(output_dir: str) -> None:
 
 
 def finalize_exported_config(config, output_dir: str, *, source: str | None) -> None:
-    """Bring a just-written ``config.json`` up to the artifact contract and tag the model card; every
-    writer's last step.
-
-    Each rewrite is a no-op for a family that needs none, so writers run the whole set: a checkpoint
-    missing one trains normally and fails only in the merge tools or the rollout server.
-    """
+    """Bring a just-written ``config.json`` up to the artifact contract and tag the model card; every writer's last
+    step. A checkpoint missing a rewrite trains normally and fails only in the merge tools or the rollout server."""
     restore_model_type(config, output_dir)
     export_source_config_schema(config, output_dir, source=source)
     drop_unshipped_auto_map(output_dir)
@@ -261,16 +236,14 @@ def finalize_exported_config(config, output_dir: str, *, source: str | None) -> 
 
 
 def save_model_config(model, output_dir: str) -> None:
-    """Write what ``model.save_pretrained`` would beside a parallel save's hand-gathered weights:
-    ``config.json`` (finalized), ``generation_config.json`` and the remote-code modeling module."""
+    """Write what ``save_pretrained`` would beside gathered weights: config, generation config, remote code."""
     if not hasattr(model, "config"):
         return
     config = model.config
     architecture = hf_architecture_name(model)
     if architecture is not None:
         config.architectures = [architecture]
-    # Run-scoped router mutations (zeroed aux coef, forced output_router_logits, toolkit stamps)
-    # configure this run rather than the artifact: serialize with the pre-mutation values restored.
+    # Run-scoped router mutations (zeroed aux coef, forced output_router_logits, stamps) stay out of the artifact.
     with config_export_ready(config):
         config.save_pretrained(output_dir)
     if (remote_code_cls := remote_code_model_class(model)) is not None:

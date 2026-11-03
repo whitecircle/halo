@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the clips and transformers keep the gradient norm on the device.
-
-The toolkit's clip paths (EP / TP / PP / FSDP) return the norm as a DEVICE tensor on purpose: a
-``.item()`` is a full host sync that serializes the whole rank against the copy engine. The non-finite step
-guard reads it a step late from pinned memory under AdamWBF16 and Muon, and before each step under any other
-optimizer (``tests/cpu/trainers/test_nonfinite_step_guard.py``). HF reads the norm back inside
-``_maybe_log_save_evaluate``'s ``should_log`` branch, and ``_get_grad_norm`` itself converts only under
-DeepSpeed — this pins both, so a transformers bump that adds a second read fails here instead of
-showing up as a throughput regression.
-
-    python tests/cpu/trainers/test_grad_norm_host_sync.py
-"""
+"""The clips and transformers keep the gradient norm on the device, since an ``.item()`` host-syncs the whole rank.
+HF reads the norm only in ``_maybe_log_save_evaluate``'s ``should_log`` branch; a bump adding a read fails here."""
 
 import pytest
 import torch
@@ -20,8 +10,6 @@ from halo.trainers.parallelism.grad_clipping import GradientClippingMixin, pp_cl
 
 
 class _NoHostSync(torch.Tensor):
-    """A tensor that refuses to be read back to the host."""
-
     def item(self):
         raise AssertionError("the gradient norm was read back to the host")
 
@@ -38,8 +26,6 @@ class _Accelerator:
 
 
 class _Trainer:
-    """Stands in for the trainer ``Trainer._get_grad_norm`` is a method of."""
-
     _has_mixed_mesh_grads = GradientClippingMixin._has_mixed_mesh_grads
 
     def __init__(self):
@@ -48,7 +34,6 @@ class _Trainer:
 
 
 def test_get_grad_norm_keeps_the_norm_on_device():
-    """The clip's own by-product is handed straight back — no conversion on the step path."""
     me = _Trainer()
 
     norm = Trainer._get_grad_norm(me, me.model, grad_norm=torch.tensor(3.0).as_subclass(_NoHostSync))
@@ -58,7 +43,7 @@ def test_get_grad_norm_keeps_the_norm_on_device():
 
 
 def test_get_grad_norm_without_clipping_computes_one_but_still_does_not_sync():
-    """At max_grad_norm <= 0 HF computes an unclipped norm (for the log and the step guard); it stays on device."""
+    """At max_grad_norm <= 0 HF still computes an unclipped norm for the log and the step guard."""
     me = _Trainer()
 
     norm = Trainer._get_grad_norm(me, me.model, grad_norm=None)
@@ -67,8 +52,7 @@ def test_get_grad_norm_without_clipping_computes_one_but_still_does_not_sync():
 
 
 def test_the_pipeline_clip_returns_a_device_tensor(monkeypatch):
-    """The PP clip aggregates the whole pipeline's squared norms in one all-reduce and applies the
-    coefficient unconditionally — no ``if norm > max_norm``, which would be a host sync per step."""
+    """The coefficient applies unconditionally: ``if norm > max_norm`` would be a host sync per step."""
 
     class _Dist:
         ReduceOp = torch.distributed.ReduceOp

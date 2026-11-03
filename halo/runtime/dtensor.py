@@ -1,5 +1,4 @@
-"""DTensor-agnostic tensor access: the full tensor (a mesh COLLECTIVE), the local shard, whole-tensor
-writes into a live parameter, and the retain-gated gather a gathered save runs on every rank."""
+"""DTensor-agnostic tensor access; full-tensor reads and writes are mesh COLLECTIVES."""
 
 from collections.abc import Iterable
 
@@ -8,20 +7,15 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 
 
 def materialize_dtensor(data: torch.Tensor | None) -> torch.Tensor | None:
-    """A DTensor's full tensor, autograd-aware (COLLECTIVE over its mesh); ``None`` and plain tensors
-    pass through."""
+    """A DTensor's full tensor, autograd-aware (COLLECTIVE over its mesh); others pass through."""
     if isinstance(data, DTensor):
         return data.full_tensor()
     return data
 
 
 def copy_full_tensor(target: torch.Tensor, value: torch.Tensor, *, src_data_rank: int | None = 0) -> None:
-    """Copy the whole tensor ``value`` into the live parameter or buffer ``target``, at its dtype.
-
-    A DTensor target goes through ``distribute_tensor``, which by default broadcasts mesh rank 0's copy: a
-    mesh COLLECTIVE every rank issues in the same key order. ``src_data_rank=None`` shards each rank's own
-    copy instead, collective-free, where every rank holds the whole tensor.
-    """
+    """Copy whole ``value`` into live ``target``. A DTensor broadcasts mesh rank 0's copy (COLLECTIVE, same key order
+    on every rank); ``src_data_rank=None`` shards each rank's own whole copy, collective-free."""
     data = target.data if isinstance(target, torch.nn.Parameter) else target
     value = value.to(data.dtype)
     if isinstance(data, DTensor):
@@ -37,8 +31,7 @@ def to_local(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def local_numel(param: torch.Tensor) -> int:
-    """Element count held by this rank; ``DTensor.numel()`` reports the global size, while an
-    FSDP-ignored EP expert tensor is already per-rank."""
+    """Elements on this rank; ``DTensor.numel()`` is global, an FSDP-ignored EP expert tensor already per-rank."""
     return to_local(param).numel()
 
 
@@ -50,18 +43,14 @@ def full_cpu_tensor(param_data: torch.Tensor) -> torch.Tensor:
 
 
 def gather_full_tensors(items: Iterable[tuple[str, torch.Tensor]], *, retain: bool) -> dict[str, torch.Tensor]:
-    """COLLECTIVE: gather every item on every rank; return the host copies only where ``retain``.
-
-    Gating the gather itself on ``retain`` would hang a gathered save; non-writers join through
-    :func:`materialize_dtensor`, skipping the host copy.
-    """
+    """COLLECTIVE: gather every item on every rank, keeping host copies only where ``retain``. Gating the gather itself
+    on ``retain`` would hang a gathered save."""
     resolved: dict[str, torch.Tensor] = {}
     for name, tensor in items:
         if retain:
             resolved[name] = full_cpu_tensor(tensor)
         else:
             materialize_dtensor(tensor)
-        # Released before ``items`` makes the next one: a derived item (a LoRA fold) would otherwise
-        # live beside its successor.
+        # Free it before ``items`` yields the next, or a derived item (a LoRA fold) lives beside its successor.
         del tensor
     return resolved

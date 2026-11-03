@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""The rank-uniform environment check is ONE seam, run EARLY, and it covers the non-EP consumers.
-
-Two things break if it runs only on the DeepEP path:
-
-* it runs only on the DeepEP path, while ``HALO_GRAD_BUCKET_MB`` also sets the chunk boundaries of
-  the TP replicated sweep and the QLoRA sweep — both bucketed reductions over groups that span OS
-  nodes, both of which desync silently when one node's buckets are a different size;
-* it runs AFTER the FS-heavy weight load. A world collective placed there is the first collective
-  a straggler node can miss, so the job dies at ``DIST_NCCL_TIMEOUT_MINUTES`` with a
-  traceback naming the env check rather than the load that ran long. Every value it compares is
-  known at import, so there is nothing to wait for.
-
-These tests pin the pure divergence verdict, the latch that keeps the loader's backstop free, that every
-distributed load runs that backstop first, and the fact that the bucket knob is part of the compared set. On
-a real gloo group they pin that ranks disagreeing on transformers' ``FLASH_ATTENTION_DETERMINISTIC``, which picks
-a head_dim-256 model's attention backend, are refused, by transformers' own reading of it; and that a checkpoint
-write-thread count that differs across ranks or is negative raises at the join on every rank, so no rank reaches a
-save's first gather.
-
-    python tests/cpu/parallelism/test_env_uniformity.py
-"""
+"""The rank-uniform environment check is one seam, run early, covering the TP and QLoRA sweeps too. A world
+collective after the load is the first a straggler can miss, blaming the env check."""
 
 import datetime
 import importlib
@@ -43,11 +24,10 @@ from tests.common.parallelism import make_parallelism_config
 _MOD = "halo.runtime.consensus"
 
 PG_TIMEOUT = datetime.timedelta(seconds=90)
-# Short: a rank that reaches the stand-in gather alone waits there this long before the case fails.
+# A rank reaching the stand-in gather alone waits this long before the case fails.
 WRITE_THREADS_PG_TIMEOUT = datetime.timedelta(seconds=20)
-# Per case, each rank's HALO_CHECKPOINT_WRITE_THREADS.
 _WRITE_THREAD_COUNTS = {"one_rank_negative": ("-1", "0"), "both_negative": ("-2", "-2"), "differing": ("2", "0")}
-# Per case, each rank's spelling of transformers' determinism switch (None: unset).
+# None: unset.
 _DETERMINISM_SPELLINGS = {
     "one_rank_deterministic": (None, "1"),
     "zero_and_unset": ("0", None),
@@ -69,7 +49,7 @@ def test_one_drifting_node_is_reported_with_both_spellings():
 
 
 def test_a_name_missing_on_one_rank_is_a_divergence():
-    """A rank whose module resolved a different key set has a different behaviour, not a smaller one."""
+    """A different key set is a different behaviour."""
     assert "EP_DISABLE_GIN" in divergent_settings([{"EP_DISABLE_GIN": "1"}, {}])
 
 
@@ -78,14 +58,12 @@ def test_an_empty_gather_is_not_a_divergence():
 
 
 def test_the_collective_raises_with_the_caller_s_guidance():
-    """The message must carry the operator's own knob names and rank 0's reference values."""
-
     def fake_all_gather(out_list, obj):
         del obj
         out_list[:] = [{"HALO_GRAD_BUCKET_MB": 256}] * 4 + [{"HALO_GRAD_BUCKET_MB": 64}] * 4
 
     def disagreeing_digests(slots, op=None, group=None):
-        slots.copy_(torch.tensor([7, -3]))  # max(d) != -max(-d): two digests met
+        slots.copy_(torch.tensor([7, -3]))  # max(d) != -max(-d): two digests met.
 
     with (
         patch(f"{_MOD}.dist.is_available", return_value=True),
@@ -104,13 +82,11 @@ def test_the_collective_raises_with_the_caller_s_guidance():
 
 
 def test_the_grad_bucket_knob_is_in_the_compared_set():
-    """It is consumed by the TP and QLoRA sweeps too, which never touch DeepEP — dropping it from
-    the set would leave those two paths with no uniformity guard at all."""
+    """Dropping it would leave the TP and QLoRA sweeps with no uniformity guard."""
     assert "HALO_GRAD_BUCKET_MB" in rank_uniform_env.rank_uniform_settings()
 
 
 def _count_joins(monkeypatch) -> list:
-    """Arm a fresh latch and record every ``reject_divergent_settings`` the seam issues."""
     calls: list = []
     monkeypatch.setattr(rank_uniform_env, "_env_uniformity_verified", False)
     monkeypatch.setattr(rank_uniform_env, "reject_divergent_settings", lambda *a, **k: calls.append(a))
@@ -118,8 +94,7 @@ def _count_joins(monkeypatch) -> list:
 
 
 def test_the_check_runs_at_most_once_per_process(monkeypatch):
-    """The entry scripts run it in distributed setup; the loader's backstop must then cost nothing,
-    or the post-load world join is simply back."""
+    """Otherwise the post-load world join is back."""
     calls = _count_joins(monkeypatch)
     monkeypatch.setattr(rank_uniform_env, "has_process_group", lambda: True)
 
@@ -130,13 +105,8 @@ def test_the_check_runs_at_most_once_per_process(monkeypatch):
 
 
 def test_a_pre_init_call_does_not_disarm_the_backstop(monkeypatch):
-    """``reject_divergent_settings`` no-ops before ``init_process_group``, so a call that lands
-    there compares nothing.
-
-    Latching on it would leave ``load_distributed_model``'s backstop permanently satisfied by a check that
-    never ran — and the backstop exists exactly for the caller that reached DeepEP without the entry
-    script's ordered setup, which is the same caller likeliest to have called this early.
-    """
+    """``reject_divergent_settings`` no-ops before ``init_process_group``; latching there would permanently satisfy
+    the backstop with a check that never ran."""
     calls = _count_joins(monkeypatch)
     monkeypatch.setattr(rank_uniform_env, "has_process_group", lambda: False)
     rank_uniform_env.agree_rank_uniform_env()
@@ -157,8 +127,7 @@ class _LoadStarted(Exception):
 
 @pytest.mark.parametrize("ep_size", [1, 8], ids=["dense", "ep"])
 def test_every_distributed_load_agrees_the_env_before_it_loads(monkeypatch, ep_size):
-    """The loader's backstop runs before anything else, for a dense load as for an EP one: a caller that
-    skipped the entry script's setup still gets the join before its first rank-asymmetric work."""
+    """A caller that skipped the entry script's setup still gets the join before its first rank-asymmetric work."""
     events: list = []
     monkeypatch.setattr(model_loading, "agree_rank_uniform_env", lambda: events.append("agree"))
 
@@ -175,9 +144,7 @@ def test_every_distributed_load_agrees_the_env_before_it_loads(monkeypatch, ep_s
 
 
 def test_the_guidance_does_not_scope_the_rule_to_an_ep_group(monkeypatch):
-    """The seam is world-wide — the grad-bucket knob is read by the TP and QLoRA sweeps too — so a
-    message telling the operator to align "every rank of an EP group" points a non-EP job at a
-    group it does not have."""
+    """The grad-bucket knob is world-wide, so naming an EP group points a non-EP job at a group it lacks."""
     guidance: list = []
     monkeypatch.setattr(rank_uniform_env, "_env_uniformity_verified", False)
     monkeypatch.setattr(rank_uniform_env, "reject_divergent_settings", lambda *a: guidance.append(a[2]))
@@ -187,9 +154,8 @@ def test_the_guidance_does_not_scope_the_rule_to_an_ep_group(monkeypatch):
 
 
 def test_the_legacy_backend_timeout_warning_gates_on_the_parsed_value(monkeypatch):
-    """A docker-compose pass-through (``- HALO_DEEPEP_GPU_TIMEOUT_SECONDS``) exports the name with an
-    EMPTY value when it is absent. A presence test warns there about a knob nobody set; the parsed
-    value resolves to the default and correctly says nothing."""
+    """A docker-compose pass-through exports the name with an empty value, so a presence test warns about a knob
+    nobody set."""
     monkeypatch.setenv("HALO_DEEPEP_GPU_TIMEOUT_SECONDS", "")
     reloaded = importlib.reload(settings_mod)
     try:
@@ -205,7 +171,6 @@ def test_the_legacy_backend_timeout_warning_gates_on_the_parsed_value(monkeypatc
 
 
 def _determinism_worker(rank: int, tmp_dir: str) -> None:
-    """Run the seam once per case with this rank's spelling of the switch, recording what it raised."""
     outcomes = {}
     for case, spellings in _DETERMINISM_SPELLINGS.items():
         if spellings[rank] is None:
@@ -223,8 +188,8 @@ def _determinism_worker(rank: int, tmp_dir: str) -> None:
 
 
 def test_ranks_disagreeing_on_flash_attention_determinism_are_refused(tmp_path):
-    """Set on one rank only, the switch would load FA4 there and its fallback on the peer for a head_dim-256
-    model; every rank must raise naming it. ``0`` and unset are one setting to transformers, so they agree."""
+    """Set on one rank only, it loads FA4 there and its fallback on the peer for a head_dim-256 model. ``0`` and
+    unset are one setting to transformers."""
     run_gloo_ranks(_determinism_worker, 2, str(tmp_path), pg_timeout=PG_TIMEOUT)
     for rank in range(2):
         outcomes = json.loads((tmp_path / f"rank{rank}.json").read_text())
@@ -235,7 +200,6 @@ def test_ranks_disagreeing_on_flash_attention_determinism_are_refused(tmp_path):
 
 
 def _write_threads_worker(rank: int, tmp_dir: str, case: str) -> None:
-    """The run's startup join, then a save's writer and its first gather, recording how far this rank got."""
     os.environ["HALO_CHECKPOINT_WRITE_THREADS"] = _WRITE_THREAD_COUNTS[case][rank]
     rank_uniform_env._env_uniformity_verified = False
     outcome = {"refused": None, "refused_at": None, "reached_gather": False}
@@ -254,8 +218,7 @@ def _write_threads_worker(rank: int, tmp_dir: str, case: str) -> None:
 
 @pytest.mark.parametrize("case", sorted(_WRITE_THREAD_COUNTS))
 def test_a_write_thread_count_refused_anywhere_is_refused_at_startup_on_every_rank(tmp_path, case):
-    """A negative count on one rank would raise there at the save while its peers wait in the save's first
-    gather; agreed at startup, every rank refuses a differing or negative count before any save."""
+    """A negative count on one rank would raise at the save while its peers wait in the first gather."""
     run_gloo_ranks(_write_threads_worker, 2, str(tmp_path), case, pg_timeout=WRITE_THREADS_PG_TIMEOUT)
     expected = "-2: expected a thread count >= 0" if case == "both_negative" else "'HALO_CHECKPOINT_WRITE_THREADS': ["
     for rank in range(2):

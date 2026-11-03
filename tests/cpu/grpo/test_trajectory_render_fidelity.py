@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""Pinning tests: the env-GRPO trajectory row IS one serving-template render, and the loss mask marks
-exactly the spans of it the policy generated.
-
-Chat templates are not prefix-monotone — the render of the first N messages is not generally a prefix
-of the render of the first N+1 — so a row assembled from independently rendered per-turn prefixes
-contains tokens no serving render produces: harmony marks the LAST assistant turn with ``<|return|>``
-and every earlier one with ``<|end|>``, Qwen3 moves reasoning in and out of a turn depending on what
-follows it. :func:`_prefix_delta_row` builds such a row as an independent contrast.
-
-Placement is checked against oracles that do NOT read the implementation's own output:
-
-* :data:`EXPECTED_SPAN_BOUNDARIES` — the first and last token of every trained span, per model and
-  conversation. A span shifted by even one token changes one of them.
-* :func:`_content_bounds` — where a message's content sits in the render, recovered by re-rendering
-  the conversation with that content perturbed and diffing. Each span must cover its own content and
-  reach no neighbour's.
-* the final turn's span must end at the end of the render, and injected markers must never be trained.
-
-Real tokenizers on purpose: a stand-in with a monotone template is exactly what these assertions must
-not be satisfiable by. ``google/gemma-3-4b-it`` is the monotone control, so the machinery is shown not
-to disturb the easy case.
-
-    python tests/cpu/grpo/test_trajectory_render_fidelity.py
-"""
+"""The env-GRPO trajectory row is one serving-template render, and the loss mask marks exactly the spans the policy
+generated. Real tokenizers on purpose: templates are not prefix-monotone, with ``google/gemma-3-4b-it`` the control."""
 
 import os
 import types
@@ -45,8 +23,7 @@ TOOL_CALL = [{"id": "c1", "type": "function", "function": {"name": "calc", "argu
 
 
 def _tool_convo():
-    """user -> assistant(tool call + CoT) -> tool -> assistant(answer + CoT): every tool-using env's
-    shape. Strictly alternating templates (Gemma) reject it."""
+    """Every tool-using env's shape; strictly alternating templates (Gemma) reject it."""
     return [
         Message.user("Add 21 and 21 with the calculator. USERAAA"),
         Message.assistant("", thinking="THINKAAA", tool_calls=TOOL_CALL),
@@ -56,8 +33,7 @@ def _tool_convo():
 
 
 def _chat_convo():
-    """user -> assistant -> user -> assistant: multi-turn dialogue, no tools (every template renders
-    it). The turn-1 terminator is the one harmony rewrites."""
+    """No tools, so every template renders it. The turn-1 terminator is the one harmony rewrites."""
     return [
         Message.user("Who are you? USERAAA"),
         Message.assistant("I am REPLYAAA.", thinking="THINKAAA"),
@@ -67,8 +43,8 @@ def _chat_convo():
 
 
 def _whitespace_convo():
-    """Assistant content opening with newlines, so the template's own trailing newline and the policy's
-    first characters compete for one BPE token — the case where a span boundary is easiest to misplace."""
+    """Assistant content opening with newlines, so the template's trailing newline and the policy's first characters
+    compete for one BPE token, where a span boundary is easiest to misplace."""
     return [
         Message.user("Print blank lines then a word. USERAAA"),
         Message.assistant("\n\nREPLYAAA", thinking="THINKAAA"),
@@ -78,8 +54,7 @@ def _whitespace_convo():
 
 
 def _truncated_convo():
-    """Ends on an env observation the policy never answers (the ``max_turns`` cap), so the render's last
-    block is not an assistant turn."""
+    """Ends on an env observation the policy never answers (the ``max_turns`` cap)."""
     return [
         Message.system("You are a calculator agent. SYSAAA"),
         Message.user("Add twice. USERAAA"),
@@ -121,8 +96,7 @@ INJECTED_MARKERS = ("USERAAA", "USERBBB", "TOOLAAA", "TOOLBBB", "SYSAAA")
 
 
 def _stub(tok):
-    """Minimal object exposing what ``_tokenize_trajectory`` reads, with the real render/limit methods
-    bound so tokenization goes through the genuine chat-template path."""
+    """Real render and limit methods bound, so tokenization takes the real chat-template path."""
     stub = types.SimpleNamespace(
         processing_class=tok,
         _tokenizer=tok,
@@ -190,9 +164,8 @@ def _row_with_result(stub, messages):
 
 
 def _assert_dropped_not_guessed(stub, result, row, caplog, *needles):
-    """The contract for a trajectory the template cannot decompose: no guessed render is trained (one
-    fully masked row), the episode is invalidated so it leaves the group baseline, the cause is logged
-    with its name — and nothing is recorded as the batch error that fails every rank."""
+    """No guessed render is trained (one fully masked row), the episode leaves the group baseline, the cause is logged
+    by name, and nothing is recorded as the batch error that fails every rank."""
     _prompt, completion, mask = row
     assert stub._batch_errors.reason is None, "a data-local template failure must not fail the run"
     assert result.trajectory.episode_invalid
@@ -212,11 +185,7 @@ def _trajectory(messages):
 
 
 def _prefix_delta_row(stub, messages):
-    """Row assembled by rendering each cumulative message prefix and concatenating the deltas.
-
-    The construction a non-monotone template invalidates, kept as an independent contrast: where it
-    disagrees with the full render, the trained row must follow the render and not this.
-    """
+    """Row built by concatenating cumulative-prefix render deltas, which a non-monotone template invalidates."""
     first = next(i for i, m in enumerate(messages) if m.role == "assistant")
     prompt = stub._render_messages_to_ids(messages[:first], True, {})
     completion: list[int] = []
@@ -230,7 +199,7 @@ def _prefix_delta_row(stub, messages):
 
 
 def _mask_spans(mask):
-    """Contiguous ``[start, end)`` runs of ones — the trained turns."""
+    """Contiguous ``[start, end)`` runs of ones."""
     spans = []
     start = None
     for i, value in enumerate([*mask, 0]):
@@ -243,13 +212,8 @@ def _mask_spans(mask):
 
 
 def _content_bounds(stub, messages, index):
-    """``[start, end)`` of message ``index``'s content inside the authoritative render.
-
-    Independent of the code under test: render the conversation twice, once with that message's content
-    replaced, and take the common prefix and common suffix. What the two renders share is template
-    scaffolding or another message; what differs is this message's content. ``None`` when the message
-    has no content to locate.
-    """
+    """``[start, end)`` of message ``index``'s content in the render, or ``None`` if it has none. Independent of the
+    code under test: render twice with that content replaced and take the common prefix and suffix."""
     if not messages[index].content:
         return None
     full = _render(stub, messages)
@@ -267,12 +231,7 @@ def _content_bounds(stub, messages, index):
 
 @pytest.mark.parametrize(("model", "convo_name"), CASES)
 def test_trained_row_is_exactly_the_authoritative_render(model, convo_name):
-    """prompt + completion is the single full-conversation render, token for token.
-
-    The row-level half of the contract: every trained token comes from a render a serving engine
-    produces, so nothing is spliced in and no context can vanish. It says nothing about WHERE the mask
-    falls — that is what the boundary and content oracles below are for.
-    """
+    """The row-level half of the contract; where the mask falls is for the boundary and content oracles below."""
     stub, messages, full = _case(model, convo_name)
     prompt, completion, mask = _row(stub, messages)
 
@@ -283,12 +242,7 @@ def test_trained_row_is_exactly_the_authoritative_render(model, convo_name):
 
 @pytest.mark.parametrize(("model", "convo_name"), CASES)
 def test_trained_span_boundaries_match_the_expected_tokens(model, convo_name):
-    """Each trained span starts and ends on the expected token.
-
-    The placement oracle: the values in :data:`EXPECTED_SPAN_BOUNDARIES` are hand-checked against the
-    render, so a span shifted by one token in either direction fails here — which an assertion that
-    slices the same array the mask indexes cannot detect.
-    """
+    """A span shifted by one token fails here; an assertion slicing the array the mask indexes cannot detect that."""
     stub, messages, _ = _case(model, convo_name)
     _, completion, mask = _row(stub, messages)
     spans = _mask_spans(mask)
@@ -302,12 +256,7 @@ def test_trained_span_boundaries_match_the_expected_tokens(model, convo_name):
 
 @pytest.mark.parametrize(("model", "convo_name"), CASES)
 def test_each_span_covers_its_own_content_and_no_neighbour_content(model, convo_name):
-    """Every assistant turn's span covers that turn's content and stops short of its neighbours'.
-
-    Bounds come from :func:`_content_bounds`, which locates content by perturbing it and diffing two
-    renders — no dependence on the spans under test. A span shifted off its own content, or one that
-    reaches into the environment's text, fails here.
-    """
+    """Bounds come from :func:`_content_bounds`, with no dependence on the spans under test."""
     stub, messages, full = _case(model, convo_name)
     prompt, completion, mask = _row(stub, messages)
     offset = len(prompt)
@@ -333,17 +282,15 @@ def test_each_span_covers_its_own_content_and_no_neighbour_content(model, convo_
 
 @pytest.mark.parametrize(("model", "convo_name"), CASES)
 def test_environment_injected_text_is_never_trained(model, convo_name):
-    """Env/tool/user text stays visible to attention and carries no loss; the assistant's own text
-    carries loss."""
+    """Env/tool/user text stays visible to attention and carries no loss."""
     stub, messages, _ = _case(model, convo_name)
     _, completion, mask = _row(stub, messages)
     tok = stub._tokenizer
 
     trained = tok.decode([t for t, m in zip(completion, mask, strict=True) if m])
     row = tok.decode(completion)
-    # Anchor: both loops below only assert inside a guard, and on a trajectory whose assistant turns
-    # carry no content — the ``truncated`` case, CoT plus tool calls only — neither fires. Training
-    # nothing at all would otherwise satisfy "no injected marker is trained".
+    # Both loops below assert only inside a guard, and the ``truncated`` case, with no assistant content, fires
+    # neither. Training nothing at all would otherwise pass.
     assert trained.strip(), "nothing in this trajectory is trained"
     for marker in INJECTED_MARKERS:
         if marker in row:
@@ -355,8 +302,7 @@ def test_environment_injected_text_is_never_trained(model, convo_name):
 
 @pytest.mark.parametrize(("model", "convo_name"), CASES)
 def test_final_turn_span_ends_where_the_render_ends(model, convo_name):
-    """A trajectory ending on an assistant turn trains through the last token of the render — that is
-    where the episode's stop token lives. One ending on an observation must not."""
+    """The render's last token is the episode's stop token; a trajectory ending on an observation must not train it."""
     stub, messages, full = _case(model, convo_name)
     prompt, _completion, mask = _row(stub, messages)
     last_end = _mask_spans(mask)[-1][1] + len(prompt)
@@ -368,13 +314,8 @@ def test_final_turn_span_ends_where_the_render_ends(model, convo_name):
 
 
 def test_mid_episode_turns_never_train_the_end_of_episode_terminator():
-    """Where a template rewrites an earlier turn's terminator, the end-of-episode form appears nowhere
-    in that turn's trained span.
-
-    Rendering a turn on its own yields the end-of-episode form (harmony's ``<|return|>``); training it
-    mid-episode teaches the policy to stop after its first tool call. Collecting the cases that
-    actually rewrite keeps this from going vacuous if the fixtures stop covering such a template.
-    """
+    """Rendering a turn alone yields the end-of-episode form (harmony's ``<|return|>``); training it mid-episode
+    teaches the policy to stop after its first tool call."""
     rewritten = []
     loaded = False
     for model, convo_name in CASES:
@@ -401,8 +342,7 @@ def test_mid_episode_turns_never_train_the_end_of_episode_terminator():
 
 
 def test_every_renderable_case_has_expected_boundaries():
-    """Every (model, conversation) pair whose template renders the shape is pinned in
-    :data:`EXPECTED_SPAN_BOUNDARIES`, so a case cannot quietly drop out of the boundary oracle."""
+    """A case cannot quietly drop out of the boundary oracle."""
     missing = []
     loaded = False
     for model in MODELS:
@@ -420,12 +360,7 @@ def test_every_renderable_case_has_expected_boundaries():
 
 
 def test_fixtures_exercise_non_monotone_and_monotone_templates():
-    """Anti-vacuity control for the matrix.
-
-    The assertions above only bite when a fixture's template rewrites earlier turns. Assert the matrix
-    holds both kinds: cases where the prefix-diffing row differs from the authoritative render, and at
-    least one where it does not.
-    """
+    """The assertions above bite only when a template rewrites earlier turns, so the matrix must hold both kinds."""
     non_monotone, monotone = [], []
     for model, convo_name in CASES:
         stub = _load(model)
@@ -446,8 +381,6 @@ def test_fixtures_exercise_non_monotone_and_monotone_templates():
 
 @pytest.mark.parametrize(("model", "convo_name"), CASES)
 def test_prefix_diffing_row_is_rejected_where_it_diverges(model, convo_name):
-    """Where the prefix-diffing row differs from the authoritative render the trained row follows the
-    render; where the template is monotone the two agree, so nothing regresses."""
     stub, messages, full = _case(model, convo_name)
     naive_prompt, naive_completion = _prefix_delta_row(stub, messages)
     prompt, completion, _ = _row(stub, messages)
@@ -458,8 +391,6 @@ def test_prefix_diffing_row_is_rejected_where_it_diverges(model, convo_name):
 
 
 def test_sampled_token_path_bypasses_re_rendering():
-    """``train_on_sampled_tokens`` with the engine's ids present trains those ids verbatim: the
-    re-render path stays out of the token-id path."""
     stub, messages, _ = _case(QWEN3_0_6B, "tool")
     sampled = {1: [101, 102, 103], 3: [201, 202]}
     for idx, ids in sampled.items():
@@ -474,9 +405,6 @@ def test_sampled_token_path_bypasses_re_rendering():
 
 
 def test_sampled_token_path_falls_back_to_the_identical_render_row():
-    """With no captured ids the turns path falls back to the single re-rendered row, and that row is
-    identical to the one ``_tokenize_trajectory`` builds — the two paths cannot disagree about what the
-    trajectory is."""
     stub, messages, full = _case(GPT_OSS_20B_OPENAI, "tool")
     result = RolloutResult(prompt="task", trajectory=_trajectory(messages))
 
@@ -491,8 +419,7 @@ def test_sampled_token_path_falls_back_to_the_identical_render_row():
 
 
 def test_unlocatable_turn_span_is_reported_not_guessed(caplog):
-    """A render that cannot be decomposed drops THAT episode (named in the warning) with a fully masked
-    row; it is not guessed from prefix renders and does not fail the run."""
+    """The episode drops with a fully masked row, named in the warning, and the run goes on."""
     stub, messages, _ = _case(QWEN3_0_6B, "tool")
     real_render = stub._render_messages_to_ids
 
@@ -509,12 +436,9 @@ def test_unlocatable_turn_span_is_reported_not_guessed(caplog):
 
 
 def test_consecutive_assistant_turns_are_reported_not_guessed(caplog):
-    """Two assistant messages in a row leave the second turn's context unanchorable on a template that
-    rewrites an assistant-final prefix. The boundary between the generation prompt and the policy's own
-    tokens is then unknowable — a header's token length is not turn-invariant, since BPE merges its
-    last token with the turn's first content token differently per turn — so it must be reported rather
-    than carried over from another turn.
-    """
+    """Two assistant messages in a row leave the second turn's context unanchorable on a template that rewrites an
+    assistant-final prefix. A header's token length is not turn-invariant, since BPE merges its last token with the
+    turn's first content token differently per turn, so it is not carried over from another turn."""
     stub = _load(GPT_OSS_20B_OPENAI)
     if stub is None:
         pytest.skip("gpt-oss tokenizer unavailable")
@@ -531,9 +455,8 @@ def test_consecutive_assistant_turns_are_reported_not_guessed(caplog):
 
 
 def test_template_render_failure_is_reported_not_raised(caplog):
-    """A template that rejects the trajectory itself drops the episode, never raises: a raw exception
-    on one rank alone leaves its peers in the batch collectives until the NCCL watchdog fires, and a
-    batch error recorded for one malformed trajectory takes every rank down mid-run."""
+    """A raw exception on one rank leaves its peers in the batch collectives until the NCCL watchdog fires, and a batch
+    error recorded for one malformed trajectory takes every rank down mid-run."""
     stub, messages, _ = _case(QWEN3_0_6B, "chat")
 
     def _explode(*_args, **_kwargs):
@@ -548,10 +471,9 @@ def test_template_render_failure_is_reported_not_raised(caplog):
 
 @pytest.mark.parametrize("soft", [True, False])
 def test_every_render_path_restates_the_budget_the_episode_ran_under(soft):
-    """The whole-trajectory render and the per-turn prompt re-render hand the template the level, its budget
-    and whether the engine enforced it, as the trajectory recorded them. A soft flag dropped at either renders
-    the budget as a cut where the engine rendered a target, and every log-prob after that line is scored
-    against a prompt the policy never saw; a flag added to an enforced budget does the reverse."""
+    """A soft flag dropped at either render states the budget as a cut where the engine rendered a target, so every
+    later log-prob is scored against a prompt the policy never saw. A flag added to an enforced budget does the
+    reverse."""
     stub, messages, _ = _case(QWEN3_0_6B, "chat")
     render, seen = stub._render_messages_to_ids, []
 

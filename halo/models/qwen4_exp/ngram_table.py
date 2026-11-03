@@ -10,12 +10,8 @@ from halo.models.gradient_checkpointing import active_recompute_scope
 
 
 class HostNGramTable(ExternalTable):
-    """The frozen table ``Qwen4ExpTextNGramEmbedding`` holds in place of its ``nn.Embedding``.
-
-    A lookup returns the rows the stock embedding would, on the ids' device at ``compute_dtype``, the dtype the
-    stock weight would hold (it follows module-wide casts). A checkpointed layer's recompute reads its first
-    pass's rows back rather than gathering them again.
-    """
+    """``compute_dtype`` is the dtype the stock weight would hold, following module-wide casts. A checkpointed layer's
+    recompute reads its first pass's rows back rather than gathering them again."""
 
     part_key_format = "shard_{index}.weight"
 
@@ -36,7 +32,6 @@ class HostNGramTable(ExternalTable):
         return cache["rows"]
 
     def _gather(self, ids: torch.Tensor) -> torch.Tensor:
-        """Rows for ``ids``, gathered part by part into a pinned buffer when they go to an accelerator."""
         if not self.is_attached:
             raise RuntimeError(
                 f"{type(self).__name__} has no table attached: the model was built for a host n-gram table but "

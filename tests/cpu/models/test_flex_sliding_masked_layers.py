@@ -1,33 +1,5 @@
 """The flex-sliding attention serves every masked causal layer of a sliding-window model, full layers included,
-and keys its warm-up on what each attention module calls with.
-
-* The resolver picks the implementation for an in-library model with sliding-window layers or heads wider
-  than flash runs, on an SDPA run on CUDA, and keeps plain SDPA for a model whose every call carries what
-  FlexAttention is not given here (sinks, a logit softcap), a class not declared backend-compatible
-  (Inkling's relative bias), a remote-code class, a model with neither, a non-SDPA run, a CPU host and
-  ``HALO_FLEX_SLIDING=0``.
-* The warm-up's calls read each module's own head count: Step-3.7's sliding and full layers differ, and its
-  config's global count raises. Over the tiny roster they are exactly the calls a packed forward makes, each
-  the call its own module declares.
-* FlexAttention takes a masked call only over exactly its mask's queries and keys and with the heads, widths
-  and scaling its module declares: a tensor-parallel rank's share of the heads, another value width or scale,
-  or a module declaring no call keeps SDPA, with one warning.
-* A head narrower than Inductor's FlexAttention kernel takes (query/key or value) is neither warmed nor served: such
-  a model runs SDPA on every layer.
-* A full layer's packed (document-causal) mask, with a padded tail, reduces to block masks whose tiles are
-  exactly the ones the dense mask touches, and whose full tiles are exactly the ones it fills; the
-  uncompiled FlexAttention over them matches per-document fp64 attention.
-* Every tiny model the implementation serves, dense Mistral (a window on the config alone), Cohere2 (NoPE full
-  layers) and OLMo 3 (q/k norm) included, reproduces the SDPA model's loss and every gradient on a packed row
-  and on a right-padded batch longer than its window, with every layer on uncompiled FlexAttention reading
-  each block mask as the compiled kernel does. Each of the three dense models is held to the shape it
-  covers.
-* A wide-head layer's packed mask yields its documents' boundaries over every row of the batch; a mask
-  any query of which attends other than its own document's prefix (a padded tail, a window, a bidirectional
-  span, a hole) yields none, so the call keeps SDPA.
-
-    python tests/cpu/models/test_flex_sliding_masked_layers.py
-"""
+and keys its warm-up on what each attention module calls with."""
 
 import os
 from unittest.mock import patch
@@ -81,9 +53,8 @@ ROSTER = {
     "gemma4": TINY_GEMMA4_FLEX_FAMILY,
     "gemma4_text": TINY_GEMMA4_TEXT_FLEX_FAMILY,
 }
-# The tiny families with sliding-window layers whose every call FlexAttention may take. DeepSeek-V4 resolves
-# here too, but its family spec forces eager before this step; GptOss carries sinks on every call; Inkling a
-# dense relative bias; Bailing is remote code with no sliding layer.
+# The tiny families with sliding layers whose every call FlexAttention may take. DeepSeek-V4 resolves here too, but its
+# family spec forces eager; GptOss carries sinks on every call; Inkling a dense relative bias; Bailing is remote code.
 FLEX_FAMILIES = {
     "cohere2",
     "cohere2_moe",
@@ -116,9 +87,9 @@ def test_the_resolver_over_the_tiny_roster(family):
 
 def test_the_resolver_keeps_sdpa_where_flex_takes_no_call():
     sliding = MistralConfig(sliding_window=64)
-    assert _resolve(sliding) == SDPA_FLEX_SLIDING  # premise: a window on every layer, no layer_types
+    assert _resolve(sliding) == SDPA_FLEX_SLIDING  # a window on every layer, no layer_types
     assert _resolve(Gemma3TextConfig()) == SDPA_FLEX_SLIDING
-    assert Gemma2Config().attn_logit_softcapping  # premise: every Gemma 2 call carries the softcap
+    assert Gemma2Config().attn_logit_softcapping  # every Gemma 2 call carries the softcap
     assert _resolve(Gemma2Config()) == "sdpa"
     assert _resolve(Qwen3Config()) == "sdpa"  # no sliding layer, narrow heads
     assert _resolve(sliding, "flash_attention_2") == "flash_attention_2"
@@ -129,11 +100,10 @@ def test_the_resolver_keeps_sdpa_where_flex_takes_no_call():
 
 @pytest.mark.parametrize("family", ["inkling_text", "inkling_mm_model"])
 def test_a_class_not_declared_backend_compatible_keeps_sdpa(family):
-    """Inkling has sliding layers, but every attention call carries the dense relative bias FlexAttention is
-    not given, which its class declares by not being backend-compatible; flex would only warm unused graphs."""
+    """Every Inkling call carries a dense relative bias flex is not given, so it would only warm unused graphs."""
     torch.manual_seed(0)
     model = tiny_family_model(ROSTER[family])
-    assert has_sliding_window_layers(model.config)  # premise: a window would select it
+    assert has_sliding_window_layers(model.config)  # a window would select it
     assert not type(model).is_backend_compatible()
     assert _resolve(model.config) == "sdpa"
 
@@ -150,24 +120,21 @@ _RemoteModel.__module__ = "transformers_modules.org.repo.modeling_remote"
 
 
 def test_a_remote_code_config_keeps_sdpa():
-    """A remote-code model's attention may not dispatch through the registry the implementation is registered
-    in: unmapped before its load, and mapped to its remote class once a load (a frozen reference's, say)
-    registered it."""
+    """A remote-code model's attention may not dispatch through the registry the implementation is registered in."""
     config = _RemoteConfig(sliding_window=64)
     assert _resolve(config) == "sdpa"
     mapping = AutoModelForCausalLM._model_mapping._extra_content
     with patch.dict(mapping, {_RemoteConfig: _RemoteModel}):
-        assert _RemoteModel.is_backend_compatible()  # premise: only its remote origin keeps it off
+        assert _RemoteModel.is_backend_compatible()  # only its remote origin keeps it off
         assert _resolve(config) == "sdpa"
 
 
 def test_step3p7_calls_carry_each_layers_own_head_count():
-    """Step-3.7's full layers run 4 heads over 2 KV heads, its sliding layers 2 over 2; the config's global
-    head count raises, so a warm-up reading it fails the load."""
+    """The config's global head count raises, so a warm-up reading it fails the load."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES["step3p7"])
     attention = next(m for m in model.modules() if isinstance(m, Step3p7Attention))
-    with pytest.raises(RuntimeError):  # premise: AmbiguousGlobalPerLayerAttributeError
+    with pytest.raises(RuntimeError):  # AmbiguousGlobalPerLayerAttributeError
         _ = attention.config.num_attention_heads
     assert flex_attention_calls(model) == {
         AttentionCall(4, 2, 64, 64, None, 0.125, None),
@@ -180,17 +147,15 @@ def _narrow_value_mla() -> Glm4MoeLiteForCausalLM:
     torch.manual_seed(0)
     model = Glm4MoeLiteForCausalLM(Glm4MoeLiteConfig(**{**TINY_GLM4_MOE_LITE_CONFIG, "v_head_dim": 16}))
     attention = next(m for m in model.modules() if isinstance(m, Glm4MoeLiteAttention))
-    assert attention.v_head_dim != attention.qk_head_dim  # premise
+    assert attention.v_head_dim != attention.qk_head_dim
     return model
 
 
 def test_the_call_check_and_the_warmup_read_one_call_on_an_mla_module():
-    """FlexAttention's call check and its warm-up read the same per-module call: an MLA module, which keeps no
-    ``head_dim``, reports its query/key width instead of raising, and its own value width, which SDPA and
-    FlexAttention take unpadded."""
+    """An MLA module reports its query/key width instead of raising, and its value width, which flex takes unpadded."""
     model = _narrow_value_mla()
     attention = next(m for m in model.modules() if isinstance(m, Glm4MoeLiteAttention))
-    assert not hasattr(attention, "head_dim")  # premise
+    assert not hasattr(attention, "head_dim")
     call = sdpa_flex_sliding._flex_call(attention)
     assert call == attention_call(attention)
     assert (call.head_dim, call.v_head_dim) == (attention.qk_head_dim, attention.v_head_dim)
@@ -198,8 +163,7 @@ def test_the_call_check_and_the_warmup_read_one_call_on_an_mla_module():
 
 
 def test_an_mla_forward_makes_the_call_its_modules_declare():
-    """The value an MLA module hands the attention interface is as wide as its ``v_head_dim``, the width the
-    FlexAttention warm-up compiles: a call check keyed on the query/key width would refuse every such call."""
+    """A call check keyed on the query/key width would refuse every such call."""
     model = _narrow_value_mla()
     seen, refused = _runtime_calls(model, [150, 30, 90])
     assert _signatures(model) == seen
@@ -207,14 +171,12 @@ def test_an_mla_forward_makes_the_call_its_modules_declare():
 
 
 def _packed(lengths: list[int], vocab: int) -> dict:
-    """One row packing documents of ``lengths``, each trained on its own next tokens."""
     ids = torch.randint(3, vocab, (1, sum(lengths)), generator=torch.Generator().manual_seed(0))
     position_ids = torch.cat([torch.arange(n) for n in lengths])[None]
     return {"input_ids": ids, "position_ids": position_ids, "labels": ids}
 
 
 def _padded(lengths: list[int], vocab: int) -> dict:
-    """One right-padded row per length, the padding unattended and untrained."""
     seq = max(lengths)
     ids = torch.randint(3, vocab, (len(lengths), seq), generator=torch.Generator().manual_seed(1))
     attention_mask = (torch.arange(seq)[None] < torch.tensor(lengths)[:, None]).long()
@@ -222,14 +184,13 @@ def _padded(lengths: list[int], vocab: int) -> dict:
 
 
 def _full_mask(query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
-    """A boolean mask over exactly the call's queries and keys, the shape FlexAttention's call check admits."""
+    """The shape FlexAttention's call check admits."""
     return torch.ones(query.shape[0], 1, query.shape[-2], key.shape[-2], dtype=torch.bool)
 
 
 def _runtime_calls(model, lengths: list[int]) -> tuple[set[tuple[int, int, int, int, float | None]], list]:
     """``(heads, kv_heads, head_dim, v_head_dim, scaling)`` of every causal call no wider than FLASH_MAX_HEAD_DIM a
-    packed forward hands the attention interface (what the compiled kernel would see), and the calls among them
-    that differ from the call their own module declares, which FlexAttention would refuse."""
+    packed forward makes, and the calls among them FlexAttention would refuse."""
     seen, refused = set(), []
     sdpa = ALL_ATTENTION_FUNCTIONS["sdpa"]
 
@@ -255,9 +216,7 @@ def _signatures(model) -> set[tuple[int, int, int, int, float | None]]:
 
 @pytest.mark.parametrize("family", FORWARD_FAMILIES)
 def test_the_warmup_calls_are_the_ones_a_forward_makes(family):
-    """Over the tiny roster the warm-up's calls must be exactly the head counts, head widths and scales a
-    packed forward hands the attention: a call it misses compiles mid-run, one it invents is never used. Each
-    call must also be the one its own module declares, which is all FlexAttention takes."""
+    """A call the warm-up misses compiles mid-run, and one it invents is never used."""
     torch.manual_seed(0)
     model = tiny_family_model(ROSTER[family])
     seen, refused = _runtime_calls(model, [150, 30, 90])
@@ -319,14 +278,12 @@ def test_flex_serves_masked_rows_past_a_tile_on_narrow_heads():
 
 
 def test_flex_takes_only_the_call_the_warmup_compiles(caplog):
-    """FlexAttention takes a call only with the heads, widths and scaling its module declares, the call the
-    warm-up compiles for it: tensor parallelism hands each rank its share of the heads, which would compile a
-    graph mid-run. A refused call warns once."""
+    """Tensor parallelism hands each rank a share of the heads, which would compile a graph mid-run."""
     q = torch.zeros(2, 4, 300, 64)
     k = torch.zeros(2, 2, 300, 64)
     mask = torch.ones(2, 1, 300, 300, dtype=torch.bool)
     module = causal_attention(scaling=0.125)
-    assert flex_attention_calls(module) == {AttentionCall(4, 2, 64, 64, None, 0.125, None)}  # premise: the warm-up's
+    assert flex_attention_calls(module) == {AttentionCall(4, 2, 64, 64, None, 0.125, None)}
     assert _flex_serves(q, k, mask, None, module=module)
     with caplog.at_level("WARNING", logger=sdpa_flex_sliding.logger.name):
         for _ in range(2):
@@ -344,15 +301,13 @@ def test_flex_takes_only_the_call_the_warmup_compiles(caplog):
     [(8, 8, False), (16, 8, False), (8, 16, False), (16, 16, True), (256, 32, True), (512, 512, False)],
 )
 def test_flex_runs_only_head_widths_its_kernel_takes(head_dim, v_head_dim, runs):
-    """Inductor's FlexAttention kernel takes no query/key or value head narrower than FLEX_MIN_HEAD_DIM (it raises
-    NYI at compile), and the implementation runs no query/key head wider than FLASH_MAX_HEAD_DIM."""
+    """Inductor's kernel raises NYI at compile on a query/key or value head narrower than FLEX_MIN_HEAD_DIM."""
     call = AttentionCall(4, 2, head_dim, v_head_dim, 128, 0.125, None)
     assert sdpa_flex_sliding._flex_runs(call) is runs
 
 
 def test_full_layer_flex_matches_per_document_attention():
-    """Uncompiled FlexAttention over a packed full layer's block masks, GQA and a padded tail included, in fp64
-    and under ``no_grad``: each real query must attend exactly its own document's prefix."""
+    """Over a packed full layer's block masks, each real query must attend exactly its own document's prefix."""
     lengths, pad, heads, kv_heads, dim = [300, 7, 150], 40, 4, 2, 32
     mask = _documents(lengths, pad)
     seq = mask.shape[0]
@@ -383,9 +338,8 @@ def test_full_layer_flex_matches_per_document_attention():
 
 
 def _as_the_kernel_reads(block_mask: BlockMask) -> BlockMask:
-    """``block_mask`` with its mask function applied as the compiled kernel applies it: a listed full tile
-    whole, a listed partial tile through the function, any other tile not at all. Uncompiled FlexAttention
-    evaluates the function alone, which would hide a wrong tile list."""
+    """As the compiled kernel reads: a full tile whole, a partial tile through the function, any other tile not at all.
+    Uncompiled FlexAttention evaluates the function alone, which would hide a wrong tile list."""
     kv_blocks = block_mask.kv_indices.shape[-1]
     partial = _dense_blocks(block_mask.kv_num_blocks, block_mask.kv_indices, kv_blocks)
     full = _dense_blocks(block_mask.full_kv_num_blocks, block_mask.full_kv_indices, kv_blocks)
@@ -407,8 +361,7 @@ def _as_the_kernel_reads(block_mask: BlockMask) -> BlockMask:
 
 
 def _uncompiled_kernel(calls: list):
-    """Uncompiled FlexAttention in place of the compiled kernel, appending to ``calls`` on each call: proof the
-    path under test ran, where a fallback to SDPA would reproduce the SDPA model exactly."""
+    """Appends to ``calls`` as proof the path ran, since a fallback to SDPA would reproduce the SDPA model exactly."""
 
     def kernel(query, key, value, *, block_mask, **kwargs):
         calls.append(1)
@@ -426,8 +379,7 @@ def _loss_and_grads(model, batch: dict) -> tuple[torch.Tensor, dict[str, torch.T
 
 
 def _reads_rotary_positions(model, layer: int) -> bool:
-    """Whether attention layer ``layer`` reads rotary positions: its output at positions 0..7 differs from its
-    output with every token at position 0, where the rotation is the identity."""
+    """Compares positions 0..7 against every token at position 0, where the rotation is the identity."""
     attention = model.model.layers[layer].self_attn
     hidden = torch.randn(1, 8, model.config.hidden_size, generator=torch.Generator().manual_seed(0))
     with torch.no_grad():
@@ -439,9 +391,7 @@ def _reads_rotary_positions(model, layer: int) -> bool:
 
 
 def test_the_dense_sliding_families_keep_the_shapes_they_cover():
-    """Mistral windows its layers from the config alone (no ``layer_types``, no window on a module, yet the
-    window binds), Cohere2's full layers are NoPE, and OLMo 3 norms q and k across the whole projection. A
-    transformers change that dropped one would leave the parity sweep green over a shape it no longer runs."""
+    """Dropping one of these shapes upstream would leave the parity sweep green over a shape it does not run."""
     torch.manual_seed(0)
     mistral, cohere2, olmo3 = (tiny_family_model(ROSTER[family]) for family in ("mistral", "cohere2", "olmo3"))
     assert "layer_types" not in vars(mistral.config)
@@ -467,9 +417,8 @@ def test_the_dense_sliding_families_keep_the_shapes_they_cover():
 @pytest.mark.parametrize("batch, lengths", [(_packed, [150, 30, 90]), (_padded, [260, 140])], ids=["packed", "padded"])
 @pytest.mark.parametrize("family", FORWARD_FAMILIES)
 def test_the_flex_model_matches_the_sdpa_model(family, batch, lengths):
-    """On a packed row and on a right-padded batch longer than the window, every layer of every row takes
-    FlexAttention, and the model reproduces the SDPA model's loss and every gradient to fp32 round-off.
-    FlexAttention's uncompiled math runs a CPU backward; only its input check refuses one."""
+    """Every layer of every row takes FlexAttention and reproduces the SDPA model to fp32 round-off.
+    Its uncompiled math runs a CPU backward; only its input check refuses one."""
     register_flex_sliding_attention()
     torch.manual_seed(0)
     reference = tiny_family_model(ROSTER[family])
@@ -477,7 +426,7 @@ def test_the_flex_model_matches_the_sdpa_model(family, batch, lengths):
     candidate.load_state_dict(reference.state_dict())
     text_config = candidate.config.get_text_config()
     text_config._attn_implementation = SDPA_FLEX_SLIDING
-    assert max(lengths) > text_config.sliding_window  # premise: the window masks keys
+    assert max(lengths) > text_config.sliding_window  # the window masks keys
     inputs = batch(lengths, text_config.vocab_size)
     calls = []
     with (
@@ -496,8 +445,7 @@ def test_the_flex_model_matches_the_sdpa_model(family, batch, lengths):
 
 @pytest.mark.parametrize("head_dim", [8, sdpa_flex_sliding.FLEX_MIN_HEAD_DIM])
 def test_heads_narrower_than_flex_takes_keep_sdpa(head_dim):
-    """A model whose heads are narrower than FLEX_MIN_HEAD_DIM has no FlexAttention call to warm and runs every
-    layer of a packed row on SDPA, reproducing the SDPA model; at FLEX_MIN_HEAD_DIM every layer takes FlexAttention."""
+    """Below FLEX_MIN_HEAD_DIM there is no FlexAttention call to warm and every layer runs SDPA."""
     register_flex_sliding_attention()
     torch.manual_seed(0)
     overrides = {"head_dim": head_dim}
@@ -527,7 +475,6 @@ def _batch(*rows: torch.Tensor) -> torch.Tensor:
 
 @pytest.mark.parametrize("rows", [[[300, 7, 150]], [[200, 257], [457]], [[1] * 5]])
 def test_packed_documents_are_read_off_the_mask(rows):
-    """Each row's document starts, offset by the row, end to end, closed by the batch's token count."""
     seq = sum(rows[0])
     mask = _batch(*(_documents(lengths) for lengths in rows))
     cu_seqlens, max_len = sdpa_flex_sliding.causal_documents(mask)
@@ -574,7 +521,7 @@ def test_masks_that_are_not_document_causal_have_no_documents(mask):
 def test_one_row_off_document_causal_takes_the_batch_off():
     seq = 400
     good, bad = _documents([300, 100]), _documents([200, 100], pad=100)
-    assert sdpa_flex_sliding.causal_documents(_batch(good, good)) is not None  # premise
+    assert sdpa_flex_sliding.causal_documents(_batch(good, good)) is not None
     assert bad.shape == (seq, seq)
     assert sdpa_flex_sliding.causal_documents(_batch(good, bad)) is None
     assert sdpa_flex_sliding.causal_documents(_batch(bad, good)) is None

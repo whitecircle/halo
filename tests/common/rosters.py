@@ -10,18 +10,14 @@ from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 def import_all_trainers() -> None:
-    """Import every module under ``halo.trainers`` so the ``DistributedTrainerMixin`` subclass tree is complete."""
+    """Import every module under ``halo.trainers`` so the mixin's subclass tree is complete."""
     for module in pkgutil.walk_packages(halo.trainers.__path__, "halo.trainers."):
         importlib.import_module(module.name)
 
 
 def distributed_trainer_classes() -> list[type]:
-    """Every ``DistributedTrainerMixin`` subclass defined under ``halo.trainers``, sorted by name, after
-    importing every trainer module.
-
-    Filtered by module: ``__subclasses__()`` is process-global, and a stub trainer another test module
-    defines (pytest imports them all before running any) would otherwise join the roster.
-    """
+    """Every ``DistributedTrainerMixin`` subclass under ``halo.trainers``, sorted; filtered by module, since a stub in
+    another test joins ``__subclasses__()``."""
     import_all_trainers()
     return sorted(
         (cls for cls in iter_subclasses(DistributedTrainerMixin) if cls.__module__.startswith("halo.trainers")),

@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the CP wrapper's stale-dense-MLP state_dict filter.
-
-``UlyssesModel.state_dict`` drops stale duplicate dense-MLP keys on sparse (MoE) layers.
-A filter that substring-matches a hardcoded projection list drops the REAL expert weights of an
-EP-wrapped GptOss layer under EP+CP (``mlp.gate_up_proj`` / ``mlp.down_proj`` /
-``mlp.down_proj_bias`` — ".mlp.down_proj" is a substring of ".mlp.down_proj_bias"). The filter
-derives everything from the model itself instead: EP layers are exempt by ``isinstance`` and
-dense-projection names are harvested from the model's own genuinely-dense ``.mlp`` layers with
-exact-key matching.
-
-Run: ``python tests/cpu/parallelism/test_cp_state_dict_filter.py`` (or ``pytest -m cpu``).
-"""
+"""The CP wrapper's stale-dense-MLP state_dict filter derives from the model, since substring matching drops real EP
+GptOss experts. ".mlp.down_proj" is a substring of ".mlp.down_proj_bias"."""
 
 from __future__ import annotations
 
@@ -37,28 +27,21 @@ _EP_GPTOSS_LAYER_KEYS = {
 
 
 def test_ep_gptoss_expert_keys_are_never_stale():
-    """An EP-wrapped GptOss layer's grouped expert params (dense-NAMED but real weights) survive —
-    both via the EP exemption and because an all-sparse model has no dense layer to harvest names
-    from. A substring filter drops all four expert keys."""
+    """Dense-named but real weights; a substring filter drops all four."""
     assert stale_dense_mlp_keys(_EP_GPTOSS_LAYER_KEYS, ep_mlp_paths={"model.layers.0.mlp"}) == set()
     assert stale_dense_mlp_keys(_EP_GPTOSS_LAYER_KEYS) == set()
 
 
 def test_hybrid_model_stale_dense_duplicates_dropped():
-    """Hybrid (GLM-4-MoE-Lite-shaped) model: the sparse layer's stale dense duplicates — exact
-    matches of the genuinely-dense layer's param names — are dropped; everything else survives."""
     keys = {
-        # layer 0: genuinely dense — harvest source, must survive.
         "model.layers.0.mlp.gate_proj.weight",
         "model.layers.0.mlp.up_proj.weight",
         "model.layers.0.mlp.down_proj.weight",
-        # layer 1: sparse — experts + router-as-gate + shared experts survive.
         "model.layers.1.mlp.experts.gate_up_proj",
         "model.layers.1.mlp.experts.down_proj",
         "model.layers.1.mlp.gate.weight",
         "model.layers.1.mlp.shared_experts.gate_proj.weight",
         "model.layers.1.mlp.shared_experts.down_proj.weight",
-        # layer 1: stale dense duplicates — must drop.
         "model.layers.1.mlp.gate_proj.weight",
         "model.layers.1.mlp.down_proj.weight",
     }
@@ -69,10 +52,9 @@ def test_hybrid_model_stale_dense_duplicates_dropped():
 
 
 def test_no_substring_collisions_on_sparse_layers():
-    """EP-style grouped params on a sparse layer never match dense names by substring: only EXACT
-    relative-key matches are stale (".mlp.gate_proj" substring-hits ".mlp.gate_proj_gmm")."""
+    """Only exact relative-key matches are stale: ``.mlp.gate_proj`` substring-hits ``.mlp.gate_proj_gmm``."""
     keys = {
-        "model.layers.0.mlp.gate_proj.weight",  # dense harvest source
+        "model.layers.0.mlp.gate_proj.weight",
         "model.layers.0.mlp.down_proj.weight",
         "model.layers.1.mlp.router.weight",
         "model.layers.1.mlp.gate_proj_gmm",
@@ -82,18 +64,14 @@ def test_no_substring_collisions_on_sparse_layers():
 
 
 def test_ep_exemption_wins_over_exact_match():
-    """Even a hypothetical EP-layer key that exactly matches a dense param name survives — the live
-    module IS the expert owner, so nothing under it is a stale copy."""
+    """The live module is the expert owner, so nothing under it is a stale copy."""
     keys = {
-        "model.layers.0.mlp.down_proj.weight",  # dense harvest source
+        "model.layers.0.mlp.down_proj.weight",
         "model.layers.1.mlp.router.weight",
-        "model.layers.1.mlp.down_proj.weight",  # would exact-match without the exemption
+        "model.layers.1.mlp.down_proj.weight",  # Would exact-match without the exemption.
     }
     assert stale_dense_mlp_keys(keys, ep_mlp_paths={"model.layers.1.mlp"}) == set()
     assert stale_dense_mlp_keys(keys) == {"model.layers.1.mlp.down_proj.weight"}
-
-
-# Integration: wrapper.state_dict() on a toy model with a REAL EP GptOss layer
 
 
 class _GptOssRouter(nn.Module):
@@ -133,14 +111,12 @@ class _DenseMLP(nn.Module):
 
 
 class _NativeSparseMLP(nn.Module):
-    """HF-native-shaped sparse block carrying stale dense duplicates — the shape the filter must drop."""
-
     def __init__(self):
         super().__init__()
         self.router = _GptOssRouter()
         self.experts = _GptOssExperts()
-        self.gate_proj = nn.Linear(H, M, bias=False)  # stale duplicate
-        self.down_proj = nn.Linear(M, H, bias=False)  # stale duplicate
+        self.gate_proj = nn.Linear(H, M, bias=False)
+        self.down_proj = nn.Linear(M, H, bias=False)
 
 
 class _Layer(nn.Module):
@@ -157,7 +133,6 @@ def _toy_model(ep_layer: nn.Module) -> nn.Module:
 
 
 def _bare_wrapper(model: nn.Module) -> UlyssesModel:
-    """Wrapper instance without CP group/patching side effects — state_dict only needs .model."""
     wrapper = UlyssesModel.__new__(UlyssesModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model

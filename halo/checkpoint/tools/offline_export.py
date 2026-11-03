@@ -1,6 +1,5 @@
-"""The standalone tools' model-directory contract: the source resolver, the input gates, the size preflight,
-the non-weight copy, the resume state a shard merge carries, the gated load of the head class per ``--task``,
-the fp32 norm cast and the one full-model write every tool owes its output directory."""
+"""The standalone tools' model-directory contract: source resolver, input gates, size preflight, non-weight copy, a
+shard merge's resume state, the gated load per ``--task``, the fp32 norm cast and the one full-model write."""
 
 import contextlib
 import logging
@@ -45,8 +44,7 @@ from halo.models.param_roles import is_normalization_module
 
 logger = logging.getLogger(__name__)
 
-# ``--task`` → the class a tool loads a checkpoint with; None resolves it from the config (``auto_load_model``:
-# AutoModelForCausalLM would drop a VLM's vision tower). One table, so every load goes through the coverage gate.
+# None resolves from the config (``auto_load_model``), as AutoModelForCausalLM would drop a VLM's vision tower.
 TASK_MODEL_CLASSES = {
     "causal_lm": None,
     "classification": AutoModelForSequenceClassification,
@@ -61,9 +59,8 @@ _LEGACY_TOKENIZER_SIDECARS = ("special_tokens_map.json", "added_tokens.json", "c
 
 
 def is_non_artifact_entry(name: str, *, is_dir: bool) -> bool:
-    """Whether a checkpoint's top-level entry ``name`` stays out of an artifact built from it: any run-internal
-    ``_*`` entry (the run's scratch and records, such as the checkpointing-plan record beside a final model), and a
-    hidden subdirectory, a nested ``checkpoint-N`` (resume state) or a vendor weight dump."""
+    """Whether a top-level entry stays out of an artifact: any run-internal ``_*`` entry, a hidden subdirectory, a
+    nested ``checkpoint-N`` (resume state) or a vendor weight dump."""
     if name.startswith(RUN_INTERNAL_PREFIX):
         return True
     return is_dir and (name.startswith((".", f"{PREFIX_CHECKPOINT_DIR}-")) or name in WEIGHT_DUMP_DIRS)
@@ -77,15 +74,10 @@ def copy_checkpoint_aux_files(
     carried: Collection[str] = (),
     verbose: bool = False,
 ) -> None:
-    """Copy a checkpoint's non-weight files from ``input_dir`` to ``output_dir``, then tag the model card.
-
-    Skips the top-level weight files and indexes the caller writes fresh, but keeps the resume state a
-    resume-from-merged run restores unless ``include_resume_sidecars`` is off (an artifact that is a new
-    base). Subdirectories copy whole, weights included (a SentenceTransformer module directory), except the
-    :func:`is_non_artifact_entry` ones; run-internal ``_*`` files and unpublished staged files stay behind too,
-    and so do the ``carried`` names, the files the caller brings across itself (a shard merge's linked resume
-    state). ``output_dir`` inside ``input_dir`` raises: the walk would copy the destination into itself.
-    """
+    """Copy non-weight files to ``output_dir`` and tag the model card, keeping resume state unless
+    ``include_resume_sidecars`` is off (an artifact that is a new base). Subdirectories copy whole unless they are
+    :func:`is_non_artifact_entry`; ``carried`` names are the caller's to bring. ``output_dir`` inside ``input_dir``
+    raises."""
     input_root = os.path.realpath(input_dir)
     if os.path.commonpath([input_root, os.path.realpath(output_dir)]) == input_root:
         raise ValueError(
@@ -133,15 +125,10 @@ def first_holder(name: str, input_dirs: Sequence[str]) -> str | None:
 
 
 def resume_state_sources(input_dirs: Sequence[str]) -> dict[str, str]:
-    """``{filename: input holding it}`` for the resume state a merge of ``input_dirs``, the directories of one
-    save, carries: every per-rank file (optimizer shards, RNG and prefetch states, one per global rank) and,
-    last, the optimizer meta every node writes alike. Carried, they resume the merged directory exactly on the
-    save's topology, behind the save's own fingerprint gates.
-
-    Raises:
-        ValueError: a per-rank file held at different sizes, inputs whose optimizer metas differ, or a rank
-            of the meta whose optimizer shard no input holds.
-    """
+    """``{filename: input holding it}`` for the resume state a merge of one save's directories carries: every per-rank
+    file and, last, the optimizer meta, so the merged directory resumes exactly on the save's topology behind its
+    fingerprint gates. Raises on a size conflict, differing metas, or a meta rank whose optimizer shard no input
+    holds."""
     names = {name for input_dir in input_dirs for name in os.listdir(input_dir) if is_per_rank_resume_file(name)}
     sources = {name: first_holder(name, input_dirs) for name in sorted(names)}
     meta_paths = [os.path.join(input_dir, OPTIMIZER_META_FILE) for input_dir in input_dirs]
@@ -183,13 +170,9 @@ def _file_versions(directory: str, names: tuple[str, ...]) -> dict[str, tuple[in
 
 
 def load_task_model(model_path: str, task: str, *, excuse_task_head: bool, text_only: bool = False, **load_kwargs):
-    """``model_path`` loaded as ``task``'s class (:data:`TASK_MODEL_CLASSES`), its missing keys gated.
-
-    ``excuse_task_head`` lets the head the class adds over the backbone be absent, which only the caller can
-    judge (an adapter that saves it, an encoder base under the widest causal-LM class). ``text_only``, the class
-    an adapter may be trained through on a multimodal checkpoint, applies to the causal-LM resolution; a task
-    with one class raises ``ValueError`` on it.
-    """
+    """``model_path`` loaded as ``task``'s class, its missing keys gated. ``excuse_task_head`` lets the class's added
+    head be absent, which only the caller can judge; ``text_only`` applies to the causal-LM resolution and raises
+    elsewhere."""
     model_class = TASK_MODEL_CLASSES[task]
     if model_class is None:
         return auto_load_model(model_path, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs)
@@ -199,8 +182,7 @@ def load_task_model(model_path: str, task: str, *, excuse_task_head: bool, text_
 
 
 def cast_norms_to_fp32(model) -> None:
-    """Cast every normalization leaf to fp32 (a bf16 body with fp32 norms). Leaves only: a container that
-    classifies as a norm must not drag its children up with it."""
+    """Cast every normalization leaf to fp32; leaves only, as a norm-classed container must not drag its children."""
     logger.info("Setting specific layers to appropriate precision...")
     for module in model.modules():
         if is_normalization_module(module) and next(module.children(), None) is None:
@@ -216,13 +198,9 @@ def save_full_checkpoint(
     include_resume_sidecars: bool = True,
     **save_kwargs,
 ) -> None:
-    """``save_pretrained`` plus the non-weight files a conversion tool's output directory needs.
-
-    The order is the contract: ``source_dir``'s files are copied before the save so the live config and
-    tokenizer overwrite them, stale weight files are swept only after it, and carried legacy tokenizer
-    files the fresh processing class did not rewrite are dropped. The save writes the layout the saved
-    config declares (:func:`~halo.checkpoint.hub_layout.save_pretrained_layout`). Full models only.
-    """
+    """``save_pretrained`` plus a tool output's non-weight files, for full models only. The order is the contract:
+    ``source_dir``'s files copy before the save so the live config and tokenizer overwrite them, stale weights are
+    swept after it, and carried legacy tokenizer files the fresh processing class did not rewrite are dropped."""
     if is_peft_model(model):
         raise ValueError(
             "save_full_checkpoint writes full model directories; an unmerged PEFT adapter save must "
@@ -250,11 +228,8 @@ def save_full_checkpoint(
 
 
 def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str:
-    """A local checkpoint directory as-is; a Hub repo id resolved through the download cache, offline from the
-    cache alone: a call that may fetch lists a pinned commit's files through the Hub, which raises offline.
-
-    The fetch leaves the vendor weight dumps behind (:data:`~halo.checkpoint.format.WEIGHT_DUMP_IGNORE_PATTERNS`):
-    no tool reads them, and the aux copy drops them from every output."""
+    """A local directory as-is; a Hub id through the download cache, cache-only when offline, as a call that may fetch
+    lists a pinned commit's files through the Hub. The fetch leaves vendor weight dumps behind, which no tool reads."""
     if os.path.isdir(model_id):
         return model_id
     logger.info(f"Resolving {model_id} through the HF cache (HF_HOME)...")
@@ -267,9 +242,8 @@ def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str
 
 
 def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:
-    """Refuse a conversion whose output directory is its own input: every tool writer ends in
-    :func:`~halo.checkpoint.writing.remove_stale_checkpoint_files`, which deletes the source shards. An
-    existing output is compared by identity too, since ``realpath`` does not see through a bind mount."""
+    """Refuse an output that is its input, since every tool writer deletes the source shards it does not overwrite. An
+    existing output is compared by identity too, as ``realpath`` does not see through a bind mount."""
     if os.path.realpath(input_dir) == os.path.realpath(output_dir) or (
         os.path.exists(input_dir) and os.path.exists(output_dir) and os.path.samefile(input_dir, output_dir)
     ):
@@ -281,11 +255,8 @@ def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:
 
 
 def reject_sibling_adapter(input_dir: str) -> None:
-    """Refuse a shard merge whose input holds a PEFT adapter beside the shards.
-
-    The aux copy carries ``adapter_config.json`` but not the adapter weights, so the merged directory
-    would advertise an adapter it does not hold; no supported run produces this pairing.
-    """
+    """Refuse a shard merge with a PEFT adapter beside the shards: the aux copy carries ``adapter_config.json`` but not
+    the weights, so the merged directory would advertise an adapter it lacks."""
     adapter_weights = [name for name in ADAPTER_WEIGHT_NAMES if os.path.isfile(os.path.join(input_dir, name))]
     if adapter_weights:
         raise ValueError(
@@ -298,8 +269,7 @@ def reject_sibling_adapter(input_dir: str) -> None:
 
 
 def _nearest_existing_path(path: str) -> str:
-    """``path`` resolved, or its nearest existing ancestor: a directory a tool has yet to create lands on that
-    ancestor's volume."""
+    """``path`` resolved, or its nearest existing ancestor, whose volume a directory yet to be created lands on."""
     target = os.path.realpath(path)
     while not os.path.exists(target):
         target = os.path.dirname(target)
@@ -307,19 +277,15 @@ def _nearest_existing_path(path: str) -> str:
 
 
 def cross_device_bytes(paths: Iterable[str], output_dir: str) -> int:
-    """An estimate of the bytes of ``paths`` that :func:`~halo.checkpoint.atomic.link_or_copy_file` copies into
-    ``output_dir`` rather than hard-links: those of the files on another filesystem. It undercounts where the
-    output's filesystem refuses a link anyway (a second bind mount of it, a protected hard link, a project-quota
-    boundary), since such a file is copied too."""
+    """Estimated bytes of ``paths`` that :func:`~halo.checkpoint.atomic.link_or_copy_file` copies rather than links:
+    those on another filesystem. Undercounts where the output's filesystem refuses a link anyway (a second bind mount,
+    a protected hard link, a project-quota boundary)."""
     device = os.stat(_nearest_existing_path(output_dir)).st_dev
     return sum(status.st_size for status in map(os.stat, paths) if status.st_dev != device)
 
 
 def preflight_resource_warning(tool: str, output_dir: str, *, disk_bytes: int | None, ram_bytes: int | None) -> None:
-    """Warn when ``tool``'s estimated peak host RAM or output disk exceeds what the host has free.
-
-    Warn-only because both figures are estimates; ``None`` skips a side.
-    """
+    """Warn when estimated peak host RAM or output disk exceeds what is free; ``None`` skips a side."""
     if ram_bytes:
         available = available_host_ram_bytes()
         if available is not None and ram_bytes > available:
@@ -346,12 +312,8 @@ def preflight_model_load_resources(
     device_map: str | None = None,
     writes_full_model: bool = True,
 ) -> None:
-    """Size preflight for a tool loading a whole checkpoint through ``from_pretrained``, estimated from the
-    source's safetensors bytes.
-
-    Silent for a hub id, a weightless directory and a per-rank-sharded one: whether the input is usable
-    is the tool's own gates' call.
-    """
+    """Size preflight for a whole-checkpoint ``from_pretrained``, from the source's safetensors bytes. Silent for a hub
+    id, a weightless directory and a per-rank one, whose usability is the tool's own gates' call."""
     if not (weights_dir and os.path.isdir(weights_dir)):
         return
     try:

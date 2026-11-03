@@ -1,11 +1,6 @@
 #!/usr/bin/env python
 """The trainer's pipeline-loss contract: inert defaults, and which objectives fuse into the last stage.
-
-Fusing hands the last stage the causal-LM CE in token chunks, so an adapter whose loss reads the
-assembled output (per-sequence log-probs, a pooled row, a pair comparison) must never fuse, whatever
-the knob says.
-
-    python tests/cpu/trainers/test_pipeline_loss_adapter.py
+Fusing hands the last stage the causal-LM CE in token chunks, so a loss reading the assembled output must never fuse.
 """
 
 import pytest

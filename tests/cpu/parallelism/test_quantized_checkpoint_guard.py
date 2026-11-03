@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""EP must refuse a natively-quantized checkpoint on every family, not just the one leaf class.
-
-The EP path materializes experts as plain ``nn.Parameter``s, so an MXFP4/int checkpoint cannot be
-trained. ``apply_ep_layers`` refuses one up front — but the scan runs on the class named in
-``MOE_LAYER_MAP``, and for ten of the eleven families that class is the MoE *block*, whose expert
-tensors hang off a child module (``GptOssMLP.experts.gate_up_proj``). Only ``Gemma4TextExperts`` is
-itself the expert leaf. A shallow ``recurse=False`` scan therefore sees nothing on gpt-oss — the
-family the error message names — and lets the run continue to an unrelated failure at first forward.
-
-Both tests drive the real ``apply_ep_layers`` on the real upstream ``GptOssMLP`` layout, so
-they cover the guard's depth AND a transformers relayout in one place: the refusal test fails with
-``recurse=False``, and the acceptance test fails if the guard starts firing on bf16. They patch with a
-one-rank EP config, which builds no process group; the gate runs before construction and is the same
-at every ``ep_size``.
-
-Run: pytest tests/cpu/parallelism/test_quantized_checkpoint_guard.py
-"""
+"""EP refuses a natively-quantized checkpoint on every family, since a shallow scan of ``MOE_LAYER_MAP``'s class
+misses nested expert tensors. The gate runs before construction at every ``ep_size``."""
 
 import pytest
 import torch
@@ -45,7 +30,6 @@ def _model_with_gptoss_mlp() -> nn.Module:
 
 
 def test_quantized_experts_are_refused_at_patch_time():
-    """The real guard must see the nested uint8 expert tensor and refuse the model."""
     model = _model_with_gptoss_mlp()
     with torch.no_grad():
         model.mlp.experts.gate_up_proj = nn.Parameter(
@@ -56,7 +40,6 @@ def test_quantized_experts_are_refused_at_patch_time():
 
 
 def test_float_experts_are_not_rejected():
-    """The guard must not fire on a normal bf16 model — patching proceeds and wraps the block."""
     model = _model_with_gptoss_mlp().to(torch.bfloat16)
     returned = apply_ep_layers(model, single_process_ep_config())
     assert type(returned.mlp).__name__ != "GptOssMLP", "the MoE block was not wrapped"

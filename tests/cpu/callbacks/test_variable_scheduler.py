@@ -1,23 +1,16 @@
 #!/usr/bin/env python
-"""Tests for VariableSchedulerCallback. Run: python tests/cpu/callbacks/test_variable_scheduler.py"""
 
 import pytest
 import torch
 
 from halo.callbacks.variable_scheduler import VariableSchedulerCallback
 
-# Mock helpers
-
 
 class MockModel:
-    """Simple mock model to receive scheduled attributes."""
-
     pass
 
 
 class MockModuleWrappedModel:
-    """Simulates DDP/FSDP wrapped model with .module attribute."""
-
     def __init__(self, inner_model):
         self.module = inner_model
 
@@ -36,11 +29,8 @@ class MockControl:
     pass
 
 
-# Tests
-
-
 def test_linear_schedule():
-    """Linear from initial to final over max_steps, holding at final past it rather than extrapolating."""
+    """Holds at final past max_steps rather than extrapolating."""
     model = MockModel()
     cb = VariableSchedulerCallback(
         attribute_name="test_attr",
@@ -59,7 +49,7 @@ def test_linear_schedule():
 
 
 def test_error_no_training_steps():
-    """A run with no steps has nothing to schedule over; it fails at train begin, not on a division."""
+    """A run with no steps fails at train begin, not on a division."""
     cb = VariableSchedulerCallback(
         attribute_name="test_attr",
         initial_value=1.0,
@@ -74,7 +64,6 @@ def test_error_no_training_steps():
 
 
 def test_missing_model_in_kwargs_raises():
-    """No model in the callback kwargs is a hard error — the attribute has nowhere to land."""
     cb = VariableSchedulerCallback(
         attribute_name="x",
         initial_value=1.0,
@@ -82,11 +71,10 @@ def test_missing_model_in_kwargs_raises():
     )
     state = MockTrainerState(global_step=0, max_steps=100)
     with pytest.raises(ValueError, match="(?i)model"):
-        cb.on_train_begin(MockArgs(), state, MockControl())  # no model=...
+        cb.on_train_begin(MockArgs(), state, MockControl())
 
 
 def test_module_wrapped_model_unwrapped():
-    """A DDP/FSDP-style wrapper (.module) has the attribute set on the inner model."""
     inner = MockModel()
     wrapped = MockModuleWrappedModel(inner)
     cb = VariableSchedulerCallback(
@@ -97,7 +85,6 @@ def test_module_wrapped_model_unwrapped():
     state = MockTrainerState(global_step=0, max_steps=100)
     cb.on_train_begin(MockArgs(), state, MockControl(), model=wrapped)
 
-    # The attribute lands on the inner module, not the wrapper.
     assert hasattr(inner, "my_attr")
     assert not hasattr(wrapped, "my_attr")
 
@@ -107,9 +94,8 @@ def test_module_wrapped_model_unwrapped():
 
 
 def test_existing_attribute_not_overwritten_on_train_begin():
-    """If the model already defines the attribute, on_train_begin leaves it intact."""
     model = MockModel()
-    model.my_attr = 0.123  # pre-existing value
+    model.my_attr = 0.123
     cb = VariableSchedulerCallback(
         attribute_name="my_attr",
         initial_value=1.0,
@@ -117,7 +103,6 @@ def test_existing_attribute_not_overwritten_on_train_begin():
     )
     state = MockTrainerState(global_step=0, max_steps=100)
     cb.on_train_begin(MockArgs(), state, MockControl(), model=model)
-    # on_train_begin only sets the attr when absent — pre-existing stays.
     assert abs(model.my_attr - 0.123) < 1e-6
 
 
@@ -137,11 +122,7 @@ def test_model_attribute_is_initialized():
 
 
 def test_step_leaves_the_module_tree_unchanged():
-    """Only the top-level ``.module`` wrapper is peeled.
-
-    A nested child exposing ``.module`` (an FSDP1 unit) stays in place: a recursive unwrap would
-    replace such children on every step, rewriting the model mid-training.
-    """
+    """A nested child exposing ``.module`` (an FSDP1 unit) stays in place; a recursive unwrap rewrites the model."""
 
     class Unit(torch.nn.Module):
         def __init__(self):

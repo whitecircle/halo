@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: which saver a checkpoint context routes to.
-
-``select_checkpoint_saver`` follows one precedence exactly — PEFT adapters first (unless a merged
-base or accelerate's FSDP owns the save), then PP (a stage is a partial model), standalone expert
-LoRA adapters, EP (sharded past one rank when asked, else gathered; incl. EP+TP / EP+CP) before CP,
-CP before TP, TP before plain FSDP2, an unsharded model holding an external table (which transformers'
-``save_pretrained`` cannot write) after that, and ``None`` when no mode owns the save. A drift here silently
-routes a save through the wrong gather path, so this asserts the ROUTE — the function that will
-run — for every mode combination.
-
-    python tests/cpu/checkpoint/test_checkpoint_save_ladder.py
-"""
+"""Which saver a checkpoint context routes to: ``select_checkpoint_saver``'s precedence, asserted as the function that
+will run. A drift silently routes a save through the wrong gather path."""
 
 import pytest
 import torch.nn as nn
@@ -54,8 +44,7 @@ class _Tiny(nn.Module):
 
 
 def _ctx(topology: dict | None = None, *, peft: bool = False, table: bool = False, **fields):
-    """A saver context on the real config of ``topology`` (one process when omitted), ``fields`` set;
-    ``peft`` hands it a PeftModel, ``table`` a model holding an external table."""
+    """``peft`` hands it a PeftModel, ``table`` a model holding an external table."""
     model = _Tiny(table=table)
     model = get_peft_model(model, LoraConfig(r=1, target_modules=["proj"])) if peft else model
     config = make_parallelism_config(**topology) if topology else None
@@ -64,7 +53,7 @@ def _ctx(topology: dict | None = None, *, peft: bool = False, table: bool = Fals
 
 _EXPERT_LORA = {"has_ep_layers": True, "has_expert_lora": True}
 
-# (description, topology, fields, saver that must run) — precedence + every mode. None = nobody owns the save.
+# None = nobody owns the save.
 CASES = [
     ("PEFT adapters", None, {"peft": True}, save_peft_adapters),
     (
@@ -121,9 +110,8 @@ def test_ladder_routes_each_mode(desc, topology, fields, expected):
 
 @pytest.mark.parametrize("desc,topology,fields,expected", CASES)
 def test_save_checkpoint_reports_whether_a_mode_owned_the_save(desc, topology, fields, expected, monkeypatch):
-    """The bool the trainers branch on: False sends ``save_model`` to the base Trainer, and a mode
-    that owns the save must never return it — under TP the base save gathers every DTensor from the
-    one rank it runs on and then barriers the WORLD, hanging the job."""
+    """False sends ``save_model`` to the base Trainer; under TP that gathers from one rank and barriers the world,
+    hanging the job."""
     ran = []
     for name in (
         "save_peft_adapters",
@@ -146,7 +134,6 @@ def test_save_checkpoint_reports_whether_a_mode_owned_the_save(desc, topology, f
 
 @pytest.mark.parametrize("world_size, expected", [(2, save_ep_sharded_checkpoint), (1, save_ep_gathered_checkpoint)])
 def test_a_sharded_ep_save_needs_more_than_one_rank(world_size, expected, monkeypatch):
-    """``save_sharded_ep`` picks the per-rank shards; one rank has nothing to shard and gathers."""
     monkeypatch.setattr(save_mod, "get_global_world_size", lambda: world_size)
     assert select_checkpoint_saver(_ctx(has_ep_layers=True, save_sharded_ep=True)) is expected
 

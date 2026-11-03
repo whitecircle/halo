@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """Every ``loss_type`` the embedding config accepts builds a loss, and every registered loss is accepted.
-
-The parser refuses a value outside ``EmbeddingConfig.loss_type``'s choices, so ``build_embedding_loss``
-looks the registry up without a miss branch: a choice added to the config without a registry entry
-would fail only at a run's first construction, and a registry entry the config omits is unreachable.
-
-Run: pytest tests/cpu/trainers/test_embedding_loss_registry.py
-"""
+A choice with no registry entry fails only at a run's first construction; an entry the config omits is unreachable."""
 
 from typing import get_args, get_type_hints
 

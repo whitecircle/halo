@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Test the accelerator-level parallelism knobs the mixin applies on BOTH launch branches.
-
-``fp32_output_conversion`` (default False, i.e. off) clears accelerate's
-``native_amp`` so ``prepare`` does not wrap the forward in ``convert_outputs_to_fp32`` — the full
-``[B, S, V]`` logits upcast. It must apply outside ``build_plain_accelerator``, which an
-``accelerate launch`` that manages FSDP/DDP never reaches — a knob confined there leaves the upcast
-in place on that branch. The knobs that genuinely cannot apply there must say so instead of
-vanishing.
-
-Run: python tests/cpu/trainers/test_accelerator_knobs.py
-"""
+"""Accelerator knobs on both launch branches; knobs an accelerate-managed launch cannot apply warn.
+``fp32_output_conversion`` applies outside ``build_plain_accelerator``, which ``accelerate launch`` never reaches."""
 
 import types
 
@@ -53,9 +44,6 @@ def _capture_warnings(fn) -> list[str]:
     return calls
 
 
-# ── fp32_output_conversion ───────────────────────────────────────────────
-
-
 def test_native_amp_disabled_when_requested():
     me = _fake_self()
     _configure(me)
@@ -69,14 +57,11 @@ def test_native_amp_kept_when_knob_on():
 
 
 def test_native_amp_kept_under_fp16():
-    # native_amp also gates GradScaler unscaling — clearing it would clip on scaled grads.
+    # native_amp also gates GradScaler unscaling; clearing it would clip on scaled grads.
     me = _fake_self(fp16=True)
     warnings = _capture_warnings(lambda: _configure(me))
     assert me.accelerator.native_amp is True
     assert any("fp16" in w for w in warnings), warnings
-
-
-# ── knobs an accelerate-managed launch cannot honour ─────────────────────
 
 
 def test_silent_when_all_knobs_are_default():
@@ -88,7 +73,7 @@ def test_names_every_unapplicable_knob_that_is_set():
     warnings = _capture_warnings(lambda: _warn_unapplied(me))
     assert len(warnings) == 1, warnings
     assert "use_hsdp" in warnings[0] and "fp32_grad_reduce" in warnings[0]
-    # Not listed: it IS applied on this branch.
+    # It is applied on this branch.
     assert "fp32_output_conversion" not in warnings[0]
 
 

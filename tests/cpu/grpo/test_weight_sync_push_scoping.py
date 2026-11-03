@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""Every weight-sync push scopes the engine's co-load groups to the model it sends.
-
-SGLang's MLA loaders fuse ``q_a_proj`` and ``kv_a_proj_with_mqa`` from a cache local to one request
-and drop a half that arrives alone, so the client holds a declared pair in one chunk. The pair exists
-only where the model has both projections, which is why the groups are scoped to the pushed module
-tree. Unscoped, a client either waits for a partner the model never declares (a false "missing their
-partners" refusal of a model without ``q_a_proj``) or, scoped to no model at all, holds nothing and
-sends the halves in separate requests — which the engine drops, leaving it serving stale attention
-weights with no error.
-
-What is pinned: the environmental trainer's push scopes its client whether that is one SGLang client
-or a pool of them, and the collective push scopes its forwarding client exactly once (the pool's own
-scoping is pinned in ``tests/cpu/weight_sync/test_pool.py``).
-
-Run: ``python tests/cpu/grpo/test_weight_sync_push_scoping.py`` (or ``pytest -m cpu``).
-"""
+"""Every weight-sync push scopes the engine's co-load groups to the model it sends. SGLang's MLA loaders drop a half
+of the pair that arrives alone; an unscoped client falsely refuses a model without ``q_a_proj`` or splits the pair."""
 
 from __future__ import annotations
 
@@ -64,7 +50,6 @@ class _MLAModel(nn.Module):
 
 
 def _stub_trainer(model: nn.Module, client):
-    """The environmental trainer's sync entrypoint, on the smallest object it needs."""
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.model = model
     trainer.accelerator = SimpleNamespace(is_main_process=True)
@@ -95,8 +80,8 @@ def _two_params_per_chunk(monkeypatch):
 
 
 def test_the_streamed_push_does_not_refuse_a_model_without_q_a_proj():
-    """An MLA block without ``q_lora_rank`` has no ``q_a_proj``: its ``kv_a_proj_with_mqa`` loads on
-    its own, so holding it for a partner refuses a sound sync at the close."""
+    """An MLA block without ``q_lora_rank`` has no ``q_a_proj``, and holding its ``kv_a_proj_with_mqa`` for a partner
+    refuses a sound sync at the close."""
     model = _MLAModel(("q_b_proj", "kv_a_proj_with_mqa", "o_proj"))
     wire = Wire()
     client = wire.attach(offline_client(SGLangWeightSyncClient))
@@ -108,7 +93,6 @@ def test_the_streamed_push_does_not_refuse_a_model_without_q_a_proj():
 
 
 def test_the_streamed_push_keeps_a_declared_pair_in_one_request():
-    """Anti-over-scoping: where the model declares both halves, the scoped groups still hold the pair."""
     wire = Wire()
     client = wire.attach(offline_client(SGLangWeightSyncClient))
 

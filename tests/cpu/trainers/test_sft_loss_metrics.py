@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""``DistributedSFTTrainer``'s loss metrics fold ONCE per log, not once per micro-batch, under every mode.
-
-The trainer computes its own mean_token_accuracy / entropy / aux_loss / num_attended_tokens_seen, with and
-without context parallelism. Each micro-batch records sums into a ``WorldMetrics`` window that one flush per log
-folds across the world — fold-of-sums equals sum-of-folds, which is what these tests prove against a fake 2-rank
-group. Gathering and ``.item()``-ing each quantity per micro-batch instead, as TRL's ``SFTTrainer.compute_loss``
-does, puts four collectives and three host stalls per micro-batch on the critical path of every optimizer step,
-which at 512 GPUs is hundreds per step.
-
-Run: python tests/cpu/trainers/test_sft_loss_metrics.py
-"""
+"""``DistributedSFTTrainer``'s loss metrics fold once per log, not once per micro-batch, under every mode.
+TRL's per-micro-batch fold costs four collectives and three host stalls each: hundreds per step at 512 GPUs."""
 
 import types
 from collections import defaultdict
@@ -63,11 +54,8 @@ def _accumulate(rank, outputs, labels, attention_mask):
 
 
 def _microbatch(seed, rows=2, aux_loss=None, attended=SEQ, cp=True):
-    """(outputs, labels, attention_mask) for one micro-batch; under ``cp`` the logits cover rank 0's chunk.
-
-    ``attended`` is how many of the SEQ positions are attended, so a caller can make the
-    micro-batches carry UNEQUAL token counts.
-    """
+    """``(outputs, labels, attention_mask)``; under ``cp`` the logits cover rank 0's chunk.
+    ``attended`` lets a caller give the micro-batches unequal token counts."""
     generator = torch.Generator().manual_seed(seed)
     width = SEQ // CP_SIZE if cp else SEQ
     outputs = types.SimpleNamespace(logits=torch.randn(rows, width, VOCAB, generator=generator))
@@ -88,12 +76,8 @@ def _drain_in_lockstep(ranks):
 
 
 def _run(ranks, batches, *, drain_every_microbatch):
-    """Accumulate ``batches`` on every rank, draining once at the end or after every micro-batch.
-
-    Draining per micro-batch is the unbatched formulation (one fold per micro-batch, its ratio appended
-    for TRL to average); draining once is the shipped behaviour. Both go through the SAME code, so the
-    comparison cannot drift.
-    """
+    """Drain once at the end (shipped) or after every micro-batch (the unbatched formulation).
+    Both go through the same code, so the comparison cannot drift."""
     for batch in batches:
         for rank in ranks:
             _accumulate(rank, *batch)
@@ -109,7 +93,6 @@ def _metric(rank, key):
 
 @pytest.mark.parametrize("cp", [True, False], ids=["cp", "no-cp"])
 def test_accumulation_runs_no_collective_and_emits_nothing(cp):
-    """The whole point: the micro-batch path must not reach the wire, with or without CP."""
     rank = _rank(cp=cp)
     for seed in range(4):
         _accumulate(rank, *_microbatch(seed, aux_loss=0.25, cp=cp))
@@ -118,8 +101,7 @@ def test_accumulation_runs_no_collective_and_emits_nothing(cp):
 
 
 def test_token_counter_is_exactly_fold_of_sums_equals_sum_of_folds():
-    """``num_attended_tokens_seen`` is a pure sum, so batching it is an identity — asserted EXACTLY,
-    across a fake 2-rank CP group, not to a tolerance."""
+    """``num_attended_tokens_seen`` is a pure sum, so batching it is an identity and takes no tolerance."""
     batches = [_microbatch(seed) for seed in range(5)]
 
     batched = [_rank(0), _rank(1)]
@@ -129,7 +111,7 @@ def test_token_counter_is_exactly_fold_of_sums_equals_sum_of_folds():
 
     assert batched[0]._total_train_tokens == per_microbatch[0]._total_train_tokens == 5 * 2 * SEQ
     assert _metric(batched[0], "num_attended_tokens_seen") == _metric(per_microbatch[0], "num_attended_tokens_seen")
-    # Both ranks of the group agree — the fold is global, not rank-local.
+    # The fold is global, so both ranks of the group agree.
     assert batched[0]._total_train_tokens == batched[1]._total_train_tokens
 
 
@@ -146,10 +128,7 @@ def test_ranks_sharing_a_batch_count_it_once(replication):
 
 
 def test_ratio_metrics_match_the_per_microbatch_formulation_on_equal_token_counts():
-    """Accuracy and entropy become token-weighted over the log window instead of an unweighted mean
-    of per-micro-batch ratios. The two coincide exactly when the micro-batches carry equal token
-    counts.
-    """
+    """Accuracy and entropy are token-weighted over the log window, which equals the unweighted mean only here."""
     batches = [_microbatch(seed, aux_loss=0.1 * seed) for seed in range(4)]
 
     batched = [_rank(0), _rank(1)]
@@ -161,13 +140,11 @@ def test_ratio_metrics_match_the_per_microbatch_formulation_on_equal_token_count
         new = _metric(batched[0], key)
         old = _metric(per_microbatch[0], key)
         assert len(new) == 1 and len(old) == len(batches)
-        # TRL's log() averages the list; that average is what actually reaches the run's logs.
+        # TRL's log() averages the list, and that average reaches the run's logs.
         assert new[0] == pytest.approx(sum(old) / len(old), rel=1e-12), key
 
 
 def test_ratio_metrics_are_token_weighted_when_microbatches_differ_in_length():
-    """With unequal micro-batches the batched value is the window's token-weighted mean, which sits
-    between the per-micro-batch ratios rather than tracking either end."""
     batches = [_microbatch(0, attended=SEQ, cp=False), _microbatch(1, attended=SEQ // 4, cp=False)]
 
     batched = [_rank(cp=False)]
@@ -183,9 +160,7 @@ def test_ratio_metrics_are_token_weighted_when_microbatches_differ_in_length():
 
 @pytest.mark.parametrize("cp", [True, False], ids=["cp", "no-cp"])
 def test_drain_folds_once_per_log_on_every_rank_however_many_microbatches(cp):
-    """Participation is structural: a rank whose window is empty (its first log) enters the flush too,
-    never skips it — one rank sitting out is a hang for the other 511 — and a full window costs the
-    same one fold across the ranks."""
+    """A rank whose window is empty (its first log) enters the flush too; one rank sitting out hangs the other 511."""
     full, empty = _rank(0, cp=cp), _rank(1, cp=cp)
     for seed in range(8):
         _accumulate(full, *_microbatch(seed, aux_loss=0.3, cp=cp))
@@ -200,8 +175,7 @@ def test_drain_folds_once_per_log_on_every_rank_however_many_microbatches(cp):
 
 
 def _oracle(logits, labels):
-    """TRL's ``SFTTrainer.compute_loss`` metrics, spelled out: accuracy and entropy over the supervised
-    next-token positions."""
+    """TRL's ``SFTTrainer.compute_loss`` metrics: accuracy and entropy over the supervised next-token positions."""
     shift_labels = labels[:, 1:]
     loss_mask = shift_labels != LABEL_IGNORE_INDEX
     accuracy = (((logits.argmax(-1) == shift_labels) & loss_mask).sum() / loss_mask.sum()).item()
@@ -211,16 +185,11 @@ def _oracle(logits, labels):
 
 @pytest.mark.parametrize("cp", [True, False], ids=["cp", "no-cp"])
 def test_records_carry_the_quantities_their_names_claim(cp):
-    """Independent recomputation, not another pass through the same code.
-
-    Swapping the attended tokens (attention mask, padding included) for the loss-token count is exactly the
-    confusion the name ``num_attended_tokens_seen`` guards against, and comparing two passes of the same code
-    would not see it; nor would it see entropy weighted by the attended tokens instead of the supervised ones.
-    """
+    """An independent recomputation: two passes of the same code would miss attended tokens swapped for the loss-token
+    count, or entropy weighted by the attended tokens."""
     chunk = SEQ // CP_SIZE if cp else SEQ
     outputs, labels, mask = _microbatch(0, rows=2, attended=SEQ - 1, cp=cp)
-    # Row 0 predicts its next tokens 0 and 3 and skips two ignored ones: accuracy is over the loss tokens alone,
-    # and nonzero; the attended tokens still count the ignored labels.
+    # Row 0 skips two ignored labels: accuracy covers the loss tokens alone, while the attended tokens count them.
     labels[0, 2:4] = LABEL_IGNORE_INDEX
     for position in (0, 3):
         outputs.logits[0, position, labels[0, position + 1]] += 100.0
@@ -242,8 +211,7 @@ def test_records_carry_the_quantities_their_names_claim(cp):
 
 
 def test_liger_token_accuracy_is_weighted_by_its_supervised_tokens():
-    """A fused-loss forward skips the logits and reports its own accuracy; the window weighs each
-    micro-batch's accuracy by the tokens it was taken over."""
+    """A fused-loss forward skips the logits and reports its own accuracy; the window weighs it by its tokens."""
     rank = _rank(cp=False)
     for accuracy, attended in ((1.0, SEQ), (0.0, SEQ // 4)):
         _, labels, mask = _microbatch(0, attended=attended, cp=False)
@@ -256,10 +224,8 @@ def test_liger_token_accuracy_is_weighted_by_its_supervised_tokens():
 
 
 def test_empty_window_emits_nothing_rather_than_a_zero():
-    """A run's final ``log()`` fires after the window was already drained. Appending a 0.0 accuracy
-    there puts a bogus last point on every run's curves; the emit is skipped on the FLUSHED
-    result, so every rank skips together.
-    """
+    """A run's final ``log()`` fires after the drain, and a 0.0 there would put a bogus last point on every curve.
+    The skip reads the flushed result, so every rank skips together."""
     ranks = [_rank(0), _rank(1)]
     _run(ranks, [_microbatch(0)], drain_every_microbatch=False)
     after_real = {key: list(values) for key, values in ranks[0]._metrics["train"].items()}
@@ -271,8 +237,7 @@ def test_empty_window_emits_nothing_rather_than_a_zero():
 
 
 def test_drain_is_a_noop_under_pipeline_parallelism():
-    """The schedule computes the loss on the last stage and records nothing here; a flush would be a
-    collective for nothing on every log."""
+    """The schedule computes the loss on the last stage and records nothing here, so a flush would be wasted."""
     rank = _rank(cp=False)
     rank._pp_runner = object()
     with _no_collective():
@@ -281,8 +246,6 @@ def test_drain_is_a_noop_under_pipeline_parallelism():
 
 
 def test_train_and_eval_windows_do_not_contaminate_each_other():
-    """``_metrics`` is keyed by mode and so is the accumulator; eval must not add to the run's
-    train-token counter."""
     rank = _rank(0)
     _accumulate(rank, *_microbatch(0))
     rank.model.training = False
@@ -296,7 +259,6 @@ def test_train_and_eval_windows_do_not_contaminate_each_other():
 
 
 def test_accumulator_resets_after_a_drain():
-    """A window must not be counted twice: the next log folds only what came after this one."""
     ranks = [_rank(0), _rank(1)]
     _run(ranks, [_microbatch(0)], drain_every_microbatch=False)
     first = ranks[0]._total_train_tokens

@@ -1,6 +1,5 @@
-"""Grading a contest program against its tests: one sandbox session per grade, a failure summary the policy
-reads, and the run's grading contract (:class:`GradingSpec`), shared by the environment and the offline
-re-grader so both score alike."""
+"""Grading a contest program against its tests, and the run's grading contract (:class:`GradingSpec`), shared by the
+environment and the offline re-grader so both score alike."""
 
 import logging
 import textwrap
@@ -33,27 +32,22 @@ from halo.environments.tasks.coding.verdicts import (
 
 logger = logging.getLogger(__name__)
 
-# Characters of stdout a test accepts before OUTPUT LIMIT EXCEEDED, raised per test to a multiple of that
-# test's own expected output: a fixed cap fails every correct solution whose answer is larger than it.
+# Stdout characters a test accepts before OUTPUT LIMIT EXCEEDED, raised per test to a multiple of its expected output:
+# a fixed cap fails every correct solution whose answer is larger.
 DEFAULT_MAX_OUTPUT_SIZE = 1_000_000
 OUTPUT_CAP_EXPECTED_MULTIPLE = 4
 
 _STDERR_EXCERPT_CHARS = 200
 _OUTPUT_EXCERPT_CHARS = 100
-# Verdict detail is failures-only, one entry per distinct verdict, capped: per-test PASS lines carry no
-# information the summary's pass count doesn't, tests failing the same way say it once, and an
-# uncapped failure list turns a broken solution into a page of noise.
+# Failures only, one entry per distinct verdict, capped: an uncapped list turns a broken solution into a page of noise.
 _MAX_FAILURE_DETAILS = 5
-# Tests named on one folded verdict line before the rest are counted.
 _MAX_FOLDED_TESTS_NAMED = 6
 
 
 class GradeResult(NamedTuple):
-    """Outcome of grading one solution against a test list: ``ran_ok`` counts tests that exited cleanly with output,
-    ``infra_errors`` those lost to the backend, ``graded`` those judged — below ``total``, the scoring denominator,
-    once a budget stop (``budget_hit``) or ``stop_on_first_failure`` cuts the run short. ``graded`` has no default:
-    every value is wrong for some grade.
-    """
+    """``ran_ok`` counts tests that exited cleanly with output, ``infra_errors`` those lost to the backend, ``graded``
+    those judged: below ``total``, the scoring denominator, once a budget stop or ``stop_on_first_failure`` cuts the
+    run short. ``graded`` has no default because every value is wrong for some grade."""
 
     passed: int
     total: int
@@ -66,8 +60,6 @@ class GradeResult(NamedTuple):
 
 @dataclass
 class _Failure:
-    """One distinct non-passing verdict and the tests that produced it, in order."""
-
     body: str
     tests: list[int]
 
@@ -81,8 +73,8 @@ class _Failure:
 
 @dataclass
 class _FailureLog:
-    """One grade's non-passing tests folded by verdict and capped, the notes after them, and its infra errors by
-    text; ``full`` is the ``verdict_detail`` that shows more than each failure's class."""
+    """One grade's non-passing tests folded by verdict and capped; ``full`` is the ``verdict_detail`` that shows more
+    than each failure's class."""
 
     full: bool
     failures: list[_Failure] = field(default_factory=list)
@@ -92,8 +84,6 @@ class _FailureLog:
     infra_errors: int = 0
 
     def add(self, test: int, body: str) -> None:
-        """Book a non-passing test: onto the failure with the same verdict, else as a new one while
-        under the cap, else counted as suppressed."""
         for failure in self.failures:
             if failure.body == body:
                 failure.tests.append(test)
@@ -104,8 +94,8 @@ class _FailureLog:
             self.suppressed += 1
 
     def add_infra(self, test: int, error: str) -> None:
-        """Book a test lost to infra: no verdict on the program. Under ``outcome`` it shows its class alone: the
-        error's text (a service's message, an exception quoting a path) can carry what the program wrote."""
+        """Under ``outcome`` it shows its class alone: the error's text (a service's message, an exception quoting a
+        path) can carry what the program wrote."""
         self.infra_texts[error] += 1
         self.infra_errors += 1
         self.add(
@@ -113,7 +103,6 @@ class _FailureLog:
         )
 
     def details(self) -> list[str]:
-        """Each folded failure, then the notes, then how many failures the cap left out."""
         lines = [failure.render() for failure in self.failures] + self.notes
         if self.suppressed:
             lines.append(f"...and {self.suppressed} more non-passing tests (details omitted).")
@@ -124,10 +113,8 @@ class _FailureLog:
 def _grading_runner(
     sandbox: SandboxExecutor, code: str, *, language: str, timeout: float
 ) -> Iterator[Callable[[str], SandboxResult]]:
-    """A ``run(stdin)`` for one grade over one session, so a compiled submission is built once, reset to its prepared
-    state after every run so no test sees an earlier one's files. An executor without sessions, or a session that fails
-    to open (logged), grades through one-shot runs.
-    """
+    """A ``run(stdin)`` over one session, so a compiled submission is built once, reset after every run so no test sees
+    an earlier one's files. An executor without sessions, or a session that fails to open, grades one-shot."""
 
     def one_shot(stdin: str) -> SandboxResult:
         return run_reporting_faults(sandbox.run, code, stdin=stdin, timeout=timeout, language=language)
@@ -160,10 +147,9 @@ def _grading_runner(
 
 
 def _compile_error_note(result: SandboxResult, shown: bool) -> str:
-    """The note a source that never built grades as: every test fails the same way, so it is judged once with
-    the whole pool counted. The compiler names its first error first, so the head of its stderr follows where
-    ``shown``: under ``full``, for a host build error, or on a backend that builds apart from every test's stdin
-    (``COMPILES_WITHOUT_TEST_INPUT``)."""
+    """Every test fails the same way, so it is judged once with the whole pool counted. The head of the compiler's
+    stderr follows where ``shown``: under ``full``, for a host build error, or on a backend that builds apart from
+    every test's stdin (``COMPILES_WITHOUT_TEST_INPUT``)."""
     note = "COMPILATION ERROR (every test fails)"
     if result.stderr and shown:
         note += "\n" + textwrap.indent(stderr_head(result.stderr, _STDERR_EXCERPT_CHARS), "  ")
@@ -180,13 +166,12 @@ def _judge_test(
     timeout: float,
     max_output_size: int,
 ) -> tuple[bool, bool, bool]:
-    """``(passed, ran_ok, lost)`` for test number ``test``'s run, a non-passing one booked on ``log``: ``lost`` is a
-    test the backend lost, no verdict on the program."""
+    """``(passed, ran_ok, lost)``; ``lost`` is a test the backend lost, no verdict on the program."""
     if result.timed_out:
         log.add(test, f"TIME LIMIT EXCEEDED ({timeout:g}s)")
         return False, False, False
     if result.error:
-        # Backend/transport failure (not the program's stderr); bucket as ERROR even with partial stdout.
+        # Backend or transport failure; bucket as ERROR even with partial stdout.
         log.add_infra(test, result.error)
         return False, False, True
     if result.returncode not in (0, None):
@@ -227,8 +212,8 @@ def _judge_test(
 
 
 def _grade_summary(passed: int, total: int, graded: int, budget_hit: bool, max_grading_seconds: float | None) -> str:
-    """The grade's first line: the pass count, and after a budget stop how far grading got — for diagnosis, not
-    credit: the full pool stays the scoring denominator, so an ungraded test is never passed."""
+    """The pass count, and after a budget stop how far grading got, for diagnosis only: the full pool stays the scoring
+    denominator, so an ungraded test is never passed."""
     summary = f"Passed {passed}/{total} test cases."
     if budget_hit:
         summary += (
@@ -250,12 +235,9 @@ def run_solution_against_tests(
     max_grading_seconds: float | None = None,
     verdict_detail: str = VERDICT_DETAIL_OUTCOME,
 ) -> GradeResult:
-    """Run a solution against test cases, one sandbox run each, judging stdout against each test's ``output`` with
-    ``verdict_fn`` (default: trimmed exact match) -> :class:`GradeResult`. The details list the non-passing tests,
-    folded by verdict, capped and shown as ``verdict_detail`` says. ``max_grading_seconds`` bounds the grade's wall
-    clock, checked between tests (at least one runs), since a several-hundred-test problem would stall the rollout
-    round; the full pool stays the denominator, so size the budget to the pool.
-    """
+    """One sandbox run per test. ``max_grading_seconds`` bounds the wall clock, checked between tests (at least one
+    runs), since a several-hundred-test problem would stall the rollout round; the full pool stays the denominator, so
+    size the budget to the pool."""
     full = require_verdict_detail(verdict_detail) == VERDICT_DETAIL_FULL
     if not test_cases:
         return GradeResult(0, 0, "No test cases provided.", 0, graded=0)
@@ -305,11 +287,8 @@ def run_solution_against_tests(
 
 @dataclass(frozen=True)
 class GradingSpec:
-    """The grading contract a run is scored under: everything constant across its problems, built once by the
-    environment so the offline re-grader reproduces a run's verdicts from the same object rather than re-threading each
-    knob. The per-problem facts (``checker``, ``time_limit``, ``stated_tolerance``) stay :func:`grade_solution`
-    arguments; :meth:`to_meta` / :meth:`with_meta` carry the contract across a trajectory dump, off the field list.
-    """
+    """The grading contract a run is scored under: everything constant across its problems, so the offline re-grader
+    reproduces a run's verdicts from the same object. Per-problem facts stay :func:`grade_solution` arguments."""
 
     sandbox: SandboxExecutor
     comparison: str = "exact"
@@ -323,7 +302,7 @@ class GradingSpec:
     max_grading_seconds: float | None = None
     verdict_detail: str = VERDICT_DETAIL_OUTCOME
 
-    # The live executor: rebuilt from the run's env kwargs offline, never carried through a JSON dump.
+    # Rebuilt offline from the run's env kwargs, never carried through a JSON dump.
     _META_EXCLUDED = frozenset({"sandbox"})
 
     def __post_init__(self) -> None:
@@ -355,13 +334,11 @@ class GradingSpec:
         require_verdict_detail(self.verdict_detail)
 
     def to_meta(self) -> dict[str, Any]:
-        """This contract as a JSON-able block for a trajectory meta line."""
         return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in self._META_EXCLUDED}
 
     def with_meta(self, meta: dict[str, Any], **overrides: Any) -> "GradingSpec":
-        """This contract with a dumped :meth:`to_meta` block, then ``overrides``, applied over it; a key no field
-        declares raises, so a trajectory written under a retired spelling is never re-graded under today's defaults.
-        """
+        """A key no field declares raises, so a trajectory written under a retired spelling is never re-graded under
+        today's defaults."""
         unknown = sorted(set(meta) - set(self.to_meta()))
         if unknown:
             raise ValueError(
@@ -371,10 +348,8 @@ class GradingSpec:
         return replace(self, **{**meta, **overrides})
 
     def time_limit_for(self, language: str, time_limit: float | None) -> float:
-        """The per-test limit a ``language`` program runs under for a problem stating ``time_limit`` (unstated:
-        ``default_timeout``): an interpreted language floored at ``default_timeout``, a compiled one scaled by
-        ``compiled_time_limit_scale``, either clamped to ``max_time_limit``.
-        """
+        """An interpreted language floors at ``default_timeout``, a compiled one scales by
+        ``compiled_time_limit_scale``, either clamped to ``max_time_limit``."""
         limit = time_limit or self.default_timeout
         resolved = find_language(language)
         if resolved is not None and not resolved.is_compiled:
@@ -396,10 +371,7 @@ def grade_solution(
     stated_tolerance: FloatTolerance | None = None,
     language: str | None = None,
 ) -> GradeResult:
-    """Grade ``code`` against ``tests`` under ``spec`` -> :class:`GradeResult`, the single grading entry point: the
-    verdict :func:`build_verdict` picks, each test at the limit :meth:`GradingSpec.time_limit_for` derives from the
-    problem's ``time_limit``, in ``language`` (default ``spec.language``).
-    """
+    """The single grading entry point; each test runs at :meth:`GradingSpec.time_limit_for`."""
     language = language or spec.language
     return run_solution_against_tests(
         code,

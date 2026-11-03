@@ -1,6 +1,5 @@
-"""How the streamed weight sync cuts its chunks: the chunk budget, the parameter groups an engine loads only
-together, and the parameter snapshots on the sync device. Snapshots stay off pinned host memory: a chunk that
-transits the host is copied out and back over PCIe, and those two copies, not the fabric, would set the rate."""
+"""How the streamed weight sync cuts its chunks. Snapshots stay off pinned host memory, as a chunk that transits the
+host is copied out and back over PCIe, and those two copies would set the rate instead of the fabric."""
 
 from collections.abc import Callable, Iterable
 
@@ -10,9 +9,8 @@ from torch.distributed.tensor import DTensor
 from halo.env import env_positive_int
 from halo.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES
 
-# One streamed chunk on the sync GPU, HALO_WEIGHT_SYNC_CHUNK_MB (default one packed buffer), read once at
-# import. The forwarding rank holds this plus the largest tensor, which is a chunk of its own; each chunk
-# costs one engine round trip, so a larger budget trades memory for fewer.
+# Read once at import. The forwarding rank holds this plus the largest tensor, which is a chunk of its own; each
+# chunk costs one engine round trip, so a larger budget trades memory for fewer.
 WEIGHT_SYNC_CHUNK_BYTES = env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", PACKED_BUFFER_BYTES >> 20) << 20
 
 
@@ -52,8 +50,7 @@ def split_co_loaded(
 def declared_co_load_groups(
     groups: tuple[tuple[str, ...], ...], module_names: Iterable[str]
 ) -> tuple[tuple[str, ...], ...]:
-    """``groups`` narrowed to the members ``module_names`` carries: an engine fuses only what the model declares
-    (an MLA block without ``q_lora_rank`` has no ``q_a_proj``)."""
+    """Narrowed to what ``module_names`` carries; an MLA block without ``q_lora_rank`` has no ``q_a_proj``."""
     names = set(module_names)
 
     def declared(suffix: str) -> bool:
@@ -64,8 +61,7 @@ def declared_co_load_groups(
 
 
 def resolve_sync_device(device: torch.device | str | int) -> torch.device:
-    """The explicit ``cuda:N`` form of ``device``: an index and a bare ``"cuda"`` must name the transport's GPU,
-    and ``torch.device("cuda")`` compares unequal to ``cuda:0``."""
+    """The explicit ``cuda:N`` form of ``device``, as ``torch.device("cuda")`` compares unequal to ``cuda:0``."""
     resolved = device if isinstance(device, torch.device) else torch.device(device)
     if resolved.type == "cuda" and resolved.index is None:
         resolved = torch.device("cuda", torch.cuda.current_device())
@@ -82,9 +78,8 @@ def snapshot_to_sync_device(
     flush: Callable[[], None],
 ) -> torch.Tensor:
     """A contiguous copy of ``weights`` on ``device`` (the source's when ``None``), after ``flush`` sent the pending
-    chunk if ``weights`` would take it past ``budget``. A copy, never an alias, so the next optimizer step cannot
-    rewrite a buffered weight; async on the caller's stream, completed by the flush. A param neither broadcast
-    protocol can carry is refused first, before it can quiesce an engine."""
+    chunk if ``weights`` would pass ``budget``. An alias would let the next optimizer step rewrite a buffered weight.
+    Async, completed by the flush. A param no broadcast can carry raises first, before it can quiesce an engine."""
     if isinstance(weights, DTensor):
         raise TypeError(
             f"Parameter {name!r} is a DTensor: the weight-sync client broadcasts raw local storage but "

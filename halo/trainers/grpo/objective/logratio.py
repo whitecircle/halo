@@ -1,7 +1,5 @@
-"""Truncated log-ratio terms of the GRPO objectives, pure functions over trainer tensors: the k3 KL tail clamp,
-the sampler-to-trainer importance ratio, and the masking stages (default off), which give a masked token ratio 0
-and leave the DAPO normalizer and the KL anchor in place. Trajectories pool turn rows by ``traj_ids``.
-"""
+"""Truncated log-ratio terms of the GRPO objectives: the k3 KL tail clamp, the importance ratio, and the masking stages
+(default off), which give a masked token ratio 0 and leave the DAPO normalizer and the KL anchor in place."""
 
 from __future__ import annotations
 
@@ -28,16 +26,15 @@ forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed
 
 
 def sampled_token_mask(completion_mask: torch.Tensor, row_has_sampling: torch.Tensor) -> torch.Tensor:
-    """The completion tokens of rows that carry sampling logprobs: the only tokens a sampler-side
-    quantity (a forced close, a certain token, the IS ratio) can be read on."""
+    """The only tokens a sampler-side quantity (a forced close, a certain token, the IS ratio) can be read on."""
     return completion_mask.bool() & row_has_sampling.unsqueeze(1)
 
 
 def sampler_certain_mask(
     sampling_logps: torch.Tensor, completion_mask: torch.Tensor, row_has_sampling: torch.Tensor
 ) -> torch.Tensor:
-    """Policy tokens the sampler emitted with probability 1 (:data:`SAMPLER_CERTAIN_LOGPROB`), on rows that
-    carry sampling logprobs: no sampling choice was made there, so they carry no importance weight."""
+    """Tokens the sampler emitted with probability 1: no sampling choice was made there, so they carry no importance
+    weight."""
     return sampled_token_mask(completion_mask, row_has_sampling) & (sampling_logps >= SAMPLER_CERTAIN_LOGPROB)
 
 
@@ -49,14 +46,8 @@ def zero_engine_forced_closes(
     completion_ids: torch.Tensor,
     reasoning_end_ids: tuple[int, ...],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(ratio, forced)``: the ratio zeroed at reasoning closes the engine forced, a run of the reasoning-end
-    ids the sampler emitted wholly at probability 1, as vLLM's thinking budget appends at a turn's cap.
-
-    The close was not the policy's action; trained with the episode's advantage, repeated forced closes drive
-    down the model's own probability of ending its reasoning. Ratio 0 drops the policy-gradient term and keeps
-    the DAPO normalizer, like every mask stage here. A natural run emitted wholly at probability 1 is zeroed
-    too, which costs nothing at top_p 1 (the budgeted recipes) and otherwise only a near-certain token's
-    gradient."""
+    """The ratio zeroed at reasoning closes the engine forced at a turn's thinking cap. Trained with the episode's
+    advantage, repeated forced closes drive down the model's own probability of ending its reasoning."""
     certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
     width = len(reasoning_end_ids)
     forced = torch.zeros_like(certain)
@@ -69,25 +60,15 @@ def zero_engine_forced_closes(
 
 
 def clamp_ref_logps(ref_logps: torch.Tensor, policy_logps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Bound the tail of the k3 KL estimator by capping the log-ratio at :data:`KL_LOGRATIO_CLAMP`
-    nats. Unconditional; not configurable.
-
-    ``per_token_kl = exp(ref − logp) − (ref − logp) − 1`` is unbounded where the policy suppresses a
-    token the reference gives high probability; capping ``ref`` at ``policy + KL_LOGRATIO_CLAMP``
-    truncates that tail. Returns ``(clamped_ref, clamped)``, the second the bool mask of the positions
-    the cap bit.
-    """
+    """Cap the k3 estimator's log-ratio at :data:`KL_LOGRATIO_CLAMP` nats, as ``exp(ref − logp) − (ref − logp) − 1`` is
+    unbounded where the policy suppresses a token the reference favors. Returns ``(clamped_ref, clamped)``."""
     ceiling = policy_logps + KL_LOGRATIO_CLAMP
     return torch.minimum(ref_logps, ceiling), ref_logps > ceiling
 
 
 def kl_clamp_counts(clamped: torch.Tensor, loss_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(clamped loss tokens, loss tokens)``, the pair :data:`KL_CLAMP_FRAC_KEY` is the world ratio of.
-
-    Over the loss mask the KL term is averaged on (TRL's ``kl``: the completion mask times the tool mask,
-    after every drop), so a cap that bit on padding, on a tool-output token or on a dropped row is not
-    counted, nor is any of them in the denominator.
-    """
+    """Over the loss mask the KL term is averaged on, so a cap that bit on padding, a tool-output token or a dropped
+    row counts nowhere."""
     loss_mask = loss_mask.bool()
     return (clamped & loss_mask).sum(), loss_mask.sum()
 
@@ -99,14 +80,9 @@ def compute_is_ratio(
     row_has_sampling: torch.Tensor,
     clip_max: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Truncated per-token engine→trainer importance ratio ``clamp(exp(logπ_recompute − logπ_sampling), clip_max)``.
-
-    Rows flagged ``False`` in ``row_has_sampling`` (rollout error dropped their sampling logprobs) and
-    non-policy tokens get ratio exactly 1, so one bad row cannot perturb the others. So does a token
-    the sampler reports as certain (:data:`SAMPLER_CERTAIN_LOGPROB`): no sampling choice was made
-    there, so it carries no importance weight and cannot trip a band or the veto.
-    Returns ``(ratio, logps_diff, corrected_mask)``, all shaped like ``completion_mask``.
-    """
+    """Truncated per-token ratio ``clamp(exp(logπ_recompute − logπ_sampling), clip_max)``. Rows without sampling
+    logprobs, non-policy tokens and sampler-certain tokens get exactly 1, so one bad row cannot perturb the others and
+    no band or veto trips. Returns ``(ratio, logps_diff, corrected_mask)``."""
     corrected_mask = sampled_token_mask(completion_mask, row_has_sampling) & ~sampler_certain_mask(
         sampling_logps, completion_mask, row_has_sampling
     )
@@ -122,14 +98,9 @@ def select_mask_logratio(
     corrected_mask: torch.Tensor,
     row_has_engine: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, torch.Tensor]]]:
-    """The log-ratio the mask stages read when the engine re-scored the rows under the trainer's
-    current weights: ``logπ_engine_now − logπ_sampling`` on rows that carry a re-score — pure policy
-    staleness, since the two engine passes share their numerics — and the trainer diff elsewhere.
-    Returns it with the step's diagnostics as ``(numerator, denominator)`` pairs over the re-scored
-    tokens: the staleness mean, the numerics mean ``logπ_recompute − logπ_engine_now`` (the floor the
-    bands would otherwise read) and the coverage of the re-score over the corrected tokens. The pairs
-    stay on device, for the caller to read with the step's other counts.
-    """
+    """``logπ_engine_now − logπ_sampling`` on rows the engine re-scored under current weights (pure staleness, as both
+    engine passes share numerics), the trainer diff elsewhere; plus on-device ``(numerator, denominator)``
+    diagnostics."""
     use_engine = corrected_mask & row_has_engine.unsqueeze(1)
     engine_diff = (engine_logps - sampling_logps) * use_engine
     mask_diff = torch.where(use_engine, engine_diff, logps_diff)
@@ -143,8 +114,7 @@ def select_mask_logratio(
 
 
 def _num_trajs(traj_ids: torch.Tensor) -> int:
-    """Trajectories ``traj_ids`` spans (ids ``0..n-1``, −1 for dummy rows). A host read: it sizes the
-    per-trajectory reductions."""
+    """Ids ``0..n-1``, −1 for dummy rows. A host read: it sizes the per-trajectory reductions."""
     return int(traj_ids.max()) + 1 if traj_ids.numel() else 0
 
 
@@ -179,13 +149,8 @@ def apply_is_masks(
     traj_ids: torch.Tensor,
     config: ISMaskConfig,
 ) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, int]]]:
-    """Apply the geometric-band / veto stages to the truncated ratio.
-
-    ``traj_ids`` maps each row to its trajectory (−1 for dummy rows). The veto tests the raw
-    (pre-truncation) ratio ``exp(logps_diff)``, so the clip cannot hide a catastrophic token.
-    Returns the masked ratio and the diagnostic ``(masked, total)`` counts of each active stage, the
-    masked count left on device.
-    """
+    """The veto tests the raw ratio ``exp(logps_diff)``, so the clip cannot hide a catastrophic token. Returns the
+    masked ratio and each active stage's ``(masked, total)`` counts, the masked count left on device."""
     if not config.any_mask_active:
         return ratio, {}
     num_trajs = _num_trajs(traj_ids)
@@ -200,7 +165,6 @@ def apply_is_masks(
         stats["sampling/is_geo_band_masked_frac"] = ((~in_geo).sum(), num_trajs)
         traj_keep &= in_geo
     if config.veto_min is not None:
-        # uncorrected tokens read as 1.0 so they never trip the veto.
         row_min = torch.where(corrected_mask, raw_ratio, torch.ones_like(raw_ratio)).min(dim=1).values
         traj_min = _traj_scatter(row_min, traj_ids, num_trajs, "amin")
         # An id with no rows keeps the 0 scatter init, which reads as vetoed; restrict to contributing ids.
@@ -220,10 +184,8 @@ def apply_opsm(
     row_advantages: torch.Tensor,
     delta: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Off-Policy Sequence Masking (DeepSeek-V3.2): zero the ratio of negative-advantage trajectories
-    whose mean log-ratio magnitude exceeds ``delta`` nats. Positive-advantage trajectories are never
-    masked. Returns the masked ratio and the per-trajectory bool mask of what it masked.
-    """
+    """Off-Policy Sequence Masking (DeepSeek-V3.2): zero negative-advantage trajectories whose mean log-ratio magnitude
+    exceeds ``delta`` nats. Returns the masked ratio and the per-trajectory mask."""
     num_trajs = _num_trajs(traj_ids)
     if num_trajs == 0:
         return ratio, torch.zeros(0, dtype=torch.bool, device=ratio.device)

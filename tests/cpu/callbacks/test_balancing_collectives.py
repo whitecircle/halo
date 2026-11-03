@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""What configuring MoE balancing and building the run's callbacks issue, pinned against the balancing
-collective-sequence golden: the collectives in call order, the records between them, the raise, the
-roster and the router config left behind, per mode, loss kind and weight-sync flag.
-
-Run: python tests/cpu/callbacks/test_balancing_collectives.py
-"""
+"""The collectives MoE balancing setup issues, pinned against a golden: call order, records, the raise, the roster and
+the router config left behind, per mode, loss kind and weight-sync flag."""
 
 import json
 
@@ -20,8 +16,7 @@ def test_the_cases_are_the_golden_cases():
 
 
 def test_the_golden_holds_every_collective_seam():
-    """Anti-vacuity: the cases reach the mode agreement, the nothing-balanced consensus and the export
-    contract, some raise, and the toolkit's records reach the trace (a stale logger prefix drops them all)."""
+    """A stale logger prefix would drop every record from the trace."""
     events = [event for trace in GOLDEN.values() for event in trace]
     assert any(event.startswith("all_gather_object") for event in events)
     assert any(event.startswith("all_reduce SUM") for event in events)

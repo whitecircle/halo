@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The embedding metrics read the sentence embeddings the loss forward already computed.
-
-``embed/*`` (logged before each log step and averaged over every eval batch) comes from the pipeline's own
-forwards, recorded inside the loss, rather than from a second ``no_grad`` encode of each text group:
-sentence-transformers runs the anchor column alone, the candidate columns merged column-major, a cached loss
-chunk by chunk and Matryoshka once at full width, so the rows lie group after group. Driven
-through the real loss call of each pattern, against an independent per-group encode, counting the backbone's
-forwards.
-
-Run: pytest tests/cpu/trainers/test_embedding_metric_features.py
-"""
+"""The embedding metrics read the sentence embeddings the loss forward already computed, with no second encode.
+The forwards run anchors alone, candidates column-major, cached losses by chunk, so rows lie group after group."""
 
 import pytest
 import torch
@@ -41,7 +32,6 @@ def _pipeline() -> SentenceTransformer:
 
 
 def _inputs(model: SentenceTransformer, columns: tuple[str, ...]) -> dict:
-    """A collated batch as sentence-transformers hands it to ``compute_loss``: ``{column}_{feature}`` keys."""
     inputs = {}
     for column in columns:
         for key, value in model[0].preprocess(_COLUMNS[column]).items():
@@ -63,7 +53,6 @@ def _backbone_forwards(model: SentenceTransformer) -> list[int]:
 
 
 def _reference_metrics(model: SentenceTransformer, inputs: dict, columns: tuple[str, ...]) -> dict[str, float]:
-    """The metrics over an independent encode of each text group alone."""
     with torch.no_grad():
         embeddings = [
             model({key[len(column) + 1 :]: value for key, value in inputs.items() if key.startswith(f"{column}_")})[
@@ -113,7 +102,6 @@ def test_eval_metrics_come_from_the_loss_forward_without_a_second_one(loss_name)
 
 
 def test_group_heads_take_each_groups_leading_rows_across_chunks():
-    """Groups of five, four and six rows over chunks that straddle the group boundaries, column-major."""
     rows = torch.arange(15.0).unsqueeze(1)
     heads = _group_heads(list(rows.split([4, 7, 2, 2])), [5, 4, 6])
     assert [head.squeeze(1).tolist() for head in heads] == [[0, 1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12, 13, 14]]

@@ -1,24 +1,5 @@
-"""What ``configure_run_tokenizer`` may change about the tokenizer a run then EXPORTS.
-
-The seam mutates the tokenizer for the run's benefit, and both mutations otherwise reach the
-checkpoint:
-
-  * ``model_max_length`` is pinned to the run's sequence budget because HF resolves every
-    ``truncation=True, max_length=None`` call against it. ``save_pretrained`` writes the LIVE
-    attribute into ``tokenizer_config.json`` — it adds the key to its own save set whether or not
-    the tokenizer was constructed with one — so an SFT run at ``max_length: 40000`` exports a
-    262k-context model whose served context is 40k, with nothing marking the cap as a training
-    budget. ``pristine_model_max_length`` is what keeps the pin off disk.
-  * ``--added_special_tokens`` on transformers' default REPLACES the extra-special list rather than
-    extending it. Adding one token therefore drops every control token the checkpoint ships from
-    ``all_special_ids`` (which the trainers build their special-token masks from) and from the
-    exported ``tokenizer_config.json``.
-
-Built on a real ``PreTrainedTokenizerFast`` rather than a stub, because the save format is exactly
-what is under test.
-
-    python tests/cpu/model_loading/test_tokenizer_export_fidelity.py
-"""
+"""What ``configure_run_tokenizer`` may change about the exported tokenizer: ``save_pretrained`` writes the live
+``model_max_length``, and transformers' default replaces the extra-special list."""
 
 from __future__ import annotations
 
@@ -46,7 +27,6 @@ CONTROL_TOKENS = ["<|im_start|>", "<|im_end|>"]
 
 
 def _tokenizer() -> PreTrainedTokenizerFast:
-    """A real fast tokenizer with the shape that matters: its own context bound and control tokens."""
     vocab = {token: index for index, token in enumerate(["<unk>", "<pad>", "<eos>", *CONTROL_TOKENS, "hi", "there"])}
     backend = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
     backend.pre_tokenizer = pre_tokenizers.Whitespace()
@@ -69,9 +49,6 @@ def _saved_config(tokenizer, tmp_path) -> dict:
     return _written_config(tmp_path)
 
 
-# model_max_length: pinned for the run, never for the export
-
-
 def test_the_export_carries_the_tokenizers_own_bound(tmp_path):
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
@@ -82,8 +59,8 @@ def test_the_export_carries_the_tokenizers_own_bound(tmp_path):
 
 
 def test_a_second_pin_does_not_overwrite_the_snapshot(tmp_path):
-    """A preference or distillation script runs the seam once per model against one tokenizer; the
-    second pass must not record the first pass's budget as the tokenizer's own bound."""
+    """A script runs the seam once per model against one tokenizer; the second pass must not snapshot the first's
+    budget."""
     tokenizer = _tokenizer()
     configure_run_tokenizer(
         CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
@@ -96,8 +73,7 @@ def test_a_second_pin_does_not_overwrite_the_snapshot(tmp_path):
 
 
 def test_a_processor_reaches_its_nested_tokenizer():
-    """A VLM run hands the trainer the processor, whose save delegates to the tokenizer the seam
-    pinned — so the restore has to reach through it."""
+    """A VLM trainer holds the processor, whose save delegates to the pinned tokenizer."""
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
     )
@@ -108,8 +84,7 @@ def test_a_processor_reaches_its_nested_tokenizer():
 
 
 def test_an_unpinned_tokenizer_is_left_alone():
-    """The GRPO family pins nothing unless both halves of its budget are bounded, so there is
-    nothing to keep off disk and nothing to restore."""
+    """The GRPO family pins nothing unless both halves of its budget are bounded."""
     tokenizer = _tokenizer()
     with pristine_model_max_length(tokenizer):
         assert tokenizer.model_max_length == MODEL_CONTEXT
@@ -117,13 +92,7 @@ def test_an_unpinned_tokenizer_is_left_alone():
 
 
 class _Fsdp2SaveTrainer:
-    """Only the trainer surface ``save_model`` reads, with the real mixin methods bound to it.
-
-    Shaped as a plain mixin-managed FSDP2 run — no EP/CP/TP/PP, no adapters — so
-    ``select_checkpoint_saver`` picks ``save_fsdp2_checkpoint``: the cheapest of the in-training
-    writers that saves the tokenizer, and the one an ordinary ``torchrun`` data-parallel run takes.
-    The model is a bare ``Linear`` because only the tokenizer half of the write is under test.
-    """
+    """A plain FSDP2 run, the cheapest in-training writer that saves the tokenizer; the model is a bare ``Linear``."""
 
     _fsdp_wrapped = True
     _accelerate_manages_fsdp = False
@@ -159,22 +128,17 @@ class _Fsdp2SaveTrainer:
     _mark_model_save_collectives_done = DistributedTrainerMixin._mark_model_save_collectives_done
 
     def _top_level_model(self):
-        # The double runs unwrapped (no accelerate/DDP/compile), so the top-level model IS self.model.
+        # The double runs unwrapped, so the top-level model is self.model.
         return self.model
 
 
 def test_a_trainer_save_exports_the_models_own_bound(tmp_path):
-    """``save_model`` is the one gate all in-training writers pass through (the strategies, the PEFT
-    adapter saver, and the base Trainer fall-through), so the restore has to be on THAT path rather
-    than merely available to it.
-
-    Driven through a real save and read back off disk: the claim is about the number in the file the
-    run ships, which a check that ``save_model``'s source mentions the context manager cannot make —
-    it holds just as well when the manager is applied to the wrong object or after the write."""
+    """``save_model`` is the one gate all in-training writers pass through. Driven through a real save, since a
+    source check holds when the manager is misapplied."""
     tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
     )
-    # Premise: there IS a pin to keep off disk, so the assertion below is not the tokenizer's default.
+    # Premise: there is a pin to keep off disk.
     assert tokenizer.model_max_length == RUN_BUDGET
 
     _Fsdp2SaveTrainer(tokenizer, str(tmp_path)).save_model(str(tmp_path))
@@ -183,9 +147,6 @@ def test_a_trainer_save_exports_the_models_own_bound(tmp_path):
         "the run's sequence budget was exported as the served context window"
     )
     assert tokenizer.model_max_length == RUN_BUDGET, "the run must keep truncating at its budget after the save"
-
-
-# added_special_tokens: a union, not a replacement
 
 
 def test_added_special_tokens_keep_the_checkpoints_own(tmp_path):
@@ -217,12 +178,8 @@ def test_re_adding_an_existing_special_token_does_not_duplicate_it():
 
 
 def test_growing_the_vocabulary_under_tp_is_refused():
-    """HF-native TP shards the embedding into a DTensor that ``resize_token_embeddings`` cannot re-shard;
-    the seam names the pre-run tool instead of dying inside a torch sharding-strategy lookup.
-
-    Through the production predicate, since the sharding-agnostic seam takes the verdict as a
-    parameter: a predicate that stopped recognizing the DTensor would drop the refusal silently.
-    """
+    """``resize_token_embeddings`` cannot re-shard the DTensor; through the production predicate, so one that stops
+    recognizing it drops the refusal."""
     tokenizer = _tokenizer()
     model = Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, "vocab_size": len(tokenizer)}))
     embedding = model.get_input_embeddings()
@@ -241,12 +198,8 @@ def test_growing_the_vocabulary_under_tp_is_refused():
 
 
 def test_every_production_caller_passes_the_sharding_predicate():
-    """The refusal above only fires where the caller supplies the verdict.
-
-    ``embeddings_sharded`` is a required keyword, so a call site without it raises ``TypeError`` —
-    but only once that call runs, behind a whole (often parallel) model load. Source-level so the CPU
-    suite names such a call site first.
-    """
+    """``embeddings_sharded`` is a required keyword, but its ``TypeError`` fires only behind a whole model load, so
+    this names such a call site first."""
     calls, missing = 0, []
     assert (REPO_ROOT / "halo").is_dir() and (REPO_ROOT / "scripts").is_dir(), "the sweep lost a root"
     for path in sorted((*(REPO_ROOT / "halo").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"))):

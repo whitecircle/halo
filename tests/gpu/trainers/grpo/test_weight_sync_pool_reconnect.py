@@ -1,21 +1,8 @@
 #!/usr/bin/env python
-"""A weight-sync pool whose client fails to open an update before any chunk went out reconnects once and
-lands the whole sync through the rebuilt client.
+"""A pool whose client fails to open an update reconnects once and lands the whole sync through the rebuilt client.
 
-``WeightSyncPool`` retries a failed client step once, on a fresh client, only while nothing of
-the sync reached the engine, since re-sending the snapshots it kept then puts the whole update there.
-The pool's client here fails its first update open, as against a server that dropped the request; the
-pool must retire it (closing its communicator and freeing the group port), form a new client on the
-same port and re-flush, after which the served policy is the one an undisturbed sync of the same
-weights serves.
-
-Requires the vLLM container serving the SAME dense checkpoint on a GPU outside
-``CUDA_VISIBLE_DEVICES``, as the re-init suite does.
-
-Usage:
-    HALO_TEST_VLLM_DENSE_SERVER_URL=http://localhost:8010 NCCL_IB_DISABLE=1 NCCL_NET=Socket \
-    CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/grpo/test_weight_sync_pool_reconnect.py
+``WeightSyncPool`` retries only while nothing reached the engine, since re-sending the kept snapshots then puts the
+whole update there.
 """
 
 from unittest.mock import patch
@@ -45,8 +32,7 @@ def _push(pool: WeightSyncPool, weight: torch.Tensor) -> None:
 
 
 def _restore(pool: WeightSyncPool, original: torch.Tensor) -> dict[str, float] | None:
-    """Push the checkpoint's own weight back and probe it, or ``None`` if that failed. Runs on every
-    path: the tier's next suite asserts against the unperturbed server."""
+    """Runs on every path: the tier's next suite asserts against the unperturbed server."""
     try:
         _push(pool, original)
         return probe_top_logprobs(VLLM_DENSE_SERVER_URL, VLLM_REINIT_MODEL)
@@ -75,7 +61,7 @@ def run(ctx) -> dict:
     )
     begin = VLLMWeightSyncClient._start_engine_update
     opened_by: list[VLLMWeightSyncClient] = []
-    # Each opening client's communicator, kept here because its close drops the client's own reference.
+    # Kept here because a client's close drops its own reference.
     communicators: list[PyNcclCommunicator] = []
 
     def first_open_dropped(client):

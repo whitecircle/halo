@@ -1,6 +1,5 @@
-"""COLLECTIVE preflights of each rollout server before the trainer is built: its context window, and whether its
-sampler and prompt log-probs are the reference the IS ratio divides by. Each probes on rank 0 and raises its
-refusal on every rank; a server that cannot answer only warns, since a probe never fails the run by itself."""
+"""COLLECTIVE preflights of each rollout server: its context window, and whether its log-probs are the reference the IS
+ratio divides by. Rank 0 probes and its refusal raises everywhere; a server that cannot answer only warns."""
 
 import logging
 import math
@@ -40,7 +39,6 @@ _PROMPT_LOGPROB_CONFIDENT = -1.0
 # nats: the bound catches a whole sequence that itself prefilled as a graph (a raised capture range).
 _PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL = 4.0
 
-# How each arm stops summing the IS log-ratios over a sequence.
 _PER_TOKEN_RATIO_REMEDY = (
     "take the ratio per token: on online GRPO a token_* vllm_importance_sampling_mode with a loss_type other than "
     "vespo; on the environmental arm, whose correction is per token already, drop isr_geo_band_min/max and "
@@ -75,14 +73,9 @@ def _probe_top_logprobs(
 def probe_sampler_logprob_semantics(
     client: WeightSyncClientBase, *, top_k: int, min_p: float, repetition_penalty: float
 ) -> tuple[bool | None, bool | None]:
-    """``(temperature_applied, nucleus_renormalized)``: whether the engine's per-token logprobs are the SAMPLING
-    distribution's (after temperature, after a top-p renormalization) or the raw values, ``None`` where the probe
-    could not tell, read off three 1-token completions of one prompt.
-
-    The prefill logits are the same under every sampler, so temperature 2 halves the top-1/top-2 gap only if
-    applied before the logprobs, and top-p 0.5 lifts the top logprob only if renormalized into them. The
-    caller passes the other filters' off values, each request moving one knob from the identity sampler.
-    """
+    """``None`` where the probe could not tell. Prefill logits are the same under every sampler, so temperature 2
+    halves the top-1/top-2 gap only if applied before the logprobs, and top-p 0.5 lifts the top logprob only if
+    renormalized."""
     try:
         model_id = client.served_model_id()
     except Exception as e:
@@ -111,7 +104,7 @@ def _probe_server(
     default: Any,
     failure: str,
 ) -> Any:
-    """``probe`` over a fresh client for ``url``, else ``default`` with the warning ``Could not <failure> <url>``."""
+    """``probe`` over a fresh client for ``url``, else ``default`` with a warning."""
     client = None
     try:
         client = client_cls(base_url=url, retry_policy=_PROBE_RETRY)
@@ -130,7 +123,6 @@ def _verify_context_window_on_rank0(
     single_turn_tokens: int,
     full_trajectory_tokens: int | None,
 ) -> None:
-    """Rank 0's body of :func:`verify_context_window`."""
     for url in urls:
         mml = _probe_server(client_cls, url, client_cls.served_max_model_len, None, "read max_model_len from")
         if mml is None:
@@ -155,8 +147,7 @@ def _verify_context_window_on_rank0(
 def _verify_probed_sampler(
     url: str, temperature: float, cuts: list[str], temperature_applied: bool | None, nucleus_renormalized: bool | None
 ) -> None:
-    """Refuse the server at ``url`` whose probed logprobs are not the IS reference, and warn where the probe could
-    not tell. ``cuts`` are the sampler cuts a sequence-summing consumer reads, empty where none does."""
+    """``cuts`` are the sampler cuts a sequence-summing consumer reads, empty where none does."""
     if temperature != 1.0:
         if temperature_applied is None:
             logger.warning(
@@ -201,7 +192,6 @@ def _verify_sampler_logprob_reference_on_rank0(
     repetition_penalty: float,
     sequence_ratio_active: bool,
 ) -> None:
-    """Rank 0's body of :func:`verify_sampler_logprob_reference`."""
     if sequence_ratio_active and repetition_penalty != 1.0:
         raise ValueError(
             f"repetition_penalty={repetition_penalty} while the per-token log-ratios are summed over each "
@@ -230,9 +220,8 @@ def _verify_sampler_logprob_reference_on_rank0(
 
 
 def _probe_prompt_logprobs(client: WeightSyncClientBase, token_ids: list[int]) -> tuple[float, float, int]:
-    """``(mean NLL, gap, length)``: the whole sequence's mean NLL, and the largest per-position gap to a prefix
-    scored alone over the positions the whole scores above :data:`_PROMPT_LOGPROB_CONFIDENT` (infinite for a
-    non-finite log-prob), with that prefix's length."""
+    """``(mean NLL, gap, length)``: the largest per-position gap to a prefix scored alone, over the positions the whole
+    scores above :data:`_PROMPT_LOGPROB_CONFIDENT` (infinite for a non-finite log-prob)."""
     anchor, rest = token_ids[:1], token_ids[1:]
     score = partial(client.score_completion_logprobs, anchor, timeout=_PROBE_TIMEOUT_S)
     whole = score(rest)
@@ -251,7 +240,6 @@ def _probe_prompt_logprobs(client: WeightSyncClientBase, token_ids: list[int]) -
 def _verify_engine_prompt_logprobs_on_rank0(
     client_cls: type[WeightSyncClientBase], urls: list[str], tokenizer
 ) -> None:
-    """Rank 0's body of :func:`verify_engine_prompt_logprobs`."""
     # A counting sequence cut past vLLM's CUDA-graph capture range (512 tokens), so the whole prefills eagerly.
     counting = " ".join(str(n) for n in range(2048))
     token_ids = resolve_tokenizer(tokenizer)(counting)["input_ids"][:1100]
@@ -282,8 +270,8 @@ def _verify_engine_prompt_logprobs_on_rank0(
 
 
 def _on_rank0(check: Callable[..., None], backend: str, *args) -> None:
-    """COLLECTIVE: run ``check(client_cls, *args)`` on rank 0 and raise its refusal on every rank. The backend is
-    resolved on every rank, since a rank-0-only raise there would strand the peers in the verdict broadcast."""
+    """COLLECTIVE. The backend is resolved on every rank, since a rank-0-only raise there would strand the peers in the
+    verdict broadcast."""
     client_cls = resolve_weight_sync_client(backend)
     raise_rank0_failure(partial(check, client_cls, *args), refusal_text, ValueError)
 
@@ -291,8 +279,8 @@ def _on_rank0(check: Callable[..., None], backend: str, *args) -> None:
 def verify_context_window(
     urls: list[str], single_turn_tokens: int, full_trajectory_tokens: int | None = None, *, backend: str
 ) -> None:
-    """COLLECTIVE: refuse a rollout server whose context window cannot hold ``single_turn_tokens``; a
-    ``full_trajectory_tokens`` worst case past it only warns."""
+    """COLLECTIVE. Refuses a window that cannot hold ``single_turn_tokens``; a ``full_trajectory_tokens`` worst case
+    past it only warns."""
     _on_rank0(_verify_context_window_on_rank0, backend, urls, single_turn_tokens, full_trajectory_tokens)
 
 
@@ -307,14 +295,9 @@ def verify_sampler_logprob_reference(
     sequence_ratio_active: bool,
     backend: str,
 ) -> None:
-    """COLLECTIVE: refuse a rollout server whose per-token logprobs are not the reference the IS ratio divides by.
-
-    The trainer scores at the sampling temperature, so the engine's logprobs must carry it too (raw values
-    tilt every weight to π^T / π^1 while the ratio still reads ≈ 1). A reference renormalized over a sampler
-    cut (top-p < 1, top-k > 0, min-p > 0) lifts every uncertain position, which a consumer summing the
-    per-token log-ratios over a sequence (``sequence_ratio_active``) reads as drift; so does a
-    ``repetition_penalty`` other than 1, refused there without a probe.
-    """
+    """COLLECTIVE. Raw logprobs tilt every weight to π^T / π^1 while the ratio reads ≈ 1. A reference renormalized over
+    a sampler cut lifts every uncertain position, which a sequence-summing consumer reads as drift; so does a
+    ``repetition_penalty`` other than 1."""
     _on_rank0(
         _verify_sampler_logprob_reference_on_rank0,
         backend,
@@ -329,8 +312,6 @@ def verify_sampler_logprob_reference(
 
 
 def verify_engine_prompt_logprobs(urls: list[str], tokenizer, *, backend: str) -> None:
-    """COLLECTIVE: refuse a rollout server whose prompt log-probs, which ``isr_engine_reference`` reads, do not
-    follow from the tokens alone. The probe scores a counting sequence that prefills eagerly, then prefixes of
-    it at captured-graph lengths, and compares the shared positions the whole scores confidently.
-    """
+    """COLLECTIVE. Scores a counting sequence that prefills eagerly, then prefixes at captured-graph lengths, and
+    compares the shared positions the whole scores confidently."""
     _on_rank0(_verify_engine_prompt_logprobs_on_rank0, backend, urls, tokenizer)

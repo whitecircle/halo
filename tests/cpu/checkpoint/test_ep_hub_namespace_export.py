@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""An EP-gathered save writes every tensor outside the expert banks in its hub checkpoint's namespace.
-
-transformers reads several checkpoints through renames its module tree does not keep — a SigLIP
-tower's ``vision_model`` level (Command A+, LFM2-VL), a vendor namespace (Inkling's ``model.llm.*``,
-DeepSeek-V4's ``layers.N.attn.*``, GLM-5 Next's hyper-connections, Step-3.7's ``moe.*``), Mistral 3's
-legacy llava prefixes — while the serving engines load hub names (vLLM 0.32.0 raises on Command A+'s
-flattened tower). The gathered save therefore reverts what the load recorded, as ``save_pretrained``
-does, on every streamed chunk; only the expert banks keep the layout their family's gather emits (fused
-or per expert), which ``from_pretrained`` and both engines read either way.
-
-Swept over every tiny EP family and every multimodal wrapper one ships under, each loaded from a tiny
-checkpoint in the spelling its family's whole conversion mapping reverts to
-(:func:`_write_hub_checkpoint`; the hub spelling, as far as transformers' own revert restores it) and
-saved through the real
-``save_ep_gathered_checkpoint`` after an ``ep_size=1`` EP patch. Per family: the save's keys outside the expert banks
-are the hub checkpoint's; the artifact reloads, with no missing or unexpected key, into the tensors it
-was saved from (so the per-chunk revert is the whole one); the wrapper-less writer writes the hub
-checkpoint's keys exactly; ``unfuse_moe_experts.py`` turns the save into the hub checkpoint where the
-hub stores experts one by one; a resume and the EP lazy loader read the save back; the weight sync
-forwards what the save writes; and the sharded EP save is refused exactly where
-``merge_ep_shards.py``'s key-by-key stream could not reproduce the save.
-
-Run: ``python tests/cpu/checkpoint/test_ep_hub_namespace_export.py`` (or ``pytest -m cpu``).
-"""
+"""An EP-gathered save writes every tensor outside the expert banks in its hub checkpoint's namespace. transformers
+reads several checkpoints through renames its module tree does not keep, and the serving engines load hub names."""
 
 from __future__ import annotations
 
@@ -64,8 +42,6 @@ FAMILIES: dict[str, TinyFamily] = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 
 @dataclass
 class _Loaded:
-    """One family loaded from its hub checkpoint, EP-patched, and what its gathered save wrote."""
-
     family: TinyFamily
     model: torch.nn.Module
     hub: dict[str, torch.Tensor]
@@ -76,15 +52,8 @@ class _Loaded:
 
 
 def _write_hub_checkpoint(family: TinyFamily, directory: str) -> None:
-    """``family``'s seeded tiny model through transformers' save-side revert of the family's whole
-    conversion mapping — the hub spelling, as far as that revert restores it (DeepSeek-V4's root keys
-    keep the ``model.`` prefix the load adds).
-
-    transformers drops every ``PrefixChange`` when it saves a model built from its config, which would
-    write a SigLIP tower without the ``vision_model`` level the Command A+ and LFM2-VL indices carry, so
-    a sub-model's own ``PrefixChange`` is kept. A model-level one is left out: it reads a text-only class
-    out of its multimodal sibling's checkpoint, and such a class has no hub of its own.
-    """
+    """transformers drops every ``PrefixChange`` when it saves a config-built model, so a sub-model's own is kept;
+    DeepSeek-V4's root keys keep the ``model.`` prefix."""
     torch.manual_seed(0)
     model = tiny_family_model(family).to(torch.bfloat16)
     model._weight_conversions = [
@@ -117,7 +86,6 @@ def _loaded(name: str, tmp_path) -> _Loaded:
 
 
 def _live_name(model: torch.nn.Module, key: str) -> str:
-    """The live name checkpoint ``key`` loads into, by transformers' own load-side respelling."""
     conversions = get_model_conversion_mapping(model, add_legacy=True)
     renamings = [c for c in conversions if isinstance(c, WeightRenaming)]
     converters = [c for c in conversions if isinstance(c, WeightConverter)]
@@ -126,10 +94,8 @@ def _live_name(model: torch.nn.Module, key: str) -> str:
 
 
 def _in_expert_bank(loaded: _Loaded, key: str) -> bool:
-    """Whether checkpoint ``key`` loads into an EP layer's expert weights — the one place the save's
-    layout may differ from the hub's (fused against per expert). The live name is the HF block's, whose
-    expert spelling the EP layer need not share (Qwen3's fused ``gate_up_proj`` against its split pair),
-    so it is matched against every family's roots."""
+    """The one place the save's layout may differ from the hub's; the HF block's spelling need not match the EP
+    layer's, so every family's roots are checked."""
     live = _live_name(loaded.model, key)
     for path in loaded.ep_layers:
         if live.startswith(f"{path}."):
@@ -179,7 +145,7 @@ _WRAPPERLESS_SAVERS = {"fsdp2": save_fsdp2_checkpoint, "tp": save_tp_checkpoint}
 @pytest.mark.parametrize("saver", _WRAPPERLESS_SAVERS)
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_wrapperless_save_writes_the_hub_checkpoint(name, saver, tmp_path):
-    """The FSDP2/CP/TP writers revert the per-expert merges too, so they write the hub keys exactly."""
+    """These writers revert the per-expert merges too."""
     family = FAMILIES[name]
     hub_dir, out_dir = str(tmp_path / "hub"), str(tmp_path / "out")
     _write_hub_checkpoint(family, hub_dir)
@@ -193,8 +159,7 @@ def test_wrapperless_save_writes_the_hub_checkpoint(name, saver, tmp_path):
 
 @pytest.mark.parametrize("name", ["cohere2_vision", "lfm2_vl"])
 def test_a_model_without_a_load_record_writes_the_tower_level(name, tmp_path):
-    """A lazily loaded (or config-built) model carries no record, so its save reverts the family's
-    registry mapping, which must keep a sub-model's own ``PrefixChange``."""
+    """A lazily loaded or config-built model carries no record, so its save reverts the family's registry mapping."""
     family = FAMILIES[name]
     hub_dir, out_dir = str(tmp_path / "hub"), str(tmp_path / "out")
     _write_hub_checkpoint(family, hub_dir)
@@ -220,8 +185,7 @@ class _RecordingSender:
 
 
 def _gather_on_cpu(layer: EPMoELayerBase):
-    """The layer's own gather on the host: the sync asks for the GPU, and the family's assembly is what
-    is under test."""
+    """The sync asks for the GPU, and the family's assembly is what is under test."""
 
     def gather(device, **kwargs):
         return type(layer).gather_expert_state_dict(layer, **{**kwargs, "device": "cpu"})
@@ -231,8 +195,7 @@ def _gather_on_cpu(layer: EPMoELayerBase):
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
-    """The sync and the save invert one list: the engine receives the checkpoint's names, all but the
-    persistent buffers a parameter payload never carries."""
+    """The sync and save invert one list, all but the persistent buffers a parameter payload never carries."""
     loaded = _loaded(name, tmp_path)
     for layer in loaded.ep_layers.values():
         layer.gather_expert_state_dict = _gather_on_cpu(layer)
@@ -250,8 +213,7 @@ def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
 
 
 def test_save_and_sync_split_experts_by_the_layers_own_roots():
-    """A replicated tensor spelled like another family's expert root (GptOss's ``gate_up_proj_bias``) is this
-    layer's replicated state: the save writes it beside the experts, so the sync must push it densely."""
+    """GptOss's ``gate_up_proj_bias`` is this layer's replicated state: the sync must push it densely."""
     layer = bare_ep_layer(
         StubEPLayerBase,
         gate_up_proj=torch.zeros(2, 4, 8),
@@ -268,9 +230,7 @@ def test_save_and_sync_split_experts_by_the_layers_own_roots():
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_sharded_save_refused_exactly_where_the_merge_cannot_reproduce_it(name, tmp_path, monkeypatch):
-    """``merge_ep_shards.py`` writes the live names through the family's ``export_key_renames`` alone,
-    plus each layer's gather: where that is not what the gathered save writes, the sharded save must
-    be refused, and only there."""
+    """``merge_ep_shards.py`` writes live names through ``export_key_renames`` alone plus each layer's gather."""
     loaded = _loaded(name, tmp_path)
     layer_cls = type(next(iter(loaded.ep_layers.values())))
     live = (key for key, _ in itertools.chain(loaded.model.named_parameters(), persistent_buffers(loaded.model)))
@@ -299,10 +259,7 @@ def test_sharded_save_refused_exactly_where_the_merge_cannot_reproduce_it(name, 
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_unfuse_turns_the_gathered_save_into_the_hub_checkpoint(name, tmp_path):
-    """Where the hub stores one tensor per expert and the gather writes the fused pair,
-    ``unfuse_moe_experts.py`` is the documented step to the hub layout (SGLang 0.5.22's per-expert
-    loaders drop a fused pair); it must land on the hub checkpoint's keys exactly. A family whose hub
-    is fused is refused by the script, and its gathered save must already be the hub checkpoint."""
+    """SGLang 0.5.22's per-expert loaders drop a fused pair; a family whose hub is fused is refused by the script."""
     loaded = _loaded(name, tmp_path)
     unfused = str(tmp_path / "unfused")
     try:
@@ -318,10 +275,7 @@ def test_unfuse_turns_the_gathered_save_into_the_hub_checkpoint(name, tmp_path):
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_lazy_loader_maps_the_gathered_save(name, tmp_path):
-    """Continuing from an export runs the EP lazy loader over it, on the shell a run builds (the family patches
-    applied to its config): every key outside the expert banks (whose per-expert form the expert fuser owns)
-    and the external tables (which the load attaches) must land on a live tensor, the SigLIP towers'
-    ``vision_model`` level included."""
+    """Excludes the expert banks, which the fuser owns, and the external tables, which the load attaches."""
     loaded = _loaded(name, tmp_path)
     stock = tiny_family_model(loaded.family)
     apply_family_patches(stock.config, "sdpa")
@@ -334,7 +288,7 @@ def test_lazy_loader_maps_the_gathered_save(name, tmp_path):
     disk_to_model, fanout = family_key_mapping(shell, list(loaded.saved))
 
     live = set(shell.state_dict())
-    # A fan-in's other sources (GLM-5 Next's k/v short convolutions) are read through its first one.
+    # GLM-5 Next's k/v short convolutions are read through the fan-in's first source.
     fan_in = {
         sibling
         for targets in fanout.values()
@@ -353,8 +307,7 @@ def test_lazy_loader_maps_the_gathered_save(name, tmp_path):
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_resume_reads_the_gathered_save_back(name, tmp_path):
-    """A resume reads a checkpoint through ``ModuleLayoutView``: every live tensor but a tied alias must
-    come back from the save, equal to what was saved."""
+    """Every live tensor but a tied alias comes back equal."""
     loaded = _loaded(name, tmp_path)
     shell = tiny_family_model(loaded.family).to(torch.bfloat16)
     tied = {key for key, _ in shell.named_parameters(remove_duplicate=False)} - dict(shell.named_parameters()).keys()
@@ -369,9 +322,8 @@ def test_resume_reads_the_gathered_save_back(name, tmp_path):
 
 
 def test_a_dequantizing_load_record_is_not_reverted_as_a_hub_layout(tmp_path):
-    """A dequantizing MXFP4 gpt-oss load records the quantizer's converters, whose reverse respells
-    every expert bank to a bare ``gate_up_proj`` with no layer prefix. The save reads the family's
-    registry mapping instead and still writes the hub checkpoint."""
+    """The quantizer's converters would respell every expert bank to a bare ``gate_up_proj``, so the save reads the
+    registry mapping."""
     family = FAMILIES["gpt_oss"]
     hub_dir, ep_dir = str(tmp_path / "hub"), str(tmp_path / "ep")
     _write_hub_checkpoint(family, hub_dir)
@@ -395,8 +347,7 @@ def test_a_dequantizing_load_record_is_not_reverted_as_a_hub_layout(tmp_path):
 
 
 def test_a_failing_revert_fails_the_save(tmp_path, monkeypatch):
-    """A chunk the revert cannot respell must fail the save, not land in the module spelling beside
-    hub-spelled ones; the failure travels through the save's deferred guard."""
+    """Otherwise the chunk lands in the module spelling beside hub-spelled ones."""
     family = FAMILIES["cohere2_vision"]
     hub_dir, ep_dir = str(tmp_path / "hub"), str(tmp_path / "ep")
     _write_hub_checkpoint(family, hub_dir)
@@ -418,9 +369,7 @@ def test_the_sharded_refusal_is_wired_into_the_family_check(tmp_path):
 
 
 def test_command_a_plus_writes_the_tower_vllm_loads(tmp_path):
-    """vLLM 0.32.0's ``Cohere2VisionForConditionalGeneration`` holds SigLIP under a ``vision_model``
-    child and raises on a flattened tower key; its composite has no ``lm_head`` and raises on one too.
-    The experts stay the fused pair vLLM reads."""
+    """vLLM 0.32.0 raises on a flattened tower key and on ``lm_head``; the experts stay the fused pair it reads."""
     saved = _loaded("cohere2_vision", tmp_path).saved
 
     assert "model.vision_tower.vision_model.embeddings.patch_embedding.weight" in saved
@@ -430,8 +379,7 @@ def test_command_a_plus_writes_the_tower_vllm_loads(tmp_path):
 
 
 def test_step3p7_writes_the_release_spelling(tmp_path):
-    """The spellings the serving engines read for Step-3.7, pinned against the real ``Step-3.7-Flash``
-    index; no module-tree spelling may survive."""
+    """Pinned against the real ``Step-3.7-Flash`` index."""
     saved = _loaded("step3p7", tmp_path).saved
     for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]):
         if kind != "sparse":

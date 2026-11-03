@@ -1,6 +1,5 @@
-"""``gradient_checkpointing_plan: auto``: measure one fully checkpointed step, agree a lighter checkpointing policy
-across the world, apply it from the next step on, and keep its record in ``output_dir``, whose unfinished plan
-floors the next run's there (the policy math: :mod:`halo.models.checkpointing_plan`)."""
+"""``gradient_checkpointing_plan: auto``: measure one fully checkpointed step, agree a lighter policy across the world,
+apply it from the next step, and record it in ``output_dir``, whose unfinished plan floors the next run's."""
 
 from __future__ import annotations
 
@@ -48,8 +47,8 @@ from halo.runtime.ranks import get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# The step of this process measured: its first allocates the optimizer moments lazily and runs every JIT
-# warm-up, so the first at the steady-state footprint is the second (a resume counts from its own start).
+# The process step measured: the first allocates optimizer moments lazily and runs every JIT warm-up, so the second is
+# the first at the steady-state footprint (a resume counts from its own start).
 MEASURE_STEP = 2
 # Fixed-point scale of a rank's reserved-to-allocated ratio in the int64 world reduction.
 RESERVED_RATIO_SCALE = 10**6
@@ -82,11 +81,9 @@ CUDA_MEMORY = MemoryReader(
 
 
 class StepMemoryProbe:
-    """One step's :class:`~halo.models.checkpointing_plan.StepMemory`, from hooks on every
-    :func:`~halo.models.checkpointing_plan.plan_layers` layer: the peak at each micro-step's first backward
-    recompute, every layer recompute's allocation delta and a checkpoint's input size, plus the peak before the
-    optimizer step (:meth:`mark_backward_end`). Early stop is off for the step, so a non-reentrant recompute runs to
-    its layer's end (same numerics, one step's extra work)."""
+    """One step's :class:`~halo.models.checkpointing_plan.StepMemory`, from hooks on every plan layer: the peak at each
+    micro-step's first backward recompute, each recompute's allocation delta, a checkpoint's input size and the peak
+    before the optimizer step. Early stop is off for the step, so a non-reentrant recompute runs to its layer's end."""
 
     def __init__(self, model, reader: MemoryReader):
         self._reader = reader
@@ -144,11 +141,9 @@ class StepMemoryProbe:
 
 
 def step_memory_across_ranks(local: StepMemory) -> StepMemory:
-    """COLLECTIVE: the conservative world view of every rank's reading, in one all-reduce. The prediction grows
-    with the peaks and the recompute bytes and shrinks with the checkpoint input, and the budget shrinks with the
-    non-torch bytes and the reserved-to-allocated ratio, so the input takes the world MIN and the rest the world
-    MAX. The ratio is each rank's own (every device holds its own reserve), and the world's reserved peak is the
-    world peak at the largest one."""
+    """COLLECTIVE, one all-reduce: the input takes the world MIN and the rest the MAX, since the prediction shrinks
+    with the input and grows with the peaks and recompute bytes, and the budget shrinks with non-torch bytes and the
+    reserved ratio. The ratio is each rank's own; the world's reserved peak is the world peak at the largest."""
     ratio = -(-local.reserved_peak * RESERVED_RATIO_SCALE // max(local.peak, 1))
     peak, head, backward, recompute, neg_input, world_ratio, non_torch = rank_max(
         [
@@ -166,9 +161,8 @@ def step_memory_across_ranks(local: StepMemory) -> StepMemory:
 
 
 def agree_plan(plan: RunPlan) -> None:
-    """COLLECTIVE: raise on every rank when any rank resolved a different plan, naming the fields. The inputs are
-    world-reduced before the choice, so a divergence is a resolver bug; under FSDP it would hang, since
-    checkpointed and plain layers gather at different times."""
+    """COLLECTIVE: raise on every rank when any rank resolved a different plan: inputs are world-reduced, so it is a
+    resolver bug, and under FSDP it would hang, as checkpointed and plain layers gather at different times."""
     reject_divergent_settings(
         asdict(plan), "The resolved gradient-checkpointing plan", f"{PLAN_OFF_REMEDY} to bypass the plan."
     )
@@ -200,9 +194,8 @@ def _read_run_plan(path: str) -> RunPlan | None:
 
 
 def restore_recompute_floor(output_dir: str, fingerprint: dict, num_layers: int) -> int:
-    """COLLECTIVE: the floor index the record a previous run left in ``output_dir`` sets on this run's plan
-    (:func:`~halo.models.checkpointing_plan.recompute_floor_index`). Each rank reads its own node's copy and the
-    world takes the highest floor any copy sets; an unreadable copy raises on every rank."""
+    """COLLECTIVE: the floor index a previous run's record sets on this run's plan. Each rank reads its own node's copy
+    and the world takes the highest floor; an unreadable copy raises on every rank."""
     path = os.path.join(output_dir, RUN_PLAN_FILE)
     guard = DeferredRankFailure(f"Reading {path} (delete it on every node to plan without its floor)", ValueError)
     record = guard.run(lambda: _read_run_plan(path))
@@ -232,8 +225,7 @@ def build_plan_context(
     packed_rows: bool,
     multimodal_rows: bool,
 ) -> PlanContext:
-    """The refusal facts of this run, ``packed_rows`` and ``multimodal_rows`` as its collator builds them; its
-    fingerprint is :func:`build_plan_fingerprint`'s."""
+    """The refusal facts of this run, ``packed_rows`` and ``multimodal_rows`` as its collator builds them."""
     gc_kwargs = training_config.gradient_checkpointing_kwargs or {}
     return PlanContext(
         num_layers=len(plan_layers(model)),
@@ -280,12 +272,8 @@ def build_plan_fingerprint(
 
 class CheckpointingPlanCallback(TrainerCallback):
     """Measure this process's step :data:`MEASURE_STEP` fully checkpointed and checkpoint only what the budget needs
-    from the next step on, never below ``floor_index`` (:func:`restore_recompute_floor`).
-
-    The applied plan's record in ``output_dir`` is written unfinished, and train end marks it finished, so the next
-    run there knows whether this one survived its plan. Every rank runs the same hooks at the same step, so the
-    collectives are ordered.
-    """
+    from the next step on, never below ``floor_index``. The record is written unfinished and train end marks it
+    finished, so the next run knows whether this one survived its plan."""
 
     def __init__(
         self,
@@ -356,10 +344,8 @@ def build_checkpointing_plan_callback(
     packed_rows: bool,
     multimodal_rows: bool,
 ) -> CheckpointingPlanCallback:
-    """COLLECTIVE: the callback for ``gradient_checkpointing_plan: auto``, floored by the record in ``output_dir``
-    (:func:`restore_recompute_floor`) and budgeted on the world's smallest device. Raises ``ValueError`` with every
-    reason when the run cannot take a plan, and on every rank when the ranks' fingerprints differ (one plan serves
-    every rank)."""
+    """COLLECTIVE: the callback, floored by the record in ``output_dir`` and budgeted on the world's smallest device.
+    Raises ``ValueError`` with every reason the run cannot take a plan, and on every rank when fingerprints differ."""
     if not torch.cuda.is_available():
         raise ValueError("gradient_checkpointing_plan: auto measures CUDA allocator readings and needs a GPU.")
     context = build_plan_context(

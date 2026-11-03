@@ -1,8 +1,5 @@
-"""Tests for checkpoint-resume detection, the output_dir overwrite guard, the pre-load run setup
-(halo/entrypoints/run_setup.py) and the attention switch the parse sets, single-process (no torch.distributed init).
-
-Run: python -m pytest tests/cpu/config/test_training_environment.py
-"""
+"""Checkpoint-resume detection, the output_dir overwrite guard, the pre-load run setup
+(halo/entrypoints/run_setup.py) and the attention switch the parse sets, single-process."""
 
 import json
 import logging
@@ -42,12 +39,8 @@ def _write_checkpoint(output_dir, step=5):
     return ckpt
 
 
-# Explicit resume path
-
-
 def test_explicit_missing_resume_path_raises(tmp_path):
-    """An explicit-but-nonexistent path must fail loud — degrading to a from-scratch run silently
-    discards the user's resume intent (and the output_dir guard was skipped for it)."""
+    """Degrading to a from-scratch run silently discards the resume intent."""
     config = _config(tmp_path / "out", resume=str(tmp_path / "does-not-exist" / "checkpoint-100"))
     with pytest.raises(ValueError, match="does not exist"):
         resume_checkpoint_from_config(config, overwrite_output_dir=False)
@@ -59,9 +52,6 @@ def test_explicit_existing_resume_path_returned(tmp_path):
     assert resume_checkpoint_from_config(config, overwrite_output_dir=False) == str(ckpt)
 
 
-# Auto-detect (resume_from_checkpoint: true)
-
-
 def test_auto_resume_finds_last_checkpoint(tmp_path):
     out = tmp_path / "out"
     _write_checkpoint(out, step=5)
@@ -71,8 +61,7 @@ def test_auto_resume_finds_last_checkpoint(tmp_path):
 
 
 def test_auto_resume_passes_over_a_newer_checkpoint_whose_save_never_completed(tmp_path):
-    """The mixin publishes trainer_state.json last, so a step directory without it is a save that
-    stopped partway; resuming it would load a mix of the new and the absent files. It leaves the
+    """trainer_state.json is published last, so a step directory without it stopped partway. It leaves the
     step-directory namespace with its data intact, so rotation cannot take it for the newest."""
     out = tmp_path / "out"
     complete = _write_checkpoint(out, step=5)
@@ -133,8 +122,8 @@ def test_auto_resume_missing_output_dir_starts_fresh(tmp_path):
 
 
 def test_auto_resume_nothing_found_revalidates_output_dir(tmp_path):
-    """resume=True skipped the output_dir guard in setup; when auto-detection finds no checkpoint
-    the run is effectively fresh, so a non-empty output_dir must raise, not be overwritten."""
+    """resume=True skipped the output_dir guard in setup, so a run that finds no checkpoint is fresh and must raise
+    on a non-empty directory."""
     out = tmp_path / "out"
     out.mkdir()
     (out / "model.safetensors").write_text("weights from a previous run")
@@ -162,9 +151,8 @@ def test_auto_resume_nothing_found_internal_dirs_ok(tmp_path):
 
 
 def test_auto_resume_nothing_found_stale_fs_probe_marker_ok(tmp_path):
-    """A job killed inside the output-filesystem probe leaves its ``.halo_fs_probe_<ns>`` sentinel
-    behind (rank 0's removal never ran). The marker is the toolkit's own inert dropping — blocking
-    the next launch on it bricks the output_dir, and its ns suffix means only a PREFIX match fires."""
+    """A job killed inside the output-filesystem probe leaves its ``.halo_fs_probe_<ns>`` sentinel; blocking on it
+    bricks the output_dir, and its ns suffix means only a prefix match fires."""
     out = tmp_path / "out"
     out.mkdir()
     (out / f"{FS_PROBE_PREFIX}123456789").write_text("halo")
@@ -173,8 +161,7 @@ def test_auto_resume_nothing_found_stale_fs_probe_marker_ok(tmp_path):
 
 
 def test_stale_fs_probe_marker_does_not_exempt_other_leftovers(tmp_path):
-    """Anti-over-exemption: the prefix exempts that one sentinel, not hidden files at large — a
-    previous run's leftovers must still refuse the directory even beside a stale marker."""
+    """The prefix exempts that one sentinel, not hidden files at large."""
     out = tmp_path / "out"
     out.mkdir()
     (out / f"{FS_PROBE_PREFIX}123456789").write_text("halo")
@@ -229,9 +216,6 @@ def test_auto_resume_nothing_found_overwrite_flag_skips_validation(tmp_path):
     (out / "model.safetensors").write_text("weights")
     config = _config(out, resume=True)
     assert resume_checkpoint_from_config(config, overwrite_output_dir=True) is None
-
-
-# No resume requested
 
 
 def test_no_resume_returns_none(tmp_path):
@@ -324,9 +308,6 @@ def test_the_start_banner_names_the_attention_backend_the_policy_was_built_with(
             method_name="SFT",
         )
     assert [record.getMessage().strip() for record in caplog.records if "Attention:" in record.getMessage()] == lines
-
-
-# Run setup before the model load
 
 
 def _required_values(dataclass_types) -> dict:

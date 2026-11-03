@@ -1,5 +1,5 @@
-"""Optimizer state as a resume compares it: this rank's sharded view, and the bit-exact comparison of a saved
-state against the state a load restored."""
+"""Optimizer state as a resume compares it: this rank's sharded view, and the bit-exact comparison of saved vs
+restored."""
 
 import torch
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimizer_state_dict
@@ -9,23 +9,10 @@ from halo.models.unwrapping import unwrap_toolkit_wrappers
 
 
 def local_optimizer_state(model, optimizer) -> dict:
-    """This rank's optimizer state as an :func:`assert_optimizer_state_bit_exact` payload.
-
-    The per-rank ``optimizer_shard_XXXXX.pt`` files hold this view (``get_optimizer_state_dict`` at
-    ``full_state_dict=False``, keyed by param FQN), so a snapshot taken here is comparable to what a
-    resume restores. DTensor entries are reduced to their local shard, keeping the comparison
-    rank-local with no collective, so a per-rank divergence is not averaged away.
-
-    ``reshard_fsdp2_modules`` first, for the same reason the save path does it: after an eval-only
-    forward the FSDP2 modules still carry their transient unsharded params, and
-    ``get_optimizer_state_dict`` then maps no optimizer param to an FQN (``KeyError: 0``, or an empty
-    state).
-
-    An optimizer holding no state (a restore that loaded none, a warm restart) reads as an empty
-    state. ``get_optimizer_state_dict`` would first fill it with a zero-LR step, which runs the
-    trainer's step-pre-hooks outside the restore's mute (the deferred EP sweep then claims the step
-    the next clip claims, and raises) and leaves zero moments in the live optimizer.
-    """
+    """This rank's optimizer state as an :func:`assert_optimizer_state_bit_exact` payload, the view the per-rank shards
+    hold; no collective. Reshards first: after an eval-only forward ``get_optimizer_state_dict`` maps no param to an
+    FQN (``KeyError: 0``). A stateless optimizer reads as empty, since that call would fill it with a zero-LR step
+    running the trainer's step-pre-hooks outside the restore's mute."""
     reshard_fsdp2_modules(model)
     if not optimizer.state:
         return {"state": {}}
@@ -49,12 +36,7 @@ def local_optimizer_state(model, optimizer) -> dict:
 
 
 def assert_optimizer_state_bit_exact(saved: dict, restored: dict) -> None:
-    """Assert two ``optimizer.state_dict()`` payloads carry identical per-param state.
-
-    Fails when a ``load_state_dict`` drops, casts, re-quantizes or resets any state tensor (or
-    scalar, such as ``step``). ``saved`` must be non-empty, since comparing two empty states would
-    check nothing.
-    """
+    """Assert two ``optimizer.state_dict()`` payloads carry identical per-param state; ``saved`` must be non-empty."""
     assert len(saved["state"]) > 0, "premise: the saved optimizer state is empty"
     assert saved["state"].keys() == restored["state"].keys(), (
         f"restored state covers params {sorted(restored['state'])}, saved {sorted(saved['state'])}"
@@ -73,11 +55,8 @@ def assert_optimizer_state_bit_exact(saved: dict, restored: dict) -> None:
 
 
 def optimizer_state_matches(saved: dict, restored: dict) -> tuple[bool, str]:
-    """:func:`assert_optimizer_state_bit_exact` as an ``(ok, why)`` pair instead of a raise.
-
-    Every rank has to reach the next collective: a bare assertion on one rank leaves its peers
-    blocked, so a distributed test records the verdict and agrees it rather than aborting the body.
-    """
+    """:func:`assert_optimizer_state_bit_exact` as ``(ok, why)``; a bare assert on one rank leaves its peers blocked at
+    the next collective."""
     try:
         assert_optimizer_state_bit_exact(saved, restored)
     except AssertionError as e:

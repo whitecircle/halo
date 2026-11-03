@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""Distributed off-policy distillation (text or VLM): the student is fit to a frozen teacher's token distribution.
-
-Usage: torchrun --nproc_per_node=8 scripts/training/distillation/teacher_distill.py \\
-    examples/distillation/qwen3_5/distill-qwen3.5-9b-from-qwen3.6-35b-a3b.yaml
-"""
+"""Distributed off-policy distillation (text or VLM): the student is fit to a frozen teacher's token distribution."""
 
 import logging
 
@@ -60,13 +56,11 @@ logger = logging.getLogger(__name__)
 def _load_distill_teacher(
     *, args, model_config, training_config, requested_attn: str | None, is_vlm: bool, local_rank: int
 ) -> PreTrainedModel:
-    """Load the frozen teacher at ``teacher_model_revision`` (the student's pin names a commit in another repo), in
-    the run's dtype, on the request the student loads under, which under live sinks falls back to
-    auto-detection: a sink-dropping teacher would shift every logprob it scores against its student."""
+    """At ``teacher_model_revision`` (the student's pin names a commit in another repo), on the student's request,
+    which under live sinks falls back to auto-detection: a sink-dropping teacher shifts every logprob."""
     return load_frozen_auxiliary_model(
         args.teacher_model,
-        # The teacher's logits are the target the student is fit to, so it loads in the run's own
-        # precision: an fp32 run scored against a bf16 teacher fits rounded targets.
+        # The student's target, so in the run's precision: an fp32 run against a bf16 teacher fits rounded targets.
         dtype=resolve_training_dtype(training_config),
         # Empty string is an unset pin, not a branch name the hub can resolve.
         revision=args.teacher_model_revision or None,
@@ -81,12 +75,9 @@ def _load_distill_teacher(
 
 
 def _reject_neutralized_teacher_sinks(teacher_config: PretrainedConfig, *, reset_sinks: bool) -> None:
-    """Refuse ``reset_sinks: true`` with a GptOss teacher, before any weight loads.
-
-    The flag neutralizes the sinks of both models. A student fine-tunes away from them, but a frozen teacher never
-    trains back (:data:`~halo.models.attention.gpt_oss_sinks.NEUTRALIZED_TEACHER_SINKS_COST`), so the student would
-    fit a degenerate distribution.
-    """
+    """Refuse ``reset_sinks: true`` with a GptOss teacher, before any weight loads. A frozen teacher never trains back
+    (:data:`~halo.models.attention.gpt_oss_sinks.NEUTRALIZED_TEACHER_SINKS_COST`), so the student would fit a
+    degenerate distribution."""
     if reset_sinks and uses_gpt_oss_sinks(teacher_config):
         raise ValueError(
             f"reset_sinks: true would neutralize the attention sinks of the GptOss teacher too, and "
@@ -113,11 +104,8 @@ def _load_teacher_metadata(*, args, model_config) -> tuple[PreTrainedTokenizerBa
 
 
 def _text_distill_collator(args, tokenizer, model_config):
-    """The completions-only collator, else the padded causal-LM one; the losses mask on its ``labels``.
-
-    The padded collator restores a turn-ending EOS where pad == eos, which a plain LM collator masks as
-    padding, leaving the student no stop signal to learn.
-    """
+    """The completions-only collator, else the padded causal-LM one, which restores a turn-ending EOS where pad == eos;
+    a plain LM collator masks it, leaving no stop signal to learn."""
     return select_data_collator(
         tokenizer=tokenizer,
         train_on_completions_only=args.train_on_completions_only,
@@ -146,8 +134,7 @@ def main():
 
     teacher_tokenizer, teacher_config = _load_teacher_metadata(args=args, model_config=model_config)
     _reject_neutralized_teacher_sinks(teacher_config, reset_sinks=args.reset_sinks)
-    # One request for both loads, decided on both checkpoints, so the two forwards compared token by
-    # token take the same backend wherever both models accept it.
+    # One request for both loads, so the forwards compared token by token take the same backend where both accept it.
     attn_default = default_padded_attn_implementation(
         model_config, sinks_reset=args.reset_sinks, companion_configs=(teacher_config,)
     )

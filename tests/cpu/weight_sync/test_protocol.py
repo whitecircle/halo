@@ -1,29 +1,6 @@
 #!/usr/bin/env python
-"""The vLLM weight-sync client's HTTP lifecycle must never strand the server, and never swallow the
-server's own diagnosis.
-
-Every defect pinned here leaves a *running* RL job broken with no usable error:
-
-- ``/pause`` takes effect server-side BEFORE vLLM writes its reply, so a lost reply must still count
-  as "may be paused" — otherwise nothing ever issues ``/resume`` and every later rollout queues
-  forever behind a paused engine that still answers ``/health`` with 200.
-- ``/start_weight_update`` opens a layerwise reload (params moved to meta); a lost reply must still
-  be closed by ``/finish_weight_update`` or the next sync hits a half-reloaded model.
-- ``/update_weights`` runs on a background thread. When the local producer fails, that thread holds
-  the server's rejection (e.g. an unsupported dtype) — dropping it turns a precise 500 into
-  "broadcast did not complete within 600s".
-- ``check_server`` must honour its deadline for a server answering 503/401/404, not only for an
-  unreachable one, else startup spins silently forever.
-- A paused server must be *reported* as paused: the probe's ``/v1/completions`` request is QUEUED by
-  a paused engine, so it can only time out and misreport a wedged scheduler.
-- The ``/v1/models`` read must go over the retrying session: a still-warming server answers 503, and
-  a bare request would fail the startup context-window preflight on it.
-
-Tests drive the REAL client against a fake vLLM HTTP server that records its own state, so they fail
-on the ordering/bookkeeping bugs rather than on mocked call counts.
-
-Run: ``python tests/cpu/weight_sync/test_protocol.py`` (or ``pytest -m cpu``).
-"""
+"""The vLLM weight-sync client's HTTP lifecycle must never strand the server or swallow the server's own diagnosis.
+Each defect pinned here leaves a running RL job broken with no usable error. Tests use a recording fake server."""
 
 from __future__ import annotations
 
@@ -61,8 +38,6 @@ JOIN_TIMEOUT_S = 30.0
 
 
 class FakeCommunicator:
-    """Stand-in for ``PyNcclCommunicator`` (the real one needs a GPU and a live peer)."""
-
     def __init__(self, aborted: bool = False):
         self.device = torch.device("cpu")
         self.aborted = aborted
@@ -75,8 +50,7 @@ class FakeCommunicator:
 
 
 class _StoreHoldingCommunicator(FakeCommunicator):
-    """A communicator that holds the unique-id store it formed from, as the frame of a thread parked in
-    ``ncclCommInitRank`` does."""
+    """Holds the unique-id store it formed from, as the frame of a thread parked in ``ncclCommInitRank`` does."""
 
     def __init__(self, store, device):
         super().__init__()
@@ -84,8 +58,7 @@ class _StoreHoldingCommunicator(FakeCommunicator):
 
 
 class _BlockingInitLibrary:
-    """libnccl whose ``ncclCommInitRank`` blocks, as the real one does until the engine joins, and calls
-    ``on_parked`` once it does."""
+    """``ncclCommInitRank`` parks, as the real one does until the engine joins, and calls ``on_parked`` first."""
 
     def __init__(self, on_parked):
         self.parked = threading.Event()
@@ -114,7 +87,6 @@ def server():
 
 @pytest.fixture
 def client(server, monkeypatch):
-    """A real client attached to the fake server, with the cleanup/HTTP deadlines shortened."""
     monkeypatch.setattr(wsc, "CLEANUP_TIMEOUT_S", 5)
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     monkeypatch.setattr(wsc, "CHUNK_SYNC_TIMEOUT_S", 10)
@@ -129,7 +101,6 @@ def _no_op_producer(**kwargs):
 
 
 def _bind_error(port: int) -> str | None:
-    """``None`` if a listener can be bound on ``port`` right now, else the OS error."""
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -145,11 +116,8 @@ def _bindable(port: int) -> bool:
 
 
 def _run_bounded(fn) -> list:
-    """Run ``fn`` on a thread and return ``[outcome]``, or ``[]`` if it never returned.
-
-    An unbounded spin is one of the defects under test, so it must be observed as one instead of
-    hanging the suite (``pytest-timeout`` is not installed in the image).
-    """
+    """Returns ``[outcome]``, or ``[]`` if ``fn`` never returned: an unbounded spin is a defect under test, and
+    ``pytest-timeout`` is not in the image."""
     outcome: list = []
 
     def runner():
@@ -166,9 +134,8 @@ def _run_bounded(fn) -> list:
 
 
 def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
-    """vLLM's ``/pause`` defaults to ``mode=abort``, which kills every in-flight generation — the
-    prefetched rollout round — and hands each back as a fragment with an ordinary stop reason. The
-    client must ask for ``keep``, so those requests freeze and resume under the new weights."""
+    """``mode=abort``, the default, kills the prefetched rollout round and hands each back as a fragment with an
+    ordinary stop reason. ``keep`` freezes those requests to resume under the new weights."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
 
     push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
@@ -178,9 +145,8 @@ def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
 
 
 def test_a_chunk_waits_on_its_update_rpc_for_the_configured_chunk_deadline(server, client, monkeypatch):
-    """vLLM replies to a chunk's ``/update_weights`` only once it received the chunk, so the RPC is bounded by
-    ``HALO_NCCL_SYNC_TIMEOUT_SECONDS`` like the drain: a fixed RPC timeout below it would fail a chunk the
-    knob allows."""
+    """vLLM replies only once it received the chunk, so a fixed RPC timeout below ``HALO_NCCL_SYNC_TIMEOUT_SECONDS``
+    would fail a chunk the knob allows."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     monkeypatch.setattr(wsc, "CHUNK_SYNC_TIMEOUT_S", 1234.0)
     deadlines = []
@@ -201,7 +167,6 @@ def test_a_chunk_waits_on_its_update_rpc_for_the_configured_chunk_deadline(serve
 
 
 def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):
-    """A ``/pause`` whose reply fails must still be resumed: the engine is already paused."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     server.status["/pause"] = 500
 
@@ -216,7 +181,6 @@ def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):
 
 
 def test_pause_left_by_a_failed_sync_is_lifted_on_close(server, client, monkeypatch):
-    """The atexit/close path must lift a pause whose reply never arrived."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     server.status["/pause"] = 500
     server.refuse.add("/resume")  # the in-sync resume never lands either; only close() can recover
@@ -231,7 +195,6 @@ def test_pause_left_by_a_failed_sync_is_lifted_on_close(server, client, monkeypa
 
 
 def test_failed_start_weight_update_is_closed(server, client, monkeypatch):
-    """A ``/start_weight_update`` that may have taken effect must be closed by the finally."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     server.status["/start_weight_update"] = 500
 
@@ -246,13 +209,12 @@ def test_failed_start_weight_update_is_closed(server, client, monkeypatch):
 
 
 def test_start_weight_update_read_timeout_is_closed(server, client, monkeypatch):
-    """Same defect via the real-world trigger: the reply is lost, not refused."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     real_request = requests.request
 
     def timing_out_request(method, url, *args, **kwargs):
         if url.endswith("/start_weight_update"):
-            real_request(method, url, *args, **kwargs)  # the server DOES open the update
+            real_request(method, url, *args, **kwargs)  # the server does open the update
             raise requests.exceptions.ReadTimeout("simulated lost reply")
         return real_request(method, url, *args, **kwargs)
 
@@ -295,13 +257,8 @@ def test_an_update_declares_only_names_dtypes_and_shapes(server, client, monkeyp
 
 
 def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(server, client, monkeypatch):
-    """A sync interrupted AFTER a chunk went out must not resume the engine as if it were healthy.
-
-    It then holds neither the old policy nor the new one, and the layerwise reload materializes a
-    layer whose tensors straddled the boundary from uninitialized storage while it waits for the
-    rest — which never arrives, because the trainer keeps no copy of what already landed. Resuming
-    serves exactly that, behind a 200 ``/health``.
-    """
+    """The engine holds neither policy, and the layerwise reload materializes a layer straddling the boundary from
+    uninitialized storage, waiting for a rest that never arrives. Resuming serves that behind a 200 ``/health``."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
@@ -326,12 +283,7 @@ def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(s
 
 
 def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client, monkeypatch):
-    """The tail is a chunk like any other, and its close resumes the engine in a ``finally``.
-
-    Failing it once an earlier chunk landed leaves the same part-old-part-new model as failing
-    mid-stream, so the verdict has to be taken where the chunk fails — before that ``finally`` puts
-    the engine back on the wire.
-    """
+    """The close resumes the engine in a ``finally``, so the verdict has to be taken where the chunk fails."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
@@ -351,9 +303,8 @@ def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client,
 
 
 def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, client, monkeypatch):
-    """Anti-over-rejection: with nothing on the wire the engine still holds the weights it was
-    serving, so the phase must be closed and the pause lifted — left quiesced it refuses every later
-    sync and queues every rollout."""
+    """With nothing on the wire the engine still holds its weights; left quiesced it refuses every later sync and
+    queues every rollout."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
     server.status["/update_weights"] = 500
@@ -372,9 +323,8 @@ def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, c
 
 
 def test_a_failed_snapshot_completion_still_closes_the_update(server, client, monkeypatch):
-    """The snapshot completion runs INSIDE the close: a sticky CUDA error there is exactly the state a
-    failing sync is in, and skipping ``/finish_weight_update`` leaves the engine mid-reload while
-    ``/health`` answers 200 — every later ``/start_weight_update`` fails and the probe cannot see it."""
+    """The completion runs inside the close. Skipping ``/finish_weight_update`` leaves the engine mid-reload while
+    ``/health`` answers 200, so every later ``/start_weight_update`` fails and the probe cannot see it."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
 
     def sticky_cuda_error(self):
@@ -392,9 +342,8 @@ def test_a_failed_snapshot_completion_still_closes_the_update(server, client, mo
 
 
 def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, monkeypatch):
-    """The third way a sync ends mid-model: the snapshot completion fails, so the tail is dropped rather than
-    sent. The engine then holds the earlier chunks and its old weights for the rest — the same mixed
-    model, so the close must still refuse to resume it."""
+    """The engine holds the earlier chunks and its old weights for the rest, the same mixed model, so the close must
+    not resume it."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
@@ -416,10 +365,8 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
 
 
 def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(client, monkeypatch):
-    """The flush must wait for the staged copies alone: a whole-device synchronize also waits for the
-    previous chunk's broadcasts and, in a multi-server fan-out, every other server's, which
-    serializes each chunk's tail with the next. And it must not touch the device when nothing was
-    staged (before ``init_communicator``, or an empty tail)."""
+    """A whole-device synchronize also waits for the previous chunk's broadcasts and, in a multi-server fan-out, every
+    other server's, which serializes each chunk's tail with the next."""
     synchronized: list = []
     monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: synchronized.append(device))
     client._sync_device = torch.device("cuda", 3)  # a guarded whole-device sync would fire on it
@@ -443,7 +390,6 @@ def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(clien
 
 
 def test_check_server_honours_the_deadline_on_a_non_200_health(server, monkeypatch):
-    """A route answering 503 forever is as dead as an unreachable one."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     server.status["/health"] = 503
 
@@ -468,12 +414,10 @@ def test_probe_generation_reports_a_paused_server(server, client):
 
 
 def test_probe_generation_passes_on_a_serving_server(server, client):
-    """Anti-vacuity: the pause check must not reject a healthy server."""
     assert _run_bounded(client._probe_generation) == [None]
 
 
 def _record_session_gets(client, monkeypatch) -> list[str]:
-    """URLs the client's retrying session GETs, recorded without disabling the adapter."""
     seen: list[str] = []
     real_request = client._session.request
 
@@ -498,7 +442,6 @@ def test_the_model_card_read_goes_over_the_retrying_session(server, client, monk
 
 
 def test_a_card_without_a_context_window_reports_none(server, client):
-    """The preflight skips rather than raising on a server whose card omits ``max_model_len``."""
     assert client.served_max_model_len() is None
 
 
@@ -513,7 +456,6 @@ def test_probe_generation_resolves_the_served_model_over_the_session(server, cli
 
 
 def test_context_window_preflight_raises_on_a_server_that_cannot_hold_one_turn(server):
-    """The startup gate builds its own client per URL, so a too-small window fails before training."""
     server.max_model_len = 1024
 
     with pytest.raises(ValueError, match="context window"):
@@ -552,8 +494,7 @@ def test_sampler_logprob_probe_reads_each_engine_default(server, client):
 
 
 def test_sampler_logprob_preflight_refuses_a_raw_reference_at_any_temperature_but_one(server):
-    """Raw (pre-temperature) logprobs make every IS weight π^T/π^1: refused whenever the trainer scores
-    at a temperature other than 1, and the refusal names the server flag that fixes it."""
+    """Raw (pre-temperature) logprobs make every IS weight π^T/π^1, so they are refused at any other temperature."""
     with pytest.raises(ValueError, match="processed_logprobs"):
         _preflight(server.url, 1.1, 1.0, True)
     with pytest.raises(ValueError, match="RAW"):
@@ -568,8 +509,8 @@ def test_sampler_logprob_preflight_refuses_a_raw_reference_at_any_temperature_bu
 
 
 def test_sampler_logprob_preflight_refuses_a_nucleus_reference_under_the_geometric_band(server):
-    """A nucleus-renormalized reference with top-p < 1 shifts every uncertain position by its nucleus
-    mass, which the geometric band reads as drift; pre-nucleus references (SGLang, raw at T=1) pass."""
+    """A nucleus-renormalized reference with top-p < 1 shifts every uncertain position by its nucleus mass, which the
+    geometric band reads as drift."""
     server.logprobs_mode = "processed_logprobs"
     with pytest.raises(ValueError, match="rollout_top_p: 1.0"):
         _preflight(server.url, 1.0, 0.95, True)
@@ -580,9 +521,8 @@ def test_sampler_logprob_preflight_refuses_a_nucleus_reference_under_the_geometr
 
 @pytest.mark.parametrize("cut", [{"top_k": 20}, {"min_p": 0.05}], ids=["top_k", "min_p"])
 def test_sampler_logprob_preflight_refuses_a_top_k_or_min_p_cut_like_a_nucleus(server, cut):
-    """vLLM's processed logprobs are taken after top-k and min-p as after top-p, so either cut lifts the
-    tokens it keeps the way the nucleus does; the probe still runs with every filter off, so the cut it
-    measures is its own top-p 0.5, not the run's."""
+    """vLLM's processed logprobs are taken after top-k and min-p as after top-p. The probe runs with every filter off,
+    so the cut it measures is its own top-p 0.5, not the run's."""
     server.logprobs_mode = "processed_logprobs"
     name = next(iter(cut))
     with pytest.raises(ValueError, match=f"{name}={cut[name]}"):
@@ -594,8 +534,7 @@ def test_sampler_logprob_preflight_refuses_a_top_k_or_min_p_cut_like_a_nucleus(s
 
 
 def test_trl_s_top_k_off_value_is_no_cut(server):
-    """TRL spells an off top-k 0, the rollout config -1: neither is a cut, so neither is refused under a
-    sequence-summed ratio and, at temperature 1, neither spends a probe."""
+    """TRL spells an off top-k 0, the rollout config -1."""
     server.logprobs_mode = "processed_logprobs"
     for off in (0, -1):
         _preflight(server.url, 1.0, 1.0, True, top_k=off)
@@ -603,8 +542,7 @@ def test_trl_s_top_k_off_value_is_no_cut(server):
 
 
 def test_a_repetition_penalty_is_refused_under_a_sequence_summed_ratio_without_a_probe(server):
-    """Both engines' sampling logprobs carry the penalty and the trainer's never do, so no server
-    verdict clears the pairing; a token-level ratio takes it per token and passes."""
+    """Both engines' sampling logprobs carry the penalty and the trainer's never do, so no server verdict clears it."""
     server.logprobs_mode = "sglang_default"
     with pytest.raises(ValueError, match="repetition_penalty=1.1"):
         _preflight(server.url, 1.0, 1.0, True, repetition_penalty=1.1)
@@ -613,7 +551,7 @@ def test_a_repetition_penalty_is_refused_under_a_sequence_summed_ratio_without_a
 
 
 def test_sampler_logprob_preflight_warns_on_an_unreachable_server(server, caplog):
-    """An unreadable probe must never be what fails the run — it warns and moves on."""
+    """An unreadable probe must never be what fails the run."""
     server.close()
     with caplog.at_level(logging.WARNING):
         _preflight(server.url, 1.1, 1.0, True)
@@ -621,7 +559,6 @@ def test_sampler_logprob_preflight_warns_on_an_unreachable_server(server, caplog
 
 
 def test_context_window_preflight_skips_an_unreachable_server(server):
-    """An unreadable probe must never be what fails the run — it warns and moves on."""
     server.close()
 
     _verify_context_window_on_rank0(VLLMWeightSyncClient, [server.url], 10**9, None)
@@ -629,8 +566,8 @@ def test_context_window_preflight_skips_an_unreachable_server(server):
 
 @pytest.mark.parametrize("client_cls", [VLLMWeightSyncClient, SGLangWeightSyncClient], ids=["vllm", "sglang"])
 def test_the_preflight_probe_reads_each_engines_server(client_cls, caplog):
-    """The probe builds its own client per URL and degrades any failure to a warning, so a client that
-    can no longer be built from a URL alone would pass every preflight without reading a server."""
+    """The probe degrades any failure to a warning, so a client that cannot be built from a URL would pass every
+    preflight without reading a server."""
     server = fake_server_class(client_cls)()
     try:
         server.max_model_len = 1024
@@ -644,15 +581,9 @@ def test_the_preflight_probe_reads_each_engines_server(client_cls, caplog):
 
 
 def test_group_port_is_released_when_group_formation_fails(server, monkeypatch):
-    """A failed group formation must give its ``group_port`` back, or every retry EADDRINUSEs.
-
-    ``ncclCommInitRank`` is unconditionally blocking, so when the server's half fails the formation thread
-    stays parked in the real communicator's constructor, its frame holding the unique-id store. Dropping
-    references cannot free the listener; closing the store can, and only while the communicator keeps no
-    reference of its own to the store's ``TCPStore``. Without that, one wedged connect attempt burns the
-    configured port for the whole process: the reconnect path and every later client on that port die
-    with ``Address already in use`` instead of retrying.
-    """
+    """``ncclCommInitRank`` blocks, so the formation thread stays parked with its frame holding the unique-id store.
+    Closing the store frees the listener only while the communicator keeps no reference to its ``TCPStore``; otherwise
+    one wedged connect burns the port for the whole process."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     monkeypatch.setattr(client_base, "GROUP_FORMATION_TIMEOUT_S", 20)
     # The server's 500 is held until the communicator parked, so the failure lands with the init in flight.
@@ -675,12 +606,7 @@ def test_group_port_is_released_when_group_formation_fails(server, monkeypatch):
 
 
 def test_group_port_is_released_on_close(server, monkeypatch):
-    """``close_communicator`` must free the port so the next client can bind it.
-
-    A trainer that syncs to several servers in sequence, or a test process that builds one trainer
-    after another, reuses the configured group port; a listener surviving the close makes
-    every run after the first fail before it starts.
-    """
+    """A listener surviving the close makes every later run on the configured group port fail before it starts."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     monkeypatch.setattr(client_base, "GROUP_FORMATION_TIMEOUT_S", 20)
     monkeypatch.setattr(wsc, "PyNcclCommunicator", _StoreHoldingCommunicator)
@@ -691,7 +617,7 @@ def test_group_port_is_released_on_close(server, monkeypatch):
     handle.init_communicator(device="cpu")
     assert not _bindable(port), "the group listener was never bound — the test proves nothing"
 
-    # Pinned like a parked ncclCommInitRank thread would: the release must not need a GC of the comm.
+    # Pinned as a parked ncclCommInitRank thread would, so the release must not need a GC of the comm.
     pinned = handle._transport
     handle.close_communicator()
 
@@ -700,7 +626,7 @@ def test_group_port_is_released_on_close(server, monkeypatch):
 
 
 def test_a_closed_store_cannot_publish():
-    """Closing releases the store, so a later publish must say so instead of raising AttributeError."""
+    """A later publish must say so instead of raising AttributeError."""
     listener = RendezvousListener("127.0.0.1", 0)
     store = UniqueIdStore.create(host="127.0.0.1", listener=listener, world_size=1)
     store.close()
@@ -735,8 +661,7 @@ def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypat
 
 
 def test_init_communicator_refuses_an_engine_older_than_its_wire(server, monkeypatch):
-    """An engine before the init-carried packed geometry would refuse the first update with a bare 500
-    mid-sync; the client names the version before it pauses or joins anything."""
+    """An engine before the init-carried packed geometry would refuse the first update with a bare 500 mid-sync."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     server.version = "0.26.0"
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
@@ -757,8 +682,8 @@ def test_init_communicator_refuses_a_server_that_reports_no_version(server, monk
 
 
 def test_the_packed_geometry_rides_the_init_request(server, monkeypatch):
-    """The engine reads the packed geometry once, from the init; an update carrying it is refused, and
-    an init without it leaves the engine receiving tensor by tensor while the trainer sends packed."""
+    """An update carrying the geometry is refused, and an init without it leaves the engine receiving tensor by tensor
+    while the trainer sends packed."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     monkeypatch.setattr(client_base, "GROUP_FORMATION_TIMEOUT_S", 20)
     monkeypatch.setattr(wsc, "PyNcclCommunicator", _StoreHoldingCommunicator)
@@ -777,7 +702,6 @@ def test_the_packed_geometry_rides_the_init_request(server, monkeypatch):
 
 
 def test_zero_dim_param_is_rejected_before_the_server_is_paused(server, client, monkeypatch):
-    """A param the packed protocol cannot carry must fail while the server is still serving."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
 
     with pytest.raises(ValueError, match="0-dimensional"):
@@ -803,11 +727,8 @@ def test_dtensor_param_is_rejected(server, client, tmp_path, monkeypatch):
 
 
 def test_close_aborts_the_communicator(server, client):
-    """``close_communicator`` must abort the NCCL communicator, not just drop the reference.
-
-    ``PyNcclCommunicator`` has no ``__del__``, so a dropped-but-live communicator strands its device
-    memory for the process lifetime — one leak per reconnect and per served endpoint.
-    """
+    """``PyNcclCommunicator`` has no ``__del__``, so a dropped-but-live communicator strands its device memory, one
+    leak per reconnect and per served endpoint."""
     communicator = FakeCommunicator()
     client._transport = communicator
 
@@ -828,7 +749,6 @@ def test_aborted_communicator_is_refused_by_name(server, client):
 
 
 def test_aborted_communicator_refuses_to_broadcast():
-    """The communicator itself must fail by name, for callers that hold it directly."""
     comm = PyNcclCommunicator.__new__(PyNcclCommunicator)
     comm.disabled = False
     comm.aborted = True
@@ -863,8 +783,7 @@ def test_disabled_communicator_still_exposes_its_device():
 
 
 def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
-    """The re-score reads the prompt_logprobs echo: entries keyed by the token id (as a string),
-    aligned to the whole prompt+completion sequence; only the completion slice comes back, in order."""
+    """The prompt_logprobs echo is keyed by token id (as a string) and aligned to the whole sequence."""
     server = FakeVLLMServer()
     try:
         client = offline_client(VLLMWeightSyncClient, server.url)
@@ -878,9 +797,8 @@ def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
 
 
 def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
-    """SGLang's re-score goes through /generate with logprob_start_len on the last prompt token, whose
-    entry anchors the window with no log-prob; the completion's entries follow, [logprob, token_id,
-    text] each, and must carry the completion's own ids in order."""
+    """SGLang's re-score goes through /generate with logprob_start_len on the last prompt token, whose entry anchors
+    the window with no log-prob. The completion's entries follow as [logprob, token_id, text]."""
     server = FakeSGLangServer()
     try:
         client = offline_client(SGLangWeightSyncClient, server.url)

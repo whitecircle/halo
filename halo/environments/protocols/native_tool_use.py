@@ -23,25 +23,20 @@ from halo.inference.response import ENGINE_CUT_FINISH_REASONS
 from halo.rewards.graders.matching import is_correct_answer
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
 
-# The episode whose tool batch is executing, per asyncio Task / thread: one env instance serves concurrent
-# rollouts, so a handler reads per-episode state from here, never from an instance attribute.
+# Per asyncio Task / thread: one env instance serves concurrent rollouts, so a handler reads per-episode state here.
 _ACTIVE_TRAJECTORY: ContextVar[Trajectory | None] = ContextVar("native_tool_use_active_trajectory", default=None)
 
 
 class NativeToolUseEnvironment(EnvironmentBase):
-    """Environment using native OpenAI-format tool calling."""
-
     SHAPING_COMPONENTS = ("tool_shaping",)
 
-    # State the fact and ask for the action — never for shorter reasoning. These texts are trained on
-    # wherever a recovery succeeds, so any instruction here becomes a GLOBAL lesson, learned far
-    # outside the situation it was written for.
+    # State the fact and ask for the action, never for shorter reasoning: these texts are trained on wherever a
+    # recovery succeeds, so any instruction here becomes a global lesson.
     LENGTH_CUTOFF_NUDGE = (
         "Your previous turn was cut off before you made a tool call, so nothing was recorded. Make "
         "your tool call now with the best solution you have."
     )
-    # Sent only on a token-cap cut inside a call, so it may name the length limit; the action it asks for
-    # is where the reasoning goes, not less of it.
+    # Sent only on a cut inside a call, so it may name the limit; it asks where the reasoning goes, not for less of it.
     LENGTH_CUTOFF_IN_CALL_NUDGE = (
         "Your previous turn reached its length limit while writing a tool call, so the call was not run and "
         "nothing was recorded. Make the call again, keeping your reasoning out of its arguments."
@@ -75,9 +70,8 @@ class NativeToolUseEnvironment(EnvironmentBase):
         tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
-        """``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``; an unlisted tool is uncapped): a
-        call past its cap is refused unrun, and a subclass may tighten the stamp per episode
-        (``_apply_effort_profile``)."""
+        """``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``; unlisted is uncapped); a call past
+        its cap is refused unrun."""
         super().__init__(**kwargs)
 
         require_finite(
@@ -100,22 +94,18 @@ class NativeToolUseEnvironment(EnvironmentBase):
         self.length_cutoff_penalty = length_cutoff_penalty
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
-        """Get tools in OpenAI format for the rollout engine's generation request."""
         return self.registry.to_openai_tools()
 
     def _unproductive_turn_nudge(self, nudge_attr: str) -> str | None:
-        """The protocol's nudge, or its ``TOOLLESS_`` counterpart when the registry holds no tool, so a
-        tool-less environment is never told to make a tool call."""
+        """A tool-less environment takes the ``TOOLLESS_`` nudge, so it is never told to make a tool call."""
         if not self.registry.names():
             nudge_attr = f"TOOLLESS_{nudge_attr}"
         return super()._unproductive_turn_nudge(nudge_attr)
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
-        """The text answer that completed the episode, where one did."""
         return trajectory.info.get("final_response") if trajectory.info.get(COMPLETED_KEY) else None
 
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
-        """Initialize episode with task prompt."""
         return self._init_trajectory(
             prompt,
             context,
@@ -125,17 +115,15 @@ class NativeToolUseEnvironment(EnvironmentBase):
 
     @staticmethod
     def active_trajectory() -> Trajectory | None:
-        """The episode whose tool call is executing — for a handler that grades or acts on per-episode
-        state — or ``None`` outside an episode binding (a handler called directly)."""
+        """``None`` outside an episode binding (a handler called directly)."""
         return _ACTIVE_TRAJECTORY.get()
 
     @staticmethod
     def _coerce_tool_calls(tool_calls_data: list[dict[str, Any]]) -> list[NativeToolCall]:
-        """Parse a context's raw OpenAI-format tool-call payload."""
         return [NativeToolCall.from_openai_format(tc) for tc in tool_calls_data]
 
     def _unknown_tool_result(self, tc: NativeToolCall) -> NativeToolResult:
-        """The error result of a call naming no registered tool, marked ``unknown_tool`` for tokenization."""
+        """Marked ``unknown_tool`` for tokenization."""
         return NativeToolResult(
             tool_call_id=tc.id,
             name=tc.name,
@@ -145,8 +133,6 @@ class NativeToolUseEnvironment(EnvironmentBase):
         )
 
     def _result_from_call(self, tc: NativeToolCall, outcome: str | Exception) -> NativeToolResult:
-        """A call's result from its payload or caught exception, observation truncated, a refusal marked
-        ``refused`` (:func:`is_refused_unrun`) and a sandbox fault carried for the accounting to book by type."""
         content, success, fault = tool_call_outcome(tc.name, outcome)
         return NativeToolResult(
             tool_call_id=tc.id,
@@ -158,20 +144,17 @@ class NativeToolUseEnvironment(EnvironmentBase):
         )
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
-        """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
         return self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
 
     def _finalize_text_response(self, trajectory: Trajectory, action: str) -> StepOutcome:
-        """The terminal step of a plain-text answer, which pays nothing: a finish without tool calls is priced once,
-        by :meth:`_tool_use_shaping`."""
+        """Pays nothing: a finish without tool calls is priced once, by :meth:`_tool_use_shaping`."""
         trajectory.info[COMPLETED_KEY] = True
         trajectory.info["final_response"] = action
         return StepOutcome(trajectory=trajectory, reward=0.0, done=True, truncated=False, info={})
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
-        """Bind the executing episode around a tool batch (:meth:`active_trajectory`); a subclass binding more (a
-        workspace session) nests its own ContextVar inside ``super()``'s block."""
+        """A subclass binding more (a workspace session) nests its own ContextVar inside ``super()``'s block."""
         token = _ACTIVE_TRAJECTORY.set(trajectory)
         try:
             yield
@@ -183,7 +166,6 @@ class NativeToolUseEnvironment(EnvironmentBase):
         tool_calls: list[NativeToolCall],
         trajectory: Trajectory,
     ) -> tuple[list[NativeToolResult], float]:
-        """Execute a batch of tool calls. Returns (results, reward_delta)."""
         results = []
         reward = 0.0
 
@@ -206,7 +188,6 @@ class NativeToolUseEnvironment(EnvironmentBase):
         return results, reward
 
     def _record_tool_interaction(self, results: list[NativeToolResult], trajectory: Trajectory) -> dict[str, Any]:
-        """Record the results as tool messages in the trajectory, return step info."""
         for result in results:
             trajectory.add_message(result.to_message())
 
@@ -222,7 +203,6 @@ class NativeToolUseEnvironment(EnvironmentBase):
         return {"step_tool_calls": len(results)}
 
     def _step_single(self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None) -> StepOutcome:
-        """Process model response with potential tool calls."""
         ctx = context or {}
         tool_calls_data = ctx.get("tool_calls", [])
         if not tool_calls_data:
@@ -234,7 +214,7 @@ class NativeToolUseEnvironment(EnvironmentBase):
         return StepOutcome(trajectory=trajectory, reward=reward, done=False, truncated=False, info=info)
 
     def _step_without_tool_calls(self, trajectory: Trajectory, action: str, ctx: dict[str, Any]) -> StepOutcome:
-        """A turn that called no tool: an engine-cut or empty turn recovers, anything else is the final answer."""
+        """An engine-cut or empty turn recovers; anything else is the final answer."""
         last_turn = bool(ctx.get(LAST_TURN_KEY))
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             in_call = bool(ctx.get(CUT_TOOL_CALLS_KEY))
@@ -244,9 +224,9 @@ class NativeToolUseEnvironment(EnvironmentBase):
         return self._finalize_text_response(trajectory, action)
 
     def _tool_use_shaping(self, trajectory: Trajectory) -> float:
-        """The episode's tool-use shaping: ``no_tool_use_penalty`` for no tool call, ``turn_overflow_penalty`` for a
-        ``max_turns`` overflow (never for an episode its driver lost), and ``length_cutoff_penalty`` per recovered
-        unproductive turn (the one that exhausted the recovery cap pays the overflow instead)."""
+        """``no_tool_use_penalty`` for no tool call, ``turn_overflow_penalty`` for a ``max_turns`` overflow (never for
+        an episode its driver lost), ``length_cutoff_penalty`` per recovered unproductive turn (the one that exhausted
+        the recovery cap pays the overflow instead)."""
         shaping = -self.no_tool_use_penalty if trajectory.info.get(TOTAL_TOOL_CALLS_KEY, 0) == 0 else 0.0
         if trajectory.truncated and EPISODE_ERROR_KEY not in trajectory.info:
             shaping -= self.turn_overflow_penalty
@@ -256,12 +236,11 @@ class NativeToolUseEnvironment(EnvironmentBase):
         return shaping
 
     def _episode_shaping(self, trajectory: Trajectory) -> dict[str, float]:
-        """The protocol's episode-level term, :meth:`_tool_use_shaping`, logged as ``reward/tool_shaping``."""
         return {"tool_shaping": self._tool_use_shaping(trajectory)}
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
-        """1 for a completed episode whose answer validates, or that has nothing to grade against (completing is
-        the objective there), else 0; a null ``answer`` cell grades invalid."""
+        """1 for a completed episode whose answer validates, or with nothing to grade against (completing is the
+        objective there), else 0; a null ``answer`` cell grades invalid."""
         if not trajectory.info.get(COMPLETED_KEY):
             return EpisodeGrade(0.0)
 
@@ -282,15 +261,11 @@ class NativeToolUseEnvironment(EnvironmentBase):
 
 
 class AsyncNativeToolUseEnvironment(AsyncEnvironmentBase, NativeToolUseEnvironment):
-    """Async NativeToolUseEnvironment with concurrent tool execution."""
-
     async def _execute_tool_calls_async(
         self,
         tool_calls: list[NativeToolCall],
         trajectory: Trajectory,
     ) -> tuple[list[NativeToolResult], float]:
-        """Execute tool calls concurrently."""
-
         async def execute_one(tc: NativeToolCall) -> NativeToolResult:
             tool = self.registry.get(tc.name)
             if not tool:
@@ -313,7 +288,6 @@ class AsyncNativeToolUseEnvironment(AsyncEnvironmentBase, NativeToolUseEnvironme
     async def _step_single_async(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
     ) -> StepOutcome:
-        """Process model response with async tool execution."""
         ctx = context or {}
         tool_calls_data = ctx.get("tool_calls", [])
         if not tool_calls_data:

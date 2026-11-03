@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""The embedding save path is the shared checkpoint ladder.
-
-``EmbeddingTrainer`` owns one genuine difference from every other trainer: its top-level model is a
-``SentenceTransformer`` ``nn.Sequential``, so the checkpoint context has to be re-pointed at the
-``auto_model`` backbone. Everything downstream of that — save dtype, hub expert layout, shard size,
-the streamed writer, and the single retaining rank on a gathered save — must come from
-``save_checkpoint`` and the shared gather/write leaves rather than a local re-implementation. A run
-with nothing to gather is the mixin's save alone, so every save step (reshard, router-balancing
-sidecar, writer) runs once on either branch.
-
-Run: pytest tests/cpu/trainers/test_embedding_save_routing.py
-"""
+"""The embedding save path is the shared checkpoint ladder, re-pointed at the ``auto_model`` backbone.
+Every save step (reshard, router-balancing sidecar, writer) runs once on either branch."""
 
 import contextlib
 import os
@@ -48,8 +38,6 @@ class _Block(nn.Module):
 
 
 class _Backbone(nn.Module):
-    """A linear, then two blocks under ``encoder.layers`` or, as a bare AutoModel holds them, ``layers``."""
-
     def __init__(self, bare: bool = False):
         super().__init__()
         self.linear = nn.Linear(4, 4, bias=False)
@@ -62,15 +50,13 @@ class _Backbone(nn.Module):
 
 
 class _SharedExpertEPLayer(StubEPLayerBase):
-    """An EP layer holding the block's shared experts, which the EP layers adopt as a child."""
-
     def __init__(self):
         super().__init__()
         self.shared_experts = nn.Linear(4, 4, bias=False)
 
 
 class _SentenceTransformerLike(nn.Module):
-    """Stands in for the ST Sequential: the backbone is a CHILD, not the model itself."""
+    """The backbone is a child, not the model itself."""
 
     def __init__(self, backbone: nn.Module):
         super().__init__()
@@ -125,8 +111,7 @@ def _context(host, monkeypatch):
 
 
 def test_checkpoint_context_points_at_the_backbone_not_the_st_sequential(monkeypatch):
-    # The base factory snapshots _top_level_model(); a strategy handed the Sequential would gather
-    # and write "transformer.*"-prefixed keys no loader accepts.
+    # A strategy handed the Sequential would gather and write "transformer.*"-prefixed keys no loader accepts.
     host, backbone, top = _host()
     ctx = _context(host, monkeypatch)
 
@@ -147,13 +132,12 @@ def test_non_lora_save_delegates_to_the_registry_with_the_configured_shard_size(
 
     assert seen["ctx"] is ctx
     assert seen["out"] == str(tmp_path)
-    # The ladder carries max_shard_size through to the EP/TP savers.
     assert seen["ctx"].max_shard_size == "1GB"
     assert seen["ctx"].model is backbone
 
 
 def test_gathered_lora_save_retains_only_on_the_writer(monkeypatch, tmp_path):
-    # retain defaults True, so an unqualified gather leaves a full CPU state dict on EVERY rank.
+    # retain defaults True, so an unqualified gather leaves a full CPU state dict on every rank.
     host, _, _ = _host(has_lora=True, is_save_rank=False)
     ctx = _context(host, monkeypatch)
     seen = {}
@@ -174,8 +158,7 @@ def test_gathered_lora_save_retains_only_on_the_writer(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("bare", [False, True], ids=["prefixed-layers", "bare-layers"])
 def test_injected_lora_save_streams_the_fold_one_conversion_chunk_at_a_time(monkeypatch, tmp_path, bare):
-    """The fold reaches disk through the streamed writer, normalized one conversion chunk (a decoder block) at a
-    time, so the save rank never holds the whole backbone, under the base model's names at the save dtype."""
+    """One conversion chunk (a decoder block) at a time, so the save rank never holds the whole backbone."""
     host, backbone, _ = _host(has_lora=True, bare=bare)
     ctx = _context(host, monkeypatch)
     expected = {
@@ -203,7 +186,7 @@ def test_injected_lora_save_streams_the_fold_one_conversion_chunk_at_a_time(monk
 
 
 def test_the_injected_lora_save_folds_one_target_at_a_time(monkeypatch, tmp_path):
-    """Each fold is a device copy of its target: folded all up front, every one would be alive at once."""
+    """Each fold is a device copy of its target; folded up front, all would be alive at once."""
     host, _, _ = _host(has_lora=True)
     ctx = _context(host, monkeypatch)
     real_fold = peft_adapters.lora_folded
@@ -248,8 +231,7 @@ def _failing_write_worker(rank: int, tmp_dir: str) -> None:
 
 
 def test_a_failed_injected_lora_write_raises_on_every_rank(tmp_path):
-    """No ``pytorch_model.bin`` fallback: a failed write stops every rank rather than leaving a format no
-    other gathered save writes, or stranding the peers."""
+    """A ``pytorch_model.bin`` fallback would leave a format no other gathered save writes, or strand the peers."""
     run_gloo_ranks(_failing_write_worker, WORLD_SIZE, str(tmp_path))
 
     for rank in range(WORLD_SIZE):
@@ -259,9 +241,8 @@ def test_a_failed_injected_lora_write_raises_on_every_rank(tmp_path):
 
 
 def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():
-    """An EP layer adopts the block's shared experts as children, so a target list that reaches only
-    those puts every adapter inside it. The run still trains injected LoRA: it must be folded on save
-    and refused under EP, which an EP-excluding scan would miss."""
+    """An EP layer adopts the block's shared experts as children, and the run still trains injected LoRA there.
+    It must be folded on save and refused under EP, which an EP-excluding scan would miss."""
     layer = _SharedExpertEPLayer()
     backbone = _Backbone()
     backbone.add_module("moe", layer)
@@ -272,8 +253,7 @@ def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():
 
 
 def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatch, tmp_path):
-    # The run's sequence budget is pinned on the tokenizer as a truncation default; save_pretrained
-    # would otherwise persist it as the exported model's served context.
+    # The run's sequence budget is pinned on the tokenizer, and save_pretrained would persist it as the served context.
     host, _, _ = _host()
     host._pristine_special_token_ids = []
     monkeypatch.setattr(checkpointing_mod, "save_balancing_biases", lambda *args, **kwargs: None)
@@ -300,7 +280,6 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
 
 
 def _record_save_steps(host, monkeypatch) -> list[str]:
-    """Record the save steps that must run once per save: the reshard, the balancing sidecar, each writer."""
     calls = []
     host._pristine_special_token_ids = []
     monkeypatch.setattr(checkpointing_mod, "save_balancing_biases", lambda *args, **kwargs: calls.append("sidecar"))
@@ -320,9 +299,7 @@ def _record_save_steps(host, monkeypatch) -> list[str]:
 
 
 def test_a_plain_save_is_the_mixins_save_alone(monkeypatch, tmp_path):
-    """Single GPU, DDP and accelerate FSDP: the mixin's save owns the reshard, the sidecar and the fence
-    mark, with ST's writer as its base fallback. Wrapping it in a second copy of those steps runs each
-    twice — a second sidecar write, a second reshard."""
+    """Single GPU, DDP, accelerate FSDP: a second copy of the mixin's steps would run the sidecar and reshard twice."""
     host, _, _ = _host()
     host._fsdp_wrapped = False
     host.args.should_save = False
@@ -335,9 +312,8 @@ def test_a_plain_save_is_the_mixins_save_alone(monkeypatch, tmp_path):
 
 
 def test_a_one_process_save_of_ep_layers_writes_the_pipeline_config_beside_the_ladder(monkeypatch, tmp_path):
-    """The grouped-GEMM EP layers on one process are not FSDP2-wrapped, yet only the ladder's EP saver writes their
-    experts in the hub layout, and the mixin's payload writes no pipeline config beside a ladder save: the export
-    would load as a bare backbone, mean-pooled and unnormalized. The save takes the distributed payload."""
+    """Only the ladder's EP saver writes hub-layout experts, but the mixin's payload adds no pipeline config beside it.
+    The export would load as a bare backbone, mean-pooled and unnormalized."""
     host, backbone, _ = _host()
     backbone.add_module("moe", _SharedExpertEPLayer())
     host._fsdp_wrapped = False
@@ -351,8 +327,6 @@ def test_a_one_process_save_of_ep_layers_writes_the_pipeline_config_beside_the_l
 
 
 def test_a_distributed_save_writes_through_the_mixins_payload_hook(monkeypatch, tmp_path):
-    """EP/TP/FSDP2 and injected LoRA replace only the payload: the mixin's save keeps the reshard, the
-    sidecar and the fence mark, each once, and ST's writer never runs."""
     host, _, _ = _host()
     calls = _record_save_steps(host, monkeypatch)
 

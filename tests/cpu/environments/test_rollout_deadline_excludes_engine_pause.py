@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""The episode and request deadlines count engine-serving time, not the seconds a weight sync held the
-engines paused.
-
-A sync freezes every in-flight generation (vLLM ``mode=keep``) for the whole push. A wall-clock
-deadline charges that window to the episode, and a request that expires inside it is re-issued while
-its frozen original still completes server-side: the same turn is sampled twice. ``RolloutManager``
-keeps the paused-seconds clock the trainer credits after each sync, the actors read a Ray copy of it,
-and ``_await_with_deadline`` re-arms against it.
-
-    python tests/cpu/environments/test_rollout_deadline_excludes_engine_pause.py
-"""
+"""Episode and request deadlines count engine-serving time, not the seconds a weight sync held the engines paused. A
+request expiring inside the window is re-issued while its frozen original still completes: the same turn is
+sampled twice. ``RolloutManager`` keeps the clock, and ``_await_with_deadline`` re-arms against it."""
 
 import asyncio
 from types import SimpleNamespace
@@ -213,8 +205,8 @@ async def _episode_across_a_pause(
 
 
 async def test_a_request_frozen_across_a_sync_is_sampled_once():
-    # Wall clock: the 1.0 s request overruns its 0.5 s deadline. Serving time is 0.2 s — the engine sat
-    # paused for the other 0.8 s, and without the credit the turn is re-issued and sampled twice.
+    # Wall clock: the 1.0 s request overruns its 0.5 s deadline. Serving time is 0.2 s, the engine paused for the other
+    # 0.8 s; without the credit the turn is re-issued and sampled twice.
     result, posts = await _episode_across_a_pause(
         request_delay=1.0, request_timeout=0.5, pause_from=0.1, pause_s=0.8, max_retries=2
     )

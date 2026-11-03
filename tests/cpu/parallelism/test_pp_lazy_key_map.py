@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""Stage-aware loading: the checkpoint-key map a mis-rebase would corrupt in total silence.
-
-The stage-aware loader claims a subset of the checkpoint's keys and RE-BASES them onto its stage's
-layer numbering (``layers.5`` on disk becomes ``layers.1`` on the stage that starts at layer 4).
-Every decoder layer of a model shares its shapes, so an off-by-``lo`` rebase loads layers
-``0..k`` into every stage: no crash, no missing key, a plausible loss curve, and a model that is
-silently the first stage's layers repeated. Nothing downstream can detect it.
-
-Two properties pin it down:
-
-  * ``local_parameter_name(global_parameter_name(k)) == k`` for every key of every stage — the
-    naming map and its inverse are one rebase helper and must stay mutual inverses.
-  * The stages' claimed DISK keys partition the checkpoint exactly: every decoder-layer key is
-    claimed by exactly one stage, and what a stage claims is precisely what it later re-exports
-    under global names. Non-layer keys (embeddings, final norm, head) are claimed by EVERY stage on
-    purpose — they are O(vocab x hidden) and ``build_pipeline_stage`` drops the unowned ones.
-
-Run: python tests/cpu/parallelism/test_pp_lazy_key_map.py
-"""
+"""Stage-aware loading's key map: an off-by-``lo`` rebase loads the first stage's layers everywhere with no crash.
+Claimed disk keys partition the checkpoint; non-layer keys are every stage's."""
 
 import pytest
 import torch
@@ -28,7 +11,7 @@ from halo.distributed.pipeline_parallel.stage import build_pipeline_stage, slice
 from halo.model_loading.parallel.pp import StageKeyFilter
 from tests.common.models import TINY_QWEN3_CONFIG
 
-# 8 tiny layers: pp2 is the uniform split (as pp4 would be), pp3 the uneven one.
+# pp2 is the uniform split, pp3 the uneven one.
 PP_SIZES = (2, 3)
 LAYER_ROOT = "model.layers."
 
@@ -40,12 +23,10 @@ def _model(cls=Qwen3ForCausalLM, **overrides):
 
 
 def _checkpoint_keys(cls=Qwen3ForCausalLM, **overrides) -> list[str]:
-    """The key set a real safetensors checkpoint of this model carries."""
     return sorted(_model(cls, **overrides).state_dict())
 
 
 def _stages(pp_size: int, pp_split=None, cls=Qwen3ForCausalLM):
-    """One built ``PipelineStageModule`` per stage, each from its own copy of the model."""
     return [build_pipeline_stage(_model(cls), rank, pp_size, pp_split=pp_split) for rank in range(pp_size)]
 
 
@@ -54,14 +35,11 @@ def _planners(pp_size: int, pp_split=None) -> list[StageKeyFilter]:
     return [StageKeyFilter(lo, hi, LAYER_ROOT) for lo, hi in partition]
 
 
-# The rebase helper itself
-
-
 def test_stage_key_shifts_only_the_layer_index():
     planner = StageKeyFilter(4, 8, LAYER_ROOT)
     assert planner.stage_key("model.layers.5.mlp.down_proj.weight") == "model.layers.1.mlp.down_proj.weight"
     assert planner.stage_key("model.layers.4.input_layernorm.weight") == "model.layers.0.input_layernorm.weight"
-    # Non-layer keys are replicated verbatim on every stage.
+    # Replicated verbatim on every stage.
     assert planner.stage_key("model.embed_tokens.weight") == "model.embed_tokens.weight"
     assert planner.stage_key("lm_head.weight") == "lm_head.weight"
     # A double-digit index must not be truncated by the single-character partition.
@@ -77,9 +55,6 @@ def test_owns_is_half_open_on_the_layer_range():
     assert planner.owns("model.norm.weight")
 
 
-# global_parameter_name <-> local_parameter_name
-
-
 @pytest.mark.parametrize("pp_size", PP_SIZES)
 def test_local_name_inverts_global_name_for_every_stage_key(pp_size):
     for stage in _stages(pp_size):
@@ -90,7 +65,7 @@ def test_local_name_inverts_global_name_for_every_stage_key(pp_size):
 
 
 def test_local_name_inverts_global_name_for_a_non_lm_head():
-    """``score`` (sequence classification) exercises the head branch of the inverse."""
+    """``score`` exercises the head branch of the inverse."""
     for stage in _stages(2, cls=Qwen3ForSequenceClassification):
         for local in stage.state_dict():
             assert stage.local_parameter_name(stage.global_parameter_name(local)) == local, local
@@ -100,9 +75,6 @@ def test_local_name_inverts_global_name_under_a_manual_split():
     for stage in _stages(2, pp_split=[5, 3]):
         for local in stage.state_dict():
             assert stage.local_parameter_name(stage.global_parameter_name(local)) == local, local
-
-
-# The stages' claimed disk keys partition the checkpoint
 
 
 @pytest.mark.parametrize("pp_size", PP_SIZES)
@@ -131,12 +103,7 @@ def test_non_layer_keys_are_claimed_by_every_stage(pp_size):
 
 @pytest.mark.parametrize("pp_size", PP_SIZES)
 def test_claimed_keys_equal_what_the_stage_re_exports_globally(pp_size):
-    """The end-to-end property: what the loader reads under a disk key is what the stage saves it as.
-
-    Compares the loader's ownership filter against the stage module's own ``global_parameter_name``
-    — the two halves of the round trip that a wrong ``lo`` would break in opposite directions and
-    that no shape check can catch.
-    """
+    """The two halves of the round trip a wrong ``lo`` breaks in opposite directions, past any shape check."""
     layer_keys = {k for k in _checkpoint_keys() if k.startswith(LAYER_ROOT)}
     stages = _stages(pp_size)
     for planner, stage in zip(_planners(pp_size), stages, strict=True):
@@ -151,7 +118,6 @@ def test_claimed_keys_equal_what_the_stage_re_exports_globally(pp_size):
 
 @pytest.mark.parametrize("pp_size", PP_SIZES)
 def test_rebased_keys_land_on_the_sliced_model(pp_size):
-    """Every claimed disk key, re-based, must name a real parameter of the sliced backbone."""
     keys = _checkpoint_keys()
     for planner in _planners(pp_size):
         sliced = _model()
@@ -168,7 +134,7 @@ def test_manual_split_partitions_the_checkpoint_exactly():
     claimed = [{k for k in layer_keys if planner.owns(k)} for planner in planners]
     assert set().union(*claimed) == layer_keys
     assert sum(len(c) for c in claimed) == len(layer_keys)
-    # The split is honored, not silently uniformed: 5 layers' keys on stage 0, 3 on stage 1.
+    # The split is honored: 5 layers' keys on stage 0, 3 on stage 1.
     per_layer = len(layer_keys) // 8
     assert len(claimed[0]) == 5 * per_layer and len(claimed[1]) == 3 * per_layer
 

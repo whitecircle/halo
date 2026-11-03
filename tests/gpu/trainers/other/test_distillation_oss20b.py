@@ -1,23 +1,9 @@
 #!/usr/bin/env python
 """Teacher distillation of GPT-OSS-20B into itself under every parallel layout of the student.
 
-The teacher is the same checkpoint, loaded without parallelism by the script's own frozen-teacher loader on the
-student's attention request and sinks policy; only the student takes the layout. At step 1 the two compute the same
-function, so the logged KL term is zero up to kernel noise whatever the student's layout does to its forward, and a
-layout that mis-combined an expert, mis-sharded a projection or loaded the wrong weights shows a KL far above that
-noise. Both keep the pretrained sinks live: neutralized, the model is far off its trained function, and there the
-same noise reaches half a nat per token. After the run the KL has moved off zero (the student trained), the layout
-is read off the model, and the student's save loads back as a complete GPT-OSS checkpoint.
-
-Modes (``MODES``): ``fsdp`` (FSDP2, experts sharded at ep1), ``fsdp_unsharded`` (ep1 experts whole and
-FSDP-ignored), ``ep`` (EP2), ``tp`` (TP2), ``ep_tp`` (EP2 + TP2), ``etp`` (pure expert TP2) on two ranks;
-``ep_etp`` (EP2 x ETP2), ``ep_dp2`` (two EP groups) and ``tp_dp2`` (TP2 x DP2: the FSDP2 shard of each TP group's
-replica) on four, ``--gpus-per-node 2`` placing each EP group in its own simulated NVLink domain.
-
-Usage:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_distillation_oss20b.py --mode ep
-    torchrun --nproc_per_node=4 tests/gpu/trainers/other/test_distillation_oss20b.py --mode ep_dp2 --gpus-per-node 2
-    torchrun --nproc_per_node=4 tests/gpu/trainers/other/test_distillation_oss20b.py --mode tp_dp2
+At step 1 teacher and student compute one function, so the KL is zero up to kernel noise, and a mis-combined expert or
+mis-sharded projection shows far above it. Both keep pretrained sinks live: neutralized, the model is far off its
+trained function, and the same noise reaches half a nat per token.
 """
 
 import argparse
@@ -52,21 +38,19 @@ NUM_TRAIN_SAMPLES = 32
 MAX_SEQ_LENGTH = 4096
 NUM_TRAIN_STEPS = 5
 BATCH_SIZE = 1
-# Large enough that four updates move the student's distribution measurably off the teacher's.
+# Four updates move the student's distribution measurably off the teacher's.
 LEARNING_RATE = 1e-4
 SEED = 42
-# The step-1 KL between a student and a teacher holding the same weights, in nats per token. With live sinks the bf16
-# noise of two layouts of these weights is ~0.02 on these rows; the defects it guards (two experts' down projections
-# swapped, a rank holding the other's sink slice, an output-projection bias summed on both TP ranks) sit at 0.5 and up.
+# Nats per token. With live sinks the bf16 noise of two layouts is ~0.02 on these rows; the defects guarded (two
+# experts' down projections swapped, a rank holding the other's sink slice, a bias summed on both TP ranks) sit at 0.5
+# and up.
 STEP1_KL_ATOL = 0.1
-# How far the last step's KL must sit above the first's: past the live-sink noise, so a student whose updates never
-# landed fails it.
+# Past the live-sink noise, so a student whose updates never landed fails it.
 KL_MOVED_MIN = 0.05
-# The sinks policy both models load under: live and frozen.
+# Live and frozen, on both models.
 RESET_SINKS = False
-# The flash kernel that carries live sinks, resolved per GPU at run time (:func:`sink_carrying_attention`).
+# Resolved per GPU at run time (:func:`sink_carrying_attention`).
 FLASH = "flash"
-# Each mode's world size, student ParallelismConfig fields and attention implementation.
 MODES = {
     "fsdp": (2, {}, FLASH),
     "fsdp_unsharded": (2, {"fsdp_shard_ep1_experts": False}, FLASH),
@@ -88,7 +72,6 @@ FIELDS = {**MODE_FIELDS, **({"gpus_per_node": ARGS.gpus_per_node} if ARGS.gpus_p
 
 
 def create_distillation_dataset(num_samples: int, tokenizer, seed: int = SEED) -> Dataset:
-    """Create synthetic math SFT data for distillation testing."""
     random.seed(seed)
 
     templates = [
@@ -118,16 +101,14 @@ def create_distillation_dataset(num_samples: int, tokenizer, seed: int = SEED) -
 
 
 def sink_carrying_attention(kind: str) -> str:
-    """``kind``, or for :data:`FLASH` the kernel that carries live sinks on this GPU: FA4 on Blackwell, eager
-    elsewhere (FA2 and the stock FA3 build drop the sink column)."""
+    """FA4 on Blackwell, eager elsewhere (FA2 and the stock FA3 build drop the sink column)."""
     if kind != FLASH:
         return kind
     return "flash_attention_4" if is_blackwell_gpu() else "eager"
 
 
 def load_teacher(config: TeacherDistillationConfig, attn_implementation: str, local_rank: int):
-    """The teacher: the same checkpoint through the script's frozen-teacher load, on the student's request and sinks
-    policy, unsharded."""
+    """The script's frozen-teacher load, on the student's request and sinks policy, unsharded."""
     return teacher_distill._load_distill_teacher(
         args=SimpleNamespace(teacher_model=MODEL_NAME, teacher_model_revision=None, reset_sinks=RESET_SINKS),
         model_config=SimpleNamespace(trust_remote_code=True),
@@ -169,7 +150,7 @@ def run(ctx) -> dict:
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # already applied by load_distributed_model
+        use_liger_kernel=False,  # Already applied by load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",

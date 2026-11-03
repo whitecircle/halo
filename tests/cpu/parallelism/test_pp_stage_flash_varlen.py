@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""A packed pipeline microbatch on a flash run reaches its stage's attention with the varlen set already built.
-
-The schedule microbatches only batch-dim tensors, so the varlen set the packing collator builds for a flattened
-row cannot ride in with a pipeline batch; left alone, every attention layer of every stage derives it from
-``position_ids`` (a packed-row check, a ``nonzero`` and a max length, each a host sync on a device), and again in
-the recompute. The stage forward builds it once per microbatch from one host read of the row, with the exact
-longest segment as the host-int max length, wherever transformers would take that varlen path, and hands nothing
-anywhere else.
-
-Held here: the set equals transformers' derivation on every row a pipeline batch holds (a row its documents fill, a
-chunked pad tail, a per-pad zero tail, a one-document row); building it reads the device row once; the stage hands
-it to the backbone only on a flash run's unmasked one-row microbatch with ``position_ids``, and a GatedDeltaNet
-family's stage its mixers' own markers on such a microbatch on any backend; across the pipeline-registered tiny
-roster the stages read it in place of the derivation with identical kernel arguments and bit-identical outputs
-(:mod:`tests.common.pp_packed_flash_varlen`, one fresh interpreter per family); and the real schedule over gloo
-(pp2 x dp2, FSDP2 per stage) reproduces bit for bit the step loss, gradients, eval loss and forward-only output it
-gives without the set, under both schedules, activation checkpointing and the fused head loss, with no host read left
-inside attention.
-
-    python tests/cpu/parallelism/test_pp_stage_flash_varlen.py
-"""
+"""A packed pipeline microbatch on a flash run reaches attention with the varlen set built once from one host read.
+The schedule splits batch-dim tensors only, so each layer would otherwise sync."""
 
 import copy
 import datetime
@@ -71,8 +52,7 @@ SCHEDULE_CASES = (
 
 
 def _device_row(position_ids: torch.Tensor) -> tuple[torch.Tensor, list[str]]:
-    """``position_ids`` standing in for a row on a device: every tensor derived from it stays on the "device",
-    ``cpu()`` hands the host a plain copy, and each host read of a device value is recorded."""
+    """Every derived tensor stays on the stand-in device; each host read of a device value is recorded."""
     reads: list[str] = []
 
     class DeviceRow(torch.Tensor):
@@ -104,9 +84,6 @@ class _Handed(Exception):
 
 
 def _handed(stage, position_ids: torch.Tensor | None, attention_mask: torch.Tensor | None = None) -> dict:
-    """The forward kwargs ``stage`` hands its backbone for a microbatch of ``position_ids`` (without them, one row
-    of :data:`MAX_LENGTH`)."""
-
     def capture(_module, _args, kwargs):
         raise _Handed(kwargs)
 
@@ -129,9 +106,6 @@ def test_the_set_is_what_transformers_derives(layout):
 
 
 def test_the_rows_cover_the_cases():
-    """Anti-vacuity: every packed row's longest segment is shorter than the row, the row its documents fill ends
-    on its longest (no pad tail behind it), the zero tail makes each pad a segment of its own, and the
-    one-document row does not restart."""
     for position_ids in _rows("ramp_tail"):
         assert packed_row_varlen_kwargs(position_ids)["max_length_q"] < MAX_LENGTH
     filled = next(i for i, documents in enumerate(PP_ROW_DOCUMENTS) if sum(documents) == MAX_LENGTH)
@@ -176,14 +150,14 @@ def test_a_masked_microbatch_is_left_to_its_mask():
 
 
 def test_a_multi_row_microbatch_is_left_to_transformers():
-    """transformers runs a microbatch of more rows on the dense kernel; a set spanning them would merge the rows."""
+    """A set spanning rows would merge them on transformers' dense kernel."""
     row, reads = _device_row(torch.cat(_rows("ramp_tail")[:2]))
     assert not VARLEN_KEYS & _handed(_stage(), row).keys()
     assert reads == []
 
 
 def test_a_microbatch_without_position_ids_is_left_to_transformers():
-    """The backbone then numbers the row from 0 itself, which transformers runs on the dense kernel."""
+    """The backbone numbers the row from 0 itself."""
     assert not VARLEN_KEYS & _handed(_stage(), None).keys()
 
 
@@ -194,8 +168,7 @@ def test_a_one_document_microbatch_keeps_the_dense_kernel():
 
 
 def test_a_gated_deltanet_stage_hands_its_mixers_their_markers():
-    """Its conv reads ``seq_idx`` and its chunked delta rule the varlen set, which the packing collator emits for a
-    flattened row: the stage rebuilds both from the same single host read, as the collator builds them."""
+    """Its conv reads ``seq_idx`` and its chunked delta rule the varlen set."""
     position_ids = _rows("ramp_tail")[0]
     stage = _stage("qwen3_5")
     row, reads = _device_row(position_ids)
@@ -208,7 +181,7 @@ def test_a_gated_deltanet_stage_hands_its_mixers_their_markers():
 
 
 def test_a_masked_gated_deltanet_microbatch_is_left_to_its_mask():
-    """Padded rows hold one document each and carry their mask: nothing is handed, as before the seam."""
+    """Padded rows hold one document each and carry their mask."""
     position_ids = _rows("ramp_tail")[0]
     row, reads = _device_row(position_ids)
     handed = _handed(_stage("qwen3_5"), row, attention_mask=torch.ones_like(position_ids))
@@ -226,7 +199,7 @@ def test_a_stage_without_a_config_hands_nothing():
 
 
 def test_withholding_the_seam_restores_the_derivation():
-    """Anti-vacuity for the sweep's and the schedule's baseline arm: without the seam nothing is handed over."""
+    """Anti-vacuity for the baseline arm."""
     with seam_withheld():
         assert not VARLEN_KEYS & _handed(_stage(), _rows("ramp_tail")[0]).keys()
 
@@ -244,16 +217,15 @@ def test_every_pp_packing_family_reads_the_set_in_place_of_the_derivation(family
 
 
 def test_the_sweep_holds_the_flash_families_pipeline_runs():
-    """Anti-vacuity: the dense and the MoE families the pipeline recipes train reach the seam, so their sweep entries
-    cannot be skips."""
+    """Anti-vacuity: their sweep entries cannot be skips."""
     assert seam_sweep_skip("dense:qwen3") is None
     assert seam_sweep_skip("gpt_oss") is None
 
 
 def _schedule_worker(rank: int, case: ScheduleCase) -> None:
     torch.set_num_threads(2)
-    # Bit equality needs a reference that repeats: GptOss's expert-bias gradient accumulates in a thread-dependent
-    # order otherwise, a few ULPs apart from run to run with or without the seam.
+    # GptOss's expert-bias gradient accumulates in a thread-dependent order otherwise, a few ULPs apart from run to
+    # run.
     torch.use_deterministic_algorithms(True)
     config = ParallelismConfig(
         world_size=WORLD, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, pp_schedule=case.schedule

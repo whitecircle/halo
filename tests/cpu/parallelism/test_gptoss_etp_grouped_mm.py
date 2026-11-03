@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""GptOss under expert TP runs its experts through grouped GEMM, on the storage the per-expert loop reads.
-
-ETP stores this rank's slice of every local expert de-interleaved under the plain ``gate_proj``/``up_proj``
-names (and ``gate_proj_bias``/``up_proj_bias``, ``down_proj`` sharded on its input axis, ``down_proj_bias`` on
-expert-TP rank 0 only). The grouped path reads that pair where it reads ``*_gmm`` outside ETP, so a checkpoint an
-ETP run wrote on the per-expert loop resumes unchanged.
-
-Every layer here is a real ``EPGptOssMoELayer`` built on a real ``EPConfig`` for one rank of a pure-ETP (world 2)
-or an ep4 x etp2 (world 8) job, around the real ``transformers`` ``GptOssMLP``; only DeepEP is stubbed, since the
-expert compute is called on a dispatched view directly. Asserted in fp32 on CPU, where ``F.grouped_mm`` runs:
-
-* the grouped path is the one that runs under ETP, on this rank's ETP-sharded weights;
-* it matches the per-expert loop on the same rank, forward and backward (tokens, routing weights, every expert
-  weight and bias), DeepEP's ``-1`` padding included;
-* summed over the expert-TP partners, as the token-space all-reduce sums them, it reproduces the upstream
-  ``GptOssExperts`` output and input gradients, and each rank's weight gradients are its slice of upstream's;
-* the stored parameters do not depend on which compute path the run asked for;
-* outside ETP the same grouped path reads the ``*_gmm`` pair and reproduces upstream.
-
-Run: ``python tests/cpu/parallelism/test_gptoss_etp_grouped_mm.py`` (or ``pytest -m cpu``).
-"""
+"""GptOss under expert TP runs grouped GEMM on the storage the per-expert loop reads, so an ETP checkpoint resumes
+unchanged. In fp32, where ``F.grouped_mm`` runs on CPU; only DeepEP is stubbed."""
 
 from __future__ import annotations
 
@@ -39,21 +20,19 @@ from tests.common.ep_stubs import stubbed_rank_ep_layer
 
 E, H, M, K = 16, 16, 32, 2  # experts, hidden, expert intermediate, top_k
 TOKENS = 24
-# Inside the fixture's activation scale, so the clamped SwiGLU's clamp and its zero-gradient region are exercised.
+# Inside the fixture's activation scale, so the clamp and its zero-gradient region are exercised.
 SWIGLU_LIMIT = 1.0
 # (world size, ep_size); expert_tp_size is the quotient.
 LAYOUTS = {"etp2": (2, 1), "ep4_etp2": (8, 4), "ep2": (2, 2)}
 ETP_LAYOUTS = ("etp2", "ep4_etp2")
-# Fraction of the reference's max magnitude two fp32 paths summing the same terms in another order may differ by:
 # ~12x the measured worst case (1.7e-7, grouped vs loop), far below a bf16 rounding of one operand (~4e-3).
 RELATIVE_BAND = 2e-6
-# The storage every ETP rank holds on either compute path, which its checkpoints carry.
 ETP_STORAGE = ("router.weight", "router.bias", "gate_proj", "up_proj", "gate_proj_bias", "up_proj_bias", "down_proj")
 ETP_RANK0_ONLY = ("down_proj_bias",)
 
 
 def _block() -> GptOssMLP:
-    """The upstream block, every parameter (biases included, which upstream leaves uninitialized) drawn."""
+    """Biases included, which upstream leaves uninitialized."""
     torch.manual_seed(0)
     block = GptOssMLP(
         GptOssConfig(
@@ -74,7 +53,6 @@ def _block() -> GptOssMLP:
 
 
 def _rank_layer(block: GptOssMLP, layout: str, rank: int, *, grouped_at_build: bool = False) -> EPGptOssMoELayer:
-    """Rank ``rank``'s layer around a copy of ``block`` (:func:`stubbed_rank_ep_layer`)."""
     return stubbed_rank_ep_layer(
         EPGptOssMoELayer, copy.deepcopy(block), *LAYOUTS[layout], rank, grouped=grouped_at_build
     )
@@ -85,15 +63,14 @@ def _all_rank_layers(block: GptOssMLP, layout: str) -> list[EPGptOssMoELayer]:
 
 
 def _dispatched_view(layer: EPGptOssMoELayer, *, padded: bool, seed: int):
-    """``(tokens, local expert ids, routing weights)`` as this rank receives them: ``K`` distinct experts per
-    token, ids outside this rank's range padded with DeepEP's ``-1`` when ``padded``, else drawn from it only."""
+    """Ids outside this rank's range are padded with DeepEP's ``-1`` when ``padded``."""
     generator = torch.Generator().manual_seed(seed)
     pool = E if padded else layer.experts_per_rank
     picks = torch.rand(TOKENS, pool, generator=generator).argsort(dim=-1)[:, :K]
     if padded:
         local = picks - layer.expert_start
         local[(local < 0) | (local >= layer.experts_per_rank)] = -1
-        keep = (local >= 0).any(dim=-1)  # DeepEP delivers only tokens with a local expert
+        keep = (local >= 0).any(dim=-1)  # DeepEP delivers only tokens with a local expert.
         local = local[keep]
     else:
         local = picks
@@ -108,7 +85,6 @@ def _expert_params(layer: EPGptOssMoELayer) -> dict[str, nn.Parameter]:
 
 
 def _forward_backward(layer, tokens, experts, weights, *, grouped: bool, cotangent):
-    """The rank's expert output and its gradients on tokens, routing weights and every expert parameter."""
     layer._use_grouped_mm = grouped
     layer.zero_grad(set_to_none=True)
     tokens = tokens.clone().requires_grad_(True)
@@ -143,8 +119,6 @@ def _assert_close(actual: torch.Tensor, expected: torch.Tensor, label: str) -> N
 
 @pytest.mark.parametrize("layout", ETP_LAYOUTS)
 def test_etp_runs_the_grouped_gemm_on_its_sharded_weights(monkeypatch, layout):
-    """Asked for grouped GEMM, an ETP layer reports and runs it: three grouped projections over this rank's
-    ``[E_local, H, M/etp]`` gate and up halves and its ``[E_local, M/etp, H]`` down slice."""
     layer = _rank_layer(_block(), layout, rank=1, grouped_at_build=True)
     assert layer.expert_tp_size == 2 and layer._use_grouped_mm
 
@@ -164,8 +138,6 @@ def test_etp_runs_the_grouped_gemm_on_its_sharded_weights(monkeypatch, layout):
 
 @pytest.mark.parametrize("layout", ETP_LAYOUTS)
 def test_etp_grouped_gemm_matches_the_per_expert_loop(layout):
-    """Every rank of the layout, the same parameters through both paths: output, token and routing-weight
-    gradients, and every expert weight and bias gradient agree to fp32 reordering."""
     block = _block()
     for rank, layer in enumerate(_all_rank_layers(block, layout)):
         tokens, experts, weights = _dispatched_view(layer, padded=layout != "etp2", seed=10 + rank)
@@ -183,7 +155,6 @@ def test_etp_grouped_gemm_matches_the_per_expert_loop(layout):
 
 
 def _upstream_slices(block: GptOssMLP, layer: EPGptOssMoELayer, source: str) -> dict[str, torch.Tensor]:
-    """``source`` (``"data"`` or ``"grad"``) of upstream's expert tensors, cut to what ``layer`` stores."""
     experts = block.experts
     start, end = layer.expert_start, layer.expert_end
     shard = M // layer.expert_tp_size
@@ -208,10 +179,7 @@ def _upstream_slices(block: GptOssMLP, layer: EPGptOssMoELayer, source: str) -> 
 
 @pytest.mark.parametrize("layout", ETP_LAYOUTS)
 def test_etp_partners_sum_to_the_upstream_experts(layout):
-    """Each dispatch-EP rank's expert-TP partners, on tokens routed to that rank's experts: their grouped outputs
-    and input gradients summed (the token-space all-reduce and the ETP backward sum) equal upstream's
-    ``GptOssExperts``, the down bias counted once, and each rank's weight gradients are its own slice of
-    upstream's."""
+    """Summed as the token-space all-reduce and the ETP backward do; the down bias counts once."""
     block = _block()
     layers = _all_rank_layers(block, layout)
     partners: dict[int, list[EPGptOssMoELayer]] = {}
@@ -244,9 +212,7 @@ def test_etp_partners_sum_to_the_upstream_experts(layout):
 
 @pytest.mark.parametrize("layout", ETP_LAYOUTS)
 def test_etp_storage_does_not_depend_on_the_compute_path(layout):
-    """Every rank stores the same tensors under the same names whether its run asked for grouped GEMM or not, and
-    they are the ETP storage checkpoints carry: an ETP checkpoint written on the per-expert loop resumes on
-    grouped GEMM with its weights and its optimizer moments' parameter names unchanged."""
+    """Optimizer moments' parameter names stay unchanged too."""
     block = _block()
     for rank in range(LAYOUTS[layout][0]):
         grouped = _rank_layer(block, layout, rank, grouped_at_build=True)
@@ -264,9 +230,6 @@ def test_etp_storage_does_not_depend_on_the_compute_path(layout):
 
 
 def test_grouped_gemm_outside_etp_reads_the_gmm_pair():
-    """Outside ETP the grouped path reads the de-interleaved ``*_gmm`` pair: each ep2 rank's output and input
-    gradients equal upstream's ``GptOssExperts`` on the tokens routed to its experts, and its gate and up
-    gradients are upstream's de-interleaved halves."""
     block = _block()
     for rank in range(LAYOUTS["ep2"][0]):
         layer = _rank_layer(block, "ep2", rank, grouped_at_build=True)

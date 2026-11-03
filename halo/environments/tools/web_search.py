@@ -1,8 +1,5 @@
-"""Pluggable web search backends for environment tools, auto-selected by available API key.
-
-Priority: Serper (SERPER_API_KEY) → Brave (BRAVE_API_KEY) → Tavily (TAVILY_API_KEY) → DuckDuckGo
-(keyless fallback). Each raw result is ``{"title", "url", "snippet"}``.
-"""
+"""Pluggable web search backends, auto-selected by available API key: Serper, Brave, Tavily, then keyless DuckDuckGo.
+Each raw result is ``{"title", "url", "snippet"}``."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -15,15 +12,12 @@ from ddgs import DDGS
 
 from halo.env import env_flag, env_str
 
-# Per-request wall-clock cap (seconds) for every HTTP search backend.
 _SEARCH_TIMEOUT = 15.0
-# Results a search returns when the call names no count.
 DEFAULT_MAX_RESULTS = 5
 _ALLOW_MOCK_SEARCH_FLAG = "HALO_ALLOW_MOCK_SEARCH"
 
 
 def _format_results(results: list[dict[str, Any]], max_results: int) -> str:
-    """Format search results into a readable string for the model."""
     if not results:
         return "No results found."
     lines = []
@@ -46,9 +40,8 @@ async def _async_search_duckduckgo(query: str, max_results: int) -> list[dict[st
 
 @dataclass(frozen=True)
 class _HttpSearchSpec:
-    """A keyed JSON search API, shared by the sync and async transports: ``build(query, max_results, key)`` gives the
-    httpx request kwargs for the key read from ``env_key``, ``parse(data)`` the ``{"title", "url", "snippet"}`` dicts.
-    """
+    """A keyed JSON search API shared by the sync and async transports: ``build(query, max_results, key)`` gives httpx
+    request kwargs, ``parse(data)`` the result dicts."""
 
     method: str
     url: str
@@ -61,14 +54,12 @@ class _HttpSearchSpec:
 
 
 def _sync_call(spec: _HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
-    """Run ``spec`` over a blocking httpx request."""
     resp = httpx.request(spec.method, spec.url, timeout=_SEARCH_TIMEOUT, **spec.request_kwargs(query, max_results))
     resp.raise_for_status()
     return spec.parse(resp.json())[:max_results]
 
 
 async def _async_call(spec: _HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
-    """Run ``spec`` over an async httpx client."""
     async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
         resp = await client.request(spec.method, spec.url, **spec.request_kwargs(query, max_results))
         resp.raise_for_status()
@@ -102,7 +93,7 @@ async def _async_search_mock(query: str, max_results: int) -> list[dict[str, Any
 
 @dataclass(frozen=True)
 class _SearchBackend:
-    """A selectable search backend: its sync/async entry points and the API-key env var (None = keyless)."""
+    """``env_key`` is the API-key env var (None = keyless)."""
 
     sync: Callable[..., list[dict[str, Any]]]
     async_: Callable[..., Awaitable[list[dict[str, Any]]]]
@@ -110,7 +101,6 @@ class _SearchBackend:
 
 
 def _http_backend(spec: _HttpSearchSpec) -> _SearchBackend:
-    """Bind a :class:`_HttpSearchSpec` to the shared sync/async transports."""
     return _SearchBackend(sync=partial(_sync_call, spec), async_=partial(_async_call, spec), env_key=spec.env_key)
 
 
@@ -169,17 +159,15 @@ _MOCK_BACKEND = _SearchBackend(sync=_search_mock, async_=_async_search_mock)
 
 
 def _selectable_backends() -> dict[str, _SearchBackend]:
-    """The backends a caller may name. The flag is read per call, making it a runtime opt-in that
-    does not depend on import order."""
+    """The flag is read per call, making it a runtime opt-in that does not depend on import order."""
     if env_flag(_ALLOW_MOCK_SEARCH_FLAG):
         return {**_BACKENDS, "mock": _MOCK_BACKEND}
     return _BACKENDS
 
 
 def validate_search_backend(backend: str | None) -> None:
-    """Raise on a backend name this process cannot select (``None`` auto-selects). Checked at tool construction too,
-    since every protocol turns a per-search raise into a priced observation and a run would train on a dead tool.
-    """
+    """``None`` auto-selects. Checked at tool construction too, since every protocol turns a per-search raise into a
+    priced observation and a run would train on a dead tool."""
     if backend is None:
         return
     selectable = _selectable_backends()
@@ -194,8 +182,7 @@ def validate_search_backend(backend: str | None) -> None:
 
 
 def _resolve_backend(backend: str | None) -> tuple[str, _SearchBackend]:
-    """The backend a search runs on, by name: the named one, else the first in :data:`_BACKENDS` order this process
-    can reach (keyless, or its key present)."""
+    """The named backend, else the first in :data:`_BACKENDS` order this process can reach."""
     backend = backend or next(
         name for name, spec in _BACKENDS.items() if spec.env_key is None or env_str(spec.env_key)
     )
@@ -204,22 +191,14 @@ def _resolve_backend(backend: str | None) -> tuple[str, _SearchBackend]:
 
 
 def _backend_failure(backend: str, exc: Exception) -> RuntimeError:
-    """Build the error the search entry points raise for a backend fault; the protocol running the
-    tool logs it.
-
-    A fault raises rather than falling back to mock results, which would score as a successful search.
-    """
+    """A fault raises rather than falling back to mock results, which would score as a successful search."""
     return RuntimeError(f"web_search backend '{backend}' failed: {exc}")
 
 
 def web_search_raw(
     query: str, max_results: int = DEFAULT_MAX_RESULTS, backend: str | None = None
 ) -> list[dict[str, Any]]:
-    """Search the web, returning the raw ``{"title", "url", "snippet"}`` results.
-
-    ``backend=None`` auto-selects by available API keys; an unknown name raises ``ValueError`` and a
-    backend fault ``RuntimeError``.
-    """
+    """An unknown name raises ``ValueError`` and a backend fault ``RuntimeError``."""
     backend, impl = _resolve_backend(backend)
 
     try:
@@ -229,15 +208,10 @@ def web_search_raw(
 
 
 def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS, backend: str | None = None) -> str:
-    """Search the web and return results formatted as a string for LLM consumption.
-
-    ``backend=None`` auto-selects by available API keys; pass a name to force one.
-    """
     return _format_results(web_search_raw(query, max_results, backend), max_results)
 
 
 async def async_web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS, backend: str | None = None) -> str:
-    """Async version of web_search."""
     backend, impl = _resolve_backend(backend)
 
     try:

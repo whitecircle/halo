@@ -1,9 +1,5 @@
-"""GRPO's trainer-side log-prob scoring: the chunked hidden-state sweep, the full-logits memory guard, the
-KL reference policy and the protected-token entropy mask.
-
-The chunked sweep scores the backbone's hidden states through :func:`halo.kernels.head_logprobs.chunked_head_logprobs`
-under the family's verified head transform; TRL's ``_compute_loss`` runs unchanged on the ``(B, T)`` result.
-"""
+"""GRPO's trainer-side log-prob scoring: the chunked hidden-state sweep, the full-logits memory guard, the KL reference
+policy and the protected-token entropy mask."""
 
 import inspect
 import logging
@@ -48,8 +44,6 @@ _FULL_LOGITS_WARN_FRACTION = 0.5
 
 @dataclass(frozen=True)
 class LogitsWidth:
-    """The completion logits row a loss forward carries, in tokens, and the setting that bounds it."""
-
     tokens: int
     set_by: str
 
@@ -57,9 +51,8 @@ class LogitsWidth:
 def full_logits_verdict(
     rows: int, rows_set_by: str, width: LogitsWidth, vocab: int, free_bytes: int
 ) -> tuple[bool, str] | None:
-    """``(fatal, message)`` for a full-logits plane of ``rows × width × vocab`` against ``free_bytes``: fatal
-    when it cannot fit, a warning past :data:`_FULL_LOGITS_WARN_FRACTION` of it, ``None`` when it fits
-    comfortably. ``rows_set_by`` names the batch-size setting behind ``rows``."""
+    """``(fatal, message)``: fatal when the plane cannot fit, a warning past :data:`_FULL_LOGITS_WARN_FRACTION`,
+    ``None`` when it fits comfortably."""
     plane = rows * width.tokens * vocab * _FULL_LOGITS_BYTES_PER_LOGIT
     if plane <= _FULL_LOGITS_WARN_FRACTION * free_bytes:
         return None
@@ -82,12 +75,8 @@ def full_logits_verdict(
 def dense_row_spans(
     attention_mask: torch.Tensor, completion_width: int = 0
 ) -> tuple[list[tuple[int, int]], list[int]]:
-    """Real-token span ``[lo, hi)`` per row of a padded batch, as the dense per-row path forwards it, and each
-    row's real-token count in the mask's last ``completion_width`` columns (zeros when that is 0).
-
-    Every reader of the per-row widths derives them here, the <2-token widening included (a 1-token
-    span is widened by a neighbour so the next-token shift leaves at least one position).
-    """
+    """Real-token span ``[lo, hi)`` per row and each row's count in the mask's last ``completion_width`` columns. A
+    1-token span is widened by a neighbour so the next-token shift leaves a position."""
     # One D2H for the whole mask: a per-row read serializes CPU and GPU on every row, which defeats
     # CPU launch-ahead on a path that runs repeatedly per gradient microbatch.
     mask = attention_mask.detach().to("cpu", torch.bool)
@@ -111,34 +100,26 @@ def dense_row_spans(
 
 
 def _completion_window(parts: Sequence[torch.Tensor], width: int) -> torch.Tensor:
-    """Each row's leading ``part`` zero-padded to ``width`` along its first dim, stacked ``(rows, width, ...)``."""
     return torch.stack([F.pad(part, (0, 0) * (part.dim() - 1) + (0, width - part.size(0))) for part in parts])
 
 
 def rows_forward_densely(model, batch_size: int) -> bool:
-    """Whether the chunked forward trims each row to its real span, one backbone call per row.
-
-    Mandatory under FA4 (exact RoPE positions and rank-uniform collective counts). Taken on every
-    attention path when rows are forwarded singly anyway (``batch_size == 1``): a padded row otherwise
-    costs its rank's widest prompt+completion in every layer, and the head sweep its padded width.
-    """
+    """Mandatory under FA4 (exact RoPE positions and rank-uniform collective counts); at ``batch_size == 1`` a padded
+    row otherwise costs its rank's widest prompt+completion in every layer."""
     return effective_attn_implementation(getattr(model, "config", None)) == "flash_attention_4" or batch_size == 1
 
 
 class LogprobScoringMixin:
-    """Trainer-agnostic GRPO log-prob scoring: the chunked sweep (batched, per-row dense, CP-sharded), the
-    full-logits memory guard and the KL reference policy. Hosts provide ``temperature``, ``accelerator``,
-    ``args``, ``model``, ``ref_model`` and ``_use_chunked_grpo_logprobs``."""
+    """Hosts provide ``temperature``, ``accelerator``, ``args``, ``model``, ``ref_model`` and
+    ``_use_chunked_grpo_logprobs``."""
 
     # Armed by :meth:`_capturing_completion_logits`: where the scoring forward also leaves its logits.
     _completion_logits_sink: list[torch.Tensor] | None = None
 
     @contextmanager
     def _capturing_completion_logits(self) -> Iterator[list[torch.Tensor]]:
-        """Yield a list the scoring forwards run inside the block append their completion logits to: one
-        ``(rows, logits_to_keep, V)`` tensor per forwarded sub-batch, in row order, the family head's own
-        output before the temperature, carrying the forward's graph. A host whose loss also needs the
-        logits reads them here instead of forwarding the policy a second time."""
+        """Yield a list the block's scoring forwards append ``(rows, logits_to_keep, V)`` logits to, pre-temperature
+        and carrying the graph, so a host whose loss needs them need not forward the policy twice."""
         sink: list[torch.Tensor] = []
         self._completion_logits_sink = sink
         try:
@@ -148,27 +129,21 @@ class LogprobScoringMixin:
 
     @property
     def _trains_rows_densely(self) -> bool:
-        """Whether the train-mode scoring forwards, the loss pass and its no-grad recompute, take the dense
-        per-row path: the chunked sweep at a batch size :func:`rows_forward_densely` trims."""
+        """Whether the train-mode scoring forwards, the loss pass and its no-grad recompute, take the dense per-row
+        path."""
         return self._use_chunked_grpo_logprobs and rows_forward_densely(
             self.accelerator.unwrap_model(self.model), self.args.per_device_train_batch_size
         )
 
     def _resolve_chunked_head_transform(self) -> None:
-        """Verify the policy's head path at construction when the chunked sweep will score it, so a
-        family it cannot reproduce is refused before the first rollout. Pure local computation on the
-        class and config: every rank reaches the same verdict."""
+        """Refuse a family the chunked sweep cannot reproduce before the first rollout. Pure local computation, so
+        every rank reaches the same verdict."""
         if self._use_chunked_grpo_logprobs:
             self._head_transform(self.accelerator.unwrap_model(self.model))
 
     def _verify_full_logits_fit(self, width: LogitsWidth | None) -> None:
-        """COLLECTIVE when it runs: refuse a full-logits loss forward that cannot fit on this device, on
-        every rank when one cannot; warn when it takes a large share. ``width`` is the logits row the
-        loss forward carries (``None``: nothing bounds it, nothing is checked).
-
-        The rows are the chunk one loss forward materializes: ``per_device_train_batch_size``, or
-        ``per_device_eval_batch_size`` when evaluation runs and it is larger. A floor on the step's peak.
-        """
+        """COLLECTIVE when it runs. Refuse a full-logits loss forward that cannot fit, on every rank when one cannot;
+        warn on a large share. A ``width`` of ``None`` means nothing bounds it."""
         if self._use_chunked_grpo_logprobs or width is None or not torch.cuda.is_available():
             return
         head = self.accelerator.unwrap_model(self.model).get_output_embeddings()
@@ -197,8 +172,7 @@ class LogprobScoringMixin:
 
     @contextmanager
     def _reference_policy(self) -> Iterator[nn.Module]:
-        """Yield the model that scores the KL reference: the frozen ``ref_model`` when the trainer holds
-        one, else the PEFT policy itself, with its adapters disabled for the duration."""
+        """The frozen ``ref_model`` when the trainer holds one, else the PEFT policy with its adapters disabled."""
         if self.ref_model is not None:
             yield self.ref_model
             return
@@ -208,9 +182,8 @@ class LogprobScoringMixin:
     def _chunked_completion_logps(
         self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False
     ):
-        """Chunked ``(logps, entropies)`` for a possibly-wrapped model. Redirects through the wrapper so
-        its pre-forward hooks fire (FSDP2 unshards root params, ``lm_head`` included) before the sweep
-        runs on the unwrapped module."""
+        """Redirects through the wrapper so its pre-forward hooks fire (FSDP2 unshards root params, ``lm_head``
+        included) before the sweep runs on the unwrapped module."""
         unwrapped = self.accelerator.unwrap_model(model)
         return self._chunked_forward_redirection(
             model,
@@ -225,11 +198,8 @@ class LogprobScoringMixin:
         )
 
     def _cp_chunked_logps(self, model, input_ids, attention_mask, labels):
-        """Score CP-owned next-token targets without constructing vocabulary-wide logits.
-
-        ``labels`` describes the full right-padded row on every CP peer. The returned local labels
-        mark supervised positions; log-probs at ignored positions have no training meaning.
-        """
+        """Score CP-owned next-token targets without vocabulary-wide logits. ``labels`` describes the full right-padded
+        row on every peer; log-probs at ignored positions have no training meaning."""
         unwrapped = self.accelerator.unwrap_model(model)
         wrapper = find_ulysses_model(unwrapped)
         if wrapper is None:
@@ -284,19 +254,13 @@ class LogprobScoringMixin:
         return logps, entropies
 
     def _head_logits(self, unwrapped_model, hidden: torch.Tensor) -> torch.Tensor:
-        """The logits the family's head path computes for ``hidden``; called inside the redirected forward,
-        where FSDP2 has gathered the head."""
+        """Called inside the redirected forward, where FSDP2 has gathered the head."""
         return self._head_transform(unwrapped_model).project(unwrapped_model.get_output_embeddings(), hidden)
 
     def _dense_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Per-row, unpadded backbone forward -> every row's completion hidden states, concatenated
-        ``(sum(widths), H)``, and each row's width: its real completion-token count, at least 1 so every
-        row stays autograd-connected (a pruned row drops its FSDP/EP backward collectives).
-
-        Each row trimmed to its real span with ``attention_mask=None`` keeps FA4 on its dense kernel and
-        restores RoPE positions ``[0, len)``; every supported family's attention is relative, so the
-        log-probs match the padded forward, and one forward per row keeps the FSDP/EP collective count in step.
-        """
+        """Each row's width is at least 1 so it stays autograd-connected (a pruned row drops its FSDP/EP backward
+        collectives). Trimming with ``attention_mask=None`` keeps FA4 on its dense kernel and restores RoPE positions
+        ``[0, len)``; every supported family's attention is relative, so log-probs match padded."""
         spans, n_comps = dense_row_spans(attention_mask, logits_to_keep)
         widths = [max(n_comp, 1) for n_comp in n_comps]
         rows = [
@@ -306,16 +270,14 @@ class LogprobScoringMixin:
         return torch.cat(rows), widths
 
     def _backbone_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """One sub-forward, opening its own EP capacity scope first: it enters the backbone directly, past
-        the pre-hook that scopes the shared DeepEP arena, and each dense row carries its own length.
-        Rank-uniform: the sub-forward count follows the per-rank batch shape."""
+        """Open its own EP capacity scope: it enters the backbone directly, past the pre-hook that scopes the shared
+        DeepEP arena, and each dense row carries its own length."""
         bump_forward_generation()
         return self._get_last_hidden_state(unwrapped_model, input_ids, attention_mask, logits_to_keep)
 
     def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Backbone hidden states for the last ``logits_to_keep`` completion positions (text-only):
-        forward the backbone (no ``lm_head``), drop the final position (the causal next-token shift),
-        keep the last ``logits_to_keep``."""
+        """Forward the backbone, drop the final position (the causal next-token shift), keep the last
+        ``logits_to_keep``."""
         backbone = base_transformers_model(unwrapped_model).base_model
         hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
         return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
@@ -333,8 +295,7 @@ class LogprobScoringMixin:
         return logps, shifted_labels
 
     def _head_sweep(self, unwrapped_model) -> Callable[..., tuple[torch.Tensor, torch.Tensor | None]]:
-        """``sweep(hidden, targets, compute_entropy=False) -> (logps, entropy)`` through the output
-        embedding, materialized off any DTensor, under the verified head transform."""
+        """``sweep(hidden, targets, compute_entropy=False) -> (logps, entropy)`` under the verified head transform."""
         lm_head = unwrapped_model.get_output_embeddings()
         self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
         weight = materialize_dtensor(lm_head.weight)
@@ -357,12 +318,8 @@ class LogprobScoringMixin:
         return sweep
 
     def _assert_output_embeddings_unadapted(self, unwrapped_model, lm_head) -> None:
-        """Reject a PEFT tuner on the output embedding rather than ignore its delta.
-
-        With ``lm_head`` in ``target_modules``, ``get_output_embeddings()`` resolves either to the
-        tuner wrapper, whose ``.weight`` property is the base weight, or to the base linear with the
-        wrapper elsewhere; both hand the chunked matmul a delta-free weight. Checked once per run.
-        """
+        """``get_output_embeddings()`` resolves to the tuner wrapper or the base linear, and both hand the chunked
+        matmul a delta-free weight. Checked once per run."""
         if getattr(self, "_lm_head_adapter_checked", False):
             return
         adapted = getattr(lm_head, "base_layer", None) is not None or any(
@@ -378,8 +335,7 @@ class LogprobScoringMixin:
         self._lm_head_adapter_checked = True
 
     def _head_transform(self, unwrapped_model) -> HeadTransform:
-        """``unwrapped_model``'s verified head transform, resolved once per model: the verification
-        builds a meta-device shell of the model's class."""
+        """Resolved once per model, since the verification builds a meta-device shell of the model's class."""
         base = base_transformers_model(unwrapped_model)
         transforms = getattr(self, "_head_transforms", None)
         if transforms is None:
@@ -390,13 +346,8 @@ class LogprobScoringMixin:
 
 
 def _tp_gathered_output_head(model) -> torch.nn.Module | None:
-    """The output embedding when a TP plan shards it and transformers' DTensor forward computes it, else ``None``.
-
-    Read off the plan transformers applied rather than off ``is_tp_mode``: the MoE path applies TP to
-    attention alone and leaves the head whole, and FSDP2 makes the head's weight a DTensor in every
-    mode, so neither the axis flag nor the parameter type separates a gathered head from a plain one.
-    A head on the local-shard forward is left out: its gathered logits are a fresh tensor.
-    """
+    """The output embedding when a TP plan shards it and transformers' DTensor forward computes it. Read off the plan:
+    the MoE path applies TP to attention alone, and FSDP2 makes the head's weight a DTensor in every mode."""
     head = embedding_module(model, "output")
     plan = getattr(model, "_tp_plan", None)
     if head is None or not plan or runs_local_forward(head):
@@ -406,15 +357,11 @@ def _tp_gathered_output_head(model) -> torch.nn.Module | None:
 
 
 class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
-    """Overrides TRL's ``_get_per_token_logps_and_entropies`` with the chunked sweep, gated by
-    ``self._use_chunked_grpo_logprobs``; TRL's full-logits scorer serves it off and for multimodal inputs
-    (the sweep is text-only). Mixed in ahead of ``GRPOTrainer`` and behind ``ProtectedTokenEntropyMixin``,
-    whose override reaches it through ``super()``.
-    """
+    """TRL's full-logits scorer serves the gate off and multimodal inputs. Mixed in ahead of ``GRPOTrainer`` and behind
+    ``ProtectedTokenEntropyMixin``, whose override reaches it through ``super()``."""
 
-    # The modality inputs are the rest of TRL's full-logits scorer's parameters: derived from its
-    # signature rather than hand-listed, so a release adding one does not slip past this gate into the
-    # text-only chunked path.
+    # Derived from TRL's full-logits scorer's signature, so a release adding a modality input does not slip past this
+    # gate into the text-only chunked path.
     _MODALITY_KEYS = frozenset(inspect.signature(GRPOTrainer._full_logits_logps).parameters) - {
         "self",
         "model",
@@ -438,16 +385,16 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
         compute_aux_loss=False,
         **kwargs,
     ):
-        """``(logps, entropies, aux_loss)``, with ``aux_loss`` always ``None``: the trainer mixin hands TRL's
-        GRPO a zero router aux-loss coefficient, the term being inert under a policy-gradient loss."""
+        """``aux_loss`` is always ``None``: the trainer mixin hands TRL's GRPO a zero coefficient, the term being inert
+        under a policy-gradient loss."""
         if compute_aux_loss:
             raise RuntimeError(
                 "TRL asked the GRPO log-prob forward for the router aux loss, but the toolkit hands GRPO a zero "
                 "router_aux_loss_coef and its scorers return none."
             )
         # TRL's loss forward passes batch_size=None; rows are independent, so bounding it is exact. The
-        # bound follows the TRAINER's mode, not the passed model's: a frozen reference model is always
-        # in eval, and a different bound there can route the KL's two sides through different paths.
+        # bound follows the TRAINER's mode: a frozen reference model is always in eval, and a different bound there can
+        # route the KL's two sides through different paths.
         if batch_size is None:
             batch_size = (
                 self.args.per_device_train_batch_size if self.model.training else self.args.per_device_eval_batch_size
@@ -478,7 +425,6 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
 
     @property
     def _model_accepts_multimodal(self) -> bool:
-        """Whether the model can receive vision inputs at all (cached: config-static per run)."""
         cached = getattr(self, "_model_accepts_multimodal_cache", None)
         if cached is None:
             config = getattr(self.accelerator.unwrap_model(self.model), "config", None)
@@ -499,13 +445,8 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
 
     @contextmanager
     def _writable_logits(self, model):
-        """Let TRL's full-logits path divide the logits in place under TP by cloning a gathered head's output.
-
-        A gathered ``lm_head`` plan (HF's ``colwise_gather_output``) left on transformers' forward (a head class
-        with a forward of its own) ends in ``DTensor.to_local()``, whose output autograd forbids writing in
-        place, and TRL divides the sliced logits by the temperature in place (``Output 0 of SliceBackward0 is
-        a view and is being modified inplace``).
-        """
+        """HF's ``colwise_gather_output`` plan ends in ``DTensor.to_local()``, whose output autograd forbids writing in
+        place, and TRL's full-logits path divides the logits in place under TP; clone it."""
         head = _tp_gathered_output_head(self.accelerator.unwrap_model(model))
         if head is None:
             yield
@@ -518,10 +459,9 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
 
 
 class ProtectedTokenEntropyMixin:
-    """Union the tokenizer's special and added token positions into ``top_entropy_quantile``'s mask, which
-    alone never reinforces the lowest-entropy tokens (role markers, tool delimiters, BOS/EOS). Mixed in ahead
-    of ``ChunkedGRPOLogprobsMixin``, whose chunked path returns without calling ``super()``: behind it, the
-    completion-id stash would never run. Inert at ``top_entropy_quantile == 1.0``."""
+    """Union special and added token positions into ``top_entropy_quantile``'s mask, which alone never reinforces the
+    lowest-entropy tokens (role markers, tool delimiters, BOS/EOS). Mixed in ahead of ``ChunkedGRPOLogprobsMixin``,
+    whose chunked path never calls ``super()``. Inert at ``top_entropy_quantile == 1.0``."""
 
     def _get_per_token_logps_and_entropies(self, model, input_ids, attention_mask, logits_to_keep, *args, **kwargs):
         # Stash completion ids for get_high_entropy_mask, called on the same micro-batch by _compute_loss.
@@ -552,11 +492,9 @@ class ProtectedTokenEntropyMixin:
         return (high_entropy | is_protected) & mask.bool()
 
     def _protected_token_ids(self) -> torch.Tensor | None:
-        """Special/added token ids for this tokenizer, cached. ``None`` when the tokenizer exposes none."""
         cached = getattr(self, "_protected_ids_cache", None)
         if cached is not None:
-            # An empty cache means "resolved, nothing to protect"; caching it keeps the warning below
-            # to once per run rather than once per micro-batch.
+            # An empty cache means resolved with nothing to protect, which keeps the warning below to once per run.
             return cached if cached.numel() else None
 
         tokenizer = resolve_tokenizer(self.processing_class)

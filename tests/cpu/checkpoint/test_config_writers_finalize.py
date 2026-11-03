@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""Every toolkit path that writes a model ``config.json`` must finalize it the same way.
-
-``finalize_exported_config`` is the whole contract: the live ``model_type`` restored for the vendor
-classes that declare none (Bailing/Ling), the source repo's own schema for the families whose serving
-engines have no config class (Step-3.7), and the ``auto_map`` entries trimmed to the modules the
-directory ships. Running a subset is not running the contract: the artifact loads and trains, and
-fails later in the merge tools or the server on a family the run never mentioned. The trainer's writers reach it
-through ``save_model_config`` and the tools through ``save_full_checkpoint``; a bare
-``save_pretrained`` on a model or config object owes the call itself. This walks every function
-under ``halo/`` and ``scripts/`` that calls ``save_pretrained`` on something other than a tokenizer /
-processor / adapter config and requires the finalizer (or one of the two writers carrying it) in the
-same function.
-
-Run: ``pytest -m cpu tests/cpu/checkpoint/test_config_writers_finalize.py``
-"""
+"""Every path writing a model ``config.json`` runs ``finalize_exported_config``, or the artifact fails later on a
+family the run never mentioned."""
 
 from __future__ import annotations
 
@@ -25,8 +12,7 @@ import pytest
 from tests.common.repo import REPO_ROOT
 
 _ROOTS = ("halo", "scripts")
-# Receivers whose save_pretrained writes no model config.json: tokenizers, processors, generation
-# configs, PEFT adapter configs and adapter-only PeftModel saves.
+# Receivers whose save_pretrained writes no model config.json.
 _EXEMPT_RECEIVER_MARKERS = (
     "tokenizer",
     "processor",
@@ -36,9 +22,7 @@ _EXEMPT_RECEIVER_MARKERS = (
     "peft_model",
     "adapter",
 )
-# Functions whose save produces no artifact: the throwaway staging re-serialization the source-schema
-# carry differences against, which runs the finalizer's first step and cannot call the finalizer
-# itself without recursing into it.
+# The throwaway staging re-serialization runs the finalizer's first step and cannot call it without recursing.
 _EXEMPT_FUNCTIONS = {
     ("halo/checkpoint/config_export.py", "_serialized_config"),
 }
@@ -50,7 +34,6 @@ def _receiver_text(call: ast.Call) -> str:
 
 
 def _config_writers(path: pathlib.Path) -> list[tuple[str, bool]]:
-    """``(function name, finalizes)`` for every function calling a non-exempt ``save_pretrained``."""
     tree = ast.parse(path.read_text())
     found = []
     for node in ast.walk(tree):
@@ -98,8 +81,7 @@ def test_every_model_config_writer_finalizes_the_config(path):
 
 @pytest.mark.parametrize(("relative", "name"), sorted(_EXEMPT_FUNCTIONS))
 def test_every_exemption_names_an_unfinalized_writer(relative, name):
-    """An exemption whose function no longer writes an unfinalized config exempts nothing today and
-    silently covers whatever unfinalized save lands in that function next."""
+    """A stale exemption silently covers whatever unfinalized save lands in that function next."""
     assert (name, False) in _config_writers(REPO_ROOT / relative), (
         f"{relative}:{name} is exempt but is no unfinalized config writer — drop the exemption"
     )

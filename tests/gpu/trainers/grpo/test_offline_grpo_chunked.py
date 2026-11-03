@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""Offline GRPO ``use_chunked_grpo_logprobs`` under real FSDP2 + FA4 on 2 GPUs.
-
-The chunked path and frozen-reference checkpoint lifecycle must both hold:
-
-1. Parity: per-token completion log-probs from the chunked path (backbone hidden + vocab-chunked
-   softmax; per-row dense forwards under FA4) must match the full-logits path on the same collated
-   batch, on every rank, over the real (non-pad) completion positions.
-2. Training: a short chunked run with ``kl_beta > 0`` and the default ``min_log_prob`` clamp
-   finishes with finite losses. The run-start scores are restored without a sweep on resume;
-   trained weights, optimizer moments and scheduler restore at the midpoint, then export reloads.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/grpo/test_offline_grpo_chunked.py
-"""
+"""Offline GRPO ``use_chunked_grpo_logprobs`` under real FSDP2 + FA4: log-prob parity with the full-logits path, and a
+chunked run's resume and export."""
 
 import math
 import os
@@ -50,12 +37,9 @@ BATCH_SIZE = 2
 NUM_TRAIN_SAMPLES = 32
 SEED = 42
 SAVE_STEP = MAX_STEPS // 2
-# The reference itself is coarse: TRL's bf16 branch returns bf16-rounded log-probs (ULP 0.06-0.25 at
-# |logp| 8-32) while the chunked path is fp32, and FA4's padded-varlen vs per-row-dense forwards add
-# per-token kernel noise the full-logits path shows even against itself. The gate is therefore the
-# mean at 0.05, with a looser per-token ceiling: a systematic defect (position shift, off-by-one
-# span) moves every completion token by whole nats.
-# Exact-math equivalence is pinned separately in fp32 on CPU (test_offline_grpo_chunked_logprobs.py).
+# TRL's bf16 branch returns bf16-rounded log-probs (ULP 0.06-0.25 at |logp| 8-32) while chunked is fp32, and FA4's
+# padded-varlen vs per-row-dense forwards add kernel noise. A real defect moves every completion token by whole nats.
+# Exact math is pinned in fp32 on CPU (test_offline_grpo_chunked_logprobs.py).
 PARITY_MEAN_TOL = 5e-2
 PARITY_MAX_TOL = 0.5
 
@@ -65,8 +49,8 @@ class _SavedWeights(RestorePointSnapshot):
         ids, labels = fixed_text_batch(self.trainer.processing_class, torch.cuda.current_device(), RESUME_PROBE_TEXT)
         live_loss = fixed_batch_loss(self.trainer.model, ids, labels)
         checkpoint = os.path.join(self.trainer.args.output_dir, f"checkpoint-{self.trainer.state.global_step}")
-        # The checkpoint oracle separates a stale live forward from an incorrect resume without
-        # replacing the live loss that the resume comparison must still match.
+        # Separates a stale live forward from an incorrect resume, keeping the live loss the resume comparison must
+        # match.
         with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
             oracle = load_liger_class_patched_model(checkpoint).to(ids.device)
             try:
@@ -77,9 +61,8 @@ class _SavedWeights(RestorePointSnapshot):
 
 
 def _batch_parity_check(trainer) -> tuple[float, float]:
-    """(mean, max) |chunked − full| completion log-prob over this rank's first batch (pad positions
-    excluded: the dense per-row path leaves their hidden zero by design while the full path computes
-    them)."""
+    """(mean, max) over this rank's first batch, pad positions excluded: the dense per-row path leaves their hidden
+    zero by design."""
     batch = next(iter(trainer.get_train_dataloader()))
     batch = trainer._prepare_inputs(batch)
     input_ids = torch.cat([batch["prompt_input_ids"], batch["completion_input_ids"]], dim=1)
@@ -136,7 +119,7 @@ def run(ctx) -> dict:
         max_completion_length=2048,
         dataloader_drop_last=True,
         use_chunked_grpo_logprobs=True,
-        kl_beta=0.04,  # reference logps take the chunked path too
+        kl_beta=0.04,  # Reference logps take the chunked path too.
     )
 
     trainer = OfflineGRPOTrainer(

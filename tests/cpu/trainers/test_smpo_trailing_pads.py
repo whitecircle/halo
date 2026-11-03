@@ -1,26 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: an SMPO row scores alike whatever its batch's padding, because every row is flushed left.
-
-The collator left-pads prompts, and leading pads move a row's real tokens off the positions and
-indices they hold unpadded, which two of the roster's attentions read:
-
-* Mistral4 scales its queries by the llama-4 factor of each token's absolute position;
-* DeepSeek-V4's CSA/HCA compressors pool KV over windows cut at fixed tensor indices, with no pad mask,
-  and judge causality per window, so no choice of ``position_ids`` realigns them.
-
-``concatenate_pairs`` moves every pad behind its completion, after which a model's default positions
-and windows are the unpadded row's. Pinned through the real ``concatenated_forward``:
-
-* a ragged batch's left-padded pair scores the log-probs that pair scores alone, on a tiny Mistral4
-  whose scale steps every 2 positions and on a tiny DeepSeek-V4 whose CSA windows are 4 tokens;
-* the same for an image pair on a tiny Gemma 4, whose bidirectional image-block mask is built from the
-  ``mm_token_type_ids`` the flush moves with their tokens;
-* the CP layout scores the padded batch alike: one full-sequence forward with no mask and the
-  ``arange`` positions the CP wrapper passes, the attention the Ulysses all-to-all reconstructs;
-* the flush reads nothing back from the device, so it adds no host sync to a forward.
-
-    python tests/cpu/trainers/test_smpo_trailing_pads.py
-"""
+"""An SMPO row scores alike whatever its batch's padding, because every row is flushed left.
+Leading pads move real tokens off what Mistral4's query scale and DeepSeek-V4's compressor windows read by position."""
 
 from types import SimpleNamespace
 
@@ -173,8 +153,7 @@ def test_the_cp_layout_scores_the_padded_batch_alike():
 
 @pytest.mark.parametrize("cp_size", [1, 2])
 def test_the_flush_reads_nothing_back_from_the_device(cp_size):
-    """On meta tensors any host read of a value (``.item()``, ``int()``, a tensor in an ``if``) raises,
-    so the concat completing there proves the flush issues no device-to-host copy."""
+    """On meta tensors any host read of a value raises, so finishing the concat there proves no device-to-host copy."""
     batch = {key: value.to("meta") for key, value in _batch(_PROMPTS, _CHOSEN, _REJECTED).items()}
     batch["mm_token_type_ids"] = torch.zeros_like(batch["prompt_input_ids"])
 

@@ -1,9 +1,5 @@
-"""The EP bitwise harness finds nothing between two runs of today's EP code, every case but the known ones records
-what its variant owes, each seeded change to an EP layer shows up as a delta in the record it touches, and the
-verdict fails when its negative control raises instead of moving a record.
-
-Run: python tests/cpu/parallelism/test_ep_bitwise_harness.py
-"""
+"""The EP bitwise harness: nothing between two runs of today's code, each case records what it owes, seeded changes
+show up, and a raising control fails the verdict."""
 
 import pytest
 import torch
@@ -57,7 +53,6 @@ def _produced(output, families, variants, **kwargs):
 
 
 def _differences(baseline, mutated, family: str, variant: str) -> list[str]:
-    """Every line by which the one changed record differs, the listing's cut aside."""
     [delta] = compare_records(baseline, mutated)
     assert delta["path"] == f"{CPU.label}/{family}/{variant}/rank0"
     return record_deltas(_records(baseline, family, variant), _records(mutated, family, variant))
@@ -69,7 +64,7 @@ def _hooks(record: dict, rank: int) -> list[str]:
 
 @pytest.fixture(scope="module")
 def roster(tmp_path_factory):
-    """Every family through every CPU variant, once for the module (a few seconds)."""
+    """Once for the module (a few seconds)."""
     return _produced(tmp_path_factory.mktemp("roster"), FAMILIES, VARIANTS)
 
 
@@ -101,7 +96,7 @@ def test_each_forward_variant_records_what_sets_it_apart(roster):
     defaults, fp32 = _records(roster, "qwen3_moe", "defaults"), _records(roster, "qwen3_moe", "fp32_masters")
     dtypes = {line.split()[0]: line.split()[1] for line in fp32["orders"]["named_parameters"]}
     assert (dtypes[ROUTER], dtypes["model.embed_tokens.weight"]) == ("torch.float32", "torch.bfloat16")
-    # Experts register no hook, FSDP-managed or not: their sync is FSDP2's or the trainer's sweep.
+    # Their sync is FSDP2's or the trainer's sweep.
     assert defaults["orders"]["grad_hooks"] == []
     assert fp32["orders"]["grad_hooks"] == []
 
@@ -122,7 +117,7 @@ def test_each_construction_variant_records_what_sets_it_apart(roster):
     hooked = _records(roster, "qwen3_moe", "in_backward_grad_sync")
     router_hooks = [line for line in _hooks(hooked, 0) if line.startswith(f"{ROUTER} ")]
     assert router_hooks == [f"{ROUTER} all_reduce(RedOpType.SUM, torch.float32, default group) scale 0.5"]
-    # The expert divide is the trainer's post-backward sweep, which a reentrant recompute cannot repeat.
+    # The post-backward sweep, which a reentrant recompute cannot repeat.
     assert not any(line.startswith(f"{EXPERT_SHARD} ") for line in _hooks(hooked, 1))
 
     deferred = _records(roster, "qwen3_moe", "deferred_grad_sync")
@@ -130,7 +125,7 @@ def test_each_construction_variant_records_what_sets_it_apart(roster):
 
     saved = _hooks(_records(roster, "qwen3_moe", "modules_to_save"), 0)
     assert any(".gate.modules_to_save.default.weight all_reduce(" in line for line in saved)
-    # Every family whose EP layer owns its router hooks it; an external router (Gemma 4) is FSDP2's.
+    # An external router (Gemma 4) is FSDP2's.
     layer_classes = ep_layer_class_by_model_type()
     owners = [family for family in FAMILIES if layer_classes[family]._ROUTER_ATTR is not None]
     assert owners and all(
@@ -147,7 +142,7 @@ def test_the_negative_control_skips_cases_known_to_raise():
 
 
 def test_two_producer_processes_match(tmp_path):
-    """Base against base, each tree's producer in its own process as ``make verify-ep`` runs them."""
+    """Each tree's producer in its own process, as ``make verify-ep`` runs them."""
     outputs = [tmp_path / "first", tmp_path / "second"]
     for output in outputs:
         args = ["--produce", str(output), "--launch", CPU.label, "--families", *SAMPLE_FAMILIES]
@@ -207,7 +202,7 @@ def test_unregistered_gradient_hooks_are_an_order_delta(monkeypatch, tmp_path):
 
 
 def _local_average_hook(ep_config):
-    """A router hook that divides by the DP width without reducing first."""
+    """Divides by the DP width without reducing first."""
 
     def hook(param):
         param.grad.div_(ep_config.stage_world_size)
@@ -216,7 +211,7 @@ def _local_average_hook(ep_config):
 
 
 def test_a_router_hook_without_its_all_reduce_is_an_order_delta(monkeypatch, tmp_path):
-    """Router gradients that lose their DP all-reduce: the same hook count, a different hook."""
+    """The same hook count, a different hook."""
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["in_backward_grad_sync"])
     monkeypatch.setattr(grad_sync, "build_router_grad_hook", _local_average_hook)
 
@@ -232,7 +227,7 @@ def test_a_router_hook_without_its_all_reduce_is_an_order_delta(monkeypatch, tmp
 
 
 def test_a_hook_under_a_deferred_sync_is_a_delta(monkeypatch, tmp_path):
-    """In-backward hooks in a layout the post-backward sweep owns: the router hooks register on every rank."""
+    """The router hooks register on every rank."""
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["deferred_grad_sync"])
     init = EPConfig.__init__
 

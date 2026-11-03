@@ -1,10 +1,5 @@
 #!/usr/bin/env python
-"""The adapter refusals read off a live model with EP layers: PEFT LoRA inside an EP layer, a PEFT config the
-native grouped expert adapters cannot match, and expert LoRA no layer built. Each fires on its own condition,
-named by its mechanism, and the supported layout passes.
-
-Run: python tests/cpu/peft/test_adapter_rules.py
-"""
+"""Adapter refusals read off a live model with EP layers: each fires on its own condition and names its mechanism."""
 
 import pytest
 import torch
@@ -24,8 +19,7 @@ _SPEC = ExpertLoraSpec(r=RANK, alpha=2 * RANK)
 
 
 class _MoEHost(nn.Module):
-    """An attention projection beside an EP layer holding a shared-expert ``nn.Linear``, with or without the
-    native grouped adapters on its stored expert weight."""
+    """An attention projection beside an EP layer's shared-expert ``nn.Linear``, with or without native adapters."""
 
     def __init__(self, *, native_adapters: bool):
         super().__init__()
@@ -46,8 +40,7 @@ def _peft(targets: list[str], *, native_adapters: bool = True, **lora):
 
 
 def test_the_supported_adapter_layouts_pass():
-    """Native grouped adapters inside the EP layer beside a PEFT attention adapter of a matching recipe, an
-    expert-only run, and no expert LoRA at all."""
+    """Native adapters beside a PEFT attention adapter of a matching recipe, an expert-only run, and no expert LoRA."""
     attention_only = _peft(["q_proj"], r=RANK, lora_alpha=2 * RANK)
     reject_peft_lora_in_ep_layers(attention_only)
     reject_expert_lora_peft_conflicts(attention_only, _SPEC)

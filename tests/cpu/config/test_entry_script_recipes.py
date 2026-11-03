@@ -1,12 +1,7 @@
 #!/usr/bin/env python
 """The entry-script runs (``trainers/other/test_entry_scripts.py``) are held to the training scripts: every method
 under ``scripts/training`` has a case, a tiny recipe and a GPU row, and each run config parses with its script's
-own arguments under the overrides its launches pass, its environment building where it names one; with its
-attention unset, it leaves the script's own default. A renamed config field or a new script fails here, not first
-on the GPU tier.
-
-Run: python tests/cpu/config/test_entry_script_recipes.py
-"""
+own arguments. A renamed config field or a new script fails here, before the GPU tier."""
 
 import ast
 import dataclasses
@@ -127,8 +122,7 @@ def test_each_run_config_parses_with_its_scripts_own_arguments(tmp_path, method,
 
 @pytest.mark.parametrize("method", sorted(CASES))
 def test_a_run_config_with_its_attention_unset_parses_no_attention(tmp_path, method):
-    """Every recipe pins its attention, and the unset run config drops that pin and nothing else, so the script
-    parses no ``attn_implementation`` and picks the backend itself."""
+    """The unset run config drops only the recipe's attention pin, so the script picks the backend itself."""
     pinned = yaml.safe_load(recipe_path(method).read_text())["attn_implementation"]
     kept_path = write_run_config(method, tmp_path, model=_MODEL, dataset_dir="data")
     kept = yaml.safe_load(kept_path.read_text())

@@ -1,16 +1,5 @@
 #!/usr/bin/env python
-"""
-CPU contract test for the KTO trainer's TRL integration.
-
-Guards the wiring that GPU tests can't cheaply cover:
-  - the distributed subclass really composes DistributedTrainerMixin with the
-    correct TRL base, and declares the documented parallelism support flags;
-  - the script-args dataclass constructs with sane defaults;
-  - the pipeline loss reads TRL's own unpaired-preference collator batch wrapped to the pipeline's
-    fixed shape.
-
-Run: python tests/cpu/trainers/test_kto_trainer.py
-"""
+"""The KTO trainer's TRL integration: MRO and support flags, script-args defaults, the pipeline batch transform."""
 
 from types import SimpleNamespace
 
@@ -29,8 +18,8 @@ from halo.trainers.preference.kto import DistributedKTOTrainer
 def test_kto_trainer_mro_and_flags():
     assert issubclass(DistributedKTOTrainer, DistributedTrainerMixin)
     assert issubclass(DistributedKTOTrainer, KTOTrainer)
-    # KTO mirrors DPO: CP no (full-sequence log-prob pooling + KL ref),
-    # PP yes (apo_zero_unpaired only, precompute-only — gated in _reject_unsupported_pp_options).
+    # KTO mirrors DPO: no CP (full-sequence log-prob pooling + KL ref),
+    # PP yes (apo_zero_unpaired only, precompute-only, gated in _reject_unsupported_pp_options).
     assert DistributedKTOTrainer.SUPPORTS_CP is False
     assert DistributedKTOTrainer.PP_REFUSAL is None
     assert "kto" in DistributedKTOTrainer._tag_names
@@ -43,10 +32,7 @@ def test_kto_args_defaults():
 
 
 def test_the_pipeline_batch_transform_reads_the_fixed_shape_collators_batch():
-    """Under PP the trainer's collator is wrapped to pad the batch to ``max_length``; the adapter's
-    ``pad_spec`` must carry ``completion_mask`` with ``input_ids``, or the transform sees two widths. The
-    scored tokens are the completion's, at the positions TRL's completion mask marks; the reference and the
-    label ride along per row."""
+    """``pad_spec`` must carry ``completion_mask`` with ``input_ids``, or the transform sees two widths."""
     rows = [
         {"prompt_ids": [5, 6, 7], "completion_ids": [8, 9], "label": True, "ref_logps": -1.5},
         {"prompt_ids": [5], "completion_ids": [10, 11, 12], "label": False, "ref_logps": -2.5},

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the persistent Triton cache anchor set at training setup.
-
-``TRITON_CACHE_DIR`` defaults to ``~/.triton`` — ephemeral inside a ``--rm`` container — and fla's
-autotuners persist shape-keyed measured configs there, so losing it re-benchmarks kernels per fresh
-sequence length on every run (a per-rank straggler stall, tens of seconds each). The anchor must
-derive from ``HF_HOME`` exactly like the FA4 kernel cache, must never override an explicit operator
-choice, must actually be applied by the run's setup — an anchor nothing calls is no anchor — and must
-not point at a location it cannot write: a shared ``HF_HOME`` mounted read-only fails the first
-compile with EROFS, so that case falls back to the temp dir, or with no writable location leaves the
-library's own default, and says so.
-
-    pytest -m cpu tests/cpu/kernels/test_triton_cache_env.py
-"""
+"""The persistent Triton cache anchor: ``~/.triton`` is ephemeral in a ``--rm`` container, re-benchmarking fla's
+autotuners per sequence length. It falls back where ``HF_HOME`` is read-only."""
 
 from __future__ import annotations
 
@@ -33,23 +22,19 @@ _TRITON_SUBDIR = "triton_cache"
 
 @pytest.fixture
 def temp_root(monkeypatch, tmp_path):
-    """A fresh temp dir that ``tempfile.gettempdir`` resolves to (it caches, so force a re-read)."""
+    """``tempfile.gettempdir`` caches, so force a re-read."""
     root = tmp_path / "tmp"
     root.mkdir()
     monkeypatch.setenv("TMPDIR", str(root))
     monkeypatch.setattr(tempfile, "tempdir", None)
-    # Set first so monkeypatch records the variable and also removes what the anchor writes.
+    # Set first so monkeypatch also removes what the anchor writes.
     monkeypatch.setenv(_TRITON_VAR, "")
     monkeypatch.delenv(_TRITON_VAR)
     return root
 
 
 def _deny_writes_under(monkeypatch, root) -> None:
-    """Make every path under ``root`` read as unwritable, as on a read-only mount.
-
-    Simulated at the access check because the image runs tests as root, which permission bits do
-    not stop; a read-only filesystem stops root too.
-    """
+    """At the access check, since the image runs tests as root, which permission bits do not stop."""
     real_access = os.access
     root = os.path.abspath(root)
 
@@ -99,7 +84,7 @@ def test_read_only_hf_home_falls_back_to_tempdir_with_a_warning(monkeypatch, tem
 
 
 def test_no_writable_location_leaves_the_library_default(monkeypatch, temp_root, tmp_path, caplog):
-    """A temp dir another user owns is no fallback: the variable stays unset for the library's default."""
+    """A temp dir another user owns is no fallback."""
     hf_home = tmp_path / "hf"
     hf_home.mkdir()
     monkeypatch.setenv("HF_HOME", str(hf_home))
@@ -114,8 +99,7 @@ def test_no_writable_location_leaves_the_library_default(monkeypatch, temp_root,
 def test_a_host_with_no_temp_dir_still_anchors_on_hf_home_and_otherwise_leaves_the_default(
     monkeypatch, temp_root, tmp_path, caplog
 ):
-    """``tempfile.gettempdir`` raises when no candidate directory is usable. That must not cost a run its
-    writable ``HF_HOME`` anchor, nor raise where the anchor is unwritable too: the variable stays unset."""
+    """``tempfile.gettempdir`` raises when no candidate is usable, which must not cost a writable ``HF_HOME``."""
 
     def no_temp_dir():
         raise FileNotFoundError("No usable temporary directory found")
@@ -136,7 +120,7 @@ def test_a_host_with_no_temp_dir_still_anchors_on_hf_home_and_otherwise_leaves_t
 
 @pytest.mark.parametrize("kind", ["file", "dangling link"])
 def test_a_non_directory_at_the_cache_path_falls_back(monkeypatch, temp_root, tmp_path, kind):
-    """Triton cannot create its cache under a file or a broken link, even an executable one."""
+    """Triton cannot create its cache under a file or a broken link."""
     hf_home = tmp_path / "hf"
     hf_home.mkdir()
     target = hf_home / _TRITON_SUBDIR
@@ -151,7 +135,7 @@ def test_a_non_directory_at_the_cache_path_falls_back(monkeypatch, temp_root, tm
 
 
 def test_read_only_cache_dir_under_a_writable_hf_home_falls_back(monkeypatch, temp_root, tmp_path):
-    """A cache directory mounted read-only on its own is judged by itself, not by its parent."""
+    """Judged by itself, not by its parent."""
     hf_home = tmp_path / "hf"
     (hf_home / _TRITON_SUBDIR).mkdir(parents=True)
     monkeypatch.setenv("HF_HOME", str(hf_home))
@@ -161,7 +145,7 @@ def test_read_only_cache_dir_under_a_writable_hf_home_falls_back(monkeypatch, te
 
 
 def test_hf_home_not_created_yet_keeps_the_anchor(monkeypatch, temp_root, tmp_path):
-    """Triton creates its own directory, so a writable volume whose HF_HOME is not made yet keeps it."""
+    """Triton creates its own directory."""
     hf_home = tmp_path / "fresh" / "hf"
     monkeypatch.setenv("HF_HOME", str(hf_home))
     anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
@@ -169,9 +153,8 @@ def test_hf_home_not_created_yet_keeps_the_anchor(monkeypatch, temp_root, tmp_pa
 
 
 def test_the_run_setup_anchors_it_before_anything_can_compile():
-    """Read off the setup's own source: the anchor has to be applied there, and this is the only
-    assertion that survives the call being dropped. Triton reads the variable lazily at first
-    compile, so a setup that stops anchoring costs a re-benchmark per run and fails nothing."""
+    """Triton reads the variable at first compile, so a setup that stops anchoring fails nothing and costs a
+    re-benchmark per run."""
     tree = ast.parse(inspect.getsource(configure_training_run))
     anchored = {
         node.args[0].value

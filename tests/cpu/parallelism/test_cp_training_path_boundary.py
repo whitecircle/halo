@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""SFT and SMPO's actual CP forwards retain boundary supervision and gradient normalization, and SMPO's
-holds on a batch whose prompts the collator left-padded."""
+"""SFT and SMPO's CP forwards retain boundary supervision and gradient normalization, also on prompts the collator
+left-padded."""
 
 import copy
 from types import SimpleNamespace
@@ -40,14 +40,14 @@ def _sync_gradient(parameter, cp_size):
 
 
 def _drop_boundary(labels, cp_rank, cp_size):
-    """This chunk's next-token targets with its last one, scored against the next chunk, ignored."""
+    """Its last target, scored against the next chunk, ignored."""
     targets = cp_local_targets(labels, cp_rank, cp_size).clone()
     targets[:, -1] = LABEL_IGNORE_INDEX
     return targets
 
 
 def _drop_boundary_logprobs(logits, labels, start=0):
-    """SMPO's log-probs with each chunk's last position, the one scored against the next chunk, ignored."""
+    """Each chunk's last position ignored."""
     logps, mask = next_token_logprobs(logits, labels, start)
     return logps, torch.cat([mask[:, :-1], torch.zeros_like(mask[:, -1:])], dim=1)
 
@@ -57,7 +57,7 @@ def _sft_worker(rank, cp_size):
     baseline = _LogitsModel()
     ids = torch.randint(0, VOCAB, (2, SEQ))
     labels = torch.full_like(ids, LABEL_IGNORE_INDEX)
-    # Only chunk-edge targets are supervised; their omission cannot hide inside a long-row mean.
+    # Only chunk-edge targets are supervised, so their omission cannot hide in a long-row mean.
     labels[:, SEQ // cp_size :: SEQ // cp_size] = ids[:, SEQ // cp_size :: SEQ // cp_size]
     mask = torch.ones_like(ids)
     expected = F.cross_entropy(
@@ -140,7 +140,6 @@ def _smpo_worker(rank, cp_size):
 
 
 def _smpo_ragged_worker(rank, cp_size):
-    """Two pairs whose prompts the collator left-pads to unequal lengths, through the real CP wrapper."""
     torch.manual_seed(97)
     baseline = _LogitsModel()
     prompt_mask = torch.tensor([[0, 0, 0, 1, 1], [1, 1, 1, 1, 1]])
@@ -186,8 +185,7 @@ def test_smpo_concatenated_forward_loss_and_gradients_need_boundary_targets(cp_s
 
 @pytest.mark.parametrize("cp_size", [2, 4])
 def test_smpo_left_padded_prompts_train_the_unsplit_objective(cp_size):
-    """The CP attention ignores the mask, so SMPO must hand the wrapper every pad trailing, with labels
-    flushed in step: a ragged batch then scores, and backpropagates, exactly as without CP."""
+    """CP attention ignores the mask, so SMPO hands the wrapper every pad trailing, with labels flushed in step."""
     run_gloo_ranks(_smpo_ragged_worker, cp_size, cp_size)
 
 

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
 """Every trainer that computes its own loss must opt out of HF's loss-kwargs rescaling.
-
-HF infers ``model_accepts_loss_kwargs`` from the model's forward signature alone — any ``**kwargs``
-makes it True — and then SKIPS the ``/gradient_accumulation_steps`` division, on the assumption that
-the loss is a token sum the model already normalized by ``num_items_in_batch``. A trainer whose loss
-is its own mean has to say otherwise, or its gradients scale with the accumulation count.
-
-Two spellings satisfy that: the ``LOSS_IS_OWN_MEAN`` class attribute the mixin's
-``_restore_trl_overrides`` applies, and a direct ``model_accepts_loss_kwargs = False`` assignment
-in a base BELOW HF's ``Trainer`` (TRL's own GRPO/DPO/reward trainers do exactly that).
-
-    python tests/cpu/trainers/test_loss_kwargs_contract.py
-"""
+``**kwargs`` in a forward makes HF skip the ``/gradient_accumulation_steps`` division, so gradients scale with it."""
 
 import inspect
 
@@ -26,7 +15,6 @@ _ASSIGNMENT = "model_accepts_loss_kwargs = False"
 
 
 def _computes_its_own_loss(cls: type) -> bool:
-    """The trainer's loss is written in this repo rather than inherited from HF/TRL."""
     for name in ("compute_loss", "get_batch_loss_metrics"):
         function = getattr(cls, name, None)
         if function is not None and getattr(function, "__module__", "").startswith("halo.trainers"):
@@ -35,17 +23,12 @@ def _computes_its_own_loss(cls: type) -> bool:
 
 
 def _declares_the_attribute(cls: type) -> bool:
-    """A subclass declares it; the mixin's own default (False) does not count."""
     return any(_FLAG in base.__dict__ for base in cls.__mro__ if base is not DistributedTrainerMixin)
 
 
 def _assigns_the_flag(cls: type) -> bool:
     """A base between the trainer and HF's ``Trainer`` hard-assigns the flag.
-
-    Scoped to those bases on purpose. HF's ``Trainer`` carries the string as part of its OWN
-    inference and ``DistributedTrainerMixin`` as the conditional application of ``_FLAG``, so a scan
-    that reached either would answer True for every trainer in the roster and certify nothing.
-    """
+    HF's ``Trainer`` and the mixin both carry the string, so a scan reaching them would certify every trainer."""
     for base in cls.__mro__:
         if base is Trainer:
             break
@@ -60,12 +43,12 @@ def _assigns_the_flag(cls: type) -> bool:
     return False
 
 
-# Derived from the class hierarchy, not listed: a new trainer joins by existing.
+# Derived from the class hierarchy, so a new trainer joins by existing.
 CUSTOM_LOSS_TRAINERS = [cls for cls in distributed_trainer_classes() if _computes_its_own_loss(cls)]
 
 
 def test_the_derived_roster_covers_the_trainer_families():
-    """Anti-vacuity: an empty or tiny roster would make the contract test below assert nothing."""
+    """An empty or tiny roster would make the contract test below assert nothing."""
     names = {cls.__name__ for cls in CUSTOM_LOSS_TRAINERS}
     assert len(names) >= 6, f"the roster collapsed to {sorted(names)} — the derivation stopped finding trainers"
     assert {"SMPOTrainer", "OfflineGRPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
@@ -81,9 +64,6 @@ def test_every_custom_loss_trainer_opts_out_of_loss_kwargs_rescaling(trainer):
 
 
 def test_the_gate_rejects_a_trainer_that_forgets_the_flag():
-    """Anti-tautology: the two spellings are the ONLY ways past the parametrization above, so a
-    subclass that computes its own loss and says nothing must be rejected by both."""
-
     class _Forgetful(DistributedTrainerMixin, Trainer):
         def compute_loss(self, *args, **kwargs):
             raise NotImplementedError
@@ -98,8 +78,6 @@ class _SpineStopped(Exception):
 
 
 class _SpineHost:
-    """A bare host carrying only what the spine reads before the parallelism setup it cannot run."""
-
     _deferred_liger_kernel = False
     model = None
 
@@ -113,8 +91,7 @@ class _SpineHost:
 
 @pytest.mark.parametrize("loss_is_own_mean", [False, True])
 def test_the_spine_applies_the_declared_attribute(loss_is_own_mean):
-    """The one place the attribute turns into HF's flag — and declared-only, so a trainer that says
-    nothing keeps whatever HF inferred."""
+    """Declared-only: a trainer that says nothing keeps whatever HF inferred."""
     host = _SpineHost(loss_is_own_mean)
 
     with pytest.raises(_SpineStopped):
@@ -127,7 +104,6 @@ def test_the_spine_applies_the_declared_attribute(loss_is_own_mean):
 
 
 def test_the_default_leaves_hf_inference_alone():
-    """Declared-only: the mixin's own default must not opt anything out on its behalf."""
     assert DistributedTrainerMixin.LOSS_IS_OWN_MEAN is False
 
 

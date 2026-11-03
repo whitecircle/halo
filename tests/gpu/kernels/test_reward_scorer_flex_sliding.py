@@ -1,17 +1,8 @@
 #!/usr/bin/env python
-"""A Gemma 4 reward model scores on its CUDA default, ``sdpa_flex_sliding``, as it does on plain SDPA.
+"""A Gemma 4 reward model scores on its CUDA default, ``sdpa_flex_sliding``, as on plain SDPA.
 
-``--rm_attn_implementation`` defaults to ``sdpa``, which ``load_reward_model`` hands to ``apply_family_patches``, so
-on CUDA a wide-head model builds ``sdpa_flex_sliding``. The scoring scripts run the forward under
-``torch.inference_mode`` on their one executor thread, with no warm-up, so the sliding layers' FlexAttention first
-compiles there. A tiny random-init Gemma 4 sequence classifier (one sliding layer, one 512-wide global layer) scores
-two right-padded batches of conversations longer than its window and the 128-token tile, through
-``load_reward_model`` and ``score_conversations_offloaded`` as the scripts call them, on the default and under
-``HALO_FLEX_SLIDING=0``, against an fp32 SDPA load. The default must build the variant and run every sliding call on
-FlexAttention; in fp32 its scores must match the reference to the kernel's TF32 round-off (a sliding layer that
-ignored its window moves them by about their own size), and in bf16 stay within twice SDPA's own bf16 error.
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_reward_scorer_flex_sliding.py
+Scripts run under ``torch.inference_mode`` on their one executor thread with no warm-up, so FlexAttention first
+compiles there. A sliding layer ignoring its window moves scores by about their own size.
 """
 
 import asyncio
@@ -32,12 +23,12 @@ from tests.common.tiny_models import build_wide_head_gemma4_reward_checkpoint
 
 SEED = 0
 WORDS = tuple(f"w{i}" for i in range(200))
-# Words per conversation, all past the window and the tile; two batches of three, each padded to its longest.
+# All past the window and the tile; two batches of three, each padded to its longest.
 CONVERSATION_WORDS = ((300, 260, 210), (170, 290, 150))
 BATCH_SIZE = 3
 # The compiled kernel's fp32 dots run in TF32.
 FP32_ERROR_BOUND = 1e-2
-# The two bf16 scorers accumulate differently; the flex one may trail SDPA's bf16 error by this factor.
+# The two bf16 scorers accumulate differently.
 SDPA_ERROR_RATIO = 2.0
 ERROR_FLOOR = 1e-3
 
@@ -54,8 +45,8 @@ def _conversations() -> list[list[dict]]:
 
 
 def _score(executor, checkpoint: str, device: str, dtype: str, *, flex: bool) -> tuple[np.ndarray, str, int]:
-    """The scores, the built attention implementation and the number of attention modules FlexAttention serves a
-    call of, of a ``load_reward_model`` load on the scripts' path."""
+    """The scores, the built attention implementation and the modules FlexAttention serves, of a ``load_reward_model``
+    load."""
     env = {} if flex else {"HALO_FLEX_SLIDING": "0"}
     with patch.dict(os.environ, env):
         tokenizer, model, rm_device = load_reward_model(

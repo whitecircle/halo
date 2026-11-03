@@ -14,11 +14,9 @@ from halo.rewards.terms import RewardModelBackend, RewardModelTerm
 
 
 class ServedRewardModel(Scorer):
-    """The scorer behind a :class:`RewardModelTerm`: every sample is the conversation rendered with the reward model's
-    own chat template and tokenized without added special tokens (never a rendered prompt re-templated), so both
-    engines score the same sequence and a template spelling its own BOS gets no second one. vLLM's ``/classify`` takes
-    the text and returns raw logits; SGLang's takes token ids and returns an ``embedding`` vector.
-    """
+    """Every sample is the conversation rendered with the model's own chat template and tokenized without added special
+    tokens, so both engines score the same sequence and a template spelling its own BOS gets no second one. vLLM's
+    ``/classify`` takes text and returns raw logits; SGLang's takes ids and returns an ``embedding`` vector."""
 
     term_type = RewardModelTerm
     term: RewardModelTerm
@@ -33,8 +31,8 @@ class ServedRewardModel(Scorer):
         return (self._key("logit"),)
 
     def _tokenizer_for_rendering(self):
-        """The reward model's tokenizer, loaded on first use; a load failure raises through the caller
-        (the launch probe surfaces it) rather than scoring every batch as a request failure."""
+        """A load failure raises through the caller (the launch probe surfaces it) rather than scoring every batch as a
+        request failure."""
         if self._tokenizer is None:
             self._tokenizer = AutoTokenizer.from_pretrained(self.term.tokenizer or self.term.model)
         return self._tokenizer
@@ -45,7 +43,6 @@ class ServedRewardModel(Scorer):
         return self._client
 
     async def score(self, samples: Sequence[ScoringSample]) -> list[ScoreResult]:
-        """Verdicts in sample order, from batches of the term's ``batch_size``."""
         batches = [samples[i : i + self.term.batch_size] for i in range(0, len(samples), self.term.batch_size)]
         results = await asyncio.gather(*(self._bounded(self._score_batch, batch) for batch in batches))
         return [result for batch in results for result in batch]
@@ -55,10 +52,8 @@ class ServedRewardModel(Scorer):
 
     async def _score_batch(self, samples: Sequence[ScoringSample]) -> list[ScoreResult]:
         term = self.term
-        # The load stays loud (the launch probe surfaces a bad tokenizer); the render does not. A
-        # ``full`` view hands the template tool turns and tool_calls, which a reward model's template
-        # may refuse — and a raise here escapes every guard up to the actor's catch-all, masking the
-        # whole episode for the rest of the run.
+        # The load stays loud; the render does not. A reward model's template may refuse a ``full`` view's tool turns,
+        # and a raise here escapes every guard up to the actor's catch-all, masking the episode.
         tokenizer = self._tokenizer_for_rendering()
         try:
             texts = [tokenizer.apply_chat_template(scored_messages(s, term.view), tokenize=False) for s in samples]
@@ -75,7 +70,6 @@ class ServedRewardModel(Scorer):
         return [ScoreResult(term.normalize(logit), {logit_key: logit}) for logit in logits]
 
     async def _logits(self, client: httpx.AsyncClient, texts: list[str]) -> list[float]:
-        """The head output at ``label_index`` for each text, in order, from the engine's classify route."""
         term = self.term
         url = f"{term.url.rstrip('/')}/classify"
         if term.backend is RewardModelBackend.VLLM:

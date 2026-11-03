@@ -15,8 +15,6 @@ from halo.models.moe.family_specs import GPT_OSS
 
 
 class EPGptOssMoELayer(EPMoELayerBase):
-    """EP layer for GptOss fused experts using DeepEP."""
-
     HF_MODULE_NAMES = ("GptOssMLP",)
     FAMILY = GPT_OSS
 
@@ -24,24 +22,16 @@ class EPGptOssMoELayer(EPMoELayerBase):
 
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "router.num_experts")
 
-    # The one family that spells its router ``router`` rather than ``gate``.
     _ROUTER_ATTR = "router"
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
-        """GptOss implements its own interleaved clamped-SwiGLU compute paths, so it latches that combine
-        instead of an activation. ``alpha`` and ``limit`` are read as attributes, not with defaults: a
-        substituted default corrupts the clamped SwiGLU on every expert."""
+        """GptOss latches its own interleaved clamped-SwiGLU combine instead of an activation. ``alpha`` and ``limit``
+        are attributes, since a substituted default corrupts every expert's clamp."""
         self._gptoss_glu = GluCombine.gptoss(experts.alpha, experts.limit)
 
     def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
-        """Slice and register expert parameters for this rank.
-
-        GptOss gate_up_proj is interleaved ``[g0,u0,g1,u1,...]``. Grouped GEMM and ETP store it
-        de-interleaved, because stride-2 slicing on grouped_mm outputs gives NaN backward gradients:
-        unsharded as ``gate_proj_gmm``/``up_proj_gmm``, ETP-sharded as ``gate_proj``/``up_proj``.
-        ``weights_already_sharded`` skips dim-0 slicing. Expert biases are optional (a bias-less GptOss
-        variant is legal); the weights are not.
-        """
+        """``gate_up_proj`` is interleaved ``[g0,u0,g1,u1,...]``. Grouped GEMM and ETP store it de-interleaved, because
+        stride-2 slicing on grouped_mm outputs gives NaN backward gradients. Expert biases are optional."""
         self._require_fused_experts(experts)
         start, end = self._local_expert_range(weights_already_sharded)
 
@@ -68,8 +58,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
             self.down_proj_bias = nn.Parameter(experts.down_proj_bias.data[start:end].clone())
 
     def _adopt_expert_params_tp(self, experts: nn.Module, start: int, end: int):
-        """TP-sharded expert params: de-interleave gate_up into gate/up and shard the intermediate
-        dim; down_proj shards on dim 1. start/end is the dim-0 slice."""
+        """ETP-sharded params: de-interleave gate_up, shard the intermediate dim; ``down_proj`` shards on dim 1."""
         tp_rank = self.expert_tp_rank
 
         # [E, H, 2M] → two [E, H, M]; the biases likewise [E, 2M] → two [E, M].
@@ -89,8 +78,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
             self.down_proj_bias = nn.Parameter(experts.down_proj_bias.data[start:end].clone())
 
     def _glu_combine_name(self) -> str:
-        """GptOss runs its own interleaved-bias compute paths and never reaches the base GLU seam; every
-        path calls its latched combine, eager under ``HALO_FUSED_GLU=0``."""
+        """Never reaches the base GLU seam; every path calls its latched combine, eager under ``HALO_FUSED_GLU=0``."""
         return self._gptoss_glu.name if fused_glu_enabled() else "eager"
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
@@ -98,14 +86,11 @@ class EPGptOssMoELayer(EPMoELayerBase):
         return F.softmax(router_logits.float().gather(-1, indices), dim=-1)
 
     def _route_with_bias(self, router_input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Balanced routing through the adopted native ``router.bias``.
-
-        The bias enters via ``F.linear`` as it does at serving, so selection is the native top-k over
-        bias-inclusive logits and the gate the native softmax over the selected values."""
-        # The adopted bias integrates sign-steps in fp32 but F.linear rejects a mixed-dtype bias, and
-        # under ep1+fsdp_shard_ep1_experts the router computes in bf16 (see ``_fp32_router_input``):
-        # cast at the read, not at the state. ``None``-safe, since a transient-fallback route applies
-        # its side-buffer inside ``_deepseek_biased_route`` on a possibly bias-less router.
+        """Balanced routing through the adopted native ``router.bias``, entering via ``F.linear`` as at serving, so
+        selection is the native top-k over bias-inclusive logits."""
+        # The adopted bias integrates sign-steps in fp32 but F.linear rejects a mixed-dtype bias, and under
+        # ep1+fsdp_shard_ep1_experts the router computes in bf16, so cast at the read. ``None``-safe for a
+        # transient-fallback route on a bias-less router.
         bias = self.router.bias
         logits = F.linear(router_input, self.router.weight, bias if bias is None else bias.to(router_input.dtype))
         weights, experts = self._deepseek_biased_route(logits)
@@ -137,9 +122,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         return result.view(B, S, H), logits.to(input_dtype)
 
     def _expert_forward(self, idx: int, x: torch.Tensor) -> torch.Tensor:
-        """One local expert, read from whichever layout this rank stores (see the base method): ETP
-        keeps gate/up de-interleaved under the plain names, every other configuration keeps the pair
-        interleaved."""
+        """One local expert from this rank's layout: ETP keeps gate/up de-interleaved, every other mode interleaved."""
         if self.expert_tp_size > 1:
             gated = self._gptoss_glu(
                 self._proj_with_bias(idx, x, "gate_proj"), self._proj_with_bias(idx, x, "up_proj")
@@ -149,14 +132,11 @@ class EPGptOssMoELayer(EPMoELayerBase):
         return self._proj_with_bias(idx, gated, "down_proj")
 
     def _proj_with_bias(self, idx: int, x: torch.Tensor, weight_attr: str) -> torch.Tensor:
-        """Loop-path projection plus the expert's ``<weight_attr>_bias`` where this rank holds one."""
         out = self._expert_proj_single(idx, x, weight_attr)
         bias = getattr(self, f"{weight_attr}_bias", None)
         return out if bias is None else out + bias[idx]
 
     def _deinterleaved_gate_up_attrs(self) -> tuple[str, str]:
-        """The de-interleaved gate/up pair :meth:`_adopt_expert_params` stored: ``*_gmm`` outside ETP, the plain
-        names under it."""
         return ("gate_proj_gmm", "up_proj_gmm") if hasattr(self, "gate_proj_gmm") else ("gate_proj", "up_proj")
 
     def _grouped_expert_ffn(
@@ -166,8 +146,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         sorted_expert_ids: torch.Tensor,
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
-        """Grouped GEMM for GptOss experts: 3 calls (gate + up + down) with de-interleaved weights, ETP-sharded
-        or not, each plus its expert bias."""
+        """Three grouped GEMM calls (gate, up, down) with de-interleaved weights, each plus its expert bias."""
         gate_attr, up_attr = self._deinterleaved_gate_up_attrs()
         gate = self._gmm_proj_with_bias(sorted_tokens, gate_attr, offs, output_dtype, sorted_expert_ids)
         up = self._gmm_proj_with_bias(sorted_tokens, up_attr, offs, output_dtype, sorted_expert_ids)
@@ -177,19 +156,14 @@ class EPGptOssMoELayer(EPMoELayerBase):
     def _gmm_proj_with_bias(
         self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype, eids: torch.Tensor
     ) -> torch.Tensor:
-        """Grouped-GEMM projection plus the per-token gather of ``<weight_attr>_bias`` where this rank holds one."""
         out = self._expert_proj(x, weight_attr, offs, out_dtype)
         bias = getattr(self, f"{weight_attr}_bias", None)
         # MoEExpertBiasGather's backward is an atomic-free GEMM: index_add's value, no bf16 atomic.
         return out if bias is None else out + MoEExpertBiasGather.apply(bias, eids)
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
-        """Warm whichever activation this layer's compute path calls (see the base method).
-
-        Every path runs the same Triton kernel and differs only in how the halves reach it:
-        grouped-GEMM and ETP store them de-interleaved and contiguous, the per-expert loop splits
-        them out of one interleaved projection output.
-        """
+        """Every path runs the same Triton kernel and differs only in how the halves reach it: grouped-GEMM and ETP
+        store them contiguous, the per-expert loop splits one interleaved output."""
         if self._use_grouped_mm or self.expert_tp_size > 1:
             gate, up = (half.contiguous() for half in gate_up.chunk(2, dim=-1))
         else:

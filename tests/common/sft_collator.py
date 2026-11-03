@@ -1,13 +1,12 @@
-"""The collator ``scripts/training/sft.py`` selects, for the GPU suites and profiling benchmarks that train
-:class:`~halo.trainers.sft.DistributedSFTTrainer` on rows TRL tokenizes, so they run the batches an SFT run does."""
+"""The collator ``scripts/training/sft.py`` selects, for GPU suites and benchmarks training on rows TRL tokenizes."""
 
 from halo.data.collators.collator_rules import evaluation_batch_size
 from halo.data.collators.factory import select_data_collator
 
 
 def build_sft_collator(tokenizer, sft_config, model_config, parallelism_config):
-    """The collator the SFT script selects for ``sft_config``'s full-sequence rows, trained on every token;
-    ``None`` under ``packing`` or ``padding_free``, whose rows TRL packs and collates itself."""
+    """The SFT script's collator for full-sequence rows; None under ``packing`` or ``padding_free``, whose rows TRL
+    packs and collates itself."""
     if sft_config.packing or sft_config.padding_free:
         return None
     cp_mode = parallelism_config.is_cp_mode

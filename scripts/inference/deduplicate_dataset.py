@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""Semantic deduplication of a large dataset via sentence embeddings + FAISS similarity search.
-
-Embeds ``--text_field``, then drops every row whose cosine similarity to an earlier row exceeds
-``--similarity_threshold``.
-
-Usage:
-    python scripts/inference/deduplicate_dataset.py \\
-        --dataset dataset.jsonl \\
-        --output_path deduplicated_dataset.jsonl \\
-        --text_field "text" \\
-        --model_id "sentence-transformers/all-MiniLM-L6-v2" \\
-        --similarity_threshold 0.95 \\
-        --batch_size 32
-"""
+"""Semantic deduplication of a large dataset via sentence embeddings + FAISS: drops every row whose cosine similarity
+to an earlier row exceeds ``--similarity_threshold``."""
 
 import argparse
 import logging
@@ -26,7 +14,6 @@ from scripts.cli_arguments import add_hub_source_args, add_trust_remote_code_arg
 
 
 def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
-    """The input dataset, the field deduplicated on, the kept fields and the output file."""
     parser.add_argument(
         "--dataset",
         type=str,
@@ -70,7 +57,6 @@ def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_embedding_args(parser: argparse.ArgumentParser) -> None:
-    """The sentence-embedding model, its tokenization length, batch and device."""
     # No --revision: the embedding load threads none.
     add_hub_source_args(
         parser, source="The sentence-embedding model", default="sentence-transformers/all-MiniLM-L6-v2", revision=False
@@ -91,7 +77,6 @@ def _add_embedding_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_search_args(parser: argparse.ArgumentParser) -> None:
-    """The similarity threshold and the batched FAISS search passes."""
     parser.add_argument(
         "--similarity_threshold",
         type=float,
@@ -116,7 +101,6 @@ def _add_search_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
-    """Embedding reuse, the dry run, the row sample and verbosity."""
     parser.add_argument("--save_embeddings", action="store_true", help="Save computed embeddings to disk for reuse")
     parser.add_argument("--load_embeddings", type=str, default=None, help="Path to precomputed embeddings file (.npy)")
     parser.add_argument(
@@ -134,7 +118,6 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Deduplicate large datasets using semantic embeddings")
     _add_dataset_args(parser)
     _add_embedding_args(parser)
@@ -144,12 +127,10 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> int:
-    """Run the deduplication pipeline, returning the process exit code."""
     args = parse_arguments()
     configure_cli_logging(verbose=args.verbose)
 
-    # Attached once the output path is known, so the log lands next to the dataset it describes
-    # rather than in whatever directory the script was launched from.
+    # Beside the dataset it describes, not in whatever directory the script was launched from.
     log_path = Path(args.output_path).with_suffix(".log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.getLogger().addHandler(logging.FileHandler(log_path))

@@ -106,7 +106,7 @@ def _local_mask_worker(rank, cp_size):
     chunk = width // cp_size
     grid = -0.25 - torch.arange(labels.numel()).reshape(labels.shape).float() * 0.01
     _, local_labels = cp_shift_against_full_labels(torch.zeros(labels.size(0), chunk, 1), labels, rank, cp_size)
-    # Each shard's shifted targets padded to its chunk and gathered: the grid the sweep's mask must equal.
+    # The gathered grid the sweep's mask must equal.
     local_valid = F.pad(local_labels != LABEL_IGNORE_INDEX, (0, chunk - local_labels.size(1)))
     shards = [torch.empty_like(local_valid) for _ in range(cp_size)]
     dist.all_gather(shards, local_valid)

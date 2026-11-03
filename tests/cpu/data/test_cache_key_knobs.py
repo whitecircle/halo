@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""Cache-key sensitivity tests for the REAL build_chat_row_processor closures.
-
-The text/LLM SFT path builds its map function with build_chat_row_processor, which captures
-output-affecting knobs (conversation_field, system_prompt, add_generation_prompt,
-max_length, ...) as closure FREE VARIABLES — not fn_kwargs. The deterministic cache file
-name therefore depends entirely on _closure_fingerprint capturing those scalars:
-a knob that changes tokenized output but is invisible to the cache key makes two
-distinct runs collide on one cache file and silently reuse stale tokens.
-
-These tests drive the actual factory (not a hand-rolled stand-in) through
-map_cache_file_name and assert:
-  - changing each output-affecting knob CHANGES the cache name, and
-  - a captured-but-output-irrelevant dict does NOT (the negative control below).
-
-Run: pytest tests/cpu/data/test_cache_key_knobs.py
-"""
+"""Cache-key sensitivity of the real ``build_chat_row_processor`` closures, whose output-affecting knobs are free
+variables and reach the file name only through ``_closure_fingerprint``. A knob invisible to the key makes two
+distinct runs silently share stale tokens."""
 
 import pytest
 from datasets import Dataset
@@ -47,15 +34,12 @@ def _ds() -> Dataset:
 
 
 def _name_for(**proc_kwargs) -> str:
-    """Build a processor with the given knobs and return its cache file name."""
     tok = _MockTokenizer()
     proc = build_chat_row_processor(tok, max_length=512, **{"conversation_field": "messages", **proc_kwargs})
     return map_cache_file_name("map", proc, _ds(), "tokenize", {})
 
 
 def test_conversation_field_changes_cache_name():
-    """conversation_field 'messages' vs 'conversation' selects a different source column —
-    different tokens — so the cache name MUST differ."""
     name_messages = _name_for(conversation_field="messages")
     name_conversation = _name_for(conversation_field="conversation")
     assert name_messages != name_conversation, (
@@ -65,22 +49,18 @@ def test_conversation_field_changes_cache_name():
 
 
 def test_system_prompt_changes_cache_name():
-    """A None vs a concrete system_prompt prepends different tokens; cache name MUST differ."""
     name_none = _name_for(system_prompt=None)
     name_set = _name_for(system_prompt="You are a helpful assistant.")
     assert name_none != name_set, "system_prompt change did not change the cache name"
 
 
 def test_add_generation_prompt_changes_cache_name():
-    """add_generation_prompt True vs False changes the templated string (and which turns are
-    kept); cache name MUST differ."""
     name_true = _name_for(add_generation_prompt=True)
     name_false = _name_for(add_generation_prompt=False)
     assert name_true != name_false, "add_generation_prompt change did not change the cache name"
 
 
 def test_max_length_changes_cache_name():
-    """max_length is the truncation bound — different output for long rows; cache name MUST differ."""
     tok = _MockTokenizer()
     proc_512 = build_chat_row_processor(tok, max_length=512, conversation_field="messages")
     proc_4096 = build_chat_row_processor(tok, max_length=4096, conversation_field="messages")
@@ -90,19 +70,15 @@ def test_max_length_changes_cache_name():
 
 
 def test_identical_knobs_same_cache_name():
-    """Two processors with identical knobs must reuse the same cache (determinism)."""
     name_a = _name_for(conversation_field="messages", system_prompt="sys")
     name_b = _name_for(conversation_field="messages", system_prompt="sys")
     assert name_a == name_b, "identical processor knobs produced different cache names (no reuse)"
 
 
 def test_irrelevant_captured_object_does_not_change_cache_name():
-    """A captured dict that is neither a scalar nor a tokenizer (the rejection sentinel
-    build_chat_row_processor builds) must NOT reach the closure fingerprint: it does not affect the
-    tokenized output of valid rows, and keying on it would needlessly re-tokenize the corpus.
-
-    The negative control for the tests above — pinned on _closure_fingerprint directly, since
-    the sentinel is derived from the tokenizer and not settable from outside."""
+    """A captured dict that is neither scalar nor tokenizer (the rejection sentinel) must not reach the fingerprint,
+    or the corpus re-tokenizes needlessly. Pinned on ``_closure_fingerprint``, since the sentinel is not settable
+    from outside."""
 
     def make(max_length, sentinel):
         def process_row(row):

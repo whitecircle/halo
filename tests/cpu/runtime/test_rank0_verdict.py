@@ -1,8 +1,5 @@
-"""``rank0_verdict`` on a real 2-rank gloo group: rank 0's result reaches every rank, and only rank 0
-probes; a raise in rank 0's probe raises the caller's exception type on every rank, naming the cause.
-
-Run: python tests/cpu/runtime/test_rank0_verdict.py
-"""
+"""``rank0_verdict`` on a real 2-rank gloo group: only rank 0 probes, and a raise there raises on every rank, naming
+the cause."""
 
 import pytest
 

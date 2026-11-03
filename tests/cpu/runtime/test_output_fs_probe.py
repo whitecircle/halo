@@ -1,21 +1,6 @@
 #!/usr/bin/env python
 """The output-filesystem reality probe: ``DIST_*_SHARED_FILESYSTEM`` vs what ``output_dir`` does.
-
-The flags are pure declarations — nothing else in the toolkit checks them against a filesystem —
-and both ways of getting them wrong are silent at 2+ nodes:
-
-* declared SHARED on per-node storage: only global rank 0 writes ``trainer_state.json`` /
-  ``scheduler.pt`` / ``rng_state``, so no checkpoint resumes on nodes 1..N
-  (the mixin's ``save_on_each_node`` forcing keys off exactly this flag);
-* declared PER-NODE on shared storage: every node's local rank 0 writes the SAME paths at once.
-
-``verify_output_filesystem_sharing`` writes one sentinel from rank 0 and gathers who can see it;
-``filesystem_contradiction`` is the whole verdict, identical on every rank because the
-gathered list is. These tests drive the verdict directly with synthetic gathers, and drive the
-collective wrapper against a fake process group to pin the skip rule and the cleanup.
-
-Run: pytest tests/cpu/runtime/test_output_fs_probe.py
-"""
+The flags are pure declarations and both ways of being wrong are silent at 2+ nodes."""
 
 import datetime
 import os
@@ -45,56 +30,52 @@ def test_declared_shared_on_per_node_storage_is_rejected():
 
 
 def test_declared_per_node_on_shared_storage_is_rejected():
-    """The mirror image: every node's local rank 0 would write the same checkpoint paths."""
+    """Every node's local rank 0 would write the same checkpoint paths."""
     reason = _output_contradiction(declared_shared=False, seen=[True] * 16)
     assert reason is not None
     assert "DIST_OUTPUT_SHARED_FILESYSTEM" in reason, f"the fix must be actionable: {reason}"
 
 
 def test_matching_declarations_pass():
-    """Anti-over-rejection, both directions."""
     assert _output_contradiction(declared_shared=True, seen=[True] * 16) is None
     assert _output_contradiction(declared_shared=False, seen=[True] + [False] * 15) is None
 
 
 def test_a_writer_that_cannot_read_its_own_sentinel_is_its_own_diagnosis():
-    """``seen[0]`` False means the checkpoint writer's own directory is broken (full, read-only,
-    stale handle) — reporting that as a sharing mismatch would send the operator to the wrong knob."""
+    """``seen[0]`` False means the writer's own directory is broken; reporting a sharing mismatch sends the operator
+    to the wrong knob."""
     reason = _output_contradiction(declared_shared=True, seen=[False] * 16)
     assert reason is not None
     assert "rank 0 could not read back" in reason, f"the real fault must be named: {reason}"
 
 
 def test_partial_visibility_is_not_shared():
-    """A 4-node job where two nodes mount the share and two do not is still not a shared output."""
     assert _output_contradiction(declared_shared=True, seen=[True] * 24 + [False] * 8) is not None
 
 
 def _fake_world(monkeypatch, *, world: int, local_world: int, rank: int, seen: list[bool]):
-    """Drive the collective wrapper as ``rank`` of a ``world``-rank job whose gather returns ``seen``."""
     monkeypatch.setattr(ranks.dist, "is_available", lambda: True)
     monkeypatch.setattr(ranks.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(ranks.dist, "get_world_size", lambda *a, **k: world)
     monkeypatch.setattr(ranks.dist, "get_rank", lambda *a, **k: rank)
     monkeypatch.setattr(filesystem, "get_local_world_size", lambda: local_world)
     monkeypatch.setattr(filesystem, "get_num_nodes", lambda: max(1, world // local_world))
-    # Off rank 0 the broadcast delivers what rank 0 wrote: one sentinel, written.
+    # Off rank 0 the broadcast delivers what rank 0 wrote.
     monkeypatch.setattr(
         filesystem, "broadcast_from_rank0", lambda value: value if value is not None else ("0", [None])
     )
-    # The NFS-lag poll budget is real wall time; a rank that sees nothing would sit it out here.
+    # The NFS-lag poll budget is real wall time.
     monkeypatch.setattr(filesystem, "fs_probe_timeout", lambda: datetime.timedelta(0))
 
     def fake_gather(out_list, obj):
-        del obj  # this rank's observation is supplied by the synthetic list
+        del obj  # Supplied by the synthetic list.
         out_list[:] = [[rank_seen] for rank_seen in seen]
 
     monkeypatch.setattr(ranks.dist, "all_gather_object", fake_gather)
 
 
 def test_a_single_node_job_is_skipped_entirely(monkeypatch, tmp_path):
-    """Within one node every rank shares the mounts by construction, so the probe (and its poll)
-    must not run — nor leave a sentinel behind."""
+    """Within one node every rank shares the mounts."""
     _fake_world(monkeypatch, world=8, local_world=8, rank=0, seen=[True] * 8)
     monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: False)
     filesystem.verify_output_filesystem_sharing(str(tmp_path))
@@ -102,7 +83,6 @@ def test_a_single_node_job_is_skipped_entirely(monkeypatch, tmp_path):
 
 
 def test_the_multi_node_probe_cleans_up_its_sentinel(monkeypatch, tmp_path):
-    """A leftover dotfile in every checkpoint directory is its own bug."""
     _fake_world(monkeypatch, world=16, local_world=8, rank=0, seen=[True] * 16)
     monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: True)
     filesystem.verify_output_filesystem_sharing(str(tmp_path))
@@ -110,7 +90,6 @@ def test_the_multi_node_probe_cleans_up_its_sentinel(monkeypatch, tmp_path):
 
 
 def test_the_multi_node_probe_raises_on_a_contradiction(monkeypatch, tmp_path):
-    """Wiring check: the verdict must actually reach a raise, on every rank."""
     _fake_world(monkeypatch, world=16, local_world=8, rank=9, seen=[True] * 8 + [False] * 8)
     monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: True)
     with pytest.raises(RuntimeError, match="declared SHARED"):
@@ -118,10 +97,9 @@ def test_the_multi_node_probe_raises_on_a_contradiction(monkeypatch, tmp_path):
 
 
 def test_a_per_node_declaration_never_waits_out_the_poll(monkeypatch, tmp_path):
-    """Asymmetry that keeps the probe free on the common non-shared launch: only a rank that
-    EXPECTS to see the sentinel pays the NFS-lag poll. Not seeing it agrees with the declaration,
-    so there is nothing to wait for."""
-    # Rank 0 sees its own write; no other node does — the ordinary per-node-NVMe shape.
+    """Only a rank expecting to see the sentinel pays the poll, which keeps the probe free on the common non-shared
+    launch."""
+    # Rank 0 sees its own write; no other node does (per-node NVMe).
     _fake_world(monkeypatch, world=16, local_world=8, rank=9, seen=[True] + [False] * 15)
     monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: False)
     monkeypatch.setenv("DIST_FS_PROBE_TIMEOUT_SECONDS", "30")
@@ -135,8 +113,6 @@ def test_a_per_node_declaration_never_waits_out_the_poll(monkeypatch, tmp_path):
 
 
 def test_a_shared_declaration_polls_for_the_configured_budget(monkeypatch, tmp_path):
-    """A shared mount whose attribute cache outlasts the default budget is not misread as per-node once
-    ``DIST_FS_PROBE_TIMEOUT_SECONDS`` covers it."""
     _fake_world(monkeypatch, world=16, local_world=8, rank=9, seen=[True] * 16)
     monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: True)
     monkeypatch.setenv("DIST_FS_PROBE_TIMEOUT_SECONDS", "180")
@@ -150,14 +126,13 @@ def test_a_shared_declaration_polls_for_the_configured_budget(monkeypatch, tmp_p
 
 
 def test_a_shared_declaration_the_probe_cannot_confirm_names_the_attribute_cache():
-    """A real shared mount with a long attribute cache reads as unshared; the refusal must point at the
-    probe budget before the per-node flag, which on that mount would race every node's writer."""
+    """The refusal points at the probe budget first, since the per-node flag on that mount would race every node's
+    writer."""
     reason = _output_contradiction(declared_shared=True, seen=[True] * 8 + [False] * 8)
     assert "DIST_FS_PROBE_TIMEOUT_SECONDS" in reason and "acdirmax" in reason, reason
 
 
 def test_an_output_dir_rank_zero_cannot_write_raises_naming_it(monkeypatch, tmp_path):
-    """Checkpoints need a writable output_dir: a failed sentinel write is the diagnosis, on every rank."""
     _fake_world(monkeypatch, world=16, local_world=8, rank=0, seen=[False] * 16)
     monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: True)
     blocking = tmp_path / "a_file"
@@ -167,8 +142,7 @@ def test_an_output_dir_rank_zero_cannot_write_raises_naming_it(monkeypatch, tmp_
 
 
 def test_a_directory_is_probed_once_per_process(monkeypatch, tmp_path):
-    """The entry scripts probe before resume detection and every trainer probes again at construction;
-    the second call must not write another sentinel or enter the gather again."""
+    """Entry scripts probe before resume detection and every trainer probes again at construction."""
     _fake_world(monkeypatch, world=16, local_world=8, rank=0, seen=[True] * 16)
     monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: True)
     monkeypatch.setattr(filesystem, "_probed_output_dirs", set())
@@ -196,8 +170,6 @@ class _ProbeReached(Exception):
 
 
 class _InitHost:
-    """A bare trainer host for the shared init, stopped right after the output-filesystem probe."""
-
     _apply_training_args_overrides = base_mixin.DistributedTrainerMixin._apply_training_args_overrides
 
     def _snapshot_model_config_state(self, model_config):
@@ -205,7 +177,7 @@ class _InitHost:
 
 
 def test_every_trainer_construction_probes_its_output_dir(monkeypatch):
-    """A Python-API run never passes through the entry scripts' probe, so the trainer runs it itself."""
+    """A Python-API run never passes through the entry scripts' probe."""
     probed = []
     monkeypatch.setattr(base_mixin, "verify_output_filesystem_sharing", probed.append)
 

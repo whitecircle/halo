@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""Merge the per-node directories of a pipeline-parallel save into one ``from_pretrained``-loadable checkpoint.
+"""Merge a pipeline-parallel save's per-node directories on a non-shared output filesystem into one checkpoint.
 
-A pipeline-parallel save on a non-shared output filesystem (``DIST_OUTPUT_SHARED_FILESYSTEM=0``) leaves
-each node's directory with the whole-model index but only the stage parts that node wrote. Copy every
-node's directory of the save onto one host, then merge them; a shared-filesystem save needs no merge.
-
-Usage:
-    python scripts/after_training/merge_pp_stages.py \\
-        --input_dir /copies/node0/checkpoint-500 /copies/node1/checkpoint-500 \\
-        --output_dir /path/to/merged_checkpoint
+Each node's directory has the whole-model index but only the stage parts it wrote: copy them onto one host, then merge.
 """
 
 import argparse

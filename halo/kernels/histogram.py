@@ -1,9 +1,5 @@
-"""Sync-free integer histograms for MoE routing.
-
-``torch.bincount`` sizes its output from the largest index, so CUDA reads that value back to the host —
-a full device sync per MoE layer per forward on the routing hot path. Counting into a pre-sized buffer
-with ``scatter_add_`` needs no round-trip.
-"""
+"""Sync-free integer histograms for MoE routing. ``torch.bincount`` sizes its output from the largest index, so CUDA
+reads that value back to the host, a full device sync per MoE layer per forward."""
 
 from __future__ import annotations
 
@@ -13,13 +9,8 @@ import torch
 def sync_free_bincount(
     indices: torch.Tensor, size: int, *, dtype: torch.dtype = torch.float32, weights: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """Occurrences of each value in ``[0, size)`` across ``indices``, without a device sync.
-
-    ``indices`` is flattened and cast to ``int64``; out-of-range values must be filtered by the caller,
-    since ``scatter_add_`` would write them out of bounds. ``dtype`` is the counter's: fp32 where the
-    counts feed metric math, int64 where they become offsets (integer adds are exactly associative).
-    ``weights``, shaped like ``indices``, counts each occurrence that many times.
-    """
+    """The caller filters out-of-range values, which ``scatter_add_`` would write out of bounds. ``dtype`` is fp32
+    where counts feed metric math, int64 where they become offsets (integer adds are exactly associative)."""
     flat = indices.flatten().long()
     counts = torch.zeros(size, dtype=dtype, device=flat.device)
     occurrences = torch.ones_like(flat, dtype=dtype) if weights is None else weights.flatten().to(dtype)
@@ -30,10 +21,6 @@ def sync_free_bincount(
 def accumulate_bincount(
     counter: torch.Tensor | None, indices: torch.Tensor, size: int, *, weights: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """Add ``indices``' counts into ``counter``, creating it on the first call and returning it.
-
-    ``counter`` is ``None`` until the first forward that routes and is added into in place afterwards.
-    Counts are fp32: they feed metric math, not offsets. ``weights`` is :func:`sync_free_bincount`'s.
-    """
+    """``counter`` is ``None`` until the first forward that routes and is added into in place afterwards."""
     counts = sync_free_bincount(indices, size, weights=weights)
     return counts if counter is None else counter.add_(counts)

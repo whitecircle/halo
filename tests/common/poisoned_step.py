@@ -1,9 +1,6 @@
-"""A poisoned optimizer step and the parameter state around one, for suites that check a non-finite step is skipped.
-
-The last rank multiplies the decoder's final norm output by NaN on the chosen steps, which leaves every forward
-collective finite (DeepEP dispatch included) and makes the backward NaN, so the gradient reductions carry the NaN to
-every rank. :class:`AroundStep` copies this rank's parameter shards right before and right after one optimizer step.
-"""
+"""A poisoned optimizer step and the parameter state around one, for suites checking a non-finite step is skipped. NaN
+on the last rank's final norm output leaves every forward collective finite and makes the backward NaN, so reductions
+carry it to every rank."""
 
 import torch
 import torch.distributed as dist
@@ -14,7 +11,7 @@ from halo.runtime.dtensor import to_local
 
 
 def final_norm(model) -> torch.nn.Module:
-    """The decoder's final norm, the one module named ``norm`` (the per-layer and per-head norms are not)."""
+    """The decoder's final norm, the one module named ``norm``."""
     (norm,) = [module for name, module in model.named_modules() if name.split(".")[-1] == "norm"]
     return norm
 
@@ -26,8 +23,6 @@ def local_parameter_state(model) -> dict[str, torch.Tensor]:
 
 
 class PoisonSteps(TrainerCallback):
-    """The last rank multiplies its final norm's output by NaN on the optimizer steps in ``steps``."""
-
     def __init__(self, trainer, steps):
         self.steps = frozenset(steps)
         self.armed = False
@@ -45,8 +40,6 @@ class PoisonSteps(TrainerCallback):
 
 
 class AroundStep(TrainerCallback):
-    """This rank's parameter shards right before and right after optimizer step ``step``."""
-
     def __init__(self, trainer, step: int):
         self.trainer, self.step = trainer, step
         self.before = self.after = None

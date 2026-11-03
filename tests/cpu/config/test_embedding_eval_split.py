@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``embedding.py`` hands the trainer the dataset's ``test`` split whenever the dataset has one.
-
-A pre-sharded eval split can leave a rank no rows. Chosen by truthiness, that rank alone got no eval
-dataset (or fell through to another split) and skipped the evaluation its peers entered.
-
-Driven through ``main()`` up to the trainer construction, with the model build stubbed.
-
-Run: pytest tests/cpu/config/test_embedding_eval_split.py
-"""
+"""``embedding.py`` hands the trainer the dataset's ``test`` split whenever it has one. A pre-sharded eval split can
+leave a rank no rows; chosen by truthiness, that rank alone would skip the evaluation its peers entered."""
 
 import sys
 import types

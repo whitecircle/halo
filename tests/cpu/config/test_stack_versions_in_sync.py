@@ -1,29 +1,7 @@
 #!/usr/bin/env python
-"""Every stack version this repo *states* must equal the pin it is stated about.
-
-The stack lives in four images built from three Dockerfiles and one lock, and each version is
-pinned in exactly one place: ``pyproject.toml`` for the training dependencies, ``uv.lock`` (through
-``docker/nccl_pin.py``) for the NCCL runtime every image shares, and a ``Dockerfile`` ``ARG`` for
-each engine and the NGC base. Prose and error strings across the root guides, ``agent-docs/``,
-``human-docs/``, ``halo/``, ``tests/``, ``scripts/``, ``examples/`` and the agent skills restate
-those numbers hundreds of times, and a bump that updates the pin and misses one of them points a
-reader — or a refusal message — at a version nobody runs. This gate reads each pin from its single
-source and fails on any stated number that disagrees.
-
-Numbers that are deliberately not the pin are exempt by **form**, not by location: a floor
-(``>= X``), an attribution to the release something first shipped in (``native in X``), and
-provenance (``vendored from X``, ``measured on X``) all stay true when the pin moves forward, so
-they are recognized by the shape of the sentence — and only for a release this stack has already
-reached, so no form can excuse a number ahead of the pin. The two numbers with no such shape are
-exempt by ``(package, version)`` pair with a reason. Both lists are anti-rot checked: an entry that
-describes nothing in the tree fails.
-
-Which pin a number is measured against is read off the sentence too: the rollout images carry their
-own transformers, so a number is held to the training pin unless a rollout image is the nearest
-thing the sentence attributes it to.
-
-    python tests/cpu/config/test_stack_versions_in_sync.py
-"""
+"""Every stack version this repo states equals the pin it is stated about. Numbers off the pin are exempt by form (a
+floor, an attribution, provenance), only for a release the stack has reached, or by ``(package, version)`` pair
+with a reason; a number is held to the training pin unless a rollout image is its nearest attribution."""
 
 import re
 import tomllib
@@ -38,12 +16,8 @@ from tests.common.repo import REPO_ROOT, load_script_module
 nccl_pin = load_script_module("docker/nccl_pin.py")
 locked_version = load_script_module(".github/scripts/locked_version.py").locked_version
 
-# Every tree that states a stack version: the root guides, both doc trees, the error strings and
-# docstrings under halo/, the pinned-behaviour comments in tests/ and scripts/, the launch comments
-# in examples/, the agent skills, and the pin sources themselves — a Dockerfile's ``ARG`` agrees
-# with itself, but the paragraph of comment explaining why it says that number does not. Left out:
-# ``uv.lock`` (generated) and ``Makefile`` (tags only — checked below). Data files under
-# agent-docs/assets record third-party baseline environments.
+# Every tree that states a stack version, the pin sources included. Left out: ``uv.lock`` (generated) and ``Makefile``
+# (tags only, checked below). Data files under agent-docs/assets record third-party baseline environments.
 SCANNED_TREES = (
     "CLAUDE.md",
     "README.md",
@@ -61,8 +35,7 @@ SCANNED_TREES = (
     "skills/**/*.md",
 )
 
-# Vendored hub remote-code, and this file, which names non-pin versions by construction — in the
-# exemption reasons and in the planted-drift fixture. Neither states a version this repo owns.
+# Vendored hub remote-code; this file names non-pin versions by construction.
 NOT_SCANNED = ("docker/vllm/parity/fixtures",)
 
 FILES_BY_TREE: dict[str, list[Path]] = {
@@ -75,15 +48,12 @@ FILES_BY_TREE: dict[str, list[Path]] = {
 }
 SCANNED_FILES = sorted({path for paths in FILES_BY_TREE.values() for path in paths})
 
-# A version token, and what may sit between it and the package name: a comparator, an image tag's
-# `:`, a hyphenated spelling (`torch-2.11`), a markdown cell wall, the backtick closing a code-font
-# name. `<` is deliberately absent — an exclusive upper bound is the pin's own range end, not a
-# claim about what runs.
+# A version token, and what may sit between it and the package name. ``<`` is absent: an exclusive upper bound is the
+# pin's own range end.
 _VERSION = r"v?(\d+\.\d+(?:\.\d+)?)"
 _LEAD = r"(?:[\s~^=≥:|`-]|>=|>|==|=)*"
 
-# How each package is spelled where a version follows it. Anchored on a non-word boundary so
-# ``flash_attn`` does not match ``attn``, and kept to the spellings that actually precede a number.
+# Anchored on a non-word boundary so ``flash_attn`` does not match ``attn``.
 PACKAGE_ALIASES: dict[str, str] = {
     "torch": r"(?:PyTorch|torch)",
     "transformers": r"[Tt]ransformers",
@@ -95,33 +65,25 @@ PACKAGE_ALIASES: dict[str, str] = {
     "sglang": r"(?:SGLang|sglang(?:-server)?)",
     "nccl": r"(?:nvidia-nccl-cu13|NCCL)",
     "ngc": r"nvcr\.io/nvidia/pytorch:",
-    # ``-dsl`` is load-bearing: CUTLASS, the vendored C++ template library the FA source builds
-    # carry, is a different thing from the ``nvidia-cutlass-dsl`` wheel and moves on its own.
+    # ``-dsl`` matters: the vendored CUTLASS C++ library the FA source builds carry moves on its own, apart from the
+    # ``nvidia-cutlass-dsl`` wheel.
     "cutlass_dsl": r"(?:nvidia-)?cutlass-dsl(?:-libs-[a-z0-9]+)?",
     "quack": r"quack(?:-kernels)?",
 }
 
-# Prose wraps, and the subject of a sentence — whose image a version belongs to, the verb that makes
-# it history — can sit a line above the number. A statement is judged on this window, not its line.
+# A sentence's subject can sit a line above the number, so a statement is judged on this window, not its line.
 WINDOW_LINES = 2
 
-# Whose stack a number belongs to is settled by the nearest of these words before it — a sentence
-# routinely names both sides ("the server ships X, training is on Y"), and the subject closest to
-# the number owns it. The rollout images carry their own transformers, both behind the training
-# image's, so those lines are claimable only where a rollout image is what the number is about;
-# an unattributed "transformers X" is a claim about the training stack and is held to its pin.
+# The nearest of these words before a number owns it: a sentence routinely names both sides. An unattributed
+# transformers number is held to the training pin.
 ATTRIBUTION = re.compile(r"\b(?:vllm|sglang|rollout|server|training)\b", re.IGNORECASE)
 
-# A file named for an engine is about that engine: it is the attribution of last resort, for the
-# lines inside `Dockerfile.vllm` or `docker/vllm/` that never repeat whose image they configure.
-# Only a fallback — a "training" nearer the number still wins, as it does in prose.
+# A file named for an engine is about that engine, the attribution of last resort; a nearer training word still wins.
 ENGINE_PATH = re.compile(r"vllm|sglang", re.IGNORECASE)
 
-# Sentence shapes that state a release other than the pin on purpose. ``{version}`` is replaced by
-# the matched number and the match must cover it, so the marker word sits beside *this* number, in
-# one sentence (``[^.\n|]`` stops at a full stop, a line break and a markdown cell wall alike).
-# Every verb here is past tense: "5.14 shipped X" is history, "5.14 ships X" is a claim about the
-# release in use, which a bump has to revisit.
+# Sentence shapes stating a release other than the pin on purpose. The match must cover ``{version}``, so the marker
+# sits beside this number in one sentence. Every verb is past tense: a present-tense claim is one a bump has to
+# revisit.
 HISTORICAL_FORMS: dict[str, str] = {
     r"(?:>=|≥|>|at least)\s*v?{version}\b|{version}\+(?![\w.])": (
         "a floor — the oldest upstream release that works, which moving the pin forward cannot falsify"
@@ -134,8 +96,7 @@ HISTORICAL_FORMS: dict[str, str] = {
     ),
 }
 
-# Numbers that are deliberately not the pin and have no such shape. Each entry must still match
-# something, so a statement that is deleted or corrected takes its exemption with it.
+# Each entry must still match something, so a corrected statement takes its exemption with it.
 ALLOWED_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("nccl", "2.28.9"): "torch's own wheel-metadata pin — the value the uv override exists to replace",
     ("cutlass_dsl", "4.4.2"): "gram-newton-schulz's own hard pin — the value the force-reinstall exists to replace",
@@ -143,15 +104,13 @@ ALLOWED_EXCEPTIONS: dict[tuple[str, str], str] = {
 
 
 class Statement(NamedTuple):
-    """One version a scanned file states, with the window of prose it is judged in."""
-
     package: str
     version: str
     path: Path
     line_number: int
     line: str
     window: str
-    offset: int  # where the number sits in ``window`` — what "before the number" means
+    offset: int  # where the number sits in ``window``
 
 
 @cache
@@ -176,11 +135,8 @@ def _dockerfile_value(dockerfile: str, pattern: str) -> str:
 
 
 def _matches(stated: str, pinned: str) -> bool:
-    """``5.16`` covers ``5.16.1`` and vice versa; ``5.1`` never covers ``5.16``.
-
-    Pins are held at the precision their source states them, so a truncated pin cannot wildcard a
-    patch level: against ``0.5.17``, ``SGLang 0.5`` still reads as that line, ``0.5.14`` does not.
-    """
+    """``5.16`` covers ``5.16.1`` and vice versa; ``5.1`` never covers ``5.16``. Pins hold at their source's
+    precision, so a truncated pin cannot wildcard a patch level."""
     return stated == pinned or stated.startswith(f"{pinned}.") or pinned.startswith(f"{stated}.")
 
 
@@ -200,8 +156,7 @@ def stack_pins() -> dict[str, set[str]]:
         # assert against, and it moves only with a DeepEP rebuild.
         "nccl": {nccl_pin.locked_version(str(REPO_ROOT / "uv.lock")), nccl_pin.MINIMUM},
         "ngc": {_dockerfile_value("Dockerfile", r"^ARG BASE_IMAGE=nvcr\.io/nvidia/pytorch:(\S+)-py3$")},
-        # The pair FA4 and the Muon / block-scaled MoE kernels share: one ARG each, interpolated
-        # into every install line, so the number lives in exactly one place per package.
+        # The pair FA4 and the Muon / block-scaled MoE kernels share, one ARG each.
         "cutlass_dsl": {_dockerfile_value("Dockerfile", r"^ARG CUTLASS_DSL_VERSION=(\S+)$")},
         "quack": {_dockerfile_value("Dockerfile", r"^ARG QUACK_VERSION=(\S+)$")},
     }
@@ -209,12 +164,9 @@ def stack_pins() -> dict[str, set[str]]:
 
 @cache
 def engine_scoped_pins() -> dict[str, set[str]]:
-    """Pins claimable only where a rollout image is the nearest thing the number is attributed to.
-
-    Each engine ships its own transformers, its upstream image's exact pin, recorded in its
-    Dockerfile. Both sit a line or two behind the training image's, so leaving them claimable
-    everywhere would let a stale training-stack sentence pass as a statement about a server.
-    """
+    """Pins claimable only where a rollout image is the number's nearest attribution. Each engine's transformers
+    sits behind the training image's, so a stale training sentence could otherwise pass as a statement about a
+    server."""
     return {
         "transformers": {
             _dockerfile_value("Dockerfile.vllm", r"transformers==([\d.]+)"),
@@ -224,13 +176,12 @@ def engine_scoped_pins() -> dict[str, set[str]]:
 
 
 def all_pins() -> dict[str, set[str]]:
-    """Both scopes unioned — what a statement's age is measured against, and what a failure prints."""
+    """Both scopes unioned: what a statement's age is measured against and what a failure prints."""
     engine = engine_scoped_pins()
     return {package: versions | engine.get(package, set()) for package, versions in stack_pins().items()}
 
 
 def stated_versions() -> list[Statement]:
-    """Every version a scanned file states."""
     patterns = {name: re.compile(rf"(?<![\w./-]){alias}{_LEAD}{_VERSION}") for name, alias in PACKAGE_ALIASES.items()}
     found = []
     for path in SCANNED_FILES:
@@ -245,7 +196,6 @@ def stated_versions() -> list[Statement]:
 
 
 def _claimed_by_a_rollout_image(statement: Statement) -> bool:
-    """Whether the attribution nearest the number is a rollout image rather than the training one."""
     nearest = None
     for match in ATTRIBUTION.finditer(statement.window[: statement.offset]):
         nearest = match.group(0).lower()
@@ -255,11 +205,8 @@ def _claimed_by_a_rollout_image(statement: Statement) -> bool:
 
 
 def _form_matches(form: str, statement: Statement) -> bool:
-    """Whether a historical shape is written around *this* statement's number.
-
-    The match has to span the number itself: the same digits two lines up, under a marker word of
-    their own, are a different statement and cannot lend this one their exemption.
-    """
+    """Whether a historical shape spans this statement's number; the same digits two lines up are a different
+    statement."""
     pattern = form.replace("{version}", re.escape(statement.version))
     return any(
         match.start() <= statement.offset < match.end()
@@ -279,7 +226,7 @@ def _exemption(statement: Statement, pins: set[str]) -> str | None:
 
 
 def unpinned_statements() -> list[Statement]:
-    """Statements no pin in scope covers — each one needs an exemption or it is drift."""
+    """Statements no pin in scope covers; each needs an exemption or it is drift."""
     anywhere, engine = stack_pins(), engine_scoped_pins()
     unpinned = []
     for statement in stated_versions():
@@ -292,7 +239,6 @@ def unpinned_statements() -> list[Statement]:
 
 
 def drifted_statements() -> list[str]:
-    """Stated versions that are neither the pin nor a legitimately non-pin statement."""
     every = all_pins()
     return [
         f"{statement.path}:{statement.line_number} states {statement.package} {statement.version} "
@@ -312,15 +258,9 @@ def test_stated_versions_match_their_pins():
 
 
 def test_a_stale_number_anywhere_in_the_prose_is_reported(tmp_path, monkeypatch):
-    """Anti-vacuity for the gate itself: the tree passing must mean drift is caught, not missed.
-
-    One planted file per shape, because the window spans lines: a bare stale pair, a sentence
-    claiming a rollout image's transformers line with nothing saying it is one, a provenance-shaped
-    verb the forms deliberately do not cover, a floor ahead of the pin, a present-tense capability
-    claim (which a bump must revisit, unlike the past tense the forms exempt), a marker word two
-    lines above a different number, and — the shape that made attribution positional — one sentence
-    naming both images, where only the training half drifts.
-    """
+    """One planted file per shape, since the window spans lines: a bare stale pair, an unattributed rollout
+    transformers line, an uncovered provenance verb, a floor ahead of the pin, a present-tense claim, a marker
+    two lines above another number, and one sentence naming both images."""
     planted = {
         "bare.md": "Serve from vLLM 0.19.3, whose transformers 5.13 reads what the checkpoint writer writes.\n",
         "unattributed.py": '"""Mirrors transformers 5.14, whose default REPLACES the extra-special list."""\n',
@@ -341,7 +281,7 @@ def test_a_stale_number_anywhere_in_the_prose_is_reported(tmp_path, monkeypatch)
         "ahead_of_the_pin.md": ("transformers 9.9",),
         "present_tense.md": ("vllm 0.24.0",),
         "borrowed_marker.md": ("transformers 5.10",),  # the floor two lines up is a different claim
-        "contrasted.md": ("transformers 5.19",),  # and NOT the 5.19.0 the server half claims
+        "contrasted.md": ("transformers 5.19",),  # and not the 5.19.0 the server half claims
     }
     reported = drifted_statements()
     assert len(reported) == sum(len(statements) for statements in expected.values()), reported
@@ -351,11 +291,8 @@ def test_a_stale_number_anywhere_in_the_prose_is_reported(tmp_path, monkeypatch)
 
 
 def test_every_exemption_still_describes_something():
-    """Anti-rot: an exemption for a sentence nobody writes any more silently widens the gate.
-
-    Measured against the statements no pin covers — the only ones an exemption can speak for — so an
-    entry kept alive by a sentence that now states the pin is reported as the dead weight it is.
-    """
+    """An exemption for a sentence nobody writes widens the gate. Measured against the statements no pin covers, the
+    only ones an exemption can speak for."""
     unpinned = unpinned_statements()
     stated = {(statement.package, statement.version) for statement in unpinned}
     stale = sorted(pair for pair in ALLOWED_EXCEPTIONS if pair not in stated)
@@ -366,10 +303,9 @@ def test_every_exemption_still_describes_something():
 
 
 def test_image_tags_agree_with_the_dockerfile_args():
-    """Every engine image tag written down — build/push, compose default, doc, test, launch comment
-    — names the version its Dockerfile ARG builds, exactly: the scan above reads a tag as a version
-    statement, which accepts the line (``halo:vllm-0.26``) where a tag has to be the whole number.
-    ``Makefile`` is here rather than in the scan because tags are all it states."""
+    """Every engine image tag names the exact version its Dockerfile ARG builds: the scan above accepts the line
+    (``halo:vllm-0.26``), where a tag must be the whole number. ``Makefile`` is here because tags are all it
+    states."""
     pins = stack_pins()
     expected = {
         "halo:vllm": _dockerfile_value("Dockerfile.vllm", r"^ARG VLLM_VERSION=(\S+)$"),
@@ -403,7 +339,7 @@ def test_ruff_is_pinned_once_in_the_lock():
 
 
 def test_the_scan_actually_reads_the_stack():
-    """Anti-vacuity: a regex or a glob that stopped matching would make every assertion above pass."""
+    """A regex or a glob that stopped matching would make every assertion above pass."""
     statements = stated_versions()
     assert set(PACKAGE_ALIASES) == set(stack_pins()), (
         "a package is spelled in one table and pinned in the other — every alias needs a pin to "

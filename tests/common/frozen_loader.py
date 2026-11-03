@@ -1,12 +1,5 @@
-"""Stub harness for the shared frozen-auxiliary-model loader.
-
-Every unparallelized frozen model the toolkit scores a policy against (the DPO/KTO reference, the
-SDPG KL anchor, the offline-GRPO KL reference, both distillation teacher paths) loads through
-:func:`~halo.model_loading.parallel.frozen_models.load_frozen_auxiliary_model`, so its module namespace is
-where a test intercepts the hub fetches. That also makes these stubs a consolidation check: a call
-site that re-implemented the load would fetch through its own names, and :func:`captured_load` would
-find no recorded fetch.
-"""
+"""Stub harness for the shared frozen-auxiliary-model loader; a call site re-implementing the load fetches elsewhere
+and :func:`captured_load` finds nothing."""
 
 import contextlib
 import types
@@ -22,7 +15,7 @@ STUB_RESOLVED_ATTN = "flex_attention"
 
 @contextlib.contextmanager
 def stub_frozen_loader():
-    """Patch every hub call, fetch-coordination scope and sink patch the loader reaches; yields the captures."""
+    """Patch every hub call, fetch scope and sink patch the loader reaches; yields the captures."""
     resolver_calls: list[dict] = []
 
     def fake_resolve(model_config, attn_implementation, dtype, *, sinks_policy):
@@ -42,19 +35,17 @@ def stub_frozen_loader():
         patch.object(frozen_loader, "auto_load_model") as auto_load,
         patch.object(frozen_loader, "from_pretrained_verified") as vlm_load,
         patch.object(frozen_loader, "resolve_model_source") as fetch_scope,
-        # Patched where they are defined rather than where the loader imports from: the loader reaches
-        # them through ``apply_sinks_policy``, so intercepting them here keeps the assertion
-        # end-to-end (loader, shared policy, the branch that policy picks).
+        # Where they are defined: the loader reaches them through ``apply_sinks_policy``, keeping the assertion
+        # end-to-end.
         patch.object(sink_patches, "_reset_gpt_oss_sinks") as reset_sinks,
         patch.object(sink_patches, "_set_gpt_oss_sinks_trainable") as freeze_sinks,
     ):
         build_config.return_value = STUB_CONFIG
-        # The source agreement hands back the source every rank then reads at its revision; unchanged here.
+        # The source agreement hands back the source every rank reads at its revision; unchanged here.
         fetch_scope.side_effect = lambda model_name_or_path, revision, *, tag: ModelSource(
             model_name_or_path, revision, model_name_or_path
         )
-        # The real live branch returns the layer count, which apply_sinks_policy compares (> 0) to
-        # stamp the model live-sinks; a bare MagicMock return would TypeError on that comparison.
+        # apply_sinks_policy compares the layer count (> 0), and a bare MagicMock would TypeError on it.
         freeze_sinks.return_value = 1
         yield types.SimpleNamespace(
             resolver_calls=resolver_calls,
@@ -68,11 +59,8 @@ def stub_frozen_loader():
 
 
 def captured_load(caps, *, is_vlm: bool = False):
-    """The single weight fetch the stubs recorded, with the config fetch and resolver call beside it.
-
-    ``is_vlm`` selects which loader the caller was expected to reach: the pinned
-    ``AutoModelForImageTextToText`` fetch, or the config-resolved ``auto_load_model``.
-    """
+    """The single weight fetch recorded, with its config fetch and resolver call; ``is_vlm`` picks the expected
+    loader."""
     loader_mock = caps.vlm_load if is_vlm else caps.auto_load
     assert loader_mock.call_count == 1, f"expected exactly one frozen weight fetch, got {loader_mock.call_count}"
     assert len(caps.resolver_calls) == 1, caps.resolver_calls

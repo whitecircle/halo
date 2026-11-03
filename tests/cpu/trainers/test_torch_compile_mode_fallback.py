@@ -1,11 +1,6 @@
 #!/usr/bin/env python
 """``torch_compile`` without a ``torch_compile_mode`` compiles in ``default`` mode, on every launch path.
-
-``reduce-overhead`` (CUDA graphs) measures slower on EP MoE, so it runs only when the config names it. The
-mixin's compile call decides the mode; a multi-process accelerate-managed launch compiles its DDP wrapper again
-with its own dynamo plugin, whose unset mode resolves to the same one.
-
-    python tests/cpu/trainers/test_torch_compile_mode_fallback.py
+``reduce-overhead`` (CUDA graphs) measures slower on EP MoE, so it runs only when the config names it.
 """
 
 from types import SimpleNamespace
@@ -34,8 +29,7 @@ def compile_calls(monkeypatch):
 
 @pytest.fixture
 def clean_dynamo_env(monkeypatch):
-    """Clear ACCELERATE_DYNAMO_* vars inherited from the launch env (an ``accelerate launch`` sets them) so
-    ``TorchDynamoPlugin`` reads its own default."""
+    """Clear the ACCELERATE_DYNAMO_* vars an ``accelerate launch`` sets, so the plugin reads its own default."""
     for key in _DYNAMO_ENV:
         monkeypatch.delenv(key, raising=False)
 
@@ -85,8 +79,7 @@ def test_hf_training_arguments_reach_the_default_mode(compile_calls, tmp_path):
 
 
 def test_accelerate_dynamo_plugin_defaults_to_the_same_mode(clean_dynamo_env):
-    """The compile ``prepare`` puts around a multi-process accelerate launch's DDP wrapper uses the plugin's mode,
-    which HF passes through from ``torch_compile_mode``; left unset, it must match the trainer's fallback."""
+    """A multi-process accelerate launch compiles its DDP wrapper at the plugin's mode, matching the fallback."""
     assert TorchDynamoPlugin(backend="inductor").mode == DEFAULT_TORCH_COMPILE_MODE
 
 

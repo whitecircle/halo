@@ -48,10 +48,9 @@ STEP_1_CASES = {
     "teacher_distill": ("distillation/teacher-distill", [], "loss", 0.0),
 }
 ACCELERATE_CONFIG = REPO_ROOT / "launcher-configs" / "accelerate" / "fsdp2_full_config.yaml"
-# Above bf16 noise between the FSDP2-wrapped policy and its frozen copy. Measured on Qwen3-0.6B over 2 GPUs: DPO, with
-# and without PEFT and precomputed reference log-probs, 1.9e-9 off ln 2; KTO and teacher distillation exact; offline
-# GRPO's KL 3.2e-3. With the weights zeroed off rank 0, DPO missed by 0.37 and KTO by 0.14, and the other three
-# cases crashed on rank 1.
+# Above bf16 noise between the FSDP2 policy and its frozen copy. Measured on Qwen3-0.6B over 2 GPUs: DPO 1.9e-9 off ln
+# 2; KTO and teacher distillation exact; offline GRPO's KL 3.2e-3. With weights zeroed off rank 0, DPO missed by 0.37
+# and KTO by 0.14, and the other three cases crashed on rank 1.
 STEP_1_ATOL = 1e-2
 
 parser = argparse.ArgumentParser(description=__doc__)

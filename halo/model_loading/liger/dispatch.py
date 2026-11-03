@@ -1,8 +1,6 @@
-"""Liger Kernel dispatch: resolve the applier per ``model_type`` (the toolkit spec for it or its text sub-config's,
-then Liger's registry in the same order) and apply it with the per-family defaults and the parallelism safety rules.
-
-Cross-entropy is always the toolkit's scoped patch and an upstream applier's ``layer_norm`` stays off: upstream installs
-both process-wide (``torch.nn.functional.cross_entropy``, and before the model exists ``torch.nn.LayerNorm``)."""
+"""Liger Kernel dispatch: resolve the applier per ``model_type`` and apply it with per-family defaults and the
+parallelism safety rules. Cross-entropy is always the toolkit's scoped patch and an upstream ``layer_norm`` stays off,
+since upstream installs both process-wide."""
 
 from __future__ import annotations
 
@@ -34,7 +32,7 @@ LIGER_APPLIED_CONFIG_ATTR = "_halo_liger_applied_config"
 LIGER_CP_FUSED_LOSS_ATTR = "_halo_liger_cp_fused_loss"
 
 # Flags whose applier-declared ``False`` default states that Liger's kernel cannot serve the family
-# (a partial, mrope or YARN rotary; GptOss's clamped experts) — honored over the shared default-on.
+# (a partial, mrope or YARN rotary; GptOss's clamped experts), honored over the shared default-on.
 _APPLIER_DEFAULT_OFF_FLAGS = ("rope", "swiglu", "geglu")
 
 # Every family the toolkit patches. A family registered into Liger's own dict instead would resolve on the
@@ -60,7 +58,7 @@ _PER_MODEL_DEFAULTS = {
 # Applier lookup order: a toolkit applier wins over Liger's own entry, for either spelling of the family.
 _APPLIER_REGISTRIES = (_TOOLKIT_LIGER_APPLIERS, MODEL_TYPE_TO_APPLY_LIGER_FN)
 
-# The shared Liger defaults; per-family and user overrides layer on top of a fresh copy.
+# Per-family and user overrides layer on top of a fresh copy.
 _LIGER_DEFAULTS = {
     "rope": True,
     "cross_entropy": True,
@@ -80,11 +78,8 @@ def _liger_model_types(model_config) -> tuple[str | None, str | None]:
 
 
 def _resolve_applier(model_type: str | None, fallback_type: str | None) -> tuple[str | None, Callable | None]:
-    """``(model_type, applier)`` Liger resolves to: the toolkit's applier for either spelling, else upstream's.
-
-    The toolkit owns a family through its multimodal wrappers too: an upstream wrapper applier (Gemma 4's)
-    runs its own text-tower roles, which would replace the ones the tower's spec takes over.
-    """
+    """``(model_type, applier)``: the toolkit's for either spelling, else upstream's, as an upstream wrapper applier
+    (Gemma 4's) would replace the roles the tower's spec takes over."""
     for registry in _APPLIER_REGISTRIES:
         for candidate in (model_type, fallback_type):
             if candidate in registry:
@@ -93,11 +88,8 @@ def _resolve_applier(model_type: str | None, fallback_type: str | None) -> tuple
 
 
 def _toolkit_applier(model_type: str | None, applier) -> LigerApplier | None:
-    """``applier`` as the toolkit's :class:`LigerApplier`, or ``None`` where liger-kernel's own resolved.
-
-    Which flags a toolkit applier hands upstream is read off its spec, so a toolkit entry that is not a
-    ``LigerApplier`` is refused rather than read as withholding nothing.
-    """
+    """``applier`` as the toolkit's :class:`LigerApplier`, or ``None`` for upstream's; any other toolkit entry is
+    refused, since which flags it hands upstream is read off its spec."""
     if model_type not in _TOOLKIT_LIGER_APPLIERS:
         return None
     if not isinstance(applier, LigerApplier):
@@ -109,24 +101,17 @@ def _toolkit_applier(model_type: str | None, applier) -> LigerApplier | None:
 
 
 def liger_ep_disables_fused_glu(needs_ep_layers: bool, model_config) -> bool:
-    """The ``has_ep_wrapped_experts`` argument both Liger application sites pass.
-
-    True only when an EP layer replaces every module the resolved applier's GLU patch swaps: upstream's
-    MoE appliers swap the routed-experts class the EP layer replaces wholesale, while a toolkit spec names
-    the dense and shared-expert MLPs every EP layer adopts unchanged.
-    """
+    """True only when an EP layer replaces every module the applier's GLU patch swaps: upstream swaps the routed
+    experts the EP layer replaces, a toolkit spec the dense and shared-expert MLPs every EP layer adopts."""
     if not wraps_experts(model_config, ep_layers_requested=needs_ep_layers):
         return False
     return not any(candidate in _TOOLKIT_GLU_SURVIVES_EP for candidate in _liger_model_types(model_config))
 
 
 def liger_routed_expert_overrides(needs_ep_layers: bool, model_config) -> dict[str, str]:
-    """``{"swiglu": reason}`` where upstream Liger's ``swiglu`` could replace routed experts Halo does not wrap.
-
-    Upstream's MoE appliers swap routed experts for ``LigerExperts`` under ``swiglu``, whose Blackwell
-    input-gradient fix is not validated here. The rule keys on the config having experts, and the flag goes
-    whole: any dense, shared-expert or vision SwiGLU upstream fuses under it runs eager too.
-    """
+    """``{"swiglu": reason}`` where upstream's ``swiglu`` could replace routed experts Halo does not wrap with
+    ``LigerExperts``, whose Blackwell input-gradient fix is not validated here. The whole flag goes, so upstream's
+    other SwiGLUs run eager too."""
     if not has_routed_experts(model_config) or wraps_experts(model_config, ep_layers_requested=needs_ep_layers):
         return {}
     model_type, applier = _resolve_applier(*_liger_model_types(model_config))
@@ -213,14 +198,10 @@ def sanitize_liger_config(
     cp_size: int = 1,
     pp_size: int = 1,
 ) -> dict:
-    """``user_config`` with every kernel the safety rules force off turned off.
-
-    Both Liger applications (model load, and the trainer's before HF Trainer re-applies) call this, since a
-    rule present at one site only is undone by whichever runs second. The parallelism rules yield to an
-    explicit ``swiglu``/``geglu`` request, which they make inert rather than wrong; the routed-experts
-    and prefix-LM rules do not. It also pins the Liger implementations (:func:`pin_liger_impls`), since a
-    model passed to the trainer reaches only the second site.
-    """
+    """``user_config`` with every kernel the safety rules force off turned off; both Liger applications call this, as a
+    rule at one site is undone by the other. Parallelism rules yield to an explicit ``swiglu``/``geglu``, which they
+    make inert. It also pins the Liger implementations, as a model passed to the trainer reaches only the second
+    site."""
     pin_liger_impls()
     forced_off = liger_parallelism_overrides(
         has_ep_wrapped_experts=liger_ep_disables_fused_glu(needs_ep_layers, model_config),
@@ -240,14 +221,9 @@ def sanitize_liger_config(
 
 
 def trl_reapplication_config(model_config, applied: dict) -> dict:
-    """The config HF Trainer re-applies Liger with at ``train()``: ``applied`` with the toolkit's roles off.
-
-    HF's re-application runs the applier liger-kernel registers for the model's own ``model_type`` alone, its
-    defaults filling every omitted flag. Where the toolkit owns the family, every flag that applier declares and
-    the toolkit applier does not hand upstream goes off, as do the roles a delegating spec took over
-    (``upstream_off``); otherwise upstream's instance patch binds its variant over the family's, or, for a family
-    the toolkit patches alone that upstream also registers (DeepSeek-V4), its norm swap and fused head.
-    """
+    """The config HF Trainer re-applies Liger with at ``train()``: ``applied`` with toolkit-owned roles off. HF runs
+    the upstream applier for ``model_type``, its defaults filling omitted flags, whose instance patch would bind over
+    the family's."""
     toolkit = _toolkit_applier(*_resolve_applier(*_liger_model_types(model_config)))
     if toolkit is None:
         return applied
@@ -258,12 +234,8 @@ def trl_reapplication_config(model_config, applied: dict) -> dict:
 
 
 def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> None:
-    """Warn when FLCE was applied to a model whose trainer's loss can never engage it.
-
-    A trainer computing its loss outside the model's forward passes no ``labels``, so the fused path never
-    engages. The load-time patch site does not know the trainer and re-applying would not unpatch the
-    forward, so this warns instead.
-    """
+    """Warn when FLCE was applied but the trainer's loss passes no ``labels``; the patch site does not know the trainer
+    and re-applying would not unpatch the forward."""
     applied = getattr(model_config, LIGER_APPLIED_CONFIG_ATTR, None) or {}
     if applied.get("fused_linear_cross_entropy") and is_global_main_process():
         logger.warning(
@@ -275,7 +247,6 @@ def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> Non
 
 
 def _layered_liger_config(model_type: str, user_overrides: dict) -> dict:
-    """The shared Liger defaults under the family's own and the user's overrides."""
     return {**_LIGER_DEFAULTS, **_PER_MODEL_DEFAULTS.get(model_type, {}), **user_overrides}
 
 
@@ -295,9 +266,8 @@ def _build_liger_config(
     requested_kernels: frozenset[str],
     wrapper_head: bool,
 ) -> dict:
-    """The flags ``apply_fn`` is called with: the toolkit and per-model defaults under the user's overrides, the
-    fused loss off under a multimodal wrapper's own head, CE yielding to a requested FLCE, the applier's own
-    default-off flags kept off, and every key the applier does not accept dropped."""
+    """The flags ``apply_fn`` is called with: defaults under the user's overrides, no fused loss under a wrapper's own
+    head, CE yielding to a requested FLCE, the applier's default-off flags kept off, unaccepted keys dropped."""
     signature_params = inspect.signature(apply_fn).parameters
     valid_params = set(signature_params.keys())
 
@@ -332,8 +302,7 @@ def _build_liger_config(
                 )
             config["cross_entropy"] = False
 
-    # An applier declaring one of these ``False`` states Liger's kernel cannot serve the family; read
-    # off the applier so a family added upstream is covered.
+    # An applier declaring one of these ``False`` states Liger cannot serve the family; covers upstream additions.
     for name in _APPLIER_DEFAULT_OFF_FLAGS:
         parameter = signature_params.get(name)
         if parameter is not None and parameter.default is False and name not in user_overrides:
@@ -357,16 +326,11 @@ def _apply_liger_for_standard_models(
     fallback_model_type: str | None = None,
     requested_kernels: frozenset[str] = frozenset(),
 ) -> dict | None:
-    """Apply the applier :func:`_resolve_applier` picks; returns the applied (signature-filtered) config, or
-    ``None`` when none ran.
-
-    A family no applier covers warns, since ``use_liger_kernel`` defaults on, and raises when the config
-    asked for a specific kernel nothing can deliver.
-    """
+    """Apply the resolved applier; returns the applied config, or ``None`` when none ran. A family no applier covers
+    warns, as ``use_liger_kernel`` defaults on, and raises when a specific kernel was requested."""
     resolved_type, apply_fn = _resolve_applier(model_type, fallback_model_type)
-    # Resolved through the text tower of a multimodal wrapper: the checkpoint loads as the wrapper
-    # class, whose own head runs. The applier's fused loss patches the tower's `*ForCausalLM`, which
-    # that model never instantiates, so it would report as applied while the logits plane materializes.
+    # Resolved through a multimodal wrapper's text tower: the fused loss patches the tower's `*ForCausalLM`, which that
+    # model never instantiates, so it would report as applied while the logits plane materializes.
     wrapper_head = apply_fn is not None and resolved_type != model_type
     if wrapper_head:
         suffix = " (toolkit applier)" if resolved_type in _TOOLKIT_LIGER_APPLIERS else ""
@@ -435,20 +399,14 @@ def apply_liger_kernel(
     cp_size: int = 1,
     pp_size: int = 1,
 ) -> dict | None:
-    """Apply Liger Kernel before model loading, under the per-family defaults and the safety rules of
-    :func:`sanitize_liger_config`.
-
-    Returns the effective applied config, or ``None`` when nothing was applied, and records it run-scoped
-    on ``model_config`` under :data:`LIGER_APPLIED_CONFIG_ATTR`; under CP, also whether the wrapper runs the
-    fused loss, under :data:`LIGER_CP_FUSED_LOSS_ATTR`.
-    """
+    """Apply Liger before model loading; returns the applied config or ``None`` and records it run-scoped on
+    ``model_config``, under CP also whether the wrapper runs the fused loss."""
     model_type, fallback_type = _liger_model_types(model_config)
     patch_config = liger_kernel_config or {}
     if cp_size > 1:
         cp_fused_loss = _resolves_fused_loss(model_type, fallback_type, patch_config)
         set_config_field_run_scoped(model_config, LIGER_CP_FUSED_LOSS_ATTR, cp_fused_loss)
-        # Taken out of the patch request rather than forced off under a warning: the CP override still keeps the
-        # model's own head unpatched, and the wrapper serves the request.
+        # Out of the patch request, as the CP override keeps the model's head unpatched and the wrapper serves it.
         patch_config = {key: value for key, value in patch_config.items() if key != "fused_linear_cross_entropy"}
         if cp_fused_loss and is_global_main_process():
             logger.info(
@@ -466,8 +424,7 @@ def apply_liger_kernel(
         pp_size=pp_size,
     )
 
-    # The raw dict, not the sanitized one: the fold writes `swiglu: False` under EP, which is the
-    # toolkit's decision and must not read as a user request on a family nothing covers.
+    # The raw dict: the fold writes `swiglu: False` under EP, a toolkit decision that must not read as a user request.
     requested = frozenset(key for key, value in (liger_kernel_config or {}).items() if value)
     applied_config = _apply_liger_for_standard_models(model_type, user_overrides, fallback_type, requested)
     set_config_field_run_scoped(model_config, LIGER_APPLIED_CONFIG_ATTR, applied_config)
@@ -475,13 +432,9 @@ def apply_liger_kernel(
 
 
 def finalize_liger_after_direct_load(training_config, original_use_liger: bool, model) -> None:
-    """Reconcile TRL's ``use_liger_kernel`` flag after a direct model load already applied Liger.
-
-    Reads the effective config :func:`apply_liger_kernel` applied. Under ``fused_linear_cross_entropy``
-    the model returns no logits, so the flag must stay on or TRL slices ``None`` in its metric path, and
-    pinning the applied config makes TRL's re-application an identical re-patch. Otherwise the flag is
-    cleared, so TRL does not re-apply Liger with its own defaults over the patched modules.
-    """
+    """Reconcile TRL's ``use_liger_kernel`` after a direct load applied Liger. Under FLCE the model returns no logits,
+    so the flag stays on (or TRL slices ``None``) with the applied config pinned; otherwise it clears, so TRL does not
+    re-apply over the patches."""
     if not original_use_liger:
         return
     applied = getattr(model.config, LIGER_APPLIED_CONFIG_ATTR, None)

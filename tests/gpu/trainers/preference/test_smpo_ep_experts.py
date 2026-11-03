@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""
-Test: native grouped-LoRA on EP experts with a NON-SFT trainer (SMPOTrainer, EP=2).
-
-Expert-LoRA mechanics (adapter build, grad-sync, save) live in the shared DistributedTrainerMixin /
-EP layers, so this confirms they ride a preference trainer's path end to end — frozen base + only
-expert adapters trainable, adapters move, and trainer.save_model writes a standalone adapter file.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_ep_experts.py
-"""
+"""Native grouped LoRA on EP experts through a non-SFT trainer (SMPOTrainer, EP=2): frozen base, adapters move,
+standalone adapter file."""
 
 import math
 import os
@@ -40,7 +31,7 @@ NUM_TRAIN_SAMPLES = 64
 MAX_LENGTH = 2048
 MAX_PROMPT_LENGTH = 1024
 NUM_TRAIN_STEPS = 5
-LEARNING_RATE = 1e-3  # large so adapters move clearly
+LEARNING_RATE = 1e-3  # Large so adapters move clearly.
 SEED = 42
 
 
@@ -121,7 +112,6 @@ def run(ctx) -> dict:
     )
     checks["adapters_moved"] = b_moved
 
-    # trainer.save_model adapter-only write (save_expert_lora_adapters)
     save_dir = os.path.join(ctx.output_dir, "adapter")
     trainer.save_model(save_dir)
     ctx.barrier()

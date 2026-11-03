@@ -1,6 +1,4 @@
-"""S3 transport: the boto3 ``S3Client`` of one bucket (existence, listing, deletion, folder transfers), the
-bounded parallel transfer pool and the default-bucket helpers. Dataset trees go through
-:mod:`halo.data.sources.s3_dataset_store`."""
+"""S3 transport: the boto3 ``S3Client`` of one bucket, the bounded parallel transfer pool, default-bucket helpers."""
 
 import os
 import shutil
@@ -38,16 +36,14 @@ _S3_DELETE_BATCH = 1000
 
 
 def default_bucket(needed_by: str, remedy: str) -> str:
-    """The bucket a key-only S3 path lives in: ``HALO_S3_DEFAULT_BUCKET``. Unset, it raises naming ``needed_by``,
-    the input that gave no bucket, and ``remedy``, the way to give one there."""
+    """``HALO_S3_DEFAULT_BUCKET``; unset, raises naming ``needed_by`` and ``remedy``."""
     if not DEFAULT_BUCKET:
         raise ValueError(f"No S3 bucket for {needed_by}: {remedy}, or set HALO_S3_DEFAULT_BUCKET to your own bucket.")
     return DEFAULT_BUCKET
 
 
 def parallel_s3_transfer(items: list, transfer_one: Callable[[Any], int], *, desc: str, show_progress: bool) -> None:
-    """Run ``transfer_one`` over ``items`` on a bounded thread pool, re-raising the first per-file error;
-    the byte counts it returns feed the progress bar."""
+    """A bounded thread pool, re-raising the first per-file error; returned byte counts feed the progress bar."""
     if not items:
         return
     pbar = tqdm(total=len(items), desc=desc, unit="file") if show_progress else None
@@ -63,8 +59,7 @@ def parallel_s3_transfer(items: list, transfer_one: Callable[[Any], int], *, des
 
 
 def _is_aws_configured(session: botocore.session.Session, name: str) -> bool:
-    """Whether the AWS environment or the active profile sets botocore config variable ``name``, botocore's
-    built-in default left out."""
+    """Whether the AWS environment or profile sets ``name``, botocore's built-in default left out."""
     config_name, env_vars, _default, typecast = session.session_var_map[name]
     chain = ConfigChainFactory(session=session).create_config_chain(
         env_var_names=env_vars, config_property_names=config_name, conversion_func=typecast
@@ -73,9 +68,8 @@ def _is_aws_configured(session: botocore.session.Session, name: str) -> bool:
 
 
 def _retry_defaults(session: botocore.session.Session) -> dict[str, Any]:
-    """The client's ``retries`` config: 4 total attempts and standard mode (botocore's own default is legacy), each
-    only where neither ``AWS_MAX_ATTEMPTS`` / ``AWS_RETRY_MODE`` nor the profile sets it, so botocore reads the
-    rest from them."""
+    """4 total attempts and standard mode (botocore's default is legacy), each only where neither ``AWS_MAX_ATTEMPTS``
+    / ``AWS_RETRY_MODE`` nor the profile sets it."""
     retries: dict[str, Any] = {}
     if not _is_aws_configured(session, "max_attempts"):
         retries["total_max_attempts"] = 4
@@ -85,7 +79,6 @@ def _retry_defaults(session: botocore.session.Session) -> dict[str, Any]:
 
 
 def _local_files(root_path: str) -> list[tuple[str, str, int]]:
-    """``(path, path relative to root_path, size)`` of every file under ``root_path``, in walk order."""
     files = []
     for root, _dirs, names in os.walk(root_path):
         for name in names:
@@ -96,12 +89,7 @@ def _local_files(root_path: str) -> list[tuple[str, str, int]]:
 
 @dataclass
 class S3Client:
-    """One bucket's boto3 client: existence, listing, deletion and folder transfers.
-
-    Credentials default to the standard AWS chain when unset; ``endpoint_url`` targets S3-compatible services.
-    Retries follow ``AWS_MAX_ATTEMPTS`` / ``AWS_RETRY_MODE`` and the profile, the toolkit's defaults filling only
-    what they leave unset.
-    """
+    """One bucket's client; credentials default to the AWS chain, ``endpoint_url`` targets S3-compatible services."""
 
     bucket: str | None = None  # None takes default_bucket()
     aws_access_key_id: str | None = None
@@ -130,7 +118,6 @@ class S3Client:
         self.boto_client = boto3.Session(botocore_session=core_session, **session_kwargs).client("s3", **client_kwargs)
 
     def get_storage_options(self) -> dict:
-        """This client's credentials and endpoint as s3fs ``storage_options`` (empty under the default chain)."""
         opts = {}
         if self.aws_access_key_id:
             opts["key"] = self.aws_access_key_id
@@ -147,7 +134,6 @@ class S3Client:
 
     @staticmethod
     def full_key(key: str, subfolder: str | None = None) -> str:
-        """``key`` under an optional ``subfolder``, surrounding slashes normalized."""
         if subfolder:
             subfolder = subfolder.strip("/")
             key = key.strip("/")
@@ -155,7 +141,6 @@ class S3Client:
         return key.strip("/")
 
     def s3_uri(self, key: str, subfolder: str | None = None) -> str:
-        """The full ``s3://`` URI of ``key`` (under ``subfolder``) in this client's bucket."""
         return f"s3://{self.bucket}/{self.full_key(key, subfolder)}"
 
     def object_exists(self, key: str, subfolder: str | None = None) -> bool:
@@ -196,8 +181,7 @@ class S3Client:
     def list_objects(
         self, prefix: str = "", subfolder: str | None = None, recursive: bool = True, max_keys: int = 1000
     ) -> list[dict[str, Any]]:
-        """Objects under ``prefix`` as ``Key``/``FullKey``/``Size``/``LastModified``/``Type`` dicts; immediate
-        children only when not ``recursive``."""
+        """``Key``/``FullKey``/``Size``/``LastModified``/``Type`` dicts; immediate children unless ``recursive``."""
         full_prefix = self.full_key(prefix, subfolder)
         if full_prefix and not full_prefix.endswith("/"):
             full_prefix += "/"
@@ -233,8 +217,7 @@ class S3Client:
         return objects
 
     def delete(self, key: str, subfolder: str | None = None, recursive: bool = True) -> bool:
-        """Delete one object, or with ``recursive`` every object under the slash-anchored prefix; False when
-        nothing was deleted."""
+        """One object, or with ``recursive`` all under the slash-anchored prefix; False when nothing was deleted."""
         full_key = self.full_key(key, subfolder)
 
         if recursive:
@@ -255,8 +238,7 @@ class S3Client:
                 return False
 
     def content_entries(self, full_key: str) -> list[tuple[str, str, int]]:
-        """``(key, ETag, size)`` of every object under the prefix, raising on any listing failure (where
-        :meth:`content_fingerprint` answers ``None`` alike for an outage and an empty prefix)."""
+        """Raises on any listing failure; :meth:`content_fingerprint` answers ``None`` for outage and empty prefix."""
         return [
             (obj["Key"], obj.get("ETag", ""), obj["Size"])
             for obj in self.list_prefix_objects(full_key.rstrip("/") + "/")
@@ -275,13 +257,12 @@ class S3Client:
             return None
 
     def delete_keys(self, keys: list[str]) -> None:
-        """Delete ``keys`` in listing order, batched to :data:`_S3_DELETE_BATCH` per request."""
         for start in range(0, len(keys), _S3_DELETE_BATCH):
             batch = [{"Key": key} for key in keys[start : start + _S3_DELETE_BATCH]]
             self.boto_client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
 
     def list_prefix_objects(self, prefix: str) -> list[dict[str, Any]]:
-        """Raw object listing under an exact string prefix (no trailing-slash forcing)."""
+        """Under an exact string prefix (no trailing-slash forcing)."""
         entries = []
         paginator = self.boto_client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
@@ -296,9 +277,8 @@ class S3Client:
         overwrite: bool = True,
         show_progress: bool = False,
     ) -> str:
-        """Upload a local directory tree to S3, returning the S3 URI; an existing prefix raises unless
-        ``overwrite``. Overwriting never clears the prefix up front, and the ``metadata.json`` marker is
-        deleted first and uploaded last, so a torn upload reads as no preprocessed dataset."""
+        """Returns the S3 URI; an existing prefix raises unless ``overwrite``. Never clears the prefix up front, and
+        the ``metadata.json`` marker goes first and uploads last, so a torn upload reads as no preprocessed dataset."""
         local_path = os.path.abspath(local_path)
         if not os.path.isdir(local_path):
             raise ValueError(f"Local path is not a directory: {local_path}")
@@ -311,8 +291,8 @@ class S3Client:
             if not overwrite:
                 raise FileExistsError(f"Folder already exists: {s3_uri}. Use overwrite=True to replace.")
             logger.info(f"Overwriting existing folder at {s3_uri}")
-            # Uncapped: the stale sweep below deletes what this set does NOT contain, so a listing
-            # truncated at any max_keys would silently re-upload-and-keep objects it never saw.
+            # Uncapped: the stale sweep deletes what this set does not contain, so a truncated listing would keep
+            # objects it never saw.
             existing_keys = {entry["Key"] for entry in self.list_prefix_objects(f"{full_key}/")}
 
         files_to_upload = _local_files(local_path)
@@ -330,11 +310,10 @@ class S3Client:
             return file_size
 
         parallel_s3_transfer(bulk_items, _upload_one, desc=f"Uploading to {key}", show_progress=show_progress)
-        for item in marker_items:  # sequential and last — the parallel bulk gives no ordering
+        for item in marker_items:  # sequential and last: the parallel bulk gives no ordering
             _upload_one(item)
 
-        # Only after the complete upload: a stale shard numbering left behind would otherwise ride
-        # into the new dataset (an index-less reader globs the prefix).
+        # Only after the complete upload: a stale shard numbering would otherwise ride into the new dataset.
         stale = sorted(existing_keys - {f"{full_key}/{rel}" for _, rel, _ in files_to_upload})
         for stale_key in stale:
             self.boto_client.delete_object(Bucket=self.bucket, Key=stale_key)
@@ -353,8 +332,7 @@ class S3Client:
         overwrite: bool = True,
         show_progress: bool = False,
     ) -> str:
-        """Download an S3 prefix to ``local_path``, returning it; an existing ``local_path`` is replaced when
-        ``overwrite``, else raises."""
+        """Returns ``local_path``; an existing one is replaced when ``overwrite``, else raises."""
         full_key = self.full_key(key, subfolder)
         s3_uri = self.s3_uri(key, subfolder)
 
@@ -396,9 +374,8 @@ class S3Client:
 
 
 def build_s3_uri(path: str, subfolder: str | None = None, *, given_as: str) -> str:
-    """The S3 URI ``path`` names, without constructing a client: a full ``s3://bucket/key`` URI as given (a
-    malformed one raises), a bare key under ``subfolder`` in :func:`default_bucket`. ``given_as`` names the
-    input ``path`` came from (a CLI flag), for the unset-bucket error."""
+    """Without constructing a client: a full URI as given, a bare key under ``subfolder`` in :func:`default_bucket`.
+    ``given_as`` names the input for the unset-bucket error."""
     if parse_dataset_source(path)[0] == "s3":
         return path
     bucket = default_bucket(f"{given_as} {path!r}", "pass a full s3://<bucket>/<key> URI")

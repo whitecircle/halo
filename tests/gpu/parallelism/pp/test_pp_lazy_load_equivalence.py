@@ -1,39 +1,9 @@
 #!/usr/bin/env python
-"""Stage-aware PP loading must be bitwise identical to load-everything-then-drop.
+"""Stage-aware PP loading is bitwise identical to load-everything-then-drop.
 
-The stage-aware loader reads only its stage's decoder layers out of the checkpoint and re-bases
-their keys (``layers.5`` on disk → ``layers.1`` on a stage starting at layer 4). Every decoder layer
-of a model shares its shapes, so an off-by-``lo`` rebase loads layers ``0..k`` into every stage with
-no crash, no missing key and a perfectly plausible loss curve. The only thing that catches it is
-comparing the loaded tensors themselves against a whole-model load.
-
-So this compares, per stage and per parameter/buffer:
-
-    from_pretrained(whole model) + build_pipeline_stage   ==   load_pp_stage_model + build_pipeline_stage
-
-keyed by ``global_parameter_name`` on both sides, with ``torch.equal`` — never ``allclose``: a
-tolerance would accept a wrong-but-similar layer, which is exactly the failure mode. The comparison
-is scoped to the state the checkpoint carries, which is exactly what the loader is responsible for;
-everything else on the stage is derived (recomputed RoPE buffers, a randomly-initialized absent
-head) and is checked for being finite and rank-uniform instead — two independent random draws are
-never bitwise equal. It also asserts no tensor survived on the meta device (the coverage gate) and
-that both sides agree on the layer partition.
-
-Topology: the two ranks are one stage's worth of ranks (the EP group under ``--ep 2``); each process
-walks both ``pp_rank``s of a virtual ``pp_size=2`` pipeline in turn, so every stage is checked on
-every rank. The EP process groups, the DeepEP buffers and the loader's rank-uniform gates
-(``reject_across_ranks``) are entered in the same order on both.
-
-``--head seq_cls`` loads through ``AutoModelForSequenceClassification``, whose ``score`` head is
-absent from a causal-LM checkpoint: ``from_pretrained`` random-inits it, and the stage-aware loader
-has to do the same or the head strands on the meta device and reward/classification lose PP.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/pp/test_pp_lazy_load_equivalence.py
-     [--pp_split 5,3] [--ep 2] [--head seq_cls] [--ep 2 --moe_family qwen3_moe] [--ep 2 --fp32_masters]
-
-``--fp32_masters`` saves an fp32 checkpoint and loads it with ``fp32_router`` / ``fp32_experts``: the stage
-reload skips EP layers on resume, so the stage loader's own read is the only one routers and experts get,
-and it must keep them at fp32 exactly as the EP lazy loader does.
+An off-by-``lo`` key rebase loads layers ``0..k`` into every stage with no crash and a plausible loss, so only
+``torch.equal`` catches it; a tolerance accepts a wrong-but-similar layer. ``--fp32_masters``: the stage reload skips
+EP layers on resume, so the stage loader's read is the only one routers and experts get.
 """
 
 import os
@@ -70,26 +40,21 @@ from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN
 from tests.common.rank_log import log
 
 PP_SIZE = 2
-# --pp_split lo,hi: a non-uniform partition, where an off-by-lo rebase is not masked by the
-# uniform case's equal stage sizes.
+# --pp_split lo,hi: a non-uniform partition, where equal stage sizes do not mask an off-by-lo rebase.
 PP_SPLIT = None
-# --ep 2: the same equivalence on a tiny MoE whose experts are sharded across the two ranks, so the
-# PP layer filter has to compose with the EP expert slice rather than replace it.
+# --ep 2: a tiny MoE sharded across the two ranks, so the PP layer filter must compose with the EP expert slice.
 EP_SIZE = 1
-# --head seq_cls: load a head the checkpoint does not carry, which the loader must random-init.
+# --head seq_cls: a head the checkpoint does not carry, which the loader must random-init.
 HEAD = "causal_lm"
-# --moe_family qwen3_moe: a checkpoint in the individual (per-expert-key) format, which reaches the
-# loader through ExpertFuser rather than the fused EXPERT_SHARD plan. GptOss saves its experts fused,
-# so the default --ep node never exercises the fusing path under a stage re-base.
+# --moe_family qwen3_moe: per-expert keys reach the loader through ExpertFuser; GptOss saves fused, so the default --ep
+# node never exercises the fusing path under a stage re-base.
 MOE_FAMILY = "gptoss"
-# --fp32_masters: an fp32 checkpoint loaded with fp32 routers and experts (EP only).
 FP32_MASTERS = False
 
 DTYPE = torch.bfloat16
 
 
 def _build_source_model():
-    """The tiny model whose saved checkpoint both paths read (identical on every rank)."""
     torch.manual_seed(1234)
     if EP_SIZE > 1 and MOE_FAMILY == "qwen3_moe":
         model = Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG, pad_token_id=0, eos_token_id=1))
@@ -101,12 +66,10 @@ def _build_source_model():
 
 
 def _model_class():
-    """The task head the two paths load through. ``seq_cls`` adds a head absent from the checkpoint."""
     return AutoModelForSequenceClassification if HEAD == "seq_cls" else AutoModelForCausalLM
 
 
 def _write_checkpoint(ctx) -> str:
-    """Rank 0 writes the shared safetensors checkpoint; every rank reads it."""
     suffix = "_fp32" if FP32_MASTERS else ""
     path = os.path.join(tempfile.gettempdir(), f"pp_lazy_load_equivalence_ep{EP_SIZE}_{MOE_FAMILY}{suffix}")
     if ctx.rank == 0:
@@ -116,7 +79,6 @@ def _write_checkpoint(ctx) -> str:
 
 
 def _reference_stage(ckpt: str, pp_rank: int, ep_config, device):
-    """The whole-model path: load everything, then drop the other stages' layers."""
     if ep_config is None:
         model = _model_class().from_pretrained(ckpt, dtype=DTYPE, attn_implementation="eager").to(device)
     else:
@@ -127,11 +89,8 @@ def _reference_stage(ckpt: str, pp_rank: int, ep_config, device):
 
 
 def _absent_head_is_usable(head: torch.Tensor | None, device) -> bool:
-    """The checkpoint-absent head must hold real, finite data — and the same data on every rank.
-
-    A per-rank random init is the silent failure: FSDP2 never syncs parameters, so the DP replicas
-    would train two different heads from step 1.
-    """
+    """Real, finite and the same on every rank: FSDP2 never syncs parameters, so a per-rank random init trains two
+    heads."""
     if head is None or head.is_meta or not bool(torch.isfinite(head).all()) or float(head.abs().sum()) == 0.0:
         return False
     rank0 = head.float().to(device)
@@ -140,11 +99,8 @@ def _absent_head_is_usable(head: torch.Tensor | None, device) -> bool:
 
 
 def _stage_aware_stage(ckpt: str, pp_rank: int, ep_config, device):
-    """The stage-aware path: stream only this stage's layers, then finish the split.
-
-    Returns the stage plus the task head captured before the split — it is materialized on every
-    stage at load and dropped from all but the last.
-    """
+    """Also returns the task head captured before the split: materialized on every stage, dropped from all but the
+    last."""
     del device
     model = _load_stage_lazy(
         ckpt,
@@ -174,8 +130,7 @@ def run(ctx):
 
     ctx.on_teardown(_remove_checkpoint)
 
-    # One EP group spanning the whole world: the two ranks are one stage's ranks, and the virtual
-    # pipeline below is walked by both of them.
+    # One EP group spanning the world: the two ranks are one stage's ranks, and both walk the virtual pipeline below.
     ep_config = (
         EPConfig(
             ep_size=EP_SIZE,
@@ -191,16 +146,15 @@ def run(ctx):
         else None
     )
 
-    # The checkpoint's own key set, in the unsplit model's naming — the keys both paths must carry.
+    # The keys both paths must carry, in the unsplit model's naming.
     checkpoint_keys = set(resolve_checkpoint_weights(ckpt).weight_map)
 
     checks, metrics = {}, {}
     worst_mismatch = None
     total_compared = 0
 
-    # Only rank 0 built and wrote the checkpoint above, so its RNG is one draw ahead. Re-seed every
-    # rank identically — the property the absent-head init relies on, which production gets from
-    # configure_training_run's set_seed before the model load.
+    # Only rank 0 wrote the checkpoint, so its RNG is one draw ahead. Production gets this identical seed, which the
+    # absent-head init relies on, from configure_training_run's set_seed.
     ctx.broadcast_seed(1234)
     head_initialized = True
 
@@ -216,9 +170,8 @@ def run(ctx):
             head_initialized &= _absent_head_is_usable(head, device)
         new_tensors, new_stranded = ppeq.snapshot_stage(stage, buffers=True)
         new_range = stage.layer_range
-        # The EP layers hold their expert slices as their own attributes (``mlp.gate_up_proj``), not under the
-        # checkpoint's keys (``mlp.experts.gate_up_proj``): a comparison scoped to checkpoint keys alone would
-        # never look at the experts both loaders are responsible for.
+        # EP layers hold expert slices as their own attributes (``mlp.gate_up_proj``), outside the checkpoint's keys
+        # (``mlp.experts.gate_up_proj``), so a comparison scoped to checkpoint keys alone would never see the experts.
         expert_banks = {
             stage.global_parameter_name(f"{path}.{name}")
             for path, layer in named_ep_layers(stage)
@@ -229,9 +182,8 @@ def run(ctx):
 
         checks[f"stage{pp_rank}_same_layer_range"] = ref_range == new_range
         checks[f"stage{pp_rank}_no_meta_tensors"] = not ref_stranded and not new_stranded
-        # The two paths may differ on recomputed, non-checkpoint buffers (the stage-aware path runs
-        # finalize_loaded_model's rotary fixers, which a plain from_pretrained does not need). Any key
-        # the checkpoint carries must be present on both sides — that is the property under test.
+        # The paths may differ on recomputed non-checkpoint buffers (the stage-aware path runs finalize_loaded_model's
+        # rotary fixers). Any key the checkpoint carries must be on both sides.
         key_diff = set(ref_tensors) ^ set(new_tensors)
         checks[f"stage{pp_rank}_no_checkpoint_key_diff"] = not (key_diff & checkpoint_keys)
         if ref_stranded or new_stranded:
@@ -251,14 +203,14 @@ def run(ctx):
         total_compared += len(compared)
         if mismatched and worst_mismatch is None:
             worst_mismatch = (pp_rank, mismatched[:5])
-        # Vacuity guard: an empty comparison is the signature of a broken name map, not a pass.
+        # An empty comparison signals a broken name map.
         checks[f"stage{pp_rank}_bitwise_identical"] = bool(compared) and not mismatched
         checks[f"stage{pp_rank}_covers_its_layers"] = sum(1 for name in compared if ".layers." in name) >= (
             new_range[1] - new_range[0]
         )
         if FP32_MASTERS:
-            # Bitwise agreement alone would pass if both sides rounded alike; the masters must also be
-            # fp32 on both sides and carry precision bf16 cannot hold.
+            # Bitwise agreement passes if both sides rounded alike; the masters must also carry precision bf16 cannot
+            # hold.
             masters = [name for name in compared if new_tensors[name].dtype == torch.float32]
             checks[f"stage{pp_rank}_masters_fp32_on_both_sides"] = bool(masters) and all(
                 ref_tensors[name].dtype == torch.float32 for name in masters
@@ -281,8 +233,7 @@ def run(ctx):
         del ref_tensors, new_tensors
         cleanup_memory()
 
-    # The stages together must still cover the whole model — a partition both paths agree on being
-    # wrong the same way would otherwise pass every check above.
+    # A partition both paths agree on being wrong the same way would otherwise pass every check above.
     torch.manual_seed(1234)
     full_partition = resolve_layer_partition(_build_source_model(), PP_SIZE, PP_SPLIT)
     checks["partition_covers_every_layer"] = full_partition[0][0] == 0 and all(
@@ -292,8 +243,7 @@ def run(ctx):
         checks["manual_split_honored"] = [hi - lo for lo, hi in full_partition] == PP_SPLIT
 
     if HEAD == "seq_cls":
-        # The head the checkpoint does not carry must exist, hold real data, and be identical on
-        # every rank — a per-rank random init would diverge the FSDP replicas from step 1.
+        # A per-rank random init would diverge the FSDP replicas from step 1.
         checks["absent_head_initialized"] = head_initialized
     metrics["tensors_compared"] = total_compared
     metrics["ep_size"] = EP_SIZE

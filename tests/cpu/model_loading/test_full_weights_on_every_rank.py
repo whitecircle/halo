@@ -1,16 +1,5 @@
-"""Every load through the toolkit's weight funnel holds the checkpoint's weights on every rank under accelerate's
-rank-0-only loading.
-
-With ``ACCELERATE_USE_FSDP`` and ``FSDP_CPU_RAM_EFFICIENT_LOADING`` on (``fsdp2_full_config.yaml``),
-``from_pretrained`` replaces the weights off each node's local rank 0 with a CPU zero copy and leaves them to the
-broadcast in ``accelerator.prepare``. A frozen reference or teacher never gets it, and the policy is that zero copy
-until it does, so a reference sweep at construction or a teacher placed beside the policy fails. ``from_pretrained_verified``, the
-funnel every policy, reference and teacher load goes through, must load the full weights on every rank and leave the
-variable as it found it. The control is a plain ``from_pretrained`` under the same environment, which must come back
-zero on rank 1: it keeps the test inside the condition it guards.
-
-    python tests/cpu/model_loading/test_full_weights_on_every_rank.py
-"""
+"""The toolkit's weight funnel holds full weights on every rank under accelerate's rank-0-only loading, which zeroes
+other ranks and never broadcasts to a frozen reference."""
 
 import json
 import os

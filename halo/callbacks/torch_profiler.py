@@ -1,7 +1,5 @@
-"""Schedule-based :mod:`torch.profiler` capture for the HF Trainer loop: a bounded ``wait`` → ``warmup`` →
-``active`` window writing per-rank artifacts (Chrome trace, memory timeline, top-ops table, optional CUDA
-memory-snapshot pickle). Only global rank 0 profiles unless ``ranks`` says more.
-"""
+"""Schedule-based :mod:`torch.profiler` capture for the HF Trainer loop, writing per-rank artifacts over a bounded
+window. Only global rank 0 profiles unless ``ranks`` says more."""
 
 from __future__ import annotations
 
@@ -26,17 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 class TorchProfilerCallback(TrainerCallback):
-    """:class:`torch.profiler.profile` over a step schedule.
-
-    Args:
-        output_dir: per-rank artifact directory (defaults under ``HALO_DATA_ROOT``).
-        wait/warmup/active/repeat: the profiler schedule; the trace covers the ``active`` window.
-        ranks: which global ranks profile — ``"0"`` (default), ``"all"``, or a comma list ``"0,8"``.
-        record_shapes/profile_memory/with_stack: forwarded to profile (``with_stack`` is what flame
-            graphs need, ``profile_memory`` the memory timeline).
-        memory_snapshot: also record CUDA allocation history over the window and dump a ``.pickle``.
-        label: filename prefix for artifacts.
-    """
+    """``torch.profiler.profile`` over a step schedule. ``ranks`` is ``"0"``, ``"all"`` or a list like ``"0,8"``.
+    ``with_stack`` is what flame graphs need, ``profile_memory`` the memory timeline; ``memory_snapshot`` also dumps
+    CUDA allocation history over the window as a ``.pickle``."""
 
     def __init__(
         self,

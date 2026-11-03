@@ -1,5 +1,5 @@
-"""Grow a model's vocabulary by the patterns that tokenize to more than one token, mean-initializing the new
-embedding rows, and save the patched checkpoint as a new base (optionally with a chat template and neutralized sinks)."""
+"""Grow a model's vocabulary by the patterns that tokenize to more than one token, mean-initializing the new embedding
+rows, and save the patched checkpoint as a new base (optionally with a chat template and neutralized sinks)."""
 
 import logging
 
@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 def filter_patterns_needing_multiple_tokens(
     tokenizer: PreTrainedTokenizer, patterns: list[str]
 ) -> list[tuple[str, int]]:
-    """Filter patterns that currently use more than 1 token."""
     patterns_to_add = []
     for pattern in patterns:
         tokens = tokenizer.encode(pattern, add_special_tokens=False)
@@ -44,11 +43,7 @@ def add_tokens_to_model(
     tokenizer: PreTrainedTokenizer,
     patterns: list[str],
 ) -> int:
-    """
-    Add new tokens to tokenizer and resize model embeddings.
-
-    Returns the number of tokens added.
-    """
+    """Add tokens to the tokenizer and resize the embeddings; returns the number added."""
     original_vocab_size = len(tokenizer)
     logger.info(f"Original vocabulary size: {original_vocab_size}")
 
@@ -80,9 +75,8 @@ def add_tokens_to_model(
 
     logger.info(f"Model embeddings shape before: {model.get_input_embeddings().weight.shape}")
 
-    # Grow only. Models like gpt-oss ship an embedding padded larger than len(tokenizer): the rows
-    # above len(tokenizer) are unassigned and every special (harmony EOS, <|call|>) sits below it, so a
-    # shrink recovers only padding and any target under len(tokenizer) cuts the specials.
+    # Grow only. gpt-oss ships an embedding padded past len(tokenizer) with every special (harmony EOS, <|call|>) below
+    # it, so a shrink recovers only padding and any target under len(tokenizer) cuts the specials.
     current_embedding_size = model.get_input_embeddings().weight.shape[0]
     if new_vocab_size > current_embedding_size:
         model.resize_token_embeddings(new_vocab_size)
@@ -123,15 +117,12 @@ def patch_vocabulary(
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     trust_remote_code: bool = False,
 ) -> None:
-    """Add ``patterns`` to ``model_id``'s vocabulary (mean-initialized rows), optionally set its chat template and
-    neutralize its sinks, and save the patched checkpoint to ``output_dir`` as a new base."""
-    # Refused up front: an in-place patch has no undo, and a per-rank EP/TP-sharded source would load
-    # with randomly initialized experts (missing keys only warn) while the patched save looked
-    # complete.
+    """Add ``patterns`` to the vocabulary (mean-initialized rows), optionally set a chat template and neutralize sinks,
+    and save to ``output_dir`` as a new base."""
+    # An in-place patch has no undo, and a per-rank source would load random experts while the save looked complete.
     reject_in_place_conversion(model_id, output_dir)
     reject_partial_checkpoint(model_id)
-    # Without --device_map the whole model lands in host RAM, and the patched output is about the
-    # source's size on disk (not reported for a Hub id, where there is nothing local to measure).
+    # Without --device_map the whole model lands in host RAM; the output is about the source's size on disk.
     preflight_model_load_resources(model_id, output_dir, tool="patch_vocab", device_map=device_map)
 
     logger.info("PATCH VOCABULARY SCRIPT")
@@ -143,9 +134,7 @@ def patch_vocabulary(
     if patterns:
         logger.info(f"Patterns to process: {len(patterns)}")
 
-    # Full processor for VLMs, whose processor config and chat template have to survive the save, else
-    # a plain tokenizer. New tokens go into this object's tokenizer, so the patched VLM reloads as
-    # multimodal.
+    # The full processor for VLMs, so the patched checkpoint reloads as multimodal; new tokens go into its tokenizer.
     logger.info("Loading tokenizer/processor...")
     processing_class = load_processing_class(model_id, trust_remote_code=trust_remote_code)
     if processing_class is None:
@@ -156,10 +145,8 @@ def patch_vocabulary(
         set_run_chat_template(tokenizer, load_chat_template(chat_template))
         adopt_tokenizer_chat_template(processing_class)
 
-    # auto_load_model resolves the widest Auto* class (AutoModelForCausalLM would drop a vision
-    # tower) and routes through the checkpoint-coverage gate: a truncated or key-mismatched source
-    # would otherwise load with randomly initialized tensors and be saved as a complete-looking
-    # patch.
+    # The widest Auto* class (AutoModelForCausalLM would drop a vision tower), through the coverage gate, or a
+    # truncated source would be saved as a complete-looking patch.
     logger.info("Loading model...")
     model = auto_load_model(
         model_id,
@@ -175,13 +162,10 @@ def patch_vocabulary(
 
     if reset_sinks:
         logger.info("RESETTING ATTENTION SINKS")
-        # The trainers' own seam rather than a second walk: it neutralizes what every trainer
-        # neutralizes and stamps the sink policy the provenance record and the merge tools read, so a
-        # patched checkpoint and a trained one agree on what their sinks mean.
+        # The trainers' own seam, so a patched checkpoint and a trained one agree on what their sinks mean.
         apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED)
-        # It returns without error on a family that carries no sinks, and the stamp is the only
-        # signal it did anything: unchecked, the flag would save an untouched checkpoint that
-        # downstream tools (provenance, the merge tools, the RL sink gate) read as sink-free.
+        # It returns without error on a sink-less family and the stamp is the only signal; unchecked, the flag would
+        # save an untouched checkpoint downstream tools read as sink-free.
         if stamped_sinks_policy(model) is None:
             raise ValueError(
                 f"--reset_sinks was requested, but {model_id} (model_type="

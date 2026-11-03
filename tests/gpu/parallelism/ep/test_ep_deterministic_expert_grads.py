@@ -1,14 +1,9 @@
 #!/usr/bin/env python
-"""Under ``full_determinism``, an EP backward repeats bit for bit, expert weight gradients included.
+"""Under ``full_determinism``, an EP backward repeats bit for bit, expert weight gradients included; body in
+``tests/common/ep_determinism.py``.
 
-The backward-replay body (``tests/common/ep_determinism.py``) on GPT-OSS under every two-rank layout and
-on every other family of :data:`~tests.common.tiny_models.TINY_MOE_FAMILIES` under ep2. DeepEP's default
-dispatch claims receive slots with atomics, so without the deterministic buffer every expert weight
-gradient is summed in a different order on each pass; each family's own expert kernels (bias gathers,
-clamped GLUs, separate halves, external routers) sit between that dispatch and the expert weight gradients.
-
-    torchrun --nproc_per_node=2 \\
-        tests/gpu/parallelism/ep/test_ep_deterministic_expert_grads.py --family gpt_oss --mode ep2
+DeepEP's default dispatch claims receive slots with atomics, so without the deterministic buffer every expert gradient
+sums in a different order.
 """
 
 from tests.common.ep_determinism import WORLD_SIZE, determinism_parser, run_backward_replay

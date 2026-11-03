@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""A GLM-5 Next tree row on the real kernels matches every example run alone.
+"""A GLM-5 Next tree row on the real kernels matches every example run alone, against the fp32 stock forward.
 
-The CPU tier runs the KDA layers through the toolkit's torch fallbacks and the sparse-attention
-products at fp32; this pins what only the CUDA path can break. The KDA scan runs fla's ``chunk_kda``
-with one initial state per varlen sequence and a gradient through both states, its convolution runs
-``causal_conv1d`` over a gathered row with ``seq_idx``, and the sparse attention runs its products on
-the tensor cores with fp32 results.
-
-A tiny GLM-5 Next runs a row of trees of several shapes, in bf16 and in fp32, against the fp32 stock
-forward of each example on its own: hidden states and mixer gradients, the same row without its plan
-as a negative control, and the KDA warm-up running every state variant a training row compiles. Its
-top-k exceeds every path, so each query attends all its visible pools: a selection cut ranks scores
-that the tree and the example alone reduce in different orders, and a near-tie swapped there moves a
-token by a whole pool — that would measure rounding, not the mixers. The selection itself is pinned
-on an fp64 model, on paths that outgrow a 16-key top-k: the tree's key sets against the stock indexer's
-on every example. Both score in fp32 there, from inputs that agree to fp64 rounding, so only two pools
-within fp32 rounding of each other at a cut could split them. Every expert is active: top-k routing
-flips on bf16 noise, which would measure the router.
+Top-k exceeds every path, since a selection cut ranks scores the two reduce in different orders, and a near-tie moves a
+token by a whole pool. The selection itself is pinned on an fp64 model, where only pools within fp32 rounding at a cut
+could split it. Every expert is active: top-k routing flips on bf16 noise, which would measure the router.
 """
 
 import copy
@@ -42,25 +29,22 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.trees import concat_columns, example_rows, randomize_indexer_pools, tree_columns
 
 VOCAB = 1024
-BF16_REL_TOL = 4e-2  # bf16 through four layers against fp32
+BF16_REL_TOL = 4e-2  # bf16 through four layers against fp32.
 FP32_REL_TOL = 1e-3
 GRAD_COSINE_FLOOR = 0.999
-LEAK_REL_FLOOR = 0.3  # a row without its plan must be far from the reference, or the checks compare nothing
+LEAK_REL_FLOOR = 0.3  # A row without its plan must be far from the reference, or the checks compare nothing.
 FAMILY = "glm5_next_text"
 # Every expert active; a top-k past every path of the row (the longest is 406 tokens); the tail on.
 OVERRIDES = {"index_topk": 512, "index_kpool_always_select_tail": True, "num_experts_per_tok": 8}
-# The selection check: eight indexer heads (fewer score many pools exactly zero, a tie the stock
-# top-k breaks arbitrarily) and sixteen keys, so every path past twenty tokens selects.
+# Eight indexer heads (fewer score many pools exactly zero, a tie stock top-k breaks arbitrarily) and sixteen keys, so
+# paths past twenty tokens select.
 SELECTING = {"index_n_heads": 8, "index_topk": 16}
-# (takes a state, returns one, normalizes query and key itself) of the recurrence calls along a
-# chain: its root, its middle, its leaf. A tree row is normalized once, ahead of the depths.
+# (takes a state, returns one, normalizes query and key itself) along a chain: root, middle, leaf. A tree row
+# normalizes once.
 RECURRENCE_STATE_VARIANTS = {(False, True, False), (True, True, False), (True, False, False)}
 
 
 def _tree_row(generator: torch.Generator) -> dict[str, torch.Tensor]:
-    """Trees of several shapes in one row: trunks shorter and longer than a pool's reach, a second
-    level, branches from 2 to 70 tokens, and a plain document."""
-
     def tokens(n: int) -> list[int]:
         return torch.randint(0, VOCAB, (n,), generator=generator).tolist()
 
@@ -101,8 +85,6 @@ def _mixer_gradients(model) -> torch.Tensor:
 
 
 def _alone(model, row, examples) -> tuple[torch.Tensor, torch.Tensor]:
-    """Hidden states of every example run on its own by the stock forward, laid back on the row, and
-    the mixer gradients of the summed loss over their trained tokens."""
     model.zero_grad(set_to_none=True)
     hidden = torch.zeros(len(row["input_ids"]), model.config.get_text_config().hidden_size, device="cuda")
     for rows in examples:
@@ -113,9 +95,7 @@ def _alone(model, row, examples) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _record_recurrence_states(module, name: str) -> set[tuple[bool, bool, bool]]:
-    """Note, for every call of the recurrence from here on, whether it took a state, whether it
-    returned one and whether it normalized. Installed before tree attention, so it sees what the
-    kernel is asked."""
+    """Installed before tree attention, so it sees what the kernel is asked."""
     seen: set[tuple[bool, bool, bool]] = set()
     stock = getattr(module, name)
 

@@ -1,8 +1,5 @@
-"""Rank-coordinated dataset map, filter, whole-dataset transform and pack.
-
-The load rank runs each operation to a deterministic cache file and the other ranks load it back, so no rank
-repeats the work or keeps its own copy. Set ``HF_DATASETS_CACHE`` for a cache directory every rank shares.
-"""
+"""Rank-coordinated dataset map, filter, whole-dataset transform and pack: the load rank runs each operation to a
+deterministic cache file and the others load it back. Set ``HF_DATASETS_CACHE`` to a directory all ranks share."""
 
 import contextlib
 import functools
@@ -39,13 +36,12 @@ from halo.runtime.ranks import get_global_rank, get_local_world_size, is_local_m
 
 logger = logging.getLogger(__name__)
 
-# The cache dir :func:`scratch_dataset_maps` redirects coordinated operations to, for its block.
+# Where :func:`scratch_dataset_maps` redirects coordinated operations, for its block.
 _scratch_cache_dir: str | None = None
 
 # The rows TRL's ``pack_dataset`` packs as one unit: its batched map leaves ``batch_size`` at the datasets default.
 _PACK_BATCH_ROWS = inspect.signature(Dataset.map).parameters["batch_size"].default
 
-# What TRL's ``pack_dataset`` maps over each batch, by strategy.
 _TRL_PACKERS = {
     "bfd": functools.partial(_pack_bfd, on_seq_length_overflow="truncate"),
     "bfd_split": functools.partial(_pack_bfd, on_seq_length_overflow="split"),
@@ -54,7 +50,7 @@ _TRL_PACKERS = {
 
 
 def dataset_num_proc_override() -> int | None:
-    """``HALO_DATASET_NUM_PROC``, or ``None`` while it is unset; below 1 raises."""
+    """``None`` while unset; below 1 raises."""
     name = "HALO_DATASET_NUM_PROC"
     override = env_int(name, None)
     if override is not None and override < 1:
@@ -66,10 +62,9 @@ def dataset_num_proc_override() -> int | None:
 
 
 def _resolve_dataset_num_proc() -> int:
-    """Default map/filter worker processes, ``HALO_DATASET_NUM_PROC`` overriding: three quarters of the CPUs this
-    process may use, at most 64. The load rank runs a coordinated operation while its node's other ranks wait
-    and then read its cache files back, whatever their own count; those ranks compute only on a per-rank key (a
-    pre-sharded load), sharing the count then (:func:`coordinated_dataset_operation`)."""
+    """Three quarters of the CPUs this process may use, at most 64. The load rank runs a coordinated operation while
+    its node's other ranks wait and read its cache files back; those ranks compute only on a per-rank key (a
+    pre-sharded load), sharing the count then."""
     override = dataset_num_proc_override()
     if override is not None:
         return override
@@ -81,24 +76,22 @@ DATASET_NUM_PROC = _resolve_dataset_num_proc()
 
 
 def resolve_map_num_proc(configured: int | None) -> int:
-    """``dataset_num_proc`` → map/filter worker count. Unset means the toolkit default, not 1 worker."""
+    """Unset means the toolkit default, not 1 worker."""
     return configured or DATASET_NUM_PROC
 
 
 def _maps_in_workers(num_proc: int | None) -> bool:
-    """Whether a coordinated map or filter at ``num_proc`` runs in worker processes, each task carrying a pickle of
-    the callable; at 1 or below it hands ``datasets`` ``None`` and maps in process."""
+    """At 1 or below ``datasets`` gets ``None`` and maps in process."""
     return num_proc is not None and num_proc > 1
 
 
 def datasets_cache_dir() -> str:
-    """The datasets cache dir: ``HF_DATASETS_CACHE``, else HF's default."""
     return os.environ.get("HF_DATASETS_CACHE") or str(datasets.config.HF_DATASETS_CACHE)
 
 
 def ensure_cache_dir(writer_rank: Callable[[], bool] = is_local_main_process) -> str:
-    """COLLECTIVE: :func:`datasets_cache_dir` (inside :func:`scratch_dataset_maps`, its staging dir), created by
-    ``writer_rank`` through :func:`fs_aware_makedirs`, so a read-only or full volume raises on every rank."""
+    """COLLECTIVE: :func:`datasets_cache_dir` (inside :func:`scratch_dataset_maps`, its staging dir), so a read-only or
+    full volume raises on every rank."""
     cache_dir = _scratch_cache_dir or datasets_cache_dir()
     fs_aware_makedirs(cache_dir, writer_rank=writer_rank)
     return cache_dir
@@ -125,11 +118,9 @@ def _load_map_callable(payload: bytes, cache_key: str) -> Callable:
 
 
 class _PickledOnceCallable:
-    """A multi-worker map callable, its ``fn_kwargs`` bound, that pickles itself once. ``datasets`` pickles the
-    callable into each worker's task one task after another in this process, about a second each for a captured
-    tokenizer; every task carries these bytes instead, and the workers unpickle them in parallel. ``cache_key``
-    rides along so the fingerprint ``datasets`` takes of the bytes, which hold no first-party helper's source,
-    changes with the cache name."""
+    """A multi-worker map callable that pickles itself once: ``datasets`` pickles the callable into each task serially,
+    about a second each for a captured tokenizer. ``cache_key`` rides along so the fingerprint ``datasets`` takes of
+    the bytes, which hold no helper's source, changes with the cache name."""
 
     def __init__(self, fn: Callable, fn_kwargs: dict | None, cache_key: str):
         self._fn = functools.partial(fn, **fn_kwargs) if fn_kwargs else fn
@@ -155,9 +146,8 @@ def _cached_map_or_filter(
     op_kwargs: dict,
     cache_key_extras: dict | None = None,
 ) -> Dataset | DatasetDict:
-    """Shared body of :func:`coordinated_map` / :func:`coordinated_filter`: ``operation`` names both
-    the ``datasets`` method and the cache-key namespace, so the two seams cannot drift on which kwargs
-    they refuse, which callables they reject, or what enters the cache name."""
+    """Shared body of the map and filter seams, so they cannot drift on which kwargs they refuse, which callables they
+    reject or what enters the cache name."""
     operation_name = f"{operation} operation ({desc})" if desc else f"{operation} operation"
     # Execution knobs coordinated_dataset_operation sets itself: the on-disk cache is the cross-rank transport.
     owned = sorted(set(op_kwargs) & {"keep_in_memory", "load_from_cache_file"})
@@ -191,8 +181,8 @@ def coordinated_map(
     cache_key_extras: dict | None = None,
     **map_kwargs,
 ) -> Dataset | DatasetDict:
-    """COLLECTIVE: a deterministically-cached ``dataset.map`` (:func:`coordinated_dataset_operation`);
-    ``cache_key_extras`` keys the output-affecting tunables the function's source and closure do not show."""
+    """COLLECTIVE: a deterministically-cached ``dataset.map``; ``cache_key_extras`` keys the output-affecting tunables
+    the function's source and closure do not show."""
     return _cached_map_or_filter("map", dataset, map_fn, desc, num_proc, map_kwargs, cache_key_extras)
 
 
@@ -203,13 +193,13 @@ def coordinated_filter(
     num_proc: int = DATASET_NUM_PROC,
     **filter_kwargs,
 ) -> Dataset | DatasetDict:
-    """COLLECTIVE: a deterministically-cached ``dataset.filter`` (:func:`coordinated_dataset_operation`)."""
+    """COLLECTIVE: a deterministically-cached ``dataset.filter``."""
     return _cached_map_or_filter("filter", dataset, filter_fn, desc, num_proc, filter_kwargs)
 
 
 def _run_or_record(work: Callable[[], Any], label: str) -> tuple[Any, BaseException | None]:
-    """Run ``work``, returning ``(result, failure)`` with any ``BaseException`` recorded rather than raised: a
-    rank-local raise would strand the peers in the join that follows, which raises it on every rank instead."""
+    """``(result, failure)``, any ``BaseException`` recorded: a rank-local raise would strand the peers in the join
+    that follows, which raises it on every rank."""
     logger.info(f"{label}...")
     try:
         result = work()
@@ -220,17 +210,15 @@ def _run_or_record(work: Callable[[], Any], label: str) -> tuple[Any, BaseExcept
 
 
 def _reject_operation_failure(failure: BaseException | None, operation_name: str) -> None:
-    """COLLECTIVE (store join): abort every rank when the rank that ran the operation failed; it re-raises its
-    own exception, whose type callers rely on, and the peers a ``RuntimeError`` carrying the cause. The store,
-    not NCCL, carries the join, since the peers wait out the writer's whole map."""
+    """COLLECTIVE (store join): the failing rank re-raises its own exception, whose type callers rely on, the peers a
+    ``RuntimeError`` with the cause. The store carries the join, since peers wait out the writer's whole map."""
     store_join_recorded_failure("dataset_op", failure, f"Dataset operation {operation_name!r}")
 
 
 def run_load_rank_first(work: Callable[[], Any], operation_name: str) -> Any:
-    """COLLECTIVE (two store joins): run ``work`` on the load rank (:func:`is_fs_load_rank`, per input
-    filesystem) first, then on every other rank, for work whose first run fills a cache the others read back. A
-    failure in either phase raises its cause on every rank. Never call it inside a main-first block, which would
-    hold the peers outside both joins."""
+    """COLLECTIVE (two store joins): run ``work`` on the load rank first, then every other rank, for work whose first
+    run fills a cache. A failure in either phase raises on every rank. Never call it inside a main-first block, which
+    would hold the peers outside both joins."""
     global_rank = get_global_rank()
     is_main = is_fs_load_rank()
     result, failure = None, None
@@ -250,13 +238,11 @@ def coordinated_dataset_operation(
     num_proc: int | None,
     cache_file_name: str,
 ) -> Dataset | DatasetDict:
-    """COLLECTIVE: run a dataset op under :func:`run_load_rank_first` into ``cache_file_name``, which the other
-    ranks then load; ``operation_fn`` captures the dataset. This is the rank ordering: inside a main-first block
-    ``ensure_cache_dir``'s barrier would run on the main rank alone and the store joins go off by one."""
+    """COLLECTIVE: run a dataset op under :func:`run_load_rank_first` into ``cache_file_name``, which other ranks load.
+    In a main-first block ``ensure_cache_dir``'s barrier would run on the main rank alone, skewing the store joins."""
     cache_dir = ensure_cache_dir()
 
-    # A follower computes only on a per-rank key (a pre-sharded load), and then every follower of the node maps at
-    # once, so each takes its share of the count; on a cache hit no count spawns a worker.
+    # A follower computes only on a per-rank key, when all the node's followers map at once, so each takes its share.
     if _maps_in_workers(num_proc) and not is_fs_load_rank():
         num_proc = max(1, num_proc // get_local_world_size())
     # None, not 1: HF still spawns a subprocess at num_proc=1.
@@ -273,7 +259,7 @@ def coordinated_dataset_operation(
 
     result = run_load_rank_first(functools.partial(operation_fn, **operation_kwargs), operation_name)
 
-    # HF's _fingerprint/cache_files diverge between writer and loader ranks — stamp a rank-stable key.
+    # HF's _fingerprint/cache_files diverge between writer and loader ranks, so stamp a rank-stable key.
     if isinstance(dataset, DatasetDict):
         for split, split_ds in result.items():
             stamp_cache_key(split_ds, split_cache_names[split])
@@ -285,11 +271,9 @@ def coordinated_dataset_operation(
 
 @contextlib.contextmanager
 def scratch_dataset_maps(staging_dir: str):
-    """Every map inside the block writes under ``staging_dir``, removed on exit: a coordinated operation's cache
-    file (:func:`ensure_cache_dir`) and, with HF's map cache off, every other map's output, which would otherwise
-    sit in the process-lifetime ``$TMPDIR/hf_datasets-*`` directory (``datasets`` has no setting for it, so its
-    module-level holder is swapped). For work no later run re-reads, done by one process: a rank outside the block
-    would key its caches elsewhere."""
+    """Every map inside the block writes under ``staging_dir``, removed on exit, including maps that would otherwise
+    sit in the process-lifetime ``$TMPDIR/hf_datasets-*`` (``datasets`` has no setting, so its module-level holder is
+    swapped). For work no later run re-reads, done by one process: other ranks would key elsewhere."""
     global _scratch_cache_dir
     caching = datasets.is_caching_enabled()
     held_temp_dir, held_cache_dir = hf_fingerprint._TEMP_DIR_FOR_TEMP_CACHE_FILES, _scratch_cache_dir
@@ -316,10 +300,9 @@ def coordinated_dataset_transform(
     operation_name: str,
     cache_key_extras: dict,
 ) -> Dataset:
-    """COLLECTIVE: run a whole-dataset transform that cannot take a cache file (TRL's ``_prepare_dataset``, whose
-    maps key random fingerprints) once per filesystem scope, publishing it under :func:`transform_cache_name` for
-    the other ranks and later runs to load. ``transform`` runs on the load rank alone, so it issues no
-    collective."""
+    """COLLECTIVE: run a transform that cannot take a cache file (TRL's ``_prepare_dataset``, whose maps key random
+    fingerprints) once per filesystem scope, publishing it for other ranks and later runs. ``transform`` runs on the
+    load rank alone, so it issues no collective."""
     run_token = broadcast_from_rank0(uuid.uuid4().hex)
     target = os.path.join(
         ensure_cache_dir(), transform_cache_name(operation_name, dataset, cache_key_extras, run_token)
@@ -355,8 +338,7 @@ def coordinated_map_and_filter(
     desc: str | None = None,
     cache_key_extras: dict | None = None,
 ) -> Dataset | DatasetDict:
-    """COLLECTIVE: :func:`coordinated_map`, then a filter dropping the rejection rows (:func:`is_valid_example` on
-    ``filter_field``)."""
+    """COLLECTIVE: :func:`coordinated_map`, then a filter dropping the rejection rows."""
     original_size = dataset_total_size(dataset)
 
     processed = coordinated_map(
@@ -380,8 +362,7 @@ def coordinated_map_and_filter(
 
 
 def _pack_batches(batch_starts: pa.Table, rows: Dataset, seq_length: int, strategy: str) -> pa.Table:
-    """The packed rows of each ``_PACK_BATCH_ROWS``-row batch of ``rows`` (arrow-formatted) starting at a
-    ``batch_start``, packed alone as TRL's own map packs it."""
+    """Packed rows of each ``_PACK_BATCH_ROWS``-row batch from a ``batch_start``, packed alone as in TRL's map."""
     packer = _TRL_PACKERS[strategy]
     starts = batch_starts.column("batch_start").to_pylist()
     return pa.concat_tables([packer(rows[start : start + _PACK_BATCH_ROWS], seq_length) for start in starts])
@@ -394,10 +375,9 @@ def coordinated_pack(
     split: str = "train",
     num_proc: int = DATASET_NUM_PROC,
 ) -> Dataset:
-    """COLLECTIVE: TRL's ``pack_dataset`` of ``dataset`` into a deterministic cache file the other ranks reuse
-    (:func:`coordinated_dataset_operation`), instead of a corpus copy per rank. ``num_proc`` workers pack
-    whole batches, so the rows match TRL's single-process pack at any worker count. The packed rows carry no
-    ``attention_mask``: the packing collator, their one consumer, builds its own and drops it."""
+    """COLLECTIVE: TRL's ``pack_dataset`` into a deterministic cache file the other ranks reuse. Workers pack whole
+    batches, so rows match TRL's single-process pack at any worker count. The packed rows carry no ``attention_mask``:
+    the packing collator builds its own and drops it."""
     if strategy not in _TRL_PACKERS:
         raise ValueError(f"Invalid packing strategy {strategy!r}: TRL packs with one of {sorted(_TRL_PACKERS)}.")
     operation_name = f"packing the {split} split"

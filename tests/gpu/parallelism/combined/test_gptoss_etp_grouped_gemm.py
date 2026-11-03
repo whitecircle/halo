@@ -1,34 +1,9 @@
 #!/usr/bin/env python
-"""GptOss at ep4 x etp2 trains on grouped GEMM as it trained on the per-expert loop, and resumes a loop-path
-ETP checkpoint exactly (8 GPUs).
+"""GptOss at ep4 x etp2 trains on grouped GEMM as on the per-expert loop, and resumes a loop-path checkpoint exactly.
 
-The loop arm runs the per-expert loop under ``use_grouped_gemm: true`` (every built layer set to the loop, the config
-unchanged), the configuration a loop-path ETP checkpoint carries, fingerprint included:
-
-1. Loop, 20 steps: the reference trajectory, every EP layer on the loop.
-2. Loop, 10 steps and a checkpoint, with this rank's optimizer state and trainable weights snapshotted.
-3. The floor: the loop, 20 steps from the same init with every trainable weight perturbed by about one bf16 ULP.
-4. Grouped GEMM, 20 steps from the same init: every EP layer on grouped GEMM. Its step-1 loss and gradient norm
-   match the loop's (a forward or backward error shows there, before any drift), and over the steps before the
-   loop's gradient norm surges it strays from the loop's trajectory no further than the floor does, scaled by a
-   margin.
-5. The control: grouped GEMM with every rank's expert bank rotated by one expert, one step. Its step-1 loss must
-   miss the loop's by over twice the step-1 bound, or that bound could not see a wrong expert.
-6. Grouped GEMM resuming step 2's checkpoint: optimizer state and weights restored exactly, no fingerprint
-   warm restart, steps 11-20 on the loop's trajectory.
-
-From step 7 the loop's gradient norm surges (to about 12 at step 13): there any difference of start or reduction
-order grows chaotically, and one perturbed run of the loop strays from its reference further or less far than
-grouped GEMM by chance (on 8x B300 the floor's largest gradient-norm ratio is 1.75 against grouped GEMM's 2.85,
-where before the surge they are 1.03 and 1.12). A fixed trajectory bound would fail on that growth with no defect
-present, and one sample of it bounds nothing, hence the measured floor over the steps before the surge. Past them
-grouped GEMM's losses and gradient norms must stay finite, and the resumed arm holds steps 11-20, from the loop's
-own state, to the fixed trajectory bound.
-
-DeepEP dispatch is pinned deterministic, so the arms differ in the expert compute alone. A tiny random-init
-GptOss (8 experts: two per dispatch rank, each FFN sharded two ways) keeps the runs cheap.
-
-    torchrun --nproc_per_node=8 tests/gpu/parallelism/combined/test_gptoss_etp_grouped_gemm.py
+From step 7 the loop's grad norm surges and any difference grows chaotically: on 8x B300 the floor's largest ratio is
+1.75 against grouped GEMM's 2.85, where before the surge they are 1.03 and 1.12. So the bound is a measured floor over
+the steps before the surge.
 """
 
 import functools
@@ -70,29 +45,26 @@ LEARNING_RATE = 3e-4
 MAX_SEQ_LENGTH = 256
 NUM_SAMPLES = 256
 # The step-1 forward differs by reduction order and the loop's bf16 index_add_ rounding only: 1.09e-3 on 8x B300,
-# bitwise across reruns. This bound sits 2.7x over that; the rotated-bank control moves the step-1 loss by 1.46e-2
-# there (13x the measured delta), 2.4x past the control bound of twice this.
+# bitwise across reruns. 2.7x over that; the rotated-bank control moves it by 1.46e-2, 2.4x past the control bound of
+# twice this.
 FIRST_STEP_LOSS_TOL = 3e-3
 FIRST_STEP_GRAD_NORM_RATIO_MAX = TOL.grad_norm_ratio_max
-# The floor arm's perturbation, about one bf16 ULP: it moves about half the weights by one ULP, where 2e-3 moves 0.15%
-# and 5e-4 none.
+# About one bf16 ULP: moves about half the weights by one ULP, where 2e-3 moves 0.15% and 5e-4 none.
 FLOOR_PERTURBATION = 4e-3
-# Grouped GEMM may stray from the loop's trajectory this many times as far as the floor arm does, over the steps
-# before the loop's gradient norm surges.
+# How many times as far as the floor arm grouped GEMM may stray, before the surge.
 FLOOR_LOSS_DELTA_FACTOR = 2.0
 FLOOR_GRAD_NORM_RATIO_FACTOR = 1.25
-# The loop's surge: the first step whose gradient norm rises past this factor over the lowest before it. On 8x B300
-# that is step 7 (4.21 over 2.66) for any factor from 1.08 to 1.58.
+# First step whose grad norm rises past this over the lowest before it. On 8x B300 that is step 7 (4.21 over 2.66) for
+# any factor from 1.08 to 1.58.
 SURGE_GRAD_NORM_RISE = 1.25
-# Steps the window before the surge must hold for the floor comparison to see past step 1's own checks.
+# Steps before the surge the floor comparison needs to see past step 1's own checks.
 MIN_PRE_SURGE_STEPS = 3
-# The resumed arm starts from the loop's own step-10 state, so it stays inside a fixed bound.
+# Starts from the loop's own step-10 state, so it stays inside a fixed bound.
 TRAJECTORY_LOSS_TOL = TOL.parallel_vs_baseline_train_loss_abs
 
 
 def _run_per_expert_loop(model) -> None:
-    """Every EP layer of ``model`` on the per-expert loop, the config unchanged: at ``expert_tp_size > 1`` both
-    compute paths hold the same weights, so the switch after the build changes the compute alone."""
+    """At ``expert_tp_size > 1`` both compute paths hold the same weights, so the switch changes the compute alone."""
     for _, layer in named_ep_layers(model):
         layer._use_grouped_mm = False
 
@@ -103,7 +75,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
         max_steps=max_steps,
         per_device_train_batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
-        lr_scheduler_type="constant",  # phases with different max_steps stay comparable
+        lr_scheduler_type="constant",  # Phases with different max_steps stay comparable.
         bf16=True,
         gradient_checkpointing=True,
         logging_steps=1,
@@ -135,7 +107,6 @@ def _make_trainer(model_path, tokenizer, dataset, config, **load_kwargs) -> Dist
 
 
 def _layer_checks(model, *, grouped: bool, label: str) -> dict[str, bool]:
-    """Every EP layer is GptOss's, split ep4 x etp2, and runs the compute path the phase is named for."""
     layers = [layer for _, layer in named_ep_layers(model)]
     return {
         f"{label}_layers_are_gptoss_etp": bool(layers)
@@ -154,13 +125,13 @@ def _grad_norms(trainer) -> list[float]:
 
 
 def _trainable_weights(model) -> dict[str, torch.Tensor]:
-    """Every trainable parameter, whole. Collective under FSDP2."""
+    """COLLECTIVE under FSDP2."""
     reshard_fsdp2_modules(model)
     return snapshot_trainable(model)
 
 
 class _ResumeCapture(TrainerCallback):
-    """The restored optimizer state and weights at ``on_train_begin``: after the restore, before the first step."""
+    """The restored optimizer state and weights after the restore, before the first step."""
 
     def __init__(self, holder: dict):
         self.holder = holder
@@ -183,8 +154,6 @@ def _deltas(reference: list[float], candidate: list[float]) -> list[float]:
 
 
 def _pre_surge_steps(norms: list[float]) -> int:
-    """How many steps run before the first whose gradient norm rises past :data:`SURGE_GRAD_NORM_RISE` times the
-    lowest before it; all of them when none does."""
     for step in range(1, len(norms)):
         if norms[step] > SURGE_GRAD_NORM_RISE * min(norms[:step]):
             return step
@@ -201,8 +170,7 @@ def _trajectory_checks(reference: list[float], candidate: list[float], label: st
 
 
 def _train_arm(ctx, tiny_dir, tokenizer, dataset, train_out, steps: int, *, grouped: bool, label: str, edit=None):
-    """COLLECTIVE. One run from the tiny checkpoint: its layer checks, per-step losses and gradient norms, and what
-    ``edit`` (applied to the built model before training) returned."""
+    """COLLECTIVE. One run from the tiny checkpoint, ``edit`` applied to the built model before training."""
     trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, steps, None))
     ctx.on_teardown(trainer.cleanup_ep)
     if not grouped:
@@ -242,7 +210,7 @@ def run(ctx):
     log(f"\n--- 1. per-expert loop, {TOTAL_STEPS} steps ---")
     arm_checks, loop_losses, loop_norms, _ = arm(TOTAL_STEPS, grouped=False, label="loop")
     checks |= arm_checks
-    # Anti-vacuity: the trajectories carry signal well past the bound they are compared under.
+    # Anti-vacuity: the trajectories carry signal well past their bound.
     loop_drop = loop_losses[0] - min(loop_losses) if loop_losses else 0.0
     metrics["loop_loss_drop"] = loop_drop
     checks["loop_loss_moved_past_the_bound"] = loop_drop > TOL.control_min_loss_shift(TRAJECTORY_LOSS_TOL)

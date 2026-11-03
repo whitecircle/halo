@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: per-head norm registration must ACCUMULATE across its two writers.
-
-``register_per_head_norm_params`` is called from both TP entry points —
-``retarget_hf_replicated_grad_hooks`` (HF-native ``tp_plan="auto"``) and
-``apply_tp_to_attention_only`` (toolkit selective TP). The single reader,
-``DistributedTrainerMixin._sync_tp_replicated_grads``, SUMs the registered names over the TP group
-and AVG-reduces everything else: a name dropped from the set trains on exactly ``1/tp_size`` of its
-true gradient, silently — the partial tripwire only fires when NO registered name resolves.
-
-Run: ``python tests/cpu/parallelism/test_tp_per_head_norm_registration.py`` (or ``pytest -m cpu``).
-"""
+"""Per-head norm registration accumulates across its two writers.
+The reader SUMs registered names and AVGs the rest, so a dropped name trains on ``1/tp_size`` of its gradient."""
 
 from __future__ import annotations
 
@@ -28,7 +19,6 @@ class _TwoNormModel(nn.Module):
 
 
 def test_second_writer_does_not_clobber_the_first():
-    """Two writers, disjoint non-empty module sets -> the union survives."""
     model = _TwoNormModel()
 
     register_per_head_norm_params(model, [model.plan_norm])
@@ -41,7 +31,7 @@ def test_second_writer_does_not_clobber_the_first():
 
 
 def test_registration_is_idempotent_and_sorted():
-    """Re-registering the same modules must not duplicate a name (the reader builds an id set)."""
+    """The reader builds an id set."""
     model = _TwoNormModel()
 
     register_per_head_norm_params(model, [model.selective_norm, model.plan_norm])
@@ -51,7 +41,7 @@ def test_registration_is_idempotent_and_sorted():
 
 
 def test_empty_module_list_leaves_an_existing_registration_intact():
-    """The empty-list early return must not be the only thing protecting a prior writer."""
+    """The early return must not be the only thing protecting a prior writer."""
     model = _TwoNormModel()
 
     register_per_head_norm_params(model, [model.plan_norm])

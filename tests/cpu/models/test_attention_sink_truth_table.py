@@ -1,13 +1,5 @@
 #!/usr/bin/env python
-"""The attention backend and sink-reset verdict the policy loader resolves for GptOss, per sink-flag combination.
-
-``load_distributed_model`` folds ``reset_sinks``, ``train_sinks``, ``init_from_scratch`` and context
-parallelism into the one verdict the attention resolver approves a sink-dropping backend on. Each row pins, for
-every requested backend, what the model is built with and the verdict stamped on its config, or which gate
-refused it.
-
-    python tests/cpu/models/test_attention_sink_truth_table.py
-"""
+"""The attention backend and sink-reset verdict the policy loader resolves for GptOss, per sink-flag combination."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -24,7 +16,6 @@ from tests.common.parallelism import make_parallelism_config
 
 REQUESTS = ("sdpa", "flash_attention_2", "flex_attention", "eager")
 
-# The refusals a row can end in, each keyed by the message fragment of the gate that raises it.
 CONTRADICTION = "refused: train_sinks contradicts reset_sinks"
 CP_LIVE_SINKS = "refused: CP with live sinks"
 DROPS_SINKS = "refused: backend drops live sinks"
@@ -39,10 +30,9 @@ NEUTRALIZED_FLASH = ("flash_attention_2", True)
 LIVE_FLEX = ("flex_attention", False)
 LIVE_EAGER = ("eager", False)
 
-# (reset_sinks, train_sinks, init_from_scratch, context_parallel) -> per entry of REQUESTS, the backend the model is
-# built with and the reset verdict on its config, or the refusal. A from-scratch build has no pretrained sinks to
-# neutralize, so it resolves as live; CP must refuse live sinks and a from-scratch build, and runs flex requests on
-# flash.
+# (reset_sinks, train_sinks, init_from_scratch, context_parallel) -> per REQUESTS entry, (backend, verdict) or refusal.
+# A from-scratch build has no pretrained sinks to neutralize, so it resolves as live.
+# CP refuses live sinks and a from-scratch build, and runs flex requests on flash.
 EXPECTED = {
     (True, True, True, True): (CONTRADICTION,) * 4,
     (True, True, True, False): (CONTRADICTION,) * 4,

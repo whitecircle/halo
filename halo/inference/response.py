@@ -7,14 +7,11 @@ from typing import Any
 from openai.types.chat import ChatCompletionMessageToolCall
 from pydantic import BaseModel
 
-# The OpenAI-wire finish_reason for a generation cut off at its token cap.
 FINISH_REASON_LENGTH = "length"
-# The finish reason an engine reports for a generation it aborted (a weight-sync pause that drops
-# in-flight requests, an engine restart).
+# An engine aborted the generation (a weight-sync pause dropping in-flight requests, an engine restart).
 FINISH_REASON_ABORT = "abort"
-# Finish reasons that ended a turn without the model choosing to stop. The fragment is never a
-# natural termination, so it is neither trained as one (the truncated-turn flag) nor graded as the
-# model's answer (the cut-turn recovery each protocol routes to).
+# The fragment is never a natural termination: neither trained as one (the truncated-turn flag) nor graded as the
+# model's answer (the cut-turn recovery).
 ENGINE_CUT_FINISH_REASONS = (FINISH_REASON_LENGTH, FINISH_REASON_ABORT)
 
 
@@ -36,16 +33,12 @@ def get_finish_reason(
     completion_tokens: int | None = None,
     max_tokens: int | None = None,
 ) -> str | None:
-    """The finish reason of one completion choice, whether it arrives as raw JSON or an SDK object.
+    """Reads raw JSON or an SDK object.
 
-    SGLang reports a length cut-off in ``stop_reason``, so reading ``finish_reason`` alone would
-    grade a truncated fragment as a completed answer. vLLM's ``stop_reason`` can instead hold a
-    stop-token id, which is not a reason.
-
-    A completion that consumed its whole ``max_tokens`` is a cut whatever the engine labelled it:
-    vLLM reports ``tool_calls`` whenever its parser salvaged a call from the text, so a turn cut
-    inside its call arrives labelled complete, with the call's name and empty arguments. Pass
-    ``completion_tokens`` and ``max_tokens`` to read the cap off the count as well.
+    SGLang reports a length cut-off in ``stop_reason``; vLLM's ``stop_reason`` can hold a stop-token id, which is not a
+    reason. A completion that consumed its whole ``max_tokens`` is a cut whatever the label: vLLM reports
+    ``tool_calls`` whenever its parser salvaged a call, so a turn cut inside its call arrives labelled complete with
+    empty arguments. Pass ``completion_tokens`` and ``max_tokens`` to read the cap off the count.
     """
     if isinstance(choice, Mapping):
         reason = choice.get("finish_reason") or choice.get("stop_reason")
@@ -60,11 +53,7 @@ def get_finish_reason(
 
 
 def get_reasoning_text(message: Mapping[str, Any] | Any) -> str | None:
-    """The CoT of one assistant message, whether it arrives as raw JSON or an SDK object.
-
-    The engines use different field names: vLLM answers ``reasoning``, SGLang
-    ``reasoning_content``. Reading only one of them yields an empty CoT against the other engine.
-    """
+    """vLLM answers ``reasoning``, SGLang ``reasoning_content``; reading one yields an empty CoT against the other."""
     if isinstance(message, Mapping):
         text = message.get("reasoning") or message.get("reasoning_content")
     else:

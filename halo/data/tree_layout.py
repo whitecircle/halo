@@ -1,6 +1,5 @@
-"""Tree layout of prefix-sharing examples: token paths to the trie over them, split to a row budget and laid out
-depth-first as per-token columns. A per-token packer concatenates trees untouched, and the collator recovers every
-node from the flattened batch (:func:`~halo.models.attention.tree_plan.build_node_table`). Runs in the dataset maps."""
+"""Tree layout of prefix-sharing examples: token paths to a trie, split to a row budget and laid out depth-first as
+per-token columns, which a per-token packer concatenates untouched."""
 
 from dataclasses import dataclass, replace
 from itertools import pairwise
@@ -27,11 +26,8 @@ class _TreeNode:
 
 
 def share_limit(trained: list[bool]) -> int:
-    """How many leading tokens of a path other paths may share.
-
-    Sharing stops one token before the first trained one: a node boundary breaks the next-token
-    pairing of the loss, so the token a completion is first predicted from must sit in the leaf with it.
-    """
+    """Sharing stops one token before the first trained one: a node boundary breaks the loss's next-token pairing, so
+    the token a completion is first predicted from must sit in the leaf with it."""
     first = trained.index(True) if True in trained else len(trained)
     return max(first - 1, 0)
 
@@ -43,13 +39,8 @@ def _common_prefix(a: np.ndarray, b: np.ndarray) -> int:
 
 
 def build_trie(paths: list[list[int]], share_limits: list[int], min_shared: int) -> list[_TreeNode]:
-    """Depth-first nodes of the trie over ``paths``; a shared span under ``min_shared`` (at least 1)
-    tokens is not split off.
-
-    Paths are sorted, so every subtree is a contiguous run and the shared length of a run is the
-    minimum over its adjacent pairs. Each adjacent value is capped by both paths' ``share_limits``;
-    a run then never shares past the limit of any path inside it.
-    """
+    """Depth-first trie nodes; a shared span under ``min_shared`` tokens is not split off. Paths are sorted, so a
+    subtree is a contiguous run sharing the minimum over adjacent pairs, capped by both paths' ``share_limits``."""
     order = sorted(range(len(paths)), key=paths.__getitem__)
     arrays = [np.asarray(paths[index]) for index in order]
     shared = [
@@ -73,12 +64,8 @@ def build_trie(paths: list[list[int]], share_limits: list[int], min_shared: int)
 
 
 def split_to_budget(nodes: list[_TreeNode], max_tokens: int) -> tuple[list[list[_TreeNode]], int]:
-    """Partition a trie into trees of at most ``max_tokens`` tokens, each repeating the ancestors it needs.
-
-    Leaves are taken in order and a tree is closed when the next leaf's unshared tokens would
-    overflow it. A leaf whose own path exceeds the budget is dropped and counted, as an over-length
-    row is. Returned trees are depth-first with parents re-indexed.
-    """
+    """Partition into trees of at most ``max_tokens``, each repeating the ancestors it needs. A leaf whose own path
+    exceeds the budget is dropped and counted, as an over-length row is. Parents are re-indexed."""
     has_child = {node.parent for node in nodes}
     trees: list[list[_TreeNode]] = []
     members: dict[int, int] = {}  # node index in `nodes` -> index in the open tree
@@ -109,7 +96,7 @@ def split_to_budget(nodes: list[_TreeNode], max_tokens: int) -> tuple[list[list[
 
 
 def serialize_tree(nodes: list[_TreeNode], paths: list[list[int]], trained: list[list[bool]]) -> dict[str, list]:
-    """The per-token columns of one tree. Only a leaf's tokens are trained; shared tokens never are."""
+    """Only a leaf's tokens are trained; shared tokens never are."""
     has_child = {node.parent for node in nodes}
     depths = resolve_node_depths(node.parent for node in nodes)
     row: dict[str, list] = {"input_ids": [], TRAINED_COLUMN: [], POSITION_COLUMN: [], DEPTH_COLUMN: []}

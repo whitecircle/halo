@@ -1,26 +1,8 @@
 #!/usr/bin/env python
 """The SDPG self-distillation trainer under adapters and full fine-tuning, on every parallel layout.
 
-``DistributedSelfDistillationTrainer`` takes ``peft_config`` directly (wraps with get_peft_model internally, like
-the GRPO trainers). Each mode trains through the production path and asserts that the OPD term fired and is
-non-trivial (the privileged-hint teacher sees a different prompt from the student), that the loss is finite,
-that what the mode trains moved (only the adapters, or on a full fine-tune the weights, each stepped by the optimizer
-and moved where one update reaches it), that the layout is the one asked for, and that a checkpoint of the trained
-tensors round-trips.
-
-Modes (``MODES``): lora / qlora (dense Qwen3-0.6B, FSDP2) · lora_ep / expert_lora (GptOss-20B, EP=``--ep``) ·
-lora_etp (attention LoRA under pure expert TP) · lora_ep_etp (four ranks, EP2 x ETP2) · full_ep1 / ep1_unsharded
-(GptOss-20B full fine-tune at ep1, the experts FSDP-sharded or whole and FSDP-ignored) · expert_lora_ep1_hsdp /
-expert_lora_ep1_unsharded_hsdp (native expert adapters on those two expert layouts, under HSDP over two simulated
-NVLink domains) · full_ep2_tp2 (GptOss-20B, EP2 + TP2) · full_tp2 / zero3 / hsdp (dense full fine-tune under TP2,
-FULL_SHARD, HSDP over two simulated NVLink domains). ``--world`` adds DP replicas (two EP groups, TP x DP) and
-``--gpus-per-node`` simulated domains. ``--per-rank-adapters`` redraws every rank's zero-init adapter halves from its
-own RNG stream before the trainer wraps them, as a draw on some ranks only leaves the streams, and requires them
-apart across the ranks: the layout checks then hold the wrap to starting every copy from the first one.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_self_distill.py --mode lora
+``--per-rank-adapters`` redraws each rank's zero-init adapter halves from its own RNG, as a draw on some ranks only
+leaves the streams, so the layout checks hold the wrap to starting every copy from the first one.
 """
 
 import argparse
@@ -63,19 +45,15 @@ from tests.common.weight_sync import local_parameters, moved_parameters
 MAX_STEPS = 3
 NUM_TRAIN_SAMPLES = 32
 MAX_SEQ_LENGTH = 512
-# The privileged hint the teacher reads and the student does not.
 HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}.\n"
-# The OPD term's floor once the teacher reads the hint: a teacher whose prompt equals the student's scores the
-# student's own distribution and lands at zero up to bf16 noise.
+# A teacher whose prompt equals the student's lands at zero up to bf16 noise.
 OPD_FLOOR = 1e-3
 ADAPTER_LEARNING_RATE = 1e-3
 FULL_LEARNING_RATE = 1e-5
-# ``--per-rank-adapters``: each rank's ``lora_B`` draw, ``N(0, std²)`` from ``SEED + rank``, small enough to leave
-# the initial delta near the zero-init one.
+# Small enough to leave the initial delta near the zero-init one.
 PER_RANK_ADAPTER_STD = 1e-3
 SEED = 1234
-# Each mode's model, adapter (None: full fine-tune), ParallelismConfig fields (``ep`` the --ep width, HSDP sized
-# by the world) and its default world size.
+# Each mode's model, adapter (None: full fine-tune), ParallelismConfig fields and default world size.
 MODES = {
     "lora": ("dense", "lora", lambda ep, world: {}, 2),
     "qlora": ("dense", "qlora", lambda ep, world: {}, 2),
@@ -110,12 +88,8 @@ WORLD_SIZE = ARGS.world or DEFAULT_WORLD
 
 
 def _assistant_marker(tokenizer) -> str:
-    """Derive the model's assistant-turn header so completion-only masking works for any family.
-
-    The hardcoded Qwen ``<|im_start|>assistant`` marker masks every token on gpt-oss (harmony format)
-    → zero loss. Render a turn with a sentinel answer and return the text just before it; that
-    sub-sequence is exactly what precedes the response in input_ids, so the collator finds it.
-    """
+    """The hardcoded Qwen ``<|im_start|>assistant`` marker masks every token on gpt-oss's harmony format, giving zero
+    loss, so render a turn with a sentinel answer and return the text just before it."""
     rendered = tokenizer.apply_chat_template(
         [{"role": "user", "content": "Q"}, {"role": "assistant", "content": "ANSWERSENTINEL"}],
         tokenize=False,
@@ -142,8 +116,6 @@ def _self_distill_dataset(n: int) -> Dataset:
 
 
 def _load(fields: dict):
-    """The policy through the production path: with its adapters (``(model, tokenizer, peft_config)``), or whole
-    for a full fine-tune (``peft_config`` None)."""
     parallelism_config = ParallelismConfig(**fields)
     attn = "flex_attention" if parallelism_config.has_ep_group else "sdpa"
     if ADAPTER is not None:
@@ -161,16 +133,14 @@ def _load(fields: dict):
 
 
 def _layer0_weights(model) -> dict[str, torch.Tensor]:
-    """This rank's copy of every trainable tensor of the first decoder layer: its attention and norms, which
-    every step's gradient reaches, and its experts, which only routed tokens reach."""
+    """This rank's copy of layer 0's trainable tensors: attention and norms get every step's gradient, experts only
+    routed tokens."""
     return local_parameters(model, keep=lambda name, param: param.requires_grad and ".layers.0." in name)
 
 
 def _full_finetune_updates(model, optimizer, before: dict[str, torch.Tensor]) -> dict[str, bool]:
-    """Every dense tensor of layer 0 was stepped on this rank and moved where one update at the learning rate reaches
-    it (:func:`~tests.common.training_checks.weight_update_checks`; ``MAX_STEPS`` updates of ``1e-5`` cannot change
-    bf16 norm gains near 1), and some expert tensor moved somewhere in the world (a rank's experts move only where
-    tokens were routed to them). COLLECTIVE (one flag reduction)."""
+    """COLLECTIVE (one flag reduction). ``MAX_STEPS`` updates of ``1e-5`` can't change bf16 norm gains near 1, and a
+    rank's experts move only where tokens were routed to them."""
     after = _layer0_weights(model)
     expert_ids = {id(param) for layer in ep_layers(model) for _, param in layer.expert_named_params()}
     experts = {name for name, param in model.named_parameters() if id(param) in expert_ids and name in before}
@@ -187,7 +157,7 @@ def _full_finetune_updates(model, optimizer, before: dict[str, torch.Tensor]) ->
 
 
 def _full_checkpoint_round_trip(ctx, trainer) -> dict[str, bool]:
-    """The trained model saved and read back complete through ``AutoModelForCausalLM``. COLLECTIVE (the save)."""
+    """COLLECTIVE (the save)."""
     export = os.path.join(shared_output_dir(ctx), "full_ckpt")
     trainer.save_model(export)
     barrier()

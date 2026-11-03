@@ -1,19 +1,6 @@
-"""Bench band: a ``make bench`` run held to the committed baselines ``tests/baselines/bench/<key>.json``.
-
-A run is one log per repeat of the rows ``tests/gpu/profiling/run_baseline_benchmarks.sh`` launches, and every
-rank of a row prints one line per key (``tests/common/reporting.py``). Per key, each gated metric
-(:data:`GATES`) is judged against the band of its baseline's repeats: a rate or a duration must stay within it,
-and a peak must not rise above it. A key compares only with a baseline measured by the same command on as many
-ranks of the same GPU model; a measured key with no baseline, and a baseline the run did not measure, fail too.
-
-A training line also carries its mean and median step time, read off rank 0. ``check`` flags a repeat whose mean
-is more than :data:`STEP_TIME_SKEW` off its median, the mark of a few stalled steps moving the gated mean, and
-never fails it: the gate stays on the mean.
-
-``check`` writes ``evidence/bench_band-<revision>.json`` and exits non-zero on a failure. ``record`` makes the
-baselines the run's: one file per key from at least :data:`MIN_REPEATS` repeats of one clean commit, refusing a
-repeat that a baseline of the others would fail by more than ordinary spread. Standard library only.
-"""
+"""Bench band: a ``make bench`` run held to committed ``tests/baselines/bench/<key>.json`` baselines. Standard library
+only. A key compares only with its own command, rank count and GPU model. ``check`` flags, but never fails, a mean far
+off its median; ``record`` refuses outlying repeats."""
 
 from __future__ import annotations
 
@@ -34,21 +21,17 @@ from tests.common.reporting import BENCH_DECIMALS, parse_benchmarks
 BASELINE_DIR = REPO_ROOT / "tests" / "baselines" / "bench"
 # Keeps the store in git while it holds no baseline; record removes it.
 STORE_PLACEHOLDER = ".gitkeep"
-# A band is the baseline repeats' mean, give or take the larger of a margin (a fraction of the mean) and
-# SPREAD_FACTOR times their spread (highest minus lowest). A peak's margin is narrower, but a peak gets one: held
-# to its highest repeat exactly, a peak that varies between runs fails one run in MIN_REPEATS + 1.
+# A band is the repeats' mean, give or take the larger of a margin and SPREAD_FACTOR times their spread. A peak's
+# margin is narrower, but it needs one: held to its highest repeat, a varying peak fails one run in MIN_REPEATS + 1.
 RATE_MARGIN = 0.02
 PEAK_MARGIN = 0.005
-# The gathered save is host I/O into the page cache, whose time moves by up to 6% between runs of one commit;
-# its peak resident memory moves in steps of about 1%.
+# Host I/O into the page cache moves the save's time by up to 6% between runs of one commit, its peak RSS in ~1% steps.
 SAVE_TIME_MARGIN = 0.06
 HOST_PEAK_MARGIN = 0.01
 SPREAD_FACTOR = 2
-# The spread of a few repeats is a noisy estimate of a run's own variation: five repeats keep a band that a
-# later run of the same commit passes, where three refuse to record almost every run.
+# A few repeats' spread is a noisy estimate: five keep a band a later run passes, where three refuse almost every run.
 MIN_REPEATS = 5
-# Recording refuses a repeat outside the others' band widened to OUTLIER_FACTOR times their spread: a disturbed
-# repeat (a row sharing the host with another job), not one at the edge of the spread four repeats measure.
+# A disturbed repeat (a row sharing the host with another job), not one at the edge of four repeats' spread.
 OUTLIER_FACTOR = 4
 STEP_TIME_SKEW = 0.02
 PROVENANCE_FIELDS = ("commit", "image", "measured", "world_size", "command")
@@ -57,7 +40,7 @@ _COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 def band(repeats: Sequence[float], margin: float, spread_factor: float = SPREAD_FACTOR) -> tuple[float, float]:
-    """The ``(low, high)`` band a metric's baseline repeats span, at the precision the metrics carry."""
+    """The ``(low, high)`` band a metric's repeats span, at the precision the metrics carry."""
     center = statistics.fmean(repeats)
     half_width = max(margin * center, spread_factor * (max(repeats) - min(repeats)))
     return round(center - half_width, BENCH_DECIMALS), round(center + half_width, BENCH_DECIMALS)
@@ -65,8 +48,8 @@ def band(repeats: Sequence[float], margin: float, spread_factor: float = SPREAD_
 
 @dataclass(frozen=True)
 class Banded:
-    """A rate or a duration, the mean over ranks and repeats. It fails outside its band on either side: a band a
-    speedup left behind would pass the regression that undoes it."""
+    """A rate or duration, the mean over ranks and repeats; fails on either side, since a band a speedup left behind
+    would pass the regression undoing it."""
 
     margin: float
 
@@ -85,8 +68,8 @@ class Banded:
 
 @dataclass(frozen=True)
 class Ceiling:
-    """A high-water mark, the highest over ranks and repeats. It fails above its band's upper edge, which is never
-    below the highest repeat; a lower peak passes."""
+    """A high-water mark, the highest over ranks and repeats; fails above its band's upper edge, and a lower peak
+    passes."""
 
     margin: float
 
@@ -98,8 +81,8 @@ class Ceiling:
         return {"run": value, "ceiling": high, "verdict": "above" if value > high else "within"}
 
     def outlying(self, others: Sequence[float], value: float) -> str | None:
-        """Only a repeat above the others' ceiling: a lower one widens the spread, so the ceiling recorded with
-        it still clears every repeat."""
+        """Only a repeat above the others' ceiling: a lower one widens the spread, so the recorded ceiling still clears
+        every repeat."""
         _, high = band(others, self.margin, OUTLIER_FACTOR)
         return None if value <= high else "lies above the ceiling of the others"
 
@@ -141,7 +124,7 @@ def _measurement(log: Path, key: str, lines: Mapping[int, dict]) -> Measurement:
 
 
 def read_logs(logs: Sequence[Path]) -> dict[str, list[Measurement]]:
-    """Per key, its measurement in each log, in log order: one log per repeat of the rows."""
+    """Per key, its measurement in each log, in order: one log per repeat."""
     run: dict[str, list[Measurement]] = defaultdict(list)
     for log in logs:
         by_key: dict[str, dict[int, dict]] = defaultdict(dict)
@@ -158,7 +141,6 @@ def read_logs(logs: Sequence[Path]) -> dict[str, list[Measurement]]:
 
 
 def _inconsistencies(repeats: Sequence[Mapping]) -> list[str]:
-    """Each gated metric some repeats lack, and each repeat its gate finds outlying among the others."""
     problems = []
     for name, gate in GATES.items():
         holding = [name in repeat for repeat in repeats]
@@ -174,16 +156,14 @@ def _inconsistencies(repeats: Sequence[Mapping]) -> list[str]:
 
 @dataclass(frozen=True)
 class Baseline:
-    """A committed baseline: how it was measured, and the metrics of each repeat."""
-
     key: str
     provenance: dict
     repeats: list[dict]
 
 
 def load_baselines(directory: Path) -> dict[str, Baseline]:
-    """Every baseline in ``directory`` by key. A file whose key is not its name, whose provenance is incomplete,
-    or whose repeats are too few or hold an outlying one (as :func:`record` refuses it) raises."""
+    """Every baseline in ``directory`` by key; a mismatched key, incomplete provenance, or too few or outlying repeats
+    raises."""
     baselines = {}
     for path in sorted(directory.glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -206,7 +186,6 @@ def _gpu_model(metrics: Mapping) -> str | None:
 
 
 def _incomparability(baseline: Baseline, measurements: Sequence[Measurement]) -> str | None:
-    """Why ``measurements`` cannot be held to ``baseline``, or ``None`` when they can."""
     provenance = baseline.provenance
     for measurement in measurements:
         if measurement.command != provenance["command"]:
@@ -220,7 +199,7 @@ def _incomparability(baseline: Baseline, measurements: Sequence[Measurement]) ->
 
 
 def _skewed_step_times(run: Mapping[str, Sequence[Measurement]]) -> list[str]:
-    """Each repeat of a key whose mean step time is more than :data:`STEP_TIME_SKEW` off its median."""
+    """Each repeat whose mean step time is more than :data:`STEP_TIME_SKEW` off its median."""
     flags = []
     for key, measurements in sorted(run.items()):
         for index, measurement in enumerate(measurements):
@@ -244,8 +223,7 @@ def _bound(judgment: Mapping) -> str:
 
 
 def check(run: Mapping[str, Sequence[Measurement]], baselines: Mapping[str, Baseline]) -> dict:
-    """``run`` held to ``baselines``: the verdict, every failure, the flagged step-time skews, and each key's
-    judged metrics."""
+    """``run`` held to ``baselines``: the verdict, every failure, flagged skews and each key's judged metrics."""
     failures = [f"{key}: has a baseline the run did not measure" for key in sorted(baselines.keys() - run.keys())]
     failures += [f"{key}: measured, but has no baseline" for key in sorted(run.keys() - baselines.keys())]
     judged = {}
@@ -283,11 +261,9 @@ def record(
     measured: datetime.date,
     directory: Path,
 ) -> list[Path]:
-    """Make ``directory`` hold ``run``'s baselines, measured at ``commit``: one file per key, every other baseline
-    in it removed. Writes nothing and raises when ``commit`` is not a full commit hash (a modified tree's revision
-    is not), or a key has fewer than :data:`MIN_REPEATS` repeats, repeats of differing commands or world sizes, or
-    a repeat its gate finds outlying: a rate or a duration outside the others' band widened to
-    :data:`OUTLIER_FACTOR` times their spread, a peak above that band's upper edge."""
+    """Make ``directory`` hold ``run``'s baselines at ``commit``, one file per key, removing every other baseline.
+    Writes nothing and raises on a non-full commit hash, too few repeats, differing commands or world sizes, or an
+    outlying repeat."""
     if not _COMMIT.fullmatch(commit):
         raise ValueError(f"a baseline names the clean commit it was measured at, and {commit!r} is not one")
     if not run:

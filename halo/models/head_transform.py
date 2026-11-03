@@ -1,9 +1,5 @@
-"""The head-path contract: what a causal LM's forward applies between its backbone and its logits
-(Gemma's softcap, Cohere's ``logit_scale``, Granite's ``logits_scaling``, Inkling's μP division and
-vocabulary cut). A path computing logits from the last hidden state applies the :class:`HeadTransform`
-:func:`resolve_head_transform` returns, or it scores a different distribution than the model samples
-from; each family's :class:`HeadTransformSpec` declaration is verified against its own forward.
-"""
+"""The head-path contract: what a causal LM's forward applies between its backbone and its logits. A path computing
+logits from the last hidden state applies the :class:`HeadTransform`, or it scores a different distribution."""
 
 from __future__ import annotations
 
@@ -23,8 +19,7 @@ from halo.subclass_registry import build_class_claim_map
 
 @dataclass(frozen=True)
 class HeadTransform:
-    """``softcap(logit_scale · head(hidden_scale · hidden))`` over the first ``vocab_size`` columns; a
-    ``None`` field is skipped, so the default is the bare output embedding."""
+    """``softcap(logit_scale · head(hidden_scale · hidden))`` over the first ``vocab_size`` columns; ``None`` skips."""
 
     hidden_scale: float | None = None
     logit_scale: float | None = None
@@ -32,17 +27,14 @@ class HeadTransform:
     vocab_size: int | None = None
 
     def scale_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
-        """``hidden`` as the family feeds it to the output embedding."""
         return hidden if self.hidden_scale is None else hidden * self.hidden_scale
 
     def kept_rows(self, weight: torch.Tensor, bias: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """The output-embedding rows whose logits the family returns (all of them unless truncated)."""
         if self.vocab_size is None:
             return weight, bias
         return weight[: self.vocab_size], None if bias is None else bias[: self.vocab_size]
 
     def project(self, head: nn.Module, hidden: torch.Tensor) -> torch.Tensor:
-        """The logits the family's forward returns for ``hidden``, computed through ``head``."""
         logits = head(self.scale_hidden(hidden))
         if self.vocab_size is not None:
             logits = logits[..., : self.vocab_size]
@@ -57,10 +49,8 @@ IDENTITY_HEAD_TRANSFORM = HeadTransform()
 
 
 class HeadTransformSpec:
-    """A family's declared head transform: subclasses claim ``HF_MODULE_NAMES`` and override
-    :meth:`transform`. The base applies ``final_logit_softcapping`` wherever the config sets it, the
-    one head transform transformers spells alike across families.
-    """
+    """Subclasses claim ``HF_MODULE_NAMES``. The base applies ``final_logit_softcapping``, the one head transform
+    transformers spells alike across families."""
 
     HF_MODULE_NAMES: tuple[str, ...] = ()
 
@@ -128,7 +118,6 @@ class MiniCPM3HeadTransform(HeadTransformSpec):
 
 
 def build_head_transform_spec_map() -> dict[str, type[HeadTransformSpec]]:
-    """HF causal-LM class name → :class:`HeadTransformSpec`, derived from every registered spec."""
     return build_class_claim_map(HeadTransformSpec, "HF causal-LM head class name")
 
 
@@ -136,8 +125,7 @@ _HEAD_TRANSFORM_SPEC_MAP = build_head_transform_spec_map()
 
 
 def resolve_head_transform_spec(model_class: type) -> type[HeadTransformSpec]:
-    """The spec claiming ``model_class`` or its nearest claimed ancestor (so a toolkit subclass or a
-    framework class swap inherits its family's declaration), else the base."""
+    """Nearest claimed ancestor, so a toolkit subclass or a framework class swap inherits its family's declaration."""
     return next(
         (
             _HEAD_TRANSFORM_SPEC_MAP[cls.__name__]
@@ -149,8 +137,7 @@ def resolve_head_transform_spec(model_class: type) -> type[HeadTransformSpec]:
 
 
 class _ProbeBackboneOutput(BaseModelOutputWithPast):
-    """The probe backbone's output: its hidden state, and ``None`` for every other field a family's
-    forward reads off it (router logits, image features, rope deltas)."""
+    """``None`` for every field but the hidden state that a family's forward reads off it."""
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -159,8 +146,7 @@ class _ProbeBackboneOutput(BaseModelOutputWithPast):
 
 
 def _probe_logits(model_class: type, config, declared: HeadTransform) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """``(forward logits, declared logits)`` from one probe on a meta-device shell with a real stand-in
-    head, or ``None`` for a model with no output embedding (a classification or reward head)."""
+    """``(forward logits, declared logits)`` from a meta-device shell with a stand-in head; ``None`` without a head."""
     with torch.device("meta"):
         shell = model_class._from_config(copy.deepcopy(config), dtype=torch.float32, attn_implementation="eager")
     head = shell.get_output_embeddings()
@@ -174,9 +160,8 @@ def _probe_logits(model_class: type, config, declared: HeadTransform) -> tuple[t
     backbone = shell.base_model
     if backbone is shell:
         raise ValueError(f"{model_class.__name__} exposes no backbone distinct from its head (base_model is itself).")
-    # Diagonal with log-spaced magnitudes, so the logits span 1e-2..1e3 times the stand-in weights: a
-    # softcap of any practical width saturates on some positions and stays linear on others, and a
-    # missing scale or truncation moves every position.
+    # Log-spaced magnitudes, so a softcap of any practical width saturates on some positions and stays linear on
+    # others, and a missing scale or truncation moves every position.
     hidden = torch.diag(torch.logspace(-2.0, 3.0, 8)).unsqueeze(0)
     standin = nn.Linear(hidden.shape[-1], head.out_features, bias=head.bias is not None)
     generator = torch.Generator().manual_seed(0)
@@ -202,16 +187,11 @@ def _probe_logits(model_class: type, config, declared: HeadTransform) -> tuple[t
 
 
 def verify_head_transform(model_class: type, config) -> HeadTransform:
-    """The declared head transform of ``model_class`` under ``config``, verified against its forward.
-
-    Reads the class and the config, never a weight, so every rank and every pipeline stage reaches the
-    same verdict. Raises ValueError when the forward's logits differ from the declaration's or the probe
-    cannot run it.
-    """
+    """Reads the class and the config, never a weight, so every rank and pipeline stage reaches the same verdict."""
     try:
         declared = resolve_head_transform_spec(model_class).transform(config)
-        # Only the last pipeline stage re-verifies when it is built; a probe that advanced the global
-        # generator would leave that stage's seed stream shifted against every other rank's.
+        # Only the last pipeline stage re-verifies when built; a probe advancing the global generator would leave that
+        # stage's seed stream shifted against every other rank's.
         with torch.random.fork_rng(devices=[]):
             probe = _probe_logits(model_class, config, declared)
     except Exception as e:
@@ -223,9 +203,8 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
     if probe is None:
         return IDENTITY_HEAD_TRANSFORM
     logits, expected = probe
-    # The forward and the declaration compute the same fp32 function in possibly different op forms
-    # (``x / s`` against ``x * (1 / s)``), so they agree to rounding; a wrong transform is off by
-    # orders. Tolerance per position: the probe rows span five decades, so a plane-wide floor would
+    # The same fp32 function in possibly different op forms (``x / s`` against ``x * (1 / s)``) agrees to rounding; a
+    # wrong transform is off by orders. Per position, as the probe rows span five decades and a plane-wide floor would
     # leave the small-magnitude rows unchecked.
     row_scale = expected.abs().amax(dim=-1, keepdim=True)
     matches = logits.shape == expected.shape and bool(
@@ -248,8 +227,7 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
 
 
 def resolve_head_transform(model: nn.Module) -> HeadTransform:
-    """The verified head transform of ``model``, under any framework, toolkit or PEFT wrapper; identity
-    for a model with no output embedding. Raises TypeError for a non-transformers model."""
+    """Under any wrapper; identity for a model with no output embedding."""
     base = base_transformers_model(model)
     model_class = transformers_model_class(base)
     if model_class is None:

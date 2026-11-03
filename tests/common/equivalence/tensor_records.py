@@ -1,11 +1,5 @@
-"""Per-case tensor records of a harness run and their bit-for-bit comparison.
-
-A record holds a case's tensors by name and its ordered name lists (a parameter order, a state-dict key
-order), saved at ``<output>/<case>/rank<r>.pt``; a case whose body raised saves what it raised instead, so a
-change in what raises is a difference too. Two records match when they hold the same names, every pair of
-tensors is equal bit for bit (dtype, shape and bytes, so ``-0.0`` differs from ``0.0`` and a NaN matches only
-the same NaN) and every order list is identical.
-"""
+"""Per-case tensor records of a harness run and their bit-for-bit comparison: dtype, shape and bytes, so ``-0.0``
+differs from ``0.0``. A case whose body raised saves what it raised, so a change in what raises is a difference too."""
 
 from __future__ import annotations
 
@@ -18,7 +12,6 @@ from torch.distributed.tensor import DTensor
 from tests.common.equivalence.revisions import RAISED, compare_outputs, raised_description
 
 RECORD_SUFFIX = ".pt"
-# The tensor-name prefix of a parameter gradient in a record.
 GRADIENT_PREFIX = "grad/"
 
 Tensors = dict[str, torch.Tensor]
@@ -31,8 +24,7 @@ def _plain(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def record_case(output: Path, case: str, rank: int, body: Callable[[], tuple[Tensors, Orders]]) -> None:
-    """Run ``body`` and save the ``(tensors, orders)`` it returns as ``rank``'s record of ``case`` under
-    ``output``; save what it raised instead when it raises."""
+    """Save ``body``'s ``(tensors, orders)`` as ``rank``'s record of ``case``, or what it raised."""
     try:
         tensors, orders = body()
         record = {
@@ -47,7 +39,7 @@ def record_case(output: Path, case: str, rank: int, body: Callable[[], tuple[Ten
 
 
 def case_of(record: str) -> str:
-    """The case a record path belongs to: the path without its ``rank<r>`` leaf."""
+    """A record path without its ``rank<r>`` leaf."""
     return record.rpartition("/")[0]
 
 
@@ -56,19 +48,17 @@ def load_record(path: Path) -> dict:
 
 
 def record_paths(root: Path) -> dict[str, Path]:
-    """Every record under ``root``, by its path relative to it without the suffix."""
     return {str(path.relative_to(root).with_suffix("")): path for path in sorted(root.rglob(f"*{RECORD_SUFFIX}"))}
 
 
 def bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Whether two tensors share dtype, shape and every byte."""
     if a.dtype != b.dtype or a.shape != b.shape:
         return False
     return torch.equal(a.reshape(-1).view(torch.uint8), b.reshape(-1).view(torch.uint8))
 
 
 def max_abs_difference(a: torch.Tensor, b: torch.Tensor) -> float:
-    """The largest elementwise ``|a - b|`` in fp64, ``inf`` when the shapes differ; NaN propagates."""
+    """The largest elementwise ``|a - b|`` in fp64, ``inf`` when shapes differ; NaN propagates."""
     if a.shape != b.shape:
         return float("inf")
     if a.numel() == 0:
@@ -95,7 +85,6 @@ def _tensor_delta(name: str, base: torch.Tensor, head: torch.Tensor) -> str:
 
 
 def record_deltas(base: Mapping, head: Mapping) -> list[str]:
-    """Every difference between two loaded records, one line each."""
     if RAISED in base or RAISED in head:
         return [] if base.get(RAISED) == head.get(RAISED) else [f"{RAISED}: {base.get(RAISED)} != {head.get(RAISED)}"]
     deltas = []
@@ -113,8 +102,7 @@ def record_deltas(base: Mapping, head: Mapping) -> list[str]:
 
 
 def compare_records(base_root: Path, head_root: Path) -> list[dict]:
-    """:func:`~tests.common.equivalence.revisions.compare_outputs` over the records of two outputs, each pair
-    compared bit for bit."""
+    """:func:`~tests.common.equivalence.revisions.compare_outputs` over two outputs' records, bit for bit."""
     return compare_outputs(
         record_paths(base_root),
         record_paths(head_root),
@@ -123,7 +111,6 @@ def compare_records(base_root: Path, head_root: Path) -> list[dict]:
 
 
 def raised_records(root: Path) -> dict[str, dict]:
-    """The records under ``root`` whose case raised, by record path, with what it raised."""
     raised = {}
     for record, path in record_paths(root).items():
         loaded = load_record(path)

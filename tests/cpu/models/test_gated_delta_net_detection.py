@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""GatedDeltaNet detection reads the layers a config declares, not its ``model_type``.
-
-A GatedDeltaNet layer carries conv and recurrent state across a packed row's documents unless the collator hands
-it ``seq_idx`` and ``cu_seq_lens``, and the miss is silent. The verdict is ``linear_attention`` in ``layer_types``
-on a config declaring GatedDeltaNet's key/value head split; it must keep every roster family's former
-name-keyed verdict and reach a GatedDeltaNet family under any other name. The transformers-wide sweep pins the
-configs whose verdict moved at the pinned transformers; a bump that ships a new hybrid family fails it until the
-family's layers are checked and its verdict is added to ``MOVED``.
-
-    python tests/cpu/models/test_gated_delta_net_detection.py
-"""
+"""GatedDeltaNet layers carry state across a packed row's documents without ``seq_idx`` and ``cu_seq_lens``, silently.
+Detection reads the layers a config declares, and a new hybrid family fails the sweep until added to ``MOVED``."""
 
 import contextlib
 import functools
@@ -50,7 +41,6 @@ GDN_HEADS = {"linear_num_key_heads": 2, "linear_num_value_heads": 4}
 
 
 def _named_verdict(config) -> SegmentMarkers:
-    """The markers the name list gave ``config``."""
     named = model_type_matches(config, *NAMED_GDN_PREFIXES)
     return SegmentMarkers(seq_idx=named or model_type_matches(config, *SHORT_CONV_PREFIXES), cu_seq_lens=named)
 
@@ -61,8 +51,7 @@ def _roster_config(family: str):
 
 
 def _outcome(verdict, config):
-    """``verdict(config)``, or the error it raises: a composite with several text towers has no single text
-    config, and both verdicts read through one."""
+    """A composite with several text towers has no single text config, so both verdicts can raise."""
     try:
         return verdict(config)
     except ValueError as error:
@@ -71,7 +60,6 @@ def _outcome(verdict, config):
 
 @pytest.mark.parametrize("family", sorted(ROSTER))
 def test_every_roster_family_keeps_its_verdict(family):
-    """The name list's verdict, or for a family it never held (``MOVED``) the GatedDeltaNet markers."""
     config = _roster_config(family)
     if set(config_model_types(config)) & MOVED:
         assert segment_markers_for(config) == SegmentMarkers(seq_idx=True, cu_seq_lens=True)
@@ -86,8 +74,7 @@ def test_the_roster_spans_both_verdicts():
 
 
 def test_every_qwen3_next_fixture_builds_qwen3_next():
-    """The fixture tables that key a family ``qwen3_next`` build Qwen3-Next: an entry building another MoE family
-    under that key would hold it to Qwen3-Next's verdicts."""
+    """An entry building another MoE family under that key would hold it to Qwen3-Next's verdicts."""
     fixtures = {
         "roster": ROSTER["qwen3_next"],
         "segment isolation": SEGMENT_ISOLATION_FAMILIES["qwen3_next"],
@@ -98,9 +85,8 @@ def test_every_qwen3_next_fixture_builds_qwen3_next():
 
 
 def test_across_transformers_only_gated_delta_net_layers_decide():
-    """Every config transformers ships at its defaults: Kimi Delta Attention (GLM-5 Next, Kimi Linear), Lightning
-    attention (MiniMax) and the Mamba hybrids keep no markers; only GatedDeltaNet families gain them, and only
-    the Qwen3.5 vision towers lose them."""
+    """Kimi Delta Attention (GLM-5 Next, Kimi Linear), Lightning attention (MiniMax) and the Mamba hybrids keep none.
+    Only GatedDeltaNet families gain markers, and only the Qwen3.5 vision towers lose them."""
     moved, unconstructible, compared = set(), set(), 0
     for model_type, config_cls in transformers.CONFIG_MAPPING.items():
         try:
@@ -134,8 +120,7 @@ def test_an_unknown_model_type_with_gated_delta_net_layers_is_detected(monkeypat
     ("fields", "refused"), [(GDN_HEADS, False), ({}, True)], ids=["gated_delta_net_heads", "no_head_split"]
 )
 def test_an_unknown_model_type_packs_under_pp_where_its_markers_reach_its_layers(fields, refused, monkeypatch):
-    """Pipeline parallelism keeps packed rows, and each stage rebuilds the markers GatedDeltaNet layers read, under a
-    name no list holds; the same layers without the head split read no marker, so their packed rows are refused."""
+    """Each PP stage rebuilds the markers these layers read; without the head split they read none and are refused."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla>=0.2.2", lambda: True),))
     config = UnknownHybridConfig(layer_types=["linear_attention", "full_attention"], **fields)
     config._attn_implementation = "flash_attention_2"
@@ -164,8 +149,7 @@ def test_an_unknown_model_type_packs_under_pp_where_its_markers_reach_its_layers
     ("fields", "refused"), [(GDN_HEADS, False), ({}, True)], ids=["gated_delta_net_heads", "no_head_split"]
 )
 def test_the_linear_attention_gate_reads_the_same_verdict(fields, refused, monkeypatch):
-    """Under a name no list holds, linear-attention layers with GatedDeltaNet's head split take their markers and
-    pack; the same layers without it read no marker, so their multi-document rows are refused."""
+    """Without GatedDeltaNet's head split the layers read no marker, so their multi-document rows are refused."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
     config = UnknownHybridConfig(layer_types=["linear_attention", "full_attention"], **fields)
     expectation = pytest.raises(ValueError, match="'halo_unknown_hybrid': its linear-attention layers")

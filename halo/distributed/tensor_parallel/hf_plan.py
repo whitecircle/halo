@@ -1,6 +1,4 @@
-"""HF-native tensor parallelism (``tp_plan="auto"``): what the plan shards, the tied embedding/head pair kept on one
-side of it, and the load finish: the post-load checks, the planned linears moved onto the local-shard forward, and
-transformers' per-backward norm all-reduce moved onto the trainer's step-time SUM."""
+"""HF-native tensor parallelism (``tp_plan="auto"``): what the plan shards, the tied pair, the post-load finish."""
 
 from __future__ import annotations
 
@@ -28,9 +26,8 @@ _HF_REPLICATED_GRAD_CLASS = "ReplicatedWithGradAllReduce"
 
 
 def plan_shards_param(key: str, tp_plan: dict[str, str]) -> bool:
-    """Whether ``tp_plan`` puts ``key`` under a style that shards parameters: one whose class overrides the base
-    no-op ``shard_param`` (the activation-transform styles, ``mla_kv_a_proj`` or ``ep_router``, leave theirs
-    whole). Both the lookup and the decision are transformers' own, which a restated table would drift from."""
+    """Whether ``tp_plan`` puts ``key`` under a style whose class overrides the no-op ``shard_param``. Both lookup and
+    decision are transformers' own, which a restated table would drift from."""
     style_name = _get_parameter_plan(key, tp_plan)
     if style_name is None:
         return False
@@ -55,8 +52,7 @@ def _tied_module_names(concrete) -> tuple[set[str], set[str]]:
 
 
 def _plan_keys_naming(plan: dict, modules: set[str]) -> set[str]:
-    """Keys of ``plan`` naming one of ``modules``, model-absolute (a class ``_tp_plan``) or backbone-relative (a
-    config ``base_model_tp_plan``)."""
+    """Keys of ``plan`` naming one of ``modules``, model-absolute (``_tp_plan``) or backbone-relative (config)."""
     return {
         key
         for key in plan
@@ -67,13 +63,8 @@ def _plan_keys_naming(plan: dict, modules: set[str]) -> set[str]:
 
 @contextmanager
 def consistent_tied_tp_plan(model_class, model_config):
-    """While inside, drop the plan entry of a tied embedding/head pair that only one end carries.
-
-    transformers shards module by module and ties afterwards, so a lone entry (a multimodal class planning no
-    ``lm_head``, a backbone shipping no ``base_model_tp_plan``) hands the unplanned end a weight of the other
-    kind, and the first forward fails on mixed plain/DTensor operands. Without the entry the pair stays
-    replicated.
-    """
+    """While inside, drop the plan entry of a tied embedding/head pair that only one end carries. transformers ties
+    after sharding, so a lone entry hands the unplanned end a weight of the other kind, failing on mixed operands."""
     concrete = mapped_model_class(model_config, model_class) or model_class
     heads, embeddings = _tied_module_names(concrete)
     if not ties_word_embeddings(model_config) or not heads or not embeddings:
@@ -154,12 +145,9 @@ def reject_plan_sharded_plain_params(model: nn.Module, tp_plan: dict[str, str]) 
 
 
 def retarget_hf_replicated_grad_hooks(model: nn.Module) -> None:
-    """Move transformers' per-backward norm all-reduce onto the trainer's step-time SUM.
-
-    ``ReplicatedWithGradAllReduce``'s backward hook all-reduces ``param.grad`` in place on every backward, so
-    under gradient accumulation earlier micro-batches compound by ``tp_size`` per micro-step. Raises when the
-    plan asks for that style and no hook was found.
-    """
+    """Move transformers' per-backward norm all-reduce onto the trainer's step-time SUM, since it reduces
+    ``param.grad`` in place on every backward and earlier micro-batches compound by ``tp_size``. Raises when the plan
+    asks for that style and no hook was found."""
     plan = getattr(model, "_tp_plan", None) or {}
     plan_wants_it = any(style == _HF_REPLICATED_GRAD_STYLE for style in plan.values())
 
@@ -193,19 +181,14 @@ def retarget_hf_replicated_grad_hooks(model: nn.Module) -> None:
 
 
 def is_input_embedding_tp_sharded(model: nn.Module) -> bool:
-    """Whether ``model``'s input embedding is an HF-native TP shard, which ``resize_token_embeddings`` cannot
-    re-shard."""
+    """Whether the input embedding is an HF-native TP shard, which ``resize_token_embeddings`` cannot re-shard."""
     return isinstance(model.get_input_embeddings().weight, DTensor)
 
 
 def finish_hf_tp_load(model: nn.Module, device_mesh: DeviceMesh, tp_size: int) -> None:
-    """Check a ``tp_plan="auto"`` load against the plan it applied, stamp ``device_mesh`` on ``model``, run the
-    planned linears on their local shards and move the per-backward norm all-reduces onto the trainer's step-time
-    SUM.
-
-    ``tp_plan="auto"`` plans at most the head for an architecture shipping no ``base_model_tp_plan`` (Qwen3-VL)
-    and transformers only warns, so a plan sharding no backbone parameter is refused here by name.
-    """
+    """Check a ``tp_plan="auto"`` load, stamp ``device_mesh``, run planned linears on local shards and move norm
+    all-reduces to the step-time SUM. A plan sharding no backbone parameter (Qwen3-VL ships no ``base_model_tp_plan``,
+    and transformers only warns) is refused by name."""
     applied_plan = getattr(model, "_tp_plan", None) or {}
     head = model.get_output_embeddings()
     head_ids = {id(param) for param in head.parameters()} if head is not None else set()

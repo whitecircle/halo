@@ -1,19 +1,6 @@
 #!/usr/bin/env python
 """The FSDP2 internals ``complete_fsdp2_post_backward`` drives, against the installed torch, on one CPU rank.
-
-The completion reads private FSDP2 state (``FSDPModule._get_fsdp_state()._fsdp_param_group``, each group's
-window flags, sharded and training state and communication context, each ``FSDPParam``'s unsharded
-gradient and accumulator) and calls ``post_backward``, ``finalize_backward`` and ``use_training_state``.
-These tests pin every member it reads and the defect it repairs: a ``fully_shard`` block checkpointed
-reentrant around its ``__call__`` and run three times before one backward is left gathered with an
-unreduced gradient once the root's final callback has run, and the completion turns that into the
-gradient of the same blocks run without checkpointing. A torch upgrade that renames a member fails the
-first test; one that fixes the defect upstream fails the second, the cue to retire the completion. A gradient
-FSDP2 parked in its accumulator (a no-reduce microstep under a reduce dtype other than the parameters') counts as
-unreduced too: the guard refuses it and the completion reduces it.
-
-Run: python tests/cpu/parallelism/test_fsdp2_post_backward_internals.py
-"""
+A rename fails the first test; an upstream fix of the defect fails the second, the cue to retire the completion."""
 
 import copy
 import inspect
@@ -38,8 +25,7 @@ ROWS = 3
 
 
 class _Block(nn.Module):
-    """A residual MLP checkpointed reentrant around its own ``__call__``, FSDP2's hooks inside the checkpoint
-    (the placement of transformers' ``GradientCheckpointingLayer``)."""
+    """FSDP2's hooks inside the checkpoint, the placement of transformers' ``GradientCheckpointingLayer``."""
 
     def __init__(self):
         super().__init__()
@@ -87,7 +73,6 @@ def _rows() -> list[torch.Tensor]:
 
 
 def _models(mesh) -> tuple[nn.Module, nn.Module]:
-    """The reference without checkpointing, and the checkpointed per-block FSDP2 model, from one init."""
     torch.manual_seed(0)
     reference = _Model()
     model = copy.deepcopy(reference)
@@ -99,7 +84,6 @@ def _models(mesh) -> tuple[nn.Module, nn.Module]:
 
 
 def _sharded_after_backward(mesh) -> tuple[nn.Module, nn.Module, list[FSDPParamGroup]]:
-    """Both models after one backward over every row."""
     reference, model = _models(mesh)
     reference(_rows()).backward()
     model(_rows()).backward()
@@ -111,7 +95,6 @@ def _block_groups(groups: list[FSDPParamGroup]) -> list[FSDPParamGroup]:
 
 
 def test_the_members_the_completion_reads_exist(single_rank_gloo):
-    """Every FSDP2 member the completion and its guard touch, on the objects a real wrap builds."""
     _reference, _model, groups = _sharded_after_backward(single_rank_gloo)
     assert {state.name for state in TrainingState} >= {"IDLE", "PRE_BACKWARD", "POST_BACKWARD"}
     assert list(inspect.signature(FSDPParamGroup.post_backward).parameters) == ["self", "unused"]
@@ -131,8 +114,7 @@ def test_the_members_the_completion_reads_exist(single_rank_gloo):
 
 
 def test_a_reentrant_recompute_still_leaves_the_post_backward_undone(single_rank_gloo):
-    """The defect, as this torch has it: each block group ends the backward idle, gathered and holding an
-    unreduced gradient, which the guard refuses."""
+    """The defect: each block group ends the backward idle, gathered and holding an unreduced gradient."""
     _reference, _model, groups = _sharded_after_backward(single_rank_gloo)
     blocks = _block_groups(groups)
     assert len(blocks) == BLOCKS
@@ -145,8 +127,6 @@ def test_a_reentrant_recompute_still_leaves_the_post_backward_undone(single_rank
 
 
 def test_the_completion_reduces_every_segment_and_reshards(single_rank_gloo):
-    """After the completion every group is sharded with nothing left unreduced, and each sharded gradient is
-    the reference's."""
     reference, model, groups = _sharded_after_backward(single_rank_gloo)
     assert fsdp.complete_fsdp2_post_backward(groups) == BLOCKS
     fsdp.reject_unfinished_fsdp2_backward(groups)
@@ -158,8 +138,7 @@ def test_the_completion_reduces_every_segment_and_reshards(single_rank_gloo):
 
 
 def test_the_completion_refuses_a_backward_in_flight(single_rank_gloo):
-    """Called while the backward still runs, its groups mid-pass, the completion raises rather than reduce
-    gradients the backward is still writing."""
+    """It raises rather than reduce gradients the backward is still writing."""
     _reference, model = _models(single_rank_gloo)
     groups = fsdp.fsdp2_param_groups(model)
 
@@ -172,9 +151,7 @@ def test_the_completion_refuses_a_backward_in_flight(single_rank_gloo):
 
 
 def test_an_accumulated_gradient_with_the_reduce_armed_is_reduced(single_rank_gloo):
-    """fp32 parameters reducing in fp64: a no-reduce microstep leaves every group's gradient in FSDP2's accumulator,
-    off the parameter. With the reduce re-armed and no backward to follow, the guard refuses that state, and the
-    completion reduces it to the reference's gradient."""
+    """A no-reduce microstep leaves the gradient in FSDP2's accumulator, off the parameter."""
     torch.manual_seed(0)
     reference = _Model()
     model = copy.deepcopy(reference)

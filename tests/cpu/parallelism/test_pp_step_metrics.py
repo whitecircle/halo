@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: per-step trainer metrics survive the pipeline.
-
-Under PP only the LAST stage runs the loss closure, so a trainer's per-step metrics exist on that
-stage alone — while HF logs from global rank 0, which sits on the FIRST stage. The mixin pins the
-metric names at setup and broadcasts the values down the chain every step; these tests drive that
-against a fake two-stage chain and fail if the metrics stop arriving, arrive with the wrong values,
-or stop being rank-uniform. An eval step's real examples weigh them: the examples padding an eval
-split's final round leave the batch before its step state, normalizer and loss read it, and come back
-as the inert filler rows a partial batch is padded with.
-
-    python tests/cpu/parallelism/test_pp_step_metrics.py
-"""
+"""Per-step trainer metrics survive the pipeline: they exist on the last stage while HF logs from rank 0 on the first.
+The mixin pins the names at setup and broadcasts values down the chain every step."""
 
 from types import SimpleNamespace
 
@@ -26,11 +16,7 @@ LAST_STAGE_RANK = 1
 
 
 class _FakeChain:
-    """The two collectives ``_pp_share_step_metrics`` / ``_pp_pin_metric_keys`` use.
-
-    ``broadcast`` copies the last stage's buffer into whichever rank is currently calling, which is
-    what makes "every stage ends up with the last stage's values" testable in one process.
-    """
+    """``broadcast`` copies the last stage's buffer into the caller, making the outcome testable in one process."""
 
     def __init__(self):
         self.source_values = None
@@ -54,8 +40,6 @@ class _FakeChain:
 
 
 class _Stage(PipelineTrainerMixin):
-    """One pipeline rank: the mixin's metric plumbing over a fake adapter and a metric store."""
-
     FORWARD_ROWS_PER_EXAMPLE = 1
 
     def __init__(self, metrics_fn, is_last: bool):
@@ -92,18 +76,16 @@ def _metrics(**values):
 
 
 def test_every_stage_records_the_last_stages_values(chain):
-    """The non-last stage has no loss closure, so its own reading is zeros; it must log the last
-    stage's numbers instead — otherwise rank 0's log line carries silent zeros."""
+    """Otherwise rank 0's log line carries silent zeros."""
     last = _Stage(_metrics(**{"rewards/chosen": 1.5, "sft_loss/chosen": 0.25}), is_last=True)
     first = _Stage(_metrics(**{"rewards/chosen": 0.0, "sft_loss/chosen": 0.0}), is_last=False)
     for stage in (last, first):
         stage._pp_pin_metric_keys()
 
-    # The pin probes the store with an empty dict, so a trainer with nowhere to put metrics fails
-    # at setup rather than on the first step.
+    # A trainer with nowhere to put metrics fails at setup rather than on the first step.
     assert first.stored == [({}, "train")]
 
-    last._pp_share_step_metrics("train")  # the source rank fills the fake's buffer
+    last._pp_share_step_metrics("train")  # The source rank fills the fake's buffer.
     first._pp_share_step_metrics("train")
 
     expected = ({"rewards/chosen": 1.5, "sft_loss/chosen": 0.25}, "train")
@@ -112,8 +94,7 @@ def test_every_stage_records_the_last_stages_values(chain):
 
 
 def test_one_values_only_collective_per_step_not_an_object_hop(chain):
-    """The per-step path must stay a fixed-size tensor broadcast: the object hop (a pickle plus a
-    device round trip) is what the setup-time key pin exists to keep off it."""
+    """An object hop (a pickle plus a device round trip) is what the key pin keeps off this path."""
     stage = _Stage(_metrics(a=1.0, b=2.0), is_last=True)
     stage._pp_pin_metric_keys()
     objects_after_setup = chain.object_broadcasts
@@ -126,7 +107,7 @@ def test_one_values_only_collective_per_step_not_an_object_hop(chain):
 
 
 def test_metric_names_that_disagree_across_the_chain_are_refused(chain):
-    """A data-derived key set would pair one stage's names with another's numbers, silently."""
+    """A data-derived key set would pair one stage's names with another's numbers."""
     last = _Stage(_metrics(a=1.0, b=2.0), is_last=True)
     last._pp_pin_metric_keys()
     drifted = _Stage(_metrics(a=0.0, c=0.0), is_last=False)
@@ -136,8 +117,7 @@ def test_metric_names_that_disagree_across_the_chain_are_refused(chain):
 
 
 def test_dropping_a_pinned_metric_mid_run_raises(chain):
-    """The broadcast carries values positionally; a metrics_fn that stops reporting one name would
-    otherwise shift every later value onto the wrong series."""
+    """The broadcast is positional, so a dropped name shifts every later value onto the wrong series."""
     reported = {"a": torch.ones(()), "b": torch.zeros(())}
     stage = _Stage(lambda: dict(reported), is_last=True)
     stage._pp_pin_metric_keys()
@@ -148,7 +128,6 @@ def test_dropping_a_pinned_metric_mid_run_raises(chain):
 
 
 def test_no_metrics_fn_costs_no_collective(chain):
-    """The causal-LM contract declares none; the per-step path must then not broadcast at all."""
     stage = _Stage(None, is_last=True)
     stage._pp_pin_metric_keys()
     stage._pp_share_step_metrics("train")
@@ -158,8 +137,7 @@ def test_no_metrics_fn_costs_no_collective(chain):
 
 
 class _Runtime:
-    """The two eval schedules: the loss-only one records the batch and the normalizer it was handed;
-    the forward-only one (``compute_metrics``) returns the last stage's per-token logits."""
+    """The loss-only schedule records the batch and normalizer; the forward-only one returns per-token logits."""
 
     def eval_loss(self, input_ids, labels, *, attention_mask, position_ids, num_items_in_batch, extra_targets):
         self.input_ids, self.labels, self.count = input_ids, labels, num_items_in_batch
@@ -175,7 +153,6 @@ class _PairedStage(_Stage):
 
 
 def _eval_stage(real_examples: int, compute_metrics=None, pairs: int = 2) -> _Stage:
-    """A last-stage rank evaluating a ``pairs``-pair interleaved batch, frozen at that many pairs."""
     seen = {}
     stage = _PairedStage(_metrics(m=1.0), is_last=True)
     stage._pp_adapter = PipelineLossAdapter(
@@ -197,8 +174,8 @@ def _eval_stage(real_examples: int, compute_metrics=None, pairs: int = 2) -> _St
 
 
 def test_an_eval_split_s_padding_examples_leave_the_step_as_inert_rows(chain):
-    """Pair 1 pads the eval split's final round: the step state and the normalizer see pair 0's two
-    rows alone, the schedule scores pair 1's rows as all-ignore filler, and the metrics weigh one."""
+    """Pair 1 pads the final round: state and normalizer see pair 0's rows alone, the schedule scores pair 1 as
+    filler."""
     stage = _eval_stage(real_examples=1)
     stage._pp_pin_metric_keys()
     labels = torch.arange(1, 13).view(4, 3)
@@ -215,9 +192,7 @@ def test_an_eval_split_s_padding_examples_leave_the_step_as_inert_rows(chain):
 
 
 def test_the_metrics_path_weighs_the_real_examples_too(chain):
-    """With ``compute_metrics`` the eval step drives the forward-only schedule instead; its shared
-    metrics weigh the two real pairs of three alone, and its predictions keep the batch's rows for the
-    gather to cut."""
+    """Predictions keep the batch's rows for the gather to cut."""
     stage = _eval_stage(real_examples=2, compute_metrics=lambda eval_pred: {}, pairs=3)
     stage._pp_pin_metric_keys()
     labels = torch.arange(1, 19).view(6, 3) % 5
@@ -232,8 +207,7 @@ def test_the_metrics_path_weighs_the_real_examples_too(chain):
 
 
 def test_a_step_of_padding_alone_divides_by_one(chain):
-    """No example is real: the schedule scores filler rows alone, and the normalizer it divides by is 1,
-    never a pair or row count of 0 (DPO's and KTO's normalizers count rows)."""
+    """Never a pair or row count of 0, which DPO's and KTO's normalizers count."""
     stage = _eval_stage(real_examples=0)
     stage._pp_pin_metric_keys()
 

@@ -1,28 +1,9 @@
 #!/usr/bin/env python
 """SMPO's first step under every parallel layout equals an undistributed recompute, then saves, resumes and exports.
 
-The MoE layouts train a tiny Qwen3-MoE: EP (ep2), the experts FSDP-sharded at ep1, under FULL_SHARD
-(ep1_zero3) or whole and FSDP-ignored (ep1_unsharded), expert TP (etp2), EP under attention TP (ep2tp2), and on
-four ranks EP x expert TP (ep2etp2), two EP groups in one NVLink domain (ep2dp2) and one per simulated two-GPU
-domain (ep2x2dom). The dense layouts train a tiny Qwen3 under FULL_SHARD (zero3) and HSDP over two simulated
-domains (hsdp). SMPO's loss is the rank's own mean, so a layout that miscounts it, mis-combines an expert or
-drops a reduction still trains to finite losses; the run is pinned by value instead:
-
-  1. step 1's microbatches, as ``compute_loss`` saw them, are scored again by an SMPO trainer over the same
-     initial weights under plain FSDP2 data parallelism with the stock experts (no EP layers), and each
-     microbatch loss, the logged step loss and the step-1 gradient of every parameter they share, which covers
-     every one outside the routers and routed experts (the attention, norms, embedding and head, which every
-     expert output reaches), match it;
-  2. on the MoE layouts the routed path is compared where it is computed, since at this model's random init the
-     routed output barely reaches the loss or those gradients (a halved combine moves the step-1 loss 1e-3
-     relative): the reference's stock blocks route on the picks each EP layer dispatched, and every layer's
-     output, every router gradient and each expert's gate-up and down gradient, gathered across EP and expert TP,
-     match it (:mod:`tests.common.routed_first_step`);
-  3. the layout is read off the model (``parallel_shape_checks``, ``dp_layout_checks``);
-  4. a run checkpointed midway resumes exactly and its final checkpoint serves through
-     ``AutoModelForCausalLM`` (:func:`tests.common.resume_export.run_resume_export`).
-
-Run: torchrun --nproc_per_node=2 tests/gpu/trainers/preference/test_smpo_layouts.py --mode ep1
+SMPO's loss is the rank's own mean, so a layout that miscounts it or mis-combines an expert still trains finite. The
+routed path is compared where it is computed, since at this random init its output barely reaches the loss (a halved
+combine moves the step-1 loss 1e-3 relative).
 """
 
 import argparse
@@ -55,7 +36,7 @@ from tests.common.resume_export import ResumeExportRoute, load_route_model, run_
 from tests.common.routed_first_step import pinned_reference_routing, record_routed_first_step, routed_first_step_checks
 from tests.common.training_checks import training_run_checks
 
-# Each layout's world size, model and ParallelismConfig fields; ``None`` fields are HSDP's, sized by the world.
+# ``None`` fields are HSDP's, sized by the world.
 MODES = {
     "ep2": (2, "moe", {"ep_size": 2}),
     "ep1": (2, "moe", {"ep_size": 1}),
@@ -76,11 +57,9 @@ PAIRS_PER_RANK = 2
 GRAD_ACCUM = 2
 SEQ_LEN = 64
 LEARNING_RATE = 5e-3
-# Step 1 against the undistributed recompute, relative: bf16 forwards over another reduction order (and, under
-# EP, the grouped-GEMM experts against the stock expert loop). A loss counted once per rank of a two-way axis is
-# 100% off.
+# bf16 forwards over another reduction order, and under EP grouped-GEMM against the stock loop. A loss counted once per
+# rank is 100% off.
 LOSS_RTOL = 0.02
-# A layout's axes are two-way, so a miscounted objective carries a factor of two.
 MISCOUNT_FACTOR = 2
 
 parser = argparse.ArgumentParser()
@@ -90,7 +69,6 @@ WORLD_SIZE, FAMILY, FIELDS = MODES[ARGS.mode]
 
 
 def build_model():
-    """The seeded tiny policy (identical on every rank), at the tiny vocab the dataset draws from."""
     torch.manual_seed(1234)
     if FAMILY == "moe":
         return Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG, pad_token_id=PAD_ID, eos_token_id=1))
@@ -98,7 +76,6 @@ def build_model():
 
 
 def build_dataset(vocab_size: int, seed: int = 7) -> Dataset:
-    """Pre-tokenized preference rows with ragged prompt and completion lengths, drawn from ``[4, vocab_size)``."""
     g = torch.Generator().manual_seed(seed)
 
     def ids(lo: int, hi: int) -> list[int]:
@@ -183,7 +160,7 @@ def run(ctx):
     )
     finish_phase(trainer)
 
-    # The recompute: plain FSDP2 DP over the same initial weights, the experts HF's own loop.
+    # Plain FSDP2 DP over the same initial weights, the experts HF's own loop.
     reference_config = ParallelismConfig(use_grouped_gemm=False)
     reference_model, _ = load_distributed_model(
         base, reference_config, torch.bfloat16, trust_remote_code=True, attn_implementation="eager"

@@ -1,13 +1,6 @@
 #!/usr/bin/env python
 """Ulysses attention hands its flash kernel the run's ``deterministic`` flag, as transformers does off CP.
-
-``UlyssesAttention._attend`` is the one flash call under context parallelism, and it replaces the attention
-forward through which transformers would read ``FLASH_ATTENTION_DETERMINISTIC`` on every call. A call that
-passes no flag leaves a ``full_determinism`` CP run with a non-deterministic attention backward. The flag must
-also reach each kernel the probe resolves, through the adapter the probe applies.
-
-Run: python tests/cpu/parallelism/test_cp_deterministic_attention.py  (or pytest)
-"""
+Otherwise a ``full_determinism`` CP run has a non-deterministic attention backward."""
 
 import importlib
 import inspect
@@ -26,13 +19,11 @@ from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from halo.models.attention.selection import FLASH_ATTENTION_DETERMINISTIC_ENV
 from tests.common.models import TINY_QWEN3_CONFIG
 
-# Spellings around transformers' own rule, which turns the flag on for "1" alone.
+# Around transformers' own rule, which turns the flag on for "1" alone.
 _ENV_VALUES = ("1", "0", "", "true")
 
 
 class _Attention(nn.Module):
-    """The attributes ``UlyssesAttention`` reads off the module it wraps."""
-
     def __init__(self):
         super().__init__()
         self.config = Qwen3Config(**TINY_QWEN3_CONFIG)
@@ -50,15 +41,14 @@ def _attend_inputs() -> tuple[torch.Tensor, ...]:
 
 
 def _transformers_flag() -> bool:
-    """The ``deterministic`` transformers hands a flash kernel whose signature names it."""
+    """The flag transformers hands a flash kernel whose signature names it."""
     return flash_utils._process_flash_attention_kwargs(
         query_length=4, key_length=4, is_causal=True, supports_mapping=defaultdict(bool, deterministic=True)
     )["deterministic"]
 
 
 class _BindingKernel:
-    """A flash entry point stand-in carrying the real kernel's signature: each call is bound against it, so a
-    keyword the kernel does not take raises as the kernel would, and the bound arguments are recorded."""
+    """Each call binds against the real signature, so a keyword the kernel lacks raises as it would."""
 
     def __init__(self, real):
         self.__signature__ = inspect.signature(real)
@@ -101,7 +91,7 @@ def test_ulysses_passes_the_flag_transformers_passes(value, monkeypatch):
 )
 @pytest.mark.parametrize("value", ["1", "0"])
 def test_every_kernel_the_probe_resolves_takes_the_flag(blackwell, hopper, module, value, monkeypatch):
-    """Through the probe and its FA2-contract adapter, whose dropped keywords would lose the flag silently."""
+    """Its FA2-contract adapter's dropped keywords would lose the flag silently."""
     if not _importable(module):
         pytest.skip(f"{module} does not import in this image")
     monkeypatch.setenv(FLASH_ATTENTION_DETERMINISTIC_ENV, value)

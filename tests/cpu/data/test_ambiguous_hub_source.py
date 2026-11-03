@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""A Hub-shaped dataset path that also names a local directory is refused, not guessed.
-
-``parse_dataset_source`` reads a bare ``org/name`` as a Hub id, the spelling ``prepare_dataset`` documents
-for a local output (``--output preprocessed/my_dataset``). Read as a Hub id, a ``save_to_disk`` tree loads
-through the json builder, which hands back its ``state.json`` sidecars as rows and skips the preprocessed
-stamp, so the run fails far from the cause. Every reader of a Hub-classified source (training, the
-``prepare_dataset`` input, the eval runner) refuses the spelling instead, naming ``./`` as the way to the
-directory.
-
-    python tests/cpu/data/test_ambiguous_hub_source.py
-"""
+"""A Hub-shaped dataset path that also names a local directory is refused, naming ``./`` as the way to the
+directory. Read as a Hub id, a ``save_to_disk`` tree loads through the json builder, which hands back its
+``state.json`` sidecars as rows."""
 
 import re
 

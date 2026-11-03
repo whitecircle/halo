@@ -1,29 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: tree attention on a family whose softmax layers select their keys per query.
-
-GLM-5 Next mixes KDA linear attention (a causal convolution and a delta-rule scan, the stateful
-mixer tree attention already segments) with DeepSeek sparse attention, whose indexer scores pools of
-consecutive tokens and attends the tokens of each query's top-scoring pools. On a tiny model:
-
-* a tree row gives every example the logits and gradients it has alone, also where a layer reuses
-  the previous layer's selection, and reading the sparse layers' row as one path instead of each
-  token's own moves them;
-* the selection is the stock indexer's on every example's path, in one call or in chunks that cross
-  tree boundaries, and a plan's pools and chunk ranges cost one host read for every layer of the forward,
-  its recompute included, while the backward reads none;
-* the latent attention over the selected keys is the dense masked softmax, with exact gradients, and
-  under autocast over fp32 parameters takes its two inputs in the autocast dtype;
-* under gradient checkpointing, reentrant or not, a tree row trains to the logits and gradients it
-  trains to without;
-* what the fold would skip without a word is refused before the model loads, from the config and the
-  adapter targets read as the run's PEFT config reads them, and again at the first tree batch for what
-  only the loaded layers show: an adapter on the latent's key/value projection (wrapped after the
-  install, as the trainer does) and attention dropout.
-
-The CUDA kernels are pinned by ``tests/gpu/kernels/test_tree_sparse_attention.py``.
-
-Run: python tests/cpu/models/test_tree_sparse_attention.py  (or pytest)
-"""
+"""Tree attention on a family whose softmax layers select their keys per query: GLM-5 Next mixes KDA linear attention
+with DeepSeek sparse attention. ``tests/gpu/kernels/test_tree_sparse_attention.py`` pins the CUDA kernels."""
 
 from types import SimpleNamespace
 
@@ -54,17 +31,16 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.trees import checkpointing_gaps, example_rows, randomize_indexer_pools, tree_columns
 
 VOCAB = 1024
-# Eight indexer heads: with fewer, a random model scores many pools exactly zero (every head's ReLU
-# off), and the stock top-k breaks those ties in an unspecified order. Two pools per selection, so
-# every path past twelve tokens selects.
+# Eight indexer heads: with fewer, a random model scores many pools exactly zero (every head's ReLU off), and the
+# stock top-k breaks those ties in an unspecified order. Two pools per selection, so every path past twelve tokens
+# selects.
 SPARSE_FAMILIES = {
     "glm5_next_text": (
         TINY_MOE_FAMILIES["glm5_next"],
         {"index_n_heads": 8, "index_topk": 8, "index_kpool_always_select_tail": True},
     ),
 }
-# lora_target_modules spellings: (refused before the load, PEFT wraps every sparse layer's kv_b_proj). PEFT
-# matches a list entry against the end of a module's path and reads all-linear as every linear layer; a regex
+# lora_target_modules spelling -> (refused before the load, PEFT wraps every sparse layer's kv_b_proj). A regex
 # resolves only against the loaded module tree, which the first tree batch checks.
 TARGET_SPELLINGS = {
     "listed": (["q_a_proj", "kv_b_proj"], True, True),
@@ -114,7 +90,6 @@ def model(request):
 
 
 def _install(model, monkeypatch) -> None:
-    """Tree attention on ``model``'s family for one test; every attribute it replaces is restored."""
     family = TREE_FAMILIES[model.config.get_text_config().model_type]
     for name in ("ALL_ATTENTION_FUNCTIONS", family.stateful.conv, family.stateful.recurrence):
         monkeypatch.setattr(family.module, name, getattr(family.module, name))
@@ -185,9 +160,8 @@ def test_a_tree_row_reproduces_every_example_alone(model, tree, alone, monkeypat
     assert "full" not in plan and "sparse" in plan
     _assert_tree_is_every_example_alone(model, paths, labels, columns, alone, plan)
 
-    # Without the plan the row is one sequence everywhere; with the sparse layers' links reading the
-    # row as one path (the KDA layers still segmented) their selection and attention cross branches.
-    # Each must move the logits, or the checks above compare nothing.
+    # Without the plan the row is one sequence everywhere; with the sparse links reading it as one path (KDA layers
+    # still segmented) their selection and attention cross branches. Each must move the logits.
     assert _worst_gap(_forward(model, columns, None), alone) > 1e-2
     tokens = len(columns["input_ids"])
     one_path = {
@@ -203,8 +177,8 @@ def test_a_tree_row_reproduces_every_example_alone(model, tree, alone, monkeypat
 @pytest.mark.parametrize("use_reentrant", [True, False], ids=["reentrant", "non_reentrant"])
 @pytest.mark.parametrize("model_type", sorted(SPARSE_FAMILIES))
 def test_a_tree_row_trains_identically_under_gradient_checkpointing(model_type, use_reentrant, tree, monkeypatch):
-    """A checkpointed decoder layer runs its forward again in the backward, so the sparse layers' own forward and
-    the KDA convolution and scan are handed the plan a second time and must read it as the first pass did."""
+    """A checkpointed layer runs its forward again in the backward, so the sparse layers' forward and the KDA
+    convolution and scan must read the plan as the first pass did."""
     _, _, columns = tree
     family, overrides = SPARSE_FAMILIES[model_type]
     torch.manual_seed(0)
@@ -223,8 +197,7 @@ def test_a_tree_row_trains_identically_under_gradient_checkpointing(model_type, 
 
 
 def test_a_layer_reusing_the_previous_selection_reads_the_tree_selection(tree, monkeypatch):
-    """A ``shared`` DSA layer attends the keys the full layer before it selected (GLM-5.3-Flash ships
-    none, but the stock forward supports them)."""
+    """GLM-5.3-Flash ships no ``shared`` DSA layer, but the stock forward supports them."""
     paths, labels, columns = tree
     family, overrides = SPARSE_FAMILIES["glm5_next_text"]
     torch.manual_seed(0)
@@ -242,8 +215,7 @@ def test_a_layer_reusing_the_previous_selection_reads_the_tree_selection(tree, m
 
 
 def _random_paths(generator: torch.Generator, max_depth: int = 3) -> list[list[int]]:
-    """The root-to-leaf paths of a tree of random node lengths (nodes shorter than a pool included),
-    two or three children under every node above ``max_depth``."""
+    """Root-to-leaf paths of a tree of random node lengths, nodes shorter than a pool included."""
 
     def grow(prefix: list[int], depth: int) -> list[list[int]]:
         length = int(torch.randint(1, 15, (), generator=generator))
@@ -364,8 +336,7 @@ def test_a_plans_selection_reads_the_host_once_for_every_layer(model, monkeypatc
 
 
 def _recorded_forward(query, latent, keys, scale) -> SimpleNamespace:
-    """The context the forward leaves, for calling the backward directly: a function mode does not reach the
-    backward the autograd engine runs."""
+    """A function mode misses the autograd engine's backward, so the test calls it directly on this context."""
     ctx = SimpleNamespace()
     ctx.save_for_backward = lambda *tensors: setattr(ctx, "saved_tensors", tensors)
     with torch.no_grad():
@@ -374,8 +345,8 @@ def _recorded_forward(query, latent, keys, scale) -> SimpleNamespace:
 
 
 def test_the_latent_attention_backward_reads_nothing_back_to_the_host(monkeypatch):
-    """Several query chunks, each with pad slots: the backward adds every slot, a pad's an exact zero, instead of
-    compacting the selected ones by a count read back per chunk."""
+    """The backward adds every slot, a pad's an exact zero, instead of compacting the selected ones by a count read
+    back per chunk."""
     generator = torch.Generator().manual_seed(4)
     tokens, heads, rank, width = 12, 2, 6, 5
     query = torch.randn(tokens, heads, rank, generator=generator, requires_grad=True)
@@ -424,9 +395,8 @@ def _sparse_layers(model) -> list[torch.nn.Module]:
 
 @pytest.mark.parametrize("model_type", sorted(SPARSE_FAMILIES))
 def test_the_latent_fold_sees_one_dtype_under_autocast(model_type, tree, monkeypatch):
-    """fp32 parameters under bf16 autocast, as fp32 masters train without FSDP: the folded query leaves its matmul in
-    bf16 and the latent leaves its norm in fp32. The latent attention takes both in bf16, as autocast hands SDPA its
-    inputs, and keeps its fp32 scores outside autocast's reach; the step trains the projection the fold reads."""
+    """fp32 parameters under bf16 autocast, as fp32 masters train without FSDP. The query leaves its matmul in bf16 and
+    the latent its norm in fp32; the latent attention takes both in bf16 and keeps its fp32 scores out of autocast."""
     _, _, columns = tree
     family, overrides = SPARSE_FAMILIES[model_type]
     torch.manual_seed(0)
@@ -452,9 +422,8 @@ def test_the_latent_fold_sees_one_dtype_under_autocast(model_type, tree, monkeyp
 
 @pytest.mark.parametrize("spelling", sorted(TARGET_SPELLINGS))
 def test_adapter_targets_on_kv_b_proj_are_refused_before_the_load(spelling, monkeypatch):
-    """Refused from the config and the targets alone wherever the run's PEFT config (built as the run builds it,
-    on the tiny model's module tree) wraps kv_b_proj under a spelling readable without the model, and never where
-    it wraps none."""
+    """Refused wherever the run's PEFT config wraps kv_b_proj under a spelling readable without the model, and never
+    where it wraps none."""
     targets, refused, wrapped = TARGET_SPELLINGS[spelling]
     family, overrides = SPARSE_FAMILIES["glm5_next_text"]
     model = tiny_family_model(family, overrides=overrides)
@@ -483,8 +452,7 @@ def test_attention_dropout_is_refused_before_the_load_and_only_for_the_folding_f
     with pytest.raises(ValueError, match="takes no dropout, but attention_dropout=0.1"):
         reject_unsupported_tree_attention(dropout, "sdpa", "gather")
     reject_unsupported_tree_attention(tiny_family_model(family, overrides=overrides).config, "sdpa", "gather")
-    # A family whose attention runs at the flash seam reads no kv_b_proj: the targets and the quantization are not
-    # its concern.
+    # A family whose attention runs at the flash seam reads no kv_b_proj, so the targets and quantization don't apply.
     flash_family = tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"]).config
     reject_unsupported_tree_attention(
         flash_family,
@@ -496,9 +464,8 @@ def test_attention_dropout_is_refused_before_the_load_and_only_for_the_folding_f
 
 
 def test_what_the_fold_would_skip_is_refused_at_the_first_tree_batch(tree, monkeypatch):
-    """The SFT script installs tree attention on the bare model and the trainer wraps its adapters after, so the
-    loaded layers are checked again with the first tree batch: an adapter on kv_b_proj under a target spelling
-    the pre-load check cannot read (a regex), and a dropout set on the layers after the install."""
+    """The SFT script installs tree attention on the bare model and the trainer wraps its adapters after, so the loaded
+    layers are checked again: an adapter under a regex spelling, and a dropout set after the install."""
     _, _, columns = tree
     family, overrides = SPARSE_FAMILIES["glm5_next_text"]
     torch.manual_seed(0)
@@ -519,8 +486,7 @@ def test_what_the_fold_would_skip_is_refused_at_the_first_tree_batch(tree, monke
 
 
 def test_a_sparse_plan_is_refused_at_a_flash_interface(tree):
-    """A sparse family's plan carries no flash parts, so a flash layer reading it would run the row as one
-    sequence; the view refuses it, and still hands a plan-less call to the stock interface."""
+    """A sparse family's plan carries no flash parts, so a flash layer reading it would run the row as one sequence."""
     _, _, columns = tree
     table = build_node_table(columns[POSITION_COLUMN], columns[DEPTH_COLUMN])
     plan = build_tree_attention_plan(table, sliding_window=None, full_form="gather", sparse_attention=True)
@@ -533,8 +499,8 @@ def test_a_sparse_plan_is_refused_at_a_flash_interface(tree):
 
 
 def test_the_backend_and_full_form_checks_do_not_apply_to_a_sparse_family(monkeypatch):
-    """Its sparse layers attend in their own forward and its KDA layers on their own kernels, so the run's
-    backend and ``tree_full_attention`` are not read; the segment-aware kernels still are."""
+    """Its sparse layers attend in their own forward and its KDA layers on their own kernels; the segment-aware kernels
+    still apply."""
     config = tiny_family_model(SPARSE_FAMILIES["glm5_next_text"][0]).config
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
     reject_unsupported_tree_attention(config, "sdpa", "split")
@@ -544,8 +510,7 @@ def test_the_backend_and_full_form_checks_do_not_apply_to_a_sparse_family(monkey
 
 
 def test_the_split_forms_head_dim_256_refusal_does_not_apply_to_a_sparse_family(monkeypatch):
-    """GLM-5 Next's DSA heads are 256 wide at release, the width of FA4's head_dim-256 kernel, which refuses the
-    split form on a flash family; the sparse layers never reach that kernel, so the default form passes."""
+    """GLM-5 Next's DSA heads are 256 wide at release, but the sparse layers never reach FA4's head_dim-256 kernel."""
     config = tiny_family_model(SPARSE_FAMILIES["glm5_next_text"][0], overrides={"qk_nope_head_dim": 256}).config
     assert uses_fa4_dedicated_head_dim(config)
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())

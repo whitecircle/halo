@@ -1,27 +1,6 @@
 #!/usr/bin/env python
 """A LoRA run that grew its vocabulary saves, resumes and merges the added rows with the Hub out of reach.
-
-``configure_run_tokenizer`` grows the embedding (and an untied head) past the checkpoint's rows, and those rows exist
-in no base checkpoint. PEFT's own ``save_embedding_layers="auto"`` tells a grown vocabulary only by reading the base
-config again: under ``HF_HUB_OFFLINE=1`` a base named by Hub id is never read, so the adapter left the rows out, the
-resume's selection agreed and restored none, and the merge wrote the checkpoint's rows beside a longer tokenizer. A
-composite config, holding ``vocab_size`` on its text config alone, defeats the check even from a local directory.
-Pinned on a tiny Qwen3 staged as a Hub snapshot in an offline cache, tied and untied, and on a tiny Qwen3-VL:
-
-* every saver branch writes the grown rows: the plain save, the gathered selection FSDP2 and mixed EP runs write,
-  and the CP branch (keys respelled for a non-CP reload), each file safetensors, a tied pair's included; a mixed
-  run's resume adapter carries them beside its expert tensors;
-* the resume restores them onto a fresh model whose added rows were zeroed, from each branch's file (the gathered
-  one names a tied pair once). An adapter saved before adapter saves carried them, whose run kept them frozen at
-  their mean-resize init, resumes on the rows this run's grow drew, with a warning; any other tensor it lacks is
-  still refused;
-* the merge tool loads the base by its Hub id offline and serves the trained rows;
-* the trainer refuses the PEFT runs whose saves would still leave added rows out: accelerate-managed FSDP, and a
-  LoRA on one layer of an untied embedding pair. An expert-only LoRA run, whose resume grows the frozen rows again,
-  trains.
-
-    python tests/cpu/peft/test_adapter_grown_vocab_offline.py
-"""
+PEFT's ``save_embedding_layers="auto"`` detects a grown vocabulary by rereading the base config, impossible offline."""
 
 import json
 import logging
@@ -102,8 +81,7 @@ def offline_base(checkpoint, tmp_path, monkeypatch) -> bool:
 
 
 def _policy(*, seed: int | None, cp: bool = False, lora: dict = LORA) -> tuple[PeftModel, object, int]:
-    """:data:`REPO` loaded by Hub id, its vocabulary grown, LoRA applied (outside a CP wrapper with ``cp``); the added
-    rows are drawn from ``seed``, or zeroed for ``None``. Returns the model, the tokenizer and the checkpoint's rows."""
+    """:data:`REPO` with a grown vocabulary and LoRA; the added rows are drawn from ``seed``, zeroed for ``None``."""
     model = AutoModelForCausalLM.from_pretrained(REPO, dtype=torch.float32)
     rows = model.get_input_embeddings().num_embeddings
     if cp:
@@ -140,7 +118,6 @@ def _checkpoint_context(peft_model, *, cp: bool = False):
 
 
 def test_peft_alone_leaves_the_grown_rows_out_offline(offline_base):
-    """The premise every other test stands on: offline, PEFT's own selection drops the grown embedding."""
     peft_model, _, rows = _policy(seed=1)
     assert peft_model.get_input_embeddings().num_embeddings == len(WORDS) + 2 + len(GROWING_TOKENS) > rows
     with pytest.warns(UserWarning, match="Could not find a config file"):
@@ -167,8 +144,7 @@ def test_every_saver_writes_the_grown_rows_offline(offline_base, tmp_path, branc
 
 
 def _gathered_save(peft_model, directory: str) -> None:
-    """The adapter file and config the gathered branch of ``save_peft_adapters`` writes for FSDP2 and mixed EP runs:
-    ``named_parameters()`` names a tied pair once."""
+    """What ``save_peft_adapters``'s gathered branch writes for FSDP2 and mixed EP runs; a tied pair is named once."""
     peft_model.peft_config["default"].save_pretrained(directory)
     write_adapter_file(gather_adapter_state(peft_model), directory)
 
@@ -206,8 +182,7 @@ def _resume_warnings(caplog) -> list[str]:
     "lora", [LORA, {**LORA, "modules_to_save": ["embed_tokens"]}], ids=["lora", "embedding-modules-to-save"]
 )
 def test_an_adapter_saved_without_the_grown_rows_resumes_on_the_regrown_rows(offline_base, tmp_path, caplog, lora):
-    """The adapter PEFT alone writes offline, as every save did before adapter saves carried the rows: its run kept
-    them frozen at their mean-resize init, so the resume keeps the rows this run's grow drew, and restores the rest."""
+    """Its run kept the rows frozen at their mean-resize init, so the resume keeps the rows this run's grow drew."""
     trained, _, rows = _policy(seed=1, lora=lora)
     trained.save_pretrained(str(tmp_path), save_embedding_layers=False)
     saved = set(load_file(tmp_path / ADAPTER_SAFETENSORS_FILE))
@@ -231,8 +206,7 @@ def test_an_adapter_saved_without_the_grown_rows_resumes_on_the_regrown_rows(off
 
 
 def test_an_adapter_missing_a_trained_tensor_is_still_refused(offline_base, tmp_path):
-    """Anti-vacuity: only the grown vocabulary's frozen rows may be absent; a LoRA tensor missing beside them is the
-    mismatch it always was, named with its cause."""
+    """Only the grown vocabulary's frozen rows may be absent."""
     trained, _, _ = _policy(seed=1)
     trained.save_pretrained(str(tmp_path), save_embedding_layers=False)
     weights = tmp_path / ADAPTER_SAFETENSORS_FILE
@@ -249,8 +223,7 @@ def test_an_adapter_missing_a_trained_tensor_is_still_refused(offline_base, tmp_
 
 
 def test_ranks_disagreeing_on_the_unsaved_grown_rows_refuse_before_any_copy(offline_base, tmp_path, monkeypatch):
-    """The grown rows an adapter lacks are agreed across ranks, since a kept key's copy is a mesh collective on a
-    DTensor: when a peer read a different adapter file the resume refuses, and restores nothing."""
+    """A kept key's copy is a mesh collective on a DTensor, so the missing rows are agreed across ranks first."""
     trained, _, _ = _policy(seed=1)
     trained.save_pretrained(str(tmp_path), save_embedding_layers=False)
     fresh, _, _ = _policy(seed=None)
@@ -270,8 +243,7 @@ def test_ranks_disagreeing_on_the_unsaved_grown_rows_refuse_before_any_copy(offl
 
 
 def test_a_mixed_resume_adapter_carries_the_grown_rows(offline_base, tmp_path, monkeypatch):
-    """A mixed attention+expert run writes the gathered selection beside its expert tensors, into the resume adapter
-    of a ``merge_expert_lora_on_save`` checkpoint too; the restore reads the added rows back off it."""
+    """Also holds for the resume adapter of a ``merge_expert_lora_on_save`` checkpoint."""
     monkeypatch.setattr(adapters_mod, "gather_expert_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     trained, _, rows = _policy(seed=1)
     config = make_parallelism_config(
@@ -315,7 +287,7 @@ def test_the_merge_serves_the_rows_saved_offline(offline_base, tmp_path):
 
 
 def test_a_composite_config_saves_the_grown_rows_from_a_local_base(tmp_path):
-    """Network-independent: the base config is on disk, but its ``vocab_size`` sits on the text config."""
+    """The base config is on disk, but its ``vocab_size`` sits on the text config."""
     tokenizer = word_level_tokenizer(WORDS)
     torch.manual_seed(0)
     model = tiny_family_model(TINY_QWEN3_VL_FAMILY, tokenizer)
@@ -361,8 +333,7 @@ class _PastTheGates(Exception):
 
 
 class _ModeSetupHost(DistributedTrainerMixin):
-    """The trainer's real ``_configure_distributed_modes`` over a model on one rank, up to the first step past its
-    pre-wrap gates."""
+    """The real ``_configure_distributed_modes`` on one rank, up to the first step past its pre-wrap gates."""
 
     _deferred_liger_kernel = False
     _accelerate_manages_ddp = False
@@ -380,8 +351,7 @@ class _ModeSetupHost(DistributedTrainerMixin):
 
 
 def test_trainer_construction_runs_the_grown_vocabulary_refusal(offline_base):
-    """The refusal is reached from the trainer's own mode setup, before any wrap, where the save it guards would
-    otherwise first fail at a checkpoint."""
+    """The refusal runs before any wrap; otherwise the save it guards first fails at a checkpoint."""
     peft_model, _, _ = _policy(seed=1)
     with patch("halo.trainers.distributed_trainer.agree_rank_uniform_env"):
         with pytest.raises(ValueError, match="grew the vocabulary of an adapter run under accelerate-managed FSDP"):
@@ -395,8 +365,7 @@ def test_trainer_construction_runs_the_grown_vocabulary_refusal(offline_base):
 
 
 def test_an_expert_only_run_that_grew_its_vocabulary_trains(offline_base):
-    """An expert-only LoRA run has no PEFT adapter to carry the rows: its resume grows them again, frozen at the
-    same mean-resize init, and ``merge_expert_lora_on_save`` exports the grown embedding whole."""
+    """The resume regrows the rows at the same init, and ``merge_expert_lora_on_save`` exports the embedding whole."""
     model = AutoModelForCausalLM.from_pretrained(REPO, dtype=torch.float32)
     grow_vocabulary(model, AutoTokenizer.from_pretrained(REPO), GROWING_TOKENS)
     _expert_only(model)
@@ -404,8 +373,7 @@ def test_an_expert_only_run_that_grew_its_vocabulary_trains(offline_base):
 
 
 def test_an_ungrown_vocabulary_is_never_refused(checkpoint):
-    """Anti-vacuity: the refusals key on the grow, so an accelerate-managed FSDP run on the checkpoint's own rows,
-    and one adapting one layer of an untied pair, train."""
+    """The refusals key on the grow, so the same runs on the checkpoint's own rows train."""
     for lora in (LORA, {**LORA, "target_modules": ["q_proj", "embed_tokens"]}):
         model = AutoModelForCausalLM.from_pretrained(checkpoint[0], dtype=torch.float32)
         reject_unsaved_grown_vocabulary(get_peft_model(model, LoraConfig(**lora)), accelerate_manages_fsdp=True)

@@ -1,11 +1,5 @@
-"""The env-GRPO e2e grades a prefetching run by the round each step acquired, not by its hit count.
-
-A hit is a round delivered before its step asks for it, which depends on how long the round runs against the
-update: a run that prefetches correctly can finish with no hit, and one that pairs a step with the wrong round can
-still hit. The recorder wraps the trainer's acquire, so the check reads what each step took: its first
-``prefetch_depth`` steps collect their own prompts and every later one pops a prefetched round, whatever the
-server count.
-"""
+"""The env-GRPO e2e grades a prefetching run by the round each step acquired. Hits depend on timing: a correct run
+can finish with none, and a wrong pairing can still hit."""
 
 import types
 
@@ -18,8 +12,8 @@ _ORDER_CHECK = "prefetch_opened_with_depth_cold_rounds_then_popped_every_step"
 
 
 def _graded(acquisitions: list, depth: int, hits: int) -> tuple[dict[str, bool], list[bool]]:
-    """Step a trainer whose acquire returns ``acquisitions`` in turn (``None``: the step collects its own prompts),
-    logging ``hits`` and a finite log-ratio every step, and grade it at ``depth``."""
+    """Step a trainer whose acquire returns ``acquisitions`` in turn (``None``: the step collects its own prompts)
+    and grade it at ``depth``."""
     outcomes = iter(acquisitions)
     trainer = types.SimpleNamespace(
         _acquire_prefetched_round=lambda: next(outcomes),

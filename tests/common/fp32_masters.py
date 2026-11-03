@@ -1,6 +1,4 @@
-"""An EP model's trainable parameters by the knob that makes each an fp32 master: the routed experts
-(``ep_fp32_experts``), the live routers (``ep_fp32_router``) and every other parameter (``fp32_non_ep_params``),
-read off the live parameter identities."""
+"""An EP model's trainable parameters by the knob making each an fp32 master, read off live parameter identities."""
 
 from torch import nn
 
@@ -11,8 +9,8 @@ FP32_MASTER_GROUP_NAMES = ("expert", "router", "non_expert")
 
 
 def fp32_master_groups(model: nn.Module) -> dict[str, dict[str, nn.Parameter]]:
-    """``model``'s trainable parameters by name in each of :data:`FP32_MASTER_GROUP_NAMES`, read with the FSDP2
-    groups resharded, so a sharded parameter is its registered shard. No collective."""
+    """Trainable parameters by name per :data:`FP32_MASTER_GROUP_NAMES`, with FSDP2 groups resharded so a sharded param
+    is its shard. No collective."""
     reshard_fsdp2_modules(model)
     layers = ep_layers(model)
     experts = {id(parameter) for layer in layers for _, parameter in layer.expert_named_params()}

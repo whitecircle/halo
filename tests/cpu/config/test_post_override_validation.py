@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""CLI overrides must clear the same guards a YAML value does.
-
-``HaloArgumentParser.parse_dict`` builds each dataclass once from the YAML and the
-``--key=value`` overrides, so every guard ``__post_init__`` runs sees the CLI value. Guarded configs
-keep their guards in ``ValidatedConfig._validate_fields``. These tests fail if a guard is
-dropped, if a guarded config stops running its chain, or if a Literal field's allowed set drifts
-from the runtime table it mirrors.
-
-Run: pytest tests/cpu/config/test_post_override_validation.py
-"""
+"""CLI overrides clear the same guards a YAML value does: ``HaloArgumentParser.parse_dict`` builds each dataclass
+once from the YAML and the overrides, so every ``__post_init__`` guard sees the CLI value."""
 
 import ast
 import inspect
@@ -80,8 +72,7 @@ _RANGE_VIOLATIONS = [
     (SelfDistillScriptArguments, "train_on_completions_only", "false"),
 ]
 
-# Presence guards rather than ranges. Each needs a VALID yaml baseline so the raise can only come
-# from the override — parsing an empty config would trip the guard on its own.
+# Presence guards. Each needs a valid YAML baseline so the raise can only come from the override.
 _EMPTIED_REQUIRED_FIELDS = [
     (TeacherDistillScriptArguments, "teacher_model", "teacher_model: some-org/teacher\n", ""),
 ]
@@ -93,7 +84,6 @@ _EMPTIED_REQUIRED_FIELDS = [
     ids=[f"{c.__name__}.{f}={v}" for c, f, v in _RANGE_VIOLATIONS],
 )
 def test_cli_override_violating_a_range_raises(config_cls, flag, value, tmp_path):
-    """The failure mode this pins: an override that skips __post_init__ lets --focal_gamma=-1 train."""
     with pytest.raises(ValueError, match=flag):
         _parse(config_cls, tmp_path, [f"--{flag}={value}"])
 
@@ -111,7 +101,6 @@ def test_cli_override_violating_a_range_raises(config_cls, flag, value, tmp_path
     ids=lambda v: str(v),
 )
 def test_in_range_cli_override_still_parses(config_cls, flag, value, tmp_path):
-    """The guards must not reject legitimate values — 0 retries and 'auto' emphasis are valid."""
     parsed = _parse(config_cls, tmp_path, [f"--{flag}={value}"])
     assert str(getattr(parsed, flag)) == value
 
@@ -122,15 +111,14 @@ def test_in_range_cli_override_still_parses(config_cls, flag, value, tmp_path):
     ids=[f"{c.__name__}.{f}={v!r}" for c, f, _, v in _EMPTIED_REQUIRED_FIELDS],
 )
 def test_cli_override_emptying_a_required_field_raises(config_cls, flag, yaml_body, value, tmp_path):
-    """A valid YAML plus an emptying override must not parse clean: distillation would reach the
-    loader with a blank teacher id."""
+    """Distillation would reach the loader with a blank teacher id."""
     assert _parse(config_cls, tmp_path, [], yaml_body), "yaml baseline must parse, or the test is vacuous"
     with pytest.raises(ValueError, match=flag):
         _parse(config_cls, tmp_path, [f"--{flag}={value}"], yaml_body)
 
 
 def test_smpo_cross_field_margin_guard_survives_override(tmp_path):
-    """initial_margin < target_margin is a CROSS-field guard: overriding either side must re-check."""
+    """A cross-field guard: overriding either side must re-check."""
     with pytest.raises(ValueError, match="initial_margin"):
         _parse(SMPOConfig, tmp_path, ["--initial_margin=0.9"], "use_margin_schedule: true\n")
 
@@ -141,9 +129,8 @@ def test_classification_class_weight_exclusivity_survives_override(tmp_path):
 
 
 def test_every_validated_config_implements_the_hook_and_keeps_one_post_init_chain():
-    """Derived from the class hierarchy, not a hand list: a subclass implementing no ``_validate_fields`` runs
-    no guard, a ``__post_init__`` override that skips ``super().__post_init__()`` leaves the config unguarded,
-    and one that also calls ``_validate_fields`` validates twice."""
+    """A subclass implementing no ``_validate_fields`` runs no guard, a ``__post_init__`` override skipping
+    ``super()`` leaves the config unguarded, and one also calling ``_validate_fields`` validates twice."""
     configs = iter_subclasses(ValidatedConfig)
     assert configs, "no config routes through ValidatedConfig — the seam is dead"
     for cls in configs:
@@ -162,10 +149,8 @@ def test_every_validated_config_implements_the_hook_and_keeps_one_post_init_chai
 
 
 def test_every_validate_fields_override_opens_the_cooperative_chain():
-    """``_validate_fields`` is cooperative (the contract is stated on ``ValidatedConfig``): an
-    override that skips ``super()`` keeps only its own guards, so a class mixing two guarded bases
-    silently drops one base's checks. ``OfflineGRPOConfig`` already mixes ``ChunkedLogprobsArguments``
-    with ``ValidatedConfig``, which puts it one guarded base away from that."""
+    """An override that skips ``super()`` keeps only its own guards, so a class mixing two guarded bases silently
+    drops one's checks."""
     for cls in iter_subclasses(ValidatedConfig):
         override = cls.__dict__.get("_validate_fields")
         if override is None:
@@ -177,8 +162,8 @@ def test_every_validate_fields_override_opens_the_cooperative_chain():
 
 
 def test_dead_knobs_are_rejected_not_ignored():
-    """``num_labels`` (derived from the dataset) and ``partial_reward`` (no reward tier the grader
-    ever pays) would be settable no-ops; the parser refuses them."""
+    """``num_labels`` (derived from the dataset) and ``partial_reward`` (no tier the grader pays) would be settable
+    no-ops."""
     for parser, key in (
         (HaloArgumentParser((ClassificationConfig,)), "num_labels"),
         (HaloArgumentParser((EnvironmentConfig,)), "partial_reward"),
@@ -188,9 +173,8 @@ def test_dead_knobs_are_rejected_not_ignored():
 
 
 def test_overwrite_output_dir_reaches_both_output_dir_guards():
-    """The flag is declared ONLY on CheckpointArguments, and the parser routes a YAML key only to the
-    dataclass declaring it: ``init_training_script`` hands it to the setup guard and to the resume one
-    (a resume that finds nothing re-runs the guard), or an overwrite request still refuses the run."""
+    """The parser routes a YAML key only to the dataclass declaring it: CheckpointArguments alone, which
+    ``init_training_script`` hands to the setup guard and the resume one."""
     tree = ast.parse(textwrap.dedent(inspect.getsource(init_training_script)))
     handed = {
         call.func.id
@@ -203,8 +187,8 @@ def test_overwrite_output_dir_reaches_both_output_dir_guards():
 
 
 def test_offline_grpo_max_completion_length_defaults_to_none():
-    """dr_grpo's normalizer guard fires only on None; a 1024 default silently normalized by a number
-    nobody chose — exactly what the guard's error text warns against."""
+    """dr_grpo's normalizer guard fires only on None; a 1024 default would silently normalize by a number nobody
+    chose."""
     assert OfflineGRPOConfig.max_completion_length is None
 
 
@@ -251,8 +235,7 @@ def test_unknown_pipeline_schedule_is_rejected_at_parse_time(tmp_path):
 
 
 def test_unknown_reasoning_effort_is_rejected_at_parse_time(tmp_path):
-    """The env-GRPO path validates this steer in EnvironmentBase.__init__; the RLVR path has only the
-    parser, and an unknown level is silently ignored by most chat templates (no steer at all)."""
+    """The RLVR path has only the parser, and most chat templates silently ignore an unknown level."""
     with pytest.raises(ValueError, match="reasoning_effort"):
         _parse(OnlineGRPOScriptArguments, tmp_path, ["--reasoning_effort=hgih"])
 

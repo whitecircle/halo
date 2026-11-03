@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""FSDP2 shard groups of several decoder layers train bit for bit like one-layer groups, on gloo ranks, and save the
-same checkpoint.
-
-``apply_fsdp2_per_layer`` hands consecutive decoder layers to one ``fully_shard`` call and replaces torch's
-multi-module forward hooks with hooks at the unit's two ends (``_install_unit_hooks``). Each case trains a tiny model
-two steps at every unit size and compares the loss, every sharded gradient, every sharded weight and the state dict's
-layout with one-layer groups: odd layer counts; gradient checkpointing off, non-reentrant and reentrant, on every layer
-and on every other one; ZeRO-2 and ZeRO-3; several rows per backward; gradient-accumulation windows; nested dtype
-groups and a layer of another trainable dtype; ep1 EP layers with FSDP-sharded and FSDP-ignored experts; LoRA; a
-hybrid gated-DeltaNet stack; a pipeline stage's FSDP drive; HSDP; a TP x DP mesh. The FSDP2 writer and the optimizer
-shard store save the same tensors at every unit size, and a run resumes across unit sizes and from ZeRO-2 into ZeRO-3.
-Left to its own count the wrap groups two layers under ZeRO-2 and keeps one per group under ZeRO-3.
-
-Negative controls, each run here: torch's own multi-module hooks crash a reentrant recompute; without the first
-layer's recompute registration a partly checkpointed unit reduces only in the final callback, after the backward; a
-unit that mixes trainable dtypes fails FSDP2's dtype check.
-
-    python tests/cpu/parallelism/test_fsdp2_layer_units.py
-"""
+"""FSDP2 shard groups of several decoder layers train bit for bit like one-layer groups on gloo ranks, and save the
+same checkpoint, with hooks at the unit's two ends (``_install_unit_hooks``)."""
 
 import contextlib
 import dataclasses
@@ -57,7 +40,6 @@ from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
 
 WORLD = 2
-# HSDP's (replicate, shard) mesh, and the TP run's (dp, tp) mesh.
 MESH_4 = (2, 2)
 PG_TIMEOUT = datetime.timedelta(seconds=120)
 VOCAB = 128
@@ -67,7 +49,7 @@ UNIT_SIZES = (2, 3)
 MICROBATCHES = 2
 FAMILIES = {
     "dense": (TINY_DENSE_FAMILIES["qwen3"], {}),
-    # Gated DeltaNet layers beside attention layers: units span both layer types.
+    # Units span both layer types.
     "hybrid": (TINY_DENSE_FAMILIES["qwen3_5"], {}),
     "moe": (TINY_MOE_FAMILIES["qwen3_moe"], {"num_experts": 4, "moe_intermediate_size": 32}),
 }
@@ -76,20 +58,17 @@ LORA_TARGETS = ["q_proj", "v_proj"]
 
 @dataclasses.dataclass(frozen=True)
 class Case:
-    """One training shape; ``variant`` names what is built on the family's tiny model before the FSDP2 wrap."""
-
     family: str = "dense"
-    # "" | "nested" (each MLP in float64, a nested group) | "odd_layer" (layer 1 in float64) | "lora"
-    # | "ep_sharded" / "ep_ignored" (ep1 EP layers, the experts FSDP-sharded or left out of every group)
-    # | "fp32_rope" (fp32 position embeddings into every layer, which each group's pre-forward casts)
+    # "" | "nested" (each MLP in float64) | "odd_layer" (layer 1 in float64) | "lora" | "ep_sharded" / "ep_ignored" |
+    # "fp32_rope" (fp32 position embeddings each group's pre-forward casts)
     variant: str = ""
     layers: int = 4
-    gc: str = "reentrant"  # "off" | "nonreentrant" | "reentrant"
+    gc: str = "reentrant"
     every_n_layers: int = 1
     raf: bool = False
-    rows: int = 1  # forwards per backward
-    window: str = ""  # "" | "defer" (no reduce before the window's last backward) | "keep" (no reshard)
-    pipeline: bool = False  # the FSDP calls torch's pipeline stage makes around its microbatches
+    rows: int = 1  # Forwards per backward.
+    window: str = ""  # "defer": no reduce before the window's last backward. "keep": no reshard.
+    pipeline: bool = False  # The FSDP calls torch's pipeline stage makes around its microbatches.
 
     @property
     def name(self) -> str:
@@ -138,7 +117,7 @@ def _loss(model: nn.Module, rows: list[torch.Tensor]) -> torch.Tensor:
 
 
 def _digest(tensor: torch.Tensor) -> str:
-    """This rank's shard of ``tensor``, bit for bit."""
+    """This rank's shard, bit for bit."""
     local = (tensor.to_local() if isinstance(tensor, DTensor) else tensor).detach().contiguous().reshape(-1)
     return hashlib.sha256(local.view(torch.uint8).numpy().tobytes()).hexdigest()[:16]
 
@@ -155,7 +134,7 @@ def _ep1_config(experts_fsdp_managed: bool) -> EPConfig:
 
 
 def _tensor_parallel(model: nn.Module, tp_mesh) -> None:
-    """Megatron-style TP on each decoder layer: column-parallel in, row-parallel out."""
+    """Megatron-style TP: column-parallel in, row-parallel out."""
     plan = {f"self_attn.{name}": ColwiseParallel() for name in ("q_proj", "k_proj", "v_proj")}
     plan |= {f"mlp.{name}": ColwiseParallel() for name in ("gate_proj", "up_proj")}
     plan |= {"self_attn.o_proj": RowwiseParallel(), "mlp.down_proj": RowwiseParallel()}
@@ -164,7 +143,6 @@ def _tensor_parallel(model: nn.Module, tp_mesh) -> None:
 
 
 def _build(case: Case, tp_mesh) -> tuple[nn.Module, list[nn.Parameter]]:
-    """``case``'s model under its gradient checkpointing, and the parameters the wrap leaves out."""
     family, overrides = FAMILIES[case.family]
     torch.manual_seed(0)
     model = tiny_family_model(family, overrides={**overrides, "num_hidden_layers": case.layers, "vocab_size": VOCAB})
@@ -172,7 +150,7 @@ def _build(case: Case, tp_mesh) -> tuple[nn.Module, list[nn.Parameter]]:
     if case.variant.startswith("ep_"):
         apply_ep_layers(model, _ep1_config(experts_fsdp_managed=case.variant == "ep_sharded"))
         if case.variant == "ep_ignored":
-            # A bf16 run's load dtype: no FSDP2 cast reaches the ignored experts.
+            # No FSDP2 cast reaches the ignored experts.
             model.to(torch.bfloat16)
             ignored = [p for _, layer in named_ep_layers(model) for p in layer.parameters()]
     elif case.variant == "nested":
@@ -196,8 +174,6 @@ def _build(case: Case, tp_mesh) -> tuple[nn.Module, list[nn.Parameter]]:
 
 
 def _wrap(case: Case, unit: int | None, mesh, tp_mesh=None) -> tuple[nn.Module, int]:
-    """``case``'s model wrapped at ``unit`` layers per group (None: the wrap's own count); returns it and its group
-    count."""
     model, ignored = _build(case, tp_mesh)
     policy = mixed_precision_policy(torch.bfloat16, fp32_reduce=True, cast_forward_inputs=True)
     groups = apply_fsdp2_per_layer(model, mesh, policy, case.raf, IdentityParamSet(ignored), layers_per_unit=unit)
@@ -205,7 +181,6 @@ def _wrap(case: Case, unit: int | None, mesh, tp_mesh=None) -> tuple[nn.Module, 
 
 
 def _layout(model: nn.Module) -> list[list]:
-    """Every state-dict entry's key, global shape, placements and this rank's local shape."""
     return [
         [key, list(value.shape), str(value.placements), list(value.to_local().shape)]
         if isinstance(value, DTensor)
@@ -215,9 +190,7 @@ def _layout(model: nn.Module) -> list[list]:
 
 
 class _ReductionLog:
-    """Each FSDP2 reduce-scatter as ``(issued after the backward, reduces a decoder-layer group)``: by the root's
-    final callback or the trainer's completion rather than a post-backward hook, so nothing overlaps it. The
-    groups the trainer's completion reduces are counted apart."""
+    """Issued after the backward means by the final callback or the trainer's completion, so nothing overlaps it."""
 
     def __init__(self):
         self.reduces: list[tuple[bool, bool]] = []
@@ -252,8 +225,6 @@ class _ReductionLog:
             yield
 
     def take(self) -> tuple[int, int, int]:
-        """``(reduce-scatters, decoder-layer ones issued after the backward, groups the completion reduced)`` since
-        the last take."""
         counts = (len(self.reduces), sum(after and layer for after, layer in self.reduces), self.completed)
         self.reduces.clear()
         self.completed = 0
@@ -261,7 +232,6 @@ class _ReductionLog:
 
 
 def _set_window_end(model: nn.Module, case: Case, is_last: bool) -> None:
-    """The trainer's per-microstep toggles (``_set_window_end``)."""
     for module in fsdp2_modules(model):
         if case.window == "keep":
             module.set_reshard_after_backward(is_last, recurse=False)
@@ -270,8 +240,8 @@ def _set_window_end(model: nn.Module, case: Case, is_last: bool) -> None:
 
 
 def _pipeline_backward(model: nn.Module, losses: list[torch.Tensor]) -> None:
-    """torch 2.11's pipeline stage around an FSDP2 stage: each microbatch's backward with the stage's reduce,
-    reshard and finalization off, then ``perform_reduce_grad``'s post-backward over every state."""
+    """torch 2.11's pipeline stage around an FSDP2 stage: reduce, reshard and finalization off per microbatch, then
+    ``perform_reduce_grad``'s post-backward."""
     for loss in losses:
         model.set_is_last_backward(False)
         model.set_reshard_after_backward(False)
@@ -288,7 +258,6 @@ def _pipeline_backward(model: nn.Module, losses: list[torch.Tensor]) -> None:
 
 
 def _step(case: Case, model: nn.Module, step: int, log: _ReductionLog) -> float:
-    """One optimizer step's backwards, each followed by the trainer's completion; returns the loss."""
     rank = dist.get_rank()
     groups = fsdp.fsdp2_param_groups(model)
     with log.watch():
@@ -310,8 +279,7 @@ def _step(case: Case, model: nn.Module, step: int, log: _ReductionLog) -> float:
 
 
 def _settled(model: nn.Module) -> bool:
-    """Whether every FSDP2 state is back to idle with no forward root or unfinished multi-module forward left over:
-    a stale forward root skips the next forward's wait for the optimizer step."""
+    """A stale forward root skips the next forward's wait for the optimizer step."""
     states = {id(state): state for state in (module._get_fsdp_state() for module in fsdp2_modules(model))}.values()
     root = fully_shard.state(model)
     return (
@@ -322,7 +290,6 @@ def _settled(model: nn.Module) -> bool:
 
 
 def _train(case: Case, unit: int, mesh, tp_mesh=None) -> dict:
-    """``STEPS`` SGD steps of ``case`` at ``unit`` layers per group: what a comparison across unit sizes reads."""
     model, groups = _wrap(case, unit, mesh, tp_mesh)
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(params, lr=LR)
@@ -345,7 +312,7 @@ def _train(case: Case, unit: int, mesh, tp_mesh=None) -> dict:
 
 
 def _attempt(fn, *args, **kwargs) -> dict:
-    """``fn``'s record, or the error it raised: every rank builds the same structure, so a raise is on all."""
+    """Every rank builds the same structure, so a raise is on all."""
     try:
         return fn(*args, **kwargs)
     except Exception as error:
@@ -353,14 +320,12 @@ def _attempt(fn, *args, **kwargs) -> dict:
 
 
 def _torch_group_hooks_case(mesh) -> dict:
-    """Negative control: units on torch's own multi-module hooks."""
     with patch.object(fsdp, "_install_unit_hooks", lambda unit: None):
         return _attempt(_train, Case(), 2, mesh)
 
 
 def _no_recompute_registration_case(mesh) -> dict:
-    """Negative control: the partly checkpointed unit without the first layer's recompute registration, the one
-    call the unit hooks make while the group is in ``PRE_BACKWARD`` (FSDP2's own pre-forward makes it in
+    """Negative control: the one call the unit hooks make in ``PRE_BACKWARD`` (FSDP2's own pre-forward makes it in
     ``FORWARD``)."""
     real = _fsdp_param_group.FSDPParamGroup._register_post_backward_hook
 
@@ -374,7 +339,7 @@ def _no_recompute_registration_case(mesh) -> dict:
 
 
 def _dtype_blind_units_case(mesh) -> dict:
-    """Negative control: the float64 layer grouped with its neighbor whatever its dtype."""
+    """Negative control: the float64 layer grouped with its neighbor."""
 
     def blind(layers, splits, left_out, layers_per_unit):
         return [list(range(len(layers)))[i : i + layers_per_unit] for i in range(0, len(layers), layers_per_unit)]
@@ -384,9 +349,6 @@ def _dtype_blind_units_case(mesh) -> dict:
 
 
 def _resume_case(mesh, tmp: Path) -> dict:
-    """AdamW steps saved by the FSDP2 writer and the optimizer shard store at each unit size, every saved tensor
-    digested; then one-layer groups resumed from each unit size's checkpoint take one more step, and so does ZeRO-3
-    on the wrap's own groups resumed from the two-layer one."""
     case = Case(layers=3)
     rank = dist.get_rank()
     config = make_parallelism_config(world_size=WORLD, gpus_per_node=WORLD, rank=rank)
@@ -451,7 +413,6 @@ def _worker(rank: int, out: str) -> None:
 
 
 def _mesh_4_worker(rank: int, out: str) -> None:
-    """HSDP (2 replicas of 2 shards), and FSDP2 over the DP dimension of a TP x DP mesh, on 4 ranks."""
     hsdp_mesh = init_device_mesh("cpu", MESH_4, mesh_dim_names=("dp_replicate", "dp_shard"))
     dp_tp_mesh = init_device_mesh("cpu", MESH_4, mesh_dim_names=("dp", "tp"))
     results = {}
@@ -508,16 +469,12 @@ def _assert_same_training(results: dict, prefix: str) -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 def test_units_train_bit_for_bit_like_one_layer_groups(runs, case):
-    """Loss, every sharded gradient and weight after each step, and the state dict's keys, global shapes,
-    placements and local shapes equal one-layer groups' on every rank."""
     for rank_runs in runs:
         _assert_same_training(rank_runs["cases"], case.name)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
 def test_every_fsdp2_state_settles_after_the_backward(runs, case):
-    """After each step's backward every FSDP2 state is idle, with no forward root and no multi-module forward left
-    open, at every unit size."""
     for rank_runs in runs:
         for unit in (1, *UNIT_SIZES):
             run = _ok(rank_runs["cases"][f"{case.name}|{unit}"], case.name)
@@ -526,12 +483,8 @@ def test_every_fsdp2_state_settles_after_the_backward(runs, case):
 
 @pytest.mark.parametrize("case", DENSE_CASES, ids=lambda case: case.name)
 def test_each_unit_is_one_group_reduced_once_per_pass(runs, case):
-    """ceil(layers / unit) decoder-layer groups beside the embedding and root groups, the modules of a unit naming
-    one group. Each group reduce-scatters once per backward, a decoder-layer group from its post-backward hook
-    inside the backward; at several rows per backward each decoder-layer group reduces once more after it, for
-    the recomputes FSDP2's hooks did not cover, as one-layer groups do. torch's final callback visits a unit's
-    state once per module and reduces those leftovers itself, so the trainer's completion reduces only the
-    one-layer groups'."""
+    """torch's final callback visits a unit's state once per module and reduces leftovers itself, so the trainer's
+    completion reduces only one-layer groups'."""
     for rank_runs in runs:
         for unit in (1, *UNIT_SIZES):
             run = _ok(rank_runs["cases"][f"{case.name}|{unit}"], case.name)
@@ -546,8 +499,7 @@ def test_each_unit_is_one_group_reduced_once_per_pass(runs, case):
 
 
 def test_nested_groups_leave_their_layers_in_one_unit(runs):
-    """Three layers, each MLP a nested float64 group: the layers' own float32 parameters decide their units, so
-    two units at two layers per group (and one at three) beside the three nested, embedding and root groups."""
+    """The layers' own float32 parameters decide their units."""
     case = Case(variant="nested", layers=3)
     for rank_runs in runs:
         for unit in (1, *UNIT_SIZES):
@@ -557,7 +509,6 @@ def test_nested_groups_leave_their_layers_in_one_unit(runs):
 
 
 def test_a_layer_of_another_dtype_opens_its_own_unit(runs):
-    """The float64 layer 1 of four splits the first pair: units [0], [1], [2, 3] at two layers per group."""
     for rank_runs in runs:
         run = _ok(rank_runs["cases"][f"{Case(variant='odd_layer').name}|2"], "odd_layer")
         assert run["groups"] == 3 + 2, run["groups"]
@@ -565,8 +516,7 @@ def test_a_layer_of_another_dtype_opens_its_own_unit(runs):
 
 @pytest.mark.parametrize("case", PARTIAL_GC_CASES, ids=lambda case: case.name)
 def test_a_partly_checkpointed_unit_reduces_inside_the_backward(runs, case):
-    """Every other layer checkpointed: a unit whose first layer alone is recomputed still reduce-scatters from its
-    post-backward hook, beside the rest of the backward, not from the final callback after it."""
+    """A unit whose first layer alone is recomputed still reduces from its post-backward hook."""
     for rank_runs in runs:
         for unit in (1, *UNIT_SIZES):
             run = _ok(rank_runs["cases"][f"{case.name}|{unit}"], case.name)
@@ -574,16 +524,13 @@ def test_a_partly_checkpointed_unit_reduces_inside_the_backward(runs, case):
 
 
 def test_negative_control_torch_group_hooks_crash_a_reentrant_recompute(runs):
-    """torch starts the unit at its last layer's recompute and reshards it after that layer's backward, so the
-    first layer recomputes on sharded parameters."""
+    """torch reshards the unit after its last layer's backward, so the first layer recomputes on sharded parameters."""
     for rank_runs in runs:
         error = rank_runs["torch_group_hooks"].get("error", "")
         assert "mixed torch.Tensor and DTensor" in error, rank_runs["torch_group_hooks"]
 
 
 def test_negative_control_without_the_recompute_registration_the_reduce_waits_for_the_callback(runs):
-    """The partly checkpointed reentrant run minus the first layer's registration: the units' reduce-scatters move
-    to the final callback, which the inside-the-backward assertion above refuses."""
     for rank_runs in runs:
         run = _ok(rank_runs["no_recompute_registration"], "no_recompute_registration")
         assert all(count > 0 for count in run["layer_reduces_after_backward"]), run["layer_reduces_after_backward"]
@@ -596,7 +543,6 @@ def test_negative_control_a_unit_mixing_dtypes_fails_fsdp2s_dtype_check(runs):
 
 
 def test_the_saved_checkpoint_is_the_same_at_every_unit_size(runs):
-    """The FSDP2 writer's tensors and this rank's optimizer-shard moments, tensor for tensor."""
     for rank_runs in runs:
         resume = _ok(rank_runs["resume"], "resume")
         assert resume["unit1"]["weights"] and resume["unit1"]["moments"]
@@ -605,8 +551,6 @@ def test_the_saved_checkpoint_is_the_same_at_every_unit_size(runs):
 
 
 def test_a_run_resumes_across_unit_sizes(runs):
-    """One-layer groups resumed from each unit size's checkpoint, ZeRO-3 resumed from the two-layer ZeRO-2 one
-    included, take the step the uninterrupted run takes."""
     for rank_runs in runs:
         resume = _ok(rank_runs["resume"], "resume")
         for unit in (1, *UNIT_SIZES):
@@ -623,8 +567,7 @@ def test_units_on_hsdp_and_tp_meshes_train_bit_for_bit(mesh_4_runs, mesh, case):
 
 @pytest.mark.parametrize(("raf", "expected"), [(False, [[0, 1], [2, 3]]), (True, [[0], [1], [2], [3]])])
 def test_the_wrap_groups_layers_under_zero2_and_not_under_zero3(single_rank_mesh, raf, expected):
-    """The wrap's own unit count: two layers per group under ZeRO-2, one under ZeRO-3, whose backward would hold
-    the running and the prefetched unit gathered."""
+    """ZeRO-3's backward would hold the running and the prefetched unit gathered."""
     model, _ = _build(Case(gc="off"), None)
     policy = mixed_precision_policy(torch.bfloat16, fp32_reduce=True, cast_forward_inputs=True)
     groups = apply_fsdp2_per_layer(model, single_rank_mesh, policy, raf, IdentityParamSet())
@@ -634,10 +577,7 @@ def test_the_wrap_groups_layers_under_zero2_and_not_under_zero3(single_rank_mesh
 
 
 def test_the_unit_hooks_internals_exist(single_rank_mesh):
-    """The FSDP2 members the unit hooks drive, on the installed torch: the multi-module hook handle they remove, the
-    state's forward hooks, policy and training state they read, and the group's post-backward registration,
-    unshard and training state. The input cast they share with FSDP2's pre-forward is pinned by the fp32_rope
-    cases."""
+    """The FSDP2 members the unit hooks drive, on the installed torch."""
     layers = nn.ModuleList(nn.Linear(4, 4) for _ in range(2))
     fully_shard(list(layers), mesh=single_rank_mesh)
     state = layers[0]._get_fsdp_state()

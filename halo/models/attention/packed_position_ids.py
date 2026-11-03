@@ -1,6 +1,5 @@
-"""The flash-interface view a modeling module's attention registry takes, the ``position_ids`` stash a forward
-leaves on the modules below it, and packed-document re-injection through both for families whose forward drops
-``position_ids`` before flash attention."""
+"""The flash-interface view a modeling module's attention registry takes, the ``position_ids`` stash a forward leaves
+on the modules below it, and packed-document re-injection for families whose forward drops ``position_ids``."""
 
 from __future__ import annotations
 
@@ -19,14 +18,11 @@ _STASH_ATTR = "_halo_packed_position_ids"
 
 
 def get_stashed_position_ids(module):
-    """The ``position_ids`` a forward wrapped by :func:`install_position_ids_stash` left on ``module``, or
-    ``None`` outside such a forward."""
     return getattr(module, _STASH_ATTR, None)
 
 
 class FlashInterfaceViewBase(ABC):
-    """A view of ``ALL_ATTENTION_FUNCTIONS`` that hands out wrapped flash interfaces and everything else
-    untouched, installed into one modeling module so every other family keeps the original."""
+    """Installed into one modeling module, so every other family keeps the original registry."""
 
     def __init__(self, inner):
         self._inner = inner
@@ -59,8 +55,6 @@ class FlashInterfaceViewBase(ABC):
 
 
 class PositionIdsInjectingRegistry(FlashInterfaceViewBase):
-    """Flash interfaces that re-inject the module's stashed ``position_ids``."""
-
     def wrap_flash_interface(self, fn):
         @functools.wraps(fn)
         def with_position_ids(module, *fargs, **fkwargs):
@@ -73,13 +67,11 @@ class PositionIdsInjectingRegistry(FlashInterfaceViewBase):
 
 
 def is_position_ids_stash_installed(owner_cls) -> bool:
-    """Whether :func:`install_position_ids_stash` already wraps ``owner_cls.forward``."""
     return getattr(owner_cls.forward, _STASH_ATTR, False)
 
 
 def install_position_ids_stash(owner_cls, stash_targets) -> bool:
-    """Leave ``owner_cls.forward``'s ``position_ids`` on the modules ``stash_targets(self)`` returns for the
-    duration of each call (:func:`get_stashed_position_ids` reads it). ``False`` when already installed."""
+    """Leave ``owner_cls.forward``'s ``position_ids`` on the modules ``stash_targets(self)`` returns, for each call."""
     if is_position_ids_stash_installed(owner_cls):
         return False
     original_forward = owner_cls.forward
@@ -104,13 +96,8 @@ def install_position_ids_stash(owner_cls, stash_targets) -> bool:
 
 
 def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targets) -> bool:
-    """Stash ``owner_cls.forward``'s ``position_ids`` on the attention modules ``stash_targets(self)``
-    returns, and give ``modeling_module`` a registry view whose flash interfaces re-inject it.
-
-    A forward that never hands ``position_ids`` to the attention interface runs a packed row as one
-    dense causal sequence on flash; dense backends form the packed mask at the model level. ``False``
-    when already installed.
-    """
+    """A forward that never hands ``position_ids`` to the attention interface runs a packed row as one dense causal
+    sequence on flash; dense backends form the packed mask at the model level."""
     if is_position_ids_stash_installed(owner_cls):
         return False
     registry = modeling_module.ALL_ATTENTION_FUNCTIONS
@@ -121,9 +108,7 @@ def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targ
 
 
 def patch_mistral4_flash_packed_position_ids() -> None:
-    """Make Mistral4's flash path see ``position_ids``, so packed documents stay isolated. Its attention
-    forward takes ``position_ids`` for the attention scale and passes only ``**kwargs`` on, so the
-    stash rides that forward."""
+    """Mistral4's attention forward takes ``position_ids`` for the attention scale and passes only ``**kwargs`` on."""
     installed = install_packed_position_ids_injection(m4, m4.Mistral4Attention, lambda attention: (attention,))
     if installed and is_global_main_process():
         logger.info("Patched Mistral4 flash attention to receive position_ids (packed-document isolation)")

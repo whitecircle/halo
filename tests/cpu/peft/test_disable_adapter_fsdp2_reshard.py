@@ -1,20 +1,7 @@
 #!/usr/bin/env python
 """``disable_adapter()`` under FSDP2 restores the sharded adapters, and reshards only when it must.
-
-peft clears ``requires_grad`` on the adapter params registered at entry and restores it on those
-registered at exit, while FSDP2 swaps the registered params between the sharded DTensors and their
-unsharded copies. A single-rank gloo mesh makes those swaps for real on CPU. The trainer's wrapper
-(``install_fsdp2_safe_disable_adapter``) meets two orders:
-
-- a reference pass that is the first forward after a reshard (online GRPO / SDPG at ``beta > 0``)
-  enters on the sharded params and exits on the unsharded ones. The wrapper reshards before peft's
-  exit, or every sharded adapter (and ``modules_to_save`` copy) stays frozen for the rest of the run;
-- a reference pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same
-  params. Resharding there would make the backward re-gather the whole model once more per
-  micro-step, so the params registered after the pass must be the ones registered before it.
-
-Run: pytest tests/cpu/peft/test_disable_adapter_fsdp2_reshard.py
-"""
+A pass entering on sharded params and exiting on unsharded ones must reshard, or the sharded adapters stay frozen;
+a pass entering and exiting on the same params must not, or the backward re-gathers the whole model per micro-step."""
 
 import pytest
 import torch

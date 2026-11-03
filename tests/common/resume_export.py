@@ -1,13 +1,5 @@
-"""The save, exact-resume and export phase a trainer's checkpoint owes, under any parallel layout.
-
-One run trains ``total_steps`` from a base checkpoint with a checkpoint every ``save_step``; a fresh trainer
-built from the midway checkpoint, the way the training scripts resume, trains the rest. The resume must
-restore the per-rank optimizer state bit for bit (the restore logged, no warm restart), the step and the LR
-schedule, and must replay the unbroken run's later losses and final checkpoint. The unbroken run's final
-checkpoint must load through the run's export class with every weight its own and its head and backbone
-trained. A trainer whose checkpoint carries state of its own names the sidecar files every checkpoint must
-hold and a reader of that state, which the resumed trainer must hold bit for bit before its first step.
-"""
+"""The save, exact-resume and export phase a trainer's checkpoint owes, under any parallel layout. A resume must
+restore per-rank optimizer state bit for bit and replay the unbroken run's later losses and final checkpoint."""
 
 import math
 import os
@@ -28,8 +20,7 @@ from tests.common.rank_log import log, logged_messages
 from tests.common.tolerances import TOL
 from tests.common.training_checks import resumed_loss_deltas, step_losses, training_run_checks
 
-# The line the per-rank optimizer restore logs on success, and the phrase every warm restart's warning
-# carries; spelled here rather than imported, so a reworded log fails these checks instead of agreeing.
+# Spelled here rather than imported, so a reworded log fails these checks instead of agreeing.
 OPTIMIZER_RESTORED = "Restored per-rank optimizer state from {checkpoint}"
 WARM_RESTART = "Warm restart"
 EXPORT_CHECKS = (
@@ -42,15 +33,9 @@ EXPORT_CHECKS = (
 
 @dataclass(frozen=True)
 class ResumeExportRoute:
-    """How one trainer trains, resumes and exports.
-
-    ``build_trainer(model, output_dir, *, max_steps, save_every, resume_checkpoint)`` builds one run's trainer
-    over ``model``: ``save_every`` goes to :func:`~tests.common.checkpoint_io.save_schedule`, and
-    ``resume_checkpoint`` (``None`` for the unbroken run) is the checkpoint a resumed run restores, for a trainer
-    whose constructor is told it. ``export_class`` is the Auto class the model loads with and its checkpoint
-    serves through. ``sidecars`` are the files besides the weights and trainer state every checkpoint must carry,
-    and ``run_state(trainer)`` reads the state they restore, as named tensors.
-    """
+    """How one trainer trains, resumes and exports; ``resume_checkpoint`` is None for the unbroken run. ``sidecars``
+    are the files beside weights and trainer state every checkpoint must carry; ``run_state(trainer)`` reads what they
+    restore."""
 
     build_trainer: Callable
     export_class: type
@@ -61,7 +46,7 @@ class ResumeExportRoute:
 
 
 def save_base_checkpoint(ctx, model, tokenizer, path: str) -> str:
-    """COLLECTIVE. ``model`` and ``tokenizer`` saved at ``path`` (rank-shared) by rank 0; returns ``path``."""
+    """COLLECTIVE. ``model`` and ``tokenizer`` saved at the rank-shared ``path`` by rank 0; returns ``path``."""
     if ctx.rank == 0:
         model.save_pretrained(path)
         tokenizer.save_pretrained(path)
@@ -70,9 +55,7 @@ def save_base_checkpoint(ctx, model, tokenizer, path: str) -> str:
 
 
 def load_route_model(route: ResumeExportRoute, source: str, parallelism_config, *, resume: bool):
-    """COLLECTIVE. ``source`` loaded as the training scripts load a run's model, through
-    ``load_distributed_model`` at the route's class, dtype and attention; a resume at full checkpoint
-    precision."""
+    """COLLECTIVE. ``source`` loaded as the training scripts do; a resume at full checkpoint precision."""
     model, _ = load_distributed_model(
         source,
         parallelism_config,
@@ -86,19 +69,16 @@ def load_route_model(route: ResumeExportRoute, source: str, parallelism_config, 
 
 
 def checkpoint_file_checks(checkpoint: str, world_size: int, sidecars: tuple[str, ...]) -> dict[str, bool]:
-    """Named checks that ``checkpoint`` holds every file a resume reads back
-    (:func:`~tests.common.checkpoint_io.resume_checkpoint_checks`) and each of ``sidecars``. Reads the disk
-    only, so rank 0 calls it and shares the verdict."""
+    """Named checks that ``checkpoint`` holds every resume file and each of ``sidecars``. Disk only: rank 0 calls it
+    and shares the verdict."""
     checks = resume_checkpoint_checks(checkpoint, world_size)
     checks |= {name: os.path.isfile(os.path.join(checkpoint, name)) for name in sidecars}
     return checks
 
 
 def export_checks(export_class: type, checkpoint: str, base: str, dtype: torch.dtype) -> dict[str, bool]:
-    """Whether ``checkpoint`` serves as the trained model: it loads through ``export_class`` with no missing,
-    unexpected or mis-shaped weight, as the class ``base`` declares, which is the class the load built; and
-    every tensor of its untied head (the part outside the backbone prefix), and some backbone tensor, moved
-    off ``base``. Rank 0."""
+    """Whether ``checkpoint`` loads through ``export_class`` with no bad weight, and its untied head and some backbone
+    tensor moved off ``base``. Rank 0."""
     if not (has_whole_model_weight_file(checkpoint) and has_whole_model_weight_file(base)):
         log(f"  export: no weights at {checkpoint} or {base}")
         return dict.fromkeys(EXPORT_CHECKS, False)
@@ -130,8 +110,7 @@ def export_checks(export_class: type, checkpoint: str, base: str, dtype: torch.d
 
 
 def restore_log_checks(messages: list[str], checkpoint: str) -> dict[str, bool]:
-    """Whether the optimizer restore of ``checkpoint`` logged its success and no warm restart. Rank 0's log,
-    where both lines are written."""
+    """Whether the optimizer restore logged its success and no warm restart. Rank 0's log."""
     restored = OPTIMIZER_RESTORED.format(checkpoint=checkpoint)
     return {
         "optimizer_restore_logged": any(restored in message for message in messages),
@@ -140,9 +119,8 @@ def restore_log_checks(messages: list[str], checkpoint: str) -> dict[str, bool]:
 
 
 def restore_point_checks(saved: dict | None, restored: dict | None, save_step: int) -> dict[str, bool]:
-    """What a resume restored (``restored``, a ``"train_begin"`` :class:`RestorePointSnapshot` capture) against
-    the state its checkpoint was written from (``saved``, a ``"save"`` one): this rank's optimizer state bit
-    for bit, and the step and LR schedule at ``save_step``."""
+    """What a resume restored vs the state its checkpoint was written from: optimizer state bit for bit, and step and
+    LR at ``save_step``."""
     saved, restored = saved or {}, restored or {}
     exact, why = optimizer_state_matches(
         saved.get("optimizer") or {"state": {}}, restored.get("optimizer") or {"state": {}}
@@ -158,7 +136,6 @@ def restore_point_checks(saved: dict | None, restored: dict | None, save_step: i
 
 
 def run_state_checks(saved: dict[str, torch.Tensor], restored: dict[str, torch.Tensor]) -> dict[str, bool]:
-    """Whether the resumed trainer holds the unbroken run's checkpointed state, every tensor bit for bit."""
     equal = bool(saved) and saved.keys() == restored.keys() and all(torch.equal(saved[k], restored[k]) for k in saved)
     return {"run_state_restored": equal}
 
@@ -166,8 +143,8 @@ def run_state_checks(saved: dict[str, torch.Tensor], restored: dict[str, torch.T
 def replay_checks(
     unbroken: list[float], resumed: list[float], *, save_step: int, total_steps: int
 ) -> tuple[dict[str, bool], dict[str, float]]:
-    """The resumed run's step losses against the unbroken run's: the checkpoint's history carried over as
-    logged, and each later step within ``TOL.replayed_resume_loss_abs``."""
+    """The resumed run's step losses vs the unbroken run's: history carried over as logged, later steps within
+    ``TOL.replayed_resume_loss_abs``."""
     deltas = resumed_loss_deltas(unbroken, resumed, save_step=save_step, total_steps=total_steps)
     max_delta = max_or_nan(deltas) if deltas else math.inf
     checks = {
@@ -178,8 +155,7 @@ def replay_checks(
 
 
 def final_weight_checks(unbroken: str, resumed: str) -> tuple[dict[str, bool], dict[str, float]]:
-    """The resumed run's final checkpoint against the unbroken run's, every tensor as one vector, within
-    ``TOL.replayed_resume_weight_rtol`` relative L2. Rank 0."""
+    """The final checkpoints as one vector each, within ``TOL.replayed_resume_weight_rtol`` relative L2. Rank 0."""
     written = [load_full_state_dict(path) if has_whole_model_weight_file(path) else {} for path in (unbroken, resumed)]
     drift = relative_l2(written[1], written[0])
     log(f"  final checkpoint, resumed vs unbroken: relative L2 {drift:.3e} (tol {TOL.replayed_resume_weight_rtol})")
@@ -190,12 +166,8 @@ def final_weight_checks(unbroken: str, resumed: str) -> tuple[dict[str, bool], d
 def run_resume_export(
     ctx, route: ResumeExportRoute, parallelism_config, *, base: str, root: str, save_step: int, total_steps: int
 ) -> tuple[dict[str, bool], dict[str, float]]:
-    """COLLECTIVE. The phase's checks and metrics, the resumed run's prefixed ``resume_``.
-
-    ``base`` is the checkpoint the unbroken run loads and ``root`` a directory every rank shares. The resume
-    runs only when every unbroken-run check passed (each is rank-uniform), as nothing sound resumes from a
-    checkpoint those found wanting.
-    """
+    """COLLECTIVE. The phase's checks and metrics, the resumed run's prefixed ``resume_``. Resumes only when every
+    unbroken-run check passed."""
     unbroken_dir, resumed_dir = os.path.join(root, "unbroken"), os.path.join(root, "resumed")
     midway = os.path.join(unbroken_dir, f"checkpoint-{save_step}")
     final = f"checkpoint-{total_steps}"

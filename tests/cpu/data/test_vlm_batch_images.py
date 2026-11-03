@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the image layout of every VLM processor call: one image list per text.
-
-Gemma 3 and Gemma 4 processors read a flat image list as one text's images and refuse a batch of several texts, so a
-flat list breaks SFT above batch 1 and every reward pair, whose chosen and rejected sides are two texts. A tiny
-offline Gemma 3 (the real processor class over a word-level tokenizer, a 28-pixel SigLIP tower) runs the SFT and
-reward collators and a forward.
-
-Run: ``python tests/cpu/data/test_vlm_batch_images.py`` (or ``pytest -m cpu``).
-"""
+"""Every VLM processor call gets one image list per text: Gemma 3 and 4 processors read a flat list as one text's
+images and refuse a batch of several texts, breaking SFT above batch 1 and every reward pair. Runs on a tiny
+offline Gemma 3."""
 
 from __future__ import annotations
 
@@ -155,7 +149,7 @@ def test_the_tiny_gemma3_trains_on_a_mixed_batch():
 
 
 def test_a_flat_image_list_is_what_the_processor_refuses():
-    """Anti-vacuity: the same two-row batch with its images flattened is refused by the processor itself."""
+    """The same two-row batch with its images flattened is refused by the processor itself."""
     processor = _tiny_gemma3_processor()
     rows = [_row(3), _row(5)]
     texts = [render_vlm_text(processor, row["history"]) for row in rows]

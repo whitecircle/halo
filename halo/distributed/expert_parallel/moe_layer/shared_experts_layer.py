@@ -11,13 +11,9 @@ from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class EPSharedExpertsMoELayerBase(EPMoELayerBase):
-    """EP MoE layer whose ``forward`` is the routed template: route the flattened tokens, then the routed experts
-    plus the shared expert, which reads the layer input rather than the routed output.
-
-    A subclass supplies ``route_tokens_to_experts`` over the fp32 router logits, or overrides
-    :meth:`_route_hidden_states` where its router routes the tokens itself; :meth:`_router_logits` where its
-    router cannot be called bare (LFM-2), :meth:`_shared_expert_output` where the shared leg is gated (Qwen3.5).
-    """
+    """EP MoE layer whose ``forward`` routes the flattened tokens, then adds the shared expert, which reads the layer
+    input. A subclass supplies ``route_tokens_to_experts`` over the fp32 router logits, or overrides
+    :meth:`_route_hidden_states`, :meth:`_router_logits` (LFM-2) or :meth:`_shared_expert_output` (Qwen3.5)."""
 
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         orig_shape = hidden_states.shape
@@ -30,46 +26,38 @@ class EPSharedExpertsMoELayerBase(EPMoELayerBase):
         )
 
     def _route_hidden_states(self, flat: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(topk_indices, topk_weights)`` for the flattened tokens: ``route_tokens_to_experts`` over the fp32
-        router logits."""
         return self.route_tokens_to_experts(self._router_logits(flat).float())
 
     def _router_logits(self, flat: torch.Tensor) -> torch.Tensor:
-        """The gate's logits for the flattened tokens; of a ``(logits, weights, indices)`` router output only the
-        family-native logits are kept, since routing replay and balancing re-derive the rest."""
+        """Of a ``(logits, weights, indices)`` router output only the family-native logits are kept, since routing
+        replay and balancing re-derive the rest."""
         # Disable autocast so the gate matmul runs at the input dtype (upcast when fp32_router).
         with torch.amp.autocast("cuda", enabled=False):
             router_output = self.gate(self._router_input(flat))
         return router_output[0] if isinstance(router_output, tuple) else router_output
 
     def _shared_expert_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """The shared expert on the layer input."""
         return getattr(self, self._shared_expert_attr)(hidden_states)
 
 
 class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
-    """EP MoE layer routing DeepSeek-V3 style: score -> selection-only bias -> group-limited top-k.
+    """EP MoE layer routing DeepSeek-V3 style: score -> selection-only bias -> group-limited top-k. The sharing
+    families differ only in the score function, ``norm_topk_prob`` fallback and renormalization floor, so a mis-ordered
+    bias add cannot land in one alone. ``n_group: 1`` is plain top-k."""
 
-    The families sharing it (GLM-4 MoE Lite, Laguna, GLM-5 Next, Mistral4, Step-3.7) differ only in the score
-    function, the ``norm_topk_prob`` fallback and the renormalization floor, so a mis-ordered bias add cannot
-    land in one of them alone. ``n_group: 1`` is plain top-k.
-    """
-
-    # Fallback when neither the block, its router nor its config declares ``norm_topk_prob`` — GLM-4
-    # MoE Lite leaves the gate weights un-normalized, the others normalize.
+    # Fallback when neither the block, its router nor its config declares ``norm_topk_prob``: GLM-4 MoE Lite leaves
+    # the gate weights un-normalized, the others normalize.
     _NORM_TOPK_PROB_DEFAULT: bool = True
 
-    # Routing knobs (any spelling) this family's block, router and config genuinely do not declare —
-    # Laguna and Step-3.7 carry no group limiting and no ``norm_topk_prob``. Every other knob is
-    # required: absence means an upstream rename, and the neutral default would then be a wrong live
-    # value (routed scaling 1.0 rather than the block's 2.5, under-scaling every routed weight), so the
-    # resolution below raises instead of defaulting.
+    # Routing knobs this family genuinely does not declare (Laguna and Step-3.7 carry no group limiting or
+    # ``norm_topk_prob``). Any other absence is an upstream rename, where the neutral default would be a wrong live
+    # value (routed scaling 1.0 instead of the block's 2.5), so resolution raises.
     _OPTIONAL_ROUTING_KNOBS: tuple[str, ...] = ()
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Resolve the knobs :meth:`_group_limited_topk` reads off the block, its router, then its config; a knob
         none declares raises unless listed in :attr:`_OPTIONAL_ROUTING_KNOBS`."""
-        super()._adopt_routing(original_layer)  # top_k
+        super()._adopt_routing(original_layer)
         sources = (original_layer, self.gate, getattr(original_layer, "config", None))
 
         def _resolve(names: str | tuple[str, ...], default, *, required: bool = True):
@@ -101,12 +89,11 @@ class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
         self.routed_scaling_factor = float(_resolve("routed_scaling_factor", 1.0))
 
     def _routing_scores(self, router_logits: torch.Tensor) -> torch.Tensor:
-        """The scores both selection and the gate weights read: sigmoid, the DeepSeek-V3 form (Mistral4 uses
-        softmax)."""
+        """Scores selection and gate weights both read: sigmoid, the DeepSeek-V3 form (Mistral4 uses softmax)."""
         return router_logits.sigmoid()
 
     def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(topk_indices, topk_weights)`` — selection on the biased scores, weights on the unbiased."""
+        """Select on the biased scores; weights read the unbiased ones."""
         scores = self._routing_scores(router_logits)
         topk_indices, topk_weights = self._group_limited_topk(self._selection_scores(scores), scores)
         self._record_expert_load(topk_indices)
@@ -115,8 +102,6 @@ class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
     def _group_limited_topk(
         self, scores_for_select: torch.Tensor, gate_scores: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(topk_indices, topk_weights)``: groups and indices picked on the biased ``scores_for_select``, weights
-        gathered from the unbiased ``gate_scores``."""
         if self.n_group > 1:
             experts_per_group = self.n_routed_experts // self.n_group
             group_scores = scores_for_select.view(-1, self.n_group, experts_per_group).topk(2, dim=-1)[0].sum(dim=-1)

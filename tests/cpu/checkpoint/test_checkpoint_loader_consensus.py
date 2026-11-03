@@ -1,19 +1,5 @@
-"""CPU tests for the rank-uniform resume decisions of load_resume_weights and OptimizerShardStore.
-
-Every file-readability decision that gates a collective (or a warm-restart) must be consensus'd —
-a rank-local branch hangs peers in DTensor collectives or silently diverges optimizer state. These
-tests exercise the single-process decision logic and, via monkeypatched consensus helpers, the
-"a peer disagreed" outcomes that cannot occur single-process:
-
-- Pure-TP weight resume: rank 0 probes readability and broadcasts the verdict; a negative verdict
-  (torn file on rank 0) sends ALL ranks to the base-Trainer fallback — never a per-rank split.
-- The constructed-from-checkpoint skip and the TP+DP refusal never consume the checkpoint, so
-  they must be decided BEFORE the per-rank read — at 100B+ scale that read is a host OOM, not a
-  slowdown. The genuine pure-TP reload distributes each tensor into the live DTensor placements.
-- FSDP2 optimizer restore: a shard without its topology meta is refused as torn rather than loaded
-  ungated or warm-restarted. The terminal ``set_optimizer_state_dict`` outcome is pinned on a real
-  two-rank group in ``test_optimizer_restore_failure.py``.
-"""
+"""Rank-uniform resume decisions of load_resume_weights and OptimizerShardStore.
+A rank-local branch on file readability hangs peers in DTensor collectives or silently diverges optimizer state."""
 
 import os
 import re
@@ -59,7 +45,7 @@ class _TinyModel(nn.Module):
 
 
 class _HandSlicedModel(_TinyModel):
-    """A GptOss-shaped TP model: one param sliced by hand (a per-rank head slice, no DTensor)."""
+    """A per-rank head slice with no DTensor, GptOss-shaped."""
 
     def __init__(self):
         super().__init__()
@@ -90,8 +76,7 @@ def _ctx(
 
 
 def test_tp_torn_checkpoint_falls_back_uniformly(tmp_path):
-    """A torn model.safetensors must be caught by the rank-0 probe rather than raising out of the
-    per-rank read, so every rank takes the base-Trainer fallback."""
+    """Caught by the rank-0 probe rather than raising out of the per-rank read."""
     (tmp_path / "model.safetensors").write_bytes(b"not a safetensors file")
     model = _TinyModel()
     before = model.fc.weight.detach().clone()
@@ -101,9 +86,7 @@ def test_tp_torn_checkpoint_falls_back_uniformly(tmp_path):
 
 
 def test_tp_negative_rank0_verdict_forces_fallback(tmp_path, monkeypatch):
-    """Even with a locally-readable checkpoint, a negative rank-0 verdict (torn file on the
-    broadcast source) must send THIS rank to the fallback too — without the consensus each rank
-    decides on its own read and the world splits across branches."""
+    """Without the consensus each rank decides on its own read and the world splits across branches."""
     model = _TinyModel()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     monkeypatch.setattr(loader_mod, "broadcast_from_rank0", lambda local: False)
@@ -120,8 +103,7 @@ def test_tp_readable_checkpoint_loads(tmp_path):
 
 @pytest.fixture
 def single_rank_gloo(tmp_path):
-    """A 1-rank gloo group so the tests can hold REAL DTensor params (the TP+DP verdict keys on
-    ``isinstance(p.data, DTensor)``, which no stub can satisfy)."""
+    """The TP+DP verdict keys on ``isinstance(p.data, DTensor)``, which no stub can satisfy."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         yield
@@ -130,7 +112,6 @@ def single_rank_gloo(tmp_path):
 
 
 def _dtensor_model():
-    """A TP shard as transformers' load leaves it: a ``Shard``-placed DTensor on the TP mesh."""
     mesh = init_device_mesh("cpu", (1,))
     model = _TinyModel()
     model.fc.weight = nn.Parameter(distribute_tensor(torch.zeros(4, 4), mesh, [Shard(0)]))
@@ -138,18 +119,15 @@ def _dtensor_model():
 
 
 def _simulate_non_rank0(monkeypatch, decisions):
-    """A non-zero rank's view: no local rank-0 work, rank 0's broadcast answers replayed in call
-    order — (1) readability probe, (2) constructed-from-checkpoint, and on the genuine load (3) rank 0's
-    on-disk and live-name key counts. The sharded-resume refusal is ``rank0_verdict``'s own, real here."""
+    """Rank 0's broadcast answers replayed in call order: readability probe, constructed-from-checkpoint, then key
+    counts."""
     answers = iter(decisions)
     monkeypatch.setattr(loader_mod, "is_global_main_process", lambda: False)
     monkeypatch.setattr(loader_mod, "broadcast_from_rank0", lambda local: next(answers))
 
 
 def test_tp_skip_verdict_reads_nothing_on_non_rank0(tmp_path, single_rank_gloo, monkeypatch):
-    """TP resume of a model constructed FROM the checkpoint: the DTensor params already hold the
-    weights, so a non-zero rank must decide the skip BEFORE reading the checkpoint — there is no
-    file here at all, so a read would raise."""
+    """There is no file here at all, so a read before the skip would raise."""
     model = _dtensor_model()
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
     _simulate_non_rank0(monkeypatch, decisions=[True, True])
@@ -161,8 +139,7 @@ def test_tp_skip_verdict_reads_nothing_on_non_rank0(tmp_path, single_rank_gloo, 
 
 
 def test_tp_dp_refuses_a_model_not_built_from_the_checkpoint_without_reading(tmp_path, single_rank_gloo, monkeypatch):
-    """FSDP2 over TP is a 2-D placement ``distribute_tensor`` does not invert for packed projections,
-    so TP+DP only ever resumes a model constructed from the checkpoint — refused before any read."""
+    """FSDP2 over TP is a 2-D placement ``distribute_tensor`` does not invert for packed projections."""
     model = _dtensor_model()
     _simulate_non_rank0(monkeypatch, decisions=[True, False])
     ctx = _ctx(model, is_tp_mode=True, fsdp_wrapped=True)
@@ -172,8 +149,7 @@ def test_tp_dp_refuses_a_model_not_built_from_the_checkpoint_without_reading(tmp
 
 
 def test_tp_dp_best_model_reload_is_refused_naming_the_export(tmp_path, single_rank_gloo):
-    """The best-model reload can never be the constructed-from-checkpoint skip, so under TP+DP it is
-    refused outright — the message must point at exporting the best checkpoint directly."""
+    """This reload can never be the constructed-from-checkpoint skip."""
     model = _dtensor_model()
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
@@ -184,9 +160,7 @@ def test_tp_dp_best_model_reload_is_refused_naming_the_export(tmp_path, single_r
 
 
 def test_tp_distributes_the_checkpoint_into_the_live_dtensor(tmp_path, single_rank_gloo, monkeypatch):
-    """The genuine pure-TP load: a model NOT built from the checkpoint gets every tensor
-    ``distribute_tensor``ed into its DTensor placement — the by-value proof the resume restores
-    trained weights instead of skipping."""
+    """The by-value proof that the resume restores trained weights."""
     model = _dtensor_model()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     _simulate_non_rank0(monkeypatch, decisions=[True, False, (1, 1)])
@@ -198,8 +172,7 @@ def test_tp_distributes_the_checkpoint_into_the_live_dtensor(tmp_path, single_ra
 
 
 def test_tp_best_model_reload_reads_even_when_built_from_the_checkpoint(tmp_path, single_rank_gloo):
-    """``load_best_model_at_end``: the live weights trained PAST the best checkpoint, so the
-    constructed-from-checkpoint skip must not apply — or the export silently carries the LAST
+    """The live weights trained past the best checkpoint; skipping means the export silently carries the last
     weights."""
     model = _dtensor_model()
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
@@ -212,8 +185,7 @@ def test_tp_best_model_reload_reads_even_when_built_from_the_checkpoint(tmp_path
 
 
 def test_tp_plain_non_rank0_still_reads_for_the_genuine_load(tmp_path, monkeypatch):
-    """Anti-over-skipping: a replicated (plain) param is copied from the rank's own read, so a
-    non-zero rank on the genuine load path must still read its node's copy."""
+    """A replicated param is copied from the rank's own read, so a non-zero rank must still read its node's copy."""
     model = _TinyModel()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     _simulate_non_rank0(monkeypatch, decisions=[True, False, (1, 1)])
@@ -225,10 +197,8 @@ def test_tp_plain_non_rank0_still_reads_for_the_genuine_load(tmp_path, monkeypat
 
 
 def test_a_node_copy_short_of_an_expert_is_refused_before_any_write(tmp_path, monkeypatch):
-    """One fused live tensor stands for every per-expert key of a layer, so a node copy that lost an
-    expert's tensors spells the same live names as rank 0's. The on-disk key count is what tells them
-    apart, and it must be agreed before the copy: past it, this rank alone would fail stacking the
-    short expert list while its peers wait at the trailing barrier."""
+    """A short copy spells the same live names as rank 0's, so only the on-disk key count tells them apart; past the
+    copy, this rank alone fails while peers wait."""
     full, short = tmp_path / "full", tmp_path / "short"
     torch.manual_seed(0)
     Qwen3MoeForCausalLM(Qwen3MoeConfig(**{**TINY_QWEN3_MOE_CONFIG, "num_hidden_layers": 1})).save_pretrained(full)
@@ -239,7 +209,6 @@ def test_a_node_copy_short_of_an_expert_is_refused_before_any_write(tmp_path, mo
     short.mkdir()
     save_file({key: tensor for key, tensor in state.items() if key != lost}, str(short / "model.safetensors"))
     shutil.copy(full / "config.json", short)
-    # Rank 0 reads the whole copy: every disk key, and the same live names the short copy maps to.
     rank0_counts = (len(state), len(ModuleLayoutView(model, state).keys))
     _simulate_non_rank0(monkeypatch, decisions=[True, False, rank0_counts])
 
@@ -256,9 +225,8 @@ def test_a_node_copy_short_of_an_expert_is_refused_before_any_write(tmp_path, mo
 
 
 def test_tp_hand_sliced_param_takes_its_rank_slice(tmp_path):
-    """A param TP shards by hand (GptOss sinks) is no DTensor: the checkpoint holds every head and
-    the live param one rank's slice, so the load must chunk it by ``tp_rank`` — a whole copy would
-    shape-mismatch, and rank 0's slice on every rank would duplicate its heads."""
+    """The checkpoint holds every head: a whole copy would shape-mismatch, and rank 0's slice would duplicate its
+    heads."""
     model = _HandSlicedModel()
     save_file(
         {"fc.weight": torch.ones(4, 4), "sinks": torch.arange(4, dtype=torch.float32)},
@@ -273,10 +241,8 @@ def test_tp_hand_sliced_param_takes_its_rank_slice(tmp_path):
 
 
 def test_fsdp2_resume_with_no_matching_keys_raises(tmp_path):
-    """``set_model_state_dict`` runs strict=False (GptOss sinks and other legitimately absent keys
-    would abort the whole restore otherwise), and it reports a wholesale mismatch as `unexpected`
-    with an EMPTY `missing_keys` — so without this gate the call is a silent no-op and training
-    resumes from base weights while logging success."""
+    """strict=False reports a wholesale mismatch as `unexpected` with an empty `missing_keys`, so the call is a
+    silent no-op that resumes base weights."""
     model = _TinyModel()
     before = model.fc.weight.detach().clone()
     save_file({"totally.wrong.key": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
@@ -300,9 +266,7 @@ class _ThreeLayerModel(nn.Module):
 
 
 def test_fsdp2_resume_below_half_coverage_raises(tmp_path):
-    """A checkpoint matching SOME keys but fewer than half is a wrong-layout checkpoint, not a
-    legitimate resume — strict=False would apply the matching fraction and silently keep base
-    weights for the rest."""
+    """strict=False would apply the matching fraction and silently keep base weights for the rest."""
     model = _ThreeLayerModel()
     before = {n: p.detach().clone() for n, p in model.named_parameters()}
     save_file({"fc1.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
@@ -316,9 +280,8 @@ def test_fsdp2_resume_below_half_coverage_raises(tmp_path):
 
 
 def test_fsdp2_resume_majority_coverage_loads_and_keeps_absent(tmp_path):
-    """Majority coverage loads: gaps like tied lm_head / task heads are real, so absent tensors
-    keep their construction values (warned, not raised). Needs a (1-rank gloo) process group —
-    unlike the raise paths, this one reaches the real ``set_model_state_dict``."""
+    """Gaps like tied lm_head are real, so absent tensors keep their construction values. Needs a 1-rank gloo group
+    for the real ``set_model_state_dict``."""
     model = _ThreeLayerModel()
     before_fc3 = model.fc3.weight.detach().clone()
     save_file(
@@ -339,9 +302,7 @@ def test_fsdp2_resume_majority_coverage_loads_and_keeps_absent(tmp_path):
 
 
 def test_fsdp2_resume_with_matching_keys_reaches_the_load(tmp_path, monkeypatch):
-    """Anti-vacuity for the gate above: a checkpoint whose keys DO match must still reach
-    ``set_model_state_dict`` with the full dict. (The real call needs an initialized process group —
-    ``broadcast_from_rank0`` — so it is recorded rather than executed here.)"""
+    """Anti-vacuity: the real call needs ``broadcast_from_rank0``, so it is recorded here."""
     model = _TinyModel()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     applied = _Recorder()
@@ -355,14 +316,8 @@ def test_fsdp2_resume_with_matching_keys_reaches_the_load(tmp_path, monkeypatch)
 
 
 def test_optimizer_shards_without_meta_are_refused_as_torn(tmp_path, monkeypatch):
-    """A shard with no ``optimizer_meta.pt`` cannot be gated — neither the rank-count nor the
-    fingerprint check has anything to compare — and it is not a weights-only checkpoint either.
-
-    Reachable two ways: a kill in the window between the shard save's write and its meta write, and
-    a user who follows "delete every optimizer_shard_*.pt AND optimizer_meta.pt" by halves. Loading
-    ungated silently maps another topology's moments onto this run's params; warm-restarting resumes
-    an interrupted save as if it were complete. Both are refused unless the run opted in.
-    """
+    """A kill between the shard and meta writes reaches this. Loading ungated maps another topology's moments onto
+    this run's params."""
     model = _TinyModel()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     torch.save({"state": {}, "param_groups": []}, os.path.join(tmp_path, "optimizer_shard_00000.pt"))
@@ -385,13 +340,11 @@ def test_optimizer_shards_without_meta_are_refused_as_torn(tmp_path, monkeypatch
 
 
 def test_a_non_sharded_resume_refuses_per_rank_optimizer_shards(tmp_path):
-    """The base Trainer's loader recognizes only optimizer.pt, so routing a shard-carrying
-    checkpoint to it restores NOTHING silently — weights, step and LR schedule resume while the
-    Adam moments reset, with no warning anywhere. The gate must raise BEFORE the fallback runs."""
+    """The base Trainer's loader recognizes only optimizer.pt, so the Adam moments would reset with no warning."""
     model = _TinyModel()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     torch.save({"state": {}, "param_groups": []}, os.path.join(tmp_path, "optimizer_shard_00000.pt"))
-    loader = OptimizerShardStore(_ctx(model, optimizer))  # fsdp_wrapped=False → the base-Trainer route
+    loader = OptimizerShardStore(_ctx(model, optimizer))
 
     with pytest.raises(RuntimeError, match="optimizer_shard"):
         loader.load(str(tmp_path))
@@ -400,8 +353,7 @@ def test_a_non_sharded_resume_refuses_per_rank_optimizer_shards(tmp_path):
 
 
 def test_a_meta_only_checkpoint_is_refused_too(tmp_path):
-    """The load side treats meta-without-shards as a failed gate; the non-sharded route must refuse
-    the same artifact rather than silently restore nothing from it."""
+    """The load side treats meta-without-shards as a failed gate."""
     (tmp_path / "optimizer_meta.pt").write_bytes(b"x")
     loader = OptimizerShardStore(_ctx(_TinyModel()))
 
@@ -410,8 +362,6 @@ def test_a_meta_only_checkpoint_is_refused_too(tmp_path):
 
 
 def test_a_shard_free_checkpoint_still_takes_the_base_route(tmp_path):
-    """Anti-over-rejection: an ordinary optimizer.pt checkpoint (and a None resume) must keep
-    falling through to the base Trainer untouched."""
     model = _TinyModel()
     torch.save({}, os.path.join(tmp_path, "optimizer.pt"))
     loader = OptimizerShardStore(_ctx(model, torch.optim.SGD(model.parameters(), lr=0.1)))
@@ -423,9 +373,7 @@ def test_a_shard_free_checkpoint_still_takes_the_base_route(tmp_path):
 
 
 def test_a_meta_write_failure_defers_to_the_collective(tmp_path, monkeypatch):
-    """optimizer_meta.pt is written between two collectives. A raw raise on the save rank (ENOSPC)
-    would leave its peers in the closing barrier with no diagnostic — the write must ride the same
-    DeferredRankFailure as the shard write and surface uniformly with the real cause."""
+    """A raw raise (ENOSPC) on the save rank would leave its peers in the closing barrier with no diagnostic."""
     model = _TinyModel()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     real_save = torch.save
@@ -439,8 +387,7 @@ def test_a_meta_write_failure_defers_to_the_collective(tmp_path, monkeypatch):
     monkeypatch.setattr(optimizer_mod.torch, "save", failing_meta_save)
     loader = OptimizerShardStore(_ctx(model, optimizer, fsdp_wrapped=True))
 
-    # RuntimeError (the guard's uniform re-raise carrying the recorded reason), never the raw
-    # OSError a bare write would throw past the collectives.
+    # The guard's uniform re-raise, never the raw OSError a bare write would throw past the collectives.
     with pytest.raises(RuntimeError, match="No space left on device"):
         loader.save(str(tmp_path))
 
@@ -456,15 +403,13 @@ def _scheduler(model):
 
 
 def test_scheduler_missing_file_warm_restarts(tmp_path):
-    """No scheduler.pt anywhere is a legitimate warm restart (save_only_model runs) — False, no raise."""
+    """Legitimate under save_only_model."""
     model = _TinyModel()
     assert restore_lr_scheduler(_scheduler(model), None, str(tmp_path)) is False
 
 
 def test_scheduler_torn_file_raises(tmp_path):
-    """A scheduler.pt that exists but is unreadable on every rank must RAISE, not return False with
-    only per-rank warnings — that silently re-warms the LR schedule from step 0 while the dataloader
-    skips ahead (effective-LR desync from the resumed step)."""
+    """Returning False silently re-warms the LR schedule from step 0 while the dataloader skips ahead."""
     (tmp_path / "scheduler.pt").write_bytes(b"not a torch file")
     model = _TinyModel()
     with pytest.raises(RuntimeError, match="torn/corrupt"):
@@ -487,15 +432,12 @@ def test_scheduler_readable_file_restores(tmp_path):
 
 
 def test_scheduler_none_with_present_file_returns_false(tmp_path):
-    """No live scheduler to restore into: even a present (garbage) file is not an error."""
     (tmp_path / "scheduler.pt").write_bytes(b"garbage")
     assert restore_lr_scheduler(None, None, str(tmp_path)) is False
 
 
 def test_adapter_attn_state_without_peft_model_raises(tmp_path):
-    """A checkpoint carrying attention/PEFT adapter tensors resumed into a model with no PEFT
-    adapters must RAISE, not silently skip the apply and then log a successful restore — that
-    continues the run from base weights."""
+    """Skipping the apply would continue the run from base weights while logging a successful restore."""
     save_file(
         {"base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.zeros(2, 4)},
         os.path.join(tmp_path, "adapter_model.safetensors"),
@@ -505,8 +447,7 @@ def test_adapter_attn_state_without_peft_model_raises(tmp_path):
 
 
 def test_adapter_expert_only_state_without_peft_model_ok(tmp_path, monkeypatch):
-    """Expert-LoRA-only checkpoints (native EP grouped adapters, no PeftModel) must keep working:
-    the expert state is applied via load_expert_lora_adapters and nothing raises."""
+    """Native EP grouped adapters have no PeftModel."""
     save_file(
         {"model.layers.0.mlp.experts.gate_up_proj.lora_A": torch.zeros(2, 4)},
         os.path.join(tmp_path, "adapter_model.safetensors"),
@@ -514,7 +455,7 @@ def test_adapter_expert_only_state_without_peft_model_ok(tmp_path, monkeypatch):
     applied = _Recorder()
     monkeypatch.setattr(peft_mod, "load_expert_lora_adapters", applied)
 
-    restore_adapters(str(tmp_path), _TinyModel(), is_cp_mode=False)  # must not raise
+    restore_adapters(str(tmp_path), _TinyModel(), is_cp_mode=False)
 
     assert len(applied.calls) == 1
     assert set(applied.calls[0][0][1]) == {"model.layers.0.mlp.experts.gate_up_proj.lora_A"}
@@ -527,9 +468,7 @@ class _NamedSourceModel(_TinyModel):
 
 
 def _adapter_only_checkpoint(tmp_path, monkeypatch):
-    """An adapter-only checkpoint (LoRA / expert-LoRA + save_only_model) plus a recorder standing in
-    for the adapter restore, whose own PEFT-shape guards are a separate concern from the base-weight
-    decision under test."""
+    """The recorder stands in for the adapter restore, whose PEFT-shape guards are a separate concern."""
     save_file({"base_model.model.fc.lora_A.weight": torch.ones(2, 4)}, os.path.join(tmp_path, ADAPTER_WEIGHTS_NAME))
     restored = _Recorder()
     monkeypatch.setattr(loader_mod, "restore_adapters", restored)
@@ -537,33 +476,31 @@ def _adapter_only_checkpoint(tmp_path, monkeypatch):
 
 
 def test_ep_adapter_only_resume_accepts_hub_loaded_base(tmp_path, monkeypatch):
-    """An adapter-only checkpoint ships no base weights: the hub-loaded frozen base IS the run's
-    base, so demanding construction from the checkpoint would make every EP/CP adapter resume DOA."""
+    """The hub-loaded frozen base is the run's base, so demanding construction from the checkpoint would break every
+    EP/CP adapter resume."""
     restored = _adapter_only_checkpoint(tmp_path, monkeypatch)
     model = _NamedSourceModel("org/base-model")
     ctx = _ctx(model, has_ep_layers=True)
 
-    load_resume_weights(ctx, str(tmp_path), model)  # must not raise
+    load_resume_weights(ctx, str(tmp_path), model)
 
     assert len(restored.calls) == 1, "the adapters are the trained state — they must still be restored"
 
 
 def test_ep_adapter_only_best_model_reload_is_allowed(tmp_path, monkeypatch):
-    """``load_best_model_at_end`` on an adapter-only run is supported — the adapters reload in place,
-    so the export carries the best weights. A blanket EP/CP refusal makes every EP/CP LoRA run that
-    sets the flag die after training instead of exporting."""
+    """The adapters reload in place; a blanket refusal would kill every EP/CP LoRA run that sets the flag after
+    training."""
     restored = _adapter_only_checkpoint(tmp_path, monkeypatch)
     model = _NamedSourceModel("org/base-model")
     ctx = _ctx(model, has_ep_layers=True)
 
-    load_resume_weights(ctx, str(tmp_path), model, for_best_model=True)  # must not raise
+    load_resume_weights(ctx, str(tmp_path), model, for_best_model=True)
 
     assert len(restored.calls) == 1
 
 
 def test_ep_best_model_reload_refuses_a_base_weight_checkpoint(tmp_path):
-    """The other half: a full fine-tune's checkpoint DOES ship base weights, which cannot be reloaded
-    in place under EP/CP — so the best-model export would silently carry the LAST weights."""
+    """Base weights cannot be reloaded in place under EP/CP, so the export would silently carry the last weights."""
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     model = _NamedSourceModel("org/base-model")
     ctx = _ctx(model, has_ep_layers=True)
@@ -572,8 +509,7 @@ def test_ep_best_model_reload_refuses_a_base_weight_checkpoint(tmp_path):
 
 
 def test_ep_base_weight_checkpoint_demands_construction_from_it(tmp_path):
-    """A checkpoint that ships base weights cannot be loaded into the EP-transformed model —
-    a model constructed from anywhere else would silently keep its current weights."""
+    """A model constructed from anywhere else would silently keep its current weights."""
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     model = _NamedSourceModel("org/base-model")
     ctx = _ctx(model, has_ep_layers=True)
@@ -581,13 +517,10 @@ def test_ep_base_weight_checkpoint_demands_construction_from_it(tmp_path):
         load_resume_weights(ctx, str(tmp_path), model)
 
 
-# The resume skip is keyed on where the weights were READ, not on config._name_or_path.
+# The resume skip is keyed on where the weights were read, not on config._name_or_path.
 class _ScratchInitModel(_NamedSourceModel):
-    """``init_from_scratch``: built from the checkpoint's CONFIG, holding random weights.
-
-    ``load_distributed_model`` stamps ``_loaded_weights_from = None`` for exactly this case, because
-    ``AutoConfig.from_pretrained(checkpoint)`` leaves ``_name_or_path`` pointing at the checkpoint.
-    """
+    """``AutoConfig.from_pretrained(checkpoint)`` leaves ``_name_or_path`` pointing at the checkpoint while the
+    weights are random."""
 
     def __init__(self, source: str):
         super().__init__(source)
@@ -595,8 +528,7 @@ class _ScratchInitModel(_NamedSourceModel):
 
 
 def _fsdp2_resume_applied(tmp_path, monkeypatch, model) -> _Recorder:
-    """Run the FSDP2 reload with the DTensor distribution stubbed (it needs a process group), and
-    report whether the weights were applied."""
+    """The DTensor distribution is stubbed because it needs a process group."""
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     applied = _Recorder()
     monkeypatch.setattr(loader_mod, "set_model_state_dict", applied)
@@ -605,8 +537,7 @@ def _fsdp2_resume_applied(tmp_path, monkeypatch, model) -> _Recorder:
 
 
 def test_fsdp2_resume_reloads_when_the_weights_were_never_read(tmp_path, monkeypatch):
-    """An ``init_from_scratch`` model matches the checkpoint by ``_name_or_path`` while holding
-    RANDOM weights — skipping the reload would resume at step N on a freshly initialized model."""
+    """Skipping the reload would resume at step N on a freshly initialized model."""
     applied = _fsdp2_resume_applied(tmp_path, monkeypatch, _ScratchInitModel(str(tmp_path)))
 
     assert len(applied.calls) == 1, "the checkpoint weights must be read"
@@ -614,8 +545,7 @@ def test_fsdp2_resume_reloads_when_the_weights_were_never_read(tmp_path, monkeyp
 
 
 def test_fsdp2_resume_skips_the_reload_when_the_weights_came_from_this_checkpoint(tmp_path, monkeypatch):
-    """Anti-vacuity for the test above: a model whose weights WERE read from this checkpoint already
-    holds them, so re-reading a 100B+ state dict to overwrite them with themselves is pure waste."""
+    """Anti-vacuity: re-reading a 100B+ state dict to overwrite them with themselves is pure waste."""
     model = _NamedSourceModel(str(tmp_path))
     model._loaded_weights_from = str(tmp_path)
 

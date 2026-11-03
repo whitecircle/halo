@@ -1,9 +1,6 @@
-"""Offline privileged-context self-distillation SFT trainer, the offline approximation of SDPG.
-
-No generation: the fixed dataset response is scored by one model as student ``pi(. | x, y_<t)`` and,
-under ``torch.no_grad()``, as privileged teacher ``pi(. | c, x, y_<t)`` (``c`` = gold-answer hint), with
-``L = L_sft + beta(k) * L_OPD + alpha * L_ref``. The on-policy variant is :class:`DistributedSDPGTrainer`.
-"""
+"""Offline privileged-context self-distillation, the offline approximation of SDPG. One model scores the fixed response
+as student ``pi(. | x, y_<t)`` and, no-grad, as teacher ``pi(. | c, x, y_<t)`` (``c`` = gold-answer hint), with
+``L = L_sft + beta(k) * L_OPD + alpha * L_ref``."""
 
 import logging
 
@@ -39,8 +36,8 @@ _VISION_REUSE_MODEL_TYPES = ("lfm2_vl",)
 
 
 def _teacher_inputs(model_inputs: dict, teacher: dict) -> dict:
-    """The teacher forward's inputs: the student's, with every per-token tensor taken from the ``teacher_*``
-    branch, whose sequence the hint lengthens."""
+    """The student's inputs with every per-token tensor taken from the ``teacher_*`` branch, which the hint
+    lengthens."""
     per_token = (
         "input_ids",
         "attention_mask",
@@ -59,15 +56,13 @@ def _teacher_inputs(model_inputs: dict, teacher: dict) -> dict:
 
 
 class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, DistributedSFTTrainer):
-    """SFT trainer with an SDPG-style privileged-context self-distillation auxiliary loss."""
-
     SUPPORTS_CP = False  # privileged teacher uses a separate, longer sequence
     SUPPORTS_LOWP_PRECISION = False
     # Unlike the SFT parent's CP-only opt-out, the SDPG objective is its own mean on every axis.
     LOSS_IS_OWN_MEAN = True
     # Unlike its SFT base, this trainer forwards without labels and builds the CE itself.
     ROUTER_AUX_LOSS_ADDED_BY = None
-    # Same reason: compute_loss reads outputs.logits, so eval must not take the base's skip_logits path.
+    # compute_loss reads outputs.logits, so eval must not take the base's skip_logits path.
     LOSS_READS_LOGITS = True
     # Its loss stores its terms through StoredMetricsMixin and records none of the SFT loss metrics.
     RECORDS_LOSS_METRICS = False
@@ -136,7 +131,6 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
                 logger.info(f"Reference model moved to {device} and frozen (alpha={self.reference_kl_coef})")
 
     def _resolve_stop_token_ids(self):
-        """EOS/stop token ids excluded from OPD when ``opd_exclude_eos``, via ``resolve_eos_token_ids``."""
         tok = resolve_tokenizer(self.processing_class)
         model_config = getattr(getattr(self, "model", None), "config", None)
         self._stop_token_ids = set(resolve_eos_token_ids(tok, model_config))
@@ -149,7 +143,6 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         confidence_weights = inputs.pop("confidence_weights", None)
 
         labels = inputs["labels"]
-        # Full-vocab logits (no fused-LCE shortcut); CE computed manually below.
         model_inputs = logits_forward_inputs(inputs)
 
         reuse = self._install_vision_reuse(model)
@@ -158,8 +151,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
 
         student_outputs = model(**model_inputs)
         self._vision_record = False
-        # Rows padding an eval split's final round repeat its first rows: every term reads the
-        # split's own (in train, the whole batch, unsliced).
+        # Rows padding an eval split's final round repeat its first rows, so every term reads the split's own.
         real = self.eval_split_rows(labels.size(0))
         student_logits, labels = split_rows_head(student_outputs.logits, real), split_rows_head(labels, real)
         if confidence_weights is not None:
@@ -205,11 +197,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         return loss
 
     def _install_vision_reuse(self, model) -> bool:
-        """Install a caching wrapper around the VLM's ``get_image_features`` (once).
-
-        The wrapper records the student's image features and replays them on the teacher pass, gated
-        by ``self._vision_record``/``self._vision_replay``. Returns whether reuse is active.
-        """
+        """Cache the student's image features and replay them on the teacher pass; returns whether reuse is active."""
         if self._vision_reuse_setup:
             return self._vision_reuse_active
         self._vision_reuse_setup = True
@@ -237,7 +225,6 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         return True
 
     def _weighted_cross_entropy(self, logits, labels, sample_weights):
-        """Token-mean SFT cross-entropy with optional per-sample confidence weighting."""
         shift_labels = labels[:, 1:]
         token_ce = shifted_token_cross_entropy(logits[:, :-1, :], shift_labels)
         return masked_token_mean(token_ce, shift_labels != LABEL_IGNORE_INDEX, sample_weights)
@@ -263,11 +250,8 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
     def _response_divergence(
         self, loss_fn, student_logits, student_mask, target_logits, target_mask, sample_weights=None
     ):
-        """``loss_fn`` between the student's and the target's next-token rows at the masked positions,
-        the k-th masked row of one paired with the k-th of the other, as a per-sample token mean.
-
-        One gather per side, so the divergence covers the response rows only.
-        """
+        """``loss_fn`` at the masked positions, the k-th masked row of one side paired with the k-th of the other, as a
+        per-sample token mean. One gather per side, so the divergence covers the response rows only."""
         student_counts, target_counts = student_mask.sum(-1), target_mask.sum(-1)
         # One mask on both sides (the reference term) pairs trivially. A host check, not a device assert:
         # the boolean gathers below sync the host anyway, and a device assert would lose the counts.

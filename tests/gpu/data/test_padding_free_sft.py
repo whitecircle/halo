@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""``padding_free`` SFT trains exactly the padded batch's objective, under FSDP2, EP and TP.
+"""``padding_free`` SFT trains the padded batch's objective under FSDP2, EP and TP, built as the SFT script builds it.
 
-The padding-free collator (``DataCollatorWithFlattening``) concatenates a microbatch into one row whose
-``position_ids`` restart at every document, from which the varlen flash kernel takes each document's bounds; the
-padded collator keeps one row per document behind padding. Both score the same next tokens, so a run's first step
-must agree between them: each microbatch loss, the logged loss and the gradient of every parameter but the routers and
-experts the EP layers hold plain, by direction and norm (:mod:`tests.common.first_step`). A document whose positions
-ran on from the previous one would attend across the boundary and move the first step off the padded run's: the loss
-and the gradients on Qwen3-0.6B, the gradient direction alone on the tiny MoE, whose loss barely moves.
-
-Both runs build the trainer as ``scripts/training/sft.py`` does: the collator the factory selects, rows tokenized as
-the script tokenizes a rendered conversation, and TRL's own ``padding_free`` and dataset preparation turned off
-(``disable_trl_dataset_prep``), without which TRL refuses the collator.
-
-Modes: ``dense`` (Qwen3-0.6B, FSDP2), ``tp2`` (Qwen3-0.6B, TP2), ``ep2`` (a tiny Qwen3-MoE, EP2), on two ranks, each
-on the attention backend the loader resolves for its host.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/data/test_padding_free_sft.py --mode dense
+A document whose positions ran on attends across the boundary and moves the first step: loss and gradients on
+Qwen3-0.6B, gradient direction alone on the tiny MoE. TRL's own ``padding_free`` is off, since TRL refuses the collator
+otherwise.
 """
 
 import argparse
@@ -45,8 +32,8 @@ SEED = 42
 STEPS = 2
 BATCH_SIZE = 4
 MAX_LENGTH = 512
-# The two collations differ only in how the kernel bounds each document; bf16 reduction order and the varlen
-# against the padded kernel path remain. A document attending across a boundary moves the loss far past this.
+# bf16 reduction order and the varlen against the padded kernel path remain. A boundary crossing moves the loss far
+# past this.
 LOSS_RTOL = 0.02
 # Two-way axes: a loss counted once per rank of one is 100% off.
 MISCOUNT_FACTOR = 2
@@ -58,7 +45,6 @@ ARGS = parser.parse_args()
 
 
 def _train(source: str, tokenizer, output_dir: str, *, padding_free: bool):
-    """One run's trainer over ``source`` with the padded or the padding-free collator; returns its first step."""
     pc = ParallelismConfig(**MODES[ARGS.mode])
     model, _ = load_distributed_model(source, pc, torch.bfloat16, trust_remote_code=False, use_liger_kernel=False)
     config = SFTConfig(

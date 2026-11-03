@@ -1,8 +1,5 @@
-"""Ulysses attention: the base every family wrapper extends, and the shared MLA layer.
-
-A wrapper replaces its family's attention forward: project, RoPE on the local sequence chunk, all-to-all into head
-parallelism, flash attention over the full sequence with native GQA, all-to-all back, output projection.
-"""
+"""Ulysses attention: project, RoPE on the local chunk, all-to-all into head parallelism, flash attention over the full
+sequence with native GQA, all-to-all back, output projection."""
 
 from __future__ import annotations
 
@@ -64,7 +61,6 @@ def _flash_attn_func(allow_fa4: bool = True):
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """``[-x2, x1]`` over the last dim."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
@@ -81,16 +77,13 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
 
 
 class UlyssesAttention(nn.Module):
-    """Ulysses attention over one HF attention module, kept as ``original_attention`` and read on every call
-    (PEFT wraps its projections after this is built). Families override :meth:`_project_qkv`,
-    :meth:`_apply_rotary` and :meth:`_post_attention` where they differ from plain rotate-half GQA."""
+    """Ulysses attention over one HF attention module, read on every call since PEFT wraps its projections after this
+    is built. Families override :meth:`_project_qkv`, :meth:`_apply_rotary` and :meth:`_post_attention`."""
 
     HF_MODULE_NAMES: tuple[str, ...] = ()
 
-    # The config's attention label describes the family's own attention forward, which this wrapper
-    # replaces. False declares the wrapper's geometry flash-compatible for a family whose modeling code
-    # cannot carry a flash label at all (v4-era remote code declaring `_supports_flash_attn_2`, which
-    # transformers v5 ignores in favour of `_supports_flash_attn`).
+    # False declares the wrapper's geometry flash-compatible for a family whose modeling code cannot carry a flash
+    # label (v4-era remote code declaring `_supports_flash_attn_2`, which transformers v5 ignores).
     REQUIRES_FLASH_ATTN_LABEL: bool = True
 
     OUTPUT_PROJECTION = "o_proj"
@@ -129,8 +122,7 @@ class UlyssesAttention(nn.Module):
     @staticmethod
     def _resolve_num_kv_heads(attention: nn.Module) -> int:
         """Head count of the K/V :meth:`_project_qkv` emits, read off the unpatched module so
-        :func:`~halo.distributed.context_parallel.model_rules.reject_unsupported_ulysses_model` resolves
-        it from the same place."""
+        ``reject_unsupported_ulysses_model`` resolves it from the same place."""
         return attention.config.num_key_value_heads
 
     def extra_repr(self) -> str:
@@ -143,11 +135,8 @@ class UlyssesAttention(nn.Module):
         position_ids: torch.LongTensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """``[batch, seq/CP, hidden]`` in and out; ``position_embeddings`` and ``position_ids`` cover the local chunk.
-
-        The remaining decoder kwargs (mask, cache) are dropped: CP is training-only, and the flash call
-        takes causal masking from ``causal=``, not a mask tensor.
-        """
+        """``[batch, seq/CP, hidden]`` in and out. The other decoder kwargs (mask, cache) are dropped: CP is
+        training-only, and the flash call takes causal masking from ``causal=``."""
         batch_size, local_seq_len, _ = hidden_states.shape
         query, key, value, *extras = self._project_qkv(hidden_states, batch_size, local_seq_len)
         cos, sin = position_embeddings
@@ -178,14 +167,12 @@ class UlyssesAttention(nn.Module):
         sin: torch.Tensor,
         position_ids: torch.LongTensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """RoPE on this rank's chunk in ``[B, S, H, D]``, ``cos``/``sin`` as ``[B, S, 1, D]``: rotate-half by
-        default, the convention Qwen3, Qwen3.5/3.6 and Bailing share."""
+        """RoPE on this rank's chunk in ``[B, S, H, D]``; rotate-half by default (Qwen3, Qwen3.5/3.6, Bailing)."""
         return apply_rope(q, cos, sin), apply_rope(k, cos, sin)
 
     def _attend(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-        """Flash attention over the full sequence for this rank's heads, ``[B, S, H, D]`` with native GQA. The
-        sliding window follows the HF convention: applied only past its own length, minus 1 for the diagonal;
-        ``deterministic`` is the one transformers passes its own flash calls."""
+        """Flash attention over the full sequence for this rank's heads, native GQA. The sliding window follows HF:
+        applied only past its own length, minus 1 for the diagonal."""
         window = self.sliding_window
         return _flash_attn_func(self._allow_fa4)(
             query,
@@ -248,12 +235,9 @@ class MLAUlyssesAttention(UlyssesAttention):
     def _project_qkv(
         self, hidden_states: torch.Tensor, batch_size: int, local_seq_len: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Q/K ``[B, S, heads, qk_head_dim]`` and V ``[B, S, kv_heads, v_head_dim]``.
-
-        The ``kv_lora_rank`` slots of the compressed KV expand (norm + ``kv_b_proj``) into ``k_nope`` and V;
-        the trailing ``qk_rope_head_dim`` slots are the shared rotary K, broadcast to every KV head so the
-        all-to-all's head scatter sees a contiguous tensor.
-        """
+        """Q/K ``[B, S, heads, qk_head_dim]`` and V ``[B, S, kv_heads, v_head_dim]``. The trailing ``qk_rope_head_dim``
+        slots of the compressed KV are the shared rotary K, broadcast to every KV head so the all-to-all's head scatter
+        sees a contiguous tensor."""
         attn = self.original_attention
 
         if self.use_q_lora:

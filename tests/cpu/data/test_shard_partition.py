@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Exact-partition tests for ShardedDatasetLoader shard assignment.
-
-Megatron-style sharding must give every rank a DISJOINT slice and together COVER all
-shards exactly once — a gap silently drops data, an overlap silently double-trains it,
-and neither surfaces as an error. These tests assert the partition exactly (Counter over
-all ranks == every shard once) across several (num_shards, world_size) shapes, plus a
-real writer->loader round-trip on example IDs and the boundary cases.
-
-Run: pytest tests/cpu/data/test_shard_partition.py
-"""
+"""``ShardedDatasetLoader`` shard assignment is an exact partition: a gap silently drops data and an overlap
+silently double-trains it."""
 
 import os
 import shutil
@@ -33,7 +25,6 @@ def _assignment(num_shards: int, world_size: int, rank: int) -> tuple[int, int]:
 
 @pytest.mark.parametrize("num_shards,world_size", [(10, 3), (8, 8), (7, 4), (1, 1)])
 def test_exact_partition_no_overlap_no_gap(num_shards, world_size):
-    """Union of all ranks' assignments == every shard id exactly once."""
     coverage = Counter()
     for rank in range(world_size):
         start, end = _assignment(num_shards, world_size, rank)
@@ -41,7 +32,6 @@ def test_exact_partition_no_overlap_no_gap(num_shards, world_size):
         for shard_id in range(start, end):
             coverage[shard_id] += 1
 
-    # Every shard covered exactly once: no gap (all present) and no overlap (count==1).
     assert set(coverage.keys()) == set(range(num_shards)), (
         f"coverage gap: assigned {sorted(coverage.keys())} for {num_shards} shards"
     )
@@ -49,7 +39,6 @@ def test_exact_partition_no_overlap_no_gap(num_shards, world_size):
 
 
 def test_num_shards_equals_world_size_one_each():
-    """num_shards == world_size: each rank gets exactly one distinct shard (remainder=0 path)."""
     world_size = 6
     seen = []
     for rank in range(world_size):
@@ -71,8 +60,7 @@ def _build_sharded(num_examples: int, num_shards: int, temp_dir: str, split: str
 
 
 def test_writer_loader_roundtrip_exact_multiset():
-    """Shard 100 examples into 7, load across 4 ranks, concatenate: the multiset of
-    example_ids must be exactly range(100) — every example once, no duplicates, no drops."""
+    """100 examples in 7 shards over 4 ranks: the multiset of example_ids is exactly range(100)."""
     temp_dir = tempfile.mkdtemp()
     try:
         _build_sharded(100, num_shards=7, temp_dir=temp_dir)
@@ -93,15 +81,13 @@ def test_writer_loader_roundtrip_exact_multiset():
 
 
 def test_num_shards_equals_world_size_load_does_not_raise():
-    """num_shards == world_size is the well-shaped boundary: load_split must NOT raise
-    (the undersharded guard only fires for 0 < num_shards < world_size)."""
+    """The well-shaped boundary: the undersharded guard only fires for 0 < num_shards < world_size."""
     temp_dir = tempfile.mkdtemp()
     try:
         _build_sharded(40, num_shards=4, temp_dir=temp_dir)
-        # Every rank loads its single shard cleanly.
         for rank in range(4):
             loader = ShardedDatasetLoader(dataset_path=temp_dir, dp_rank=rank, dp_size=4)
-            ds = loader.load_split("train")  # must not raise
+            ds = loader.load_split("train")
             assert len(ds) > 0, f"rank {rank} got an empty assignment at num_shards==world_size"
     finally:
         shutil.rmtree(temp_dir)

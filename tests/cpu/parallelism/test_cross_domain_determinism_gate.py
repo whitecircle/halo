@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``full_determinism`` on an EP group spanning NVLink domains is refused while the entry script builds its
-parallelism config, before any weight is read.
-
-The dispatcher builds DeepEP's deterministic buffer under the mode ``full_determinism`` turns on, but
-across domains DeepEP runs its hybrid RDMA kernels, which have no deterministic mode: they place received
-tokens in atomic claim order, so every expert weight gradient is summed in a different order on every
-step. A group inside one domain, and a run without ``full_determinism``, build normally.
-
-    python tests/cpu/parallelism/test_cross_domain_determinism_gate.py
-"""
+"""``full_determinism`` on an EP group spanning NVLink domains is refused before any weight is read. DeepEP's hybrid
+RDMA kernels have no deterministic mode: tokens land in atomic claim order, reordering gradient sums every step."""
 
 from types import SimpleNamespace
 
@@ -20,7 +12,7 @@ from tests.common.parallelism import simulated_world
 
 
 def _built(*, world_size: int, ep_scope: str, full_determinism: bool):
-    """The config the entry-script prologue builds for an ep8 run on ``world_size`` ranks of 8-GPU domains."""
+    """An ep8 run on ``world_size`` ranks of 8-GPU domains."""
     with simulated_world(world_size, 8):
         return parallelism_config_from_args(
             ParallelismArguments(expert_parallel_size=8, ep_scope=ep_scope),
@@ -31,7 +23,7 @@ def _built(*, world_size: int, ep_scope: str, full_determinism: bool):
 
 @pytest.fixture(autouse=True)
 def _no_host_domain_size(monkeypatch):
-    """The host's ``NVLINK_DOMAIN_SIZE`` (an NVL72 box's 72) would change every domain verdict."""
+    """An NVL72 box's 72 would change every domain verdict."""
     monkeypatch.delenv("NVLINK_DOMAIN_SIZE", raising=False)
 
 

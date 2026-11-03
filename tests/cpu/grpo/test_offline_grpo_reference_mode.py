@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""Every offline-GRPO reference decision follows one classification of the policy.
-
-The constructor's run-start sweep, the CP adapter refusal, the explicit-reference gate, the script's
-``requires_ref_model`` and ``_kl_reference`` all derive from ``_reference_mode``. ``_EXPECTED`` pins
-each verdict over every policy kind × kl_beta × layout, mixed PEFT + native expert LoRA included.
-"""
+"""Every offline-GRPO reference decision derives from ``_reference_mode``; ``_EXPECTED`` pins each verdict over every
+policy kind × kl_beta × layout, mixed PEFT + native expert LoRA included."""
 
 import itertools
 import types
@@ -180,7 +176,7 @@ def test_every_reference_decision_matches_the_recorded_classification(tmp_path, 
 
 
 def test_a_checkpoint_id_policy_is_classified_by_its_config_alone():
-    """Before loading, ``model`` is a path: only peft_config and expert_lora can classify it."""
+    """Before loading, ``model`` is a path, so only peft_config and expert_lora can classify it."""
     parallelism, _ = _cell("expert_lora", "plain")
     assert OfflineGRPOTrainer._reference_mode("org/base", parallelism, None) is ReferenceMode.LIVE_BASE
     assert OfflineGRPOTrainer._reference_mode("org/base", parallelism, _lora()) is ReferenceMode.ADAPTERS_OFF

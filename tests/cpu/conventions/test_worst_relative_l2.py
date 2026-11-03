@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""``tests.common.numerics.worst_relative_l2``: the per-tensor relative error a GPU suite bounds two runs' gradients
-by.
-
-The step-guard suite's norm-only rows compare step 1's gradients against a clipping run's with it, and run only on
-the GPU tiers. A gradient synced twice or not at all may sit in a tensor too small to move an aggregate error (a
-per-head norm's weight beside an embedding), so these pin that the worst tensor decides, that comparing nothing or
-mismatched keys fails a bound, and that a NaN or a zero-norm reference cannot read as a match.
-
-Run: python tests/cpu/conventions/test_worst_relative_l2.py
-"""
+"""``tests.common.numerics.worst_relative_l2``, the per-tensor relative error a GPU suite bounds two runs' gradients
+by. A gradient synced twice or not at all may sit in a tensor too small to move an aggregate error, so the worst
+tensor decides."""
 
 import math
 

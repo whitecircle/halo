@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""Offline GRPO's actual trainer on EP8 with CP2/CP4, including KL and resume/export.
-
-The oracle runs full rows through an EP8/CP1 trainer model and independently reduces its logits.
-Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_ep_cp.py
-Use --ep-loading lazy or --ep-loading eager to select checkpoint loading.
-"""
+"""Offline GRPO's actual trainer on EP8 with CP2/CP4, including KL and resume/export, against an EP8/CP1 oracle on full
+rows."""
 
 import functools
 import hashlib
@@ -204,7 +200,7 @@ def _perturb_policy(model):
 
 
 def _pure_kl_loss(logps, reference, batch):
-    """The pure-KL oracle over CP-collated full rows, whose completion tokens the shifted labels mark."""
+    """Over CP-collated full rows, whose completion tokens the shifted labels mark."""
     valid = batch["labels"][:, 1:] != LABEL_IGNORE_INDEX
     return pure_kl_objective(logps, reference, valid, batch["group_size"], BETA)
 
@@ -239,7 +235,7 @@ def run(ctx):
         for index, row in enumerate(rows)
     ]
     batch = {name: tensor[:2] for name, tensor in all_rows.items()}
-    # A pure-KL validation batch catches an absent KL gradient, rather than hiding it under reward gradients.
+    # Catches an absent KL gradient, rather than hiding it under reward gradients.
     batch["advantage"] = torch.zeros_like(batch["advantage"])
     _perturb_policy(oracle.model)
     initial_weights = _snapshot(oracle.model)

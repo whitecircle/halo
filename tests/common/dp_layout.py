@@ -1,10 +1,5 @@
-"""The data-parallel side of a run's layout, read off the model rather than the config it was handed.
-
-``fsdp_reshard_after_forward``, ``fsdp_shard_ep1_experts``, ``use_hsdp``, several EP groups and TP with DP
-replicas each change what the FSDP2 wrap and the EP groups leave on the model, and a loader or wrap that ignored
-one would still train. These probes read those effects: the groups FULL_SHARD reshards after a forward, where
-ep1 experts live, the HSDP mesh, the expert replicas the deferred sweep keeps identical, the (dp, tp) mesh.
-"""
+"""The data-parallel side of a run's layout, read off the model, since a loader or wrap that ignored a field would
+still train."""
 
 from collections.abc import Callable, Mapping
 
@@ -21,41 +16,32 @@ from tests.common.numerics import max_or_nan
 from tests.common.rank_log import log
 
 HSDP_MESH_DIMS = ("dp_replicate", "dp_shard")
-# Tokens in the throwaway forward a probe runs the FSDP2 groups through.
 PROBE_FORWARD_TOKENS = 8
 
 
 def probe_forward(model, device: torch.device) -> None:
-    """One tiny no-grad forward of ``model``, which takes every FSDP2 group through its unshard and post-forward
-    reshard (FULL_SHARD) or leaves it gathered (SHARD_GRAD_OP), the state a training step's forward ends in.
-    ``model`` is the module the run forwards: the root's own pre-forward unshards the root's group, so a forward
-    entering below the root meets its parameters (an embedding the root holds) as sharded DTensors."""
+    """One tiny no-grad forward of the run's module, taking every FSDP2 group through unshard and post-forward reshard
+    (or leaving it gathered). Enter at the module the run forwards: the root's pre-forward unshards its group, so
+    entering below meets its params as sharded DTensors."""
     with torch.no_grad():
         model(input_ids=torch.ones(1, PROBE_FORWARD_TOKENS, dtype=torch.long, device=device))
 
 
 def probe_pipeline_forward(pipeline, device: torch.device) -> None:
-    """:func:`probe_forward` through a SentenceTransformer ``pipeline``, whose forward takes the tokenized features."""
     input_ids = torch.ones(1, PROBE_FORWARD_TOKENS, dtype=torch.long, device=device)
     with torch.no_grad():
         pipeline({"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)})
 
 
 def fsdp2_groups_sharded(model) -> bool:
-    """Every FSDP2 parameter group under ``model`` holds its sharded parameters (and there is at least one)."""
     groups = fsdp2_param_groups(model)
     return bool(groups) and all(group.is_sharded for group in groups)
 
 
 def full_shard_checks(model, forward) -> dict[str, bool]:
-    """FULL_SHARD (ZeRO-3) engaged: after ``forward`` every FSDP2 group, the root's included, is back on its shards.
-
-    The wrap passes ``reshard_after_forward`` explicitly, so FSDP2 reshards the root after its forward too (only an
-    unset value keeps the root gathered for the backward); a wrap whose one group is the root's (a SentenceTransformer)
-    is held to it like any other. SHARD_GRAD_OP leaves every group gathered after a forward until its backward, so a
-    run whose config lost ``fsdp_reshard_after_forward`` fails here. Starts from the sharded state; ``forward`` is any
-    no-grad forward of the module the run forwards. No collective beyond the forward's own.
-    """
+    """FULL_SHARD engaged: after ``forward`` every FSDP2 group, the root's included, is back on its shards.
+    SHARD_GRAD_OP leaves groups gathered until the backward, so a run that lost ``fsdp_reshard_after_forward`` fails
+    here. No collective past the forward's."""
     reshard_fsdp2_modules(model)
     forward()
     groups = fsdp2_param_groups(model)
@@ -67,9 +53,8 @@ def full_shard_checks(model, forward) -> dict[str, bool]:
 
 
 def _expert_params(model) -> list[tuple[EPMoELayerBase, torch.nn.Parameter]]:
-    """``(layer, param)`` for every expert weight and native expert adapter of ``model``'s EP layers, in
-    ``parameters()`` order, the same on every rank: the adapter accessors iterate a frozenset of names, whose order
-    differs across processes, so a collective per tensor in that order would pair different tensors."""
+    """``(layer, param)`` for expert weights and native adapters in ``parameters()`` order: adapter accessors iterate a
+    frozenset, whose order varies by process."""
     experts = []
     for layer in ep_layers(model):
         expert_ids = {id(param) for _, param in layer.expert_named_params()}
@@ -78,11 +63,8 @@ def _expert_params(model) -> list[tuple[EPMoELayerBase, torch.nn.Parameter]]:
 
 
 def ep1_expert_checks(model, *, sharded: bool) -> dict[str, bool]:
-    """Where ep1 experts live, against what the run asked for: FSDP2 shards (DTensors) when ``sharded``
-    (``fsdp_shard_ep1_experts``), so FSDP's reduce-scatter is their sync; whole plain tensors holding every
-    expert when not, synced by the EP layer's own all-reduce, and then bit-identical on every rank, native
-    expert adapters included. Read with the groups resharded. COLLECTIVE when not ``sharded`` (one gather per
-    expert tensor over the world, the DP scope ep1 replicates them across)."""
+    """Where ep1 experts live: DTensors when ``sharded``, else whole plain tensors, bit-identical on every rank.
+    COLLECTIVE when not ``sharded`` (one world gather per expert tensor)."""
     reshard_fsdp2_modules(model)
     experts = _expert_params(model)
     if sharded:
@@ -100,7 +82,6 @@ def ep1_expert_checks(model, *, sharded: bool) -> dict[str, bool]:
 
 
 def hsdp_params(model) -> list[tuple[str, DTensor]]:
-    """Every parameter held on a 2-D FSDP2 mesh, in ``named_parameters`` order (the same on every rank)."""
     return [
         (name, param.data)
         for name, param in model.named_parameters()
@@ -109,15 +90,14 @@ def hsdp_params(model) -> list[tuple[str, DTensor]]:
 
 
 def hsdp_layout(world_size: int) -> dict[str, object]:
-    """The ``ParallelismConfig`` fields of HSDP over two simulated NVLink domains of ``world_size // 2`` ranks on
-    one host: a ``(dp_replicate=2, dp_shard=world_size // 2)`` mesh, the path a two-node job takes."""
+    """``ParallelismConfig`` fields of HSDP over two simulated NVLink domains on one host, the path a two-node job
+    takes."""
     return {"use_hsdp": True, "gpus_per_node": world_size // 2}
 
 
 def hsdp_checks(model) -> dict[str, bool]:
-    """HSDP engaged and its replicas in step: FSDP2 parameters on a ``(dp_replicate, dp_shard)`` mesh,
-    replicated across the first dim and sharded along the second, each local shard bit-identical across its
-    ``dp_replicate`` group. COLLECTIVE (one gather per parameter over its replicate group)."""
+    """HSDP engaged and its replicas in step: FSDP2 params on a 2-D mesh, each local shard bit-identical across
+    ``dp_replicate``. COLLECTIVE."""
     reshard_fsdp2_modules(model)
     params = hsdp_params(model)
     placed = bool(params) and all(
@@ -138,10 +118,8 @@ def hsdp_checks(model) -> dict[str, bool]:
 
 
 def expert_replica_checks(model, ep_config) -> dict[str, bool]:
-    """Several EP groups engaged and their expert replicas in step: ``num_ep_groups`` groups, each rank's expert
-    tensors bit-identical to those its replicas in the other groups hold. A deferred cross-replica sweep that
-    never ran leaves replicas that trained on different batches apart. ``ep_config`` is ``None`` where the run
-    built no EP groups. COLLECTIVE over each replica group."""
+    """Several EP groups engaged and expert replicas bit-identical; a deferred sweep that never ran leaves them apart.
+    COLLECTIVE over each replica group."""
     groups = 0 if ep_config is None else ep_config.num_ep_groups
     engaged = groups > 1 and len(ep_config.expert_replica_ranks) == groups
     experts = [to_local(param) for _, param in _expert_params(model)]
@@ -151,8 +129,8 @@ def expert_replica_checks(model, ep_config) -> dict[str, bool]:
 
 
 def tp_dp_checks(model, data_parallel_size: int) -> dict[str, bool]:
-    """TP with DP replicas: every TP-sharded parameter sits on a ``(dp, tp)`` mesh whose ``dp`` dim spans
-    ``data_parallel_size`` ranks, the FSDP2 shard of each TP group's replica. No collective."""
+    """TP with DP replicas: every TP-sharded param sits on a ``(dp, tp)`` mesh whose ``dp`` dim spans
+    ``data_parallel_size``. No collective."""
     reshard_fsdp2_modules(model)
     params = [
         param.data
@@ -171,15 +149,8 @@ def tp_dp_checks(model, data_parallel_size: int) -> dict[str, bool]:
 def dp_layout_checks(
     model, requested: Mapping[str, object], *, world_size: int, ep_config, forward: Callable[[], object]
 ) -> dict[str, bool]:
-    """The data-parallel half of the ``ParallelismConfig`` fields ``requested``, each read off ``model``.
-
-    FULL_SHARD under ``fsdp_reshard_after_forward`` (``forward`` is a no-grad forward of the run's model), ep1
-    experts on the EP layers sharded or (``fsdp_shard_ep1_experts=False``) whole, where several ranks replicate
-    them without TP, the HSDP mesh and its replicas under ``use_hsdp``, the
-    expert replicas of several EP groups where ``world_size`` exceeds the expert group (tiling the simulated NVLink
-    domains of ``gpus_per_node`` ranks where that is set), and the (dp, tp) mesh where it exceeds the TP group. The expectation comes from ``requested``, so a run whose loader or wrap
-    dropped a field fails here. ``ep_config`` is the trainer's (``None`` without EP groups). COLLECTIVE.
-    """
+    """The data-parallel half of the ``ParallelismConfig`` fields ``requested``, each read off ``model``. COLLECTIVE.
+    The expectation comes from ``requested``, so a run whose loader or wrap dropped a field fails here."""
     ep_size = requested.get("ep_size", 1)
     expert_group = ep_size * requested.get("expert_tp_size", 1)
     tp_size = requested.get("tp_size", 1)
@@ -188,7 +159,6 @@ def dp_layout_checks(
     if requested.get("fsdp_reshard_after_forward"):
         checks |= full_shard_checks(model, forward)
     if expert_group == 1 and tp_size == 1 and world_size > 1 and ep_layers(model):
-        # Replicated experts on the grouped-GEMM EP layers: in the FSDP2 shard unless the run kept them whole.
         checks |= ep1_expert_checks(model, sharded=requested.get("fsdp_shard_ep1_experts", True))
     if requested.get("use_hsdp"):
         checks |= hsdp_checks(model)

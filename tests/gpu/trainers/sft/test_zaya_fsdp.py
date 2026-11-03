@@ -1,28 +1,9 @@
 #!/usr/bin/env python
-"""Multi-GPU FSDP2 smoke test for ZAYA1-8B.
+"""FSDP2 smoke for ZAYA1-8B: full copies load, the trainer shards them, and a few steps stay finite. Compares no loss
+against a reference.
 
-Verifies the full distributed loading pipeline:
-  1. ``load_distributed_model`` with a plain ``ParallelismConfig()`` (no EP /
-     CP / TP) goes through ``_load_undistributed_model`` → ``from_pretrained`` →
-     each rank gets a full model copy.
-  2. ``DistributedSFTTrainer`` wraps the model in FSDP2 (``fully_shard``,
-     ``reshard_after_forward=False``), so weights are sharded across the
-     rank's data-parallel group.
-  3. A handful of synthetic SFT steps run without OOM, logging a finite loss
-     at every step. No loss is compared against a reference.
-
-Designed for 2x B300 (288 GB HBM each). FSDP shards the ~17 GB of bf16
-weights ~2× → 8.4 GB / rank for params; with adamw fp32 master + state
-and bf16 activations the total stays well below 60 GB / rank.
-
-Run (2 GPUs; ``$D`` a large mounted volume for the HF cache):
-    docker run --rm --gpus '"device=0,1"' --ipc=host --ulimit memlock=-1 \\
-        --ulimit stack=67108864 \\
-        -v $(pwd):/workspace -v "$D:$D" \\
-        -w /workspace -e HF_HOME="$D/hf" \\
-        halo:blackwell \\
-        torchrun --nproc_per_node=2 \\
-            tests/gpu/trainers/sft/test_zaya_fsdp.py
+On 2x B300 FSDP halves the ~17 GB of bf16 weights; with adamw fp32 master + state the total stays well below 60 GB per
+rank.
 """
 
 import torch
@@ -41,7 +22,7 @@ from tests.common.training_checks import training_run_checks
 MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_FSDP_STEPS", 4)
 BATCH = 1
-SEQ = 512  # short — we're only validating distributed mechanics, not throughput
+SEQ = 512  # Short: this validates distributed mechanics, not throughput.
 LR = 5e-6
 NUM_SAMPLES = 16
 
@@ -83,14 +64,14 @@ def run(ctx):
         gradient_accumulation_steps=1,
         learning_rate=LR,
         bf16=True,
-        # Zaya's GC backward recompute faults in cuDNN on the CCA Conv1d pair, so the load-time
-        # patch clears supports_gradient_checkpointing; HALO_TEST_ZAYA_GC=1 only asserts that refusal.
+        # GC recompute faults in cuDNN on the CCA Conv1d pair, so the patch refuses it; HALO_TEST_ZAYA_GC=1 asserts the
+        # refusal.
         gradient_checkpointing=env_flag("HALO_TEST_ZAYA_GC"),
         gradient_checkpointing_kwargs={
             "use_reentrant": env_flag("HALO_TEST_ZAYA_GC_REENTRANT", True),
         },
-        # Zaya is FLCE: outputs.logits is a placeholder, so TRL must take its Liger path or its
-        # entropy/accuracy metrics crash on the empty tensor (the mixin prevents double-apply).
+        # FLCE: outputs.logits is a placeholder, so TRL must take its Liger path or its metrics crash on the empty
+        # tensor.
         use_liger_kernel=True,
         logging_steps=1,
         save_strategy="no",

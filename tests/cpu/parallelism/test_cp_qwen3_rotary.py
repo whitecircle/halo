@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the rotate-half CP families must ride the shared base rotary, not private copies.
-
-``UlyssesAttention._apply_rotary`` IS the rotate-half convention (via
-``apply_rope``), and Qwen3 / Qwen3.5-3.6 / Bailing inherit it. Qwen3 / Qwen3-MoE /
-Qwen3-VL-text ship full-width ``cos``, where the helper's full-rotary branch must be bit-identical
-to the rotate-half expression a private copy would spell; a drift there corrupts every CP run of
-those families with no error, and a re-forked override is how the drift gets in.
-
-Run: ``python tests/cpu/parallelism/test_cp_qwen3_rotary.py`` (or ``pytest -m cpu``).
-"""
+"""The rotate-half CP families ride the shared base rotary; a private copy drifts and corrupts every CP run of them
+with no error."""
 
 from __future__ import annotations
 
@@ -26,7 +18,7 @@ from halo.distributed.context_parallel.families import (
 )
 from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention, rotate_half
 
-# The families whose rotary IS the base default — each one that re-declares the hook is a fork.
+# Each that re-declares the hook is a fork.
 ROTATE_HALF_FAMILIES = (Qwen3MoeUlyssesAttention, Qwen3_5MoeUlyssesAttention, BailingMoeV2UlyssesAttention)
 
 HIDDEN = 32
@@ -43,7 +35,7 @@ class _FakeConfig:
 
 
 class _FakeQwen3Attention(nn.Module):
-    """Minimal stand-in for a Qwen3-style attention module (post-projection Q/K RMSNorm)."""
+    """Post-projection Q/K RMSNorm."""
 
     def __init__(self):
         super().__init__()
@@ -68,7 +60,7 @@ def _wrapper() -> Qwen3MoeUlyssesAttention:
 
 
 def _rope_inputs(seed: int, dtype=torch.float32):
-    """Q/K in the optimized ``[B, S, H, D]`` layout with cos/sin already unsqueezed as the base does."""
+    """In the ``[B, S, H, D]`` layout with cos/sin unsqueezed as the base does."""
     torch.manual_seed(seed)
     batch, seq = 2, 3
     q = torch.randn(batch, seq, NUM_Q_HEADS, HEAD_DIM, dtype=dtype)
@@ -80,7 +72,7 @@ def _rope_inputs(seed: int, dtype=torch.float32):
 
 @pytest.mark.parametrize("cls", ROTATE_HALF_FAMILIES)
 def test_rotate_half_families_do_not_fork_the_base_rotary(cls):
-    """The hook lives on the base; a family copy is silent drift the next base fix would miss."""
+    """A family copy is drift the next base fix would miss."""
     assert "_apply_rotary" not in vars(cls), (
         f"{cls.__name__} re-declares _apply_rotary; the rotate-half rotary lives on "
         f"UlyssesAttention — delete the fork or justify a genuinely different rotary."
@@ -89,7 +81,6 @@ def test_rotate_half_families_do_not_fork_the_base_rotary(cls):
 
 
 def test_qwen3_rotary_delegates_to_the_shared_helper():
-    """The inherited ``_apply_rotary`` must route both Q and K through the shared ``apply_rope``."""
     wrapper = _wrapper()
     q, k, cos, sin = _rope_inputs(seed=1)
     with patch.object(ulysses_attention, "apply_rope", side_effect=ulysses_attention.apply_rope) as helper:
@@ -99,7 +90,7 @@ def test_qwen3_rotary_delegates_to_the_shared_helper():
 
 
 def test_full_width_rotary_matches_the_rotate_half_reference():
-    """Full-width ``cos`` (every shipped Qwen3 variant) -> exactly ``(x*cos) + (rotate_half(x)*sin)``."""
+    """Every shipped Qwen3 variant has full-width ``cos``."""
     wrapper = _wrapper()
     q, k, cos, sin = _rope_inputs(seed=2, dtype=torch.float64)
 
@@ -110,7 +101,6 @@ def test_full_width_rotary_matches_the_rotate_half_reference():
 
 
 def test_rotary_broadcasts_one_cos_row_over_every_head():
-    """Layout-agnostic: ``[B, S, H, D]`` in, same shape out, each head rotated by the same row."""
     wrapper = _wrapper()
     q, k, cos, sin = _rope_inputs(seed=3)
 

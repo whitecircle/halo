@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """Adapter saves must carry the buffers of ``modules_to_save`` clones.
-
-``gather_adapter_state`` feeds PEFT a pre-resolved state dict filtered to
-adapter-relevant names. PEFT serializes a ``modules_to_save`` clone via its WHOLE state dict —
-parameters and buffers — so a router/gate carrying a balancing buffer (``e_score_correction_bias``,
-an adopted GptOss ``router.bias``) would KeyError the lookup at the first ``save_steps`` if the
-filter fed parameters only. Pinned on a real CPU PeftModel, no GPU.
-
-    python tests/cpu/peft/test_adapter_state_includes_buffers.py
-"""
+PEFT serializes a clone's whole state dict, so a parameters-only filter would KeyError at the first ``save_steps``."""
 
 import pytest
 import torch
@@ -28,7 +20,6 @@ class _Gate(nn.Module):
         super().__init__()
         self.proj = nn.Linear(8, 4, bias=False)
         self.register_buffer("e_score_correction_bias", torch.full((4,), 0.5))
-        # Non-persistent cache: recomputes on load, must never reach the adapter file.
         self.register_buffer("score_cache", torch.zeros(4), persistent=False)
 
     def forward(self, x):
@@ -55,8 +46,7 @@ def test_modules_to_save_buffer_survives_adapter_state():
 
 
 def test_non_persistent_buffers_stay_out_of_adapter_state():
-    """A non-persistent cache recomputes on load; serializing it would reload it stale on resume —
-    the filter feeds PEFT persistent buffers only, like every other checkpoint writer."""
+    """Serializing a non-persistent cache would reload it stale on resume."""
     peft_model = get_peft_model(_Tiny(), LoraConfig(target_modules=["attn"], modules_to_save=["gate"], r=4))
     state = gather_adapter_state(peft_model)
     leaked = [k for k in state if "score_cache" in k]
@@ -64,9 +54,7 @@ def test_non_persistent_buffers_stay_out_of_adapter_state():
 
 
 def test_adapter_cast_keeps_balancing_tensors_at_trained_dtype():
-    """The balancing export contract reaches the ADAPTER file too: a ``modules_to_save`` router's
-    balancing bias stays at trained fp32 while ordinary adapter tensors cast to the save dtype —
-    a bf16-rounded bias flips near-tie top-k picks when the exported slot serves."""
+    """A bf16-rounded balancing bias flips near-tie top-k picks when the exported slot serves."""
     bias_key = "base_model.model.model.layers.0.mlp.gate.modules_to_save.default.e_score_correction_bias"
     state = {
         bias_key: torch.full((4,), 0.5, dtype=torch.float32),
@@ -81,8 +69,6 @@ def test_adapter_cast_keeps_balancing_tensors_at_trained_dtype():
 
 
 def test_an_adapter_file_keeps_exactly_the_balancing_tensors_a_full_checkpoint_keeps():
-    """Over every family's real key layout, a ``modules_to_save`` clone's tensor keeps its trained dtype
-    exactly when the same tensor would in a full checkpoint; everything else goes to the save dtype."""
     cast = adapter_save_dtype_caster()
     kept_families = set()
     for name, family in ALL_FAMILIES.items():

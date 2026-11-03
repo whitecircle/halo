@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.first_step`` grades a recorded first step the way the SMPO CP GPU rows rely on.
-
-Those rows run only on the GPU tiers, so a check that stopped failing there would go unnoticed. These
-pins drive :func:`first_step_checks` and :func:`first_step_gradient_checks` with each miscount they exist
-to catch and assert that exactly its own verdict flips, drive :func:`recording_autograd_fallbacks`
-with a real backward through an in-place gloo all-reduce, and drive :func:`parameter_gradient_checks` (the
-CP roster's gradient check) with a near-tie routing flip it must absorb and the corruptions it must catch.
-
-Run: python tests/cpu/conventions/test_first_step_checks.py
-"""
+"""``tests.common.first_step`` grades a recorded first step the way the SMPO CP GPU rows rely on: each miscount
+flips exactly its own verdict, and the CP gradient check absorbs a near-tie routing flip and catches corruptions."""
 
 import warnings
 

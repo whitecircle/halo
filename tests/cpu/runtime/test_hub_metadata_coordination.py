@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""Pre-download hub reads are ordered main-rank-first, and stay free without a process group.
-
-Three sites contact the hub before the coordinated source resolution (``resolve_model_source``) ever
-runs: the text-vs-multimodal probe (``probe_checkpoint``), the expert-LoRA peel
-(``split_expert_lora_targets``), and the VLM processor/tokenizer load. Each is one small
-``from_pretrained``; at 512 ranks it is 512 simultaneous requests for the same files (HTTP 429, after
-which the probe falls back to a name heuristic that can DISAGREE with the config answer its peers read)
-— and under ``trust_remote_code`` every rank also races to populate transformers' dynamic-module
-cache.
-
-``hub_metadata_main_first`` is the one seam they share. What these tests pin: the ordering actually
-happens (the fetch runs inside the coordination, under a tag namespaced away from the other
-main-first phases), the result is returned unchanged, a failing fetch still releases the waiters,
-and a single process is untouched.
-
-Run: pytest tests/cpu/runtime/test_hub_metadata_coordination.py
-"""
+"""Pre-download hub reads are ordered main-rank-first, and stay free without a process group. At 512 ranks they are 512
+simultaneous requests; after an HTTP 429 the probe's name heuristic can disagree with its peers."""
 
 import socketserver
 import threading
@@ -43,14 +28,14 @@ _SHARED_FILESYSTEM_VARS = (
 
 @pytest.fixture()
 def fake_job(monkeypatch):
-    """One rank of a 2-rank shared-filesystem job with a fake coordination store."""
+    """One rank of a 2-rank shared-filesystem job."""
     store = FakeStore()
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(consensus.c10d, "_get_default_store", lambda: store)
     monkeypatch.setattr(filesystem, "is_input_shared_filesystem", lambda: True)
     monkeypatch.setattr(filesystem, "get_global_world_size", lambda: 2)
-    # Consensus already agreed, as it is after init_distributed; the pre-init case is its own test.
+    # Consensus already agreed, as after init_distributed; the pre-init case is its own test.
     monkeypatch.setattr(filesystem, "_shared_filesystem_consensus", dict.fromkeys(_SHARED_FILESYSTEM_VARS, True))
     return store
 
@@ -61,11 +46,7 @@ def _as_rank(monkeypatch, rank: int) -> None:
 
 
 def test_a_peer_waits_for_the_main_rank_s_fetch(fake_job, monkeypatch):
-    """The whole point: rank 1 must not reach the hub before rank 0 has populated the cache.
-
-    ``FakeStore.wait`` raises instead of blocking, so "would have waited" is observable — and a
-    fetch that ran anyway would leave ``fetched`` set.
-    """
+    """``FakeStore.wait`` raises instead of blocking, so a wait is observable."""
     _as_rank(monkeypatch, 1)
     fetched = []
     with pytest.raises(RuntimeError, match="hub_meta/vlm_probe"):
@@ -74,7 +55,6 @@ def test_a_peer_waits_for_the_main_rank_s_fetch(fake_job, monkeypatch):
 
 
 def test_the_main_rank_fetches_and_releases_the_peers(fake_job, monkeypatch):
-    """Rank 0 runs the fetch, gets its value back, and publishes the done-key its peers wait on."""
     _as_rank(monkeypatch, 0)
     result = filesystem.hub_metadata_main_first("vlm_probe", lambda **_: "config-object")
     assert result == "config-object", "the fetch's result must pass through unchanged"
@@ -86,15 +66,13 @@ def test_the_main_rank_fetches_and_releases_the_peers(fake_job, monkeypatch):
 
 @pytest.mark.parametrize("shared", [True, False], ids=["shared", "per-node"])
 def test_only_each_scopes_main_rank_may_query_the_hub(fake_job, monkeypatch, shared):
-    """A follower reads the cache its scope's main rank filled, never the Hub: at 1,024 ranks a follower
-    query per read is a burst of metadata requests against a per-account rate limit, whose 429 the
-    probe would read as a missing config. Per-node, each node's local rank 0 leads its own scope."""
+    """At 1,024 ranks a follower query per read bursts a per-account rate limit, whose 429 the probe reads as a
+    missing config."""
     monkeypatch.setattr(filesystem, "is_input_shared_filesystem", lambda: shared)
     monkeypatch.setattr(filesystem, "get_local_world_size", lambda: 1 if not shared else 2)
     asked = []
     for rank, local_main in ((0, True), (1, not shared)):
         _as_rank(monkeypatch, rank)
-        # Per-node, each rank leads its own one-rank node.
         monkeypatch.setattr(filesystem, "get_node_rank", lambda rank=rank: rank)
         monkeypatch.setattr(filesystem, "get_local_rank", lambda local_main=local_main: 0 if local_main else 1)
         monkeypatch.setattr(filesystem, "is_local_main_process", lambda local_main=local_main: local_main)
@@ -103,7 +81,7 @@ def test_only_each_scopes_main_rank_may_query_the_hub(fake_job, monkeypatch, sha
 
 
 class _CountingEndpoint(socketserver.ThreadingTCPServer):
-    """A Hub endpoint that counts the connections made to it and answers none."""
+    """Counts the connections made to it and answers none."""
 
     daemon_threads = True
 
@@ -121,7 +99,7 @@ class _CountingEndpoint(socketserver.ThreadingTCPServer):
 
 
 def _cached_tiny_config(cache: Path, repo_id: str) -> None:
-    """``repo_id``'s ``main`` in a Hub cache at ``cache``: a config and nothing else, as a metadata read leaves it."""
+    """A config and nothing else, as a metadata read leaves it."""
     repo = cache / repo_folder_name(repo_id=repo_id, repo_type="model")
     commit = "0" * 40
     snapshot = repo / "snapshots" / commit
@@ -132,9 +110,8 @@ def _cached_tiny_config(cache: Path, repo_id: str) -> None:
 
 
 def test_a_follower_reads_its_scopes_cache_without_a_hub_request(monkeypatch, tmp_path):
-    """Through a real call site: the scope's main rank contacts the Hub, and its follower then reads the
-    config from the cache that fetch left, with no request of its own. The group is faked inside the
-    coordination only, since transformers itself asks ``torch.distributed`` for a rank."""
+    """The group is faked inside the coordination only, since transformers itself asks ``torch.distributed`` for a
+    rank."""
     monkeypatch.setattr(filesystem, "has_process_group", lambda: True)
     store = FakeStore()
     monkeypatch.setattr(consensus.c10d, "_get_default_store", lambda: store)
@@ -164,8 +141,7 @@ def test_a_follower_reads_its_scopes_cache_without_a_hub_request(monkeypatch, tm
 
 
 def test_a_failing_fetch_still_releases_the_peers(fake_job, monkeypatch):
-    """``probe_checkpoint`` catches its own fetch failure and falls back to the name heuristic; if the
-    main rank's failure skipped the done-key the peers would wait out the whole store timeout."""
+    """Skipping the done-key would make peers wait out the whole store timeout."""
     _as_rank(monkeypatch, 0)
 
     def boom(**_):
@@ -177,8 +153,7 @@ def test_a_failing_fetch_still_releases_the_peers(fake_job, monkeypatch):
 
 
 def test_distinct_call_sites_do_not_share_a_phase(fake_job, monkeypatch):
-    """Tags are per call site because the call COUNTS differ per script; sharing one tag would make
-    a script that probes twice permanently off-by-one against one that probes once."""
+    """Call counts differ per script, so one shared tag leaves a script off-by-one against another."""
     _as_rank(monkeypatch, 0)
     filesystem.hub_metadata_main_first("vlm_probe", lambda **_: None)
     filesystem.hub_metadata_main_first("expert_lora_probe", lambda **_: None)
@@ -190,9 +165,8 @@ def test_distinct_call_sites_do_not_share_a_phase(fake_job, monkeypatch):
 
 
 def test_the_wait_is_bounded_far_below_the_store_default(fake_job, monkeypatch):
-    """These phases cover a handful of small config files, not a 100B snapshot. Inheriting the
-    hours-scale store budget would turn a call site entered from a branch that is not in fact
-    rank-uniform into a silent multi-hour stall instead of an error naming the tag."""
+    """These phases cover a few small config files; the hours-scale budget would turn a non-uniform branch into a
+    silent stall."""
     _as_rank(monkeypatch, 1)
     waited = []
     monkeypatch.setattr(fake_job, "wait", lambda keys, timeout=None: waited.append(timeout))
@@ -201,7 +175,7 @@ def test_the_wait_is_bounded_far_below_the_store_default(fake_job, monkeypatch):
 
 
 def test_a_single_process_is_untouched(monkeypatch):
-    """No process group (dataset prep tools, a laptop run): the fetch must run inline, no store."""
+    """Dataset prep tools, a laptop run."""
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     reset_shared_filesystem_consensus()
@@ -209,8 +183,8 @@ def test_a_single_process_is_untouched(monkeypatch):
 
 
 def test_a_follower_without_a_process_group_still_fetches(monkeypatch):
-    """Before ``init_distributed`` nobody waits for the scope's main rank, so a per-node follower (LOCAL_RANK 1)
-    cannot count on a cache it filled: read cache-only, a cold cache would fail where the Hub would answer."""
+    """Nobody waits for the scope's main rank before ``init_distributed``, so a cache-only read would fail on a cold
+    cache."""
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
     monkeypatch.setenv("DIST_INPUT_SHARED_FILESYSTEM", "0")
@@ -223,10 +197,7 @@ def test_a_follower_without_a_process_group_still_fetches(monkeypatch):
 
 
 def test_the_scope_is_agreed_before_the_first_coordinated_phase(fake_job, monkeypatch):
-    """This helper can run BEFORE ``init_distributed`` (the modality probe names the run), so it may
-    be the run's first coordinated phase. The scope comes from the shared-filesystem flags: if a
-    per-node override left them un-agreed, this tag's participants split across two scopes and the
-    ones whose scope has no main rank wait out the whole store timeout."""
+    """This can be the run's first coordinated phase, and un-agreed flags split participants across two scopes."""
     reset_shared_filesystem_consensus()
     resolved = []
     monkeypatch.setattr(

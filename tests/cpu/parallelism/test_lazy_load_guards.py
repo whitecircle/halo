@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the lazy loaders' load-time guards.
-
-The lazy path bypasses ``from_pretrained`` entirely: it reads safetensors slices and REPLACES the
-meta-device parameter with whatever came off disk. Five things ``from_pretrained`` does for free
-therefore have to be done here, and each is silent corruption when it is not:
-
-* an fp8 disk tensor is refused rather than cast without the block scales stored beside it;
-* the disk tensor's shape is checked against the live one (else the checkpoint's shape wins over the
-  config's, silently);
-* a per-expert fusion covers this rank's WHOLE expert range (else a missing global index shifts
-  every later expert down a local slot);
-* checkpoint keys that align to no model tensor are reported (``from_pretrained``'s unexpected-key
-  warning), and two keys claiming one tensor is refused rather than decided by index order;
-* the per-rank shard I/O is fenced, so a torn shard on one rank does not strand its peers in the
-  next collective.
-
-    python tests/cpu/parallelism/test_lazy_load_guards.py
-"""
+"""The lazy path bypasses ``from_pretrained`` and replaces meta parameters with what came off disk, so each guard
+here stops silent corruption."""
 
 from __future__ import annotations
 
@@ -44,7 +28,6 @@ from tests.common.repo import REPO_ROOT
 E_GLOBAL, M, H = 8, 6, 4
 LOADER_LOGGER = "halo.model_loading.parallel.lazy_plan"
 
-# Loaders that open the lazy safetensors path and must reach it through the shared rank-0 gate.
 _LAZY_GATE_CALL_SITES = (
     REPO_ROOT / "halo/model_loading/parallel/ep.py",
     REPO_ROOT / "halo/model_loading/parallel/pp.py",
@@ -71,8 +54,7 @@ class _Layer(nn.Module):
 
 
 class _MoEModel(nn.Module):
-    """``layers.0.mlp.experts.{gate_up_proj,down_proj}`` — the fused layout every family's shell holds
-    before EP patching, with the expert axis at dim 0."""
+    """The fused layout every family's shell holds before EP patching."""
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -86,14 +68,8 @@ def _load(tmp_path, model: nn.Module, tensors: dict[str, torch.Tensor], plans: l
     ).load_into_model(model, plans)
 
 
-# --------------------------------------------------------------------------------------------
-# Shape validation (both paths install the disk tensor, so nothing else can catch a mismatch)
-# --------------------------------------------------------------------------------------------
-
-
 def test_a_replicated_tensor_of_the_wrong_shape_is_refused(tmp_path):
-    """A checkpoint↔config mismatch (a patch_vocab-grown checkpoint on the base config) must raise
-    the way ``from_pretrained`` does, not silently reshape the model to the checkpoint."""
+    """A patch_vocab-grown checkpoint on the base config must raise rather than reshape the model."""
     model = nn.Linear(H, 3, bias=False)
     plan = WeightPlan(WeightAction.REPLICATE, "model.safetensors", "weight", "weight")
 
@@ -103,13 +79,12 @@ def test_a_replicated_tensor_of_the_wrong_shape_is_refused(tmp_path):
     message = str(excinfo.value)
     assert "'weight'" in message
     assert f"(5, {H})" in message and f"(3, {H})" in message, message
-    # And the model is unchanged — the guard runs BEFORE the assignment.
+    # The guard runs before the assignment.
     assert tuple(model.weight.shape) == (3, H)
 
 
 def test_an_expert_slice_shorter_than_the_rank_range_is_refused(tmp_path):
-    """A checkpoint holding fewer experts than the config declares: the ranged safetensors read
-    returns the rows that exist instead of raising, so only the shape check sees it."""
+    """The ranged read returns the rows that exist instead of raising."""
     model = _MoEModel()
     on_disk = {"layers.0.mlp.experts.gate_up_proj": torch.randn(E_GLOBAL - 2, 2 * M, H)}
     plan = WeightPlan(
@@ -127,10 +102,7 @@ def test_an_expert_slice_shorter_than_the_rank_range_is_refused(tmp_path):
 
 
 def test_a_fused_checkpoint_with_MORE_experts_than_the_config_is_refused(tmp_path):
-    """The mirror of the short-slice case, and the silent one: a ranged read is satisfied by a
-    LONGER axis, so a checkpoint carrying more experts than the config declares loads experts
-    0..N-1 at exactly the expected shape. No rank ever owns the rest — the model trains and exports
-    as if they were never in the file."""
+    """A ranged read is satisfied by a longer axis, so experts past the config are never owned and silently dropped."""
     model = _MoEModel()
     on_disk = {"layers.0.mlp.experts.gate_up_proj": torch.randn(E_GLOBAL * 2, 2 * M, H)}
     plan = WeightPlan(
@@ -149,7 +121,6 @@ def test_a_fused_checkpoint_with_MORE_experts_than_the_config_is_refused(tmp_pat
 
 
 def test_a_correctly_shaped_expert_slice_still_loads(tmp_path):
-    """Anti-vacuity: the guard rejects the mismatch, not every expert-sharded read."""
     model = _MoEModel()
     full = torch.randn(E_GLOBAL, 2 * M, H)
     plan = WeightPlan(
@@ -169,8 +140,7 @@ def test_a_correctly_shaped_expert_slice_still_loads(tmp_path):
 
 
 def test_an_fp8_disk_tensor_is_refused(tmp_path):
-    """An fp8 checkpoint whose config lost its ``quantization_config`` passes the lazy gate; its weights
-    must not be cast to bf16 without the block scales that sit beside them in the checkpoint."""
+    """fp8 must not be cast to bf16 without the block scales beside it."""
     model = nn.Linear(H, 3, bias=False)
     plan = WeightPlan(WeightAction.REPLICATE, "model.safetensors", "weight", "weight")
     save_file({"weight": torch.randn(3, H).to(torch.float8_e4m3fn)}, str(tmp_path / "model.safetensors"))
@@ -182,7 +152,7 @@ def test_an_fp8_disk_tensor_is_refused(tmp_path):
 
 
 def test_the_planner_records_the_configs_expert_count_on_every_shard_plan():
-    """The count has to travel with the plan, or the check above is unreachable in production."""
+    """Without the count on the plan, the check above is unreachable in production."""
     ep_config = SimpleNamespace(expert_start_idx=4, expert_end_idx=8, num_experts=E_GLOBAL)
     planner = WeightPlanner(ep_config)
     key = "layers.0.mlp.experts.gate_up_proj"
@@ -191,15 +161,9 @@ def test_the_planner_records_the_configs_expert_count_on_every_shard_plan():
     assert shard_plans and all(p.shard_total == E_GLOBAL for p in shard_plans)
 
 
-# --------------------------------------------------------------------------------------------
-# ExpertFuser: full local range + the fused result's shape
-# --------------------------------------------------------------------------------------------
-
-
 def _per_expert_checkpoint(
     tmp_path, experts: list[int], intermediate: int = M, dtype: torch.dtype = torch.float32
 ) -> dict[str, str]:
-    """A per-expert (Qwen3/Bailing-style) checkpoint for one layer. Returns its weight map."""
     tensors: dict[str, torch.Tensor] = {}
     for idx in experts:
         prefix = f"layers.0.mlp.experts.{idx}"
@@ -219,8 +183,8 @@ def _fuse(tmp_path, model: nn.Module, weight_map: dict[str, str], ep_start: int,
 
 
 def test_a_fusion_missing_a_global_expert_index_is_refused(tmp_path):
-    """The fuse stacks ``sorted(expert_dict)`` into local slots, so a global index the checkpoint does
-    not carry silently promotes every later expert into the wrong slot."""
+    """The fuse stacks ``sorted(expert_dict)`` into local slots, so a missing index promotes every later expert into
+    the wrong slot."""
     weight_map = _per_expert_checkpoint(tmp_path, experts=[0, 1, 3])
 
     with pytest.raises(RuntimeError, match="global expert index"):
@@ -228,8 +192,6 @@ def test_a_fusion_missing_a_global_expert_index_is_refused(tmp_path):
 
 
 def test_a_fused_tensor_of_the_wrong_shape_is_refused(tmp_path):
-    """The full range can be present and still disagree with the config — an intermediate_size the
-    model was not built for."""
     weight_map = _per_expert_checkpoint(tmp_path, experts=[0, 1, 2, 3], intermediate=M + 1)
 
     with pytest.raises(RuntimeError, match="gate_up_proj"):
@@ -237,7 +199,7 @@ def test_a_fused_tensor_of_the_wrong_shape_is_refused(tmp_path):
 
 
 def test_an_fp8_per_expert_fusion_is_refused(tmp_path):
-    """Per-expert fp8 weights reach the fuser rather than the loader, and are refused there too."""
+    """Per-expert fp8 weights reach the fuser rather than the loader."""
     weight_map = _per_expert_checkpoint(tmp_path, experts=list(range(E_GLOBAL)), dtype=torch.float8_e4m3fn)
 
     with pytest.raises(ValueError, match=r"gate_up_proj.*Dequantize it to bf16"):
@@ -245,7 +207,6 @@ def test_an_fp8_per_expert_fusion_is_refused(tmp_path):
 
 
 def test_a_complete_in_range_fusion_still_loads(tmp_path):
-    """Anti-vacuity: both fuser guards pass for the checkpoint they are meant to admit."""
     weight_map = _per_expert_checkpoint(tmp_path, experts=list(range(E_GLOBAL)))
     model = _MoEModel()
 
@@ -255,18 +216,12 @@ def test_a_complete_in_range_fusion_still_loads(tmp_path):
     assert tuple(model.layers[0].mlp.experts.gate_up_proj.shape) == (4, 2 * M, H)
 
 
-# --------------------------------------------------------------------------------------------
-# WeightPlanner: unexpected checkpoint keys, and one model tensor claimed twice
-# --------------------------------------------------------------------------------------------
-
-
 def _identity_plan(weight_map: dict[str, str], model_keys: set[str], disk_to_model=None):
     return WeightPlanner(None).build(weight_map, disk_to_model or {k: k for k in weight_map}, model_keys)
 
 
 def test_checkpoint_keys_matching_no_model_tensor_are_reported_once(caplog):
-    """``from_pretrained`` names its unexpected keys. Skipping them without a word lets an unapplied
-    hub rename take a whole module out of the load with nothing anywhere to say so."""
+    """An unapplied hub rename could take a whole module out of the load with nothing to say so."""
     weight_map = dict.fromkeys(["model.kept.weight", "model.ghost.weight", "model.other.weight"], "s.safetensors")
 
     with caplog.at_level(logging.WARNING, logger=LOADER_LOGGER):
@@ -281,8 +236,7 @@ def test_checkpoint_keys_matching_no_model_tensor_are_reported_once(caplog):
 
 
 def test_per_expert_keys_are_not_reported_as_unexpected(caplog):
-    """They align to no fused model key BY CONSTRUCTION — the ExpertFuser consumes them, and a fusion
-    that claims none of them raises there. Reporting them would bury the real hits under a wall."""
+    """The ExpertFuser consumes them, and reporting them would bury the real hits."""
     weight_map = dict.fromkeys(
         [f"layers.0.mlp.experts.{i}.{proj}.weight" for i in range(4) for proj in ("gate_proj", "down_proj")],
         "s.safetensors",
@@ -295,8 +249,7 @@ def test_per_expert_keys_are_not_reported_as_unexpected(caplog):
 
 
 def test_undeclared_per_expert_suffix_is_reported(caplog):
-    """The fuser consumes only DECLARED projection suffixes — a per-expert key with any other
-    suffix is skipped by detect_tasks and read by nothing, so silence would hide a whole module."""
+    """detect_tasks skips any other suffix and nothing reads it, so silence would hide a whole module."""
     weight_map = dict.fromkeys(
         [f"layers.0.mlp.experts.{i}.mystery_proj.weight" for i in range(2)],
         "s.safetensors",
@@ -308,8 +261,7 @@ def test_undeclared_per_expert_suffix_is_reported(caplog):
 
 
 def test_expert_index_beyond_the_config_is_reported(caplog):
-    """A checkpoint declaring MORE experts than the config: no rank owns the tail under any
-    ep_size, so those keys silently vanish without this report."""
+    """No rank owns the tail under any ep_size, so those keys would silently vanish."""
     ep_config = SimpleNamespace(expert_start_idx=0, expert_end_idx=4, num_experts=4)
     weight_map = dict.fromkeys(
         [f"layers.0.mlp.experts.{i}.gate_proj.weight" for i in range(6)],
@@ -324,18 +276,12 @@ def test_expert_index_beyond_the_config_is_reported(caplog):
 
 
 def test_two_checkpoint_keys_claiming_one_model_tensor_are_refused():
-    """Dropping whichever key the index yields second makes the loaded weight a function of shard
-    ordering — a coin flip between two tensors, taken silently."""
+    """Dropping the second key makes the loaded weight a function of shard ordering."""
     weight_map = dict.fromkeys(["decoder.attn.weight", "model.attn.weight"], "s.safetensors")
     disk_to_model = dict.fromkeys(weight_map, "model.attn.weight")
 
     with pytest.raises(RuntimeError, match="both align to"):
         _identity_plan(weight_map, {"model.attn.weight"}, disk_to_model)
-
-
-# --------------------------------------------------------------------------------------------
-# The per-rank load is fenced by the consensus seam, not by a bare barrier
-# --------------------------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -354,8 +300,8 @@ def _stub_ep_patching(monkeypatch):
 
 @pytest.fixture
 def rejections(monkeypatch) -> list[tuple[str | None, str]]:
-    """Record every trip through the consensus seam. ``DeferredRankFailure.reject`` resolves
-    ``reject_across_ranks`` from its module globals, so patching it there sees the real call."""
+    """``DeferredRankFailure.reject`` resolves ``reject_across_ranks`` from its module globals, so patching it there
+    sees the real call."""
     calls: list[tuple[str | None, str]] = []
 
     def _record(local_reason, what, exc_type=RuntimeError):
@@ -378,8 +324,7 @@ def _load_ep(path: str):
 
 
 def test_the_load_always_closes_on_the_consensus_collective(checkpoint, rejections, _stub_ep_patching):
-    """The fence is unconditional: every rank reaches it on the success path too. A reject reached
-    only by the failing rank would itself be the desync it exists to prevent."""
+    """A reject reached only by the failing rank would be the desync it exists to prevent."""
     _load_ep(checkpoint)
 
     assert len(rejections) == 1, rejections
@@ -391,9 +336,7 @@ def test_the_load_always_closes_on_the_consensus_collective(checkpoint, rejectio
 def test_a_rank_local_shard_failure_surfaces_through_the_consensus_seam(
     checkpoint, rejections, _stub_ep_patching, monkeypatch
 ):
-    """Each rank opens only the shards holding its own experts, so a torn one is a rank-LOCAL raise
-    sitting before a collective: unfenced it strands every peer until the NCCL watchdog fires and
-    blames the collective for a disk error."""
+    """Unfenced, a torn shard strands every peer until the NCCL watchdog blames the collective for a disk error."""
     torn = "stale NFS file handle: model-00002-of-00003.safetensors"
 
     def _fail(self, *args, **kwargs):
@@ -408,16 +351,13 @@ def test_a_rank_local_shard_failure_surfaces_through_the_consensus_seam(
     reason, what = rejections[0]
     assert reason == f"OSError: {torn}", reason
     assert "EP lazy load" in what
-    # The disk error reaches the peers as a REASON — not a lone OSError on one rank.
+    # The disk error reaches the peers as a reason, not a lone OSError on one rank.
     assert not isinstance(excinfo.value, OSError)
     assert torn in str(excinfo.value)
 
 
-# --- The lazy-vs-fallback gate ------------------------------------------------------------------
-
-
 def _ungated(monkeypatch):
-    """The EP-sharded refusal ahead of the verdict, out of the way: its own tests pin it."""
+    """The EP-sharded refusal has its own tests."""
     monkeypatch.setattr(model_source, "reject_ep_sharded_checkpoint", lambda source: None)
 
 
@@ -425,14 +365,8 @@ _SOURCE = model_source.ModelSource("org/model", None, "/dir")
 
 
 def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
-    """Every rank must take the branch RANK 0 chose, never the one its own filesystem suggests.
-
-    The lazy and fallback branches enter different store phases and different world collectives, and
-    every input to the choice is a best-effort per-rank probe — a partially populated cache on a
-    non-shared filesystem answers differently on different ranks. A split verdict is a hang with no
-    diagnostic on either side, so the verdict is broadcast. The rule lives once rather than being
-    spelled out at each of its three call sites (EP, EP+TP, PP stage).
-    """
+    """The branches enter different collectives and every input is a per-rank probe; a split verdict is a hang with
+    no diagnostic."""
     _ungated(monkeypatch)
     monkeypatch.setattr(model_source, "has_whole_model_weight_file", lambda _dir, **_kw: True)
     monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda _value: "rank0-verdict")
@@ -448,15 +382,14 @@ def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
     ("lazy_requested", "has_safetensors", "layout_supported", "expected"),
     [
         (True, True, True, True),
-        (True, True, False, False),  # a layout the fuser would silently misload (pre-5.14 Zaya)
-        (True, False, True, False),  # no safetensors to stream
-        (False, True, True, False),  # the run turned the lazy loader off
+        (True, True, False, False),  # A layout the fuser would silently misload (pre-5.14 Zaya).
+        (True, False, True, False),
+        (False, True, True, False),
     ],
 )
 def test_the_lazy_gate_needs_the_request_safetensors_and_a_supported_layout(
     monkeypatch, lazy_requested, has_safetensors, layout_supported, expected
 ):
-    """All three conditions, and the layout probe is only asked about a directory holding safetensors."""
     _ungated(monkeypatch)
     asked: list[str] = []
     monkeypatch.setattr(model_source, "has_whole_model_weight_file", lambda _dir, **_kw: has_safetensors)
@@ -476,12 +409,7 @@ def test_the_lazy_gate_needs_the_request_safetensors_and_a_supported_layout(
 
 @pytest.mark.parametrize("call_site", _LAZY_GATE_CALL_SITES, ids=lambda p: p.name)
 def test_a_lazy_loader_call_site_goes_through_the_one_gate(call_site):
-    """One gate, read from the source — a re-inlined copy is how the rule drifts.
-
-    Each loader that opens the lazy path would otherwise carry its own
-    ``broadcast_from_rank0(has_safetensors... and lazy_loader_supports...)`` line, restating the
-    "rank 0 decides" reasoning at each and able to drop it at one.
-    """
+    """Read from the source, since a re-inlined copy is how the rule drifts."""
     source = call_site.read_text(encoding="utf-8")
     assert "resolve_lazy_checkpoint" in source, f"{call_site.name} no longer routes its lazy gate through the helper"
     # The inlined shape, in every wrapping: the layout probe ANDed into the caller's own expression.

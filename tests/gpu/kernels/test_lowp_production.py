@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""Production-readiness: apply_lowp_compute on a representative model, verifying that
-- only the dense MLP projections (gate/up/down) are converted to low precision; attention q/k/v/o stay bf16,
-- a forward->backward->optimizer loop converges with BOTH bf16 and fp32 master weights (the low-precision
-  fake-quant path keeps the master unchanged — bf16 master, low-precision compute).
-
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_lowp_production.py
-"""
+"""apply_lowp_compute on a representative model: only the MLP projections convert, and training converges with bf16 and
+fp32 masters."""
 
 import torch
 import torch.nn as nn
@@ -19,7 +14,7 @@ from tests.common.harness import gpu_test_main, record_check
 DEV = "cuda"
 
 
-class Attn(nn.Module):  # attention projections — must stay bf16
+class Attn(nn.Module):  # Must stay bf16.
     def __init__(self, h):
         super().__init__()
         self.q_proj = nn.Linear(h, h, bias=False)
@@ -31,7 +26,7 @@ class Attn(nn.Module):  # attention projections — must stay bf16
         return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
 
 
-class MLP(nn.Module):  # SwiGLU dense MLP — gate/up/down should be converted
+class MLP(nn.Module):  # gate/up/down should be converted.
     def __init__(self, h, inter):
         super().__init__()
         self.gate_proj = nn.Linear(h, inter, bias=False)
@@ -64,7 +59,6 @@ class Model(nn.Module):
 
 
 def test_conversion_scope():
-    """Only MLP gate/up/down are converted; attention q/k/v/o stay bf16."""
     m = Model(2048, 8192).to(DEV, torch.bfloat16)
     summary = apply_lowp_compute(
         m, LowpSpec(precision="fp8", apply_dense_mlp=True, apply_moe_experts=False), expert_weight_cacheable=True
@@ -74,7 +68,7 @@ def test_conversion_scope():
             assert isinstance(getattr(blk.mlp, p), LowPrecisionLinear), f"mlp.{p} not converted"
         for p in ("q_proj", "k_proj", "v_proj", "o_proj"):
             assert not isinstance(getattr(blk.self_attn, p), LowPrecisionLinear), f"attn.{p} WAS converted"
-    assert summary["dense_linears"] == 6, summary  # 2 blocks * 3 MLP projections
+    assert summary["dense_linears"] == 6, summary  # 2 blocks * 3 MLP projections.
     print(f"  conversion scope: MLP gate/up/down converted ({summary['dense_linears']}), attention bf16 — OK")
     x = torch.randn(8192, 2048, device=DEV, dtype=torch.bfloat16) * 0.3
     out = m(x)
@@ -83,7 +77,6 @@ def test_conversion_scope():
 
 
 def test_converges_both_masters():
-    """A train loop converges with bf16 AND fp32 master weights; params keep their master dtype."""
     torch.manual_seed(0)
     M, H, I = 8192, 2048, 8192
     x = torch.randn(M, H, device=DEV, dtype=torch.bfloat16) * 0.3
@@ -98,8 +91,8 @@ def test_converges_both_masters():
         first = last = None
         for i in range(20):
             opt.zero_grad(set_to_none=True)
-            # bf16-autocast compute (as the trainer does) — for an fp32 master (fp32_non_ep_params) the
-            # bf16 activations meet the fp32 weights under autocast, exactly the real-training path.
+            # As the trainer does: for an fp32 master the bf16 activations meet the fp32 weights under autocast, the
+            # real-training path.
             with torch.autocast(DEV, dtype=torch.bfloat16):
                 out = m(x)
             loss = (out.float() - tgt.float()).pow(2).mean()

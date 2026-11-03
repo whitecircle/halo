@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Weight-sync construction gate for GptOss sinks removed by the flash_attention_2 reset.
-
-Under ``reset_sinks: true`` (the default) with FA2, the sink Parameter is set to ``None`` and leaves
-``named_parameters()``. The RL weight-sync sends named parameters only, so nothing is ever pushed
-for those slots — the rollout engine keeps generating with the PRETRAINED sinks while the trainer
-runs without them, a permanent trainer↔generator log-prob offset no sync heals and no error names.
-``reject_unsyncable_model`` must refuse that shape at construction; sink layouts the sync CAN
-represent (live sinks, or the in-place ``dtype.min`` reset every non-FA2 implementation applies)
-must keep passing.
-
-    python tests/cpu/grpo/test_weight_sync_sink_gate.py
-"""
+"""Weight-sync construction gate for GptOss sinks removed by the FA2 reset. The sync sends named parameters only, so
+the engine would keep the pretrained sinks: a permanent log-prob offset no sync heals and no error names."""
 
 import pytest
 import torch
@@ -31,16 +21,15 @@ class _Attention(nn.Module):
 
 
 def _ep_wrapped_moe() -> nn.Module:
-    """A live GptOss EP layer (the ``nn.Module`` half; the base ``__init__`` needs a process group):
-    the RL shape the gate admits, since a wrapper-less MoE is refused before the sink verdict matters."""
+    """A live GptOss EP layer (the ``nn.Module`` half; the base ``__init__`` needs a process group), since a
+    wrapper-less MoE is refused before the sink verdict matters."""
     layer = object.__new__(EPGptOssMoELayer)
     nn.Module.__init__(layer)
     return layer
 
 
 class _GptOssStub(nn.Module):
-    """Minimal GptOss-shaped tree: real family config + one decoder layer with a sinks slot and an
-    EP-wrapped MoE block."""
+    """GptOss-shaped tree: real family config, one decoder layer with a sinks slot and an EP-wrapped MoE block."""
 
     def __init__(self, sinks: torch.Tensor | None):
         super().__init__()
@@ -65,8 +54,8 @@ def test_sync_accepts_live_sinks():
 
 
 def test_sync_accepts_in_place_neutralized_sinks():
-    """The non-FA2 reset fills dtype.min IN PLACE — the Parameter survives, syncs, and the engine
-    serves the same neutralized sinks the trainer computes with. Consistent, so allowed."""
+    """The non-FA2 reset fills dtype.min in place, so the Parameter syncs and the engine serves the same neutralized
+    sinks the trainer computes with."""
     reject_unsyncable_model(_GptOssStub(sinks=torch.full((NUM_HEADS,), torch.finfo(torch.bfloat16).min)), "vllm")
 
 

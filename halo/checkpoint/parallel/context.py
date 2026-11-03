@@ -1,8 +1,4 @@
-"""Checkpoint contexts: the trainer state a saver or the resume loader reads instead of the trainer.
-
-Built fresh per save/load call, so collective and rank invariants stay explicit and the object
-references (model, optimizer, scheduler) are current.
-"""
+"""The trainer state a saver or the resume loader reads, built fresh per call so object references stay current."""
 
 from __future__ import annotations
 
@@ -18,31 +14,26 @@ if TYPE_CHECKING:
 
 @dataclass
 class CheckpointContext:
-    """Everything a checkpoint saver needs, read off the trainer at call time.
-
-    Every field but ``is_save_rank`` is rank-uniform, so every rank picks the same saver.
-    """
+    """Everything a checkpoint saver needs; every field but ``is_save_rank`` is rank-uniform, so all pick one saver."""
 
     # The unwrapped module the save gathers iterate.
     model: nn.Module
     parallelism_config: ParallelismConfig
     has_ep_layers: bool
-    # Mixin-managed FSDP2. An FSDP (v1) model only comes from an accelerate FSDP launch, which rejects every
-    # custom parallelism, so accelerate manages it and it saves through the base Trainer.
+    # Mixin-managed FSDP2. An FSDP v1 model only comes from an accelerate launch, which rejects every custom
+    # parallelism and saves through the base Trainer.
     toolkit_fsdp2: bool
     accelerate_manages_fsdp: bool
     is_save_rank: bool
     max_shard_size: str
     save_sharded_ep: bool
-    # Native grouped-LoRA on EP experts.
     has_expert_lora: bool
     cp_wrapper: Any
     tokenizer: Any
-    # PP only: tensors no stage holds (a multimodal wrapper's vision tower), by global name, that the
-    # save rank re-emits so the checkpoint keeps the wrapper layout. Empty for a plain causal LM.
+    # PP only: tensors no stage holds (a multimodal vision tower), by global name, that the save rank re-emits so the
+    # checkpoint keeps the wrapper layout.
     pp_wrapper_state: dict[str, Any] | None = None
-    # A training checkpoint rather than an export: every tensor keeps its live dtype, so fp32 masters
-    # are written unrounded; an export casts to the save dtype (``save_dtype_caster``).
+    # Every tensor keeps its live dtype, so fp32 masters are written unrounded; an export casts to the save dtype.
     training_checkpoint: bool = False
 
     @property
@@ -53,9 +44,7 @@ class CheckpointContext:
 
 @dataclass
 class CheckpointLoadContext:
-    """Everything a resume reads (:func:`~halo.checkpoint.parallel.resume_weights.load_resume_weights`,
-    :class:`~halo.checkpoint.parallel.optimizer.OptimizerShardStore`), captured per call so the
-    ``optimizer`` / ``lr_scheduler`` references are current."""
+    """Everything a resume reads, captured per call so the ``optimizer`` / ``lr_scheduler`` references are current."""
 
     # The FSDP2/parallel wrapper, NOT the unwrapped module the save gathers iterate.
     model: nn.Module
@@ -63,16 +52,14 @@ class CheckpointLoadContext:
     lr_scheduler: Any
     parallelism_config: ParallelismConfig
     has_ep_layers: bool
-    # The bare trainer._fsdp_wrapped (mixin-managed FSDP2 only), so accelerate-managed FSDP takes the base
-    # Trainer's own loaders.
+    # The bare trainer._fsdp_wrapped (mixin FSDP2 only), so accelerate-managed FSDP takes the base Trainer's loaders.
     fsdp_wrapped: bool
     tp_rank: int
-    # The base Trainer's own optimizer + scheduler load, reached without holding the trainer.
+    # Reached without holding the trainer.
     super_load_optimizer_and_scheduler: Callable[..., None]
     # A shard restore that fails under a matching topology, or an interrupted save's shard set,
     # warm-restarts instead of failing the resume.
     allow_optimizer_warm_restart: bool = False
-    # The base Trainer's own loader owns an unsharded run's whole-weight reload: accelerate-managed FSDP
-    # reads its own sharded format, and sentence-transformers rebuilds its whole pipeline through
-    # ``from_pretrained``. Otherwise the base loader would read by raw key and the loader streams it.
+    # The base Trainer's loader owns an unsharded run's whole-weight reload: accelerate-managed FSDP reads its own
+    # sharded format, and sentence-transformers rebuilds its pipeline through ``from_pretrained``.
     base_owns_whole_weight_load: bool = False

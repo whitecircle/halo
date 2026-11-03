@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""Each batch-construction failure is raised at its own phase's fence, ahead of the next phase's work.
-
-Outside routing replay the round entry joins the ``BatchBuildFence`` three times:
-* after reading the prompts, for an unusable prompt;
-* after the rollouts are acquired and before any synchronous fallback, for a wedged prefetch;
-* after tokenization, for a row over the context window.
-
-A wedged rank fenced only later would first pay a whole synchronous round while its peers wait in the
-fence. A row failure fenced later would run the recompute forward, whose dispatch is a collective, on a
-batch the step then refuses. The round entry and the batch build run for real over a recording fence;
-rollout collection, tokenization and the forward are stubs that log their turn.
-
-    python tests/cpu/grpo/test_env_batch_fence_placement.py
-"""
+"""Each batch-construction failure is raised at its own phase's fence. A wedged rank fenced later pays a whole
+synchronous round while its peers wait; a row failure fenced later runs a collective forward on a refused batch."""
 
 from collections import deque
 from types import SimpleNamespace

@@ -1,5 +1,4 @@
-"""The training script lifecycle: parse the command line, set the run up, assemble its callbacks, train,
-and tear the process group down."""
+"""The training script lifecycle: parse, set up, assemble callbacks, train and tear down."""
 
 import asyncio
 import functools
@@ -41,13 +40,10 @@ logger = logging.getLogger(__name__)
 
 
 class EarlyStopExit(SystemExit):
-    """A run an early stop ended: it exits non-zero after the teardown a finished run gets, since the
-    stop's verdict is rank-uniform and every peer leaves training at the same step."""
+    """A run an early stop ended: exits non-zero after a finished run's teardown, since the verdict is rank-uniform."""
 
 
 class ScriptContext(NamedTuple):
-    """What :func:`init_training_script` resolves for a training script."""
-
     parallelism_config: ParallelismConfig
     local_rank: int
     resume_checkpoint: str | None
@@ -56,18 +52,17 @@ class ScriptContext(NamedTuple):
 
     @property
     def mode_suffix(self) -> str:
-        """The parallelism mode the run is named and logged by."""
         return self.parallelism_config.mode_string or "standard"
 
     @property
     def policy_from_checkpoint(self) -> bool:
-        """Whether the policy loads its weights from the resume checkpoint (a Path-B resume)."""
+        """Whether the policy loads from the resume checkpoint (a Path-B resume)."""
         return self.resume_checkpoint is not None and self.model_source == self.resume_checkpoint
 
 
 def _reject_ddp_timeout(parsed: Sequence[Any]) -> None:
-    """Refuse a ``ddp_timeout`` set away from its default: the process group is up before any config is built,
-    its NCCL watchdog set by ``DIST_NCCL_TIMEOUT_MINUTES``, so the field would never apply."""
+    """Refuse a ``ddp_timeout`` off its default: the process group is up before any config is built, its NCCL watchdog
+    set by ``DIST_NCCL_TIMEOUT_MINUTES``, so the field would never apply."""
     for args in parsed:
         if isinstance(args, TrainingArguments) and differs_from_default(args, "ddp_timeout"):
             minutes = nccl_timeout() // timedelta(minutes=1)
@@ -79,25 +74,17 @@ def _reject_ddp_timeout(parsed: Sequence[Any]) -> None:
 
 
 def _set_flash_switch_from_config(parsed: Sequence[Any]) -> None:
-    """Turn transformers' deterministic flash switch on for a ``full_determinism`` config as it is parsed: every
-    attention choice reads it (a script's row plan, which may run before :func:`init_training_script`, the loader's
-    resolver, the kernels), and HF's Trainer sets it only in ``__init__``, after the load."""
+    """Every attention choice reads the switch (a script's row plan, the loader's resolver, the kernels), and HF's
+    Trainer sets it only in ``__init__``, after the load."""
     if any(isinstance(args, TrainingArguments) and args.full_determinism for args in parsed):
         enable_flash_attention_deterministic()
 
 
 def parse_script_args(*dataclass_types: type) -> Any:
-    """COLLECTIVE: raise the root logger to INFO, probe the HF caches against the declared input sharing, parse
-    the command line into ``dataclass_types``, returned in order (the instance alone for one type), and tee the
-    console into the run's ``output_dir``. A ``ddp_timeout`` the parsed config sets is refused, and a
-    ``full_determinism`` one turns transformers' deterministic flash switch on
-    (:func:`_set_flash_switch_from_config`).
-
-    The process group comes up before any dataclass is built: constructing a TrainingArguments touches
-    ``self.device``, which makes accelerate initialize the default process group without ``device_id``,
-    costing a ``new_group`` per mesh dim instead of one ``ncclCommSplit`` and leaving every barrier to
-    infer its device.
-    """
+    """COLLECTIVE: parse into ``dataclass_types``, returned in order (the instance alone for one type), and tee the
+    console into ``output_dir``. The process group comes up before any dataclass is built: constructing a
+    TrainingArguments touches ``self.device``, which makes accelerate initialize the default group without
+    ``device_id``, costing a ``new_group`` per mesh dim and leaving every barrier to infer its device."""
     configure_training_logging()
     init_distributed()
     # Before the first Hub read: a follower reads only the cache its scope's main rank fills.
@@ -107,8 +94,7 @@ def parse_script_args(*dataclass_types: type) -> Any:
     parser = HaloArgumentParser(dataclass_types)
     values = parser.load_values()
     if isinstance(values.get("output_dir"), str):
-        # Rank 0's expansion: a per-rank datetime.now() can straddle a second boundary, and on a
-        # non-shared output filesystem each node's save rank would then tee run.log elsewhere.
+        # Rank 0's expansion: a per-rank datetime.now() can straddle a second, teeing each node's run.log elsewhere.
         values["output_dir"] = broadcast_from_rank0(expand_strftime_directives(values["output_dir"]))
     output = parser.parse_dict(values)
     _reject_ddp_timeout(output)
@@ -120,11 +106,8 @@ def parse_script_args(*dataclass_types: type) -> Any:
 
 
 def _pin_single_process_to_bound_gpu(training_config) -> None:
-    """Keep a process on the one GPU it bound.
-
-    With several GPUs visible HF wraps the model in ``nn.DataParallel``, which the token-normalized
-    losses are not written for: the logged loss and the gradients scale with the GPU count.
-    """
+    """With several GPUs visible HF wraps the model in ``nn.DataParallel``, which scales the token-normalized losses
+    and gradients with the GPU count."""
     visible = training_config.n_gpu
     if visible <= 1:
         return
@@ -147,26 +130,20 @@ def init_training_script(
     split_expert_lora: bool = True,
     supports_init_from_scratch: bool = False,
 ) -> ScriptContext:
-    """The pre-model phase of a training script, after :func:`parse_script_args` brought the process group
-    up, in the order every script depends on: the device bind, the ``ParallelismConfig``, the run setup
-    (named ``{script_prefix}-{mode}``) and the resume resolution.
-
-    ``trainer_cls`` supplies the CP/PP/low-precision gates, so a mode the trainer refuses fails before any
-    model, reference or rollout probe loads. ``split_expert_lora`` peels MoE expert targets out of
-    ``lora_target_modules`` into native EP grouped LoRA; only SFT passes ``supports_init_from_scratch``.
-    """
+    """The pre-model phase, in the order every script depends on: device bind, ``ParallelismConfig``, run setup and
+    resume resolution. ``trainer_cls`` supplies the CP/PP/low-precision gates, so a refused mode fails before any load.
+    ``split_expert_lora`` peels MoE expert targets out of ``lora_target_modules`` into native EP grouped LoRA."""
     local_rank = get_local_rank()
     if torch.cuda.is_available():  # CUDA-less interpreters (config-parse checks, CPU boxes) stay usable
         torch.cuda.set_device(local_rank)
     _pin_single_process_to_bound_gpu(training_config)
 
-    # Before the weight load (a check placed after it would be the first collective a straggler
-    # misses, and the watchdog would then time out here) and after the device bind (the gather
-    # runs over NCCL).
+    # Before the weight load (after it, this is the first collective a straggler misses and the watchdog times out
+    # here) and after the device bind (the gather runs over NCCL).
     agree_rank_uniform_env()
 
-    # Peeled before the config is built: __post_init__ validates expert_lora (PP rejects it) and
-    # ep_config caches its EPConfig, so a later assignment would not reach the layers.
+    # Peeled first: __post_init__ validates expert_lora (PP rejects it) and ep_config caches its EPConfig, so a later
+    # assignment would not reach the layers.
     parallelism_config = parallelism_config_from_args(
         dist_args,
         training_config=training_config,
@@ -183,9 +160,8 @@ def init_training_script(
         f"{script_prefix}-{context.mode_suffix}",
         overwrite_output_dir=args.overwrite_output_dir,
     )
-    # output_dir is final and still unwritten: the last point at which a mis-declared
-    # DIST_*_SHARED_FILESYSTEM surfaces as a startup error rather than as a resume that restarts
-    # every non-zero node at global_step=0.
+    # The last point at which a mis-declared DIST_*_SHARED_FILESYSTEM is a startup error rather than a resume
+    # restarting every non-zero node at global_step=0.
     verify_output_filesystem_sharing(training_config.output_dir)
     resume_checkpoint, model_source = prepare_distributed_resume(
         training_config, model_config, parallelism_config, overwrite_output_dir=args.overwrite_output_dir
@@ -194,9 +170,8 @@ def init_training_script(
 
 
 def distributed_trainer_kwargs(args, parallelism_config: ParallelismConfig, *, dataset_presharded: bool):
-    """The constructor kwargs every ``DistributedTrainerMixin`` trainer takes, all together: a call site
-    missing one gathers a save the config asked to shard, re-shards a per-rank dataset, or drops the
-    checkpoint knobs or the non-finite step limit."""
+    """All together: a call site missing one gathers a save the config asked to shard, re-shards a per-rank dataset, or
+    drops the checkpoint knobs or the non-finite step limit."""
     return {
         "parallelism_config": parallelism_config,
         "moe_balancing": args.moe_balancing,
@@ -219,9 +194,8 @@ def configure_balancing_and_build_callbacks(
     packed_rows: bool = False,
     multimodal_rows: bool = False,
 ) -> list:
-    """COLLECTIVE. Configure the run's MoE balancing on ``model`` for ``context.trainer_cls``'s loss and
-    weight-sync capabilities, then build its callback roster for that mode, the checkpointing plan's last.
-    ``packed_rows`` and ``multimodal_rows`` say what the run's collator builds, which the plan's refusals read."""
+    """COLLECTIVE. Configure MoE balancing for ``context.trainer_cls``'s loss and weight-sync capabilities, then build
+    the callback roster, the checkpointing plan last. ``packed_rows`` and ``multimodal_rows`` describe the collator."""
     balancing_mode = configure_moe_balancing(
         args,
         model,
@@ -259,9 +233,7 @@ def run_trainer(
     method_name: str,
     extra_start_log: Sequence[str] | None = None,
 ) -> None:
-    """Train, between the start log (mode, axis sizes, the attention backend the policy was built with,
-    ``extra_start_log``) and the EP cleanup; a run the early stop ended raises :class:`EarlyStopExit` on every
-    rank."""
+    """Train between the start log and EP cleanup; an early-stopped run raises :class:`EarlyStopExit` on every rank."""
     # Integrations add themselves at the HEAD and would consume `logs` before our callbacks' on_log.
     reorder_integration_callbacks_last(trainer)
 
@@ -290,8 +262,7 @@ def run_trainer(
     trainer.cleanup_ep()
 
     state = trainer.state
-    # An early stop fails the run, so a scheduler or a chained stage does not take its output for a
-    # finished one.
+    # An early stop fails the run, so a scheduler or chained stage does not take its output for a finished one.
     if any(
         isinstance(callback, StopsTrainingEarly) and callback.stopped
         for callback in trainer.callback_handler.callbacks
@@ -314,15 +285,10 @@ def _tear_down_distributed() -> None:
 
 
 def with_distributed_teardown(main_fn):
-    """``main_fn`` with the distributed teardown run after a success or an :class:`EarlyStopExit`;
-    used as ``with_distributed_teardown(main)()``.
-
-    Dispatchers go before the process group: a DeepEP Gin buffer outliving the group communicator faults
-    with a sticky ``cudaErrorIllegalAddress`` that hides the original traceback. Any other exception
-    propagates with no teardown: both halves are collectives, and a rank failing mid-step has peers still
-    inside the step's own collective, so entering another parks it in the NCCL watchdog for the full
-    timeout while torchrun sees no exit to reap the peers on.
-    """
+    """``main_fn`` with the teardown run after a success or an :class:`EarlyStopExit`. Dispatchers go first: a DeepEP
+    Gin buffer outliving the group communicator faults with a sticky ``cudaErrorIllegalAddress``. Any other exception
+    propagates with no teardown: both halves are collectives, and a rank failing mid-step would park in the NCCL
+    watchdog while torchrun sees no exit to reap the peers on."""
 
     @functools.wraps(main_fn)
     def wrapper(*args, **kwargs):
@@ -338,12 +304,8 @@ def with_distributed_teardown(main_fn):
 
 
 def verify_backend_on_rank0(probe: Callable[[], object], what: str) -> None:
-    """COLLECTIVE: probe an external backend once on global rank 0 and raise its failure on every rank.
-
-    Every rank calls it behind a rank-uniform gate; the backend takes one request rather than one per
-    rank, and the ranks raise together instead of the peers waiting in the next collective. A ``probe``
-    returning a coroutine is run to completion. The ``RuntimeError`` reads ``"<what> probe failed: <error>"``.
-    """
+    """COLLECTIVE: probe once on global rank 0 behind a rank-uniform gate and raise its failure on every rank, so peers
+    do not wait in the next collective. A ``probe`` returning a coroutine is run to completion."""
 
     def run_probe() -> None:
         outcome = probe()

@@ -10,7 +10,6 @@ from halo.data.conversation import chat_template_kwargs, reject_image_content, r
 from halo.data.pipeline.rejected_rows import build_rejection_row
 from halo.models.context_window import is_bounded_length
 
-# The chat-render knobs a text run's script args carry, named as the text renderers take them.
 _TEXT_RENDER_KNOBS = (
     "conversation_field",
     "system_prompt",
@@ -21,8 +20,7 @@ _TEXT_RENDER_KNOBS = (
 
 
 def text_render_kwargs(args) -> dict[str, Any]:
-    """The run's :data:`_TEXT_RENDER_KNOBS`, passed to a text renderer and to its map-cache key from
-    this one dict, so the key cannot miss a knob the render reads."""
+    """One dict for a text renderer and its map-cache key, so the key cannot miss a knob the render reads."""
     return {name: getattr(args, name) for name in _TEXT_RENDER_KNOBS}
 
 
@@ -36,8 +34,7 @@ def render_row_conversation(
     interleaved_thinking: bool = False,
     tools_field: str | None = None,
 ) -> str:
-    """Chat-template the conversation at ``row[conversation_field]`` through :func:`render_conversation`.
-    ``add_generation_prompt`` drops the final message: on the generation-eval path the trailing assistant turn is
+    """``add_generation_prompt`` drops the final message: on the generation-eval path the trailing assistant turn is
     the reference answer to regenerate."""
     conversation = resolve_json_value(row[conversation_field])
     if add_generation_prompt:
@@ -87,8 +84,8 @@ def build_chat_row_processor(
     interleaved_thinking: bool = False,
     tools_field: str | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """Build the row map that chat-templates and tokenizes a conversation; a row over ``max_length`` becomes the
-    typed rejection row. ``use_padding=False`` for padding-free collation."""
+    """A row map that chat-templates and tokenizes; a row over ``max_length`` becomes the typed rejection row.
+    ``use_padding=False`` for padding-free collation."""
     none_example = build_rejection_row(tokenizer, truncation=True, padding=False, max_length=max_length)
 
     def process_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -132,10 +129,9 @@ def build_text_row_processor(
     append_eos: bool = True,
     truncate: bool = True,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """Build the row map for raw-text (pretraining) documents: no chat template, a trailing EOS per document
-    (``append_eos``) so packing keeps the boundaries, and the typed rejection row for empty text.
-    ``truncate=False`` when packing leaves the overflow to the strategy (``bfd_split`` keeps it, ``bfd`` drops it).
-    """
+    """Row map for raw-text (pretraining) documents: a trailing EOS per document so packing keeps boundaries, the typed
+    rejection row for empty text. ``truncate=False`` when packing leaves the overflow to the strategy (``bfd_split``
+    keeps it, ``bfd`` drops it)."""
     eos_id = tokenizer.eos_token_id
 
     def process_row(row: dict[str, Any]) -> dict[str, Any]:

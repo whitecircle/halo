@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""The head-path transform contract (``halo/models/head_transform.py``) across the supported roster.
-
-The chunked GRPO log-prob sweep and the last pipeline stage compute logits from the backbone's last
-hidden state instead of through the model's forward. A family whose forward transforms that path —
-Inkling's μP hidden division and vocabulary cut, Cohere's ``logit_scale``, Granite's
-``logits_scaling`` division, MiniCPM3's pre-head division, Gemma's softcap — is scored against the
-wrong distribution unless the path applies the same transform, and nothing raises. This file pins:
-
-* every roster family's head path verifies against its own forward — the MoE half is derived from
-  the EP layer registry, so a new native MoE family is swept without editing this file; the dense
-  families (``_DENSE_ROSTER``) and the remote-code ones (``_REMOTE_ROSTER``) are listed here;
-* the chunked sweep reproduces the forward log-probs and every parameter gradient of each tiny model
-  in ``_TINY_MODELS``, the transform families included, and those families' transforms are
-  load-bearing here; a new family's tiny model is added there;
-* a declaration removed makes its family refused, and an undeclared transform is refused.
-
-    pytest -m cpu tests/cpu/models/test_head_transform.py
-"""
+"""The head-path transform contract. Chunked log-probs and the last pipeline stage compute logits from the last hidden
+state, so a family whose forward transforms that path is silently scored wrong unless the path applies it too."""
 
 import pytest
 import torch
@@ -69,23 +53,20 @@ apply_remote_code_compat_shims()
 # The dense half of the roster; the MoE half is every model_type the EP layer registry claims.
 _DENSE_ROSTER = ("qwen3", "qwen3_5_text", "qwen3_vl")
 
-# Families whose transformers defaults do not build a model, keyed by the config class's ``model_type``; their tiny
-# config stands in. Qwen3.8-Flash-Next's defaults declare QSA layers without an indexer budget.
+# Defaults that build no model; the tiny config stands in. Qwen3.8-Flash-Next's declare QSA without an indexer budget.
 _DEFAULT_CONFIG_OVERRIDES = {
     "lfm2_moe": TINY_LFM2_MOE_CONFIG,
     "qwen4_exp_text": TINY_QWEN4_EXP_CONFIG,
     "qwen4_exp": {"text_config": TINY_QWEN4_EXP_CONFIG, "vision_config": TINY_QWEN4_EXP_VISION_CONFIG},
 }
 
-# Values the shipped checkpoints carry and the defaults leave at identity, so the sweep verifies the
-# transform the run applies: Gemma 4 caps at 30, Inkling cuts its padded vocabulary.
+# Shipped values the defaults leave at identity: Gemma 4 caps at 30, Inkling cuts its padded vocabulary.
 _UNPADDED_VOCAB = TINY_INKLING_CONFIG["vocab_size"] - 12
 _GEMMA4_TEXT = {**TINY_GEMMA4_MOE_CONFIG, "final_logit_softcapping": 30.0}
-# The tiny models' random-init logits stay far below 30, where the cap is the identity; this one bites.
+# Random-init logits stay far below 30, where the cap is the identity, so this cap is low enough to act.
 _GEMMA4_SATURATED_TEXT = {**TINY_GEMMA4_MOE_CONFIG, "final_logit_softcapping": 0.02}
 _INKLING_TEXT = {**TINY_INKLING_CONFIG, "unpadded_vocab_size": _UNPADDED_VOCAB}
 
-# Remote-code roster families, verified from their cached hub configs.
 _REMOTE_ROSTER = (BAILING_MOE_LING_MINI, BAILING_MOE_RING_MINI)
 
 _BATCH, _SEQ, _COMPLETION = 2, 12, 6
@@ -112,14 +93,14 @@ def _roster_classes() -> list[tuple[str, str]]:
 
 
 def _model(class_name: str, config_class_name: str, **config) -> torch.nn.Module:
-    """A seeded fp32 tiny model; classes are resolved by name at build time, after ``halo`` installed
-    its device-aware kernel dispatch, so the linear-attention families run their CPU paths."""
+    """Classes resolve by name at build time, after ``halo`` installed its device-aware kernel dispatch, so the
+    linear-attention families run their CPU paths."""
     torch.manual_seed(0)
     model_class = getattr(transformers, class_name)
     return model_class(getattr(transformers, config_class_name)(**config)).float().eval()
 
 
-# (id, builder) for every roster family with a shared tiny config, plus the dense transform families.
+# Every roster family with a shared tiny config, plus the dense transform families.
 _TINY_MODELS = {
     "qwen3": lambda: _model("Qwen3ForCausalLM", "Qwen3Config", **TINY_QWEN3_CONFIG),
     "qwen3_moe": lambda: _model("Qwen3MoeForCausalLM", "Qwen3MoeConfig", **TINY_QWEN3_MOE_CONFIG),
@@ -151,13 +132,11 @@ _TINY_MODELS = {
     "minicpm3": lambda: _model("MiniCPM3ForCausalLM", "MiniCPM3Config", **TINY_MINICPM3_CONFIG),
 }
 
-# The families above whose forward transforms the head path; each must be load-bearing here.
 _TRANSFORM_FAMILIES = ("inkling", "cohere2_moe", "gemma4_text", "gemma4", "granite", "minicpm3")
 
 
 class _ForwardParityHarness(LogprobScoringMixin):
-    """The chunked sweep over a real model, fed the hidden state TRL's and the offline trainer's
-    ``_get_last_hidden_state`` take: ``base_model``, the final position dropped, the completion kept."""
+    """The chunked sweep fed the hidden state TRL's and the offline trainer's ``_get_last_hidden_state`` take."""
 
     temperature = 1.0
 
@@ -167,8 +146,7 @@ class _ForwardParityHarness(LogprobScoringMixin):
 
 
 class _UndeclaredSpec:
-    """What every family resolves to with its declaration removed, softcap included. Not a
-    ``HeadTransformSpec`` subclass, so it joins no registry."""
+    """A family with its declaration removed. Not a ``HeadTransformSpec`` subclass, so it joins no registry."""
 
     @classmethod
     def transform(cls, config) -> HeadTransform:
@@ -176,7 +154,6 @@ class _UndeclaredSpec:
 
 
 def _batch(model) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(input_ids, attention_mask, upstream)``; ids below the family's returned vocabulary."""
     text = model.config.get_text_config()
     vocab = getattr(text, "unpadded_vocab_size", None) or text.vocab_size
     generator = torch.Generator().manual_seed(1)
@@ -246,7 +223,6 @@ _GRANITE_TRANSFORM = HeadTransform(logit_scale=1 / 8)
     ],
 )
 def test_declared_transforms_are_what_the_forwards_apply(class_name, config, expected):
-    """Each declaration verifies, carries the values the forward applies, and is refused once removed."""
     model_class = getattr(transformers, class_name)
     config = model_class.config_class(**config)
     verified = verify_head_transform(model_class, config)
@@ -261,8 +237,7 @@ def test_declared_transforms_are_what_the_forwards_apply(class_name, config, exp
 
 
 def test_an_undeclared_transform_is_refused():
-    """HyperCLOVAX spells Granite's ``logits_scaling`` and MULTIPLIES by it: a config-field list would
-    apply it backwards, and nothing declares it, so the verification must refuse it."""
+    """HyperCLOVAX multiplies by Granite's ``logits_scaling``; a config-field list would apply it backwards."""
     model_class = transformers.HyperCLOVAXForCausalLM
     config = model_class.config_class(logits_scaling=0.5)
     with pytest.raises(ValueError, match="HyperCLOVAXForCausalLM's forward transforms its head path") as refused:
@@ -276,8 +251,8 @@ def test_an_undeclared_transform_is_refused():
 
 
 def test_verification_leaves_the_global_generator_untouched():
-    """The last pipeline stage verifies once more than its peers; a probe that consumed the global
-    CPU generator would shift that stage's seed stream against every other rank's."""
+    """The last pipeline stage verifies once more than its peers; a probe that consumed the global CPU generator would
+    shift that stage's seed stream against every other rank's."""
     model_class = transformers.GraniteForCausalLM
     config = model_class.config_class(**TINY_GRANITE_CONFIG)
     before = torch.get_rng_state()
@@ -294,7 +269,7 @@ def test_resolution_follows_the_class_hierarchy():
 
 
 def test_a_classification_head_has_no_head_transform():
-    """No output embedding, nothing a causal-LM forward applies around it: the stage projects directly."""
+    """No output embedding, so the stage projects directly."""
     model = transformers.Qwen3ForSequenceClassification(transformers.Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=3))
     assert resolve_head_transform(model) == IDENTITY_HEAD_TRANSFORM
 
@@ -306,12 +281,8 @@ def test_a_model_that_is_not_a_transformers_model_is_refused():
 
 @pytest.mark.parametrize("family", sorted(_TINY_MODELS))
 def test_chunked_sweep_reproduces_the_family_forward(family):
-    """Log-probs, entropy-carrying sweep and every parameter gradient against the family's own forward.
-
-    The upstream gradient varies per token so a per-row scale error cannot hide in a sum. For the
-    transform families, the untransformed sweep is checked to be off by whole nats first, so a sweep
-    that dropped the transform could not pass by coincidence.
-    """
+    """The upstream gradient varies per token so a per-row scale error cannot hide in a sum. A transform family's
+    untransformed sweep must differ, so a sweep that dropped the transform cannot pass by coincidence."""
     model = _TINY_MODELS[family]()
     input_ids, attention_mask, upstream = _batch(model)
 
@@ -343,7 +314,6 @@ def test_chunked_sweep_reproduces_the_family_forward(family):
 
 
 def test_the_sweep_refuses_a_family_whose_declaration_is_removed(monkeypatch):
-    """With Inkling's declaration gone the chunked sweep must raise, not score the wrong distribution."""
     model = _TINY_MODELS["inkling"]()
     input_ids, attention_mask, _ = _batch(model)
     monkeypatch.setattr(head_transform, "resolve_head_transform_spec", lambda _cls: _UndeclaredSpec)

@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""A VLM run's chat-template override reaches the processor it renders and exports through.
-
-A processor carries its own ``chat_template``, apart from its tokenizer's: ``apply_chat_template``
-renders with it, and ``save_pretrained`` writes it over the ``chat_template.jinja`` its tokenizer
-wrote. The toolkit applies ``chat_template`` / ``force_chat_template`` to the tokenizer, so unless the
-processor adopts it a VLM run renders its rows on the checkpoint's original template and ships that
-template too. Each entry point that sets the override is driven here on a cached Qwen3.5 processor:
-the training seam (``configure_run_tokenizer`` + ``install_resolved_tokenizer``) through the FSDP2
-saver, ``prepare_dataset --is_vlm``'s processor setup, and ``patch_vocab.py``'s export.
-
-    python tests/cpu/model_loading/test_vlm_chat_template_override.py
-"""
+"""A VLM run's chat-template override reaches the processor it renders and exports through. A processor carries its
+own template, written over its tokenizer's at save."""
 
 import sys
 from types import SimpleNamespace
@@ -43,7 +33,7 @@ def _render(processor) -> str:
 
 
 def _setup_run(args: CommonScriptArguments, processor=None):
-    """The processing class a VLM training script hands its trainer, after the tokenizer seam."""
+    """After the tokenizer seam."""
     processor = processor or load_cached_processor(QWEN3_5_9B)
     tokenizer = configure_run_tokenizer(
         args, None, processor.tokenizer, None, embeddings_sharded=is_input_embedding_tp_sharded
@@ -67,8 +57,7 @@ def test_a_training_run_renders_and_exports_its_override(tmp_path):
 
 
 def test_a_run_without_an_override_keeps_the_processors_own_template(tmp_path):
-    """Only a template the run chose moves to the processor: one the checkpoint shipped for the processor
-    alone (a legacy ``chat_template.json`` beside a tokenizer template) stays the processor's."""
+    """One the checkpoint shipped for the processor alone stays the processor's."""
     processor = load_cached_processor(QWEN3_5_9B)
     processor.chat_template = PROCESSOR_ONLY
     assert processor.tokenizer.chat_template != PROCESSOR_ONLY, "premise: the two templates differ"
@@ -80,7 +69,7 @@ def test_a_run_without_an_override_keeps_the_processors_own_template(tmp_path):
 
 
 def test_prepare_dataset_renders_vlm_rows_with_the_override():
-    load_cached_processor(QWEN3_5_9B)  # skips where the processor is not cached
+    load_cached_processor(QWEN3_5_9B)  # Skips where the processor is not cached.
     args = SimpleNamespace(
         model_name_or_path=QWEN3_5_9B,
         trust_remote_code=False,

@@ -1,10 +1,5 @@
 #!/usr/bin/env python
-"""What every branch of the loader ladder issues, from a local directory and from the Hub, pinned against
-the loader collective-trace golden: process groups in build order with their members, collectives,
-device meshes, c10d-store operations, node-load phases and the model builds between them.
-
-Run: python tests/cpu/parallelism/test_load_collective_trace.py
-"""
+"""What every branch of the loader ladder issues, pinned against the loader collective-trace golden."""
 
 import json
 from unittest.mock import patch
@@ -63,16 +58,14 @@ def test_a_case_loads_a_moe_family_no_ep_layer_class_wraps(checkpoints):
     ],
 )
 def test_the_hosts_launch_environment_does_not_reach_the_trace(key, host, checkpoints, monkeypatch):
-    """Each host setting, read by the recording, would scope the load's phases differently or refuse it."""
+    """Each host setting would scope the load's phases differently or refuse it."""
     for name, value in host.items():
         monkeypatch.setenv(name, value)
     assert trace_case(CASES[key], checkpoints) == GOLDEN[key]
 
 
 def test_building_the_cp_groups_before_the_ep_groups_breaks_the_trace(checkpoints):
-    """Anti-vacuity: both configs cache their groups, so building the CP config first moves its
-    ``new_group`` calls ahead of the EP ones, which on a real job pairs one rank's EP group build
-    with a peer's CP group build."""
+    """Anti-vacuity: on a real job this pairs one rank's EP group build with a peer's CP group build."""
     ep_config = ParallelismConfig.ep_config
 
     def cp_first(config):

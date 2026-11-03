@@ -1,19 +1,4 @@
-"""Score one generated response per prompt with a local reward model.
-
-Generates against an OpenAI-compatible API, scores with the reward model, prints summary statistics.
-
-Usage:
-    python scripts/inference/reward_model/score.py \\
-        --model my-model \\
-        --dataset data/prompts.jsonl \\
-        --rm_model_id path/to/reward-model
-
-Input JSONL format:
-    {"id": "...", "prompt": [{"role": "user", "content": "..."}], ...}
-
-Output JSONL format:
-    {"id": "...", "response": "...", "reward": 0.85, "full_conversation": [...], ...}
-"""
+"""Score one generated response per prompt with a local reward model, printing summary statistics."""
 
 from halo.entrypoints.resumable_generation import run_async_cli
 from halo.entrypoints.reward_scoring import run_reward_scoring

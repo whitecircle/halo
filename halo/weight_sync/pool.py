@@ -27,24 +27,22 @@ class WeightSyncPool:
         client_cls: type[WeightSyncClientBase],
         base_group_port: int,
     ):
-        """``server_configs``: one ``{"url", "group_port", "group_host"}`` dict per server, ``url`` required. A
-        server without its own ``group_port`` takes ``base_group_port + index``, or a kernel-assigned port (0) when
-        the base is 0."""
+        """``server_configs``: one ``{"url", "group_port", "group_host"}`` dict per server, ``url`` required. A server
+        without its own ``group_port`` takes ``base_group_port + index``, or a kernel-assigned port at base 0."""
         self.server_configs = server_configs
         self.connection_timeout = connection_timeout
         self.base_group_port = base_group_port
         self._clients: list[WeightSyncClientBase] = []
         self._initialized = False
         self._device: torch.device | None = None
-        # The pushed model's module names, applied to every client built, rebuilt ones included.
         self._co_load_module_names: tuple[str, ...] | None = None
-        # Bytes buffered since the last chunk: only the pool knows when every server is done with a snapshot.
+        # Only the pool knows when every server is done with a snapshot.
         self._buffered_bytes = 0
         # NCCL groups cannot form concurrently, so reconnects from parallel flush threads take turns.
         self._reconnect_lock = threading.Lock()
         self._client_cls = client_cls
 
-        # group_port is bound on the trainer host, so two servers sharing one collide; kernel-assigned ports never do.
+        # Kernel-assigned ports never collide.
         effective_ports = [self._group_port(i) for i in range(len(server_configs))]
         fixed_ports = [port for port in effective_ports if port]
         if len(set(fixed_ports)) != len(fixed_ports):
@@ -64,7 +62,6 @@ class WeightSyncPool:
             logger.warning("WeightSyncPool already initialized, skipping")
             return
 
-        # The shared snapshots are taken on it, in the form the clients resolve.
         device = resolve_sync_device(device)
 
         for i, config in enumerate(self.server_configs):
@@ -97,8 +94,8 @@ class WeightSyncPool:
             client.scope_co_load_groups(self._co_load_module_names)
 
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
-        """Buffer one snapshot of a gathered parameter in every client, sending the pending chunk to every server
-        first when it would overflow: a shared snapshot may go only once every server sent it."""
+        """Buffer one shared snapshot in every client, sending the pending chunk to every server first when it would
+        overflow, as a snapshot may go only once every server sent it."""
         if not self._initialized:
             raise RuntimeError("WeightSyncPool not initialized. Call init_communicator() first.")
         if not self._clients:
@@ -130,7 +127,6 @@ class WeightSyncPool:
         self._buffered_bytes = 0
 
     def close_communicator(self) -> None:
-        """Close every client's connection."""
         for client in self._clients:
             try:
                 client.close_communicator()
@@ -142,21 +138,17 @@ class WeightSyncPool:
         logger.info("WeightSyncPool closed all connections")
 
     def _group_port(self, index: int) -> int:
-        """Server ``index``'s trainer-side group port: its own, else the base + index, else 0 (kernel-assigned) when
-        the base is."""
         config = self.server_configs[index]
         if "group_port" in config:
             return config["group_port"]
         return self.base_group_port + index if self.base_group_port else 0
 
     def _connect_client(self, index: int, device: torch.device) -> WeightSyncClientBase:
-        """Build server ``index``'s client and form its group on ``device``, for the first connect and a reconnect."""
         config = self.server_configs[index]
         client = self._client_cls(
             base_url=config["url"],
             group_port=self._group_port(index),
             connection_timeout=self.connection_timeout,
-            # Optional per-server routable trainer NIC for the NCCL group (multi-homed nodes).
             group_host=config.get("group_host"),
         )
         client.init_communicator(device=device)
@@ -165,7 +157,6 @@ class WeightSyncPool:
         return client
 
     def _flush_chunk_to_every_server(self) -> None:
-        """Send the buffered chunk to every server concurrently, leaving each update open."""
         self._run_on_every_client(lambda index: self._clients[index].flush_chunk(), "chunk flush")
         # Every client holds the same snapshots, so what one kept back for a co-load partner they all did.
         self._buffered_bytes = max((client.buffered_bytes for client in self._clients), default=0)
@@ -174,7 +165,7 @@ class WeightSyncPool:
         """Run ``operation(index)`` on every client concurrently, raising one aggregated failure. Indexed, so a
         retry reaches the client a reconnect swapped in."""
         run = partial(self._with_recovery, operation, what)
-        if len(self._clients) == 1:  # no thread-pool overhead for the single-server case
+        if len(self._clients) == 1:
             errors = [run(0)]
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._clients)) as executor:
@@ -195,10 +186,10 @@ class WeightSyncPool:
         try:
             operation(index)
             return None
-        except Exception as e:  # aggregated and re-raised by the caller
+        except Exception as e:
             first_error = e
         if not client.can_replay_sync:
-            client.drain_param_buffer()  # dropped rather than re-broadcast: this sync cannot be replayed
+            client.drain_param_buffer()
             return (
                 f"{url}: {first_error} (not retried: this sync was already streaming, so the engine "
                 f"holds part of the new weights and the trainer no longer has the rest to re-send — "
@@ -211,15 +202,14 @@ class WeightSyncPool:
             operation(index)
             logger.warning(f"Weight sync to {url} recovered after reconnect")
             return None
-        except Exception as retry_error:  # aggregated and re-raised by the caller
+        except Exception as retry_error:
             # The pool entry holds the snapshots: the original after a failed reconnect, else the replacement.
             self._clients[index].drain_param_buffer()
             return f"{url}: {first_error} (reconnect retry failed: {retry_error})"
 
     def _reconnect(self, index: int) -> None:
-        """Replace server ``index``'s client, carrying its buffer over; the replacement serves base weights until
-        :meth:`_with_recovery` re-flushes the sync through it. The old client is closed first: it lifts the
-        pause its failed sync left and frees the group port."""
+        """Replace server ``index``'s client, carrying its buffer over; the replacement serves base weights until the
+        re-flush. The old client closes first, lifting its failed sync's pause and freeing the group port."""
         url = self.server_configs[index]["url"]
         old = self._clients[index]
         logger.warning(

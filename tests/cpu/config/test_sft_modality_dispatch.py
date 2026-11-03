@@ -1,18 +1,7 @@
 #!/usr/bin/env python
-"""The training scripts must route their DATA path on the run, not on the checkpoint class.
-
-``is_vlm_model`` answers "is this checkpoint multimodal", and every natively-multimodal family
-(Gemma 4, Qwen3.5/3.6) answers yes — including for the text-only SFT recipes shipped against them.
-The VLM data path refuses ``packing``/``padding_free``/``train_on_last_assistant_only``, so keying
-the dispatch on the checkpoint makes those recipes raise on the very path they intend. ``is_vlm_run``
-adds the run's own declaration of image data; the model still loads through its multimodal class.
-
-Driven through ``main()`` rather than a restatement of the branch: the seam is only correct if the
-script reaches it with the dataset in hand, before the model load that takes the verdict to decide
-whether the checkpoint's processor is required.
-
-Run: pytest tests/cpu/config/test_sft_modality_dispatch.py
-"""
+"""The training scripts route their data path on the run, not the checkpoint class. ``is_vlm_model`` says yes for
+every natively multimodal family, and the VLM data path refuses ``packing``, so keying on the checkpoint breaks
+the text-only recipes; ``is_vlm_run`` adds the run's declaration of image data."""
 
 import ast
 import sys
@@ -35,7 +24,6 @@ _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 # a prefix LM on.
 _VLM_RUN_SEAMS = {"resolve_vlm_run", "resolve_preference_vlm_run"}
 
-# Every script whose data path branches on modality. One seam, not four copies of it.
 _DISPATCHING_SCRIPTS = [
     "sft.py",
     "distillation/self_distill.py",
@@ -43,8 +31,7 @@ _DISPATCHING_SCRIPTS = [
     "preference/dpo.py",
 ]
 
-# A model id the name heuristic reads as multimodal, so the checkpoint verdict is the same offline
-# as it is against the hub — otherwise this test would prove nothing about the failure mode it targets.
+# An id the name heuristic reads as multimodal, so the checkpoint verdict is the same offline as against the hub.
 _VLM_MODEL_ID = "stub/qwen3.5-9b"
 
 _TEXT_TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
@@ -60,8 +47,7 @@ class _VLMPathReached(Exception):
 
 @pytest.fixture(autouse=True)
 def _hub_offline(monkeypatch):
-    """No network from this tier: the modality probe must resolve from the name heuristic, never a
-    hub round-trip."""
+    """The modality probe must resolve from the name heuristic, never the hub."""
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
 
@@ -76,13 +62,8 @@ def _dataset(extra_columns: dict | None = None) -> DatasetDict:
 
 
 def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: bool, tokenizer=None, loads=None):
-    """Run ``sft.py:main()`` up to the data dispatch against a multimodal checkpoint.
-
-    ``stub_vlm_prep`` stubs ``_prepare_vlm_data``; the VLM option refusals (the packing one is the exact error a
-    misrouted text recipe hits) run in ``main()`` before the load either way. ``tokenizer`` stands in for the
-    processor's own, whose padding side the run must settle. ``loads`` collects the keyword arguments of every
-    model load.
-    """
+    """Run ``sft.py:main()`` up to the data dispatch against a multimodal checkpoint. ``tokenizer`` stands in for
+    the processor's own, and ``loads`` collects every model load's keyword arguments."""
     tokenizer = tokenizer if tokenizer is not None else types.SimpleNamespace(padding_side="left")
     module = _script_module("sft.py")
     config = tmp_path / "config.yaml"
@@ -142,11 +123,8 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
 
 
 def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
-    """Run ``preference/dpo.py:main()`` up to its data dispatch against a multimodal checkpoint.
-
-    Same shape as ``_run_sft``: the text branch stops at the preference prep, the VLM branch (which
-    has no prep of its own — TRL tokenizes the vision dataset) at the first call past the branch.
-    """
+    """Run ``preference/dpo.py:main()`` up to its data dispatch: the text branch stops at the preference prep, the
+    VLM branch at the first call past it."""
     module = _script_module("preference/dpo.py")
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -187,9 +165,8 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
         mock.patch.object(model_setup, "configure_adapter_training", return_value=None),
         mock.patch.object(model_setup, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        # The preference prep and the example log both live in the shared data_setup helper the
-        # script calls, so the two arms are distinguished on ITS globals: the text arm reaches
-        # the tokenizing prep first, the VLM arm (which has no prep) reaches the log.
+        # Both live in the shared data_setup helper, so the arms are distinguished on its globals: the text arm reaches
+        # the prep first, the VLM arm the log.
         mock.patch("halo.entrypoints.data_setup.prepare_preference_datasets", side_effect=fail_text),
         mock.patch("halo.entrypoints.data_setup.log_dataset_examples", side_effect=fail_vlm),
         mock.patch("halo.entrypoints.script.install_log_tee"),
@@ -206,20 +183,16 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
                 patch.stop()
 
 
-# --- text recipe on a multimodal checkpoint -------------------------------------------------------
-
-
 def test_text_dataset_on_a_multimodal_checkpoint_takes_the_text_path_with_packing(tmp_path):
-    """End to end: a checkpoint-keyed dispatch raises "packing / padding_free are not supported for
-    VLM training" here, and the shipped Gemma 4 / Qwen3.5 text SFT recipes cannot run."""
+    """A checkpoint-keyed dispatch raises the VLM packing refusal here, and the shipped Gemma 4 / Qwen3.5 text
+    recipes cannot run."""
     with pytest.raises(_TextPathReached):
         _run_sft(tmp_path, "packing: true\n", _dataset(), stub_vlm_prep=False)
 
 
 def test_text_path_settles_the_padding_side_the_text_collators_require(tmp_path):
-    """A multimodal checkpoint hands back the processor's tokenizer, which keeps the checkpoint's own
-    side — left for Gemma 4. The packing collator refuses a left-padding tokenizer outright, so
-    without this the text recipes on a multimodal checkpoint would still not run."""
+    """A multimodal checkpoint hands back the processor's tokenizer with the checkpoint's own side, left for Gemma
+    4, which the packing collator refuses."""
     tokenizer = types.SimpleNamespace(padding_side="left")
     with pytest.raises(_TextPathReached):
         _run_sft(tmp_path, "packing: true\n", _dataset(), stub_vlm_prep=False, tokenizer=tokenizer)
@@ -227,7 +200,7 @@ def test_text_path_settles_the_padding_side_the_text_collators_require(tmp_path)
 
 
 def test_vlm_run_leaves_the_processor_padding_side_alone(tmp_path):
-    """VLM batches pad through the processor — flipping its side would change every VLM run."""
+    """VLM batches pad through the processor, so flipping its side would change every VLM run."""
     tokenizer = types.SimpleNamespace(padding_side="left")
     with pytest.raises(_VLMPathReached):
         _run_sft(tmp_path, "", _dataset({"images": [[]]}), stub_vlm_prep=True, tokenizer=tokenizer)
@@ -244,9 +217,6 @@ def test_train_on_last_assistant_only_reaches_the_text_path(tmp_path):
         _run_sft(tmp_path, "train_on_last_assistant_only: true\n", _dataset(), stub_vlm_prep=False)
 
 
-# --- genuine VLM runs -------------------------------------------------------------------------------
-
-
 def test_images_field_still_dispatches_to_the_vlm_path(tmp_path):
     with pytest.raises(_VLMPathReached):
         _run_sft(tmp_path, "images_field: images\n", _dataset({"images": [[]]}), stub_vlm_prep=True)
@@ -259,8 +229,8 @@ def test_image_column_still_dispatches_to_the_vlm_path(tmp_path):
 
 
 def test_vlm_run_still_rejects_packing(tmp_path):
-    """The VLM path's refusals must be intact for runs that really do carry images — the dispatch
-    decides which runs reach them, not what they do. They are pure config, so they land before the model load."""
+    """The dispatch decides which runs reach the refusals, not what they do. They are pure config, so they land
+    before the model load."""
     loads = []
     with pytest.raises(ValueError, match="packing / padding_free are not supported for VLM"):
         _run_sft(
@@ -282,9 +252,8 @@ def test_embedded_image_conversation_still_dispatches_to_the_vlm_path(tmp_path):
 
 
 def test_text_only_model_refuses_embedded_images_before_the_model_load(tmp_path):
-    """The verdict reads the checkpoint's multimodal config, so image parts embedded in the
-    conversation would route a text-only CausalLM load to the VLM data path, where a bare tokenizer
-    stands in for the processor and the pixels are dropped."""
+    """Embedded parts would route a text-only CausalLM load to the VLM data path, where a bare tokenizer stands in
+    for the processor and the pixels are dropped."""
     rows = [[{"role": "user", "content": [{"type": "image", "image": "b64"}]}]]
     dataset = DatasetDict({"train": Dataset.from_dict({"prompt": rows}), "test": Dataset.from_dict({"prompt": rows})})
     loads = []
@@ -294,8 +263,8 @@ def test_text_only_model_refuses_embedded_images_before_the_model_load(tmp_path)
 
 
 def test_the_checkpoint_config_is_read_once(tmp_path):
-    """The run prefix and the data dispatch both need the checkpoint's modality; the dispatch takes
-    the verdict the prefix already probed rather than reading the checkpoint config a second time."""
+    """The run prefix and the data dispatch both need the modality; the dispatch takes the verdict the prefix
+    already probed."""
     probes = []
     with (
         mock.patch.object(
@@ -308,8 +277,7 @@ def test_the_checkpoint_config_is_read_once(tmp_path):
 
 
 def test_the_run_verdict_reaches_the_model_load(tmp_path):
-    """Only an image run requires the checkpoint's processor, and a multimodal checkpoint may ship
-    none (Step-3.7 Flash): the load has to be handed the verdict the dataset decides."""
+    """Only an image run requires the processor, and a multimodal checkpoint may ship none (Step-3.7 Flash)."""
     text_loads, image_loads = [], []
     with pytest.raises(_TextPathReached):
         _run_sft(tmp_path, "", _dataset(), stub_vlm_prep=False, loads=text_loads)
@@ -320,14 +288,9 @@ def test_the_run_verdict_reaches_the_model_load(tmp_path):
     assert [load["vlm_run"] for load in image_loads] == [True]
 
 
-# --- one seam, every script ------------------------------------------------------------------------
-
-
 def test_dpo_text_path_settles_the_padding_side_too(tmp_path):
-    """DPO's text branch runs on the processor's tokenizer whenever the checkpoint is multimodal —
-    Gemma 4 / GLM-4.7-Flash keep the checkpoint's LEFT side there, while every text load normalizes
-    to right. The text collators inherit that side (the packing collator refuses left outright), so
-    the branch owes the same normalization SFT and distillation already apply."""
+    """DPO's text branch runs on the processor's tokenizer on a multimodal checkpoint, whose left side the text
+    collators inherit (the packing collator refuses left)."""
     tokenizer = types.SimpleNamespace(padding_side="left")
     with pytest.raises(_TextPathReached):
         _run_dpo(tmp_path, _dataset(), tokenizer)
@@ -335,8 +298,7 @@ def test_dpo_text_path_settles_the_padding_side_too(tmp_path):
 
 
 def test_dpo_vision_run_keeps_the_processor_padding_side(tmp_path):
-    """An image-carrying preference dataset takes TRL's vision path, which pads through the
-    processor — its side must survive untouched."""
+    """TRL's vision path pads through the processor, so its side must survive."""
     tokenizer = types.SimpleNamespace(padding_side="left")
     with pytest.raises(_VLMPathReached):
         _run_dpo(tmp_path, _dataset({"images": [[]]}), tokenizer)
@@ -345,8 +307,7 @@ def test_dpo_vision_run_keeps_the_processor_padding_side(tmp_path):
 
 @pytest.mark.parametrize("script", _DISPATCHING_SCRIPTS)
 def test_every_dispatching_script_settles_the_text_path_padding_side(script):
-    """The seam is one call, and every script that branches on modality owes it: a script that
-    dispatches without it hands the text collators a left-padding tokenizer."""
+    """A script dispatching without the seam hands the text collators a left-padding tokenizer."""
     tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
     called = {
         node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -358,9 +319,8 @@ def test_every_dispatching_script_settles_the_text_path_padding_side(script):
 
 @pytest.mark.parametrize("script", _DISPATCHING_SCRIPTS)
 def test_data_dispatch_goes_through_the_shared_seam(script):
-    """Each script that branches its data path on modality must ask ``resolve_vlm_run``. A local
-    ``is_vlm_model`` / column check here is a copy that drifts: a checkpoint-keyed one makes the
-    script's text recipes unrunnable while a dataset-keyed one elsewhere keeps working."""
+    """A local ``is_vlm_model`` or column check is a copy that drifts: a checkpoint-keyed one makes the script's
+    text recipes unrunnable."""
     tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
     called = {
         node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -368,7 +328,6 @@ def test_data_dispatch_goes_through_the_shared_seam(script):
     assert called & _VLM_RUN_SEAMS, f"{script} decides its data path without the shared resolve_vlm_run seam"
 
 
-# Every script that loads a possibly-multimodal checkpoint through the modality-aware loader.
 # The modality-aware loader and the preference load built on it, each taking the run's verdict.
 _POLICY_LOADS = ("load_policy_model", "load_preference_models")
 _LOADING_SCRIPTS = sorted(
@@ -384,9 +343,8 @@ def test_the_loading_script_roster_is_not_vacuous():
 
 @pytest.mark.parametrize("script", _LOADING_SCRIPTS)
 def test_every_model_load_takes_the_run_verdict(script):
-    """``vlm_run`` must be the script's own ``resolve_vlm_run`` result: a constant, or the checkpoint's
-    verdict, either refuses the text recipes on a checkpoint shipping no processor or hands an image
-    run a bare tokenizer."""
+    """A constant or the checkpoint's verdict either refuses the text recipes on a checkpoint shipping no processor
+    or hands an image run a bare tokenizer."""
     tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
     verdicts = {
         target.id

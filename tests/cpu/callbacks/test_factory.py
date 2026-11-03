@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""The run's callback roster (:func:`halo.callbacks.factory.build_run_callbacks`): its order, the
-balancing callbacks a resolved mode selects, and the refusal of an unresolved mode.
-
-Run: python tests/cpu/callbacks/test_factory.py
-"""
+"""The roster of :func:`halo.callbacks.factory.build_run_callbacks`: its order, the balancing callback per mode, and
+the refusal of an unresolved mode."""
 
 from types import SimpleNamespace
 

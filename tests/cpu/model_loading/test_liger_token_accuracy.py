@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the token-accuracy contract the toolkit's own Liger appliers must honour.
-
-The SFT trainer, as TRL's ``SFTTrainer.compute_loss`` does, sets ``return_token_accuracy=True`` on every
-forward whenever ``use_liger_kernel`` is on — the toolkit default — and reads ``outputs.token_accuracy``
-back. An applier that returns a plain ``MoeCausalLMOutputWithPast`` has no such field, so
-``mean_token_accuracy`` is silently absent for the whole run.
-
-Run: ``pytest -m cpu tests/cpu/model_loading/test_liger_token_accuracy.py``
-"""
+"""TRL's ``compute_loss`` reads ``outputs.token_accuracy``, which a plain ``MoeCausalLMOutputWithPast`` lacks, so
+``mean_token_accuracy`` would be silently absent for the run."""
 
 from __future__ import annotations
 
@@ -21,23 +14,18 @@ from tests.common.repo import REPO_ROOT
 
 LIGER_PACKAGE = REPO_ROOT / "halo/model_loading/liger"
 
-# The toolkit's own FLCE forward — one for the whole roster (the families upstream Liger does not
-# cover), so nobody else is holding it to this contract.
+# One for the whole roster, so nobody else holds it to this contract.
 TOOLKIT_LCE_FORWARD = LIGER_PACKAGE / "cross_entropy.py"
 
 
 def test_the_output_class_actually_carries_the_field():
-    """Premise check: if Liger renames it, every assertion below would pass vacuously."""
+    """Premise: if Liger renames it, every assertion below passes vacuously."""
     fields = {f.name for f in dataclasses.fields(LigerMoeCausalLMOutputWithPast)}
     assert "token_accuracy" in fields, f"Liger's MoE output no longer carries token_accuracy: {sorted(fields)}"
 
 
 def test_no_family_ships_a_second_fused_forward():
-    """The contract below is enforced on ONE file, so a per-family forward would escape it.
-
-    A bespoke ``lce_forward`` beside the generic one would split the contract across two forwards, with
-    only one of them holding it.
-    """
+    """The contract is enforced on one file, so a per-family forward would escape it."""
     builders = {
         path.name
         for path in LIGER_PACKAGE.glob("*.py")
@@ -64,8 +52,7 @@ def test_the_forward_returns_ligers_output_class():
 
 
 def test_the_forward_forwards_the_accuracy_it_computed():
-    """Computing it and dropping it on the floor is the failure this pins — unpacking the result into
-    ``loss, _, _, _`` discards the accuracy in slot 2."""
+    """Unpacking into ``loss, _, _, _`` discards the accuracy in slot 2."""
     source = TOOLKIT_LCE_FORWARD.read_text(encoding="utf-8")
     tree = ast.parse(source)
 

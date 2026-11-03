@@ -1,17 +1,9 @@
-"""Convert a checkpoint to BF16: a full model with its normalization layers in fp32, or a PEFT adapter.
+"""Convert a checkpoint to BF16: a full model with its normalization layers in fp32, or (``--peft``) a PEFT adapter's
+weights file, without loading its base.
 
-Handles causal-LM, sequence-classification and bare-base checkpoints; ``merge_peft_adapters.py --fp32_norms``
-merges an adapter into the same layout. ``--peft`` rewrites the adapter's weights file at bf16 without
-loading its base and carries the adapter directory's other files across; it writes no model weights and
-removes nothing. ``--verify`` reads the saved safetensors headers and asserts the stored parameters are
-primarily bfloat16, raising on failure; ``--check_inference`` runs a short generation / classification pass
-and reports its output. A full-model save writes ``--output_dir`` fresh: every ``model*.safetensors`` or
-index the completed save did not produce is removed afterwards.
-
-Usage:
-    python scripts/after_training/convert_to_bf16.py --input_dir <src> --output_dir <dst> \\
-        [--task causal_lm|classification|base] [--peft] [--verify] [--check_inference]
-"""
+``--verify`` asserts the saved safetensors headers are primarily bfloat16; ``--check_inference`` runs a short pass. A
+full-model save writes ``--output_dir`` fresh: every ``model*.safetensors`` or index the completed save did not produce
+is removed afterwards."""
 
 import argparse
 

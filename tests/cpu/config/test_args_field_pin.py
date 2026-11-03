@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""Pin the script-arg dataclass field surfaces.
-
-The expectation below is a per-class map of ``dataclasses.fields()`` name → default repr
-(``factory:<value>`` for default_factory fields): every field of ``CommonScriptArguments``, and for each
-subclass the fields it declares or re-defaults over it. A subclass inherits every other field unchanged, so
-the two together pin each class's whole surface. Moving fields or classes between modules, or between a
-class and the field bundles it mixes in (ConversationRenderArguments / GenerationEvalArguments /
-PromptDatasetArguments / ChunkedLogprobsArguments), must not add, drop, or re-default a single field on any
-class — any drift fails here. Field ORDER and metadata/type spellings are deliberately not pinned.
-
-Usage:
-    python tests/cpu/config/test_args_field_pin.py
-"""
+"""Pin the script-arg dataclass field surfaces: every field of ``CommonScriptArguments``, and for each subclass what
+it declares or re-defaults. Moving fields or classes must not add, drop or re-default a field; order and metadata
+are not pinned."""
 
 import dataclasses
 import importlib
@@ -26,8 +16,7 @@ from halo.configs.script_arguments import CommonScriptArguments
 
 
 def _script_argument_classes() -> dict[str, type]:
-    """Every script-argument dataclass under ``halo/configs/``, by name — derived, so a new one is pinned or
-    fails."""
+    """Every script-argument dataclass under ``halo/configs/``, by name, derived so a new one is pinned or fails."""
     found = {}
     for module_info in pkgutil.iter_modules(halo.configs.__path__):
         module = importlib.import_module(f"halo.configs.{module_info.name}")
@@ -39,8 +28,8 @@ def _script_argument_classes() -> dict[str, type]:
 
 _CLASSES = _script_argument_classes()
 
-# Do NOT regenerate casually: an intentional field change must be edited here explicitly, with the
-# diff called out in review.
+# Do not regenerate casually: an intentional field change is edited here explicitly, with the diff called out in
+# review.
 _EXPECTED = {
     "ClassificationScriptArguments": {
         "text_field": "None",
@@ -213,14 +202,9 @@ _EXPECTED = {
 
 
 def _field_defaults(cls):
-    """Field name → default repr, with the toolkit scratch root pinned to ``<data_root>``.
-
-    ``default_factory`` paths (``profiler_output_dir``) are built by ``env.data_path()``, which
-    reads ``env.HALO_DATA_ROOT`` at CALL time — so the pin is made deterministic by *setting* that
-    root for the duration of the call, not by rewriting the result afterwards. Rewriting cannot
-    work: a scratch root of ``/`` (what the documented docker recipe yields on a host whose large
-    volume is the root filesystem) is a prefix of every unrelated absolute default as well.
-    """
+    """Field name -> default repr. ``default_factory`` paths read ``env.HALO_DATA_ROOT`` at call time, so the pin
+    sets that root for the call; rewriting the result cannot work, since a root of ``/`` prefixes every absolute
+    default."""
     with mock.patch.object(env, "HALO_DATA_ROOT", "<data_root>"):
         out = {}
         for f in dataclasses.fields(cls):
@@ -234,8 +218,6 @@ def _field_defaults(cls):
 
 
 def test_every_script_argument_class_is_pinned():
-    """A script-argument class the sweep finds but _EXPECTED does not pin would pass with any field
-    surface."""
     assert set(_CLASSES) == set(_EXPECTED), (
         f"unpinned: {sorted(set(_CLASSES) - set(_EXPECTED))}; pinned but not found: "
         f"{sorted(set(_EXPECTED) - set(_CLASSES))}"

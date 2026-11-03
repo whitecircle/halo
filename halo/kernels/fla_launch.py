@@ -1,6 +1,5 @@
-"""Launch options for FLA's autotuned Triton kernels, set on their ``triton.Autotuner`` objects before a loaded model's
-first launch (:func:`apply_fla_launch_options`, run by ``finalize_loaded_model``): the delta rule's state kernel kept on
-its ``num_warps=2`` configs on Blackwell, and the norm kernels launched at a fixed ``NB`` under ``HALO_FLA_FIXED_NB``."""
+"""Launch options for FLA's autotuned Triton kernels, set before a loaded model's first launch: the delta rule's state
+kernel on its ``num_warps=2`` configs on Blackwell, the norm kernels at a fixed ``NB`` under ``HALO_FLA_FIXED_NB``."""
 
 import ast
 
@@ -27,14 +26,13 @@ _LAUNCH_NB = 1
 
 
 def triton_autotuner(kernel) -> Autotuner | None:
-    """The ``triton.Autotuner`` under ``kernel``'s ``triton.heuristics`` wrappers, or ``None`` if it is not autotuned."""
+    """The ``triton.Autotuner`` under ``kernel``'s ``triton.heuristics`` wrappers, or ``None``."""
     while kernel is not None and not isinstance(kernel, Autotuner):
         kernel = getattr(kernel, "fn", None)
     return kernel
 
 
 def _autotuner(module, kernel_name: str, remedy: str) -> Autotuner:
-    """``module.kernel_name``'s autotuner; raises with ``remedy`` when FLA no longer defines or autotunes it."""
     autotuner = triton_autotuner(getattr(module, kernel_name, None))
     if autotuner is None:
         raise RuntimeError(f"{module.__name__}.{kernel_name} is not an autotuned FLA kernel here; {remedy}")
@@ -42,14 +40,9 @@ def _autotuner(module, kernel_name: str, remedy: str) -> Autotuner:
 
 
 def _restrict_blackwell_state_kernel() -> None:
-    """On sm_10x, autotune the delta rule's state kernel over its ``num_warps=2`` configs only.
-
-    Under Triton 3.6 its ``num_warps=4`` configs give run-to-run different, at some positions wrong, outputs and
-    gradients on packed (``cu_seqlens``) rows, and on B300 also on larger unpacked batches; the autotuner picks them at
-    Qwen3.5/3.6 shapes. Upstream keeps the kernel on ``num_warps=2`` there (fla #953, first released in 0.5.2), so this
-    is a no-op on a release that ships it. Triton keys its autotune disk cache on the config list, so a pick cached
-    from the full list is not reused.
-    """
+    """Under Triton 3.6 the ``num_warps=4`` configs give run-to-run different, at some positions wrong, outputs and
+    gradients on packed rows, and on B300 also on larger unpacked batches; the autotuner picks them at Qwen3.5/3.6
+    shapes. fla #953 (first released in 0.5.2) makes this a no-op. Triton's disk cache keys on the config list."""
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != _BLACKWELL_MAJOR:
         return
     autotuner = _autotuner(*_STATE_KERNEL, "re-check the Blackwell restriction")
@@ -64,8 +57,7 @@ def _restrict_blackwell_state_kernel() -> None:
 
 
 class _FixedNB:
-    """The JIT function an autotuner launches and warms up, with ``NB`` fixed. ``fn`` stays that JIT function: the
-    autotuner's disk-cache key walks ``.fn`` down to it."""
+    """``fn`` stays the JIT function, as the autotuner's disk-cache key walks ``.fn`` down to it."""
 
     def __init__(self, fn: JITFunction):
         self.fn = fn
@@ -100,15 +92,9 @@ def _body_reads(fn: JITFunction, name: str) -> bool:
 
 
 def _fix_norm_nb() -> None:
-    """With :data:`FIXED_NB_FLAG` set, launch the :data:`FIXED_NB_KERNELS` at a fixed ``NB``. Idempotent.
-
-    FLA's l2norm kernels (the q/k norm of the gated delta rule and KDA) and its gated-norm kernels take
-    ``NB = cdiv(rows, 65536)`` as a constexpr that only widens their autotune key. Rows are tokens times heads, so at
-    32 heads a new ``NB`` arrives every 2,048 tokens, and Triton compiles every autotune config again for each value
-    its cache has not seen. The autotuner still tunes on the real ``NB`` (same key, same disk cache) and a callable
-    launch grid still sees it; an unread constexpr compiles to the same binary, so the results are bit-identical. A
-    kernel that no longer takes an unread ``NB`` raises: fixing it would then change what the kernel computes.
-    """
+    """FLA takes ``NB = cdiv(rows, 65536)`` as a constexpr that only widens the autotune key. Rows are tokens times
+    heads, so at 32 heads a new ``NB`` arrives every 2,048 tokens and Triton recompiles every config. An unread
+    constexpr compiles to the same binary, so results are bit-identical; a kernel that reads ``NB`` raises."""
     if not env_flag(FIXED_NB_FLAG):
         return
     remedy = f"unset {FIXED_NB_FLAG} or update FIXED_NB_KERNELS"
@@ -127,7 +113,6 @@ def _fix_norm_nb() -> None:
 
 
 def apply_fla_launch_options() -> None:
-    """Set every FLA launch option this process takes, each a no-op where it does not apply. Idempotent; run before a
-    loaded model's first FLA launch."""
+    """Idempotent; run before a loaded model's first FLA launch."""
     _restrict_blackwell_state_kernel()
     _fix_norm_nb()

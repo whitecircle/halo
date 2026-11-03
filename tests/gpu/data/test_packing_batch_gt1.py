@@ -1,31 +1,8 @@
 #!/usr/bin/env python
-"""Packing at ``per_device_train_batch_size > 1``: real kernel, real ranks.
+"""Packing at batch > 1: only a B>1 row reaches a varlen kernel and FSDP2 backward in the flattened shape.
 
-The CPU suite covers the collator's B>1 flattening thoroughly (shape, loss equivalence, completion
-masking, pad tails). This covers what happens AFTER it: ``flatten_packed_batch`` concatenates the
-mini-batch into one ``[1, B*max_length]`` row, and a single-row collate — what every other GPU
-packing test does — makes that reshape a no-op, so only a B>1 row reaches a varlen attention kernel
-and an FSDP2 backward across ranks in that shape.
-
-Two things only a GPU run can check:
-
-1. **The row seam.** Concatenating two packed rows creates a boundary the B=1 path never builds —
-   row 0's last document butting directly against row 1's first (the flatten drops inter-row
-   padding). Isolation there rests on row 1's position_ids restarting at the seam. If that is
-   wrong, a document's logits shift depending on what preceded it in the batch, silently, with the
-   loss still looking plausible.
-2. **The collective path.** A packed B>1 step changes the attention shape every rank hands its
-   kernel. The failure mode is not a wrong number but a hang, so the assertion is that a full
-   forward/backward/step loop completes and produces finite gradients — the manifest timeout is
-   what fails when it does not.
-
-Both varlen kernels available on the host are covered, because the production default differs by
-architecture (FA4 on Blackwell, FA2 elsewhere) and the shape handling is per-kernel. On Blackwell an
-FA4 that fails to import fails the test rather than dropping out of the covered set.
-
-Usage::
-
-    torchrun --nproc_per_node=2 tests/gpu/data/test_packing_batch_gt1.py
+A wrong position_ids restart at the row seam shifts logits silently. A wider row changes the shape every rank hands its
+kernel, and that failure is a hang, so the manifest timeout is the assertion.
 """
 
 import torch
@@ -41,8 +18,8 @@ from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
 
 MODEL = QWEN3_0_6B
-# Rows of UNEQUAL length: collation pads row 0 and the flatten must drop that padding, so the seam
-# is row 0's last real token against row 1's first. Equal-length rows would sidestep that path.
+# Unequal lengths: collation pads row 0 and the flatten must drop that padding, so the seam is real token against real
+# token.
 DOCS_ROW0 = ["The capital of France is Paris.", "Water boils at one hundred degrees."]
 DOCS_ROW1 = [
     "Quantum mechanics describes the behaviour of subatomic particles in detail.",
@@ -51,11 +28,10 @@ DOCS_ROW1 = [
 
 
 def _varlen_impls() -> list[str]:
-    """The varlen kernels this host can actually dispatch, production default first."""
     impls = []
     if is_blackwell_gpu():
-        # Unguarded: the Blackwell image always ships FA4, its production default, so an import
-        # failure is a broken install, and swallowing it would cover FA2 alone and still pass.
+        # Unguarded: the Blackwell image always ships FA4, so swallowing an import failure would cover FA2 alone and
+        # pass.
         from flash_attn.cute import flash_attn_func  # noqa: PLC0415, F401
 
         impls.append("flash_attention_4")
@@ -85,14 +61,8 @@ def _logits_for(model, collator, rows: list[list[list[int]]], device) -> torch.T
 
 
 def test_row_seam_does_not_change_documents(rank: int, impl: str) -> bool:
-    """Row 0's logits must not depend on the CONTENT of the row concatenated after it.
-
-    The comparison holds the flattened shape fixed and swaps only row 1's tokens. Comparing B=2
-    against B=1 instead would prove nothing: the shorter row re-tiles the kernel and reorders bf16
-    accumulation, so a difference there is expected and a leak would be indistinguishable from it.
-    With the shape pinned, every remaining difference over row 0 is attention reaching across the
-    seam — the one thing B>1 packing adds that the single-row path never builds.
-    """
+    """Row 0's logits must not depend on the content of the row after it. The flattened shape stays fixed: B=2 against
+    B=1 re-tiles the kernel and reorders bf16 accumulation, so a leak would be indistinguishable there."""
     device = f"cuda:{torch.cuda.current_device()}"
     tok = AutoTokenizer.from_pretrained(MODEL)
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16, attn_implementation=impl).to(device)
@@ -101,8 +71,7 @@ def test_row_seam_does_not_change_documents(rank: int, impl: str) -> bool:
     rows = _rows(tok)
     row0, row1 = rows[0], rows[1]
 
-    # A same-length, different-content row 1: token-for-token as long as the original (so the pack
-    # layout and the flattened width are byte-identical), built from other vocabulary.
+    # Token for token as long as the original, so the pack layout and flattened width are byte-identical.
     alt = [[(t + 977) % tok.vocab_size for t in doc] for doc in row1]
     assert [len(d) for d in alt] == [len(d) for d in row1], "variant must not change the packed layout"
 
@@ -116,7 +85,7 @@ def test_row_seam_does_not_change_documents(rank: int, impl: str) -> bool:
         del model
         cleanup_memory()
 
-    # Identical shape and identical work over row 0: a correct kernel recomputes it bit-for-bit.
+    # Identical shape and work over row 0: a correct kernel recomputes it bit for bit.
     ok = drift == 0.0
     log(f"[{impl}] row-seam max |Δlogit| over row 0 = {drift:.6f} -> {'PASS' if ok else 'FAIL'}", rank=rank)
     if not ok:
@@ -129,13 +98,8 @@ def test_row_seam_does_not_change_documents(rank: int, impl: str) -> bool:
 
 
 def test_fsdp2_backward_completes_at_b2(rank: int, world_size: int, impl: str) -> bool:
-    """A packed B=2 forward/backward/step must complete on every rank with finite grads.
-
-    Regression guard for the shape the trainer actually runs: packing raises tokens per row, and a
-    kernel or collective that mishandles the wider row stalls rather than erroring. Reaching the end
-    of this loop at all is the assertion the timeout enforces; finite grads make it more than a
-    liveness check.
-    """
+    """A kernel or collective mishandling the wider row stalls rather than erroring, so reaching the end is the
+    assertion."""
     device = f"cuda:{torch.cuda.current_device()}"
     tok = AutoTokenizer.from_pretrained(MODEL)
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16, attn_implementation=impl).to(device)
@@ -147,8 +111,7 @@ def test_fsdp2_backward_completes_at_b2(rank: int, world_size: int, impl: str) -
 
     ok = True
     try:
-        # Ranks hold DIFFERENT row orders: divergent per-rank document layouts are what a shared
-        # kernel-compile or collective assumption would desync on, and identical batches would hide it.
+        # Different row orders per rank: a shared kernel-compile or collective assumption would desync on them.
         local = rows if rank % 2 == 0 else list(reversed(rows))
         batch = collator.torch_call([_feature(r) for r in local])
         batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
@@ -161,8 +124,8 @@ def test_fsdp2_backward_completes_at_b2(rank: int, world_size: int, impl: str) -
                 log(f"FAIL: [{impl}] non-finite gradient at step {step}", rank=rank)
                 ok = False
             model.zero_grad(set_to_none=True)
-            # Every rank runs every iteration: an early exit on one rank would strand the others in
-            # this barrier, turning a reported failure into the hang this test exists to detect.
+            # Every rank runs every iteration: an early exit would strand the others in this barrier, turning a failure
+            # into a hang.
             dist.barrier()
         log(f"[{impl}] fsdp2 packed-B2 loop completed on {world_size} ranks -> {'PASS' if ok else 'FAIL'}", rank=rank)
     finally:

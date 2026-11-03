@@ -1,19 +1,8 @@
 #!/usr/bin/env python
-"""Test: DistributedSelfDistillationTrainer (offline SDPG approximation) on a text LLM — single-GPU smoke.
+"""DistributedSelfDistillationTrainer on a text LLM, single-GPU smoke: finite losses and a recorded opd_loss.
 
-Runs the text self-distillation path end-to-end: SelfDistillTextCollator builds the student
-batch plus the privileged-hint teacher_* branch, and the trainer runs the student and
-teacher forwards for L = L_sft + beta(k) * L_OPD. It checks only that every configured step ran,
-that every logged step loss is finite and that the opd_loss metric was recorded (the
-privileged-teacher forward ran); it does not compare either loss term against a reference. The
-student/teacher response-token alignment is pinned on CPU by
-tests/cpu/data/test_self_distill_collator.py, and the objective by
+No loss term is compared here; alignment and objective are pinned by tests/cpu/data/test_self_distill_collator.py and
 tests/cpu/trainers/test_self_distillation_trainer.py.
-
-Model defaults to Qwen3-0.6B (CI); set HALO_TEST_MODEL to override (e.g. Qwen/Qwen3.5-4B).
-
-Run:
-    torchrun --nproc_per_node=1 tests/gpu/trainers/other/test_self_distillation_text.py
 """
 
 import torch
@@ -36,7 +25,6 @@ NUM_TRAIN_STEPS = 4
 
 
 def create_text_self_distill_dataset(n: int) -> Dataset:
-    """Synthetic raw conversations with a privileged ``answer`` field (arithmetic task)."""
     rows = []
     for i in range(n):
         a, b = i % 7, (i * 3) % 5
@@ -123,7 +111,7 @@ def run(ctx) -> dict:
         "checks": {
             "steps_completed": trainer.state.global_step == NUM_TRAIN_STEPS,
             "losses_finite": bool(losses) and all(torch.isfinite(torch.tensor(v)) for v in losses),
-            # No opd_loss metric ⇒ the privileged-teacher forward never ran.
+            # No opd_loss metric means the privileged-teacher forward never ran.
             "opd_loss_recorded": bool(opd),
         }
     }

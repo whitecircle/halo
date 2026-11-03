@@ -13,8 +13,7 @@ from halo.trainers.parallelism.pipeline_rules import reject_pp_compute_metrics, 
 
 
 def require_processing_class(processing_class):
-    """The tokenizer behind ``processing_class`` (a VLM ``ProcessorMixin`` keeps its token ids on an inner
-    one); refuses a missing ``processing_class``."""
+    """The tokenizer behind ``processing_class`` (a VLM ``ProcessorMixin`` keeps its token ids on an inner one)."""
     if processing_class is None:
         raise ValueError(
             "OfflineGRPOTrainer requires processing_class: the stored prompts and completions are "
@@ -24,8 +23,8 @@ def require_processing_class(processing_class):
 
 
 def reject_inert_max_length(args, parallelism_config) -> None:
-    """Refuse ``max_length`` off pipeline parallelism, the only mode that reads it: off PP the window is
-    the two caps the tokenization applies, so a set ``max_length`` would read as a cap and change nothing."""
+    """Off PP the window is the two caps the tokenization applies, so a set ``max_length`` would read as a cap and
+    change nothing."""
     if parallelism_config is not None and parallelism_config.is_pp_mode:
         return
     if args.max_length is None:
@@ -39,11 +38,8 @@ def reject_inert_max_length(args, parallelism_config) -> None:
 
 
 def reject_offline_pp_options(args, parallelism_config, peft_config, compute_metrics) -> None:
-    """Refuse the offline-GRPO options pipeline parallelism cannot honor, before the model load.
-
-    Its own gate rather than the spine's ``_reject_unsupported_pp_options`` hook: ``peft_config`` and
-    ``compute_metrics`` are explicit constructor parameters the hook never sees.
-    """
+    """Its own gate rather than the spine's ``_reject_unsupported_pp_options`` hook, which never sees ``peft_config``
+    and ``compute_metrics``, explicit constructor parameters."""
     if parallelism_config is None or not parallelism_config.is_pp_mode:
         return
     if args.use_chunked_grpo_logprobs:
@@ -82,8 +78,8 @@ def reject_offline_pp_options(args, parallelism_config, peft_config, compute_met
 
 
 def resolve_pp_max_length(args, parallelism_config) -> int | None:
-    """The fixed shape every pipeline batch pads to: ``max_length``, or the two caps' sum when it is unset,
-    since the fixed shape is what bounds the P2P buffers. Off pipeline parallelism, ``max_length`` as set."""
+    """The fixed shape every pipeline batch pads to, which bounds the P2P buffers: ``max_length``, or the two caps' sum
+    when it is unset. Off PP, ``max_length`` as set."""
     if parallelism_config is None or not parallelism_config.is_pp_mode:
         return args.max_length
     if args.max_length is None or args.max_length <= 0:
@@ -92,7 +88,6 @@ def resolve_pp_max_length(args, parallelism_config) -> int | None:
 
 
 def reject_offline_cp_options(parallelism_config, ref_model, reference_mode: ReferenceMode) -> None:
-    """Refuse the CP references and adapters offline GRPO does not support, before allocating policy weights."""
     if parallelism_config is None or not parallelism_config.is_cp_mode:
         return
     if reference_mode is not ReferenceMode.RUN_START:
@@ -120,8 +115,7 @@ def reject_encoder_decoder(model) -> None:
 def reject_unsupported_reference_input(
     train_dataset, eval_dataset, *, active: bool = True, presharded: bool = False
 ) -> None:
-    """COLLECTIVE. Refuse the splits a run-start full-finetuning reference sweep cannot score; inert
-    unless ``active``."""
+    """COLLECTIVE; inert unless ``active``. Refuse the splits a run-start reference sweep cannot score."""
     if not active:
         return
     reason = None

@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the prefix-LM (PaliGemma) batches: every trained token lands in the causal suffix of
-``token_type_ids``, image and prompt in the bidirectional prefix, a batch or template the processor would corrupt is
-refused, and the newline the processor appends trains nowhere.
-
-PaliGemma's processor marks no suffix in a rendered conversation (all 0: one bidirectional prefix), puts ``<bos>``
-after each row's last ``<image>`` (into the text of a row without one) and appends ``\\n`` to each row.
-
-Run: ``python tests/cpu/data/test_prefix_lm_collators.py`` (or ``pytest -m cpu``).
-"""
+"""The prefix-LM (PaliGemma) batches: every trained token lands in the causal suffix of ``token_type_ids``, image
+and prompt in the bidirectional prefix, a batch or template the processor would corrupt is refused, and the
+newline the processor appends trains nowhere."""
 
 from __future__ import annotations
 
@@ -59,8 +53,7 @@ def test_the_vlm_collator_puts_every_trained_token_in_the_suffix(completions_onl
 
 
 def test_a_model_that_is_no_prefix_lm_keeps_the_processor_token_type_ids():
-    """Anti-vacuity: the rewrite is keyed on the model's family, so Gemma 3's image markers are never replaced. The
-    processor's own ``token_type_ids`` for a rendered conversation are all 0."""
+    """The rewrite is keyed on the model's family, so Gemma 3's image markers are never replaced."""
     processor = tiny_paligemma_processor()
     assert not has_prefix_lm_attention(Gemma3Config())
     batch = paligemma_collator(processor, Gemma3Config(), completions_only=True)([digit_row()])
@@ -93,8 +86,8 @@ def test_a_row_without_an_image_is_refused_on_a_prefix_lm():
 
 
 def test_the_processor_splices_bos_into_a_text_row_of_an_image_batch():
-    """Anti-vacuity: the refusal guards a real corruption. On a model that is no prefix LM the same mixed batch
-    collates, and the text row's ``What`` comes out split around a spliced ``<bos>``."""
+    """On a model that is no prefix LM the same mixed batch collates, and the text row's ``What`` comes out split
+    around a spliced ``<bos>``."""
     processor = tiny_paligemma_processor()
     batch = paligemma_collator(processor, Gemma3Config(), completions_only=False)([digit_row(), text_row()])
     tokens = processor.tokenizer.convert_ids_to_tokens(batch["input_ids"][1].tolist())
@@ -124,8 +117,7 @@ def test_a_row_holds_the_one_bos_the_processor_puts_after_the_last_image():
 
 
 def test_a_rendered_bos_reaches_the_row_beside_the_processors_own():
-    """Anti-vacuity: the refusal guards a real duplicate. On a model that is no prefix LM the same template builds,
-    and its row holds the rendered ``<bos>`` and the processor's."""
+    """On a model that is no prefix LM the same template builds, and its row holds both ``<bos>`` tokens."""
     processor = _bos_rendering_processor()
     batch = paligemma_collator(processor, Gemma3Config(), completions_only=False)([digit_row()])
     assert int((batch["input_ids"][0] == processor.tokenizer.bos_token_id).sum()) == 2
@@ -151,7 +143,7 @@ def test_the_newline_the_processor_appends_trains_nowhere(completions_only):
 
 
 def test_the_processor_appends_a_newline_after_the_conversation():
-    """Anti-vacuity: on a model that is no prefix LM the appended newline closes the row and trains."""
+    """On a model that is no prefix LM the appended newline closes the row and trains."""
     processor = _newline_keeping_processor()
     batch = paligemma_collator(processor, Gemma3Config(), completions_only=False)([digit_row()])
     assert batch["labels"][0, -1] == processor.tokenizer.convert_tokens_to_ids("\n")

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: an EP layer labels its phases and times nothing.
-
-Every EP layer wraps its dispatch / expert-compute / combine phases in ``self._perf``, set in
-``EPMoELayerBase._init_ep_state`` to ``torch.profiler.record_function``: a label with no device work,
-so the ``ep.*`` spans appear in a profiler trace at no cost. Only ``benchmark_sft_ep.py --comm_profile``
-swaps in :meth:`EPSpanTimer.time_operation` (two ``torch.cuda.synchronize()`` per phase per forward).
-
-Wiring the timer by default costs a per-phase full-device sync on every training step of every EP run,
-a throughput regression with no failing test and no error message. So the layer's spans must be the
-profiler label.
-
-Run: ``pytest -m cpu tests/cpu/parallelism/test_ep_perf_timing.py``
-"""
+"""An EP layer labels its phases and times nothing unless ``--comm_profile``: the timer by default costs a per-phase
+full-device sync on every step, a regression with no error message."""
 
 from __future__ import annotations
 
@@ -25,8 +14,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class _PerfProbeLayer(EPMoELayerBase):
-    """Concrete, and built through the state constructor alone: the ``__init__`` template above it
-    wants a real HF MoE block, while the ``_perf`` attribute under test lives entirely in the state."""
+    """Built through the state constructor alone, since the ``__init__`` template wants a real HF MoE block."""
 
     def __init__(self, ep_config, hidden_dim):
         self._init_ep_state(ep_config, hidden_dim)
@@ -36,11 +24,7 @@ class _PerfProbeLayer(EPMoELayerBase):
 
 
 def _ep_layer(monkeypatch: pytest.MonkeyPatch) -> EPMoELayerBase:
-    """An EP layer built through the REAL state constructor, with only its EP plumbing stubbed.
-
-    The dispatcher is the one constructor dependency needing live EP process groups; the ``_perf``
-    attribute under test is set after it and reads nothing from it.
-    """
+    """The dispatcher needs live EP groups; ``_perf`` is set after it and reads nothing from it."""
     monkeypatch.setattr(layer_module, "DeepEPDispatcher", lambda *args, **kwargs: object())
     ep_config = SimpleNamespace(
         num_experts=8,

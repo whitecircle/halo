@@ -1,8 +1,5 @@
-"""Which modules produce ``router_logits``, and whether the run may collect them.
-
-Read off transformers' own ``_can_record_outputs`` registry and the forward the instance runs, so the load metrics,
-the router aux-loss gradient and the balancing resolution see exactly what an ``output_router_logits`` capture hooks.
-"""
+"""Which modules produce ``router_logits``, read off transformers' ``_can_record_outputs`` registry and the forward the
+instance runs, so every consumer sees exactly what an ``output_router_logits`` capture hooks."""
 
 from __future__ import annotations
 
@@ -16,18 +13,14 @@ from halo.models.unwrapping import base_transformers_model
 
 ROUTER_LOGITS_KEY = "router_logits"
 # Stamped where router logits must stay off (EP layers that never populate them, aux-loss paths that would crash).
-# A toolkit stamp: no export carries it, and a loader drops one a checkpoint carries.
+# No export carries this toolkit stamp, and a loader drops one a checkpoint carries.
 ROUTER_LOGITS_FORCED_OFF_ATTR = f"{TOOLKIT_STAMP_PREFIX}router_logits_forced_off"
 
 
 @dataclass(frozen=True)
 class DeclaredRouter:
-    """One router module the ``router_logits`` capture records, and how to read it.
-
-    ``logits_index`` is the tuple position the recorder captures. ``folds_discard_slot`` marks a router whose indices
-    map skipped tokens onto a real expert id, so only its logits, which keep the trailing discard column, express the
-    routing.
-    """
+    """``folds_discard_slot`` marks a router whose indices map skipped tokens onto a real expert id, so only its
+    logits, which keep the trailing discard column, express the routing."""
 
     name: str
     module: torch.nn.Module
@@ -36,19 +29,16 @@ class DeclaredRouter:
 
 
 def declares_router_logits(module: torch.nn.Module) -> bool:
-    """Whether ``module``'s class declares a ``router_logits`` capture in ``_can_record_outputs``."""
     return (getattr(module, "_can_record_outputs", None) or {}).get(ROUTER_LOGITS_KEY) is not None
 
 
 def has_discard_expert_slot(model) -> bool:
-    """Whether the model's router reserves a trailing discard/null expert slot (``_has_discard_expert_slot`` on its
-    class, Zaya). The slot must never receive tokens, so the balancing update and the load metrics leave it out."""
+    """Zaya. The slot must never receive tokens, so the balancing update and the load metrics leave it out."""
     return any(getattr(type(module), "_has_discard_expert_slot", False) for module in model.modules())
 
 
 def _router_logits_recorders(model) -> list[tuple]:
-    """Every ``router_logits`` capture spec in the module tree, de-duplicated: a composite model declares it on the
-    sub-model owning the routers and repeats it on the causal-LM wrapper."""
+    """De-duplicated, as a composite declares it on the sub-model owning the routers and repeats it on the wrapper."""
     specs: dict[tuple, None] = {}
     for module in model.modules():
         if not declares_router_logits(module):
@@ -64,10 +54,7 @@ def _router_logits_recorders(model) -> list[tuple]:
 
 
 def declared_routers(model) -> list[DeclaredRouter]:
-    """The routers the ``router_logits`` capture records, in module-tree (decoder-layer) order.
-
-    Matching mirrors transformers' installer (target class, else a class-name suffix, refined by ``layer_name``).
-    """
+    """Matching mirrors transformers' installer (target class, else a class-name suffix, refined by ``layer_name``)."""
     specs = _router_logits_recorders(model)
     routers: list[DeclaredRouter] = []
     for name, module in model.named_modules():
@@ -85,23 +72,17 @@ def declared_routers(model) -> list[DeclaredRouter]:
 
 
 def mark_router_logits_forced_off(config) -> None:
-    """Record on every config level that ``output_router_logits`` must not be (re-)enabled. Run-scoped: an exported
-    stamp would suppress ``moe/*`` metrics in every later run loading the artifact."""
+    """Run-scoped, as an exported stamp would suppress ``moe/*`` metrics in every later run loading the artifact."""
     set_config_field_run_scoped(config, ROUTER_LOGITS_FORCED_OFF_ATTR, True)
 
 
 def router_logits_forced_off(config) -> bool:
-    """Whether :func:`mark_router_logits_forced_off` stamped this config."""
     return bool(get_config_field(config, ROUTER_LOGITS_FORCED_OFF_ATTR, False))
 
 
 def honors_router_logits_flag(model) -> bool:
-    """Whether setting ``config.output_router_logits`` actually reaches this model's aux-loss term.
-
-    HF resolves a config-backed forward flag only on an explicit parameter, so a forward that reads it from ``kwargs``
-    only never consults the config. Probed on the head under every wrapper and on the forward the instance runs: a
-    Liger fused loss can rebind a parameter-less forward on the instance alone.
-    """
+    """HF resolves a config-backed forward flag only on an explicit parameter, so a forward reading it from ``kwargs``
+    never consults the config. Probed on the instance, where a Liger fused loss can rebind a parameter-less forward."""
     forward = getattr(base_transformers_model(model), "forward", None)
     if forward is None:
         return False

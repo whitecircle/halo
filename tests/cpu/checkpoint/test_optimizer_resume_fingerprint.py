@@ -1,21 +1,5 @@
-"""CPU tests for optimizer-state continuity on resume: the topology fingerprint and the
-OptimizerShardStore gate that decides restore vs warm-restart vs torn-raise.
-
-Per-rank optimizer shards restore only into the exact topology that wrote them, so
-``optimizer_meta.pt`` carries an :class:`OptimizerStateFingerprint` and the load path branches:
-
-- fingerprint matches → full restore (EP/CP included);
-- fingerprint mismatch → warm restart with a warning naming the mismatched fields;
-- shards present with no fingerprint in the meta (a pre-fingerprint checkpoint) → raise;
-- shards present with no meta at all (an interrupted save) → raise, unless the run opted in;
-- shards missing everywhere with no trace they were written → warm restart (save_only_model);
-- shards missing everywhere while other ranks' shard files or a fingerprint-matched meta prove
-  state WAS written (a wholesale rank→node permutation on a non-shared FS) → raise;
-- shards missing on a subset under a matching fingerprint → torn checkpoint → raise;
-- non-sharded modes (no mixin FSDP2, no pure TP — replicated optimizer state) → base Trainer path.
-
-Consensus outcomes that cannot occur single-process are simulated by monkeypatching ``rank_consensus``.
-"""
+"""The topology fingerprint and the OptimizerShardStore gate deciding restore vs warm restart vs torn raise.
+Consensus outcomes that cannot occur single-process are simulated by monkeypatching ``rank_consensus``."""
 
 import os
 
@@ -53,9 +37,7 @@ SAVED_BY_1_1_0 = {
 
 
 def _stub_consensus(patcher, fake) -> None:
-    """Stub the consensus the resume gates ask, in BOTH modules that ask it: the store's own gates and the
-    shared reads (``consensus_read``). Stubbing one alone answers half the gates from a real single-process
-    world and the rest from the stub."""
+    """Stubs both modules that ask; stubbing one answers half the gates from a real single-process world."""
     patcher.setattr(optimizer_mod, "rank_consensus", fake)
     patcher.setattr(coordination_mod, "rank_consensus", fake)
 
@@ -123,7 +105,6 @@ def _ctx(
 
 
 def _write_checkpoint(tmp_path, *, shard=True, meta=True, fingerprint=None, num_ranks=1, osd=None):
-    """Write a minimal optimizer checkpoint: rank-0 shard and/or meta (with optional fingerprint)."""
     if shard:
         payload = osd if osd is not None else {"state": {}, "param_groups": []}
         torch.save(payload, os.path.join(tmp_path, "optimizer_shard_00000.pt"))
@@ -164,16 +145,14 @@ def test_dict_round_trip():
 
 
 def test_the_saved_fingerprint_keeps_the_keys_1_1_0_wrote():
-    """The on-disk keys, in order, are the ones every 1.x meta carries (``use_hsdp`` saved as ``hsdp``): a
-    renamed key would warm-restart every existing shard set."""
+    """A renamed key would warm-restart every existing shard set (``use_hsdp`` is saved as ``hsdp``)."""
     live = _live_fp(torch.optim.AdamW(_TinyModel().parameters()))
     assert list(live.to_dict()) == list(SAVED_BY_1_1_0["fingerprint"])
 
 
 @pytest.mark.parametrize("key", [key for key in SAVED_BY_1_1_0["fingerprint"] if key != "expert_replica_size"])
 def test_a_saved_fingerprint_missing_a_key_mismatches(key):
-    """A meta lacking any key but the replica size differs from every live run and warm-restarts (raises
-    under PP) as any topology change does."""
+    """Any key but the replica size: it warm-restarts, or raises under PP, as a topology change does."""
     live = _live_fp(_sgd(_TinyModel()))
     saved = {name: value for name, value in live.to_dict().items() if name != key}
     assert live.mismatches(saved) == [f"{key}: saved='<absent>' current={live.to_dict()[key]!r}"]
@@ -185,10 +164,8 @@ def test_a_saved_field_the_live_run_lacks_mismatches():
 
 
 def test_shape_preserving_topology_knobs_are_fingerprinted():
-    """These four change WHICH rank owns which slice (ep_scope, nvlink_domain_size), what the expert
-    params are NAMED (use_grouped_gemm), or the FSDP mesh rank (use_hsdp) while every tensor shape stays
-    identical — so nothing downstream can catch them. Without them in the fingerprint the restore
-    succeeds and reports success on permuted or silently reinitialized state."""
+    """They change slice ownership, param names or the mesh rank while every shape stays identical, so nothing
+    downstream catches them."""
     sgd = _sgd(_TinyModel())
     live = _live_fp(sgd, _StubParallelismConfig(ep_size=8), world_size=16)
     for knob, other, key in (
@@ -223,8 +200,6 @@ def test_matching_fingerprint_restores(tmp_path, monkeypatch):
 
 
 def test_a_meta_written_by_1_1_0_resumes_exactly(tmp_path, monkeypatch):
-    """A 1.1.0 shard set restores into the same topology: its meta passes every gate, so the moments
-    restore rather than warm-restarting."""
     model = _TinyModel()
     optimizer = torch.optim.AdamW(model.parameters())
     _write_checkpoint(tmp_path, fingerprint=SAVED_BY_1_1_0["fingerprint"], num_ranks=SAVED_BY_1_1_0["num_ranks"])
@@ -257,8 +232,7 @@ def test_mismatched_fingerprint_warm_restarts_naming_fields(tmp_path, monkeypatc
 
 
 def test_mismatched_optimizer_class_warm_restarts(tmp_path, monkeypatch, caplog):
-    """Shards written by a different optimizer class carry a different state schema — never load
-    them into the live optimizer."""
+    """A different optimizer class has a different state schema."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, fingerprint={**_live_fp(optimizer).to_dict(), "optimizer_class": "AdamWBF16"})
@@ -273,13 +247,8 @@ def test_mismatched_optimizer_class_warm_restarts(tmp_path, monkeypatch, caplog)
 
 
 def test_meta_without_fingerprint_refuses_the_resume(tmp_path, monkeypatch):
-    """A num_ranks-only meta (a pre-fingerprint checkpoint) must RAISE, never restore.
-
-    The rank-count gate it would otherwise fall back to passes for any save at the same world size,
-    whatever its ep_scope / use_grouped_gemm / optimizer class — i.e. it admits exactly the permuted
-    and silently-reinitialized restores the fingerprint exists to catch. The message must name the
-    checkpoint and the deletion opt-in, since there is no warm-restart arm to fall into.
-    """
+    """The rank-count gate passes for any save at the same world size, admitting the permuted restores the
+    fingerprint exists to catch."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, fingerprint=None)
@@ -295,11 +264,7 @@ def test_meta_without_fingerprint_refuses_the_resume(tmp_path, monkeypatch):
 
 
 class _ModelWithGradFreeParam(nn.Module):
-    """A trainable parameter that never receives a gradient, so no optimizer ever gives it state.
-
-    GptOss attention sinks under a sink-dropping kernel are the live instance; the parameter is
-    named through the constructor because nothing about the property is tied to that spelling.
-    """
+    """GptOss attention sinks under a sink-dropping kernel are the live instance."""
 
     def __init__(self, param_name: str):
         super().__init__()
@@ -308,7 +273,6 @@ class _ModelWithGradFreeParam(nn.Module):
 
 
 def _shard(*, stateful=("fc.weight",), tracked=("fc.weight",)):
-    """An optimizer shard in ``get_optimizer_state_dict``'s shape: FQN-keyed state + FQN param_groups."""
     return {
         "state": {name: {"momentum_buffer": torch.zeros(1)} for name in stateful},
         "param_groups": [{"params": list(tracked), "lr": 0.1}],
@@ -317,13 +281,8 @@ def _shard(*, stateful=("fc.weight",), tracked=("fc.weight",)):
 
 @pytest.mark.parametrize("param_name", ("sinks", "learned_scale"))
 def test_a_param_the_shard_tracked_without_state_is_not_a_coverage_failure(tmp_path, monkeypatch, param_name):
-    """The gate must read the shard's own param_groups, not a hardcoded family parameter name.
-
-    An optimizer creates state lazily on the first gradient, so a tracked-but-never-updated
-    parameter is simply absent from ``state`` — with nothing to restore and no drift to report.
-    Excluding it by NAME puts per-family knowledge in a generic path and covers exactly one
-    family's spelling: any other grad-free parameter aborts every resume with a false drift report.
-    """
+    """Optimizers create state lazily, so a tracked-but-never-updated param is absent from ``state``; excluding by
+    name would cover one family's spelling."""
     model = _ModelWithGradFreeParam(param_name)
     optimizer = _sgd(model)
     _write_checkpoint(
@@ -340,8 +299,8 @@ def test_a_param_the_shard_tracked_without_state_is_not_a_coverage_failure(tmp_p
 
 
 def test_a_param_the_shard_never_tracked_fails_the_coverage_gate(tmp_path, monkeypatch):
-    """The other half: a parameter in NEITHER state nor param_groups is a real layout drift (a
-    rename, a different stage split) that ``strict=False`` would silently reinitialize."""
+    """A param in neither state nor param_groups is real layout drift that ``strict=False`` would silently
+    reinitialize."""
     model = _ModelWithGradFreeParam("sinks")
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, osd=_shard(), fingerprint=_live_fp(optimizer).to_dict())
@@ -352,8 +311,6 @@ def test_a_param_the_shard_never_tracked_fails_the_coverage_gate(tmp_path, monke
 
 
 def test_no_shards_no_meta_warm_restarts(tmp_path, monkeypatch, caplog):
-    """A checkpoint carrying no optimizer state at all (save_only_model) resumes with a warm restart,
-    not an error — no shard exists to be gated."""
     model = _TinyModel()
     optimizer = _sgd(model)
     restore = _Recorder()
@@ -367,12 +324,10 @@ def test_no_shards_no_meta_warm_restarts(tmp_path, monkeypatch, caplog):
 
 
 def test_partial_shards_with_matching_fingerprint_raise_torn(tmp_path, monkeypatch):
-    """Fingerprint match ⇒ a complete shard set was written; my shard missing while a peer has one
-    is a torn copy — restoring moments on some ranks only would silently diverge replicas."""
+    """Restoring moments on some ranks only would silently diverge replicas."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, shard=False, fingerprint=_live_fp(optimizer).to_dict())
-    # Peer reports its shard present: consensus (all_ok=local, any_ok=True).
     _stub_consensus(monkeypatch, lambda local: RankConsensus(local, True))
 
     with pytest.raises(RuntimeError, match="torn"):
@@ -380,9 +335,7 @@ def test_partial_shards_with_matching_fingerprint_raise_torn(tmp_path, monkeypat
 
 
 def test_partial_shards_without_a_meta_are_refused_as_torn(tmp_path, monkeypatch):
-    """A peer holds a shard but there is no meta at all: the save stopped between its shards and its
-    meta, which is a torn checkpoint — not a topology change to warm-restart over, and not the
-    unfingerprinted-shards case either. The torn gate runs ahead of the rank-count gate."""
+    """The save stopped between shards and meta. The torn gate runs ahead of the rank-count gate."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, shard=False, meta=False)
@@ -406,10 +359,8 @@ def test_partial_shards_without_a_meta_are_refused_as_torn(tmp_path, monkeypatch
 
 
 def test_all_shards_missing_under_matched_meta_raises_permutation(tmp_path, monkeypatch):
-    """No rank sees its own shard, but the meta's fingerprint MATCHED this run — the complete shard
-    set was written and is merely elsewhere (on a non-shared FS: a restart permuted the rank→node
-    placement wholesale). Warm-restarting here would silently reset Adam moments while weights, step
-    and LR schedule resumed."""
+    """The complete set is merely elsewhere (a restart permuted rank→node); warm-restarting would silently reset
+    Adam moments."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, shard=False, fingerprint=_live_fp(optimizer).to_dict())
@@ -420,9 +371,8 @@ def test_all_shards_missing_under_matched_meta_raises_permutation(tmp_path, monk
 
 
 def test_other_ranks_shard_files_raise_permutation_without_fingerprint(tmp_path, monkeypatch):
-    """The glob signal alone: no rank holds its OWN shard, so the unfingerprinted-shards gate does
-    not fire, but another rank's shard file sitting in this node's checkpoint dir proves the state
-    exists — misplaced, not absent."""
+    """No rank holds its own shard, so the unfingerprinted gate stays quiet; another rank's file proves the state
+    exists."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, shard=False, fingerprint=None)
@@ -449,8 +399,7 @@ def test_ep_and_cp_modes_restore_optimizer_state(tmp_path, monkeypatch, mode):
 
 
 def test_non_fsdp_ep_falls_through_to_base_trainer(tmp_path):
-    """ep_size==1 grouped-GEMM MoE without mixin FSDP2 (single GPU / replicated DDP): optimizer
-    state is replicated, so the base Trainer's optimizer.pt path restores it."""
+    """Optimizer state is replicated there, so the base Trainer's optimizer.pt path restores it."""
     model = _TinyModel()
     optimizer = _sgd(model)
     super_optim = _Recorder()
@@ -478,8 +427,6 @@ def test_save_optimizer_shards_writes_fingerprint_meta(tmp_path):
 
 
 def test_save_then_load_round_trip_gate(tmp_path, monkeypatch):
-    """A shard set written by the shard save passes the resume gate of the same topology and
-    is rejected (warm restart) by a different one."""
     model = _TinyModel()
     optimizer = _sgd(model)
     model.fc.weight.grad = torch.zeros_like(model.fc.weight)
@@ -493,23 +440,20 @@ def test_save_then_load_round_trip_gate(tmp_path, monkeypatch):
     OptimizerShardStore(_ctx(model, optimizer, parallelism_config=pc_save)).load(str(tmp_path))
     assert len(restore.calls) == 1
 
-    # Different topology (EP=2 checkpoint resumed at EP=1) → warm restart, so no second restore.
+    # EP=2 checkpoint resumed at EP=1 warm-restarts, so no second restore.
     pc_resume = _StubParallelismConfig(ep_size=1)
     OptimizerShardStore(_ctx(model, optimizer, parallelism_config=pc_resume)).load(str(tmp_path))
     assert len(restore.calls) == 1
 
 
 def _stepped(model, optimizer):
-    """One zero-grad step so the optimizer holds state to save."""
     model.fc.weight.grad = torch.zeros_like(model.fc.weight)
     optimizer.step()
 
 
 def test_low_host_ram_preflight_warns_but_never_blocks_the_save(tmp_path, monkeypatch, caplog):
-    """The host copy (cpu_offload) can OOM-kill the run, so the preflight must warn — and only warn:
-    aborting a checkpoint over an estimate would be worse than the OOM it predicts. fc.weight is 16
-    fp32 params, so the two-fp32-moment upper bound is 128 bytes; 127 available must warn (a sizing
-    shrunk below 8 B/param stops warning here and fails the test)."""
+    """Aborting a checkpoint over an estimate would be worse than the OOM. fc.weight is 16 fp32 params, so the
+    two-moment bound is 128 bytes; 127 must warn."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _stepped(model, optimizer)
@@ -523,8 +467,7 @@ def test_low_host_ram_preflight_warns_but_never_blocks_the_save(tmp_path, monkey
 
 
 def test_ample_host_ram_preflight_is_silent(tmp_path, monkeypatch, caplog):
-    """Exactly the estimate available (128 bytes for the 16-param fp32 model) is not "below" — the
-    warning must not cry wolf on every healthy save."""
+    """Exactly the estimate available is not below it."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _stepped(model, optimizer)
@@ -537,8 +480,6 @@ def test_ample_host_ram_preflight_is_silent(tmp_path, monkeypatch, caplog):
 
 
 def test_restore_preflight_warns_without_blocking_the_restore(tmp_path, monkeypatch, caplog):
-    """The restore-side twin: ``torch.load`` of the shard materializes the same bytes in host RAM,
-    and the warning must not turn a legitimate restore into a failure."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, fingerprint=_live_fp(optimizer).to_dict())
@@ -554,21 +495,16 @@ def test_restore_preflight_warns_without_blocking_the_restore(tmp_path, monkeypa
 
 
 def test_a_peer_without_the_fingerprint_raises_on_every_rank(tmp_path, monkeypatch):
-    """The unfingerprinted-shards verdict is the ``all`` of the world, not a rank-local read.
-
-    ``optimizer_meta.pt`` is written once per NODE, so a non-shared filesystem can hold a complete
-    meta on one node and a pre-fingerprint one on another. This rank's own meta is complete and its
-    shard is present — it still must raise, because the peer that raises never reaches the
-    collectives below and would leave this rank blocked in one until the NCCL watchdog kills the job.
-    """
+    """``optimizer_meta.pt`` is written once per node; a peer that raises never reaches the collectives below,
+    leaving this rank blocked until the NCCL watchdog."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, fingerprint=_live_fp(optimizer).to_dict())
     asked: list[bool] = []
 
     def peer_lacks_the_fingerprint(local):
-        # Calls 1-3 are the shard-presence probe and the meta's torn and rank-count gates; call 4 is the
-        # fingerprint question, the only one the peer answers differently.
+        # Calls 1-3 are the shard-presence probe and the meta's torn and rank-count gates; call 4 is the fingerprint
+        # question, the only one the peer answers differently.
         asked.append(local)
         return RankConsensus(False, True) if len(asked) == 4 else RankConsensus(local, local)
 
@@ -584,12 +520,8 @@ def test_a_peer_without_the_fingerprint_raises_on_every_rank(tmp_path, monkeypat
 
 
 def test_a_rank_that_cannot_produce_optimizer_state_fails_the_save(tmp_path, monkeypatch):
-    """An unproducible optimizer state must RAISE, not skip the write.
-
-    The caller rotates the previous checkpoint away as soon as this returns, so a skip trades the last
-    checkpoint that HAS optimizer state for one that has none — at exit code 0. Reachable in production: an optimizer whose ``state_dict`` refuses the
-    live sharding (FlashAdamW on unevenly-sharded DTensors) takes this path on EVERY save.
-    """
+    """The caller rotates the previous checkpoint away on return, so a skip trades it for one with no optimizer
+    state at exit code 0; FlashAdamW on uneven DTensors takes this path."""
     model = _TinyModel()
     optimizer = _sgd(model)
     _stepped(model, optimizer)
@@ -602,24 +534,19 @@ def test_a_rank_that_cannot_produce_optimizer_state_fails_the_save(tmp_path, mon
     with pytest.raises(RuntimeError, match="save_only_model"):
         OptimizerShardStore(_ctx(model, optimizer, parallelism_config=_StubParallelismConfig())).save(str(tmp_path))
 
-    # Nothing half-written either: a shard set the resume gate would have to call torn.
+    # A half-written shard set is what the resume gate would call torn.
     assert not os.path.isfile(os.path.join(tmp_path, "optimizer_shard_00000.pt"))
     assert not os.path.isfile(os.path.join(tmp_path, "optimizer_meta.pt"))
 
 
 def _scheduler(optimizer, *, gamma=0.5):
-    """A warmup-FREE decaying schedule: the shape whose step-0 LR is the full base LR."""
+    """Warmup-free: the shape whose step-0 LR is the full base LR."""
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: gamma**step)
 
 
 def test_resume_applies_the_restored_schedule_lr_to_the_optimizer(tmp_path):
-    """The first resumed step must run at the schedule's LR, not at the step-0 one.
-
-    ``LRScheduler.load_state_dict`` only updates the scheduler's own ``__dict__``, and HF steps the
-    optimizer BEFORE the scheduler — so a restore that stops at the scheduler leaves ``param_groups``
-    on the LR ``_initial_step()`` wrote there. Under a warmup that is ~0; on a warmup-free schedule
-    resumed deep into decay it is the FULL base LR for one step.
-    """
+    """``load_state_dict`` updates only the scheduler and HF steps the optimizer first, so ``param_groups`` stays on
+    the step-0 LR for one step."""
     saved_model = _TinyModel()
     saved_optimizer = torch.optim.SGD(saved_model.parameters(), lr=0.1)
     saved_scheduler = _scheduler(saved_optimizer)
@@ -643,8 +570,7 @@ def test_resume_applies_the_restored_schedule_lr_to_the_optimizer(tmp_path):
 
 
 def test_restored_schedule_lr_is_applied_per_param_group(tmp_path):
-    """Per group, in order: an optimizer with a decoupled group (no-decay params, a Muon scalar
-    group) would otherwise have every group flattened onto the first one's LR."""
+    """An optimizer with a decoupled group would otherwise be flattened onto the first group's LR."""
     model = _TinyModel()
     groups = [{"params": [model.fc.weight], "lr": 0.1}, {"params": [torch.nn.Parameter(torch.zeros(2))], "lr": 0.01}]
     saved_optimizer = torch.optim.SGD(groups)

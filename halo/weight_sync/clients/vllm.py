@@ -32,14 +32,11 @@ logger = logging.getLogger(__name__)
 
 # A merely busy scheduler still answers a 1-token probe in time; a wedged one is reported, not waited out.
 _GENERATION_PROBE_TIMEOUT_S = 60.0
-# The oldest engine whose weight-transfer wire this client speaks: the packed geometry rides
-# /init_weight_transfer_engine, and an update that carries it is refused.
+# The oldest wire this client speaks; the packed geometry rides /init_weight_transfer_engine, never an update.
 _MIN_SERVER_VERSION = (0, 32, 0)
 
 
 class VLLMWeightSyncClient(WeightSyncClientBase):
-    """Weight-sync client for a vLLM server."""
-
     BACKEND_KEY = "vllm"
     BACKEND_NAME = "vLLM"
     ENGINE_RELEASE = "vLLM 0.32.0"
@@ -50,7 +47,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     PAUSE_REQUEST = {"params": {"mode": "keep"}}
     PAUSE_ABORTS_IN_FLIGHT = False
     RESUME_ENDPOINT = "/resume"
-    # The layerwise reload phase.
     SESSION_OPEN_ENDPOINT = "/start_weight_update"
     SESSION_CLOSE_ENDPOINT = "/finish_weight_update"
     UNSERVABLE_MODEL_TYPES = {
@@ -93,7 +89,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         return self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()["world_size"]
 
     def _request_engine_join(self, master_address: str, port: int, world_size: int) -> AsyncCall:
-        # Told before the store is built: the master blocks until every worker joined.
+        # Told before the store is built, as the master blocks until every worker joined.
         return self._start_collective_rpc(
             "/init_weight_transfer_engine",
             timeout=GROUP_FORMATION_TIMEOUT_S,
@@ -103,8 +99,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                     "master_port": port,
                     "rank_offset": 1,
                     "world_size": world_size,
-                    # Read once per connection: the engine derives every chunk boundary from it, and
-                    # unset it receives tensor by tensor.
+                    # Read once per connection; unset, the engine receives tensor by tensor.
                     "packed": True,
                     "packed_buffer_size_bytes": PACKED_BUFFER_BYTES,
                     "packed_num_buffers": PACKED_NUM_BUFFERS,
@@ -121,7 +116,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
 
     def _release_transport(self, *, at_exit: bool) -> None:
         if self._transport is not None:
-            # Aborted, not dropped: without a __del__ its ncclComm and pinned memory outlive every retired client.
+            # With no __del__, a dropped communicator's ncclComm and pinned memory outlive every retired client.
             self._transport.abort()
         self._packed_streams = None
         if self._unique_id_store is not None:
@@ -130,13 +125,11 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             self._unique_id_store = None
 
     def _reset_transport_state(self) -> None:
-        # Holds the listener the store took over, until the release frees it.
         self._unique_id_store: UniqueIdStore | None = None
-        # The producer's pack streams, created once on the communicator's device; flushes are serialized.
+        # Created once on the communicator's device; flushes are serialized.
         self._packed_streams: list[torch.cuda.Stream] | None = None
 
     def _start_engine_update(self) -> None:
-        """Pause the engine and open its layerwise reload phase, unwinding both on failure."""
         self._require_communicator()
         try:
             self._quiesce()
@@ -147,8 +140,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             raise
 
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
-        """Declare one chunk over ``/update_weights``, then broadcast it packed into the open phase. ``final`` is
-        unused: this engine closes with its own ``/finish_weight_update``."""
+        """``final`` is unused, as this engine closes with its own ``/finish_weight_update``."""
         names, dtype_names, shapes = describe_chunk(chunk)
 
         server_call: AsyncCall | None = None
@@ -165,7 +157,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             if self._packed_streams is None and torch.device(device).type == "cuda":
                 with torch.cuda.device(device):
                     self._packed_streams = [torch.cuda.Stream() for _ in range(PACKED_NUM_BUFFERS)]
-            # The producer copies nothing: a copy made on a pack stream would stay in that stream's pool.
+            # A copy made on a pack stream would stay in that stream's pool, so the producer copies nothing.
             misplaced = [name for name, param in chunk if param.device != device]
             if misplaced:
                 raise RuntimeError(
@@ -181,7 +173,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         logger.debug(f"Streamed {len(chunk)} params to vLLM")
 
     def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        """Send the final chunk and close the layerwise reload; the close runs on every path."""
         try:
             self._transmit_chunk(tail, final=True)
             self._end_session()
@@ -191,7 +182,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
     ) -> list[float]:
-        """One prefill through the completions ``prompt_logprobs`` echo: the raw (pre-sampler) distribution."""
+        """One prefill through the completions ``prompt_logprobs`` echo, the raw (pre-sampler) distribution."""
         body = {
             "model": self.served_model_id(),
             "prompt": list(prompt_ids) + list(completion_ids),
@@ -219,7 +210,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         super().init_communicator(device)
 
     def _check_server_version(self) -> None:
-        """Refuse an engine older than the weight-transfer wire this client speaks (``GET /version``)."""
         body = self.request("GET", "/version", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()
         reported = body.get("version") if isinstance(body, dict) else None
         match = re.match(r"(\d+)\.(\d+)\.(\d+)", str(reported)) if reported is not None else None
@@ -232,8 +222,8 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             )
 
     def _probe_generation(self):
-        """Fail fast when ``/health`` is up but generation is wedged: a single-shot 1-token completion that only a
-        hang fails. A paused engine queues it instead, so the pause is asked first."""
+        """Fail fast when ``/health`` is up but generation is wedged. A paused engine would queue the 1-token probe,
+        so the pause is asked first."""
         try:
             resp = self.request("GET", "/is_paused", retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False)
             paused = resp.status_code == 200 and bool(resp.json()["is_paused"])
@@ -270,11 +260,10 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                 f"server's scheduler stuck. RESTART the vLLM server container to recover."
             ) from e
         except requests.exceptions.RequestException as e:
-            # Responsive but rejected the probe (e.g. raw /v1/completions disabled): not wedged.
+            # For example raw /v1/completions disabled.
             logger.warning(f"Generation probe: server responded with an error (not wedged): {e}")
 
     def _require_communicator(self) -> PyNcclCommunicator:
-        """The live communicator; raises when there is none or it was aborted."""
         if self._transport is None:
             raise RuntimeError("Call init_communicator() first")
         if self._transport.aborted:

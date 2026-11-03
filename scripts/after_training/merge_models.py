@@ -60,8 +60,7 @@ def main() -> int:
     )
     parser.add_argument("--base_model", default=None, help="Base for task_arithmetic / ties.")
     add_dtype_arg(parser)
-    # Knob defaults stay None here and resolve in merge_models(), so a knob a method ignores raises;
-    # the help text renders the method table's default rather than a copy of it.
+    # Defaults stay None and resolve in merge_models(), so a knob a method ignores raises; help shows the table's.
     parser.add_argument(
         "--density",
         type=float,

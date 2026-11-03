@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""The EP lazy loader reads a multimodal checkpoint's per-expert keys into its text-only model.
-
-A ``text_only_model`` run loads a VLM checkpoint into the text-only class, whose names drop the
-wrapper's ``language_model.`` segment. Its experts are fused in memory, so a per-expert checkpoint key
-(a Qwen3.5/3.6 checkpoint ``unfuse_moe_experts.py`` wrote, or a wrapper-less save of a model built from
-its config) is never a model key itself: the fuser finds the fused parameter it feeds from the key's
-namespace, which must therefore have the segment dropped too. Driven through the real
-:func:`~halo.model_loading.parallel.ep.load_ep_model_lazy` (EP patching stubbed — it needs
-DeepEP and process groups) against ``from_pretrained`` of the same text-only class.
-
-    python tests/cpu/parallelism/test_lazy_load_text_only_per_expert.py
-"""
+"""The EP lazy loader reads a multimodal checkpoint's per-expert keys into its text-only model. Experts are fused in
+memory, so the key's namespace drops ``language_model.`` to find them."""
 
 import pytest
 import torch
@@ -29,7 +19,7 @@ VISION = {"depth": 1, "hidden_size": 16, "intermediate_size": 16, "num_heads": 2
 
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory) -> str:
-    """A multimodal Qwen3.5-MoE checkpoint with its experts one tensor each under ``model.language_model.``."""
+    """Experts one tensor each under ``model.language_model.``."""
     path = tmp_path_factory.mktemp("qwen3_5_moe_per_expert")
     torch.manual_seed(0)
     config = Qwen3_5MoeConfig(

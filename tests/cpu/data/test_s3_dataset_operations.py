@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
-"""
-Tests for S3 dataset operations: a push writes through datasets' s3fs support, a load downloads the tree
-straight into its local cache (``download_dataset_tree``).
-
-All S3 calls are mocked — no real AWS access needed.
-
-Usage:
-    python tests/cpu/data/test_s3_dataset_operations.py
-"""
+"""A push writes through datasets' s3fs support, a load downloads the tree straight into its local cache
+(``download_dataset_tree``). All S3 calls are mocked."""
 
 import hashlib
 import importlib
@@ -40,7 +33,6 @@ from scripts.before_training.s3 import main as s3_cli_main
 
 
 def test_get_storage_options_default():
-    """Default S3Client (no custom creds) returns empty storage_options."""
     print("Testing get_storage_options (default)...")
 
     with patch.object(S3Client, "__post_init__"):
@@ -52,7 +44,6 @@ def test_get_storage_options_default():
 
 
 def test_get_storage_options_with_credentials():
-    """Custom credentials are translated to s3fs format."""
     print("Testing get_storage_options (with credentials)...")
 
     with patch.object(S3Client, "__post_init__"):
@@ -72,7 +63,6 @@ def test_get_storage_options_with_credentials():
 
 
 def test_get_storage_options_partial():
-    """Only set fields appear in storage_options."""
     print("Testing get_storage_options (partial)...")
 
     with patch.object(S3Client, "__post_init__"):
@@ -86,8 +76,7 @@ def test_get_storage_options_partial():
 
 
 def test_push_dataset_saves_to_a_staging_sibling():
-    """push_dataset writes to a unique dot-prefixed staging sibling, then promotes — never straight
-    onto the destination (the staged-push protocol; crash matrix in test_s3_staged_push.py)."""
+    """Never straight onto the destination; crash matrix in test_s3_staged_push.py."""
     print("Testing push_dataset (staged save_to_disk)...")
 
     mock_dataset = MagicMock(spec=Dataset)
@@ -112,8 +101,7 @@ def test_push_dataset_saves_to_a_staging_sibling():
 
 
 def test_push_dataset_overwrite_never_deletes_the_destination_first():
-    """Deleting the destination before uploading leaves a crash window that silently erases the only
-    copy. Overwrite must reach save_to_disk with zero destination deletes."""
+    """Deleting first leaves a crash window that erases the only copy."""
     print("Testing push_dataset (overwrite is delete-free before save)...")
 
     mock_dataset = MagicMock(spec=Dataset)
@@ -140,7 +128,6 @@ def test_push_dataset_overwrite_never_deletes_the_destination_first():
 
 
 def test_push_dataset_no_overwrite_raises_on_existing():
-    """overwrite=False against an existing dataset raises FileExistsError (no clobber)."""
     mock_dataset = MagicMock(spec=Dataset)
     mock_dataset.__len__ = MagicMock(return_value=50)
 
@@ -157,7 +144,6 @@ def test_push_dataset_no_overwrite_raises_on_existing():
 
 
 def test_load_dataset_cache_hit():
-    """When cache is valid, load_dataset reads from local cache without S3 call."""
     print("Testing load_dataset (cache hit)...")
 
     with patch.object(S3Client, "__post_init__"):
@@ -192,7 +178,6 @@ def test_load_dataset_cache_hit():
 
 
 def test_load_dataset_cache_miss():
-    """When cache is cold, load_dataset downloads from S3 URI then caches locally."""
     print("Testing load_dataset (cache miss)...")
 
     with patch.object(S3Client, "__post_init__"):
@@ -220,14 +205,9 @@ def test_load_dataset_cache_miss():
     print("  load_dataset cache miss: PASSED")
 
 
-# Cache staleness: an in-place S3 overwrite must not serve stale data.
-
-
 def _make_cached_dataset(cache_root: str, fingerprint: str | None) -> tuple[str, str]:
-    """Create a complete local cache for s3://test-bucket/my/dataset; returns (cache_path, marker).
-
-    ``fingerprint=None`` writes a legacy marker (URI only, no content identity).
-    """
+    """A complete local cache for s3://test-bucket/my/dataset; returns (cache_path, marker). ``fingerprint=None``
+    writes a marker with the URI alone."""
     cache_key = hashlib.md5(b"test-bucket/my/dataset").hexdigest()
     cache_path = os.path.join(cache_root, cache_key, "dataset")
     os.makedirs(cache_path, exist_ok=True)
@@ -266,7 +246,7 @@ def test_compute_etag_fingerprint():
 
 
 def test_content_fingerprint_none_when_unreachable():
-    """Any listing error (no creds, network outage) yields None — cache stays servable."""
+    """Any listing error yields None, so the cache stays servable."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
     client.boto_client = MagicMock()
@@ -275,7 +255,6 @@ def test_content_fingerprint_none_when_unreachable():
 
 
 def test_content_fingerprint_lists_prefix():
-    """content_fingerprint aggregates (Key, ETag, Size) of every object under the prefix."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
     client.boto_client = MagicMock()
@@ -286,11 +265,8 @@ def test_content_fingerprint_lists_prefix():
 
 
 def test_load_dataset_stale_cache_redownloads():
-    """An in-place overwrite of the same S3 key must invalidate the local cache.
-
-    The marker records the old content fingerprint; live S3 reports a new one → load_dataset must
-    re-download instead of silently serving OLD data, and record the new fingerprint.
-    """
+    """The marker records the old fingerprint and live S3 reports a new one, so the load re-downloads and records
+    it."""
     client = _make_validating_client(live_fingerprint="newfp")
 
     with tempfile.TemporaryDirectory() as cache_root:
@@ -327,7 +303,6 @@ def test_load_dataset_offline_serves_cache():
 
 
 def test_load_dataset_matching_fingerprint_serves_cache():
-    """Unchanged live content (fingerprints match) → cache served, no re-download."""
     client = _make_validating_client(live_fingerprint="fp")
 
     with tempfile.TemporaryDirectory() as cache_root:
@@ -343,12 +318,12 @@ def test_load_dataset_matching_fingerprint_serves_cache():
 
 
 def test_load_dataset_legacy_marker_served_and_upgraded():
-    """A pre-fingerprint marker stays valid (backward compatible) and is upgraded in place when
-    live S3 is reachable, so the NEXT load can detect an overwrite."""
+    """A marker with no fingerprint stays valid and is upgraded in place when S3 is reachable, so the next load can
+    detect an overwrite."""
     client = _make_validating_client(live_fingerprint="livefp")
 
     with tempfile.TemporaryDirectory() as cache_root:
-        cache_path, marker = _make_cached_dataset(cache_root, fingerprint=None)  # legacy marker
+        cache_path, marker = _make_cached_dataset(cache_root, fingerprint=None)
 
         with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
             with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
@@ -373,13 +348,8 @@ def _make_s3_loader():
 
 
 def test_load_shard_from_s3_caches_locally():
-    """The shard is downloaded once into a local md5-keyed cache, marked complete, and
-    re-read from disk on subsequent loads.
-
-    The per-shard FileLock + completion-marker cache lets disjoint DP ranks
-    download in parallel and TP/CP siblings (or reruns) reuse the cache without
-    re-streaming S3.
-    """
+    """The per-shard FileLock and completion-marker cache let disjoint DP ranks download in parallel and TP/CP
+    siblings reuse the cache."""
     shard = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=1024)
 
     with tempfile.TemporaryDirectory() as cache_root:
@@ -404,7 +374,6 @@ def test_load_shard_from_s3_caches_locally():
 
 
 def _make_cached_shard(cache_root: str, fingerprint: str | None) -> tuple[str, str]:
-    """Create a complete per-shard cache for train/shard_0000; returns (cache_path, marker)."""
     key = hashlib.md5(b"test-bucket/preprocessed/dataset/train/shard_0000").hexdigest()
     cache_path = os.path.join(cache_root, "shards", key, "shard")
     os.makedirs(cache_path, exist_ok=True)
@@ -415,11 +384,6 @@ def _make_cached_shard(cache_root: str, fingerprint: str | None) -> tuple[str, s
 
 
 def test_load_shard_from_s3_stale_cache_redownloads():
-    """Re-preprocessing to the same S3 URI must invalidate the per-shard cache.
-
-    Marker holds the old fingerprint, live S3 reports a new one → the shard is re-downloaded
-    instead of silently training on OLD data.
-    """
     shard = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=1024)
 
     with tempfile.TemporaryDirectory() as cache_root:
@@ -460,12 +424,8 @@ def test_load_shard_from_s3_offline_serves_cache():
 
 
 def test_shard_fingerprint_skips_after_unreachable_s3(caplog):
-    """After one unreachable-S3 probe, later shards must not retry (per-shard timeout cost), and the
-    give-up must be logged — an unannounced latch serves every later shard unvalidated in silence.
-
-    The probe lists through ``S3Client.content_entries`` — the same listing the whole-dataset cache
-    validates with, so a shard cache and a dataset cache compare byte-identical fingerprints.
-    """
+    """An unannounced latch serves every later shard unvalidated in silence. The probe lists through
+    ``S3Client.content_entries``, so shard and dataset caches compare identical fingerprints."""
     loader = _make_s3_loader()
 
     with patch("halo.data.sources.sharded_dataset.S3Client") as mock_client_cls:
@@ -483,9 +443,7 @@ def test_shard_fingerprint_skips_after_unreachable_s3(caplog):
 
 
 def test_shard_fingerprint_empty_listing_does_not_latch():
-    """An EMPTY prefix listing is a real absence, not a transport fault: it yields None for THAT
-    shard (nothing to fingerprint) but must leave the next shard probeable — latching on it would
-    serve a whole run's shards unvalidated after one legitimately empty prefix."""
+    """An empty listing is a real absence: latching on it would serve a whole run's shards unvalidated."""
     loader = _make_s3_loader()
 
     with patch("halo.data.sources.sharded_dataset.S3Client") as mock_client_cls:
@@ -499,7 +457,6 @@ def test_shard_fingerprint_empty_listing_does_not_latch():
 
 
 def test_load_shard_index_from_s3():
-    """An S3 loader's _load_shard_index reads the index JSON from S3 via s3fs."""
     print("Testing ShardedDatasetLoader._load_shard_index (S3)...")
 
     index_data = {
@@ -537,7 +494,6 @@ def test_load_shard_index_from_s3():
 
 
 def test_load_preprocessed_metadata_from_s3():
-    """load_preprocessed_metadata reads JSON from S3 via s3fs."""
     print("Testing load_preprocessed_metadata (S3)...")
 
     metadata_dict = {
@@ -571,7 +527,6 @@ def test_load_preprocessed_metadata_from_s3():
 
 
 def test_build_s3_uri(monkeypatch):
-    """A bare key lands under the subfolder in the default bucket, slashes normalized."""
     monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", "team-bucket")
 
     def build(key, subfolder=None):
@@ -586,8 +541,7 @@ def test_build_s3_uri(monkeypatch):
 
 @pytest.mark.parametrize("default", ["team-bucket", None], ids=["default_set", "default_unset"])
 def test_a_full_s3_uri_resolves_to_itself(monkeypatch, default):
-    """A full URI already names its bucket and key: neither the default bucket nor the subfolder may be
-    prefixed onto it (``s3://team-bucket/datasets/s3://my-bucket/...``), and an unset default bucket is no
+    """Neither the default bucket nor the subfolder is prefixed onto a full URI, and an unset default bucket is no
     reason to refuse it."""
     monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", default)
 
@@ -598,9 +552,8 @@ def test_a_full_s3_uri_resolves_to_itself(monkeypatch, default):
 
 
 def test_a_key_only_path_without_a_configured_bucket_is_refused(monkeypatch):
-    """With ``HALO_S3_DEFAULT_BUCKET`` unset there is no bucket to address: a placeholder name would
-    read and write a real bucket the user does not own, so both key-only entry points refuse, each
-    naming the input that left the bucket out and the way to give one there."""
+    """A placeholder name would read and write a real bucket the user does not own, so both entry points refuse,
+    naming the input and the way to give one."""
     monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", None)
 
     with pytest.raises(ValueError) as excinfo:
@@ -614,8 +567,7 @@ def test_a_key_only_path_without_a_configured_bucket_is_refused(monkeypatch):
 
 
 def test_the_s3_cli_requires_a_bucket_only_for_a_bare_key_without_a_default(monkeypatch):
-    """A bare key falls back to ``HALO_S3_DEFAULT_BUCKET``; with that unset the CLI refuses naming ``--bucket``
-    rather than handing the client no bucket, while a full ``s3://`` URI names its own."""
+    """With the default unset the CLI refuses naming ``--bucket``, while a full ``s3://`` URI names its own."""
 
     def client_for(argv):
         return build_command_client(s3_cli_mod.build_parser().parse_args(argv))
@@ -632,8 +584,6 @@ def test_the_s3_cli_requires_a_bucket_only_for_a_bare_key_without_a_default(monk
 
 
 def test_s3_cache_dir_derives_from_scratch_root():
-    """No explicit S3 cache override → the cache dir derives from HALO_DATA_ROOT (one scratch knob);
-    an explicit HALO_S3_DATASET_CACHE_DIR still wins."""
     keys = ("HALO_S3_DATASET_CACHE_DIR", "HALO_DATA_ROOT")
     saved = {k: os.environ.pop(k, None) for k in keys}
     try:
@@ -656,23 +606,14 @@ def test_s3_cache_dir_derives_from_scratch_root():
         importlib.reload(s3_mod)
 
 
-# CLI `delete` tests: argument parsing → the delete() call; no S3 is ever touched.
-
-
 def _run_cli(
     argv: list[str], *, answer: str | None = None, exists: bool = True, object_exists: bool = True
 ) -> MagicMock:
-    """Run the s3 CLI offline with ``delete`` mocked out; returns the mock for call assertions.
-
-    The handlers act through the ``S3Client`` ``main`` passes them (never a module-level default
-    client), so the client's own methods are the seam: ``__post_init__`` is stubbed so no boto3
-    session is built, and the URI/existence probes are canned. ``exists``/``object_exists`` model
-    what is actually in the bucket: the default is an object at the exact key; ``object_exists=False``
-    with ``exists=True`` is a folder-like prefix. ``answer`` feeds the confirmation prompt (None =
-    never prompted, i.e. ``--yes`` was passed).
-    """
-    # Patched by dotted path, not on the imported class object: the cache-dir test above reloads
-    # this module, so the name bound at import time is a STALE class the CLI no longer instantiates.
+    """Run the s3 CLI offline with ``delete`` mocked and return the mock. ``exists``/``object_exists`` model the
+    bucket: ``object_exists=False`` with ``exists=True`` is a folder-like prefix. ``answer`` feeds the
+    confirmation prompt (None: never prompted)."""
+    # Patched by dotted path: the cache-dir test above reloads this module, so the name bound at import is a stale
+    # class.
     with (
         patch("halo.data.sources.s3_client.S3Client.__post_init__"),
         patch("halo.data.sources.s3_client.S3Client.delete", return_value=True) as mock_delete,
@@ -687,9 +628,8 @@ def _run_cli(
 
 
 def test_module_info_records_survive_the_root_warning_pin():
-    """``halo`` pins the ROOT logger to WARNING, so the module's own level is what admits its INFO
-    lines — the run's only record of what data moved (downloads, cache hits, stale-object sweeps).
-    Inheriting the pin emits them nowhere while every call still reports success."""
+    """``halo`` pins the root to WARNING, so the module's own level admits its INFO lines, the run's only record of
+    what data moved."""
     captured = []
 
     class _Capture(logging.Handler):
@@ -711,8 +651,8 @@ def test_module_info_records_survive_the_root_warning_pin():
 
 
 def test_cli_owns_the_root_handler_it_inherited():
-    """The CLI's own verbosity must actually take effect: importing ``halo`` already installed a root
-    handler and pinned the level, against which a non-forcing ``basicConfig`` is a silent no-op."""
+    """Importing ``halo`` installed a root handler and pinned the level, against which a non-forcing ``basicConfig``
+    is a silent no-op."""
     root = logging.getLogger()
     saved_level, saved_handlers = root.level, list(root.handlers)
     inherited = logging.NullHandler()
@@ -731,9 +671,8 @@ def test_cli_owns_the_root_handler_it_inherited():
 
 @pytest.mark.parametrize("raw", ["0", "-1"])
 def test_non_positive_cache_lock_timeout_warns_and_falls_back(raw, caplog):
-    """``filelock`` reads the extremes as its own modes — 0 fails immediately, a negative waits
-    forever — so a non-positive override must be REFUSED out loud and fall back to the store budget,
-    never silently redefine the peer-download wait. A positive value is still honoured verbatim."""
+    """``filelock`` reads 0 as fail immediately and a negative as wait forever, so a non-positive override is
+    refused out loud."""
     saved = os.environ.get("HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS")
     try:
         os.environ["HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS"] = raw
@@ -760,11 +699,8 @@ def test_non_positive_cache_lock_timeout_warns_and_falls_back(raw, caplog):
 
 
 def test_cli_delete_is_not_recursive_by_default():
-    """A bare `delete <key>` must delete ONE object, never the whole prefix.
-
-    `store_true` can only ever set True, so a `default=True` on `--recursive` makes the flag inert
-    and turns every CLI delete into a prefix-wipe the user has no way to opt out of.
-    """
+    """``store_true`` can only set True, so ``default=True`` on ``--recursive`` would make every CLI delete a
+    prefix-wipe."""
     mock_delete = _run_cli(["delete", "my_folder", "--yes"])
 
     mock_delete.assert_called_once()
@@ -775,7 +711,6 @@ def test_cli_delete_is_not_recursive_by_default():
 
 @pytest.mark.parametrize("flag", ["--recursive", "-r"])
 def test_cli_delete_recursive_opts_in(flag):
-    """The user's intent must still be expressible: --recursive/-r reaches delete() as True."""
     mock_delete = _run_cli(["delete", "my_folder", flag, "--yes"])
 
     mock_delete.assert_called_once()
@@ -783,25 +718,19 @@ def test_cli_delete_recursive_opts_in(flag):
 
 
 def test_cli_delete_refuses_a_prefix_without_recursive():
-    """A non-recursive delete aimed at a PREFIX must refuse, not report success having done nothing.
-
-    S3's DeleteObject is idempotent: against a key that is only a prefix it returns 204, so
-    ``delete()`` reports True and the CLI would print "Deleted" while the data is still there. The
-    refusal exits non-zero before any delete call.
-    """
+    """S3's DeleteObject is idempotent, returning 204 on a key that is only a prefix, so the CLI would print Deleted
+    with the data still there."""
     with pytest.raises(SystemExit, match="is a prefix, not an object"):
         _run_cli(["delete", "my_folder", "--yes"], exists=True, object_exists=False)
 
 
 def test_cli_delete_reports_a_missing_key():
-    """Nothing at the key at all: still no delete call, and no success message."""
     mock_delete = _run_cli(["delete", "my_folder", "--yes"], exists=False, object_exists=False)
 
     mock_delete.assert_not_called()
 
 
 def test_cli_delete_recursive_still_deletes_a_prefix():
-    """Anti-vacuity for the guard: with --recursive the same prefix IS deleted."""
     mock_delete = _run_cli(["delete", "my_folder", "-r", "--yes"], exists=True, object_exists=False)
 
     mock_delete.assert_called_once()
@@ -809,12 +738,8 @@ def test_cli_delete_recursive_still_deletes_a_prefix():
 
 
 def test_recursive_delete_reports_false_when_the_prefix_matched_nothing():
-    """A prefix sweep that deleted nothing must not report success.
-
-    ``--recursive`` aimed at a single object sweeps ``<key>/``, which has no children, so an
-    unconditional ``return True`` prints "Deleted" over data that is still there — the mirror of the
-    non-recursive-on-a-prefix no-op.
-    """
+    """``--recursive`` on a single object sweeps ``<key>/``, which has no children, so an unconditional True prints
+    Deleted over data still there."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
     paginator = MagicMock()
@@ -827,14 +752,12 @@ def test_recursive_delete_reports_false_when_the_prefix_matched_nothing():
 
 
 def test_cli_delete_declines_confirmation():
-    """Without --yes, anything but 'y' at the prompt must leave S3 untouched."""
     mock_delete = _run_cli(["delete", "my_folder", "--recursive"], answer="n")
 
     mock_delete.assert_not_called()
 
 
 def test_cli_delete_confirmed_deletes():
-    """A 'y' at the prompt proceeds — the guard blocks on the answer, not on being unreachable."""
     mock_delete = _run_cli(["delete", "my_folder", "--recursive"], answer="y")
 
     mock_delete.assert_called_once()

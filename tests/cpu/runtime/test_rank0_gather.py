@@ -1,18 +1,5 @@
-"""``gather_on_rank0`` and ``combine_across_ranks`` on a real gloo group.
-
-The gather must reach rank 0 without a point-to-point operation: NCCL runs a gather, a scatter or an all-to-all
-as a send per peer, which connects every peer to rank 0 and keeps those buffers (about 0.3 GiB per NVLink peer
-within one NVLink domain) for the communicator's lifetime. Every ``torch.distributed`` collective but the ring
-ones the gather and combine issue, and every functional collective, is replaced, under every name a loaded
-module holds it by, with one that raises, so a gather routed through any other fails here on any backend; a
-control expects ``gather_object`` and both all-to-all spellings caught under the same guard.
-
-Rank 0 gets every payload exact and in rank order, across window boundaries, each round within the window;
-no peer unpickles another rank's payload. The combine returns rank 0's result on every rank and raises its
-failure on every rank. Without a process group both stay local.
-
-Run: python tests/cpu/runtime/test_rank0_gather.py
-"""
+"""``gather_on_rank0`` and ``combine_across_ranks`` on a real gloo group. NCCL runs a gather, scatter or all-to-all as
+a send per peer, keeping ~0.3 GiB per NVLink peer, so every other collective raises here on any backend."""
 
 import datetime
 import json
@@ -34,13 +21,11 @@ from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 3
 PG_TIMEOUT = datetime.timedelta(seconds=90)
-# What the gather and combine may issue, all of which NCCL runs over the ring every communicator holds: the size
-# all-gather, the payload reduce and the verdict broadcast (``broadcast_object_list`` broadcasts its sizes first).
+# All run over the ring every communicator holds: the size all-gather, payload reduce and verdict broadcast.
 _RING_COLLECTIVES = (c10d.all_gather_into_tensor, c10d.reduce, c10d.broadcast, c10d.broadcast_object_list)
 # Below every payload's pickle, so each rank's span crosses window boundaries.
 _SMALL_WINDOW = 7
 
-# What this process unpickled through _Tattle, by origin rank.
 _unpickled_origins: list[int] = []
 
 
@@ -50,7 +35,7 @@ def _unpickle_tattle(origin: int) -> "_Tattle":
 
 
 class _Tattle:
-    """A payload whose unpickling records, in the process that unpickles it, the rank it came from."""
+    """Records, in the process that unpickles it, the rank it came from."""
 
     def __init__(self, origin: int) -> None:
         self.origin = origin

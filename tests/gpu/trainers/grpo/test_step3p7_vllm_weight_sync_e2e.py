@@ -1,28 +1,9 @@
 #!/usr/bin/env python
-"""Step-3.7 live vLLM weight sync: the served policy must move, and move TO the trainer's policy.
+"""Step-3.7 live vLLM weight sync: the served policy must move, and move to the trainer's policy, per weight group.
 
-Step-3.7's live tree is spelled behind transformers' from_pretrained-side conversion while vLLM
-0.32.0's ``step3p5`` loader maps the hub namespace and silently drops every other text-tower name — so a sync
-that ships module-tree names returns ``200 OK`` and changes nothing. The gather-side pin
-(``tests/cpu/grpo/test_weight_sync_hub_namespace.py``) proves the forwarded keys equal the hub
-checkpoint's; only a live server proves the engine consumes them. This drives the production sync
-(``sync_weights_to_client`` over the EP-wrapped model) against a served tiny checkpoint and compares
-the server's next-token logprobs with the trainer's own forward, per weight group:
-
-  1. before any sync, server and trainer agree (both loaded the same hub checkpoint);
-  2. routed experts perturbed (the hub split of ``gate_up_proj``), sync → server moved, and agrees;
-  3. router gate + shared expert perturbed (``moe.gate`` / ``share_expert.*`` renames), same;
-  4. embeddings + lm_head, then the attention projections, then the attention norms perturbed (the
-     top-level prefix renames, split so a projection-only or norm-only miss names itself), same.
-
-Each group is a distinct conversion, so a rename that silently misses lands as "server did not move"
-on exactly that step. The agreement tolerance is the bf16 kernel gap between the two stacks; every
-perturbation moves the probe by an order of magnitude more.
-
-The served checkpoint is a random-init Step-3.7 in the HUB repo layout (vendor ``config.json`` and
-config class, hub-namespace safetensors, the real tokenizer) sized to what vLLM 0.32.0 accepts: its
-fused-MoE clamp supports ``swiglu_limits`` of exactly 7, the vision tower keeps the hub's 728/14
-geometry (vLLM's image processor is fixed to it), and the vocabulary is the real tokenizer's.
+vLLM 0.32.0's ``step3p5`` loader silently drops names outside the hub namespace, so a sync shipping module-tree names
+returns ``200 OK`` and changes nothing. The served checkpoint fits vLLM: its clamp takes ``swiglu_limits`` of exactly
+7, its image processor a 728/14 tower.
 
 Prerequisites (the server must own a GPU the trainer does not):
     python tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py --write-checkpoint $DIR
@@ -67,7 +48,7 @@ from tests.common.weight_sync import weight_transfer_port
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
 CHECKPOINT = env_str("HALO_TEST_STEP3P7_MODEL")
 HUB_REPO = "stepfun-ai/Step-3.7-Flash"
-# Tokenizer, chat template and the vendor config class the served checkpoint copies from the hub.
+# Copied from the hub into the served checkpoint.
 HUB_FILES = (
     "configuration_step3p7.py",
     "tokenizer.json",
@@ -78,15 +59,13 @@ HUB_FILES = (
 SEED = 0
 PROBE_PROMPT = "The capital of France is"
 PROBE_LOGPROBS = 16
-# Bounds the bf16 kernel gap between the two stacks on this model. MOVE_MIN, the shift every
-# perturbation below has to produce, sits 5x above it, so a match and a miss cannot overlap.
+# Bounds the bf16 kernel gap between the two stacks. MOVE_MIN sits 5x above it, so a match and a miss cannot overlap.
 MATCH_TOL = 0.06
 MOVE_MIN = 0.3
 NOISE_STD = 0.05
 
 LAYER_TYPES = ["full_attention", "sliding_attention", "full_attention", "sliding_attention"]
-# The vendor spelling vLLM 0.32.0 reads through the repo's own config class (transformers 5.20 loads it
-# natively too).
+# The vendor spelling vLLM 0.32.0 reads through the repo's own config class.
 SERVED_CONFIG = {
     "architectures": ["Step3p7ForConditionalGeneration"],
     "auto_map": {"AutoConfig": "configuration_step3p7.Step3p7Config"},
@@ -164,15 +143,13 @@ SERVED_CONFIG = {
 
 
 def write_checkpoint(out: Path) -> None:
-    """Materialize the served checkpoint: hub-layout files, then the seed-0 model's own save."""
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps(SERVED_CONFIG, indent=2) + "\n")
     for name in HUB_FILES:
         shutil.copyfile(hf_hub_download(HUB_REPO, name), out / name)
     torch.manual_seed(SEED)
     model = Step3p7ForConditionalGeneration(Step3p7Config.from_pretrained(out)).to(torch.bfloat16)
-    # save_pretrained writes the weights in the hub namespace but the config in transformers' own
-    # spelling, which vLLM 0.32.0's config parsing cannot read — keep only the weight files.
+    # save_pretrained writes hub-namespace weights but transformers' config spelling, which vLLM 0.32.0 can't parse.
     with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
         model.save_pretrained(tmp)
         for part in Path(tmp).glob("*.safetensors*"):
@@ -186,7 +163,6 @@ def _served_model_id() -> str:
 
 
 def _server_logprobs(model_id: str, prompt_ids: list[int]) -> dict[int, float]:
-    """Top-``PROBE_LOGPROBS`` next-token logprobs from the server, keyed by token id."""
     response = requests.post(
         f"{VLLM_SERVER_URL}/v1/completions",
         json={
@@ -216,13 +192,11 @@ def _gap(server: dict[int, float], trainer: torch.Tensor) -> float:
 
 
 def _shift(before: dict[int, float], after: dict[int, float]) -> float:
-    """How far the server's distribution moved, over the tokens both probes reported."""
     common = set(before) & set(after)
     return max_or_nan((abs(before[t] - after[t]) for t in common), default=float("inf"))
 
 
 def _trainer_shift(before: torch.Tensor, after: torch.Tensor, tokens) -> float:
-    """How far the trainer's own distribution moved, over the tokens the server probe reports."""
     return max_or_nan(abs(before[t].item() - after[t].item()) for t in tokens)
 
 
@@ -236,7 +210,6 @@ def _perturb(params: list[torch.Tensor], generator: torch.Generator) -> None:
 
 
 def _weight_groups(model) -> dict[str, list[torch.Tensor]]:
-    """The three conversion classes the sync must carry, as disjoint parameter groups."""
     ep_layers = dict(named_ep_layers(model))
     experts = [param for layer in ep_layers.values() for _name, param in layer.expert_named_params()]
     router_and_shared = [
@@ -311,9 +284,8 @@ def run(ctx) -> dict:
             expected = _trainer_logprobs(model, prompt_ids)
             sync_weights_to_client(model, client, is_main=True, is_tp_main=True)
             after = _server_logprobs(model_id, prompt_ids)
-            # The server must move about as far as the trainer's own forward moved: a group whose
-            # tensors miss their slots leaves the server where it was (or moves it by the residual
-            # of an earlier group alone).
+            # A group whose tensors miss their slots leaves the server where it was, or moves it by an earlier group's
+            # residual.
             trainer_moved = _trainer_shift(previous_expected, expected, previous)
             moved, gap = _shift(previous, after), _gap(after, expected)
             metrics[f"{group}/trainer_moved"] = trainer_moved

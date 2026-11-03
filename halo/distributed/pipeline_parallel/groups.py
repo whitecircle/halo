@@ -1,9 +1,5 @@
-"""Pipeline process groups and the chain's last-stage broadcasts.
-
-A chain holds the ranks at one intra-stage position across every stage and carries all P2P activation
-traffic (its members sit ``stage_world_size`` apart, in different NVLink domains); a stage group is one
-contiguous rank block, the FSDP data-parallel scope. Only the last stage holds a loss or a prediction.
-"""
+"""Pipeline process groups and the chain's last-stage broadcasts. A chain holds the ranks at one intra-stage position
+across stages and carries P2P activations; a stage group is one contiguous rank block, the FSDP scope."""
 
 from __future__ import annotations
 
@@ -48,11 +44,8 @@ def build_stage_group(config: ParallelismConfig) -> dist.ProcessGroup | None:
 
 
 def broadcast_scalar_from_last_stage(tensor: torch.Tensor | None, src: int, group: dist.ProcessGroup) -> torch.Tensor:
-    """COLLECTIVE over the chain: the last stage's scalar on every rank.
-
-    Non-last stages pass ``None`` and receive into a scalar fp32 buffer, so the source is cast to that
-    shape and dtype here (NCCL validates neither). One collective, for the per-step path.
-    """
+    """COLLECTIVE over the chain: the last stage's scalar on every rank. Non-last stages receive into a scalar fp32
+    buffer, so the source is cast to match here (NCCL validates neither shape nor dtype)."""
     tensor = tensor.detach().reshape(()).float() if tensor is not None else torch.zeros((), device=current_device())
     dist.broadcast(tensor, src=src, group=group)
     return tensor

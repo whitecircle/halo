@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""``TrainingArguments.ddp_timeout`` is refused: one knob governs the NCCL watchdog.
-
-``parse_script_args`` brings the process group up before any config is built, with
-``DIST_NCCL_TIMEOUT_MINUTES`` as its watchdog, and accelerate initializes no group once one exists. A
-YAML ``ddp_timeout`` would therefore parse and never apply, leaving a run that believes it waits two hours
-aborting at thirty minutes.
-
-    python tests/cpu/config/test_ddp_timeout_refusal.py
-"""
+"""``TrainingArguments.ddp_timeout`` is refused. ``parse_script_args`` brings the process group up with
+``DIST_NCCL_TIMEOUT_MINUTES`` as its watchdog before any config is built, so a YAML value would parse and never
+apply."""
 
 import pytest
 from transformers import TrainingArguments
@@ -32,7 +26,7 @@ def test_a_ddp_timeout_set_in_the_config_is_refused_naming_the_knob_that_applies
 
 
 def test_a_config_leaving_ddp_timeout_at_its_default_parses(monkeypatch, tmp_path):
-    """Anti-vacuity: only a changed value is a request, spelled out at TRL's default or left out."""
+    """Only a changed value is a request."""
     default = TrainingArguments.ddp_timeout
     assert _parse(monkeypatch, tmp_path, "").ddp_timeout == default
     assert _parse(monkeypatch, tmp_path, f"ddp_timeout: {default}\n").ddp_timeout == default

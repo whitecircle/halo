@@ -1,8 +1,5 @@
 """Every toolkit registry holds what the registry-order golden pins, in the golden's order, rendered in a fresh
-interpreter so no module a test imported first can reorder it.
-
-Run: python tests/cpu/conventions/test_registry_order.py
-"""
+interpreter so no module a test imported first can reorder it."""
 
 import json
 
@@ -22,8 +19,6 @@ def test_every_registry_holds_the_golden_order():
 
 
 def test_every_registry_holds_entries():
-    """Anti-vacuity: a registry that stopped filling, or a filter that dropped every class, would match an
-    empty golden."""
     assert [name for name, entries in GOLDEN.items() if not entries] == []
 
 

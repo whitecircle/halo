@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""A code-contests run that lists several languages lets the model pick one per program.
-
-Both tools then take a required ``language`` argument (the set's canonical names), every program runs
-and is graded in the language its call named, the episode records the language it settled on as a
-metric slice, and a call without a valid language, or with code evidently in another of the set's
-languages, is refused before it spends the episode's budget. A run naming one language keeps the
-fixed-language contract (``python_repl``, no argument).
-
-Run: python tests/cpu/environments/test_code_contests_languages.py  (or pytest)
-"""
+"""A code-contests run listing several languages lets the model pick one per program: both tools take a required
+``language``, every program runs and grades in it, and a call naming an invalid one, or with code evidently in
+another, is refused before it spends budget. One language keeps the fixed contract."""
 
 import json
 import platform
@@ -240,10 +233,8 @@ def test_the_prompt_states_the_compiled_multiplier_only_when_it_is_not_one_and_t
 
 
 def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_call():
-    """C++ sent as python, and Python sent as cpp, are refused before they run like any refusal: each pays
-    the tool-error price and flags its turn untrainable, neither scratchpad run nor submission counts, the
-    submission cap and its price stay whole, nothing is recorded as graded, and the language slice is
-    untouched."""
+    """Refused before they run: each pays the tool-error price and flags its turn untrainable, no run or submission
+    counts, and nothing is recorded as graded."""
     sandbox = _RecordingSandbox()
     env = _env(
         sandbox=sandbox,

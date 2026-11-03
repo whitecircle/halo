@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""The SFT script's data-option refusals: each fires on its own condition, and the default run passes them all.
-
-Run: python tests/cpu/trainers/test_sft_rules.py
-"""
+"""The SFT script's data-option refusals: each fires on its own condition, and the default run passes them all."""
 
 import re
 from types import SimpleNamespace
@@ -79,7 +76,7 @@ def _tree_run() -> dict[str, SimpleNamespace]:
 )
 def test_tree_packing_refuses_every_option_that_would_reshape_a_tree_row(holder, field, value, match):
     run = _tree_run()
-    reject_unsupported_tree_packing(**run)  # the supported shape passes
+    reject_unsupported_tree_packing(**run)
     setattr(run[holder], field, value)
     with pytest.raises(ValueError, match=f"^tree_packing needs: {match}") as refusal:
         reject_unsupported_tree_packing(**run)

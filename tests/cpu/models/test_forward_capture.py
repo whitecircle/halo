@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 """``capturing_forward_outputs``: a module's forward outputs, projected, for the length of one block only.
-
-The GRPO full-logits path keeps the scoring forward's logits for a loss that would otherwise forward again, and
-the embedding trainer reads its metrics off the loss forward's sentence embeddings. A hook that outlived its
-block would keep appending (and holding graphs) on every later forward, so it must go on exit, raised or not.
-
-    python tests/cpu/models/test_forward_capture.py
-"""
+A hook outliving its block would keep appending and holding graphs, so it must go on exit, raised or not."""
 
 import pytest
 import torch

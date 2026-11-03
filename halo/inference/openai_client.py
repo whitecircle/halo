@@ -1,5 +1,5 @@
-"""The OpenAI-compatible chat client: client construction, one chat request with the upstream retry, and
-the single-request helper that normalizes a reply."""
+"""The OpenAI-compatible chat client: construction, one chat request with the upstream retry, and the single-request
+helper that normalizes a reply."""
 
 import asyncio
 from collections.abc import Mapping
@@ -18,16 +18,13 @@ TRANSIENT_CLIENT_ERROR_CODES = frozenset({408, 429})
 _RETRYABLE_UPSTREAM_CODES = TRANSIENT_CLIENT_ERROR_CODES | {500, 502, 503, 504}
 UPSTREAM_RETRIES = 4
 _UPSTREAM_BACKOFF_S = 2.0
-# The SDK's own transport retries (connection errors, 408/409/429, 5xx), enough for a long eval to
-# survive transient errors under load.
 _SDK_MAX_RETRIES = 4
-# Per-request timeout (seconds) where no config sets one. Generous: a run sends many requests to one endpoint at
-# once, and a long reasoning turn queued behind them takes minutes to return.
+# Generous: a run floods one endpoint, and a long reasoning turn queued behind the requests takes minutes.
 REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 class EmptyChoicesError(RuntimeError):
-    """A chat completion that carried no choices: the error body it carried instead, if any."""
+    """The error body it carried instead, if any."""
 
     def __init__(self, model: str, error: Any):
         super().__init__(f"chat completion for {model!r} carried no choices: {error!r}")
@@ -35,7 +32,6 @@ class EmptyChoicesError(RuntimeError):
 
 
 def _usage_field(completion, field: str) -> int:
-    """A usage field from a completion response; 0 when the endpoint reported no usage."""
     usage = getattr(completion, "usage", None)
     if usage is None:
         return 0
@@ -43,13 +39,9 @@ def _usage_field(completion, field: str) -> int:
 
 
 def build_openai_client(base_url: str | None = None, api_key_override: str | None = None) -> AsyncOpenAI:
-    """Build an ``AsyncOpenAI`` client with optional base URL and API key override.
-
-    An omitted ``base_url`` targets :data:`DEFAULT_LOCAL_BASE_URL`, never the public OpenAI API. No key (an
-    empty override and an unset or blank ``OPENAI_API_KEY``) raises ``ValueError``: the SDK re-reads a
-    blank variable itself, and the empty key it builds with fails only later, as an opaque 401
-    (``.env.example`` ships the variable blank).
-    """
+    """An omitted ``base_url`` targets :data:`DEFAULT_LOCAL_BASE_URL`, never the public OpenAI API. No key raises: the
+    SDK re-reads a blank variable itself, and the empty key it builds with fails only later, as an opaque 401
+    (``.env.example`` ships the variable blank)."""
     api_key = api_key_override or env_str("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("no API key for the OpenAI-compatible client: pass one, or set OPENAI_API_KEY")
@@ -57,9 +49,8 @@ def build_openai_client(base_url: str | None = None, api_key_override: str | Non
 
 
 async def chat_completion(client: AsyncOpenAI, **request: Any):
-    """``client.chat.completions.create(**request)``, with a reply that carries no choices retried
-    on a retryable upstream code (:data:`_RETRYABLE_UPSTREAM_CODES`, exponential backoff) and raised as
-    :class:`EmptyChoicesError` otherwise, so no caller indexes an empty ``choices``."""
+    """A reply with no choices retries on a retryable upstream code and raises :class:`EmptyChoicesError` otherwise, so
+    no caller indexes an empty ``choices``."""
     for attempt in range(UPSTREAM_RETRIES + 1):
         completion = await client.chat.completions.create(**request)
         if completion.choices:
@@ -86,14 +77,9 @@ async def generate_openai_response(
     extra_body: dict[str, Any] | None = None,
     top_p: float | None = None,
 ) -> OpenAIResponse:
-    """One chat completion from an OpenAI-compatible API, as an :class:`OpenAIResponse`.
-
-    ``messages`` is a message list or one user message. ``temperature`` ``None`` keeps the served
-    default, which reasoning models require. ``extra_body`` rides the request body verbatim, for
-    fields outside the OpenAI chat schema — the rollout engines' generation contract comes from
-    :func:`~halo.environments.engine_wire.generation_control_fields`, the one owner of those
-    spellings, and OpenRouter's ``reasoning`` field from its caller. ``top_p`` is sent only when set.
-    """
+    """``temperature`` ``None`` keeps the served default, which reasoning models require. ``extra_body`` rides the
+    request body verbatim, for fields outside the OpenAI chat schema; the rollout engines' come from
+    :func:`~halo.environments.engine_wire.generation_control_fields`."""
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
 

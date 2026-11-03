@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 """``tests.common.adapters.assert_adapters_moved`` fails the adapter states that should fail it.
-
-The default passes once any adapter moved, a zero-init ``lora_B`` among them; ``require_all`` also fails a run
-that left one adapter where it started, the partially wired adapter the default lets through.
-"""
+``require_all`` also fails a run that left one adapter where it started, which the default lets through."""
 
 import pytest
 import torch

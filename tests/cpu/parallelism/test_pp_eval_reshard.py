@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""A forward-only pipeline drive must not run the schedule's trailing gradient reduction.
-
-Both single-stage schedules end ``_step_microbatches`` with ``stage.perform_reduce_grad``, which
-``eval``'s backward suppression does not reach. On an FSDP2 stage that call reshards the stage and
-finds no gradients to reduce, so each forward-only batch would pay a full parameter all-gather per
-stage to unshard it again.
-
-The counter below stands in for that reshard. These tests fail if it runs on any forward-only path,
-and also if the suppression reaches into training or outlives its scope: a leak would silently
-disable the real gradient reduction.
-
-Run: pytest tests/cpu/parallelism/test_pp_eval_reshard.py
-"""
+"""A forward-only pipeline drive must not run the schedule's trailing ``stage.perform_reduce_grad``.
+On an FSDP2 stage that call reshards with no gradients to reduce, paying a parameter all-gather per batch."""
 
 import pytest
 import torch
@@ -31,11 +20,7 @@ def _batch():
 
 
 def test_a_training_step_still_reduces_gradients():
-    """The suppression is scoped to forward-only drives.
-
-    Skipping reduce-grad on a training step would leave FSDP2's gradients unreduced across the DP
-    mesh, so every replica would step on its own shard's gradient alone.
-    """
+    """Skipping it on a training step leaves FSDP2's gradients unreduced across the DP mesh."""
     rt = fake_runner()
 
     rt.step(*_batch())
@@ -45,11 +30,7 @@ def test_a_training_step_still_reduces_gradients():
 
 @pytest.mark.parametrize("batches", [1, 5])
 def test_eval_loss_never_reshards_the_stage(batches):
-    """N eval batches cost zero reshards, not N.
-
-    A forward-only drive produces no gradients, so reduce-grad has nothing to reduce and its only
-    effect would be the reshard, paid once per eval batch.
-    """
+    """Its only effect would be the reshard, paid once per eval batch."""
     rt = fake_runner()
     input_ids, labels = _batch()
 
@@ -62,7 +43,6 @@ def test_eval_loss_never_reshards_the_stage(batches):
 
 
 def test_forward_only_never_reshards_the_stage():
-    """``forward_only`` drives the same schedule and must be suppressed on the same grounds."""
     rt = fake_runner()
     input_ids, _ = _batch()
 
@@ -74,11 +54,8 @@ def test_forward_only_never_reshards_the_stage():
 
 
 def test_the_dict_target_eval_path_is_suppressed_too():
-    """``extra_targets`` on the last stage takes its own branch, straight into ``_step_microbatches``.
-
-    That branch bypasses ``schedule.eval``, so a suppression wired only around the ``schedule.eval``
-    call would leave every preference and GRPO eval resharding per batch.
-    """
+    """``extra_targets`` bypasses ``schedule.eval``, so wiring only around that call leaves preference and GRPO eval
+    resharding per batch."""
     rt = fake_runner()
     input_ids, labels = _batch()
 
@@ -90,11 +67,7 @@ def test_the_dict_target_eval_path_is_suppressed_too():
 
 
 def test_training_resumes_reducing_after_an_eval():
-    """The suppression does not leak: a step after an eval reduces again.
-
-    A shadow left installed on the stage would disable gradient reduction for the rest of the run
-    while losses stay finite and the model still moves, on unreduced gradients.
-    """
+    """A shadow left installed disables gradient reduction for the rest of the run while losses stay finite."""
     rt = fake_runner()
     input_ids, labels = _batch()
 
@@ -108,7 +81,6 @@ def test_training_resumes_reducing_after_an_eval():
 
 
 def test_a_raising_drive_still_restores_the_stage():
-    """A failure inside the schedule must not strand the stage with reduction disabled."""
     rt = fake_runner()
 
     def exploding(*args, **kwargs):
@@ -122,12 +94,7 @@ def test_a_raising_drive_still_restores_the_stage():
 
 
 def test_the_shadowed_torch_member_is_declared_in_the_contract():
-    """The runner shadows a private torch member, so a rename must fail loud at construction.
-
-    ``_assert_pipelining_contract`` probes every name in ``_REQUIRED_STAGE_INTERNALS``. If
-    ``perform_reduce_grad`` were missing from that tuple, a torch version that renamed it would leave
-    the shadow on a dead attribute and the reshard would return unnoticed.
-    """
+    """Missing from ``_REQUIRED_STAGE_INTERNALS``, a torch rename would leave the shadow on a dead attribute."""
     assert "perform_reduce_grad" in _REQUIRED_STAGE_INTERNALS
     assert hasattr(PipelineStage, "perform_reduce_grad"), "torch renamed the member the runner suppresses"
 

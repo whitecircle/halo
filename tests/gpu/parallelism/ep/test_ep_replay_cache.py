@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""The EP checkpoint scope on real DeepEP dispatch (gpt-oss-20b, ep2 on 2 GPUs).
+"""A checkpointed EP layer replays its cached DeepEP dispatch instead of running it twice, in both checkpoint modes.
 
-A checkpointed EP layer must NOT run DeepEP twice. The recompute's fresh dispatch would reuse the
-same ``ElasticBuffer`` and invalidate the handle the original forward's backward node still holds —
-which corrupts every gradient in the model and raises nothing. The scope makes the recompute replay
-the frame's cached dispatch/combine instead. This test pins that on real dispatch, in BOTH
-checkpoint modes:
-
-  * gradients under GC match the no-GC gradients (the corruption this guards against is a measured
-    2.0 relative error on nearly every parameter, so the tight tolerance here is the whole test);
-  * both ``use_reentrant`` modes replay: the recompute signal is the scope's pass counter, not grad
-    mode (only the reentrant original forward runs under ``no_grad``);
-  * no scope survives the step, and resident memory is flat across steps (the frame-local cache
-    dies with its checkpoint frame — the layer holds no cache of its own);
-  * checkpointing re-enabled WITHOUT the scope (TRL's ``disable_gradient_checkpointing`` restores a
-    bare checkpoint on exit) fails loud instead of silently corrupting the gradients.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_replay_cache.py
+A fresh recompute dispatch reuses the ``ElasticBuffer`` and invalidates the handle the backward node holds, corrupting
+every gradient silently. Only the reentrant original runs under ``no_grad``, so the signal is the scope's pass counter.
+A bare checkpoint (restored by TRL's ``disable_gradient_checkpointing``) must fail loud.
 """
 
 import math
@@ -37,13 +24,11 @@ from tests.common.rank_log import log
 
 EP_SIZE = 2
 SEQ_LEN = 128
-# bf16 recompute reproduces the forward only to its last bits; the failure this guards against is
-# ~2.0 relative on nearly every parameter, three orders of magnitude above this gate.
+# A bf16 recompute reproduces the forward only to its last bits; the failure is ~2.0 relative, three orders above this.
 GRAD_REL_TOL = 5e-3
 
 
 def fixed_batch(device, vocab: int):
-    """One deterministic batch, identical on every rank."""
     generator = torch.Generator(device="cpu").manual_seed(42)
     input_ids = torch.randint(0, vocab, (1, SEQ_LEN), generator=generator).to(device)
     dist.broadcast(input_ids, src=0)
@@ -53,12 +38,8 @@ def fixed_batch(device, vocab: int):
 
 
 def run_step(model, device, vocab: int, *, collect: bool = False):
-    """One forward+backward. Returns the gradients when ``collect``, else memory resident after it.
-
-    The resident reading is taken after ``zero_grad``, so within a leg it holds constant unless a
-    layer retained something across steps — which is exactly what a cache that outlived its
-    checkpoint frame would do.
-    """
+    """Returns gradients when ``collect``, else resident memory after ``zero_grad``, constant unless a layer retained
+    state across steps."""
     input_ids, attention_mask, labels = fixed_batch(device, vocab)
     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
     outputs.loss.backward()
@@ -91,7 +72,7 @@ def load_ep_model(gradient_checkpointing: bool | None):
 
 
 def worst_rel_err(test: dict, reference: dict) -> tuple[float, str, int]:
-    """Largest per-parameter relative error; a non-finite one (either side) reads as ``inf``."""
+    """A non-finite error on either side reads as ``inf``."""
     worst, name, compared = 0.0, "", 0
     for key, ref in reference.items():
         if ref.norm() == 0:
@@ -122,8 +103,8 @@ def run(ctx):
         label = "reentrant" if reentrant else "non_reentrant"
 
         grads = run_step(model, ctx.device, vocab, collect=True)
-        # A layer-level cache would keep one step's dispatch alive into the next; the frame-local
-        # scope releases it with the checkpoint frame, so resident memory is flat across steps.
+        # The frame-local scope releases the dispatch with its checkpoint frame, so resident memory is flat across
+        # steps.
         resident_first = run_step(model, ctx.device, vocab)
         resident_second = run_step(model, ctx.device, vocab)
 
@@ -142,7 +123,7 @@ def run(ctx):
         del model, grads
         cleanup_memory()
 
-    # Checkpointing without the scope: the recompute's second DeepEP dispatch must fail loud.
+    # The recompute's second DeepEP dispatch must fail loud.
     model = load_ep_model(None)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.train()

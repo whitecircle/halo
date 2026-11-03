@@ -1,8 +1,4 @@
-"""DeepEP buffer sizing: wire tables and alignments, the transport ceilings, the per-forward capacity.
-
-``ParallelismConfig`` applies the ceilings to the run's declared token budget before any weight is
-read; the backends apply them to the batch in hand when they size a buffer.
-"""
+"""DeepEP buffer sizing: wire tables and alignments, transport ceilings, the per-forward capacity."""
 
 from __future__ import annotations
 
@@ -29,12 +25,9 @@ GIN_MAX_TOKENS_PER_RANK = env_int("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", 8192)
 
 
 class CapacityScope:
-    """The capacity the first MoE layer of a forward all-reduced per EP group, reused by the later layers.
-
-    Every MoE layer of a forward sees the same tokens/rank, and the generation advances once per
-    forward on every rank, so a miss (and the all-reduce behind it) lands on all ranks of a group
-    together.
-    """
+    """The capacity the first MoE layer of a forward all-reduced per EP group, reused by later layers. Every MoE layer
+    sees the same tokens/rank and the generation advances once per forward on every rank, so a miss and its all-reduce
+    land on all ranks of a group together."""
 
     def __init__(self):
         self.generation = 0
@@ -46,7 +39,6 @@ class CapacityScope:
         self.generation += 1
 
     def lookup(self, group_id: int, top_k: int) -> int | None:
-        """The capacity stored for ``group_id`` in the current generation at ``top_k``, else None."""
         entry = self._entries.get(group_id)
         if entry is None or entry[1] != self.generation or entry[2] != top_k:
             return None
@@ -64,44 +56,34 @@ capacity_scope = CapacityScope()
 
 
 def ep_dispatch_capacity(tokens_per_rank: int) -> int:
-    """The arena capacity for ``tokens_per_rank``: rounded up to :data:`EP_CAPACITY_ALIGN`, so
-    similar-sized batches reuse one buffer instead of rebuilding it every few tokens of growth."""
+    """Round up to :data:`EP_CAPACITY_ALIGN`, so similar-sized batches reuse one buffer instead of rebuilding it every
+    few tokens of growth."""
     return ((tokens_per_rank + EP_CAPACITY_ALIGN - 1) // EP_CAPACITY_ALIGN) * EP_CAPACITY_ALIGN
 
 
 def padded_wire_hidden(hidden_dim: int) -> int:
-    """The hidden width on the DeepEP wire: ``hidden_dim`` rounded up to :data:`DEEPEP_HIDDEN_ALIGN`."""
     return ((hidden_dim + DEEPEP_HIDDEN_ALIGN - 1) // DEEPEP_HIDDEN_ALIGN) * DEEPEP_HIDDEN_ALIGN
 
 
 def bump_forward_generation(*_hook_args) -> None:
-    """Open a new per-forward capacity scope. Call once per backbone forward, on every rank.
-
-    :func:`register_forward_generation_hook` installs it as a forward pre-hook; a caller that enters
-    the backbone directly (TRL's chunked log-prob path peels ``base_model`` off the wrapper) calls it.
-    """
+    """Open a new per-forward capacity scope; call once per backbone forward, on every rank. A caller that enters the
+    backbone directly (TRL's chunked log-prob path peels ``base_model`` off the wrapper) calls it itself."""
     capacity_scope.bump()
 
 
 def register_forward_generation_hook(model: torch.nn.Module) -> None:
-    """Bump the capacity generation once per ``model`` forward; a no-op with the capacity dedup off.
-
-    Register on the outermost module the loop calls, and again whenever a wrapper lands above it: a
-    task-typed ``PeftModel`` reaches the model it wraps through ``.forward()``, which runs no
-    pre-hook. Idempotence is read off this module's own hooks, not a marker attribute PEFT would
-    forward down to the wrapped model.
-    """
+    """Bump the capacity generation once per ``model`` forward. Register on the outermost module the loop calls, and
+    again whenever a wrapper lands above it: a task-typed ``PeftModel`` reaches the model it wraps through
+    ``.forward()``, which runs no pre-hook. Idempotence is read off these hooks, since PEFT forwards a marker attribute
+    to the wrapped model."""
     if not EP_CAPACITY_DEDUP or bump_forward_generation in model._forward_pre_hooks.values():
         return
     model.register_forward_pre_hook(bump_forward_generation)
 
 
 def reject_legacy_backend_topology(dispatch_size: int, *, is_cross_node: bool, gpus_per_node: int, scope: str) -> None:
-    """Raise for a dispatch topology a DeepEP V1 (``ep_buffer_backend='legacy'``) buffer cannot drive.
-
-    ``scope`` names the topology in the caller's terms; the gate is the dispatch group, which expert
-    TP makes narrower than the EP group.
-    """
+    """Raise for a dispatch topology a V1 (``legacy``) buffer cannot drive. The gate is the dispatch group, which
+    expert TP makes narrower than the EP group."""
     if is_cross_node:
         raise ValueError(
             f"ep_buffer_backend='legacy' cannot drive a CROSS-NODE EP group ({scope}): the V1 buffer "
@@ -115,7 +97,6 @@ def reject_legacy_backend_topology(dispatch_size: int, *, is_cross_node: bool, g
             f"within one OS node ({gpus_per_node} GPUs here). Use the default 'elastic' backend."
         )
     if dispatch_size not in DEEPEP_V1_CONFIG_RANKS:
-        # Only the widths that also clear the peer limit above.
         usable = sorted(w for w in DEEPEP_V1_CONFIG_RANKS if w <= min(DEEPEP_V1_MAX_NVL_PEERS, gpus_per_node))
         raise ValueError(
             f"ep_buffer_backend='legacy' has no tuned Config for a {dispatch_size}-rank dispatch "
@@ -125,8 +106,7 @@ def reject_legacy_backend_topology(dispatch_size: int, *, is_cross_node: bool, g
 
 
 def reject_oversized_dispatch(capacity: int, *, num_topk: int, padded_hidden: int, spans_domains: bool) -> None:
-    """Raise for a per-rank arena capacity DeepEP cannot carry: past the 32-bit wire index, or, on a
-    group spanning NVLink domains, past the validated proxy-Gin ceiling (the NVLink path has none)."""
+    """Raise past the 32-bit wire index or, on a group spanning NVLink domains, past the proxy-Gin ceiling."""
     index_extent = capacity * num_topk * padded_hidden
     if index_extent >= DEEPEP_INDEX_LIMIT:
         raise ValueError(

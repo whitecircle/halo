@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
-"""Schema-normalization logging: one accurate warning, and no module-level INFO silencing.
-
-Two properties pinned here:
-
-* the module logger must not be pinned to WARNING — that silences its load-bearing INFO lines (which
-  columns were kept, split sizes after normalization) on every run; the same holds for the S3 and
-  shard-cache modules beside it, whose INFO lines are the run's only record of what data moved;
-* ``_normalize_dataset_schema`` warning once per "essential" column absent from the common set gives
-  five spurious warnings on a perfectly normal multi-dataset run, naming columns NO dataset ever had.
-  The warning must fire once, and only for columns actually lost from a dataset that had them.
-
-Run: pytest tests/cpu/data/test_loading_schema_warnings.py
-"""
+"""Schema-normalization logging: the module loggers stay pinned at INFO, and ``_normalize_dataset_schema`` warns
+once, only for columns lost from a dataset that had them."""
 
 import json
 import logging
@@ -45,19 +34,12 @@ _CORPUS_LOGGER = "halo.data.sources.corpus"
     ],
 )
 def test_data_source_loggers_are_pinned_at_info(name):
-    """``halo`` pins the root to WARNING, so a module logger left unset silences the column-drop
-    notice, the cache and transfer records and each rank's loaded-split size — the run's only record
-    of what data actually trained.
-
-    The logger's OWN level, not the effective one: reading the inherited level would pass on any
-    ambient root configuration (pytest's, or a sibling test's ``caplog``) and certify nothing about
-    the module."""
+    """``halo`` pins the root to WARNING, so an unset module logger silences the run's only record of what data
+    trained. The logger's own level, since the effective one passes on any ambient root configuration."""
     assert logging.getLogger(name).level == logging.INFO
 
 
 def test_schema_warning_names_only_columns_actually_lost(caplog):
-    """Two datasets sharing 'conversation', one also carrying 'labels': exactly one warning, naming
-    'labels' and none of the essential columns no dataset ever had."""
     ds_with_labels = Dataset.from_dict({"conversation": ["a", "b"], "labels": ["x", "y"]})
     ds_without = Dataset.from_dict({"conversation": ["c"]})
 
@@ -74,12 +56,8 @@ def test_schema_warning_names_only_columns_actually_lost(caplog):
 
 
 def test_schema_warning_names_the_runs_own_declared_column(caplog):
-    """The warned-about set follows the run's configuration, not a fixed literal.
-
-    A custom ``conversation_field`` is pinned through the concatenation, so the only way to lose it
-    is a type mismatch across the entries — and that must be named. A hardcoded tuple would know only
-    the default spellings, so a column named by the YAML would vanish without a word.
-    """
+    """A custom ``conversation_field`` is pinned through the concatenation, so only a type mismatch can lose it, and
+    a hardcoded tuple would not name it."""
     ds_a = Dataset.from_dict({"dialogue": [[{"role": "user", "content": "hi"}]], "row_id": [0]})
     ds_b = Dataset.from_dict({"dialogue": ["hi"], "row_id": [1]})
 
@@ -93,8 +71,7 @@ def test_schema_warning_names_the_runs_own_declared_column(caplog):
 
 
 def test_declared_column_absent_from_one_dataset_is_pinned_not_dropped(caplog):
-    """A declared column only one entry carries is union-filled with nulls instead of being dropped
-    from all of them — and a pinned column is not "lost", so it must not warn either."""
+    """A declared column only one entry carries is union-filled with nulls, and a pinned column is not lost."""
     ds_with = Dataset.from_dict({"conversation": ["a"], "tools": [[{"name": "f"}]]})
     ds_without = Dataset.from_dict({"conversation": ["b"]})
 
@@ -107,8 +84,6 @@ def test_declared_column_absent_from_one_dataset_is_pinned_not_dropped(caplog):
 
 
 def test_no_schema_warning_when_nothing_is_lost(caplog):
-    """The normal multi-dataset run (identical schemas) must warn about nothing — a per-column
-    loop fires five times here, training operators to ignore this module's warnings."""
     ds_a = Dataset.from_dict({"conversation": ["a"]})
     ds_b = Dataset.from_dict({"conversation": ["b"]})
 
@@ -130,10 +105,8 @@ print(json.dumps(_normalize_dataset_schema([first, second])[0].column_names))
 
 
 def test_normalized_column_order_is_the_same_in_every_process():
-    """Every rank normalizes on its own, and the column order it lands on reaches each map that keys
-    or removes by ``column_names``: ranks ordering the columns differently key different caches for
-    one map, so each re-runs it instead of reading the load rank's. String-set order changes with the
-    per-process hash seed, so two seeds must agree — on the first dataset's order."""
+    """Ranks ordering the columns differently key different caches for one map and each re-runs it. String-set order
+    changes with the hash seed, so two seeds must agree on the first dataset's order."""
     orders = []
     for seed in ("1", "2"):
         result = subprocess.run(

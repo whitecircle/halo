@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""Coordinated dataset processing: writer election, cache reuse, and cross-rank agreement.
+"""Coordinated dataset processing: writer election, cache reuse, and cross-rank agreement, on a cache dir every rank
+shares.
 
-``coordinated_map`` / ``coordinated_filter`` exist to make ONE rank per filesystem scope run each
-map/filter and have the others load its cache file. Two properties are asserted, both of which need a
-cache directory that every rank SHARES — with a per-rank temp dir the calls degenerate to "every rank
-maps its own copy" and every assertion below still passes, testing nothing:
-
-1. writer election — exactly the ``is_fs_load_rank()`` ranks execute the map/filter body (the
-   map fills a cache the peers then read, so it follows the INPUT flag: shared → global rank 0
-   only; non-shared → each node's local rank 0);
-2. cache reuse — the non-writer ranks get byte-identical results without running the body.
-
-Every check runs to the end of its test, which agrees the verdict across ranks before raising: an
-early exit past a collective would strand the peers, turning a clean FAIL into a hang.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/data/test_coordinated_processing.py
+Every check runs to the end of its test, which agrees the verdict before raising: an early exit past a collective would
+strand the peers, turning a clean FAIL into a hang.
 """
 
 import os
@@ -38,26 +25,18 @@ from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log, log_all
 
-# Configuration
-
 NUM_SAMPLES = 50
 
-# Counts how many rows each rank's map/filter body actually processed. A non-writer rank that loaded
-# the writer's cache never calls the body, so this must stay 0 there.
+# A non-writer rank that loaded the writer's cache never calls the body, so its count must stay 0.
 EXEC_COUNTS: dict[str, int] = {}
 
 
-# Utilities
-
-
 def create_test_dataset(num_samples: int = NUM_SAMPLES) -> Dataset:
-    """Create a deterministic synthetic dataset for testing."""
     data = []
     for i in range(num_samples):
-        # Mix of short and long texts, with some that will be filtered
         length = (i % 5 + 1) * 10
         text = f"Sample {i}: " + " ".join([f"word{j}" for j in range(length)])
-        value = i * 3 + 7  # Deterministic value for verification
+        value = i * 3 + 7
         data.append(
             {
                 "text": text,
@@ -70,14 +49,14 @@ def create_test_dataset(num_samples: int = NUM_SAMPLES) -> Dataset:
 
 
 def gather_objects(value):
-    """All-gather ``value`` from every rank. Collective: every rank must reach it."""
+    """COLLECTIVE: every rank must reach it."""
     gathered = [None] * dist.get_world_size()
     dist.all_gather_object(gathered, value)
     return gathered
 
 
 def require_agreement(ok: bool, label: str) -> None:
-    """Raise unless EVERY rank passed. Collective, so it also keeps the ranks in lockstep."""
+    """COLLECTIVE. Raise unless every rank passed."""
     flag = torch.tensor([1 if ok else 0], device=f"cuda:{torch.cuda.current_device()}")
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
     if not flag.item():
@@ -85,21 +64,15 @@ def require_agreement(ok: bool, label: str) -> None:
 
 
 def set_hf_datasets_cache(path: str) -> None:
-    """Point HF's dataset cache at ``path``. ``datasets.config`` latched the env at import, so the
-    live config must be updated too — an env write alone leaves ``ensure_cache_dir`` disagreeing with
-    what ``datasets`` actually uses."""
+    """``datasets.config`` latched the env at import, so an env write alone leaves ``ensure_cache_dir`` disagreeing."""
     os.environ["HF_DATASETS_CACHE"] = path
     datasets.config.HF_DATASETS_CACHE = Path(path)
 
 
 @contextmanager
 def shared_cache_dir(prefix: str):
-    """A cache directory every rank sees at the SAME path — rank 0 creates it and broadcasts it.
-
-    This is what makes the writer election observable at all: with a per-rank ``mkdtemp`` no rank can
-    ever load another's cache file, so a broken election (or no coordination whatsoever) would look
-    identical to a working one.
-    """
+    """Rank 0 creates it and broadcasts it: with a per-rank ``mkdtemp`` no rank can load another's cache file, so a
+    broken election would look identical to a working one."""
     rank = dist.get_rank()
     path = tempfile.mkdtemp(prefix=prefix) if rank == 0 else None
     path = gather_objects(path)[0]
@@ -109,7 +82,7 @@ def shared_cache_dir(prefix: str):
     try:
         yield path
     finally:
-        barrier()  # nobody may delete the shared dir while a peer still reads it
+        barrier()  # Nobody may delete the shared dir while a peer still reads it.
         if previous is not None:
             set_hf_datasets_cache(previous)
         else:
@@ -121,15 +94,9 @@ def shared_cache_dir(prefix: str):
 
 @contextmanager
 def filesystem_mode(shared: bool):
-    """Run the body under ``DIST_SHARED_FILESYSTEM``, faking one node per rank when non-shared.
-
-    On a single-node launch local rank 0 IS global rank 0, so the two election branches are
-    indistinguishable. Presenting every rank as its own node makes every rank a local main, which is
-    exactly the per-node-local-storage contract: each writes and reads its own copy.
-
-    The production init agreed the flags once for the process; that memo is dropped on entry and on exit, so
-    the flags read the mode set here and then the launch's own again.
-    """
+    """Fakes one node per rank when non-shared: on a single-node launch local rank 0 is global rank 0, so the two
+    election branches are otherwise indistinguishable. The production init's memoized flags are dropped on entry and
+    exit."""
     saved = {k: os.environ.get(k) for k in ("DIST_SHARED_FILESYSTEM", "LOCAL_RANK", "LOCAL_WORLD_SIZE")}
     os.environ["DIST_SHARED_FILESYSTEM"] = "1" if shared else "0"
     if not shared:
@@ -149,15 +116,11 @@ def filesystem_mode(shared: bool):
 
 
 def on_disk_source(cache_dir: str, num_samples: int) -> Dataset:
-    """A byte-identical on-disk dataset for every rank.
-
-    ``coordinated_map`` keys its cache file on the source dataset's identity, so an in-memory
-    ``Dataset.from_list`` per rank would key differently per rank and defeat the cache sharing the
-    election depends on.
-    """
+    """``coordinated_map`` keys its cache on the source's identity, so an in-memory dataset per rank defeats cache
+    sharing."""
     path = os.path.join(cache_dir, "source")
-    # Global rank 0 writes it unconditionally: under DIST_SHARED_FILESYSTEM=0 every rank is a local
-    # main, and this scaffolding path is shared, so an fs-aware election would race here.
+    # Global rank 0 writes it: under DIST_SHARED_FILESYSTEM=0 every rank is a local main, and an fs-aware election
+    # would race on this shared scaffolding path.
     if is_global_main_process() and not os.path.exists(path):
         create_test_dataset(num_samples).save_to_disk(path)
     barrier()
@@ -165,7 +128,6 @@ def on_disk_source(cache_dir: str, num_samples: int) -> Dataset:
 
 
 def counting(key: str, fn):
-    """Wrap ``fn`` so every row it processes bumps ``EXEC_COUNTS[key]``."""
     EXEC_COUNTS[key] = 0
 
     def wrapped(example):
@@ -177,10 +139,8 @@ def counting(key: str, fn):
 
 
 def check_election(key: str, expected_rows: int) -> bool:
-    """Assert only the fs-aware writer ranks ran the body, and that the writers ran it fully.
-
-    Collective (it gathers), so every rank must reach it — never guard it behind an earlier failure.
-    """
+    """COLLECTIVE, so never guard it behind an earlier failure. Only the fs-aware writer ranks ran the body, in
+    full."""
     is_writer = is_fs_load_rank()
     executed = EXEC_COUNTS[key]
     ok = executed == (expected_rows if is_writer else 0)
@@ -202,7 +162,7 @@ def check_election(key: str, expected_rows: int) -> bool:
 
 
 def check_identical(label: str, value) -> bool:
-    """Assert every rank holds the same ``value``. Collective."""
+    """COLLECTIVE. Every rank holds the same ``value``."""
     gathered = gather_objects(value)
     ok = all(item == gathered[0] for item in gathered)
     if not ok:
@@ -210,15 +170,7 @@ def check_identical(label: str, value) -> bool:
     return ok
 
 
-# Test Functions
-
-
 def _run_map_and_filter(shared: bool) -> None:
-    """coordinated_map + coordinated_filter under one filesystem mode.
-
-    Asserts the transform is correct, that exactly the elected writer ranks executed the bodies, and
-    that every rank ends up with identical rows.
-    """
     with filesystem_mode(shared), shared_cache_dir(f"coord_{'shared' if shared else 'local'}_") as cache_dir:
         dataset = on_disk_source(cache_dir, 30)
 
@@ -248,7 +200,7 @@ def _run_map_and_filter(shared: bool) -> None:
             log_all(f"    FAIL: filter kept {len(filtered)} rows (expected {expected_kept}) or kept a short row")
             ok = False
 
-        # Collectives below run unconditionally — a rank bailing out here would strand its peers.
+        # Collectives below run unconditionally: a rank bailing out here would strand its peers.
         ok = check_election("map", 30) and ok
         ok = check_election("filter", 30) and ok
         ok = check_identical("mapped doubled column", [row["doubled"] for row in mapped]) and ok
@@ -258,26 +210,21 @@ def _run_map_and_filter(shared: bool) -> None:
 
 
 def test_shared_filesystem_mode() -> None:
-    """DIST_SHARED_FILESYSTEM=1: global rank 0 alone maps; every other rank loads its cache."""
     _run_map_and_filter(shared=True)
 
 
 def test_non_shared_filesystem_mode() -> None:
-    """DIST_SHARED_FILESYSTEM=0: each node's local rank 0 maps its own node-local copy."""
     _run_map_and_filter(shared=False)
 
 
 def _add_100(example):
-    """Reused across both calls of the cache-reuse test so the two share ONE cache key."""
+    """Reused across both calls so the two share one cache key."""
     return {"transformed": example["value"] + 100}
 
 
 def test_cache_file_is_the_shared_artifact() -> None:
-    """The writer's ``.arrow`` cache file is what every rank's result comes from.
-
-    Both halves matter: a cache file appears in the shared dir, AND repeating the identical call
-    executes the body nowhere. "A file exists somewhere" alone proves nothing about reuse.
-    """
+    """A cache file appears in the shared dir and repeating the identical call runs the body nowhere: a file alone
+    proves nothing about reuse."""
     with filesystem_mode(shared=True), shared_cache_dir("coord_cache_") as cache_dir:
         dataset = on_disk_source(cache_dir, 15)
         expected = [dataset[i]["value"] + 100 for i in range(15)]
@@ -294,8 +241,8 @@ def test_cache_file_is_the_shared_artifact() -> None:
             ok = False
         ok = check_identical("cache file listing", arrow_files) and ok
 
-        # Byte-identical call (same fn object, same desc, same source) → the cache key repeats, so
-        # NOBODY re-executes the body, writer included. counting() resets the counter.
+        # Same fn object, desc and source repeat the cache key, so nobody re-executes the body. counting() resets the
+        # counter.
         repeat = coordinated_map(dataset, counting("transform", _add_100), desc="cache_check", num_proc=1)
         if EXEC_COUNTS["transform"] != 0:
             log_all(f"    FAIL: cached rerun re-executed the body {EXEC_COUNTS['transform']}x (cache not reused)")
@@ -309,12 +256,10 @@ def test_cache_file_is_the_shared_artifact() -> None:
 
 
 def test_map_and_filter_combined() -> None:
-    """coordinated_map_and_filter end-to-end: rejection sentinels dropped, ranks agree."""
     with filesystem_mode(shared=True), shared_cache_dir("coord_mapfilter_") as cache_dir:
         dataset = on_disk_source(cache_dir, 30)
 
         def process(example):
-            """Emit a rejection sentinel (None input_ids) for even ids."""
             if example["id"] % 2 == 0:
                 return {"input_ids": None, "processed_text": None}
             return {"input_ids": [example["value"]], "processed_text": f"processed_{example['id']}"}
@@ -340,16 +285,11 @@ def test_map_and_filter_combined() -> None:
 
 
 def test_diverging_source_keys_a_distinct_cache() -> None:
-    """Ranks holding DIFFERENT data must not collide on one cache file.
-
-    This is the pre-sharded layout (each DP rank owns a disjoint slice): the cache key folds in the
-    source dataset identity, so the writer's file must never be served to a rank whose source
-    differs — that would silently replace this rank's shard with rank 0's.
-    """
+    """The pre-sharded layout: the cache key folds in the source identity, or the writer's file would silently replace
+    this rank's shard with rank 0's."""
     with filesystem_mode(shared=True), shared_cache_dir("coord_disjoint_") as cache_dir:
         rank = dist.get_rank()
         path = os.path.join(cache_dir, f"slice_{rank}")
-        # Disjoint per-rank slices, mirroring ShardedDatasetLoader's assignment.
         Dataset.from_list([{"id": rank * 100 + i, "value": rank * 100 + i} for i in range(8)]).save_to_disk(path)
         sliced = load_from_disk(path)
 
@@ -365,7 +305,7 @@ def test_diverging_source_keys_a_distinct_cache() -> None:
         if [row["doubled"] for row in mapped] != expected:
             log_all(f"    FAIL: rank {rank} got {[row['doubled'] for row in mapped]}, expected its own {expected}")
             ok = False
-        # Every rank must have run its own body: no rank's slice can come from another's cache.
+        # No rank's slice can come from another's cache.
         if EXEC_COUNTS["disjoint"] != 8:
             log_all(f"    FAIL: rank {rank} executed the body {EXEC_COUNTS['disjoint']}x, expected 8 (own slice)")
             ok = False
@@ -378,7 +318,6 @@ def test_diverging_source_keys_a_distinct_cache() -> None:
 
 
 def run(ctx) -> dict:
-    """Run all coordinated processing tests."""
     log(f"\n{'=' * 70}")
     log("  Coordinated Dataset Processing Tests")
     log(f"  World size: {ctx.world_size}, Rank: {ctx.rank}")

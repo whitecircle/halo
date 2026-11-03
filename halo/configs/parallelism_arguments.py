@@ -17,10 +17,8 @@ if TYPE_CHECKING:
 
 @dataclass
 class ParallelismArguments(ValidatedConfig):
-    """The YAML/CLI spelling of every ``ParallelismConfig`` knob, defaulting to the config's own value.
-
-    ``ParallelismConfig`` validates ranges and combinations; this class refuses only a size that is not an int.
-    """
+    """The YAML/CLI spelling of every ``ParallelismConfig`` knob; that class validates ranges and combinations, this
+    one refuses only a size that is not an int."""
 
     expert_parallel_size: int = field(
         default=ParallelismConfig.ep_size,
@@ -335,15 +333,12 @@ def parallelism_config_from_args(
     supports_init_from_scratch: bool = False,
     expert_lora: "ExpertLoraSpec | None" = None,
 ) -> ParallelismConfig:
-    """The :class:`ParallelismConfig` parsed ``ParallelismArguments`` describe, for ``trainer_cls``'s script.
-
-    Refuses here, before any model loads, what the trainer would refuse only after: a CP/PP size
-    ``trainer_cls.reject_undeclared_axes`` refuses, ``lowp_*`` knobs without ``SUPPORTS_LOWP_PRECISION`` (SFT only),
-    ``init_from_scratch`` without ``supports_init_from_scratch``, and ``training_config.full_determinism`` on an
-    EP group spanning NVLink domains. ``training_config`` also declares the per-rank token budget the DeepEP
-    dispatch-ceiling gate judges. ``expert_lora`` is passed here, not assigned onto the result: only construction
-    runs its PP and expert-TP refusals, and ``ep_config()`` caches the ``EPConfig`` it builds.
-    """
+    """The ``ParallelismConfig`` the parsed arguments describe. Refuses here, before any model loads, a CP/PP size
+    ``trainer_cls`` rejects, ``lowp_*`` without ``SUPPORTS_LOWP_PRECISION``, ``init_from_scratch`` without
+    ``supports_init_from_scratch``, and ``full_determinism`` on an EP group spanning NVLink domains.
+    ``training_config`` also declares the token budget the DeepEP dispatch-ceiling gate judges. ``expert_lora`` is
+    passed here, not assigned onto the result: only construction runs its PP and expert-TP refusals, and
+    ``ep_config()`` caches the ``EPConfig``."""
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
     if not trainer_cls.SUPPORTS_LOWP_PRECISION:
         _reject_lowp_outside_sft(lowp)
@@ -359,8 +354,7 @@ def parallelism_config_from_args(
         cp_size=dist_args.context_parallel_size, pp_size=dist_args.pipeline_parallel_size
     )
 
-    # Fields the two dataclasses spell identically forward themselves, so a knob added to both needs no
-    # wiring; only the renames and the derivations stay explicit.
+    # Fields both dataclasses spell identically forward themselves; only renames and derivations stay explicit.
     kwargs = {
         f.name: getattr(dist_args, f.name) for f in fields(ParallelismConfig) if f.init and hasattr(dist_args, f.name)
     }
@@ -373,8 +367,8 @@ def parallelism_config_from_args(
         ep_fp32_experts=dist_args.fp32_experts,
         expert_lora=expert_lora,
         lowp=lowp,
-        # A config with no max_length field (generation-shaped budgets) declares no rows; ``max_length: null``
-        # declares its rows and leaves their length to the gate's context-window resolution.
+        # No max_length field (generation-shaped budgets) declares no rows; ``max_length: null`` declares rows and
+        # leaves their length to the gate's context-window resolution.
         ep_rows_per_device=(
             trainer_cls.FORWARD_ROWS_PER_EXAMPLE * int(getattr(training_config, "per_device_train_batch_size", 0) or 0)
             if hasattr(training_config, "max_length")

@@ -1,17 +1,9 @@
 #!/usr/bin/env python
 """``HALO_FLA_FIXED_NB``: FLA's l2norm and gated-norm kernels skip the per-``NB`` recompiles and stay bit-identical.
 
-Both kernels take ``NB = cdiv(rows, 65536)`` as an unread autotune-key constexpr, rows being tokens times heads. One
-process runs the q/k l2norm and the gated output norm forward and backward at Qwen3.5/3.6-35B-A3B's linear-attention
-width over token counts that span four ``NB`` values, first with the flag (applied through ``finalize_loaded_model``)
-and then with the stock launch. The stock arm reuses the flag arm's autotune picks, which are keyed on the real ``NB``
-in both, so the two arms launch the same configs and every output and gradient must match bit for bit.
-
-With the flag each kernel's compiles stay within twice its autotune configs whatever the token counts; the stock arm,
-the control, must compile again for every new ``NB`` (otherwise the token counts never left one ``NB`` and the first
-check would pass vacuously).
-
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_fla_fixed_nb.py
+Both take ``NB = cdiv(rows, 65536)`` as an unread autotune-key constexpr. The stock arm reuses the flag arm's autotune
+picks, so outputs match bit for bit, and must compile again for each new ``NB``, or the token counts never left one
+``NB`` and the check is vacuous.
 """
 
 import os
@@ -28,14 +20,13 @@ from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log
 
 SEED = 1234
-# Qwen3.5/3.6-35B-A3B's GatedDeltaNet after the q/k repeat: 32 heads of width 128.
+# Qwen3.5/3.6-35B-A3B's GatedDeltaNet after the q/k repeat.
 HEADS, HEAD_DIM = 32, 128
 # Rows = tokens x 32 heads, so these launch with NB = 1, 3, 5 and 7.
 TOKEN_COUNTS = (2048, 6144, 10240, 14336)
 
 
 def _kernels():
-    """``(qualname, Autotuner)`` for every table kernel."""
     for module, kernel_names in FIXED_NB_KERNELS.items():
         for kernel_name in kernel_names:
             yield f"{module.__name__}.{kernel_name}", triton_autotuner(getattr(module, kernel_name))
@@ -51,7 +42,6 @@ def _inputs(device) -> list[dict[str, torch.Tensor]]:
 
 
 def _run(row: dict[str, torch.Tensor], norm: FusedRMSNormGated) -> dict[str, torch.Tensor]:
-    """Both kernels' outputs and gradients for one row."""
     q, x, g = (row[name].detach().clone().requires_grad_() for name in "qxg")
     norm.weight.grad = None
     q_normed = l2norm(q)
@@ -89,7 +79,7 @@ def _arm(rows, norm) -> tuple[list[dict[str, torch.Tensor]], Counter]:
 @gpu_test_main(exact_world_size=1, partial_state=False, prefix="test_fla_fixed_nb")
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
-    # An empty cache, as on a node's first run: compiles are real. Triton reads it at first launch.
+    # An empty cache, as on a node's first run. Triton reads it at first launch.
     os.environ["TRITON_CACHE_DIR"] = os.path.join(ctx.cache_dir, "triton")
     torch.cuda.set_device(ctx.device)
     rows = _inputs(ctx.device)
@@ -113,8 +103,8 @@ def run(ctx) -> dict:
                 assert torch.equal(a[name], b[name]), f"{name} at {tokens} tokens differs between the arms"
 
     def skips_per_nb_recompiles():
-        # Twice, not once: an integer argument (the backward's BS) still specializes on divisibility by 16, and
-        # BS = cdiv(rows, SM count) can cross it between token counts. Per-NB recompiles would be configs x 4.
+        # Twice: the backward's BS still specializes on divisibility by 16, and BS = cdiv(rows, SM count) can cross it.
+        # Per-NB recompiles would be configs x 4.
         for name, configs in config_counts.items():
             assert 0 < fixed_compiles[name] <= 2 * configs, (
                 f"{name}: {fixed_compiles[name]} compiles for {configs} configs"

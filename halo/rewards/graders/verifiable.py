@@ -1,5 +1,5 @@
-"""The RLVR graders — strict ``\\boxed{}`` accuracy and a regex format check — their reward terms, and the
-reward sources the RLVR arm admits."""
+"""The RLVR graders (strict ``\\boxed{}`` accuracy and a regex format check), their reward terms, and the reward
+sources the RLVR arm admits."""
 
 import re
 from collections.abc import Sequence
@@ -41,7 +41,6 @@ class FormatTerm(RewardTerm):
 
 
 def completion_text(completion: Any) -> str:
-    """Last assistant message content for a conversational completion, or the string itself."""
     if isinstance(completion, list):
         return completion[-1]["content"] if completion else ""
     return completion
@@ -50,16 +49,11 @@ def completion_text(completion: Any) -> str:
 def accuracy_reward(completions: Sequence[Any], answer: Sequence[Any], **kwargs: Any) -> list[float]:
     """1.0 where the completion's last ``\\boxed{}`` equals the ground truth, else 0.0.
 
-    **Strict boxed exact-match**, deliberately not the environments' validated-answer chain
-    (:func:`halo.rewards.graders.matching.is_correct_answer`, exact + numeric, which every environment grader
-    uses). The two differ on purpose: this one strips a GSM8K ``####`` rationale prefix and ``,``/``$``
-    from both sides and then requires string equality, so it grades only what the policy put in the
-    box; the environment chain normalizes case, re-extracts a box from the *ground truth* as well,
-    and accepts a numeric match within ``rtol=0.01``. Swapping in the chain would silently re-grade
-    every shipped RLVR recipe (``0.5`` vs ``.5`` and ``7 \\boxed{42}`` vs ``42`` flip verdicts).
+    Strict on purpose, unlike :func:`halo.rewards.graders.matching.is_correct_answer`: it strips a GSM8K ``####``
+    rationale prefix and ``,``/``$`` from both sides and requires string equality. Swapping in that chain would
+    silently re-grade every shipped RLVR recipe (``0.5`` vs ``.5`` and ``7 \\boxed{42}`` vs ``42`` flip verdicts).
     """
-    # strict: a short answer column would otherwise truncate silently and return fewer rewards than
-    # completions, scoring a different set of rows than was generated.
+    # strict: a short answer column would otherwise score a different set of rows than was generated.
     rewards = []
     for completion, gt in zip(completions, answer, strict=True):
         extracted = (extract_last_boxed(completion_text(completion)) or "").strip()
@@ -77,13 +71,10 @@ def accuracy_reward(completions: Sequence[Any], answer: Sequence[Any], **kwargs:
 
 def _format_grader(term: FormatTerm):
     def grader(completions: Sequence[Any], **kwargs: Any) -> list[float]:
-        """1.0 where the completion matches the term's compiled pattern, else 0.0."""
         return [1.0 if term.compiled.search(completion_text(completion)) else 0.0 for completion in completions]
 
     return grader
 
 
-# Term type → grader builder, for the RLVR arm.
 RLVR_GRADERS = {AccuracyTerm: lambda term: accuracy_reward, FormatTerm: _format_grader}
-# The reward sources the RLVR arm admits: its two graders plus the externally scored terms.
 RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm)

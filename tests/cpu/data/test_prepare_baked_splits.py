@@ -1,10 +1,6 @@
-"""A prepared dataset bakes the input's held-out split, and names every split it leaves out.
-
-The artifact holds only ``train`` and ``test``, and training evaluates on a placeholder cut from train
-when ``test`` is absent. A ``{train, validation}`` input would otherwise lose its held-out rows and
-evaluate on training data with only a warning. A split next to the baked pair (GLUE's ``validation``
-beside ``test``, imdb's ``unsupervised``) is left out with a warning that names it, not refused.
-"""
+"""A prepared dataset bakes the input's held-out split and names every split it leaves out. Training evaluates on a
+placeholder cut from train when ``test`` is absent, so a ``{train, validation}`` input would otherwise evaluate
+on training data."""
 
 import logging
 import os

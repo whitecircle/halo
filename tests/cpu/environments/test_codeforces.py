@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""
-CPU tests for Codeforces-style grading in the unified ``CodeContestsEnvironment``.
-
-Covers the pieces that plain exact-match grading gets wrong and that the environment must get
-right: token comparison, special-judge checkers, TLE handling, the per-problem
-time limit, and the env's reset → grade → reward path with ``output_comparison="tokens"``. Grading
-runs real solutions through the local subprocess sandbox, so these assertions fail if the grader,
-the verdict selection, or the sandbox integration breaks.
-
-Run:
-    python tests/cpu/environments/test_codeforces.py
-"""
+"""Codeforces-style grading in ``CodeContestsEnvironment``: token comparison, special-judge checkers, TLE handling
+and the per-problem time limit, through the local subprocess sandbox."""
 
 import base64
 import json
@@ -150,9 +140,6 @@ def test_each_stated_bound_holds_in_its_own_kind():
     assert absolute("", "2.5", "2.5009") and not absolute("", "2500.0", "2500.5")
 
 
-# Grading (token + checker + TLE) through the sandbox
-
-
 def _token_spec() -> GradingSpec:
     """The Codeforces grading contract these cases share: a real sandbox, token comparison."""
     return GradingSpec(sandbox=build_sandbox(), comparison="tokens")
@@ -198,9 +185,8 @@ def test_empty_output_stub_does_not_count_as_ran_ok():
 
 
 def test_backend_outage_counts_infra_errors():
-    """A sandbox backend/transport failure is infrastructure's fault, not the program's: GradeResult
-    must report it as infra_errors so the reward layer can withhold every rung (an all-infra-error
-    grade carries no signal about the code)."""
+    """A backend failure is infrastructure's fault, reported as infra_errors so the reward layer withholds every
+    rung."""
     down = StubSandbox(SandboxResult(stdout="", stderr="", returncode=None, timed_out=False, error="backend down"))
     result = run_solution_against_tests("print(1)", _ADD_TESTS, sandbox=down)
     assert result.infra_errors == result.total == 2
@@ -221,9 +207,6 @@ def test_checker_overrides_token_mismatch():
     assert passed == 1
     no_checker, *_ = grade_solution("print('0.99999')", tests, _token_spec(), time_limit=2.0)
     assert no_checker == 0
-
-
-# Dataset adapters
 
 
 def test_prompt_and_verification_from_row():
@@ -356,12 +339,8 @@ def test_rating_bounds_drop_unrated_problems():
     assert rating_in_bounds({"problem": "..."}, 800, 1200) is True
 
 
-# Environment: reset → grade → reward
-
-
 def test_env_reset_parses_payload_and_grades_the_judges_accept():
-    """The objective is the judge's accept: a submission passing half the tests scores like a wrong one,
-    and only one passing every test earns the objective."""
+    """A submission passing half the tests scores like a wrong one."""
     env = CodeContestsEnvironment(language="python", output_comparison="tokens")
     answer = {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}
     traj = env._reset_single("Print a+b.", {"answer": answer})
@@ -410,8 +389,7 @@ def test_env_reset_reads_a_bare_list_of_tests_from_json():
     ],
 )
 def test_env_reset_refuses_an_answer_that_holds_no_test_set(answer):
-    """Graded against zero tests, such a row would score 0 inside its GRPO group like a wrong solution.
-    Refused at reset instead, the episode becomes a rollout error the trainer masks out of the baseline."""
+    """Refused at reset, the episode becomes a rollout error the trainer masks out of the baseline."""
     env = CodeContestsEnvironment(language="python")
     with pytest.raises(ValueError, match="'answer'"):
         env.reset(["Print a+b."], [{"answer": answer}])
@@ -419,12 +397,8 @@ def test_env_reset_refuses_an_answer_that_holds_no_test_set(answer):
 
 
 def test_python_test_tool_runs_complete_program_with_imports():
-    """The python_repl test tool runs a complete program through the grading sandbox.
-
-    It must allow the standard library and print, matching what ``submit_solution`` grades. Routed to
-    the in-process restricted REPL instead, ``import sys`` is rejected ("imports are not allowed in
-    the sandbox"), leaving a model unable to test a real stdin/stdout solution before submitting.
-    """
+    """Routed to the restricted REPL, ``import sys`` is rejected, leaving a model unable to test a real stdin/stdout
+    solution."""
     env = CodeContestsEnvironment(language="python")
     tool = env.registry.get("python_repl")
     assert tool is not None
@@ -433,10 +407,8 @@ def test_python_test_tool_runs_complete_program_with_imports():
 
 
 def test_scratchpad_feeds_the_programs_stdin():
-    """The scratchpad runs the program on the stdin the call supplies, so a model can try the
-    statement's sample input on the exact program it will submit; an omitted stdin reads as
-    end-of-file rather than blocking, the schema declares it optional, and output computed from no
-    input says it got none."""
+    """A model can try the sample input on the exact program it will submit; an omitted stdin reads as end-of-file,
+    and output computed from no input says so."""
     env = CodeContestsEnvironment(language="python")
     tool = env.registry.get("python_repl")
     program = "import sys\ndata = sys.stdin.read().split()\nprint(sum(int(x) for x in data) if data else 'no input')"
@@ -455,10 +427,7 @@ def test_run_code_binds_stdin_with_the_language():
 
 
 def test_final_code_block_without_submit_is_not_graded():
-    """A final ```python block with NO submit_solution call is not graded — submit_solution is the only
-    graded channel, so an unsubmitted solution scores 0 even when it is correct. (Prevents a model from
-    bypassing the submission cap by dumping a fenced block at the end.)
-    """
+    """submit_solution is the only graded channel, which keeps a fenced block from bypassing the submission cap."""
     env = CodeContestsEnvironment(language="python", output_comparison="tokens")
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
     eids, _ = env.reset(["Read a and b on separate lines; print a+b."], [ctx])
@@ -474,12 +443,7 @@ def test_final_code_block_without_submit_is_not_graded():
 
 
 def test_completed_without_submitting_scores_zero():
-    """A finished episode that never submitted scores 0, not flat partial credit.
-
-    ``submit_solution`` is the only graded channel, so a model that ends with prose (or runs out of
-    turns) without submitting grades 0 — partial credit there would inflate the benchmark and, in
-    training, reward a model for not submitting code.
-    """
+    """Partial credit would inflate the benchmark and reward a model for not submitting."""
     env = CodeContestsEnvironment(language="python", output_comparison="tokens")
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
     eids, _ = env.reset(["Read a and b; print a+b."], [ctx])
@@ -492,10 +456,8 @@ def test_completed_without_submitting_scores_zero():
 
 
 def test_a_passing_submit_on_the_last_turn_completes_the_episode_at_the_full_objective():
-    """A submission passing every hidden test ends the episode, so one made on the final allowed turn
-    completes it instead of truncating it at ``max_turns``: it scores the full objective and pays no
-    ``turn_overflow_penalty``. (``max_submissions=2`` so the submission cap is not what ends it.)
-    """
+    """The accept ends the episode, so it scores the full objective and pays no overflow. ``max_submissions=2``
+    keeps the cap from being what ends it."""
     env = CodeContestsEnvironment(
         max_turns=1, language="python", output_comparison="tokens", max_submissions=2, turn_overflow_penalty=0.5
     )
@@ -532,9 +494,8 @@ def _repl_call(cid, code):
 
 
 def test_test_tool_capped_per_episode():
-    """The scratchpad test tool is capped at ``max_test_calls`` per episode; beyond it the call is
-    rejected and the model is nudged to submit, so it cannot iterate in the sandbox without bound."""
-    assert CodeContestsEnvironment(language="python").max_test_calls == 5  # default
+    """Beyond the cap the call is rejected and the model nudged to submit."""
+    assert CodeContestsEnvironment(language="python").max_test_calls == 5
     env = CodeContestsEnvironment(language="python", output_comparison="tokens", max_test_calls=2)
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
     eids, _ = env.reset(["Print a+b."], [ctx])
@@ -550,8 +511,7 @@ def test_test_tool_capped_per_episode():
 
 
 def test_single_submission_cap_ends_episode():
-    """With ``max_submissions=1`` one submit_solution grades and ends the episode (the default cap is 2)."""
-    assert CodeContestsEnvironment(language="python").max_submissions == 2  # default
+    assert CodeContestsEnvironment(language="python").max_submissions == 2
     env = CodeContestsEnvironment(language="python", output_comparison="tokens", max_submissions=1)
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None, "time_limit": 2.0}}
     eids, _ = env.reset(["Read a and b; print a+b."], [ctx])
@@ -581,13 +541,8 @@ def test_submission_cap_rejects_extra_and_lifts_with_knob():
 
 
 def test_sandbox_fault_during_grading_marks_the_episode_invalid():
-    """A grade lost to the HOST must never train as a wrong program.
-
-    The local backend reports such a fault by RAISING (missing interpreter, ``bwrap`` absent, fork
-    table exhausted, ENOSPC), where the remote one returns ``SandboxResult(error=...)``. Unconverted,
-    the raise escapes ``submit_solution`` as an ordinary tool error: the submission budget is already
-    spent, so the episode completes ungraded and grades 0 — inside the GRPO group baseline, where it
-    biases every sibling's advantage."""
+    """The local backend reports a host fault by raising, which would otherwise escape as a tool error with the
+    budget spent: the episode grades 0 inside the group baseline and biases every sibling's advantage."""
 
     class _RaisingSandbox(SandboxExecutor):
         def open_session(self):
@@ -612,9 +567,7 @@ def test_sandbox_fault_during_grading_marks_the_episode_invalid():
 
 
 def test_a_finished_episode_carries_no_hidden_tests():
-    """The hidden tests and the context's ``answer`` payload are needed until the submission is
-    graded and nowhere after — every hop past the env (the Ray object store, the TP broadcast) would
-    carry them. The verdict stays."""
+    """Every hop past the env would carry the tests and the ``answer`` payload; the verdict stays."""
     env = CodeContestsEnvironment(language="python", output_comparison="tokens", max_submissions=1)
     ctx = {"answer": {"tests": _ADD_TESTS, "checker": None}}
     eids, _ = env.reset(["Read a and b; print a+b."], [ctx])
@@ -630,8 +583,7 @@ def test_a_finished_episode_carries_no_hidden_tests():
 
 
 def test_max_time_limit_below_the_per_test_floor_is_refused():
-    """The task contract promises an interpreted solution at least ``timeout_per_test`` per test; a
-    clamp under it grades below what the model was told."""
+    """The task contract promises an interpreted solution at least ``timeout_per_test`` per test."""
     with pytest.raises(ValueError, match="max_time_limit"):
         CodeContestsEnvironment(language="python", timeout_per_test=5, max_time_limit=2)
     assert (
@@ -666,7 +618,6 @@ def test_invalid_reasoning_effort_rejected():
 
 
 def test_codeforces_preset_forwards_reasoning_effort():
-    """The codeforces/code_contests registry presets thread reasoning_effort onto the env."""
     env = build_environment("codeforces", {"max_turns": 4, "reasoning_effort": "high"})
     assert env.reasoning_effort == "high"
     assert build_environment("code_contests", {}).reasoning_effort == "medium"

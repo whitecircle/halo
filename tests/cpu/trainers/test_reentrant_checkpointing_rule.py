@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """Which runs force reentrant gradient checkpointing before the trainer enables it.
-
-Non-reentrant checkpointing re-runs the checkpointed forward lazily and checks every recomputed tensor's
-metadata against the forward's. A MoE routes in that recompute: the router runs on a hidden state most
-attention kernels recompute nondeterministically, a near-tie pick flips, and the routing tensors change
-shape — a rejected recompute, with or without EP layers. CP's all-to-alls and EP's DeepEP barriers
-have their own reasons. Pipeline parallelism is the one mode that needs the non-reentrant form.
-
-Run: pytest tests/cpu/trainers/test_reentrant_checkpointing_rule.py
-"""
+Non-reentrant checks recomputed metadata, and a MoE router's near-tie flip on recompute changes a tensor's shape."""
 
 import pytest
 from transformers import Qwen3Config, Qwen3MoeConfig

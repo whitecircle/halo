@@ -40,21 +40,17 @@ EP_SIZE = 2
 STEPS = 4
 MAX_LENGTH = 128
 SEED = 42
-# Selection bias that decides top-1 over any softmax probability: the chosen class gets +2, the other
-# expert and the discard slot -2.
+# Decides top-1 over any softmax probability: the chosen class gets +2, the other expert and the discard slot -2.
 PIN_BIAS = 2.0
 
 
 def expert_per_layer(idle: str, num_layers: int) -> list[int]:
-    """The expert every token routes to, per MoE layer, under ``--idle``."""
     if idle == "all":
         return [0] * num_layers
     return [0] + [1] * (num_layers - 1)
 
 
 def pin_routing(idle: str):
-    """An ``edit`` for :func:`build_tiny_family_checkpoint`: every gate pins its tokens to one expert."""
-
     def edit(model) -> None:
         routers = [module for module in model.modules() if isinstance(module, ZayaRouter)]
         for router, expert in zip(routers, expert_per_layer(idle, len(routers)), strict=True):

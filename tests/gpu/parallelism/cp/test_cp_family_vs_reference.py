@@ -1,34 +1,9 @@
 #!/usr/bin/env python
-"""Each tiny model of the CP roster under CP=2 against the same model unsplit: the first attention layer, every
-attention layer wrapped, the loss, and every gradient.
+"""Each tiny model of the CP roster (``tests/common/equivalence/cp_equivalence.py``) under CP=2 against itself unsplit.
 
-The roster is ``FAMILIES`` of ``tests/common/equivalence/cp_equivalence.py``, which covers every wrapper class.
-Every rank builds the same seeded model. The first attention layer under its wrapper over each rank's sequence
-shard, gathered, must match the unwrapped layer over the full sequence, each fed what the decoder hands it: on
-a random model the loss and the gradient direction can average away a wrong position-dependent term such as
-Mistral4's llama-4 query scale read off chunk-local positions, which this output does not. Every rank then
-scores one shared batch over the full sequence as the reference, wraps the model in ``UlyssesModel`` and scores
-its sequence shard: the CP loss averaged over the ranks must match the reference loss, and the gradients averaged
-over the ranks (the reduction FSDP2 runs) must match the reference gradients in direction and norm. Each comparison
-runs at batch 1, where flash takes Q, K and V as views of the all-to-all's receive buffer, and at batch 2, where
-they reach it as contiguous copies. A family adds the checks only its wrapper needs:
-
-  * ``glm4_moe_lite``: MLA, whose ``kv_a_proj_with_mqa`` emits a compressed KV split into a normed nope part
-    and one rotary key shared by every head; run with LoRA-Q under both ``rope_interleave`` settings, the
-    wrapper's flag pinned to the config's, since the loss cannot tell the two RoPE pairings apart on a random
-    model, and at GLM-4.7-Flash's head geometry, whose 256-wide latent heads CP runs on FA2 even on Blackwell.
-  * ``qwen3_5_moe_text``: a double-width ``q_proj`` (query and a sigmoid output gate), every layer full
-    attention, also at Qwen3.5's head geometry, which puts CP on FA4's head_dim-256 kernel on Blackwell. The
-    router aux term takes no extra ``cp_size`` factor: its component, the eval loss at a loud coefficient minus
-    the loss at zero, matches the reference and is the same on every rank. A hybrid ``layer_types`` config, whose
-    GatedDeltaNet layers scan the sequence axis, is refused by name.
-  * ``bailing_moe``: remote code with a fused ``query_key_value``, an output projection named ``dense``,
-    Q/K RMSNorm before a partial rotary and a softmax scale the module never stores. An sdpa label is
-    accepted (the wrapper calls flash itself) while a Lightning-Attention-2 layer, whose file reuses the
-    full-attention class names, is refused by name, and the wrapper reads its scale, Q/K norm and output
-    projection off the config.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family bailing_moe
+On a random model loss and gradient direction can average away a wrong position-dependent term (Mistral4's chunk-local
+query scale), so the first attention layer's output is compared too. Batch 1 hands flash views of the all-to-all's
+receive buffer, batch 2 copies.
 """
 
 import argparse
@@ -68,17 +43,16 @@ from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
 
-# The aux components are differences of two eval forwards on one batch, so the CE term and the CP-vs-reference
-# normalization gap cancel, leaving coef * aux ~ 0.2 plus bf16 noise; a dropped or doubled cp_size factor moves
-# the CP component 2x or 0.5x, and the floor keeps a vanished component from passing.
+# Differences of two eval forwards on one batch, leaving coef * aux ~ 0.2 plus bf16 noise; a dropped or doubled cp_size
+# factor moves the CP component 2x or 0.5x, and the floor keeps a vanished component from passing.
 QWEN3_5_LOSS_TOLERANCE = 8e-2
 AUX_COMPONENT_TOLERANCE = QWEN3_5_LOSS_TOLERANCE / 4
 AUX_COMPONENT_MIN = 5 * AUX_COMPONENT_TOLERANCE
-# The attention check's copy of the layer runs its matrices at this gain: at the tiny init's scale the softmax is
-# near uniform and hides a wrong position-dependent query scale under bf16 noise, and a much higher gain saturates it.
+# At the tiny init's scale the softmax is near uniform and hides a wrong query scale under bf16 noise; a much higher
+# gain saturates it.
 ATTENTION_WEIGHT_GAIN = 8.0
-# One bf16 attention layer against itself: CP's flash kernel over the gathered heads against the family's own
-# attention over the full sequence, the max error relative to the reference's largest output.
+# CP's flash kernel over the gathered heads against the family's own attention, max error relative to the largest
+# output.
 ATTENTION_RTOL = 5e-2
 ATTENTION_COSINE_MIN = 0.9995
 # At batch 1 the swap to heads returns views of its receive buffer, beyond it contiguous copies.
@@ -86,15 +60,14 @@ BATCHES = (1, BATCH)
 
 
 def causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Shifted causal-LM cross entropy in fp32, the objective the CP wrapper reproduces per chunk."""
     return F.cross_entropy(
         logits[:, :-1].float().reshape(-1, logits.size(-1)), labels[:, 1:].reshape(-1), ignore_index=-100
     )
 
 
 def attention_checks(model: nn.Module, cp_config, ids, metrics: dict) -> dict[str, bool]:
-    """COLLECTIVE. The first attention layer under its wrapper over this rank's shard of one shared hidden state,
-    gathered, against the unwrapped layer over the full sequence, each fed what the decoder hands it."""
+    """COLLECTIVE. The first attention layer under its wrapper over this rank's shard, gathered, against the unwrapped
+    one."""
     batch = ids.shape[0]
     positions = torch.arange(SEQ, device=ids.device).unsqueeze(0).expand(batch, -1)
     full_inputs = decoder_attention_inputs(model, ids, positions)
@@ -127,7 +100,6 @@ def attention_checks(model: nn.Module, cp_config, ids, metrics: dict) -> dict[st
 
 
 def gradient_checks(reference: dict, cp_model: nn.Module, metrics: dict) -> dict[str, bool]:
-    """The rank-averaged CP gradients against the reference ones, named as the reference model names them."""
     cp_grads = {name: param.grad for name, param in cp_model.named_parameters() if param.grad is not None}
     matches, grad_metrics = parameter_gradient_checks(cp_grads, reference)
     metrics |= grad_metrics
@@ -135,9 +107,8 @@ def gradient_checks(reference: dict, cp_model: nn.Module, metrics: dict) -> dict
 
 
 class FamilyChecks:
-    """A family's runs and what only its wrapper needs beside the shared comparison: ``variants`` maps the suffix a
-    run's checks carry to its config overrides, ``loss_tolerance`` bounds the CP loss against the reference, and the
-    hooks check the unwrapped model before CP wraps it and the wrapped one after its backward."""
+    """``variants`` maps a run's check suffix to its config overrides; the hooks check the unwrapped model before CP
+    wraps it and the wrapped one after its backward."""
 
     variants: dict[str, dict] = {"": {}}
     loss_tolerance = TOL.parallel_vs_baseline_loss_abs
@@ -165,8 +136,7 @@ class Glm4MoeLiteChecks(FamilyChecks):
             "kv_lora_rank": 64,
         },
     }
-    # MLA adds an all-to-all and a V pad/crop per layer on top of bf16 ordering noise; a wrong projection or
-    # interleave lands an order of magnitude off.
+    # MLA adds an all-to-all and a V pad/crop per layer on bf16 ordering noise; a wrong projection lands an order off.
     loss_tolerance = 1e-1
 
     def after_wrap(self, ctx, cp_model, model, ids, labels):
@@ -197,9 +167,8 @@ class Qwen3_5MoeChecks(FamilyChecks):
 
     @staticmethod
     def aux_component(runner: nn.Module, model: nn.Module, ids, labels) -> float:
-        """``runner``'s eval loss at ``model``'s router aux coefficient minus at zero. The stock forward reads the
-        coefficient it latched at init; the CP wrapper must read the config per forward, so its run zeroes the
-        config alone."""
+        """Eval loss at the router aux coefficient minus at zero. The stock forward reads the coefficient it latched at
+        init; the CP wrapper must read the config per forward, so its run zeroes the config alone."""
         coef = model.config.router_aux_loss_coef
         runner.eval()
         with torch.no_grad():
@@ -230,8 +199,8 @@ class Qwen3_5MoeChecks(FamilyChecks):
         return {
             "aux_component_nonvacuous": self.reference_aux > AUX_COMPONENT_MIN,
             "cp_aux_component_matches_reference": abs(cp_aux - self.reference_aux) <= AUX_COMPONENT_TOLERANCE,
-            # The eval wrapper all-reduces the aux term to the CP-group mean, so a chunk-local term would pass the
-            # average above while biasing eval_loss through the one-representative gather.
+            # All-reduced to the CP-group mean, so a chunk-local term passes the average while biasing eval_loss
+            # through the one-representative gather.
             "cp_aux_component_rank_uniform": world_spread(local_aux) <= 1e-6,
             # Its default hybrid layer_types: the GatedDeltaNet layers scan the sequence axis.
             "hybrid_layer_types_refused": refused,
@@ -246,8 +215,8 @@ class BailingMoeChecks(FamilyChecks):
 
     @staticmethod
     def _validation_checks(model: nn.Module) -> dict[str, bool]:
-        """An sdpa label is accepted; a Lightning-Attention-2 layer, injected by the class name the validator and
-        the patcher both match on, is refused by name."""
+        """An sdpa label is accepted (the wrapper calls flash itself); a Lightning-Attention-2 layer is refused by
+        name."""
         checks = {"sdpa_label_accepted": True, "linear_attention_refused_by_name": False}
         label = model.config._attn_implementation
         model.config._attn_implementation = "sdpa"
@@ -269,8 +238,6 @@ class BailingMoeChecks(FamilyChecks):
 
     @staticmethod
     def _seam_checks(model: nn.Module, cp_group) -> dict[str, bool]:
-        """The wrapper seams the loss cannot isolate on a random model, and the partial rotary the tiny config
-        must exercise."""
         attn, config = model.model.layers[0].attention, model.config
         wrapper = BailingMoeV2UlyssesAttention(attn, cp_group, CP_SIZE)
         return {
@@ -289,11 +256,9 @@ FAMILY_CHECKS = {checks.family: checks for checks in FamilyChecks.__subclasses__
 def compare_with_reference(
     ctx, family: str, checker: FamilyChecks, overrides: dict, batch: int, metrics: dict
 ) -> dict[str, bool]:
-    """COLLECTIVE. ``family``'s tiny model under CP against itself unsplit on ``batch`` rows, with ``checker``'s
-    family checks."""
+    """COLLECTIVE. ``family``'s tiny model under CP against itself unsplit on ``batch`` rows."""
     model = tiny_model(family, "gpu", ctx.device, **overrides)
-    # The seeded init already agrees across ranks; the broadcast keeps a weight mismatch from passing as a
-    # wrapper error.
+    # The broadcast keeps a weight mismatch from passing as a wrapper error.
     for tensor in [*model.parameters(), *model.buffers()]:
         if tensor.is_floating_point():
             dist.broadcast(tensor.data, src=0)

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""``convert_mistral4_bf16.py`` must dequantize the FP8 release exactly and drop only the quant sidecars.
-
-End-to-end on a tiny fake checkpoint in the release's layout: a 2-D fp8 matrix with a scalar
-``_scale_inv``, a 3-D fused expert bank with one scale per expert, a static activation scale, and
-unquantized tensors of every dtype the release carries. Every fp8 tensor must come out as the
-``weight * scale`` product an independent loop computes, the other floats must land in bf16 (the
-output is uniform), integers must pass through, the sidecars must be gone, and ``config.json``
-must lose exactly its ``quantization_config`` while gaining ``dtype: bfloat16``. Structural faults
-(an fp8 tensor without its sidecar, a scale layout this tool does not dequantize) must be refused
-before the output directory exists.
-
-Run: ``python tests/cpu/checkpoint/test_convert_mistral4_bf16.py`` (or ``pytest -m cpu``).
-"""
+"""``convert_mistral4_bf16.py`` dequantizes the FP8 release exactly and drops only the quant sidecars, on a tiny
+fake in the release's layout."""
 
 from __future__ import annotations
 
@@ -36,7 +25,7 @@ _NUM_EXPERTS = 4
 
 
 def _fp8(shape: tuple[int, ...]) -> torch.Tensor:
-    """Deterministic values exact in e4m3 (halves in [-4, 4))."""
+    """Exact in e4m3 (halves in [-4, 4))."""
     return ((torch.arange(torch.Size(shape).numel(), dtype=torch.float32).reshape(shape) % 16 - 8) / 2.0).to(
         torch.float8_e4m3fn
     )
@@ -56,7 +45,7 @@ def _default_tensors() -> dict[str, torch.Tensor]:
 
 
 def _expected(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Independent per-tensor oracle: scalar scale broadcast, per-expert scale over the leading axis."""
+    """Independent oracle: scalar scale broadcast, per-expert scale over the leading axis."""
     dense = (tensors[_DENSE_KEY].float() * tensors[_DENSE_KEY + "_scale_inv"].item()).to(torch.bfloat16)
     bank = tensors[_EXPERT_KEY].float()
     per_expert = torch.stack(
@@ -122,7 +111,7 @@ def test_every_tensor_matches_the_oracle_and_the_output_is_uniform_bf16(converte
         assert tensors[key].dtype == want.dtype, key
         assert torch.equal(tensors[key], want), key
     assert dtypes[_FP32_KEY] == "BF16" and dtypes[_INT_KEY] == "I64"
-    # Anti-vacuity: the per-expert scales differ, so a scalar broadcast of any one of them cannot pass.
+    # Anti-vacuity: per-expert scales differ, so a scalar broadcast cannot pass.
     bank = _default_tensors()[_EXPERT_KEY].float()
     assert not torch.equal(tensors[_EXPERT_KEY], bank.to(torch.bfloat16))
 
@@ -148,8 +137,7 @@ def test_fp8_without_a_sidecar_is_refused_before_any_write(tmp_path, monkeypatch
 
 
 def test_an_unsupported_scale_layout_is_refused_before_any_write(tmp_path, monkeypatch):
-    """A block grid on a 2-D matrix is the GLM-5 scheme, not this one — dequantizing it as a scalar
-    would scale every block by the first entry."""
+    """A block grid on a 2-D matrix is the GLM-5 scheme; a scalar dequant scales every block by the first entry."""
     tensors = _default_tensors()
     tensors[_DENSE_KEY + "_scale_inv"] = torch.ones(2, 2)
     source = _write_checkpoint(tmp_path / "src", tensors)

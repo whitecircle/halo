@@ -1,9 +1,5 @@
-"""Two commits of the repository side by side, for the harnesses that compare a change with its base: a
-commit's tree exported and run, the families both trees' rosters hold, the renames git finds, how a producer
-records a case that raised, the entry-by-entry comparison of two outputs with its accepted deltas and negative
-control, and the evidence record a harness writes per head commit. Standard library only, so the move kit runs
-wherever git does.
-"""
+"""Two commits side by side, for the harnesses comparing a change with its base. Standard library only, so the move kit
+runs wherever git does."""
 
 from __future__ import annotations
 
@@ -28,17 +24,14 @@ logger = logging.getLogger(__name__)
 
 # Git-ignored; each run writes <harness>-<head commit>.json here.
 EVIDENCE_DIR = REPO_ROOT / "evidence"
-# The similarity git pairs a deleted file with an added one at; a declared rename must clear the
-# caller's own, higher bar.
+# The similarity git pairs a deleted and added file at; a declared rename must clear the caller's higher bar.
 RENAME_DETECTION_PERCENT = 50
 DIGEST_HEX_CHARS = 16
-# How many differing entries one output entry's delta lists before it stops.
 DELTA_ENTRIES = 20
-# The key a producer records a raising case's exception under, in place of the case's output.
 RAISED = "raised"
-# Spelled into a raised message in place of the output root, which differs between the two runs.
+# Spelled in place of the output root, which differs between the two runs.
 OUTPUT_ROOT_MARK = "<output>"
-# Prints, as JSON, the names the ``FAMILIES`` roster of the module named by ``argv[1]`` holds.
+# Prints, as JSON, the ``FAMILIES`` names of the module named by ``argv[1]``.
 _ROSTER_SCRIPT = "import importlib, json, sys; print(json.dumps(list(importlib.import_module(sys.argv[1]).FAMILIES)))"
 
 
@@ -51,13 +44,12 @@ def _git(repo: Path, *args: str) -> bytes:
 
 
 def resolve_commit(repo: Path, ref: str) -> str:
-    """The full SHA of the commit ``ref`` names in ``repo``."""
     return _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").decode().strip()
 
 
 def export_tree(repo: Path, commit: str, destination: Path) -> Path:
-    """Write the files ``commit`` tracks under ``destination`` and return it; untracked and ignored files of
-    the checkout never reach it."""
+    """Write the files ``commit`` tracks under ``destination`` and return it; untracked and ignored files never reach
+    it."""
     archive = _git(repo, "archive", "--format=tar", commit)
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(destination, filter="data")
@@ -66,15 +58,13 @@ def export_tree(repo: Path, commit: str, destination: Path) -> Path:
 
 @dataclass(frozen=True)
 class Rename:
-    """A file git pairs across two commits, and how similar the two versions are, in percent."""
-
     old: str
     new: str
     similarity: int
 
 
 def detect_renames(repo: Path, base: str, head: str) -> list[Rename]:
-    """Every rename ``git diff -M50%`` finds from ``base`` to ``head``, with no cap on the files it compares."""
+    """Every rename ``git diff -M50%`` finds, with no cap on the files it compares."""
     fields = _git(repo, "diff", f"-M{RENAME_DETECTION_PERCENT}%", "-l0", "--name-status", "-z", base, head).decode()
     entries = fields.split("\0")
     renames, index = [], 0
@@ -107,22 +97,19 @@ def _run_module(
 def run_in_tree(
     tree: Path, module: str, *args: str, env: Mapping[str, str] | None = None, nproc: int | None = None
 ) -> None:
-    """Run ``python -m module args`` as the repository at ``tree``: its working directory and its only
-    first-party import path, so the module and everything it imports are that tree's own. ``nproc`` runs it
-    under ``torchrun`` as that many ranks on this host instead. ``env`` adds to the environment; a non-zero
-    exit raises."""
+    """Run ``python -m module args`` as the repository at ``tree``, its only first-party import path; a non-zero exit
+    raises."""
     _run_module(tree, module, args, env, nproc, check=True)
 
 
 def probe_in_tree(tree: Path, module: str, *args: str) -> subprocess.CompletedProcess[str]:
-    """:func:`run_in_tree` for a module whose exit status is the answer: how it exited, with its output."""
+    """:func:`run_in_tree` for a module whose exit status is the answer."""
     return _run_module(tree, module, args, None, check=False, capture_output=True, text=True)
 
 
 def tree_roster(tree: Path, module: str) -> list[str]:
-    """The names ``module``'s ``FAMILIES`` roster holds as the repository at ``tree`` defines it: what that tree's
-    producer accepts as ``--families``, which a head with a wider roster must not hand it. A tree that cannot
-    import ``module`` raises with that tree's error."""
+    """``module``'s ``FAMILIES`` names as ``tree`` defines them, which a wider head roster must not hand its producer.
+    Import failure raises."""
     result = _run_python(tree, ["-c", _ROSTER_SCRIPT, module], None, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"reading {module}.FAMILIES in {tree} failed: {result.stderr.strip()}")
@@ -135,10 +122,8 @@ def digest(data: bytes) -> str:
 
 
 def common_families(trees: Mapping[str, Path], module: str, requested: Iterable[str]) -> tuple[list[str], list[str]]:
-    """``requested`` narrowed to the families ``module``'s :func:`tree_roster` holds in every one of ``trees``, in
-    request order, and the families left out because some tree's roster lacks them: requested ones, and those
-    another tree's roster holds, so a family a commit adds, drops or renames is named rather than silently not
-    compared. Each tree's lacking families are logged. Raises when no requested family is left."""
+    """``requested`` narrowed to families in every tree's roster, and those left out, so an added or dropped family is
+    named. Raises when none is left."""
     requested = list(requested)
     rosters = {label: tree_roster(tree, module) for label, tree in trees.items()}
     named = dict.fromkeys([*requested, *(family for roster in rosters.values() for family in roster)])
@@ -153,8 +138,7 @@ def common_families(trees: Mapping[str, Path], module: str, requested: Iterable[
 
 
 def raised_description(error: Exception, output_root: Path | str) -> dict[str, str]:
-    """What a case raised, as a producer records it: the exception's type and its message with
-    ``output_root`` spelled :data:`OUTPUT_ROOT_MARK`."""
+    """What a case raised: its type, and its message with ``output_root`` spelled :data:`OUTPUT_ROOT_MARK`."""
     return {"type": type(error).__qualname__, "message": str(error).replace(str(output_root), OUTPUT_ROOT_MARK)}
 
 
@@ -169,7 +153,7 @@ def quiet_logs() -> Iterator[None]:
 
 
 def json_differences(base, head, prefix: str = "") -> list[str]:
-    """Every leaf by which two JSON-able values differ, one line each naming its key path; ``[]`` when equal."""
+    """Every leaf by which two JSON-able values differ, one line per key path; ``[]`` when equal."""
     if base == head:
         return []
     if isinstance(base, Mapping) and isinstance(head, Mapping):
@@ -189,8 +173,8 @@ def json_differences(base, head, prefix: str = "") -> list[str]:
 def compare_outputs[T](
     base: Mapping[str, T], head: Mapping[str, T], differences: Callable[[T, T], list[str]] = json_differences
 ) -> list[dict]:
-    """Two outputs entry by entry, each keyed by its path in the output: every path one holds and the other
-    lacks, and every path whose ``differences`` are not empty, with the first :data:`DELTA_ENTRIES` of them."""
+    """Two outputs entry by entry: paths one lacks, and paths with non-empty ``differences``, first
+    :data:`DELTA_ENTRIES` of them."""
     deltas = []
     for path in sorted(base.keys() | head.keys()):
         if path not in head:
@@ -203,8 +187,7 @@ def compare_outputs[T](
 
 
 def split_accepted(deltas: list[dict], accepted: Iterable[str]) -> tuple[list[dict], list[dict]]:
-    """``deltas`` as (failing, accepted): a path ``accepted`` names covers itself and every path under it,
-    and its deltas, a flagged change's declared effect, do not fail the verdict."""
+    """``deltas`` as (failing, accepted): an ``accepted`` path covers itself and every path under it."""
     prefixes = tuple(accepted)
     failing, declared = [], []
     for delta in deltas:
@@ -215,8 +198,7 @@ def split_accepted(deltas: list[dict], accepted: Iterable[str]) -> tuple[list[di
 
 
 def unseen_controls(control_deltas: list[dict], control_paths: Iterable[str], raised: Iterable[str]) -> list[str]:
-    """The negative-control paths that went unseen: each one no ``differs`` delta names, and each one whose
-    case raised, since a perturbation that raises proves nothing about what the comparison sees."""
+    """Negative-control paths that went unseen or raised, since a perturbation that raises proves nothing."""
     seen = {delta["path"] for delta in control_deltas if delta["delta"] == "differs"}
     return sorted((set(control_paths) - seen) | set(raised))
 
@@ -231,8 +213,7 @@ def write_evidence(
     findings: dict,
     directory: Path = EVIDENCE_DIR,
 ) -> Path:
-    """Write ``<directory>/<harness>-<head>.json`` and return its path: the commits compared, the image the
-    run used, its command line and verdict, and the harness's ``findings``."""
+    """Write ``<directory>/<harness>-<head>.json`` and return its path."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{harness}-{head}.json"
     record = {

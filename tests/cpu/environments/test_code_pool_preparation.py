@@ -1,12 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the code-contests pool preparation: the HardTests adapter, the generated-tests merge on
-the Codeforces adapter, the test-suite caps and compaction order, and the preparation script's exclusion,
-tests-table, checker-soundness, hold-out and band-config steps. A Codeforces problem whose only tests are its
-statement's examples leaves the eval, the re-grade and the pool unless asked for, and a tests table covering
-one split prepares every split.
-
-Run: python tests/cpu/environments/test_code_pool_preparation.py  (or pytest)
-"""
+"""Code-contests pool preparation: the HardTests adapter, the generated-tests merge, suite caps and compaction, and
+the script's exclusion, tests-table, checker-soundness, hold-out and band steps. A Codeforces problem whose only
+tests are its statement's examples leaves the eval, the re-grade and the pool unless asked for."""
 
 import base64
 import dataclasses
@@ -141,8 +136,8 @@ def test_hardtests_pack_uses_the_joined_suite():
 
 
 def test_hardtests_checker_runs_the_judging_function_under_the_env_contract(tmp_path):
-    """The env calls ``python checker.py input expected got``; the judging function takes
-    ``(input, candidate, reference)``, so the two output paths must be swapped into it."""
+    """The env calls ``python checker.py input expected got`` and the judging function takes ``(input, candidate,
+    reference)``, so the output paths are swapped into it."""
     judge = (
         "def output_judging_function(input_str, candidate_output, reference_output):\n"
         "    return candidate_output.split() == list(reversed(reference_output.split()))\n"
@@ -352,8 +347,8 @@ def test_holdout_takes_the_same_rows_from_every_band_and_the_rows_below():
 
 
 def test_recompaction_that_keeps_no_rows_removes_the_old_part(tmp_path, monkeypatch):
-    """A part written under wider caps must not survive a rebuild that empties the shard, or the next
-    tests-table join reads tests the current caps excluded."""
+    """A part written under wider caps must not survive a rebuild that empties the shard, or the next join reads
+    tests the caps excluded."""
     part = tmp_path / "shard-0.parquet"
     stale = pa.Table.from_pylist([], schema=suite_compaction._OUTPUT_SCHEMA).replace_schema_metadata(
         {suite_compaction._CAPS_METADATA_KEY: json.dumps({"max_tests": 40}).encode()}
@@ -380,8 +375,6 @@ def test_band_configs_share_the_test_split_and_cut_train_by_band():
     assert configs["extra-hard"]["train"]["rating"] == [2600, 3500]
     assert all(cfg["test"]["rating"] == [1200, 2100] for cfg in configs.values())
 
-
-# --- Problems graded on their statement's examples alone ---
 
 _SAMPLE = [{"input": "1\n", "output": "1\n"}]
 _ECHO = [{"input": "2\n", "output": "2\n"}]
@@ -418,8 +411,8 @@ _ROWS = [
 
 
 def test_the_eval_leaves_out_and_counts_examples_only_problems_unless_asked(caplog):
-    """A problem graded on the samples its prompt shows is passed by a program printing a constant: scored, such
-    problems inflate success@k."""
+    """A problem graded on the samples its prompt shows is passed by a program printing a constant, inflating
+    success@k."""
     adapter = dataclasses.replace(CODE_DATASET_ADAPTERS["codeforces"], load=lambda *_: list(_ROWS))
     args = SimpleNamespace(
         dataset="d",
@@ -442,8 +435,7 @@ def test_the_eval_leaves_out_and_counts_examples_only_problems_unless_asked(capl
 
 
 def test_the_regrader_rebuilds_the_rows_each_run_scored(monkeypatch):
-    """The re-grade reads an episode's problem by index, so it rebuilds the eval's sequence from the meta line: a
-    run recording the exclusion scored without the examples-only problems, one predating it with them."""
+    """The re-grade reads an episode's problem by index, so it rebuilds the eval's sequence from the meta line."""
     monkeypatch.setattr(code_contests_regrade, "load_dataset_split", lambda *_, **__: list(_ROWS))
     code_contests_regrade._load_payloads.cache_clear()
     meta = {"adapter": "codeforces", "dataset": "examples-only/now", "split": "test"}
@@ -485,8 +477,8 @@ def _tests_table(tmp_path, key: str) -> str:
 
 
 def test_a_tests_table_covering_one_split_prepares_every_split(monkeypatch, tmp_path):
-    """Generated tests that cover train alone are a valid table: the test split prepares from its own official
-    tests, and the train row the table covers is graded on its joined suite, no longer on its sample alone."""
+    """The test split prepares from its own official tests, and the train row the table covers is graded on its
+    joined suite."""
     source = DatasetDict(
         {"train": Dataset.from_list(_ROWS), "test": Dataset.from_list([_codeforces_row("cf-9", _ECHO)])}
     )

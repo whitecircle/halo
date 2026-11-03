@@ -1,29 +1,9 @@
 #!/usr/bin/env python
-"""Qwen3.8-Flash-Next (``qwen4_exp``) split into two stages through the real SFT trainer, against the unsplit model
-carrying the same ep1 wrappers: every DP replica's loss, every non-expert gradient by its unsplit name and every
-expert bank through the export's gather (:func:`~tests.common.pp_equivalence.score_stage_grads_vs_reference`).
+"""Qwen3.8-Flash-Next split into two stages, against the unsplit model with the same ep1 wrappers.
 
-The tiny model loads as a run loads it, from a checkpoint in the release layout, so its n-gram tables are host
-tables the loader attaches. Eight layers (two ``L,L,L,F`` periods) split ``[3, 5]``, off the period, with a
-per-layer-embedding (PLE) layer on each stage: stage 1's re-reads the token ids the runner hands it. Modes:
-
-  * ``ep2``: pp2 x ep2, bf16, unpadded one-document rows (the CPU suite holds the padding mask's path bitwise);
-  * ``etp2``: pp2 x etp2, fp32 (expert TP reorders each expert's sum, which in bf16 flips near-tied top-k picks),
-    the reference's experts on the per-expert loop;
-  * ``packed``: pp2 x etp2, fp32, one packed row per microbatch, every stage rebuilding the row's ``seq_idx`` and
-    varlen set from its positions, against the unsplit model fed the packing collator's markers per row. fp32: over
-    ~20-token documents the decays' (``A_log``, ``dt_bias``) and the PLE norms' gradients are small sums that bf16
-    rounding alone turns past the direction bars, in the unsplit model itself. Negative control: a stage-0 forward
-    with the rebuild withheld is refused;
-  * ``gc``: ``ep2`` under activation checkpointing (non-reentrant, the QSA selection, n-gram rows and DeepEP dispatch
-    replayed from the checkpoint frame), with the checkpoint calls counted.
-
-``--family qwen3_5_moe_text --mode packed`` runs the packed mode on Qwen3.5-MoE, whose GatedDeltaNet layers read the
-same markers.
-
-Topology: 4 GPUs as 2 simulated NVLink domains of 2; each stage is one domain.
-
-    torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_qwen4_exp_vs_reference.py --mode packed
+Split ``[3, 5]`` off the ``L,L,L,F`` period, with a PLE layer on each stage. ``etp2`` runs fp32 since the sum reorder
+flips picks in bf16; ``packed`` since over ~20-token documents bf16 rounding alone turns the decays' and PLE norms'
+small gradients past the bars.
 """
 
 import argparse
@@ -47,7 +27,7 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 SEED = 1234
 PP_SIZE = 2
-PER_DEVICE_BATCH = 2  # 2 microbatches of 1 per DP replica
+PER_DEVICE_BATCH = 2  # 2 microbatches of 1 per DP replica.
 N_MICROBATCHES = 2
 QWEN4_OVERRIDES = {
     "num_hidden_layers": 8,
@@ -55,7 +35,7 @@ QWEN4_OVERRIDES = {
     "ple_layer_ids": [2, 6],
 }
 SPLITS = {"qwen4_exp_text": [3, 5], "qwen3_5_moe_text": [4, 4]}
-# Each packed row's documents, filling the row to its fixed length (positions restart at each).
+# Fill the row to its fixed length; positions restart at each.
 PACKED_DOCUMENTS = (20, 27, 17)
 MODES = {
     "ep2": {"ep_size": 2},
@@ -75,8 +55,8 @@ DTYPE = torch.float32 if FP32 else torch.bfloat16
 
 
 def _base_model(ctx):
-    """The family's tiny model, identical on every rank: Qwen4 loaded through the host-table load from a checkpoint
-    rank 0 writes, Qwen3.5-MoE built from its seed with eight layers (two ``layer_types`` periods)."""
+    """Qwen4 through the host-table load from a checkpoint rank 0 writes; Qwen3.5-MoE from its seed with eight
+    layers."""
     if ARGS.family == "qwen3_5_moe_text":
         torch.manual_seed(SEED)
         return tiny_family_model(TINY_MOE_FAMILIES[ARGS.family], overrides={"num_hidden_layers": 8}).to(DTYPE)
@@ -88,9 +68,8 @@ def _base_model(ctx):
 
 
 def _packed_batches(rows: torch.Tensor, labels: torch.Tensor, dp_rank: int, model_config):
-    """``(labels, this replica's batch, the reference's per-row kwargs)`` for rows packed with
-    :data:`PACKED_DOCUMENTS`: positions restarting at each document, its first target ignored as the packing collator
-    ignores it, no mask; the reference reads the collator's markers per row."""
+    """Positions restart per document, its first target ignored as the packing collator does, no mask; the reference
+    reads the collator's markers per row."""
     assert sum(PACKED_DOCUMENTS) == rows.shape[1], "the packed documents fill the row"
     positions = torch.cat([torch.arange(n) for n in PACKED_DOCUMENTS]).unsqueeze(0)
     labels = labels.masked_fill(positions == 0, -100)
@@ -106,7 +85,7 @@ def run(ctx):
     checks, metrics = {}, {}
     pp_split = SPLITS[ARGS.family]
     if FP32:
-        torch.set_float32_matmul_precision("highest")  # keep the fp32 reference an actual fp32 reference
+        torch.set_float32_matmul_precision("highest")  # Keeps the fp32 reference an actual fp32 reference.
     config = ParallelismConfig(
         world_size=ctx.world_size,
         gpus_per_node=2,
@@ -153,7 +132,7 @@ def run(ctx):
     calls = ppeq.count_checkpoint_calls(stage) if ARGS.mode == "gc" else None
 
     loss = trainer.training_step(trainer.model, dict(batch))
-    trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)  # runs the deferred sweep, no scaling
+    trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)  # Runs the deferred sweep, no scaling.
     c, m = ppeq.check_loss_vs_reference(loss, reference, dp_rank)
     checks.update(c)
     metrics.update(m)

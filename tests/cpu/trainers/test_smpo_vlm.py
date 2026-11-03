@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""
-CPU tests for SMPO VLM support (SMPOTrainer VLM mode + DataCollatorForVLMSMPO).
-
-Covers the pieces GPU tests can't cheaply exercise:
-  - ``tokenize_vlm_preference_row``: raw-row normalization, image injection/extraction, prefix-strip
-    invariant, completion tokenization parity with the text path (EOS append, truncation);
-  - ``DataCollatorForVLMSMPO``: placeholder expansion at collation, row-major vision stacking,
-    left-padded prompts, BOS handling, over-length prompt fail-loud;
-  - ``concatenate_pairs``: vision-key duplication for the chosen|rejected concat (odd/even
-    batches) with the text keys byte-identical to the no-vision batch;
-  - ``concatenated_forward``: vision tensors reach the model forward; padding_free rejects them;
-  - the VLM-mode guards (padding_free, CP);
-  - an Arrow round-trip (dataset.map keeps PIL images collatable);
-  - the real Qwen3.5 processor end-to-end (skipped when not cached locally).
-
-The stub processor mimics the real contract: ``apply_chat_template`` renders un-expanded image
-placeholders, ``__call__`` expands each placeholder to a fixed patch span and emits Qwen-style
-``pixel_values`` ([total_patches, dim], row-major) + ``image_grid_thw``.
-
-Run: python tests/cpu/trainers/test_smpo_vlm.py
-"""
+"""SMPO VLM support: ``SMPOTrainer`` VLM mode and ``DataCollatorForVLMSMPO``, what GPU tests can't cheaply exercise.
+The stub renders un-expanded placeholders; ``__call__`` expands each and emits Qwen-style ``pixel_values``."""
 
 import inspect
 import re
@@ -94,8 +75,6 @@ class StubTokenizer:
 
 
 class StubProcessor:
-    """Mimics a VLM processor: placeholder expansion + Qwen-style flat pixel patches."""
-
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
@@ -125,7 +104,7 @@ class StubProcessor:
             "attention_mask": torch.ones(1, len(expanded), dtype=torch.long),
         }
         if images:
-            # Fill value = image width → tests can verify row-major patch ordering.
+            # The fill value is the image width, so tests can check row-major patch order.
             out["pixel_values"] = torch.cat(
                 [torch.full((PATCHES_PER_IMAGE, PATCH_DIM), float(img.size[0])) for img in images], dim=0
             )
@@ -134,7 +113,6 @@ class StubProcessor:
 
 
 def make_trainer(*, is_vlm: bool = True, max_prompt_length: int = 512, max_completion_length: int = 64, **args):
-    """Bare SMPOTrainer with just the attributes the tested methods read."""
     # cp_size is a read-only mixin property; has_ep_group gates dataset-map workers (EP pins 1).
     trainer = smpo_trainer(parallelism_config=SimpleNamespace(cp_size=1, has_ep_group=False), **args)
     trainer.is_vlm = is_vlm
@@ -156,12 +134,8 @@ def make_features(width=7, prompt_text="Describe the picture", n_images=1):
 
 
 def prep_row(trainer, features, processor):
-    """Run the VLM row prep the trainer's dataset map runs.
-
-    ``tokenize_vlm_preference_row`` is module-level (a bound method would pickle the trainer, and
-    with it the EP process groups, into every ``dataset.map`` worker), so its tunables come from the
-    trainer's attributes exactly as ``_prepare_dataset`` threads them through ``fn_kwargs``.
-    """
+    """Run the VLM row prep with the trainer's attributes, as ``_prepare_dataset`` threads them through ``fn_kwargs``.
+    The row fn is module-level, since a method would pickle the trainer and its EP groups into each map worker."""
     return tokenize_vlm_preference_row(
         features,
         processor,
@@ -197,7 +171,7 @@ def test_vlm_row_prep_string_prompt_and_prefix_strip():
     trainer = make_trainer()
     prompt_msg = {"role": "user", "content": "What is shown"}
     features = {
-        "prompt": "What is shown",  # string prompt → wrapped as a user turn
+        "prompt": "What is shown",  # wrapped as a user turn
         "chosen": [dict(prompt_msg), {"role": "assistant", "content": "A cat"}],  # repeats the prompt
         "rejected": [dict(prompt_msg), {"role": "assistant", "content": "A dog"}],
         "images": [Image.new("RGB", (7, 5))],
@@ -339,11 +313,8 @@ def test_collator_overlength_prompt_raises():
 
 
 class BosPostProcessingStubTokenizer(StubTokenizer):
-    """A tokenizer whose ``add_special_tokens=True`` post-processor really prepends BOS.
-
-    The probe keys on this, not on ``bos_token_id`` — the VLM prompt is tokenized with
-    ``add_special_tokens=False``, so BOS is owed exactly when the post-processor owns it.
-    """
+    """Its ``add_special_tokens=True`` post-processor prepends BOS.
+    The prompt is tokenized with ``add_special_tokens=False``, so BOS is owed only when the post-processor owns it."""
 
     def __call__(self, text, add_special_tokens=False, **kwargs):
         ids = self._encode(text)
@@ -364,12 +335,7 @@ def test_collator_bos_prepend_when_post_processor_owns_it():
 
 
 def test_collator_no_bos_for_nominal_only_bos_token():
-    """A declared-but-never-emitted bos_token must NOT be injected (gpt-oss/Bailing shape).
-
-    ``StubTokenizer`` adds nothing on ``add_special_tokens=True``, so the probe reports no
-    post-processor BOS; prepending anyway would train VLM SMPO prompts on a token the served
-    policy never produces — the text path (`tokenize_preference_row`) already gates on the probe.
-    """
+    """A bos_token declared but never emitted (gpt-oss/Bailing) would train on a token the policy never produces."""
     tokenizer = StubTokenizer(bos_token_id=1)
     processor = StubProcessor(tokenizer)
     trainer = make_trainer()
@@ -402,9 +368,8 @@ class TokenTypeStubProcessor(StubProcessor):
     ("tokenizer_cls", "overlap"), [(StubTokenizer, 0), (JoinedTurnsTokenizer, 1)], ids=["clean", "merged"]
 )
 def test_collated_pair_is_the_conversation_tokenized_whole(tokenizer_cls, overlap):
-    """Prompt ⧺ completion after collation is the processor's own tokenization of the rendered conversation, EOS
-    closed. When a token merges across the boundary, the completions start one prompt token early, and the
-    collator's prompt must end before it, or that token's text appears twice."""
+    """When a token merges across the boundary, the completions start one prompt token early, and the collator's prompt
+    must end before it, or that token's text appears twice."""
     tokenizer = tokenizer_cls()
     processor = TokenTypeStubProcessor(tokenizer)
     features = make_features()
@@ -424,8 +389,7 @@ def test_collated_pair_is_the_conversation_tokenized_whole(tokenizer_cls, overla
 
 
 def test_prompt_overlap_column_survives_signature_pruning():
-    """HF prunes every dataset column outside the signature set; a pruned overlap would silently bring the
-    repeated boundary token back."""
+    """A pruned overlap would silently bring the repeated boundary token back."""
     trainer = make_trainer()
     trainer.data_collator = make_collator(StubProcessor(StubTokenizer()))
     trainer._signature_columns = None
@@ -515,7 +479,7 @@ def test_concatenated_forward_passes_vision_inputs():
     # are the real-token ones; none are passed in.
     assert "position_ids" not in model.received
 
-    # A text batch must reach the model with NO extra kwargs.
+    # A text batch reaches the model with no extra kwargs.
     model_text = RecordingModel()
     trainer.concatenated_forward(model_text, make_text_batch(batch_size))
     assert set(model_text.received.keys()) == {"input_ids", "attention_mask"}
@@ -540,7 +504,6 @@ def test_vlm_mode_guards():
     reject_smpo_vlm_options(SimpleNamespace(padding_free=False), None, is_vlm=True)
     reject_smpo_vlm_options(SimpleNamespace(padding_free=False), SimpleNamespace(cp_size=1), is_vlm=True)
 
-    # Text mode must never trip the VLM guards.
     reject_smpo_vlm_options(SimpleNamespace(padding_free=True), SimpleNamespace(cp_size=2), is_vlm=False)
 
 
@@ -580,8 +543,7 @@ def test_prepare_dataset_skips_prepared_rows():
     ids=["vlm-without-prompt-overlap", "text-without-rejected"],
 )
 def test_prepare_dataset_refuses_partially_prepared_rows(is_vlm, columns, missing):
-    """Rows short of a prepared column are not trusted, and with the raw pair gone they cannot be tokenized
-    again: the refusal names the missing column instead of the map failing on a raw key."""
+    """With the raw pair gone these rows cannot be tokenized again, so the refusal names the missing column."""
     trainer = make_trainer(is_vlm=is_vlm)
 
     with pytest.raises(ValueError, match=rf"lacks the prepared columns \['{missing}'\]"):
@@ -596,8 +558,8 @@ _MAP_WRITER_BATCH = inspect.signature(Dataset.map).parameters["writer_batch_size
     ("text_rows", "num_proc"), [(_MAP_WRITER_BATCH, 1), (1, 2)], ids=["writer-batch", "map-shard"]
 )
 def test_dataset_map_types_images_before_the_first_image_row(text_rows, num_proc):
-    """A first writer batch, or a map shard, of text-only rows must not type ``images`` as ``List(null)``: the
-    image row after it would then fail the Arrow cast, or the shards fail to align."""
+    """A first writer batch or map shard of text-only rows would type ``images`` as ``List(null)``, and the image row
+    after it would fail the Arrow cast."""
     processor = StubProcessor(StubTokenizer())
     trainer = make_trainer(dataset_num_proc=num_proc)
     text_row = {

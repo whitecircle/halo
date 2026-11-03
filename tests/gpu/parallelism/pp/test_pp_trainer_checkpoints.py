@@ -1,26 +1,9 @@
 #!/usr/bin/env python
-"""Save, exact resume and export of every PP trainer beyond SFT, through the real trainer at pp2 x dp2.
+"""Save, exact resume and export of every PP trainer beyond SFT, at pp2 x dp2.
 
-``--trainer`` picks SMPO, DPO, KTO, the Bradley-Terry reward trainer, classification, or offline GRPO
-without (``offline_grpo``) or with (``offline_grpo_kl``) its KL term, each configured as the suite that pins
-its pipeline loss configures it. The body is :func:`tests.common.resume_export.run_resume_export`: one run
-trains ``TOTAL_STEPS`` from a saved tiny base, checkpointing every ``SAVE_STEP``; a trainer built from the
-midway checkpoint, as the training scripts resume, trains the rest and must restore the optimizer bit for bit
-and replay the unbroken run; the final checkpoint must load through the trainer's export class. The seams
-each trainer adds to the SFT resume (``test_pp_resume.py``), each failing one of those checks when it breaks:
-
-  * the pair and row layouts and per-step normalizers replay across the resume, which lands mid-epoch for
-    every trainer here (``SAVE_STEP`` is coprime with each one's steps per epoch), and SMPO's scheduled margin
-    follows the restored step;
-  * the reward and classification score heads are written by the last stage, read back by the stage loader
-    and served through ``AutoModelForSequenceClassification``;
-  * offline GRPO's grouped sampler resumes on the rows the unbroken run trained;
-  * with ``kl_beta > 0`` the run-start reference rides every checkpoint as ``reference_logps.pt``, and a
-    trainer built from the trained checkpoint attaches it rather than scoring its own weights.
-
-Topology: 4 GPUs as 2 simulated nodes of 2 (NVLink domain = 2), pp2 x dp2.
-
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_trainer_checkpoints.py --trainer smpo
+Score heads are written by the last stage and read back by the stage loader. With ``kl_beta > 0`` the run-start
+reference rides every checkpoint as ``reference_logps.pt``, and a trainer built from a trained checkpoint attaches it
+rather than scoring its own weights.
 """
 
 import argparse
@@ -54,14 +37,14 @@ from tests.gpu.parallelism.pp import test_pp_reward_bt as reward
 from tests.gpu.parallelism.pp import test_pp_smpo as smpo
 
 PP_SIZE = 2
-# Coprime with every trainer's steps per epoch (2, 3 or 4 here), so the resume lands mid-epoch and the
-# trainer's sampler has to skip to the unbroken run's next batch.
+# Coprime with every trainer's steps per epoch, so the resume lands mid-epoch and the sampler must skip to the next
+# batch.
 SAVE_STEP = 5
 TOTAL_STEPS = 2 * SAVE_STEP
 
 
 def no_resume_context(checkpoint: str | None) -> dict:
-    """The constructor kwargs of a trainer the training scripts tell nothing about the resume."""
+    """A trainer the training scripts tell nothing about the resume."""
     return {}
 
 
@@ -76,7 +59,6 @@ def offline_grpo_resume_context(checkpoint: str | None) -> dict:
 
 
 def reference_columns(trainer) -> dict[str, torch.Tensor]:
-    """The run-start reference log-probs each split carries, flattened in row order."""
     return {
         split: torch.tensor([value for row in dataset[REF_PER_TOKEN_LOGPS_COLUMN] for value in row])
         for split, dataset in (("training", trainer.train_dataset), ("evaluation", trainer.eval_dataset))
@@ -85,11 +67,7 @@ def reference_columns(trainer) -> dict[str, torch.Tensor]:
 
 @dataclass(frozen=True)
 class Case:
-    """One trainer's run, on the configuration of the suite that pins its pipeline loss.
-
-    ``args(output_dir, *, max_steps, save_every)`` builds its training arguments and ``datasets()`` its dataset
-    kwargs; ``resume_context(checkpoint)`` is what its training script passes the constructor about a resume.
-    """
+    """One trainer's run, on the configuration of the suite that pins its pipeline loss."""
 
     trainer_cls: type
     tokenizer: Callable
@@ -163,7 +141,7 @@ CASES = {
         base_model=partial(build_dense_model, vocab_size=offline_grpo.VOCAB_SIZE),
         export_class=AutoModelForCausalLM,
         args=partial(offline_grpo.build_args, kl_beta=offline_grpo_kl.KL_BETA),
-        # The evaluation split is scored at construction too, so the sidecar carries both splits.
+        # The evaluation split is scored at construction too, so the sidecar carries both.
         datasets=lambda: {
             "train_dataset": offline_grpo.build_dataset(sizes=offline_grpo_kl.TRAIN_GROUP_SIZES),
             "eval_dataset": offline_grpo.build_dataset(sizes=offline_grpo.EVAL_GROUP_SIZES, prompt_offset=100),
@@ -173,14 +151,14 @@ CASES = {
         run_state=reference_columns,
     ),
 }
-CASE = None  # CASES[--trainer], set before the harness runs
+CASE = None  # CASES[--trainer], set before the harness runs.
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_trainer_checkpoints")
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     tokenizer = CASE.tokenizer()
-    # The PP checkpoint and offline GRPO's reference cache are multi-writer directories: one root for all ranks.
+    # Multi-writer directories: one root for all ranks.
     root = shared_output_dir(ctx)
     base = save_base_checkpoint(ctx, CASE.base_model(tokenizer), tokenizer, os.path.join(root, "base"))
 

@@ -1,25 +1,10 @@
 #!/usr/bin/env python
-"""Distributed KTO training (text or VLM).
+"""Distributed KTO training (text or VLM) on *unpaired* ``{prompt, completion, label}`` rows. A VLM's processor flips
+TRL's KTOTrainer into vision mode (vision KTO is unpaired-only).
 
-Kahneman-Tversky Optimization on *unpaired* preference data — each row is a single
-``{prompt, completion, label}`` triple (``label`` marks the completion desirable or not). One
-script serves both text and vision-language models: ``load_policy_model`` auto-detects the
-modality. For a VLM the processor is the ``processing_class``, flipping TRL 1.14's KTOTrainer into
-vision mode (``DataCollatorForVisionUnpairedPreference``; vision KTO is unpaired-only) — add an
-``images``/``image`` column to the dataset, or point ``images_field`` at the column that holds them.
-
-The vision-vs-text data path follows the dataset, and TRL decides it from the row's columns alone;
-image parts embedded in the messages of a column-less dataset are refused here, since nothing on
-the text path would render them with pixels behind them.
-
-CP is not supported (full-sequence log-prob pooling + KL reference term). Under EP/TP use PEFT
-(``ref_model=None``) or ``precompute_ref_log_probs``; PP runs text-only ``apo_zero_unpaired`` full
-fine-tuning with ``precompute_ref_log_probs`` only.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/preference/kto.py \\
-        examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml
-"""
+CP is not supported (full-sequence log-prob pooling + KL reference term). Under EP/TP use PEFT (``ref_model=None``) or
+``precompute_ref_log_probs``; PP runs text-only ``apo_zero_unpaired`` full fine-tuning with
+``precompute_ref_log_probs`` only."""
 
 from trl import KTOConfig
 
@@ -51,15 +36,9 @@ _KTO_RENAMED_FIELDS = (("completion_field", "completion"), ("label_field", "labe
 
 
 def _reject_embedded_image_parts(dataset, completion_field: str) -> None:
-    """Raise on image content parts in a dataset TRL would read as text-only.
-
-    TRL's KTOTrainer decides vision-vs-text from the first row's columns alone, so a dataset that
-    embeds ``{"type": "image"}`` parts in its prompt/completion messages while shipping no image
-    column takes the text path: the chat template expands each part into vision placeholder tokens
-    with no pixels behind them. KTO renders nothing itself (TRL templates the raw
-    ``prompt``/``completion`` columns), so the per-row ``reject_image_content`` backstop the other
-    preference scripts inherit does not run here.
-    """
+    """Raise on image parts in a dataset TRL would read as text-only: TRL decides from the first row's columns alone,
+    so embedded parts with no image column become placeholder tokens with no pixels. KTO renders nothing itself, so the
+    per-row ``reject_image_content`` backstop does not run here."""
     if dataset_declares_images(dataset):  # an image column, which TRL's own probe sees
         return
     # TRL hard-codes the prompt column; the completion column is the configured one.
@@ -77,13 +56,8 @@ def _reject_embedded_image_parts(dataset, completion_field: str) -> None:
 
 
 def _require_kto_columns(ds, args) -> None:
-    """Raise on a configured KTO column the dataset does not carry.
-
-    Skipping the rename would leave TRL's KTOTrainer to fail downstream on a missing column, or to
-    train on a stale ``completion``/``label`` column that happens to exist under the default name.
-    Reported through the shared render-column guard, so a mistyped column reads the same here as on
-    every other data path.
-    """
+    """Skipping the rename would leave TRL to fail on a missing column, or train on a stale ``completion``/``label``
+    column under the default name."""
     for knob, target in _KTO_RENAMED_FIELDS:
         column = getattr(args, knob)
         if column != target:
@@ -91,11 +65,7 @@ def _require_kto_columns(ds, args) -> None:
 
 
 def _rename_kto_columns(dataset, args):
-    """Normalize dataset columns to KTO's expected ``completion``/``label`` names.
-
-    Renames exactly the pairs :func:`_require_kto_columns` checked, from the same roster. Presence is
-    that function's job, checked once over the whole DatasetDict before the first rename.
-    """
+    """Renames the pairs :func:`_require_kto_columns` checked, over the whole DatasetDict before the first rename."""
     for knob, target in _KTO_RENAMED_FIELDS:
         source = getattr(args, knob)
         if source != target:
@@ -108,9 +78,7 @@ def main():
         KTOScriptArguments, KTOConfig, ModelArguments, ParallelismArguments
     )
 
-    # TRL's KTOTrainer chat-templates and tokenizes the raw prompt/completion columns itself: it
-    # passes no `tools=`, so a dataset tool column would never reach the template, and the rows the
-    # script hands it carry no input_ids, so the decoded-sample writer would have nothing to decode.
+    # TRL templates and tokenizes the raw columns itself: it passes no `tools=`, and its rows have no input_ids.
     reject_unsupported_args("KTO training", tools_field=args.tools_field, log_decoded_samples=args.log_decoded_samples)
 
     context = init_training_script(
@@ -127,9 +95,8 @@ def main():
     # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
-    # Vision routing keys on the dataset, not the checkpoint: a natively-multimodal model trains
-    # text-only unpaired data through TRL's text path. Decided before the model load, which requires
-    # the checkpoint's processor for a vision run.
+    # Vision routing keys on the dataset: a natively-multimodal model trains text-only data through TRL's text path.
+    # Before the load, which needs the checkpoint's processor for a vision run.
     is_vlm_data = resolve_preference_vlm_run(
         args, model_config, ds, text_only_model=args.text_only_model, method="KTO"
     )

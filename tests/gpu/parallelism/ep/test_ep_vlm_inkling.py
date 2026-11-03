@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Inkling multimodal (VLM) EP=2 vs replicated-reference on a tiny random-init composite model.
-
-The production class is `InklingForConditionalGeneration` — vision/audio towers beside a
-`language_model` text backbone. EP patching must find `InklingMoE` nested under the wrapper, the
-towers must survive as replicated modules, and an image-carrying batch (pixel features
-masked-scattered at `image_token_id` placeholders) must train: loss matches the undistributed
-composite reference and the vision tower's gradients stay live alongside the expert shards.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_ep_vlm_inkling.py
-"""
+"""Inkling multimodal at EP=2 against a replicated reference: EP finds ``InklingMoE`` under the wrapper, and vision
+gradients stay live beside the expert shards."""
 
 import torch
 from transformers.models.inkling.configuration_inkling import InklingConfig, InklingVisionConfig
@@ -29,15 +19,14 @@ from tests.common.tolerances import TOL
 SEED = 42
 BATCH, SEQ = 2, 48
 N_PATCHES = 8
-IMAGE_TOKEN_ID = 500  # within the tiny text vocab (512); the real config uses a dedicated special
+IMAGE_TOKEN_ID = 500  # Within the tiny text vocab (512); the real config uses a dedicated special.
 
-# The upstream scale planner (`plan_out_scales`) rejects most tiny shapes; this one builds a valid
-# 4-layer pixel-shuffle stack. text_hidden_size must equal the text config's hidden_size.
+# The upstream scale planner rejects most tiny shapes; this builds a valid 4-layer pixel-shuffle stack.
+# text_hidden_size must equal the text config's.
 TINY_VISION = {"temporal_patch_size": 2, "patch_size": 4, "n_layers": 4, "hidden_size": 32, "text_hidden_size": 256}
 
 
 def _build_model(device):
-    """Identical tiny composite model on every rank (same seed)."""
     torch.manual_seed(SEED)
     config = InklingConfig(
         text_config=dict(TINY_INKLING_CONFIG),
@@ -50,7 +39,7 @@ def _build_model(device):
 
 
 def _image_batch(device):
-    """A fixed batch whose first row carries N_PATCHES image placeholders; pixel layout [N,T,H,W,C]."""
+    """The first row carries N_PATCHES image placeholders; pixel layout [N,T,H,W,C]."""
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, 400, (BATCH, SEQ), device=device)
     input_ids[0, 2 : 2 + N_PATCHES] = IMAGE_TOKEN_ID
@@ -76,7 +65,6 @@ def run(ctx):
 
     input_ids, pixel_values, labels = _image_batch(device)
 
-    # ── Reference: undistributed composite forward+backward ───────────────────
     ref = _build_model(device)
     ref.train()
     ref_out = ref(input_ids=input_ids, pixel_values=pixel_values, labels=labels)
@@ -86,7 +74,6 @@ def run(ctx):
     del ref, ref_out
     cleanup_memory()
 
-    # ── EP=2 on the composite wrapper, same weights, same batch ───────────────
     model = _build_model(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = apply_ep_layers(model, pc.ep_config())

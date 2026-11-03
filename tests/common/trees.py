@@ -1,12 +1,6 @@
-"""Reference pieces the tree-packing tests share.
-
-The dense keep-masks state what tree attention means — a token attends its own root-to-leaf path and
-nothing else — independently of any kernel plan, so every plan and every forward is tested against
-them. :func:`reference_varlen` is the kernel contract tree attention relies on, in plain torch: it
-stands in for the CUDA kernels on the CPU tier and is pinned to them on the GPU tier. The other
-helpers turn token paths into a tree row and a recovered node table back into the examples it holds, and
-compare a training step with gradient checkpointing against the same step without it.
-"""
+"""Reference pieces the tree-packing tests share; dense keep-masks state tree attention independently of any kernel
+plan. :func:`reference_varlen` is the kernel contract in plain torch: it stands in on CPU and is pinned to the CUDA
+kernels on GPU."""
 
 from collections.abc import Callable, Sequence
 
@@ -29,11 +23,8 @@ from halo.models.attention.tree_plan import NodeTable, build_node_table
 def tree_attention_masks(
     position_ids: torch.Tensor, depth: torch.Tensor, sliding_window: int | None
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Dense ``[N, N]`` keep-masks (full, sliding) of a row.
-
-    A query keeps a key on its own path at or before its own position; the window is measured in
-    path positions, not in row order.
-    """
+    """Dense ``[N, N]`` keep-masks (full, sliding): a query keeps keys on its own path at or before it; the window is
+    in path positions."""
     table = build_node_table(position_ids, depth)
     on_path = np.eye(len(table.starts), dtype=bool)
     for node, parent in enumerate(table.parents.tolist()):
@@ -83,9 +74,8 @@ def tree_columns(paths: list[list[int]], trained: list[list[bool]]) -> dict[str,
 
 
 def reference_varlen(calls: list[dict]):
-    """A flash varlen kernel in plain torch: per sequence a bottom-right aligned causal/window softmax
-    with the sink in the normalizer, returning ``(out, lse)`` in the kernel's layouts. Every call's
-    shape facts are appended to ``calls``."""
+    """A flash varlen kernel in plain torch: per sequence a bottom-right causal/window softmax with the sink in the
+    normalizer; returns ``(out, lse)``."""
 
     def varlen(
         q,
@@ -139,7 +129,7 @@ def reference_varlen(calls: list[dict]):
 
 
 def randomize_sinks(model: torch.nn.Module) -> None:
-    """Give every attention sink a value of its own, so a path that drops the sink moves the output."""
+    """Give every sink its own value, so a path that drops the sink moves the output."""
     with torch.no_grad():
         for module in model.modules():
             if hasattr(module, "sinks"):
@@ -147,8 +137,8 @@ def randomize_sinks(model: torch.nn.Module) -> None:
 
 
 def randomize_indexer_pools(model: torch.nn.Module) -> None:
-    """Give every DSA indexer's pool compression (slot embedding and gate) values of its own: initialized to
-    zero, it weighs a pool's tokens alike, so a pool assembled in the wrong order scores the same."""
+    """Give every DSA indexer's pool compression its own values: zero init weighs tokens alike, so a misordered pool
+    scores the same."""
     with torch.no_grad():
         for module in model.modules():
             if hasattr(module, "index_kpool_compress_ape"):
@@ -159,10 +149,8 @@ def randomize_indexer_pools(model: torch.nn.Module) -> None:
 def checkpointing_gaps(
     model: torch.nn.Module, step: Callable[[], torch.Tensor], *, use_reentrant: bool
 ) -> tuple[float, float]:
-    """``(logit gap, gradient gap)``: the largest difference in the logits and in any parameter's gradient between one
-    training step without gradient checkpointing and the same step with it. ``step`` runs the forward and its loss's
-    backward and returns the logits. The checkpointed step must run every decoder layer a second time, or the two
-    steps compare nothing."""
+    """``(logit gap, gradient gap)`` between one step without GC and the same step with it; it must re-run every
+    decoder layer, or they compare nothing."""
     layers = [module for module in model.modules() if isinstance(module, GradientCheckpointingLayer)]
     passes = []
     hooks = [layer.register_forward_pre_hook(lambda *_: passes.append(None)) for layer in layers]
@@ -189,7 +177,6 @@ def checkpointing_gaps(
 
 
 def concat_columns(trees: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    """Several trees as one packed row."""
     return {
         name: torch.cat([tree[name] for tree in trees])
         for name in ("input_ids", "labels", POSITION_COLUMN, DEPTH_COLUMN)

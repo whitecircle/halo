@@ -1,8 +1,6 @@
-"""Fused GLU combines for MoE expert compute: one row-strided Triton kernel pair serves SiLU and tanh-GELU
-(SwiGLU / GeGLU) and the clamped SwiGLU family (GptOss, DeepSeek-V4, GLM-5 Next, Step-3.7), each a
-:class:`GluCombine`. :meth:`GluCombine.packed` reads a fused ``[gate | up]`` projection in place and
-returns its gradient as one buffer, so the expert path copies on neither side of the activation.
-"""
+"""Fused GLU combines for MoE expert compute: one row-strided Triton kernel pair serves SiLU, tanh-GELU and the clamped
+SwiGLU family. :meth:`GluCombine.packed` reads a fused ``[gate | up]`` projection in place and returns its gradient as
+one buffer, so the expert path copies on neither side of the activation."""
 
 from __future__ import annotations
 
@@ -22,7 +20,6 @@ logger = logging.getLogger(__name__)
 # ``HALO_FUSED_GLU=0`` runs every combine eagerly on CUDA too, for a GPU where a GLU kernel fails to build.
 _FUSED_GLU_ENABLED = env_flag("HALO_FUSED_GLU", True)
 
-# Activation codes (``tl.constexpr`` in the kernels).
 _SILU = 0
 _GELU_TANH = 1
 _CLAMPED_SILU = 2  # alpha-scaled SiLU with the clamps of the GptOss/DeepSeek-V4/Step-3.7 family
@@ -32,18 +29,13 @@ _CLAMPED_SILU = 2  # alpha-scaled SiLU with the clamps of the GptOss/DeepSeek-V4
 _GELU_SQRT_2_OVER_PI = tl.constexpr(0.7978845608028654)
 _GELU_TANH_COEFF = tl.constexpr(0.044715)
 
-# Both saturating tails, both signs, zero and the near-zero region; the ``ACT2FN`` sweep in
-# ``test_silu_activation_probe.py`` checks it separates every registered activation.
+# Both saturating tails, both signs, zero and near-zero; it separates every registered ``ACT2FN`` activation.
 _ACTIVATION_PROBE_INPUT = (-64.0, -8.0, -1.0, -0.5, -1e-3, 0.0, 1e-3, 0.5, 1.0, 8.0, 64.0)
 
 
 def _computes_exactly(act_fn: object, reference_fn: Callable[[torch.Tensor], torch.Tensor], name: str) -> bool:
-    """Whether ``act_fn`` reproduces ``reference_fn`` bit for bit over the probe vector; False on anything
-    else, a raise included.
-
-    Behavioural rather than by type: ``ACT2FN["silu"]`` is neither ``nn.SiLU`` nor ``F.silu``. Callers
-    latch the result at construction, so an activation whose parameters train away keeps the kernel.
-    """
+    """Bit for bit over the probe vector; behavioural, as ``ACT2FN["silu"]`` is neither ``nn.SiLU`` nor ``F.silu``.
+    Callers latch the result at construction, so an activation whose parameters train away keeps the kernel."""
     if not callable(act_fn):
         return False
     try:
@@ -63,50 +55,41 @@ def _computes_exactly(act_fn: object, reference_fn: Callable[[torch.Tensor], tor
 
 
 def is_silu_activation(act_fn: object) -> bool:
-    """Whether ``act_fn`` computes exactly ``F.silu``, so a SiLU-hardcoding kernel may stand in for it."""
     return _computes_exactly(act_fn, torch.nn.functional.silu, "F.silu")
 
 
 def is_gelu_tanh_activation(act_fn: object) -> bool:
-    """Whether ``act_fn`` computes exactly the tanh-GELU approximation the fused GeGLU kernel hardcodes;
-    exact (erf) GELU is a different function."""
+    """Exact (erf) GELU is a different function from the tanh-GELU the kernel hardcodes."""
     return _computes_exactly(act_fn, lambda x: torch.nn.functional.gelu(x, approximate="tanh"), "tanh-GELU")
 
 
 def silu_mul_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """SwiGLU reference."""
     return torch.nn.functional.silu(gate) * up
 
 
 def gelu_tanh_mul_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """tanh-GeGLU reference (Gemma 4)."""
     return torch.nn.functional.gelu(gate, approximate="tanh") * up
 
 
 def gptoss_glu_eager(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
-    """GptOss clamped-SwiGLU reference."""
     gate = gate.clamp(max=limit)
     up = up.clamp(min=-limit, max=limit)
     return (up + 1) * (gate * torch.sigmoid(gate * alpha))
 
 
 def clamped_silu_mul_eager(gate: torch.Tensor, up: torch.Tensor, limit: float) -> torch.Tensor:
-    """DeepSeek-V4 and GLM-5 Next clamped SwiGLU reference: the gate clamped from above and the up half
-    symmetrically, then SiLU-gated."""
+    """DeepSeek-V4 and GLM-5 Next."""
     return torch.nn.functional.silu(gate.clamp(max=limit)) * up.clamp(min=-limit, max=limit)
 
 
 def silu_then_clamp_mul_eager(gate: torch.Tensor, up: torch.Tensor, limit: float) -> torch.Tensor:
-    """Step-3.7 clamped SwiGLU reference: SiLU first, then the activated gate clamped from above and the up
-    half symmetrically. Not interchangeable with :func:`clamped_silu_mul_eager`: it saturates at
-    ``limit`` rather than ``silu(limit)``, and its gate gradient vanishes elsewhere."""
+    """Step-3.7. Saturates at ``limit`` rather than ``silu(limit)``, and its gate gradient vanishes elsewhere."""
     return torch.nn.functional.silu(gate).clamp(max=limit) * up.clamp(min=-limit, max=limit)
 
 
 def _glu_launch(n_rows: int, width: int) -> tuple[tuple[int, int], dict]:
-    """The grid and ``BLOCK_M`` (column) / ``ROWS`` (rows per program) tile of a launch over
-    ``[n_rows, width]``, keyed on the width alone so the EP layer's small-token warmup compiles the
-    binary a full dispatch runs. Tuned on the Gemma 4 and Qwen/GLM expert widths."""
+    """Keyed on the width alone, so the EP layer's small-token warmup compiles the binary a full dispatch runs. Tuned
+    on the Gemma 4 and Qwen/GLM expert widths."""
     block_m, rows = (1024, 4) if width <= 1024 else (512, 8)
     return (triton.cdiv(n_rows, rows), triton.cdiv(width, block_m)), {"BLOCK_M": block_m, "ROWS": rows}
 
@@ -120,8 +103,6 @@ def _gelu_tanh_terms(gate):
 
 @triton.jit
 def _clamped_glu_terms(gate, up, alpha, limit, CLAMP_ACTIVATED: tl.constexpr, UP_PLUS_ONE: tl.constexpr):
-    """The clamped family's activated gate and clamped up half, plus what the backward differentiates
-    through: the gate operand, its scaled sigmoid and the GLU before any post-activation clamp."""
     up_g = tl.minimum(tl.maximum(up, -limit), limit)
     if UP_PLUS_ONE:
         up_g = up_g + 1.0
@@ -151,7 +132,7 @@ def _glu_fwd_kernel(
     BLOCK_M: tl.constexpr,
     ROWS: tl.constexpr,
 ):
-    # int64 row offsets: rows * stride can exceed 2**31.
+    # int64, as rows * stride can exceed 2**31.
     row0 = tl.program_id(0).to(tl.int64) * ROWS
     cols = tl.program_id(1) * BLOCK_M + tl.arange(0, BLOCK_M)
     col_mask = cols < width
@@ -215,7 +196,7 @@ def _glu_bwd_kernel(
         else:
             activated, up_g, gate_a, s, glu = _clamped_glu_terms(gate, up, alpha, limit, CLAMP_ACTIVATED, UP_PLUS_ONE)
             dglu = s + gate_a * alpha * s * (1.0 - s)
-            # Clamp subgradients follow torch: the bound itself is inside the pass-through interval.
+            # As in torch, the bound itself is inside the clamp's pass-through interval.
             up_in = tl.where((up >= -limit) & (up <= limit), 1.0, 0.0)
             gate_in = tl.where(glu <= limit, 1.0, 0.0) if CLAMP_ACTIVATED else tl.where(gate <= limit, 1.0, 0.0)
             dgate = dout * up_g * dglu * gate_in
@@ -225,7 +206,6 @@ def _glu_bwd_kernel(
 
 
 def _as_rows(t: torch.Tensor) -> torch.Tensor:
-    """``t`` as a 2D ``[rows, width]`` tensor with a unit column stride, copying only when no such view exists."""
     if t.stride(-1) != 1:
         t = t.contiguous()
     return t.reshape(-1, t.shape[-1])
@@ -277,8 +257,6 @@ def _glu_backward(
 
 
 class _FusedGLU(torch.autograd.Function):
-    """``combine(gate, up)`` over separate (possibly row-strided) halves."""
-
     @staticmethod
     def forward(ctx, gate: torch.Tensor, up: torch.Tensor, combine: GluCombine) -> torch.Tensor:
         shape = gate.shape
@@ -299,8 +277,8 @@ class _FusedGLU(torch.autograd.Function):
 
 
 class _FusedPackedGLU(torch.autograd.Function):
-    """``combine(gate, up)`` over a ``[..., 2M]`` ``[gate | up]`` projection output, read in place with the
-    gradient written as one buffer: no ``.contiguous()`` copies of the halves, no ``cat`` behind ``chunk``."""
+    """Over a ``[..., 2M]`` ``[gate | up]`` output, read in place with the gradient written as one buffer, so no
+    ``.contiguous()`` copies of the halves and no ``cat`` behind ``chunk``."""
 
     @staticmethod
     def forward(ctx, gate_up: torch.Tensor, combine: GluCombine) -> torch.Tensor:
@@ -322,15 +300,13 @@ class _FusedPackedGLU(torch.autograd.Function):
 
 
 def fused_glu_enabled() -> bool:
-    """Whether the fused kernels may run (``HALO_FUSED_GLU``); off, every combine runs its eager form."""
     return _FUSED_GLU_ENABLED
 
 
 @dataclass(frozen=True)
 class GluCombine:
-    """One ``act(gate) * up`` combine: the fused kernel on CUDA, its eager reference elsewhere and under
-    ``HALO_FUSED_GLU=0``. ``alpha`` and ``limit`` are runtime kernel arguments and the rest
-    ``tl.constexpr``, so every layer with one combine shares one compilation."""
+    """``alpha`` and ``limit`` are runtime kernel arguments and the rest ``tl.constexpr``, so every layer with one
+    combine shares one compilation."""
 
     activation: int
     alpha: float = 1.0
@@ -348,14 +324,11 @@ class GluCombine:
 
     @classmethod
     def clamped_silu(cls, limit: float, *, clamp_activated: bool = False) -> GluCombine:
-        """SiLU-gated with ``up`` clamped to ``±limit`` and the gate clamped from above before the SiLU
-        (DeepSeek-V4, GLM-5 Next) or, with ``clamp_activated``, the activated gate after it (Step-3.7)."""
+        """The gate clamped before SiLU (DeepSeek-V4, GLM-5 Next) or, with ``clamp_activated``, after (Step-3.7)."""
         return cls(_CLAMPED_SILU, limit=float(limit), clamp_activated=clamp_activated)
 
     @classmethod
     def gptoss(cls, alpha: float, limit: float) -> GluCombine:
-        """:func:`gptoss_glu_eager`: the clamped gate scaled by ``alpha`` inside the sigmoid, times the
-        clamped ``up + 1``."""
         return cls(_CLAMPED_SILU, alpha=float(alpha), limit=float(limit), up_plus_one=True)
 
     @property
@@ -372,7 +345,6 @@ class GluCombine:
         return self._eager(gate, up)
 
     def packed(self, gate_up: torch.Tensor) -> torch.Tensor:
-        """The combine over a fused ``[..., 2M]`` projection output laid out ``[gate | up]``."""
         if gate_up.is_cuda and fused_glu_enabled():
             return _FusedPackedGLU.apply(gate_up, self)
         return self._eager(*gate_up.chunk(2, dim=-1))
@@ -390,8 +362,7 @@ class GluCombine:
 
 
 def resolve_fused_glu_mul(act_fn: object) -> GluCombine | None:
-    """The fused combine computing ``act_fn(gate) * up``, or None for the eager ``act_fn`` combine. A
-    family gets a fused combine by having one of these activations rather than by setting a flag."""
+    """The fused combine computing ``act_fn(gate) * up``, or None for the eager ``act_fn`` combine."""
     if is_silu_activation(act_fn):
         return GluCombine.silu()
     if is_gelu_tanh_activation(act_fn):
@@ -402,9 +373,7 @@ def resolve_fused_glu_mul(act_fn: object) -> GluCombine | None:
 def resolve_clamped_glu_mul(
     act_fn: object, limit: float, *, clamp_activated: bool
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """The clamped-SwiGLU combine: the gate clamped to ``limit`` before ``act_fn`` (DeepSeek-V4, GLM-5 Next) or,
-    under ``clamp_activated``, after it (Step-3.7), and the up half to ``±limit``. Fused for a SiLU gate; any
-    other activation runs the same clamps eagerly."""
+    """Fused for a SiLU gate; any other activation runs the same clamps eagerly."""
     if is_silu_activation(act_fn):
         return GluCombine.clamped_silu(limit, clamp_activated=clamp_activated)
 

@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""``fs_aware_main_first`` — main-first coordination over the c10d store, not a NCCL barrier.
-
-The main rank's body is unbounded single-rank work: a 100B+ ``snapshot_download``
-(``resolve_model_source``), whole-corpus packing (``coordinated_pack``), an S3 dataset
-fetch. Parking the waiters inside a collective for that duration kills the job at the NCCL watchdog
-(``DIST_NCCL_TIMEOUT_MINUTES``) on EVERY peer, so the waiters must block on a store key with an
-hours-scale wall-clock timeout instead.
-
-Proven on real gloo groups: (1) ordering — the non-main rank enters the context only after the main
-rank's body finished (observes its side effect); (2) release-on-failure — an exception in the main
-rank's body still releases the waiters; (3) re-entrancy — a second use of one tag coordinates
-independently of the first (per-call generation keys); (4) **no collective wait** — with a 5 s
-process-group timeout and an 8 s main-rank body, every rank still completes, which a
-``dist.barrier()`` rendezvous cannot do; (5) the timeout is the store knob
-(``DIST_STORE_TIMEOUT_HOURS``), not a hardcoded 4 h.
-
-    python tests/cpu/runtime/test_store_main_first.py
-"""
+"""``fs_aware_main_first``: main-first coordination over the c10d store. A waiter parked in a collective through a
+100B+ download dies at the NCCL watchdog on every peer, so it blocks on a store key."""
 
 import datetime
 import os
@@ -33,33 +17,26 @@ from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 
-# The main rank's body must be allowed to outlive the process-group timeout: that is the whole point
-# of coordinating on the store. Kept far apart so a slow CI box cannot blur the two, and the PG timeout
-# wide enough that spawn + torch-import skew between the ranks on a loaded host cannot trip the
-# rendezvous before the body is even reached.
+# The body outlives the process-group timeout, far enough apart that a slow CI box cannot blur the two.
 PG_TIMEOUT_SEC = 5
 MAIN_BODY_SEC = 8
 
-# Every store wait in this module is explicitly bounded: under the 4 h production default a regression
-# would surface only as a rank killed at the join deadline, not as the wait's own error.
+# Explicitly bounded: under the 4 h default a regression would surface only as a rank killed at the join deadline.
 WAIT_TIMEOUT = datetime.timedelta(seconds=30)
 
 
 def _worker(rank: int, tmp_dir: str) -> None:
     failures = []
     marker = os.path.join(tmp_dir, "downloaded.marker")
-    # (1) Ordering: main writes the marker inside the context; the waiter must see it.
     with fs_aware_main_first("dl", timeout=WAIT_TIMEOUT):
         if rank == 0:
-            time.sleep(0.5)  # widen the race window a naive implementation would lose
+            time.sleep(0.5)  # Widen the race window a naive implementation would lose.
             with open(marker, "w") as fh:
                 fh.write("done")
         elif not os.path.isfile(marker):
             failures.append("non-main rank entered before the main rank finished")
 
-    # (2) Release-on-failure: the main rank raising must still release the waiters, PROMPTLY —
-    # a short timeout, so a variant that leaves the waiter blocked fails the test in seconds
-    # instead of stalling CI for the full store timeout.
+    # A short timeout, so a variant that leaves the waiter blocked fails in seconds.
     released_after = None
     t0 = time.time()
     try:
@@ -69,13 +46,13 @@ def _worker(rank: int, tmp_dir: str) -> None:
         released_after = time.time() - t0
     except RuntimeError as e:
         if rank == 0:
-            released_after = time.time() - t0  # the main rank's own body raised, as intended
+            released_after = time.time() - t0  # The main rank's own body raised, as intended.
         else:
             failures.append(f"waiter was not released by the main rank's failure: {e}")
     if rank != 0 and (released_after is None or released_after >= WAIT_TIMEOUT.total_seconds()):
         failures.append(f"waiter released only after {released_after}s (expected promptly)")
 
-    # (3) Re-entrancy: a fresh generation coordinates again (stale done-keys must not leak).
+    # Stale done-keys must not leak into a fresh generation.
     marker2 = os.path.join(tmp_dir, "second.marker")
     with fs_aware_main_first("dl", timeout=WAIT_TIMEOUT):
         if rank == 0:
@@ -91,7 +68,6 @@ def _worker(rank: int, tmp_dir: str) -> None:
 
 
 def _watchdog_worker(rank: int, tmp_dir: str) -> None:
-    """Main-rank body longer than the PG timeout: a collective-based wait dies, the store wait does not."""
     marker = os.path.join(tmp_dir, "slow.marker")
     try:
         with fs_aware_main_first("slow_download", timeout=datetime.timedelta(seconds=60)):
@@ -101,23 +77,21 @@ def _watchdog_worker(rank: int, tmp_dir: str) -> None:
                     fh.write("done")
         ordered = rank == 0 or os.path.isfile(marker)
         result = "PASS" if ordered else "FAIL: waiter was released before the main rank finished"
-    except Exception as e:  # the failure mode under test is exactly "a wait that raises"
+    except Exception as e:  # The failure mode under test is a wait that raises.
         result = f"FAIL: {type(e).__name__}: {str(e).splitlines()[0][:160]}"
     with open(os.path.join(tmp_dir, f"watchdog_{rank}.txt"), "w") as fh:
         fh.write(result)
 
 
 def _non_shared_fs_worker(rank: int, tmp_dir: str) -> None:
-    """Two 1-rank "nodes" on a non-shared FS: each is its own main and must not wait on the other."""
     with fs_aware_main_first("per_node_download", timeout=datetime.timedelta(seconds=30)):
         entered = time.time()
-        time.sleep(1.0)  # only serialized coordination would push the other rank past this
+        time.sleep(1.0)  # Only serialized coordination would push the other rank past this.
     with open(os.path.join(tmp_dir, f"entered_{rank}.txt"), "w") as fh:
         fh.write(repr(entered))
 
 
 def _split_fs_flag_worker(rank: int, tmp_dir: str) -> None:
-    """Ranks disagree on DIST_SHARED_FILESYSTEM; after init they must still agree on the scope."""
     os.environ["DIST_SHARED_FILESYSTEM"] = "1" if rank == 0 else "0"
     try:
         filesystem.resolve_shared_filesystem_consensus()
@@ -128,7 +102,6 @@ def _split_fs_flag_worker(rank: int, tmp_dir: str) -> None:
 
 
 def _split_side_fs_flags_worker(rank: int, tmp_dir: str) -> None:
-    """Ranks disagree on the two SIDE flags, with the umbrella unset on both."""
     os.environ.update(
         DIST_INPUT_SHARED_FILESYSTEM="1" if rank == 0 else "0",
         DIST_OUTPUT_SHARED_FILESYSTEM="0" if rank == 0 else "1",
@@ -151,11 +124,8 @@ def test_store_main_first_orders_and_releases(tmp_path):
 
 
 def test_main_body_may_outlive_the_process_group_timeout(tmp_path):
-    """A main-rank body longer than the PG timeout must NOT fail the waiters.
-
-    Fails when the waiters block in ``dist.barrier()``: gloo aborts the recv at PG_TIMEOUT_SEC and
-    both ranks raise — the 30-min NCCL-watchdog kill of a real download, scaled down.
-    """
+    """Under ``dist.barrier()`` gloo aborts the recv at PG_TIMEOUT_SEC, the NCCL-watchdog kill of a real download
+    scaled down."""
     run_gloo_ranks(_watchdog_worker, WORLD_SIZE, str(tmp_path), pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC))
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"watchdog_{rank}.txt") as fh:
@@ -164,11 +134,7 @@ def test_main_body_may_outlive_the_process_group_timeout(tmp_path):
 
 
 def test_non_shared_filesystem_scopes_coordination_per_node(tmp_path):
-    """On a non-shared FS each node coordinates only within itself — nodes run in parallel.
-
-    Each node needs its own copy of the artifact, so serializing them across the whole world turns
-    an N-node launch into N sequential downloads. Both 1-rank nodes must enter their body at once.
-    """
+    """Serializing across the world turns an N-node launch into N sequential downloads."""
     run_gloo_ranks(
         _non_shared_fs_worker,
         WORLD_SIZE,
@@ -183,12 +149,8 @@ def test_non_shared_filesystem_scopes_coordination_per_node(tmp_path):
 
 
 def test_shared_filesystem_flag_is_agreed_across_ranks(tmp_path):
-    """A split DIST_SHARED_FILESYSTEM must resolve to ONE value, rank 0's.
-
-    The flag picks the coordination scope, so a rank reading `0` while its peers read `1` sits under
-    `node{n}` while they sit under `shared` — they never see each other's keys and each waits out the
-    full store timeout. Divergence is realistic (per-node env injection, a heterogeneous --env-file).
-    """
+    """A rank reading `0` while peers read `1` sits under another scope, so each waits out the full store timeout.
+    Per-node env injection makes this realistic."""
     run_gloo_ranks(_split_fs_flag_worker, WORLD_SIZE, str(tmp_path))
     resolved = []
     for rank in range(WORLD_SIZE):
@@ -198,32 +160,25 @@ def test_shared_filesystem_flag_is_agreed_across_ranks(tmp_path):
 
 
 def test_side_shared_filesystem_flags_are_agreed_across_ranks(tmp_path):
-    """The consensus must agree the INPUT and OUTPUT flags, not just the umbrella.
-
-    Agreeing only ``DIST_SHARED_FILESYSTEM`` leaves each rank on its own side flags, and the sides
-    are what actually elect writers: ``is_fs_load_rank`` reads input, ``is_fs_save_rank``
-    reads output. Split those and two nodes both believe they are the sole checkpoint writer while
-    a third re-maps the corpus — with no error. The umbrella-only test above passes either way, so
-    this is the case that pins the split.
-    """
+    """The side flags elect writers: split them and two nodes both believe they are the sole checkpoint writer, with
+    no error."""
     run_gloo_ranks(_split_side_fs_flags_worker, WORLD_SIZE, str(tmp_path))
     resolved = []
     for rank in range(WORLD_SIZE):
         with open(tmp_path / f"sides_{rank}.txt") as fh:
             resolved.append(fh.read())
     assert resolved[0] == resolved[1], f"ranks disagreed on the input/output scope: {resolved}"
-    # Rank 0's verdict wins, so the agreed pair must be rank 0's: input shared, output not.
+    # Rank 0's verdict wins.
     assert resolved[0] == "True,False", f"the consensus did not adopt rank 0's side flags: {resolved[0]}"
 
 
 def test_no_distributed_is_passthrough():
     with fs_aware_main_first("noop"):
-        pass  # must not require an initialized process group
+        pass  # Must not require an initialized process group.
 
 
 @pytest.fixture()
 def fake_world(monkeypatch):
-    """Simulate one rank of a 2-rank shared-FS world against a shared in-memory store."""
     store = FakeStore()
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
@@ -242,37 +197,28 @@ def _enter_as(monkeypatch, rank: int, tag: str = "dl") -> None:
 
 
 def test_entry_count_divergence_is_detected_when_a_waiter_runs_ahead(fake_world, monkeypatch):
-    """A rank that enters a tag more often than its peers must RAISE with the cause named.
-
-    The phase number is each participant's private entry count, so an extra entry puts that rank
-    permanently off-by-one: it then waits on a phase key its peers never write. Left undiagnosed
-    that is an unattributed multi-hour stall, so the wait must name the tag, the knob, and the
-    entry-count/scope divergence.
-    """
+    """An extra entry leaves the rank off-by-one on a phase key peers never write, an unattributed multi-hour stall
+    unless named."""
     _enter_as(monkeypatch, 0)
-    _enter_as(monkeypatch, 1)  # round 1 complete and collected
+    _enter_as(monkeypatch, 1)  # Round 1 complete and collected.
     with pytest.raises(RuntimeError) as excinfo:
-        _enter_as(monkeypatch, 1)  # rank 1 enters a second time; rank 0 has not
+        _enter_as(monkeypatch, 1)  # Rank 1 enters a second time; rank 0 has not.
     message = str(excinfo.value)
     assert "main_first/dl" in message, f"the tag must be named: {message}"
     assert "entered this tag" in message, f"the entry-count divergence must be named: {message}"
 
 
 def test_matched_entry_counts_stay_silent(fake_world, monkeypatch):
-    """The detector must not fire on the healthy pattern it has to coexist with: the main rank never
-    waits for the waiters, so repeated rounds of one tag are legitimate as long as counts match."""
+    """The main rank never waits for waiters, so repeated rounds of one tag are legitimate while counts match."""
     for _ in range(3):
         _enter_as(monkeypatch, 0)
         _enter_as(monkeypatch, 1)
 
 
 def test_store_timeout_is_configurable(monkeypatch):
-    """The store wait is an env knob, and hours-scale — not the NCCL-watchdog scale, and not a
-    hardcoded literal."""
     monkeypatch.delenv("DIST_STORE_TIMEOUT_HOURS", raising=False)
     assert store_timeout() == datetime.timedelta(hours=DEFAULT_STORE_TIMEOUT_HOURS)
-    # Pinned against the value, not just against itself: the default must stay long enough to wait
-    # out a 100B+ download, which is the entire reason this knob is separate from the NCCL timeout.
+    # The default must stay long enough to wait out a 100B+ download.
     assert store_timeout() >= datetime.timedelta(hours=1)
     monkeypatch.setenv("DIST_STORE_TIMEOUT_HOURS", "9")
     assert store_timeout() == datetime.timedelta(hours=9)

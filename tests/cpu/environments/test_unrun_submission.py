@@ -1,12 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: the price on a failed submission whose program never ran as submitted.
-
-An episode that never passes pays ``unrun_submission_penalty`` once when a failed graded submission was a program the
-scratchpad had not run before that submission's turn — comments, whitespace and dropped output statements aside —
-while a run was still left. A solve pays none, and neither does a failure submitted with the runs spent.
-
-Run: python tests/cpu/environments/test_unrun_submission.py  (or pytest)
-"""
+"""The price on a failed submission whose program never ran as submitted: an episode that never passes pays
+``unrun_submission_penalty`` once when such a program was submitted while a run was left. A solve pays none, nor
+does a failure with the runs spent."""
 
 import json
 

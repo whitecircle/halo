@@ -1,14 +1,6 @@
 #!/usr/bin/env python
 """A SentenceTransformer must take the trainer's gradient-checkpointing call exactly as ``PreTrainedModel`` does.
-
-transformers' trainer enables checkpointing through ``gradient_checkpointing_enable(
-gradient_checkpointing_kwargs=..., every_n_layers=...)``; sentence-transformers' own override takes
-the kwargs dict only, so without the toolkit patch every embedding run with checkpointing on dies at
-that call, and one that swallowed the keyword would checkpoint every layer at the memory profile of a
-run that asked for fewer. The embedding trainer installs the patch at construction.
-
-Run: ``pytest -m cpu tests/cpu/trainers/test_embedding_gradient_checkpointing.py``
-"""
+Its own override takes only the kwargs dict, so without the toolkit patch a checkpointing run dies at that call."""
 
 import ast
 import inspect
@@ -27,7 +19,7 @@ from tests.common.models import TINY_QWEN3_CONFIG
 
 
 class _Encoder(nn.Module):
-    """The shape of sentence-transformers' ``Transformer`` module: a transformers model held as ``auto_model``."""
+    """The shape of sentence-transformers' ``Transformer``: a transformers model held as ``auto_model``."""
 
     def __init__(self):
         super().__init__()

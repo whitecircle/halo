@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""The environmental trainer's length-ordered deal of a round's rows (``length_ordered_microbatches``).
-
-* The deal is a permutation into equal contiguous micro-batches, each taking one row per length stratum; it is
-  a function of the lengths alone, so every rank runs its ``i``-th longest row at position ``i``, and that
-  attains the lock-step minimum of Σ_position max_rank cost, which TRL's per-rank shuffle does not.
-* It permutes a generation batch exactly as TRL's ``shuffle_sequence_dict`` does, and replaces that shuffle on
-  a train round's refill only; TRL's own shuffle is back after the call, runs whenever the deal is off, and a
-  TRL that refills without it is refused.
-* The gate: on where only the order changes (aligned accumulation, a loss that does not read micro-batch
-  composition, rows forwarded one per call), off otherwise, and ``true`` raises there.
-* Only the order changes: on a real causal LM the no-grad recompute and the KL reference forward return
-  bitwise the same per-row log-probs in dealt order; the batch build's IS ratio, masks and advantages are
-  bitwise those of the batch order; TRL's loss over the dealt micro-batches equals the shuffled run's within
-  fp32 accumulation for every loss type the gate admits, its per-row log-probs bitwise, while bnpo's moves.
-* Routing replay over the dealt recompute puts each row's captured routing in its own batch row (R2) and
-  replays each row its own engine routing (R3).
-
-    python tests/cpu/grpo/test_env_length_ordered_rows.py
-"""
+"""The environmental trainer's length-ordered deal of a round's rows (``length_ordered_microbatches``). It attains the
+lock-step minimum of Σ_position max_rank cost, which TRL's shuffle does not, and changes only the row order."""
 
 import ast
 import inspect
@@ -54,20 +37,16 @@ from tests.common.length_deal import (
 from tests.common.routing import BareEPLayer
 
 _VOCAB = 64
-# The loss types the environmental trainer accepts whose loss over a round TRL's real loss below shows to be
-# the same in any deal of its rows; bnpo is shown to differ, and vespo is refused at construction.
+# Losses TRL's real loss below shows to be the same in any deal of a round's rows; bnpo differs and vespo is
+# refused at construction.
 _ORDER_FREE_LOSSES = ("grpo", "sapo", "dr_grpo", "dapo", "cispo", "luspo")
 
 
 def _length_ranks(lengths: torch.Tensor) -> torch.Tensor:
-    """Each row's place in the longest-first ranking, ties by index."""
     ranked = torch.sort(lengths, descending=True, stable=True).indices
     ranks = torch.empty_like(ranked)
     ranks[ranked] = torch.arange(lengths.numel())
     return ranks
-
-
-# --- the deal ------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(("rows", "chunks"), [(1, 1), (6, 1), (6, 6), (24, 4), (35, 7), (192, 24)])
@@ -136,12 +115,8 @@ def test_rows_permute_exactly_as_trls_shuffle_permutes_them(monkeypatch):
             assert ours[key] == value, key
 
 
-# --- the buffer refill -------------------------------------------------------------------------------------------
-
-
 def _refill_host(*, deal: bool, chunks: int, batch: dict, training: bool = True, accumulation: int | None = None):
-    """A trainer built without ``__init__`` over TRL's real ``_prepare_inputs``; the round's batch is ``batch``,
-    accumulation aligned to the round (``accumulation`` steps, ``chunks`` by default)."""
+    """A trainer built without ``__init__`` over TRL's real ``_prepare_inputs``."""
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.model = types.SimpleNamespace(training=training)
     host.args = types.SimpleNamespace(steps_per_generation=chunks, gradient_accumulation_steps=accumulation or chunks)
@@ -155,7 +130,6 @@ def _refill_host(*, deal: bool, chunks: int, batch: dict, training: bool = True,
 
 
 def _round(rows: int, seed: int = 0) -> dict:
-    """A round of ``rows`` rows of random real lengths."""
     gen = torch.Generator().manual_seed(seed)
     prompt_lens = torch.randint(1, 6, (rows,), generator=gen).tolist()
     completion_lens = torch.randint(1, 9, (rows,), generator=gen).tolist()
@@ -172,8 +146,7 @@ def _micro_batches(host, chunks: int) -> list[dict]:
 
 @pytest.mark.parametrize("rounds_per_step", [1, 2])
 def test_a_train_refill_deals_every_key_in_step_and_restores_trls_shuffle(rounds_per_step):
-    """Dealt into the round's ``steps_per_generation`` micro-batches, also where an optimizer step spans
-    several rounds."""
+    """Dealt into ``steps_per_generation`` micro-batches, also where an optimizer step spans several rounds."""
     chunks, rows = 4, 16
     batch = _round(rows)
     host = _refill_host(deal=True, chunks=chunks, batch=batch, accumulation=chunks * rounds_per_step)
@@ -219,9 +192,6 @@ def test_the_trainer_deals_ahead_of_the_tp_resync_and_resolves_the_knob_at_const
     init = ast.parse(textwrap.dedent(inspect.getsource(DistributedAsyncEnvironmentalGRPOTrainer.__init__)))
     called = {n.func.attr for n in ast.walk(init) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     assert "_resolve_length_ordered_rows" in called
-
-
-# --- the gate ----------------------------------------------------------------------------------------------------
 
 
 def _gate_host(requested=None, *, attn="sdpa", batch_size=1, chunked=True, entropy_bonus=False, **args):
@@ -288,11 +258,9 @@ def test_num_iterations_over_one_stays_dealt_when_aligned():
     assert host._orders_rows_by_length is True
 
 
-# --- routing replay in dealt order -------------------------------------------------------------------------------
-
 _TOP_K, _SEQ, _LAYERS = 2, 6, 2
-# Batch rows' real spans over a padded width of _SEQ, and a deal of them that is not its own inverse, so taking
-# the order where its inverse belongs (or the reverse) misplaces rows.
+# Real spans over a padded width of _SEQ, and a deal that is not its own inverse, so taking the order where its
+# inverse belongs misplaces rows.
 _SPANS = [(0, 6), (2, 6), (1, 4), (3, 6)]
 _DEALT = torch.tensor([2, 0, 3, 1])
 
@@ -314,7 +282,6 @@ def _routed_mask(rows: int = len(_SPANS), seq: int = _SEQ) -> torch.Tensor:
 
 
 def _captured(order: torch.Tensor | None) -> torch.Tensor:
-    """What capture returns when the rows are forwarded in ``order``, each layer recording each row's tokens."""
     injector, mask = _injector(), _routed_mask()
     forwarded = list(range(len(_SPANS))) if order is None else order.tolist()
     with injector.capture(len(_SPANS), _SEQ, row_spans=[_SPANS[r] for r in forwarded], row_order=order) as result:
@@ -351,9 +318,8 @@ def test_a_row_order_without_per_row_spans_is_refused():
 
 
 def _replaying_scorer(injector: RoutingReplayInjector, replayed: dict):
-    """A per-row scorer over ``injector``'s layers: each forwarded row routes its real span to experts named by
-    its tokens, recorded while capture is on; an armed layer replays its mask over that span, kept per row
-    (keyed by the row's tokens) in ``replayed``. The log-probs are a function of the row alone."""
+    """A per-row scorer: each forwarded row routes its real span to experts named by its tokens; an armed layer replays
+    its mask over that span, kept in ``replayed`` by the row's tokens. The log-probs depend on the row alone."""
 
     def score(_model, ids, mask, keep, compute_entropy=False):
         for p, (lo, hi) in enumerate(dense_row_spans(mask)[0]):
@@ -371,8 +337,7 @@ def _replaying_scorer(injector: RoutingReplayInjector, replayed: dict):
 
 
 def _step_recompute(rollout_replay: bool, dealt: bool) -> tuple[torch.Tensor, torch.Tensor, dict]:
-    """The step batch's real no-grad recompute over a round, the routing captured (``recompute``) or the engine's
-    replayed (``rollout``), the rows forwarded in batch order or dealt: ``(log-probs, routing mask, replayed)``."""
+    """The step batch's real no-grad recompute, routing captured (``recompute``) or replayed (``rollout``)."""
     ids, mask, keep = stacked(_round(12, seed=5))
     injector, replayed = _injector(), {}
     host = scoring_host(None, None, chunks=4, accelerator=single_process_accelerator())
@@ -396,9 +361,6 @@ def test_the_step_batch_routes_every_dealt_row_as_its_batch_order_run(mode):
     assert dealt_replayed.keys() == plain_replayed.keys() and len(plain_replayed) == (12 * _LAYERS if rollout else 0)
     for key, value in plain_replayed.items():
         assert torch.equal(dealt_replayed[key], value), f"row/layer {key[1]} replayed another row's routing"
-
-
-# --- only the order changes: the no-grad forwards on a real causal LM --------------------------------------------
 
 
 def _tiny_llama(seed: int) -> LlamaForCausalLM:
@@ -434,10 +396,8 @@ def test_the_dealt_recompute_and_reference_forwards_are_bitwise_the_batch_orders
 
 
 def test_the_batch_build_reads_bitwise_the_same_ratio_masks_and_advantages_dealt():
-    """A row-wise scorer, so the dealt and the batch-order no-grad pass see each row's own score; every tensor the
-    batch hands TRL must come out identical, IS ratio and loss masks included. The dealt pass must forward the
-    rows longest first (one micro-batch here), the batch-order one as built, and the reference forward must
-    take the recompute's order."""
+    """With a row-wise scorer both no-grad passes see each row's own score. The dealt pass forwards rows longest first,
+    the batch-order one as built, and the reference forward takes the recompute's order."""
     forwarded, reference_orders = [], []
 
     def rowwise_scores(_model, ids, mask, keep, compute_entropy=False):
@@ -465,9 +425,6 @@ def test_the_batch_build_reads_bitwise_the_same_ratio_masks_and_advantages_dealt
             assert torch.equal(results[True][key], value), key
         else:
             assert results[True][key] is value is None, key
-
-
-# --- only the order changes: TRL's loss over the dealt micro-batches ---------------------------------------------
 
 
 def _loss_runs(loss_type: str) -> dict[bool, tuple[float, dict, list[torch.Tensor]]]:

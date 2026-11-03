@@ -13,20 +13,14 @@ from halo.models.moe.config_fields import has_routed_experts, resolve_router_top
 
 
 def layer_types_shift_invariant(layer_types, shift: int) -> bool:
-    """Whether re-basing a decoder-layer list by ``shift`` leaves every layer's ``layer_types`` entry
-    unchanged; :func:`layer_types_period` snaps to it and :func:`validate_partition` enforces it."""
+    """Whether re-basing a decoder-layer list by ``shift`` leaves every layer's ``layer_types`` entry unchanged."""
     return not shift or not layer_types or layer_types[shift:] == layer_types[:-shift]
 
 
 def validate_partition(model: nn.Module, partition: list[tuple[int, int]]) -> None:
-    """Raise if any stage boundary of ``partition`` would silently change the model.
-
-    Run on every rank with the whole partition, so an invalid split fails every rank together rather
-    than leaving peers at the first collective. Several families (GptOss, Qwen3, Qwen3.5, Step-3.7,
-    Laguna, Inkling) select each layer's mask as ``config.layer_types[i]`` by list position, which slicing
-    re-bases: a stage offset must be a whole number of pattern periods unless the family's spec is
-    ``layer_types_rebase_safe``. The family's own ``reject_severed_boundaries`` runs after.
-    """
+    """Raise if any stage boundary would silently change the model. Run on every rank, so an invalid split fails them
+    together. Several families select each layer's mask as ``config.layer_types[i]`` by list position, which slicing
+    re-bases: an offset must be a whole number of periods unless the spec is ``layer_types_rebase_safe``."""
     spec = resolve_pp_spec(backbone_with_layers(model))
     if not spec.layer_types_rebase_safe:
         # Read through the same accessor layer_types_period uses, so a manual pipeline_split is
@@ -54,11 +48,8 @@ def _spread(total: int, parts: int) -> list[int]:
 
 
 def _balanced_sizes(num_layers: int, pp_size: int, head_layer_equivalents: float, period: int) -> list[int]:
-    """Per-stage layer counts; the last stage's budget shrinks by the head's layer-equivalent cost.
-
-    With ``period > 1`` every boundary is a whole number of periods and the ragged tail
-    (``num_layers % period``) stays on the last stage.
-    """
+    """Per-stage layer counts; the last stage's budget shrinks by the head's layer-equivalent cost. With ``period > 1``
+    every boundary is a whole number of periods, the ragged tail on the last stage."""
     uniform = _spread(num_layers, pp_size)
     if pp_size == 1 or (head_layer_equivalents <= 0.0 and period <= 1):
         return uniform
@@ -86,15 +77,8 @@ def compute_layer_partition(
     boundary_period: int = 1,
     pp_split: list[int] | None = None,
 ) -> list[tuple[int, int]]:
-    """Split ``num_layers`` into ``pp_size`` contiguous ``[lo, hi)`` ranges.
-
-    ``pp_split`` (per-stage decoder-layer counts) overrides everything. Otherwise the last stage,
-    which carries the ``lm_head`` matmul + CE, gets ``head_layer_equivalents`` fewer layers in whole
-    multiples of ``boundary_period``, any leftover going to the middle stages first.
-
-    Raises:
-        ValueError: fewer layers than stages, or a ``pp_split`` whose length/sum/minimum does not fit.
-    """
+    """Split ``num_layers`` into ``pp_size`` contiguous ``[lo, hi)`` ranges. ``pp_split`` overrides; otherwise the last
+    stage, carrying ``lm_head`` + CE, gets ``head_layer_equivalents`` fewer layers in ``boundary_period`` units."""
     if num_layers < pp_size:
         raise ValueError(
             f"Cannot split {num_layers} decoder layers across {pp_size} pipeline stages: every stage "
@@ -119,12 +103,8 @@ def compute_layer_partition(
 
 
 def head_cost_layer_equivalents(config) -> float:
-    """The ``lm_head`` matmul's cost in decoder-layer equivalents, from parameter counts.
-
-    The attention quadratic term and the (free) embedding lookup are ignored, which only softens the
-    correction; a MoE layer counts its per-token activated expert parameters. 0.0 (uniform split)
-    when the config lacks the needed fields.
-    """
+    """The ``lm_head`` matmul's cost in decoder-layer equivalents, from parameter counts; 0.0 (uniform split) when the
+    config lacks the fields. Ignoring the attention quadratic term and embedding lookup only softens the correction."""
     text = text_config(config)
     hidden = getattr(text, "hidden_size", None)
     vocab = getattr(text, "vocab_size", None)
@@ -149,11 +129,8 @@ def head_cost_layer_equivalents(config) -> float:
 
 
 def layer_types_period(config) -> int:
-    """Smallest shift that leaves ``layer_types`` unchanged (1 when uniform or absent).
-
-    Shift-invariance rather than exact tiling, so a ragged list (step3p7's 45 layers = 11 whole
-    ``full,s,s,s`` periods plus one) still snaps.
-    """
+    """Smallest shift that leaves ``layer_types`` unchanged (1 when uniform or absent). Shift-invariance, so a ragged
+    list (step3p7's 45 layers = 11 ``full,s,s,s`` periods plus one) still snaps."""
     layer_types = getattr(text_config(config), "layer_types", None)
     if not layer_types or len(set(layer_types)) == 1:
         return 1

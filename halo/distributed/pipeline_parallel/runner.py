@@ -1,9 +1,5 @@
-"""The pipeline runner: this rank's stage, the schedule, and one optimizer step's microbatches.
-
-Wraps ``torch.distributed.pipelining``, whose schedule runs every microbatch's forward and backward, so
-the caller never calls ``.backward()`` and runs ``gradient_accumulation_steps=1``. The trainer supplies
-``zero_grad``, a grad norm reduced across the chain and the last stage's loss broadcast for logging.
-"""
+"""The pipeline runner over ``torch.distributed.pipelining``, whose schedule runs every microbatch's forward and
+backward, so the caller never calls ``.backward()`` and runs ``gradient_accumulation_steps=1``."""
 
 from __future__ import annotations
 
@@ -76,11 +72,8 @@ def resolve_batch_pad_values(pad_token_id: int, extra: Mapping[str, int] | None 
 def resolve_microbatch_count(
     config: ParallelismConfig, gradient_accumulation_steps: int, per_device_train_batch_size: int
 ) -> int:
-    """The pipeline's microbatch count: ``pipeline_microbatches``, else the user's accumulation.
-
-    The schedule runs every microbatch in one optimizer step, so HF's accumulation loop left on would
-    square the effective batch; the caller then sets ``gradient_accumulation_steps=1``.
-    """
+    """``pipeline_microbatches``, else the user's accumulation. The schedule runs every microbatch in one optimizer
+    step, so HF's accumulation left on would square the effective batch; the caller sets it to 1."""
     if config.pp_microbatches and gradient_accumulation_steps > 1:
         raise ValueError(
             f"pipeline_microbatches={config.pp_microbatches} and gradient_accumulation_steps="
@@ -121,18 +114,13 @@ def _accept_any_outputs(outputs: tuple[torch.Tensor, ...]) -> None:
 
 
 def _skip_reduce_grad(grad_scale_factor: int) -> None:
-    """Stand-in for ``PipelineStage.perform_reduce_grad`` on a drive that runs no backward.
-
-    Both schedules end every drive with it, ``eval`` included; on an FSDP2 stage it reshards with no
-    gradient to reduce, so each forward-only batch would pay an all-gather to unshard again. The stage
-    stays gathered instead, so anything that captures parameter identity calls
-    :func:`~halo.distributed.fsdp.reshard_fsdp2_modules` first.
-    """
+    """Stand-in for ``PipelineStage.perform_reduce_grad`` on a forward-only drive, where it would reshard with no
+    gradient to reduce and each batch pay an all-gather to unshard. The stage stays gathered, so anything capturing
+    parameter identity calls :func:`~halo.distributed.fsdp.reshard_fsdp2_modules` first."""
     del grad_scale_factor
 
 
 def _assert_pipelining_contract(stage_module: nn.Module, schedule: PipelineScheduleSingle) -> None:
-    """Verify the private FSDP2, schedule and stage members this runner depends on still exist."""
     if not isinstance(stage_module, FSDPModule):
         raise RuntimeError(
             "The pipeline stage module is not an FSDPModule: fully_shard must be applied to the "
@@ -148,7 +136,6 @@ def _assert_pipelining_contract(stage_module: nn.Module, schedule: PipelineSched
             f"Pipeline parallelism must be re-validated against this torch version before use."
         )
     missing = [attr for attr in _REQUIRED_SCHEDULE_INTERNALS if not hasattr(schedule, attr)]
-    # The stage is probed only once ``_stage`` itself is known to exist.
     if not missing:
         missing = [f"stage.{attr}" for attr in _REQUIRED_STAGE_INTERNALS if not hasattr(schedule._stage, attr)]
     if missing:
@@ -160,13 +147,9 @@ def _assert_pipelining_contract(stage_module: nn.Module, schedule: PipelineSched
 
 
 class PipelineRunner:
-    """Drives one optimizer step's worth of microbatches through this rank's pipeline stage.
-
-    ``loss`` is the last stage's loss, and every stage needs it: under :class:`FusedHeadLoss` the labels
-    ride as a kwarg to every stage and shape inference must see the fused scalar output.
-    ``rows_per_example`` is 2 for interleaved ``(chosen, rejected)`` batches, whose pairs must not be
-    split across microbatches.
-    """
+    """Drives one optimizer step's microbatches through this rank's stage. Every stage needs ``loss``: under
+    :class:`FusedHeadLoss` labels ride as a kwarg and shape inference must see the fused scalar. ``rows_per_example``
+    is 2 for interleaved ``(chosen, rejected)`` batches."""
 
     def __init__(
         self,
@@ -218,18 +201,9 @@ class PipelineRunner:
         num_items_in_batch: torch.Tensor | int | None = None,
         extra_targets: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor | None:
-        """Run one optimizer step's microbatches. Returns the summed loss on the last stage, else None.
-
-        COLLECTIVE over the chain: every rank passes the same batch; stage 0 consumes ``input_ids``,
-        the last stage ``labels``, and the side inputs reach every stage as kwargs.
-
-        Args:
-            num_items_in_batch: loss normalizer; defaults to this rank's next-token target count.
-                Callers that normalize across data-parallel ranks pass the reduced count.
-            extra_targets: per-example side tensors for the loss, leading dim == batch. The last
-                stage's loss then receives ``{"labels": ..., **extras}`` per microbatch, split in
-                lockstep with the rows.
-        """
+        """COLLECTIVE over the chain: one optimizer step's microbatches; returns the summed loss on the last stage,
+        else None. Every rank passes the same batch. ``num_items_in_batch`` defaults to this rank's next-token target
+        count; ``extra_targets`` are per-row tensors the loss receives as ``{"labels": ..., **extras}``."""
         return self._drive(
             backward=True,
             input_ids=input_ids,
@@ -250,11 +224,8 @@ class PipelineRunner:
         num_items_in_batch: torch.Tensor | int | None = None,
         extra_targets: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor | None:
-        """Loss-only counterpart to :meth:`step`; COLLECTIVE over the chain like it.
-
-        ``schedule.eval`` suppresses backward but keeps the loss path, and ``return_outputs=False``
-        never materializes the merged ``[B, S, V]`` logits.
-        """
+        """COLLECTIVE over the chain: loss-only :meth:`step`. ``return_outputs=False`` never materializes the merged
+        ``[B, S, V]`` logits."""
         return self._drive(
             backward=False,
             input_ids=input_ids,
@@ -290,12 +261,8 @@ class PipelineRunner:
         return outputs if self.is_last else None
 
     def _loss_fn(self, output: torch.Tensor, target: torch.Tensor | dict) -> torch.Tensor:
-        """Per-microbatch loss, divided by the whole step's normalizer.
-
-        Dividing by the step's count rather than the microbatch's makes the per-microbatch losses sum
-        to exactly the full-batch loss, so PP stays gradient-identical to the unsplit model when
-        microbatches hold unequal token counts. A fused last stage already returned the summed loss.
-        """
+        """Per-microbatch loss over the whole step's normalizer, so they sum to exactly the full-batch loss and PP
+        stays gradient-identical to the unsplit model when microbatches hold unequal token counts."""
         if isinstance(self.loss, FusedHeadLoss):
             return output / self._num_items_in_batch
         return self.loss.fn(output, target) / self._num_items_in_batch
@@ -311,8 +278,6 @@ class PipelineRunner:
         num_items_in_batch: torch.Tensor | int | None,
         extra_targets: dict[str, torch.Tensor] | None,
     ) -> torch.Tensor | None:
-        """Drive one batch's microbatches through the schedule, with or without backward; the summed
-        loss on the last stage, else None."""
         self._num_items_in_batch = (
             num_items_in_batch
             if num_items_in_batch is not None
@@ -352,7 +317,6 @@ class PipelineRunner:
                 self._step_with_dict_targets(args, kwargs, labels, extra_targets, losses, backward=backward)
             else:
                 run = self.schedule.step if backward else self.schedule.eval
-                # Only the last stage holds the head and the loss.
                 run(*args, target=labels if self.is_last else None, losses=losses, return_outputs=False, **kwargs)
 
         if not self.is_last:
@@ -366,14 +330,9 @@ class PipelineRunner:
         position_ids: torch.Tensor | None,
         labels: torch.Tensor | None = None,
     ) -> tuple[tuple, dict]:
-        """One batch's ``(args, kwargs)`` for the schedule.
-
-        Only stage 0 consumes ``input_ids`` as its activation; the others receive activations over P2P, and
-        take the ids as a ``token_ids`` kwarg where their family's layers re-read them
-        (:attr:`~halo.distributed.pipeline_parallel.stage.PipelineStageModule.token_ids_kwarg`). The side
-        inputs reach every stage as kwargs, which torch microbatches like the positional args, and so do the
-        labels a fused last stage scores inside its forward.
-        """
+        """One batch's ``(args, kwargs)`` for the schedule. Only stage 0 consumes ``input_ids`` as its activation;
+        others take them as ``token_ids`` where their family's layers re-read them. Side inputs and a fused last
+        stage's labels reach every stage as kwargs, which torch microbatches."""
         kwargs = {}
         if self.token_ids_kwarg is not None:
             kwargs["token_ids"] = input_ids
@@ -386,14 +345,10 @@ class PipelineRunner:
         return (input_ids,) if self.is_first else (), kwargs
 
     def _ensure_stage_initialized(self, args: tuple, kwargs: dict) -> None:
-        """COLLECTIVE over the chain (P2P handshake and shape inference): initialize the stage's I/O in
-        its backward-capable form, whichever drive runs first.
-
-        torch infers shapes and allocates recv buffers on the schedule's first call and keeps them: a
-        non-first stage's buffers require grad only if ``stage.has_backward`` is set then, which a
-        forward-only drive clears, leaving every later :meth:`step` sending None input gradients. The
-        last stage's output metadata is latched too, so ``kwargs`` must carry a fused stage's labels.
-        """
+        """COLLECTIVE over the chain (P2P handshake, shape inference): initialize the stage's I/O in its
+        backward-capable form, whichever drive runs first. A non-first stage's recv buffers require grad only if
+        ``stage.has_backward`` is set at torch's first call, which a forward-only drive clears, leaving later steps
+        sending None input gradients."""
         if self.schedule._stage_forward_initialized and self.schedule._stage_backward_initialized:
             return
         # torch initializes from one microbatch's inputs, not the whole batch.
@@ -403,11 +358,8 @@ class PipelineRunner:
 
     @contextlib.contextmanager
     def _override_stage_attr(self, name: str, value) -> Generator[None]:
-        """Shadow the torch stage's ``name`` in its instance dict for the scope.
-
-        The previous shadow is restored on exit, not the class member, so a nested scope cannot re-arm
-        the original inside an outer one.
-        """
+        """Shadow the torch stage's ``name`` in its instance dict for the scope, restoring the previous shadow so a
+        nested scope cannot re-arm the original."""
         had_override = name in self.stage.__dict__
         previous = self.stage.__dict__.get(name)
         self.stage.__dict__[name] = value
@@ -429,14 +381,9 @@ class PipelineRunner:
         *,
         backward: bool,
     ) -> None:
-        """Drive the schedule with per-microbatch dict targets ``{"labels": ..., **extras}``.
-
-        torch's ``step`` splits only a single target tensor, but ``_step_microbatches`` takes a
-        pre-split target list and hands each entry to the loss uninspected. The extras split with the
-        same ``tensor_split`` torch applies to the args, so every side tensor stays with its rows,
-        uneven splits included. The housekeeping around it is ``step``'s own preamble, and the
-        ``_has_backward`` toggle is ``eval``'s wrapper.
-        """
+        """Drive the schedule with per-microbatch dict targets. torch's ``step`` splits only a single target tensor,
+        but ``_step_microbatches`` takes a pre-split list. The extras split with the ``tensor_split`` torch applies to
+        the args, so every side tensor stays with its rows, uneven splits included."""
         schedule = self.schedule
         if backward and not torch.is_grad_enabled():
             raise RuntimeError("step() with backward requires gradients enabled; use eval_loss() instead.")
@@ -456,12 +403,8 @@ class PipelineRunner:
 
     @contextlib.contextmanager
     def _unfused_last_stage(self) -> Generator[None]:
-        """Run a fused last stage in its logits-returning form for one pass.
-
-        Shape inference recorded the fused scalar as this stage's output metadata, and torch checks
-        every forward against it; the last stage sends nothing, so the check guards nothing and is
-        bypassed. The previous loss function is restored, so a nested scope cannot re-arm fusion early.
-        """
+        """Run a fused last stage in its logits-returning form for one pass. torch checks every forward against the
+        fused scalar shape inference recorded; the last stage sends nothing, so that check is bypassed."""
         if not (isinstance(self.loss, FusedHeadLoss) and self.is_last):
             yield
             return

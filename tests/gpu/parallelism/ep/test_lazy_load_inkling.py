@@ -1,23 +1,8 @@
 #!/usr/bin/env python
-"""Converter-backed lazy loading of Inkling's hub-layout checkpoint, vs a from_pretrained reference.
+"""Lazy loading of Inkling's hub-layout checkpoint matches a from_pretrained reference, under EP=2, pure ETP and a
+text-only artifact.
 
-``save_pretrained`` on transformers >= 5.14 writes the composite class in Thinking Machines'
-original namespace (``model.llm.*``, ``attn.wq_du``, interleaved ``experts.w13_weight``) — the same
-layout the hub ships. The lazy loaders plan its keys on transformers' Inkling conversion
-(``checkpoint_keys.build_key_plan``), as ``from_pretrained`` does, so this gate proves, against a ``from_pretrained``
-reference on the same checkpoint:
-
-  1. **EP=2 composite** — every expert shard equals the reference's slice bitwise, attention/backbone
-     tensors equal bitwise, and the loaded model's loss matches.
-  2. **Pure ETP (ep1 x etp2)** — the wrapper's contiguous-halves split runs on the DE-INTERLEAVED
-     tensor; an un-applied Deinterleave would hand each rank interleaved halves and move the loss.
-  3. **Text-only artifact** — the same TM-layout weights with an `InklingTextConfig` ``config.json``
-     load as ``InklingForCausalLM`` (the composite entries the spec declares, its text level dropped),
-     with the tower/MTP-free key space fully covered.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_lazy_load_inkling.py
+An un-applied Deinterleave would hand each ETP rank interleaved halves and move the loss.
 """
 
 import json
@@ -55,7 +40,6 @@ def _checkpoint_dirs() -> tuple[str, str]:
 
 
 def _build_checkpoints(composite_dir: str, text_dir: str):
-    """Rank 0: save the tiny composite in TM layout, plus a text-only config twin of the weights."""
     torch.manual_seed(SEED)
     config = InklingConfig(
         text_config=dict(TINY_INKLING_CONFIG),
@@ -63,7 +47,7 @@ def _build_checkpoints(composite_dir: str, text_dir: str):
         image_token_id=500,
     )
     model = InklingForConditionalGeneration(config).to(torch.bfloat16)
-    model.save_pretrained(composite_dir)  # save_original_format=True → TM namespace on disk
+    model.save_pretrained(composite_dir)  # save_original_format=True: TM namespace on disk.
 
     os.makedirs(text_dir, exist_ok=True)
     for name in os.listdir(composite_dir):
@@ -81,12 +65,8 @@ def _build_checkpoints(composite_dir: str, text_dir: str):
 
 
 def _state_dicts_match(model, reference_sd) -> tuple[bool, str]:
-    """Every reference tensor is loaded bitwise: each EP layer's experts as its local slice, in the
-    wrapper's matmul convention (``[E_local, H, 2M]`` / ``[E_local, M, H]``), everything else by name.
-
-    Only the expert tensors an EP layer re-wraps may be absent under their reference name; any other
-    missing key is a tensor the loader dropped.
-    """
+    """In the wrapper's matmul convention (``[E_local, H, 2M]`` / ``[E_local, M, H]``). Only tensors an EP layer
+    re-wraps may be absent under their reference name; any other missing key is a tensor the loader dropped."""
     rewrapped = set()
     for name, module in model.named_modules():
         if not isinstance(module, EPInklingMoELayer):
@@ -129,7 +109,6 @@ def run(ctx):
 
     checks["lazy_gate_admits_inkling"] = is_lazy_loadable(composite_dir)
 
-    # ── Reference: from_pretrained on the same TM-layout checkpoint ───────────
     ref = InklingForConditionalGeneration.from_pretrained(
         composite_dir, dtype=torch.bfloat16, attn_implementation="eager"
     ).to(device)
@@ -141,7 +120,6 @@ def run(ctx):
     cleanup_memory()
     metrics["ref_loss"] = ref_loss
 
-    # ── Leg 1: EP=2 composite lazy load ──────────────────────────────────────
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = load_ep_model_lazy(
         composite_dir,
@@ -165,7 +143,7 @@ def run(ctx):
     del model, ep_layers
     cleanup_memory()
 
-    # ── Leg 2: pure ETP (ep1 × etp2) lazy load — de-interleave before the split ─
+    # De-interleave before the split.
     pc = ParallelismConfig(ep_size=1, expert_tp_size=2)
     model = load_ep_model_lazy(
         composite_dir,
@@ -187,7 +165,6 @@ def run(ctx):
     del model, etp_layers
     cleanup_memory()
 
-    # ── Leg 3: text-only artifact loads as InklingForCausalLM ────────────────
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = load_ep_model_lazy(
         text_dir,
@@ -203,8 +180,7 @@ def run(ctx):
     model.train()
     text_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["text_only_loss"] = text_loss
-    # The composite reference's text loss on a text-only batch is the same computation: embeddings,
-    # decoder and head all come from the shared weights.
+    # Embeddings, decoder and head all come from the shared weights, so the text loss is the same computation.
     checks["text_only_loss_matches_ref"] = abs(text_loss - ref_loss) < TOL.parallel_vs_baseline_loss_abs
     log(f"text-only lazy loss: {text_loss:.6f}  |Δref| = {abs(text_loss - ref_loss):.2e}")
 

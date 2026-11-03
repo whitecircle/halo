@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""The endpoint leaf: which key an OpenAI-compatible caller sends, which hosts name this machine only,
-and that the leaf never imports the SDK — the argument dataclasses read their defaults from it, so an
-``openai`` import there would pull the SDK into every config parse.
-
-Run: pytest tests/cpu/inference/test_endpoints.py
-"""
+"""The endpoint leaf: which key a caller sends, which hosts name this machine only, and that it never imports the
+SDK, since the argument dataclasses read their defaults from it and every config parse would pull ``openai``."""
 
 import ast
 import pathlib

@@ -9,12 +9,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Distributed Bradley-Terry reward trainer: EP, TP and PP; CP unsupported (pooling needs the whole sequence).
-
-Under PP the whole sequence lives on the last stage, so the pooled loss is a last-stage function once the
-pairs are interleaved. A VLM run swaps TRL's tokenize map and collator for the vision pair
-(:mod:`halo.data.pipeline.preferences`, :mod:`halo.data.collators.vlm_preference`).
-"""
+"""Distributed Bradley-Terry reward trainer: EP, TP and PP; CP unsupported (pooling needs the whole sequence). A VLM
+run swaps TRL's tokenize map and collator for the vision pair."""
 
 import logging
 from functools import partial
@@ -59,12 +55,8 @@ _RENDERED_SIDE_COLUMNS = frozenset(VLM_PREFERENCE_COLUMNS[:2])
 
 
 def _rendered_sides_fit(row: dict, tokenizer, max_length: int) -> bool:
-    """Whether both rendered sides fit ``max_length`` counting text tokens only.
-
-    Vision tokens are not counted: their number is processor-geometry-specific and only known once
-    the batch is expanded. This drops the worst text rows cheaply; the collator's over-length raise
-    remains the backstop for image-heavy rows near the budget.
-    """
+    """Counts text tokens only: vision tokens are processor-geometry-specific and known once the batch is expanded. The
+    collator's over-length raise remains the backstop for image-heavy rows."""
     return all(
         len(tokenizer(row[column], add_special_tokens=False)["input_ids"]) <= max_length
         for column in _RENDERED_SIDE_COLUMNS
@@ -72,13 +64,9 @@ def _rendered_sides_fit(row: dict, tokenizer, max_length: int) -> bool:
 
 
 class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, RewardTrainer):
-    """TRL RewardTrainer plus EP/TP/PP via DistributedTrainerMixin (CP excluded: the pooled score needs the
-    whole sequence)."""
-
     _tag_names = ["trl", "reward"]
 
     PP_REFUSAL = None
-    # TRL RewardTrainer's positional slots, derived from its installed signature.
     CTOR_POSITIONS = resolve_ctor_positions(RewardTrainer, "model", "args")
     # The BT pair scores in one forward that is chunked in two, so a MoE layer sees twice the rows.
     FORWARD_ROWS_PER_EXAMPLE = 2
@@ -86,32 +74,26 @@ class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, Rew
     _pp_pool_pad_id: int | None = None
     _pp_use_margins: bool = False
 
-    # The VLM run's processor. Held here rather than read off ``processing_class`` because the base
-    # ctor is handed the inner tokenizer (see ``__init__``).
+    # The VLM processor, held here because the base ctor is handed the inner tokenizer.
     _processor: ProcessorMixin | None = None
 
     def __init__(self, *args, **kwargs):
-        # The run's data path. reward_model.py loads a processor only for a run that declares image data
-        # (``is_vlm_run``), so the modality of the processing class determines it: a text recipe on
-        # a multimodal checkpoint arrives with a plain tokenizer and keeps TRL's own tokenize map
-        # and collator unchanged.
+        # reward_model.py loads a processor only for a run that declares image data, so the processing class's modality
+        # decides the data path; a text recipe on a multimodal checkpoint keeps TRL's tokenize map and collator.
         processing_class = kwargs.get("processing_class")
         self._is_vlm = processing_class is not None and resolve_tokenizer(processing_class) is not processing_class
         if self._is_vlm:
             self._processor = processing_class
             if kwargs.get("data_collator") is None:
-                # Built here, not in the script: the collator and ``_prepare_dataset`` are one
-                # contract (rendered-text columns in, [chosen ⧺ rejected] out) and must not be
-                # paired by hand.
+                # Built here because the collator and ``_prepare_dataset`` are one contract (rendered-text columns in,
+                # [chosen ⧺ rejected] out) and must not be paired by hand.
                 kwargs["data_collator"] = DataCollatorForVLMPreference(
                     processor=processing_class,
                     max_length=getattr(get_ctor_config(args, kwargs, self.CTOR_POSITIONS), "max_length", None),
                 )
-            # TRL's reward ctor settles the pad token through the tokenizer api (``pad_token``,
-            # ``get_vocab``), none of which a ProcessorMixin carries — handed a processor it raises
-            # AttributeError before the first batch. The base therefore sees the inner tokenizer,
-            # and the processor is reinstated below because ``save_pretrained`` writes
-            # ``processing_class``: without it the export carries no processor_config.json.
+            # TRL's reward ctor settles the pad token through the tokenizer api, which a ProcessorMixin lacks, so the
+            # base sees the inner tokenizer. The processor is reinstated below because ``save_pretrained`` writes
+            # ``processing_class``; without it the export carries no processor_config.json.
             kwargs["processing_class"] = resolve_tokenizer(processing_class)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=self.CTOR_POSITIONS)
         super().__init__(*args, **kwargs)
@@ -120,12 +102,9 @@ class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, Rew
         self._configure_distributed_modes()
 
     def _prepare_dataset(self, dataset, processing_class, args, dataset_name: str):
-        """Render VLM preference rows; text runs take TRL's own tokenize + filter path unchanged.
-
-        The VLM map renders both sides whole, keeping the prompt's images as PIL objects: tokenizing before
-        placeholder expansion would not match the batch the model sees. It renders through ``self._processor``,
-        since the base ctor passes the inner tokenizer, which cannot expand image placeholders.
-        """
+        """Renders both sides whole, keeping images as PIL objects, since tokenizing before placeholder expansion would
+        not match the batch. Through ``self._processor``, as the base ctor's inner tokenizer cannot expand
+        placeholders."""
         if not self._is_vlm:
             return super()._prepare_dataset(dataset, processing_class, args, dataset_name)
         processor = self._processor
@@ -179,12 +158,8 @@ class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, Rew
         return dataset
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
-        """The Bradley-Terry objective as a last-stage pipeline loss, over a scalar head.
-
-        The collator's ``[chosen ⧺ rejected]`` is interleaved so no microbatch split separates a pair, and
-        each row's pooled position rides the synthesized labels plane, from which the loss pools and reads
-        row validity. ``extra_signature_columns`` keeps the preference columns past HF's pruning.
-        """
+        """Each row's pooled position rides the synthesized labels plane. ``extra_signature_columns`` keeps the
+        preference columns past HF's pruning."""
         tokenizer = resolve_tokenizer(self.processing_class)
         self._pp_pool_pad_id = require_pooling_pad_id(self.model.config, getattr(tokenizer, "pad_token_id", None))
         if self.model.config.num_labels != 1:
@@ -201,8 +176,8 @@ class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, Rew
             # Every row is marked and the eval padding appends unmarked rows: half the marked rows are pairs.
             eval_normalizer=lambda inputs: (decode_pooling_plane(inputs["labels"]).valid.sum() / 2).clamp(min=1.0),
             extra_signature_columns=("chosen_ids", "rejected_ids", MARGIN_COLUMN),
-            # The [pairs, 2] (chosen, rejected) scores preference metrics read (argmax == 0 is the accuracy),
-            # not the [rows, S, 1] plane, where the score sits at one pooled position per row.
+            # The [pairs, 2] (chosen, rejected) scores preference metrics read (argmax == 0 is the accuracy), in place
+            # of the [rows, S, 1] plane, where the score sits at one pooled position per row.
             predictions_fn=lambda logits, inputs: torch.stack(
                 split_pairs(pooled_logits(logits, decode_pooling_plane(inputs["labels"])).squeeze(-1).float()), dim=-1
             ),

@@ -1,5 +1,3 @@
-"""Offline GRPO script arguments and ``OfflineGRPOConfig``."""
-
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
 
@@ -24,8 +22,6 @@ class OfflineGRPOScriptArguments(GenerationEvalArguments, CommonScriptArguments)
 class OfflineGRPOConfig(
     ChunkedLogprobsArguments, DatasetNumProcArguments, ModelInitKwargsArguments, ValidatedConfig, TrainingArguments
 ):
-    r"""Training arguments for [`OfflineGRPOTrainer`]; per-field docs are in each field's ``help`` metadata."""
-
     max_prompt_length: int | None = field(
         default=512,
         metadata={
@@ -112,8 +108,7 @@ class OfflineGRPOConfig(
     def _validate_fields(self) -> None:
         super()._validate_fields()
         owner = type(self).__name__
-        # The ``float | str`` union bypasses the parser's Literal gate, so a misspelled sentinel would
-        # otherwise fail only inside ``datasets.map`` on ``float(...)``.
+        # The ``float | str`` union bypasses the Literal gate: a misspelled sentinel fails only in ``datasets.map``.
         emphasis = self.best_completion_emphasis
         if isinstance(emphasis, str):
             if emphasis != "auto":

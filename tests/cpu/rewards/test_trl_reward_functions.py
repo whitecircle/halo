@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests: reward terms as TRL reward functions, the scorer catalog, and the composer that scores
-the external terms and settles their verdicts into one reward.
-
-Run: python tests/cpu/rewards/test_trl_reward_functions.py  (or pytest)
-"""
+"""Reward terms as TRL reward functions, the scorer catalog, and the composer that settles external verdicts."""
 
 import asyncio
 import inspect
@@ -43,8 +39,6 @@ GATE = JudgeTerm(
 
 @dataclass(frozen=True, kw_only=True)
 class _LocalTerm(RewardTerm):
-    """A term neither the scorer catalog nor any grader table knows."""
-
     source: ClassVar[str] = "local"
 
 
@@ -121,8 +115,7 @@ def test_scorer_function_forwards_reference_shapes_scores_and_logs_metrics(fake_
     assert scorer.seen[1].prompt == [{"role": "user", "content": "plain prompt"}]
     assert scorer.seen[1].completion == [{"role": "assistant", "content": "fail"}]
     assert scorer.seen[2].final_answer == "1234567890"
-    # Every fixed key is logged on every call (a key no sample carried logs 0), so the per-key gathers
-    # TRL runs across ranks see the same key set on a rank whose samples all failed.
+    # A key no sample carried logs 0, so TRL's per-key gathers see the same key set on every rank.
     assert logged == {
         "judge/quality/r": pytest.approx((0.5 + 1.0) / 2),
         "judge/quality/completion_tokens": 0.0,
@@ -138,7 +131,7 @@ def test_scorer_function_forwards_reference_shapes_scores_and_logs_metrics(fake_
 
 
 def test_a_neutral_term_returns_zero_for_a_missing_verdict(fake_scorers):
-    """TRL leaves a ``None`` out of the row's reward; a neutral term instead prices the failure at 0."""
+    """TRL leaves a ``None`` out of the row's reward; a neutral term prices the failure at 0."""
     (strict,), _ = build_trl_reward_functions((JUDGE,), {}, reference_column=None)
     (lenient,), _ = build_trl_reward_functions((LENIENT,), {}, reference_column=None)
     logged = {}
@@ -161,8 +154,7 @@ def test_reward_functions_refuse_a_veto_judge():
 
 
 def test_scorer_function_reads_the_conversation_column_over_the_rendered_prompt(fake_scorers):
-    """TRL hands the rendered template text as the prompt; the scorers must read the conversation it
-    was rendered from, which the online script keeps in its own column."""
+    """TRL hands the rendered template text as the prompt; the conversation is in the online script's own column."""
     (function,), _ = build_trl_reward_functions((JUDGE,), {}, prompt_column="conversation", reference_column="answer")
     conversation = [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "q"}]
     asyncio.run(
@@ -182,8 +174,7 @@ def test_scorer_function_reads_the_conversation_column_over_the_rendered_prompt(
     [("conversation", {"answer": ["a1"]}), ("answer", {"conversation": [[{"role": "user", "content": "q"}]]})],
 )
 def test_a_declared_column_trl_did_not_forward_is_refused(fake_scorers, missing, forwarded):
-    """``remove_unused_columns: true`` keeps both columns from TRL's reward kwargs. The scorer must refuse,
-    not read the rendered template as the conversation or score without the reference."""
+    """``remove_unused_columns: true`` keeps both columns from TRL's reward kwargs."""
     (function,), _ = build_trl_reward_functions((JUDGE,), {}, prompt_column="conversation", reference_column="answer")
     with pytest.raises(ValueError, match=rf"column '{missing}'.*remove_unused_columns"):
         asyncio.run(function(prompts=["<|im_start|>user\nq<|im_end|>..."], completions=["12345"], **forwarded))
@@ -297,7 +288,7 @@ def test_a_veto_zeroes_the_objective():
     )
     assert vetoed.components == {"reward/objective": 0.0, "reward/gate": 0.0} and vetoed.reward == 0.0
     assert vetoed.invalid_reason is None
-    # Every credit goes with the objective — a bonus the hack collected on the way too — the penalties stand.
+    # Every credit goes with the objective, a bonus the hack collected too; the penalties stand.
     shaped = composer.settle(
         {"reward/objective": 2.0, "reward/submission": 0.1, "reward/resubmission": -0.2},
         {"gate": ScoreResult(0.5, {}, veto=True)},

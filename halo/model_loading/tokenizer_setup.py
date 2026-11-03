@@ -1,8 +1,4 @@
-"""Tokenizer / processing-class setup: what a run pins on its tokenizer and reads back at save time.
-
-The widest processing class for a checkpoint, the chat template, the special-token ids recorded onto
-the model, and the ``model_max_length`` pin the exporter serves the tokenizer's own value back through.
-"""
+"""Tokenizer and processing-class setup: what a run pins on its tokenizer and reads back at save time."""
 
 from __future__ import annotations
 
@@ -25,33 +21,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Where :func:`configure_run_tokenizer` parks the tokenizer's own ``model_max_length`` before
-# pinning the run's, for :func:`pristine_model_max_length` to serve back at save time. A plain int on
-# the instance, so the tokenizer stays picklable for the dataset-map fingerprint and the workers.
+# The tokenizer's own ``model_max_length``, served back at save time. A plain int, so the tokenizer stays picklable for
+# the dataset-map fingerprint and the workers.
 _PRISTINE_MODEL_MAX_LENGTH_ATTR = "_halo_pristine_model_max_length"
 
-# Marks a tokenizer whose chat template the run chose (:func:`set_run_chat_template`), which its processor
-# then adopts (:func:`adopt_tokenizer_chat_template`); a template the checkpoint shipped stays each one's.
+# Marks a chat template the run chose, which its processor then adopts; a checkpoint's template stays each one's.
 _RUN_CHAT_TEMPLATE_ATTR = "_halo_run_chat_template"
 
-# Marks a model whose embeddings the run grew past its checkpoint's rows (:func:`grow_vocabulary`): the rows it
-# added exist in no base checkpoint, so every adapter save of the run carries them (:func:`vocabulary_grown`).
+# Marks a model grown past its checkpoint's rows; those rows exist in no base, so every adapter save carries them.
 _GROWN_VOCABULARY_ATTR = "_halo_grown_vocabulary"
 
 
 def load_processing_class(path: str, *, trust_remote_code: bool = False):
-    """Load the widest processing class: ``AutoProcessor`` for multimodal, else ``AutoTokenizer``, else ``None``.
-
-    Re-save utilities MUST persist this — saving only the tokenizer for a VLM yields an unloadable
-    checkpoint. Only "this directory holds no tokenizer" yields ``None``, because every caller reads
-    that as "nothing to save": any other failure must propagate rather than ship a resized model
-    beside the checkpoint's stale tokenizer.
-    """
+    """``AutoProcessor`` for multimodal, else ``AutoTokenizer``, else ``None`` when the directory holds no tokenizer.
+    Re-save utilities must persist this, as a tokenizer-only VLM save is unloadable; any other failure must propagate
+    rather than ship a resized model beside the checkpoint's stale tokenizer."""
     try:
         return AutoProcessor.from_pretrained(path, trust_remote_code=trust_remote_code)
     except (OSError, ValueError) as e:
-        # The two ways "this repo has no processor" is reported (absent processor config,
-        # unrecognized processing class) — the ordinary text-only path, hence info, not a warning.
+        # The two ways a repo reports no processor, the ordinary text-only path, hence info.
         if is_global_main_process():
             logger.info(f"No processor at {path} ({type(e).__name__}: {e}); falling back to the tokenizer.")
         try:
@@ -71,15 +59,9 @@ def resolve_tokenizer(processing_class):
 
 
 def resolve_peft_processing_class(adapter_pc, base_pc, *, text_only: bool):
-    """The processing class a merged / converted PEFT checkpoint ships, of the adapter directory's (``adapter_pc``)
-    and the base's (``base_pc``), each as :func:`load_processing_class` returns it.
-
-    The adapter directory holds the run's own processing class, with its chat template, special tokens
-    and added vocabulary. ``text_only`` (the adapter addresses a multimodal checkpoint's text-only
-    class) ships that run's tokenizer, falling back to the base's only where the adapter saved none.
-    Otherwise the base's full processor wins over an adapter carrying only a tokenizer (a tokenizer-only
-    save of a multimodal checkpoint is unloadable), and an adapter's own full processor is kept.
-    """
+    """The processing class a merged or converted PEFT checkpoint ships. ``text_only`` ships the run's tokenizer, else
+    the base's; otherwise the base's full processor wins over an adapter with only a tokenizer, as a tokenizer-only
+    save of a multimodal checkpoint is unloadable, and an adapter's own full processor is kept."""
     if text_only:
         chosen = adapter_pc or base_pc
         return None if chosen is None else resolve_tokenizer(chosen)
@@ -91,8 +73,7 @@ def resolve_peft_processing_class(adapter_pc, base_pc, *, text_only: bool):
 
 
 def load_chat_template(chat_template: str | None) -> str | None:
-    """Load a chat template from a ``.jinja``/``.jinja2``/``.j2`` file, or return the
-    string directly if it isn't such a path."""
+    """A ``.jinja``/``.jinja2``/``.j2`` file's contents, or the string itself if it is no such path."""
     if chat_template is None:
         return None
     if chat_template.endswith((".jinja", ".jinja2", ".j2")):
@@ -115,14 +96,9 @@ def load_chat_template(chat_template: str | None) -> str | None:
 
 
 def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -> None:
-    """Record a tokenizer special-token id on the model, everywhere the model reads it back.
-
-    Writes every config level that declares ``field``, plus the generation config when the head
-    carries one (transformers attaches it only to models that ``can_generate()``). The per-level
-    write is what makes composite families work: pooling keys on
-    ``config.get_text_config().pad_token_id``, so a top-level-only write leaves the decoder's id
-    unset (batch > 1 raises) or stale at the checkpoint's (pooling picks the wrong last token).
-    """
+    """Record a special-token id on every config level declaring ``field`` and the generation config. Composite
+    families need the per-level write: pooling keys on ``get_text_config().pad_token_id``, so a top-level-only write
+    leaves the decoder's id unset (batch > 1 raises) or stale (pooling picks the wrong last token)."""
     if model is None:
         return
     recorded = set_config_field(model.config, field, token_id, only_declared=True)
@@ -138,9 +114,8 @@ def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -
 
 
 def reject_stale_eos_copies(model: PreTrainedModel | None, eos_token_id) -> None:
-    """Refuse recording ``eos_token_id`` on a model holding a module that copied its config's eos id at build: the
-    copy keeps the checkpoint's id through training while every export records the new one, so a served copy
-    computes differently from the trained model (Qwen3.8-Flash-Next's n-gram history restarts after its copy)."""
+    """Refuse ``eos_token_id`` on a model holding a module that copied its config's eos id at build; the copy keeps the
+    checkpoint's id while exports record the new one (Qwen3.8-Flash-Next's n-gram history restarts after its copy)."""
     if model is None:
         return
     stale = sorted(
@@ -167,27 +142,18 @@ def configure_run_tokenizer(
     *,
     embeddings_sharded: Callable[[PreTrainedModel], bool],
 ) -> PreTrainedTokenizer:
-    """Apply args-driven tokenizer/model token setup; returns the tokenizer to use.
-
-    The return value is the tokenizer resolved through ``args.tokenizer_backend`` — callers must use
-    it in place of the one passed in. Resolution runs last, so the backend snapshots the final
-    tokenizer state (chat template, added special tokens).
-
-    ``embeddings_sharded`` says whether a vocabulary grow is impossible because the model's input
-    embedding is a parallelism shard; a parameter, since this package stays sharding-agnostic.
-    """
+    """Apply args-driven token setup and return the tokenizer to use, resolved last through ``args.tokenizer_backend``,
+    which callers must use in place of the one passed. ``embeddings_sharded`` says whether a vocabulary grow is
+    impossible; a parameter, since this package stays sharding-agnostic."""
     if max_seq_len is not None:
-        # Recorded once, before the first pin overwrites it (a run with a frozen reference calls this
-        # twice on one tokenizer), so every export writes the tokenizer's own bound.
+        # Recorded once, as a run with a frozen reference calls this twice on one tokenizer.
         if not hasattr(tokenizer, _PRISTINE_MODEL_MAX_LENGTH_ATTR):
             setattr(tokenizer, _PRISTINE_MODEL_MAX_LENGTH_ATTR, tokenizer.model_max_length)
         tokenizer.model_max_length = max_seq_len
-    # Added BEFORE the special-token roles below, because those read an id back: a token added
-    # afterwards has none at the time of the read, so ``--pad_token <new>`` with the same token in
-    # ``--added_special_tokens`` would pad with an id the model config never recorded.
+    # Before the special-token roles, which read an id back: ``--pad_token <new>`` with the same token in
+    # ``--added_special_tokens`` would otherwise pad with an id the model config never recorded.
     if args.added_special_tokens is not None:
-        # A union, not the transformers default, which swaps the whole extra-special list for the
-        # request and drops every control token the checkpoint shipped.
+        # A union: the transformers default replaces the extra-special list, dropping the checkpoint's control tokens.
         tokenizer.add_special_tokens(
             {"additional_special_tokens": args.added_special_tokens}, replace_extra_special_tokens=False
         )
@@ -207,9 +173,8 @@ def configure_run_tokenizer(
                     "rows; a PEFT adapter save of this run carries the input embedding and output head whole, since "
                     "no base checkpoint holds the added rows."
                 )
-    # The tokenizer write is conditional, the MODEL write is not: a script holding a frozen reference
-    # runs this seam once per model against the SAME tokenizer, so a shared guard would skip the
-    # second sync and leave that model's config on the checkpoint's eos.
+    # The tokenizer write is conditional, the MODEL write is not: a frozen reference runs this once per model on the
+    # SAME tokenizer, and a shared guard would leave that model's config on the checkpoint's eos.
     if args.eos_token is not None:
         if tokenizer.eos_token != args.eos_token:
             tokenizer.eos_token = args.eos_token
@@ -223,9 +188,8 @@ def configure_run_tokenizer(
         tokenizer.pad_token = args.pad_token
     elif args.pad_token is None and tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
-    # Recorded whatever settled it, unlike eos/bos above: pooling reads the pad id back to locate
-    # each row's last content token, so it must equal the id the collator pads with — none raises at
-    # batch > 1, a stale one pools on padding in silence.
+    # Recorded whatever settled it: pooling reads the pad id to locate each row's last content token, so it must equal
+    # the collator's; none raises at batch > 1, a stale one pools on padding in silence.
     if tokenizer.pad_token_id is not None:
         sync_special_token_id(model, "pad_token_id", tokenizer.pad_token_id)
         if tokenizer.pad_token_id == tokenizer.eos_token_id and model is not None and is_global_main_process():
@@ -251,16 +215,14 @@ def configure_run_tokenizer(
 
 
 def grow_vocabulary(model: PreTrainedModel, num_tokens: int, *, mean_resizing: bool = True) -> None:
-    """Resize ``model``'s embeddings (and an untied head) up to ``num_tokens`` rows and mark it grown
-    (:func:`vocabulary_grown`), on the plain transformers model under every wrapper, which is what an adapter save
-    reads back. ``mean_resizing=False`` skips the mean-and-covariance init, for a caller that overwrites the rows."""
+    """Resize the embeddings (and an untied head) up to ``num_tokens`` rows and mark the plain transformers model
+    grown, which an adapter save reads back. ``mean_resizing=False`` is for a caller overwriting the rows."""
     model.resize_token_embeddings(num_tokens, mean_resizing=mean_resizing)
     setattr(base_transformers_model(model), _GROWN_VOCABULARY_ATTR, True)
 
 
 def vocabulary_grown(model) -> bool:
-    """Whether the run grew ``model``'s vocabulary past its checkpoint's (:func:`grow_vocabulary`), read through every
-    framework, toolkit and PEFT wrapper."""
+    """Whether the run grew the vocabulary past its checkpoint's, read through every wrapper."""
     return getattr(base_transformers_model(model), _GROWN_VOCABULARY_ATTR, False)
 
 
@@ -271,14 +233,9 @@ def set_run_chat_template(tokenizer: PreTrainedTokenizerBase, template: str | No
 
 
 def adopt_tokenizer_chat_template(processing_class) -> None:
-    """Give a processor the chat template the run chose for its tokenizer (:func:`set_run_chat_template`).
-
-    A processor's ``chat_template`` is its own attribute, apart from its tokenizer's: its
-    ``apply_chat_template`` renders with it, and its ``save_pretrained`` writes it over the
-    ``chat_template.jinja`` the tokenizer wrote. A template set on the tokenizer alone would leave the
-    processor training and exporting the checkpoint's original. A no-op for a plain tokenizer and
-    where the run chose no template: a processor keeps the one its checkpoint shipped for it.
-    """
+    """Give a processor the chat template the run chose. A processor's ``chat_template`` is its own attribute, rendered
+    and saved over the tokenizer's ``chat_template.jinja``, so a tokenizer-only set would train and export the
+    original."""
     if isinstance(processing_class, PreTrainedTokenizerBase):
         return
     tokenizer = resolve_tokenizer(processing_class)
@@ -288,14 +245,9 @@ def adopt_tokenizer_chat_template(processing_class) -> None:
 
 @contextlib.contextmanager
 def pristine_model_max_length(processing_class):
-    """Serve the tokenizer's OWN ``model_max_length`` for the duration of a save.
-
-    The run's budget is pinned onto ``tokenizer.model_max_length`` because HF resolves every
-    ``truncation=True, max_length=None`` call against it, but ``save_pretrained`` writes the LIVE
-    attribute into ``tokenizer_config.json``: unrestored, an SFT run at ``max_length: 40000`` exports
-    a 262k-context model whose served context is 40k. The pin is put back on exit. A VLM run hands the
-    trainer its processor while the pin sits on the nested tokenizer.
-    """
+    """Serve the tokenizer's OWN ``model_max_length`` during a save, as ``save_pretrained`` writes the live pin: an SFT
+    run at ``max_length: 40000`` would export a 262k-context model served at 40k. A VLM run's pin sits on the nested
+    tokenizer."""
     tokenizer = next(
         (
             candidate

@@ -1,7 +1,4 @@
-"""Toolkit patches for the upstream Zaya modeling, applied at model load.
-
-All are idempotent. A renamed upstream internal fails loud rather than skipping a patch.
-"""
+"""Toolkit patches for the upstream Zaya modeling. All idempotent; a renamed upstream internal fails loud."""
 
 from __future__ import annotations
 
@@ -22,12 +19,10 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# Marks the installed document-isolated ``ZayaCCAProjection.forward``.
 _DOCUMENT_ISOLATED_ATTR = "_halo_document_isolated"
 
 
 def apply_zaya_patches() -> None:
-    """Apply every Zaya patch."""
     patch_zaya_router_load_recording()
     patch_zaya_gradient_checkpointing_refusal()
     patch_zaya_fp32_interlayer_residual()
@@ -35,15 +30,13 @@ def apply_zaya_patches() -> None:
 
 
 def patch_zaya_router_load_recording() -> None:
-    """Give ``ZayaRouter`` the expert-load recording its native ``balancing_biases`` buffer implies,
-    inside the gate's own forward so EP and plain FSDP share it; upstream counts no selections."""
+    """Inside the gate's own forward, so EP and plain FSDP share it; upstream counts no selections."""
     router_cls = zaya_modeling.ZayaRouter
     if getattr(router_cls.forward, "_halo_load_recording", False):
         return
 
     router_cls.expert_load_counter = None  # the slot iter_balancing_routers keys on
-    # Armed by BalancingBiasCallback: the native buffer always exists, so presence cannot gate
-    # recording as it does on the EP base.
+    # Armed by BalancingBiasCallback, as the native buffer always exists and presence cannot gate recording.
     router_cls.balancing_active = False
     # The discard-slot exclusion (bias update and load metrics) keys on this.
     router_cls._has_discard_expert_slot = True
@@ -71,9 +64,7 @@ def patch_zaya_router_load_recording() -> None:
 
 
 def patch_zaya_gradient_checkpointing_refusal() -> None:
-    """Refuse gradient checkpointing on Zaya at the class attribute, so transformers raises its own error
-    up front: the recompute through the CCA ``nn.Conv1d`` pair faults in cuDNN, and per-layer GC re-wraps
-    the cross-layer EDA state."""
+    """The recompute through the CCA ``nn.Conv1d`` pair faults in cuDNN, and per-layer GC re-wraps the EDA state."""
     pretrained_cls = zaya_modeling.ZayaPreTrainedModel
     if pretrained_cls.supports_gradient_checkpointing is False:
         return
@@ -83,14 +74,12 @@ def patch_zaya_gradient_checkpointing_refusal() -> None:
 
 
 def patch_zaya_fp32_interlayer_residual() -> None:
-    """Declare on the decoder-layer class that Zaya carries an fp32 residual across FSDP layers, so the
-    FSDP2 wrap leaves ``cast_forward_inputs`` off (the bf16 cast breaks non-reentrant GC recompute)."""
+    """So the FSDP2 wrap leaves ``cast_forward_inputs`` off, as the bf16 cast breaks non-reentrant GC recompute."""
     setattr(zaya_modeling.ZayaDecoderLayer, FP32_INTERLAYER_RESIDUAL_ATTR, True)
 
 
 def _same_document_masks(position_ids: torch.Tensor | None, seq_len: int, max_shift: int, device) -> list:
-    """Per shift ``s`` in ``1..max_shift``, the ``[rows, seq_len]`` mask of tokens ``t`` whose token ``t - s``
-    lies in the same document (``position_ids`` restart at 0 per document; ``None`` is one per row)."""
+    """Per shift ``s`` in ``1..max_shift``, the mask of tokens whose token ``t - s`` shares their document."""
     seq_idx = None if position_ids is None else document_ids(position_ids)
     rows = 1 if seq_idx is None else seq_idx.shape[0]
     offsets = torch.arange(seq_len, device=device) - document_starts(seq_idx, rows, seq_len, device)
@@ -98,14 +87,9 @@ def _same_document_masks(position_ids: torch.Tensor | None, seq_len: int, max_sh
 
 
 def _document_causal_cca_conv(projection, qk_states: torch.Tensor, same_document: list) -> torch.Tensor:
-    """The CCA conv pair (depthwise then grouped, both causal) on ``[B, T, C]`` q/k states, every tap
-    reaching before its token's document start reading zero input as at a row start.
-
-    A single depthwise output cannot serve both its grouped consumers at a boundary (the last token of a
-    document and the first of the next see it differently), so the pair runs as one grouped map per input
-    shift, each over the document-masked q/k that shift reads. The depthwise bias passes through every
-    grouped tap, padding included, so it folds into one constant.
-    """
+    """Every tap reaching before its token's document start reads zero. A single depthwise output cannot serve both
+    grouped consumers at a boundary, so the pair runs as one grouped map per input shift. The depthwise bias passes
+    through every grouped tap, padding included, so it folds into one constant."""
     depthwise, grouped = projection.conv_qk_depthwise, projection.conv_qk_grouped
     for conv in (depthwise, grouped):
         if not isinstance(conv, nn.Conv1d) or conv.stride != (1,) or conv.dilation != (1,) or conv.padding != (0,):
@@ -143,8 +127,7 @@ def _document_causal_cca_conv(projection, qk_states: torch.Tensor, same_document
 
 
 def _install_document_isolated_cca(projection_cls) -> None:
-    """Replace ``ZayaCCAProjection.forward`` outside cached decoding with one whose conv taps and delayed
-    value reset at every packed document start; equal to upstream on a single-document row."""
+    """Outside cached decoding the conv taps and delayed value reset at every packed document start."""
     original_forward = projection_cls.forward
 
     @functools.wraps(original_forward)
@@ -197,16 +180,12 @@ def _install_document_isolated_cca(projection_cls) -> None:
 
 
 def is_zaya_cca_document_isolated() -> bool:
-    """Whether ``ZayaCCAProjection.forward`` is the document-isolated one
-    :func:`patch_zaya_packed_document_isolation` installs."""
     return getattr(zaya_modeling.ZayaCCAProjection.forward, _DOCUMENT_ISOLATED_ATTR, False)
 
 
 def patch_zaya_packed_document_isolation() -> None:
-    """Keep a packed row's documents apart in every Zaya mixer, on every backend. ``ZayaModel`` never
-    forwards ``position_ids`` to its layers, so the model forward stashes them on each attention module,
-    whose flash interfaces re-inject them, and on each CCA projection, whose conv taps and delayed value
-    restart at every document start."""
+    """``ZayaModel`` never forwards ``position_ids`` to its layers, so the model forward stashes them on each attention
+    module and CCA projection, keeping a packed row's documents apart on every backend."""
     if is_zaya_cca_document_isolated():
         return
     install_packed_position_ids_injection(

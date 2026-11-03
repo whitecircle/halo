@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""``padding_free`` on an M-RoPE decoder is refused at collator selection, whatever backend the model resolved.
-
-The flattened row of a decoder that rotates by M-RoPE (every Qwen3.5/3.6 decoder, text towers included) faults
-the flash varlen kernels, and a dense backend takes no ``cu_seqlens`` at all, so the only correct answer is a
-refusal before the first step. A family without M-RoPE keeps its padding-free collator, and ``packing`` on the
-same decoders stays allowed.
-
-Run: python tests/cpu/data/test_mrope_padding_free_refusal.py  (or pytest)
-"""
+"""``padding_free`` on an M-RoPE decoder is refused at collator selection, whatever backend resolved: the flattened
+row faults the flash varlen kernels, and a dense backend takes no ``cu_seqlens``. A family without M-RoPE keeps
+its collator, and ``packing`` stays allowed."""
 
 from unittest import mock
 

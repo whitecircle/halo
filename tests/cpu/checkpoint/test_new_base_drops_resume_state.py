@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""A tool that writes a new base model carries none of its source run's resume state.
-
-``patch_vocab.py`` grows a vocabulary and ``merge_adapter_into_base`` folds an adapter into its base:
-each output is a new model, a starting point for the next run rather than a checkpoint of the one it
-came from. Pointed at a training checkpoint, their aux-file copy would otherwise carry that run's
-``trainer_state.json``, ``scheduler.pt``, ``rng_state_*``, ``reference_logps.pt`` and a merge-on-save checkpoint's
-``resume_adapter/`` with its marker. The marker is the worst of them: a resume from the output would
-build the policy from the ORIGINAL base plus that resume adapter and silently drop the new weights
-(the grown vocabulary, the folded adapter).
-
-    python tests/cpu/checkpoint/test_new_base_drops_resume_state.py
-"""
+"""A tool writing a new base model carries none of its source run's resume state. A carried marker makes a resume build
+from the original base plus the old adapter, silently dropping the new weights."""
 
 import sys
 
@@ -51,7 +41,6 @@ RESUME_STATE = (
 
 
 def _training_checkpoint(path) -> str:
-    """A tiny merge-on-save training checkpoint: weights, tokenizer and every resume file."""
     tokenizer = word_level_tokenizer(("hello", "world"))
     torch.manual_seed(0)
     Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, "vocab_size": len(tokenizer)})).save_pretrained(path)

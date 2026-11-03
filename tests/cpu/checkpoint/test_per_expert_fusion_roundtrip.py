@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the per-expert SAVE-split ↔ LOAD-fuse round trip.
-
-Two halves of one contract, declared in two places and never checked against each other until here:
-
-* SAVE — the EP gather splits the fused ``experts.gate_up_proj`` ``[E, 2M, H]`` into a
-  ``FUSED_SPLIT_PER_EXPERT`` family's ``per_expert_keys`` hub names.
-* LOAD — the lazy loader fuses those names back via ``per_expert_fusion_map()``, resolving the
-  gate/up halves by POSITION.
-
-If the two ever disagree, a checkpoint reloads with gate and up swapped: identical shapes, no
-missing keys, no error — a silently corrupted MoE. ``test_gate_up_swap_is_detected`` proves the
-assertion is sharp enough to see that.
-
-The fusion map is keyed by projection NAME across the WHOLE roster, so a new family reusing a name
-at a different position would silently swap the other family's halves — whichever spec comes last
-wins. That conflict must RAISE.
-
-    python tests/cpu/checkpoint/test_per_expert_fusion_roundtrip.py
-"""
+"""The per-expert save split and load fuse must agree, or gate and up swap with identical shapes and no error.
+The fusion map is keyed by name across the roster, so a conflict must raise."""
 
 from __future__ import annotations
 
@@ -34,8 +17,7 @@ E, H, M = 3, 8, 16
 
 
 def _reference():
-    """Per-expert gate/up/down and the fused form the transformers conversion produces:
-    stack experts on dim 0, concatenate ``[gate; up]`` on dim 1 (``F.linear`` convention)."""
+    """Stack on dim 0, concatenate ``[gate; up]`` on dim 1 (``F.linear`` convention)."""
     torch.manual_seed(0)
     gate = torch.randn(E, M, H)
     up = torch.randn(E, M, H)
@@ -48,7 +30,7 @@ def _reference():
 
 
 def _split_via_family(cls, fused):
-    """The SAVE side: the family's real gather on one process, its experts in the runtime matmul convention."""
+    """Its experts in the runtime matmul convention."""
     layer = bare_ep_layer(
         cls,
         gate_up_proj=fused["experts.gate_up_proj"].transpose(1, 2).clone(),
@@ -58,8 +40,7 @@ def _split_via_family(cls, fused):
 
 
 def _fuse_via_loader(cls, split):
-    """The LOAD side: re-fuse the per-expert tensors exactly as ``ExpertFuser`` does — halves ordered
-    by ``per_expert_fusion_map()`` position, concatenated on dim 0, stacked on dim 0."""
+    """Halves ordered by ``per_expert_fusion_map()`` position."""
     fusion_map = per_expert_fusion_map()
     gate_up, down = [], []
     for i in range(E):
@@ -83,13 +64,12 @@ def _unfusing_families():
 
 
 def test_at_least_one_family_declares_a_per_expert_layout():
-    """Anti-vacuity: the round-trip test below would pass trivially on an empty roster."""
+    """Anti-vacuity: the round-trip would pass on an empty roster."""
     assert _unfusing_families(), "no EP family declares a FUSED_SPLIT_PER_EXPERT layout — round trip untested"
 
 
 @pytest.mark.parametrize("cls", _unfusing_families(), ids=lambda c: c.__name__)
 def test_save_split_then_load_fuse_is_identity(cls):
-    """Whole roster: split on save, fuse on load, get the original fused tensors back bitwise."""
     _, _, _, fused = _reference()
     gate_up, down = _fuse_via_loader(cls, _split_via_family(cls, fused))
     assert torch.equal(gate_up, fused["experts.gate_up_proj"]), f"{cls.__name__}: gate_up round trip corrupted"
@@ -98,11 +78,7 @@ def test_save_split_then_load_fuse_is_identity(cls):
 
 @pytest.mark.parametrize("cls", _unfusing_families(), ids=lambda c: c.__name__)
 def test_gate_up_swap_is_detected(cls):
-    """Sharpness check: the round-trip assertion must FAIL when the halves are swapped.
-
-    Without this, a fusion map that mapped both halves to the same position (or the split emitting
-    them reversed) could still satisfy the identity above by symmetry.
-    """
+    """A map placing both halves at one position could satisfy the identity by symmetry."""
     _, _, _, fused = _reference()
     split = _split_via_family(cls, fused)
     gate_name, up_name, _ = cls.FAMILY.expert_layout.per_expert_keys
@@ -117,18 +93,12 @@ def test_gate_up_swap_is_detected(cls):
 
 
 def test_roster_has_no_conflicting_fusion_claims():
-    """The live roster must build a fusion map at all (a conflict raises)."""
     assert per_expert_fusion_map(), "roster produced an empty per-expert fusion map"
 
 
 def test_conflicting_family_claim_raises(monkeypatch):
-    """A family reusing a projection name at a DIFFERENT position must raise, not last-write-win.
-
-    Built with plain assignment the map would let the conflicting family overwrite the earlier
-    claim, and the loser's experts fuse with gate/up swapped — no error, right shapes.
-    """
+    """Plain assignment would let it overwrite the earlier claim, and the loser's experts fuse swapped."""
     gate_name, up_name, down_name = _unfusing_families()[0].FAMILY.expert_layout.per_expert_keys
-    # Swapping gate and up claims the same two names at the opposite positions.
     conflicting = MoEFamilySpec(
         model_types=("conflicting_moe",),
         expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, (up_name, gate_name, down_name)),
@@ -142,7 +112,6 @@ def test_conflicting_family_claim_raises(monkeypatch):
         monkeypatch.undo()
         per_expert_fusion_map.cache_clear()
 
-    # The roster must be healthy again for every later test/consumer.
     assert per_expert_fusion_map()
 
 

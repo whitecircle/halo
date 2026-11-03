@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """An adapter resume of a tied-embedding model takes a tied tensor's value under any of its names.
-
-A run that grows a tied model's vocabulary (``added_special_tokens``) saves the embedding with its adapters (PEFT's
-``save_embedding_layers="auto"``). The gathered save, which every FSDP2 and mixed EP run writes, names that tensor
-once, while the live selection a resume checks against names it under both ``embed_tokens`` and ``lm_head``; without
-the alias the strict restore refuses a complete file. Pinned on a tiny tied Qwen3 with a resized vocabulary, its
-adapter written as the gathered branch writes it: the restore takes it bit-equal, the alias-blind check refuses it,
-and a genuinely missing tensor of an untied model is still refused.
-
-    python tests/cpu/peft/test_adapter_restore_tied_alias.py
-"""
+The gathered save names the tensor once; the live selection a resume checks names it under both."""
 
 import os
 
@@ -62,8 +53,7 @@ def untied_dir(tmp_path_factory) -> str:
 
 
 def _resized_peft_model(base_dir: str, *, seed: int):
-    """The checkpoint at ``base_dir`` with its vocabulary grown and LoRA on ``q_proj``/``v_proj``, every tensor its
-    adapter saves (the embedding, and an untied head, among them) drawn from ``seed``."""
+    """Grown vocabulary, LoRA on ``q_proj``/``v_proj``, and every tensor the adapter saves drawn from ``seed``."""
     model = Qwen3ForCausalLM.from_pretrained(base_dir)
     model.resize_token_embeddings(GROWN_VOCAB)
     peft_model = get_peft_model(model, LoraConfig(r=4, target_modules=["q_proj", "v_proj"]))
@@ -101,8 +91,7 @@ def test_a_tied_resized_embedding_restores_under_both_names(tied_dir, tmp_path):
 
 
 def test_a_genuinely_missing_tensor_of_an_untied_model_is_still_refused(untied_dir, tmp_path):
-    """Anti-vacuity: the alias reads tensor identity, so an untied head the file lacks is not taken from the
-    embedding."""
+    """The alias reads tensor identity, so an untied head the file lacks is not taken from the embedding."""
     trained = _resized_peft_model(untied_dir, seed=1)
     saved = _gathered_save(trained, str(tmp_path))
     assert {EMBED_KEY, HEAD_KEY} <= set(saved), "premise: an untied model saves both"

@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""GptOss sinks policy must reach the parameter's OWNER through the CP (Ulysses) wrapper.
-
-The trap this pins: a CP wrapper that aliases ``sinks`` at construction puts the FA2 branch of
-``_reset_gpt_oss_sinks`` (a rebind, ``attn.sinks = None``) on the wrapper while
-``original_attention`` keeps the live pretrained tensor — which the save paths surface under the
-clean HF key after ``strip_cp_attention_level``. A model trained with no sinks then exports live
-pretrained sinks, shifting every served logprob, while the wrapper-side guard reads its own None and
-passes. The in-place branches (eager/flex ``fill_``) are visible through both references and cannot
-fail that way — the matrix below pins all of it.
-
-    python tests/cpu/parallelism/test_gptoss_cp_sinks_export.py
-"""
+"""GptOss sinks policy reaches the parameter's owner through the CP wrapper. A wrapper alias takes FA2's ``attn.sinks =
+None`` while ``original_attention`` keeps live sinks, exported under the clean HF key, and the guard passes."""
 
 import pytest
 import torch
@@ -63,7 +53,7 @@ class _Model(nn.Module):
 
 
 def _exported_sinks(model) -> dict:
-    """State dict as every CP-aware serializer writes it (prefix-strip applied)."""
+    """Prefix-strip applied, as every CP-aware serializer writes it."""
     return {strip_cp_attention_level(k): v for k, v in model.state_dict().items() if "sinks" in k}
 
 
@@ -77,8 +67,7 @@ def test_reset_sinks_reaches_the_owner(cp, impl):
 
     exported = _exported_sinks(model)
     if impl == "flash_attention_2":
-        # The rebind must land on the owner: no live sinks key may survive into the export; the
-        # save paths re-emit the neutralized tensors via neutralized_gpt_oss_sinks.
+        # The save paths re-emit neutralized tensors via neutralized_gpt_oss_sinks.
         assert exported == {}, f"live sinks leaked into the export: {list(exported)}"
         rebuilt = neutralized_gpt_oss_sinks(model)
         assert set(rebuilt) == {f"model.layers.{i}.self_attn.sinks" for i in range(config.num_hidden_layers)}
@@ -91,7 +80,7 @@ def test_reset_sinks_reaches_the_owner(cp, impl):
 
     if cp:
         for layer in model.model.layers:
-            layer.self_attn._check_sinks_neutralized()  # guard reads the owner and must pass
+            layer.self_attn._check_sinks_neutralized()  # The guard reads the owner.
 
 
 def test_cp_guard_fires_on_live_sinks():
@@ -108,7 +97,7 @@ def test_cp_wrapper_holds_no_second_binding():
     assert "sinks" not in dict(wrapper.named_parameters(recurse=False))
     assert wrapper.sinks is wrapper.original_attention.sinks
     with pytest.raises(AttributeError):
-        wrapper.sinks = None  # read-only: the policy must rebind through the owner
+        wrapper.sinks = None  # Read-only: the policy must rebind through the owner.
 
 
 if __name__ == "__main__":

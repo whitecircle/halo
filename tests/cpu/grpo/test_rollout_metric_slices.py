@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Rollout metrics are sliced by every categorical fact an episode carries.
-
-The effort level is one slice; an env stamps others under ``info["slices"]`` (the language a
-code-contests episode settled on). Each value gets the same breakdown — count, reward, tokens,
-turns, truncation, solve rate and every ``episode/*`` metric — so a run's balance across the values
-and each value's outcome read off ``<slice>/<value>/*``.
-
-Run: python tests/cpu/grpo/test_rollout_metric_slices.py  (or pytest)
-"""
+"""Rollout metrics are sliced by every categorical fact an episode carries: the effort level and whatever an env
+stamps under ``info["slices"]``. Each value gets the same breakdown under ``<slice>/<value>/*``."""
 
 import types
 from collections import defaultdict
@@ -91,8 +84,8 @@ def test_metrics_are_sliced_per_value_of_every_slice():
 
 
 def test_slices_and_the_p90_pool_every_ranks_episodes(monkeypatch):
-    """A rank's own episodes are not the batch: a slice's count and means and the token p90 are the world's
-    (cpp reward (1.2 + 0.2 + 0.4) / 3, where a mean of the two ranks' means reads 0.55)."""
+    """A slice's count and means and the token p90 are the world's: cpp reward (1.2 + 0.2 + 0.4) / 3, where a mean of
+    the two ranks' means reads 0.55."""
     peer = [
         _result("high", {"language": "cpp"}, 1.0, 1.0, reward=0.4, tokens=500),
         _result("low", {}, 0.0, 1.0, tokens=50),

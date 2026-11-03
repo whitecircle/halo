@@ -1,29 +1,9 @@
 #!/usr/bin/env python
-"""Per-head attention norms must receive the SUM of their gradient across the TP group — ONCE.
+"""Per-head attention norms receive the sum of their gradient across the TP group, once, on the toolkit's MoE plan.
 
-``q_norm``/``k_norm`` are replicated ``(head_dim,)`` parameters applied AFTER the colwise q/k
-projection, which returns a plain tensor holding only this rank's heads — each rank therefore
-accumulates the norm's gradient over its own heads only, and the true gradient is the SUM over the
-group. Nothing in the TP graph performs it.
-
-Two failure modes, both silent, and this test separates them by accumulating TWO micro-batches
-before the reduction (the shipped configs use ``gradient_accumulation_steps > 1``):
-
-* **No reduction** — the norms train on 1/tp_size of their gradient (or, at dp>1, diverge across the
-  group from step one).
-* **Reduction per backward** — a ``register_full_backward_hook`` (transformers'
-  ``ReplicatedWithGradAllReduce``) re-reduces whatever is already in ``.grad``, so each earlier
-  micro-batch's contribution is multiplied by ``tp_size`` again on every later micro-step.
-
-Both land far from the reference; a correct once-per-step SUM lands on it.
-
-This test is on the TOOLKIT path (a MoE model), which builds its own plan — ``test_tp_correctness.py``
-covers dense Qwen3 under transformers' ``tp_plan``, whose hook the loader moves onto the same
-once-per-step SUM.
-
-Run:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/tp/test_tp_attention_norm_grad.py
+Each rank accumulates only its heads' norm gradient and nothing in the TP graph sums them. With no reduction they train
+on 1/tp_size of it; a per-backward hook re-multiplies earlier micro-batches by ``tp_size``, so two micro-batches
+accumulate before the reduce.
 """
 
 from pathlib import Path
@@ -61,21 +41,15 @@ TINY_CONFIG_KWARGS = {
 
 GRAD_ACCUM_MICRO_BATCHES = 2
 
-# Every failure mode here is a clean factor of tp_size and the bf16 reduce-order noise is ~1e-1, so
-# 0.35 separates them decisively.
+# Every failure is a clean factor of tp_size and the bf16 reduce-order noise is ~1e-1.
 NORM_GRAD_TOL = 0.35
 
-# SDPA, not the auto-selected FA4: its CuTe backward fails IR verification at this model's tiny
-# head_dim. The gradient reduction under test is attention-backend independent.
+# FA4's CuTe backward fails IR verification at this model's tiny head_dim; the reduction is backend independent.
 ATTN_IMPL = "sdpa"
 
 
 class _StepSync:
-    """Drives the PRODUCTION reduction (the trainer's step-time sync) against a bare model.
-
-    The methods below are the real ones off ``DistributedTrainerMixin`` — a stand-in for the trainer
-    only in what it supplies them (the model and its TP mesh), never in what they do.
-    """
+    """The real methods off ``DistributedTrainerMixin``, supplied only the model and its TP mesh."""
 
     def __init__(self, model, parallelism_config):
         self._model = model
@@ -94,18 +68,16 @@ class _StepSync:
 
 
 def _norm_param_names(model) -> list[str]:
-    """Attention norms whose gradient is per-head-partial under colwise sharding."""
     return [n for n, _ in model.named_parameters() if n.endswith(("q_norm.weight", "k_norm.weight"))]
 
 
 def _accumulate(model, batches) -> None:
-    """Backward every micro-batch without zeroing — what ``gradient_accumulation_steps`` does."""
+    """Backward every micro-batch without zeroing, as ``gradient_accumulation_steps`` does."""
     for ids, labels in batches:
         model(input_ids=ids, labels=labels, use_cache=False).loss.backward()
 
 
 def _reference_grads(ckpt_dir: str, batches, device: str) -> dict:
-    """Single-GPU accumulation over the same micro-batches and weights (rank 0 only)."""
     model = Qwen3MoeForCausalLM.from_pretrained(ckpt_dir, dtype=torch.bfloat16, attn_implementation=ATTN_IMPL).to(
         device
     )
@@ -144,7 +116,7 @@ def run(ctx):
     obj = [names]
     dist.broadcast_object_list(obj, src=0)
     names = obj[0]
-    checks["found_per_head_norms"] = len(names) > 0  # anti-vacuity: a model without them proves nothing
+    checks["found_per_head_norms"] = len(names) > 0  # Anti-vacuity: a model without them proves nothing.
     for name in names:
         buf = ref[name] if ctx.rank == 0 else torch.zeros(TINY_CONFIG_KWARGS["head_dim"], device=device)
         dist.broadcast(buf, src=0)
@@ -166,7 +138,7 @@ def run(ctx):
 
     _accumulate(model, batches)
 
-    # Exactly one reduction, after all micro-batches — where the trainer runs it.
+    # Exactly one reduction, after all micro-batches, where the trainer runs it.
     _StepSync(model, pc)._sync_tp_replicated_grads(list(model.parameters()))
 
     live = dict(model.named_parameters())
@@ -181,7 +153,7 @@ def run(ctx):
     metrics["worst_norm_grad_rel_err"] = worst
     checks["norm_grads_match_reference"] = worst < NORM_GRAD_TOL
 
-    # The whole failure mode at dp>1 is the ranks disagreeing, so pin agreement directly.
+    # The whole failure mode at dp>1 is the ranks disagreeing.
     checks["ranks_agree"] = world_spread(worst) < 1e-6
 
     return {"checks": checks, "metrics": metrics}

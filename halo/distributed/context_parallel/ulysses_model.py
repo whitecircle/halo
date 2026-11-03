@@ -1,5 +1,5 @@
-"""The Ulysses CP model: a transformers model whose attention layers run Ulysses, fed one sequence chunk per rank
-and scored with the boundary-aware causal LM loss; its parameter names and state dict keep the hub layout."""
+"""The Ulysses CP model: attention layers run Ulysses on one sequence chunk per rank, scored with the boundary-aware
+causal LM loss; parameter names and state dict keep the hub layout."""
 
 from __future__ import annotations
 
@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 def _plain_named_items(items):
-    """``(name, value)`` pairs with the ``original_attention`` level dropped from each name, the first of each
-    resulting name kept (a param reachable both directly and through that level, GptOss sinks, appears once)."""
+    """``(name, value)`` with the ``original_attention`` level dropped, the first of each resulting name kept (a param
+    reachable both ways, GptOss sinks, appears once)."""
     seen = set()
     for name, value in items:
         name = strip_cp_attention_level(name)
@@ -46,14 +46,8 @@ def _plain_named_items(items):
 
 
 class UlyssesModel(nn.Module):
-    """A transformers model under Ulysses CP over ``cp_config``'s process group.
-
-    Construction swaps every supported attention layer for its Ulysses wrapper. ``forward`` splits the
-    inputs along the sequence axis and computes the loss itself, so the boundary token between two chunks
-    is scored. Its attention ignores the mask, so its inputs carry trailing pads only, which the CP trainers'
-    loaders enforce on the host (:class:`LeftPaddingGuard`). ``named_parameters`` and ``state_dict`` drop the
-    ``original_attention`` level, so checkpoints keep the hub layout.
-    """
+    """A transformers model under Ulysses CP. ``forward`` splits the inputs along the sequence axis and computes the
+    loss itself, so the boundary token between chunks is scored. Attention ignores the mask: trailing pads only."""
 
     # Toolkit unwrap protocol (halo.models.unwrapping.unwrap_toolkit_wrappers).
     _toolkit_inner_model_attr = "model"
@@ -69,12 +63,9 @@ class UlyssesModel(nn.Module):
         )
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, position_ids=None, **kwargs):
-        """The wrapped model's outputs on this rank's chunk, with ``loss`` against the full ``labels`` when given.
-
-        A training forward under the run's fused head loss (:attr:`_fused_head_loss`) keeps one position's logits,
-        scores the backbone's hidden states through the fused kernel, and returns ``logits=None`` with the chunk's
-        ``token_accuracy``.
-        """
+        """The wrapped model's outputs on this rank's chunk, with ``loss`` against the full ``labels``. A training
+        forward under the fused head loss keeps one position's logits, scores the backbone's hidden states through the
+        fused kernel, and returns ``logits=None`` with ``token_accuracy``."""
         local_input_ids, local_attention_mask, local_position_ids = self._split_inputs(
             input_ids, attention_mask, position_ids, kwargs
         )
@@ -154,8 +145,7 @@ class UlyssesModel(nn.Module):
         ).last_hidden_state
 
     def generate(self, *args, **kwargs):
-        """Refuse generation, which ``__getattr__`` (and PEFT's own) would delegate to the wrapped model, whose
-        patched layers all-to-all over the CP group with no cache path."""
+        """Refuse generation, which ``__getattr__`` (and PEFT's own) would delegate to the wrapped model."""
         raise NotImplementedError(
             "Context Parallelism does not support generate(): each rank holds one sequence chunk and "
             "the Ulysses attention has no KV-cache path. Generate from a saved checkpoint without CP."
@@ -183,12 +173,9 @@ class UlyssesModel(nn.Module):
         yield from _plain_named_items(self.model.named_parameters(prefix=prefix, recurse=recurse, **kwargs))
 
     def state_dict(self, *, destination=None, prefix="", keep_vars=False):
-        """The wrapped model's state dict under hub keys, without the stale dense-MLP duplicates of sparse layers.
-
-        A nested call (an outer module's recursion, a PeftModel root, passing ``destination``) gets plain
-        ``nn.Module`` keys under this module's ``model.`` level instead: the spelling that root's own
-        ``named_parameters`` and ``load_state_dict`` resolve, which PEFT adapter save and resume read through.
-        """
+        """The wrapped model's state dict under hub keys, without stale dense-MLP duplicates of sparse layers. A nested
+        call (``destination`` passed, a PeftModel root) gets plain ``nn.Module`` keys under ``model.``, the spelling
+        PEFT adapter save and resume read through."""
         if destination is not None:
             return super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
         cleaned = dict(_plain_named_items(self.model.state_dict(keep_vars=keep_vars).items()))
@@ -201,7 +188,6 @@ class UlyssesModel(nn.Module):
         return self.model.load_state_dict(*args, **kwargs)
 
     def _split_inputs(self, input_ids, attention_mask, position_ids, kwargs):
-        """This rank's chunk of ``input_ids``, ``attention_mask`` and ``position_ids``, after the input refusals."""
         if any(kwargs.get(key) is not None for key in ("pixel_values", "pixel_attention_mask")):
             # Multimodal CP unsupported: pixel features don't slice by token chunk, mrope is 3D.
             raise ValueError(
@@ -227,10 +213,9 @@ class UlyssesModel(nn.Module):
         return local_input_ids, local_attention_mask, local_position_ids
 
     def _backbone_attention_mask(self, attention_mask: torch.Tensor | None, kwargs: dict) -> torch.Tensor | None:
-        """The chunk's ``attention_mask`` where the wrapped forward reads it outside attention, else ``None``: the
-        Ulysses attention never reads it, while transformers' flash mask construction reads it back to the host
-        (``flash_attention_mask``'s ``.all()``). The router aux loss keeps padding out of its token statistics, so a
-        forward that computes it (``output_router_logits``, from the call or any config level) keeps the mask."""
+        """The chunk's ``attention_mask`` where the wrapped forward reads it outside attention, else ``None``:
+        transformers' flash mask construction would read it back to the host (``.all()``). The router aux loss keeps
+        padding out of its token statistics, so a forward computing it keeps the mask."""
         router_logits = kwargs.get("output_router_logits")
         if router_logits is None:
             config = getattr(base_transformers_model(self.model), "config", None)
@@ -241,21 +226,18 @@ class UlyssesModel(nn.Module):
 
     @cached_property
     def _warned(self) -> set[str]:
-        """The keys of the once-per-wrapper warnings already logged."""
         return set()
 
     @cached_property
     def _fused_loss_requested(self) -> bool:
-        """Whether the run resolves ``fused_linear_cross_entropy`` on (the Liger stamp); a wrapped module without a
-        transformers config carries none."""
+        """Whether the run resolves ``fused_linear_cross_entropy`` on (the Liger stamp)."""
         config = getattr(base_transformers_model(self.model), "config", None)
         return config is not None and bool(get_config_field(config, LIGER_CP_FUSED_LOSS_ATTR, False))
 
     @cached_property
     def _fused_head_loss(self) -> Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None:
-        """Liger's fused head loss over the wrapped model when the run resolves ``fused_linear_cross_entropy`` on
-        and the head allows it; ``None`` (logged when requested) keeps the fp32 logits loss. Resolved at the first
-        training forward, after any adapter has wrapped the head."""
+        """Liger's fused head loss where the run and head allow it; ``None`` keeps the fp32 logits loss. Resolved at
+        the first training forward, after any adapter has wrapped the head."""
         if not self._fused_loss_requested:
             return None
         base = base_transformers_model(self.model)
@@ -291,10 +273,8 @@ class UlyssesModel(nn.Module):
         return self._cp_mean(local_loss_sum, targets), accuracy
 
     def _compute_cp_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Causal LM loss of this rank's chunk against the full ``labels``: a non-final rank's last logit predicts
-        the next chunk's first label (:meth:`_cp_mean` weighs it), the final rank's last targets nothing. The fp32
-        cross-entropy runs over checkpointed chunks of the logits, as the pipeline's last stage scores them, so no
-        fp32 copy of the chunk's logits plane is built."""
+        """Causal LM loss of this rank's chunk against the full ``labels``. The fp32 cross-entropy runs over
+        checkpointed chunks of the logits, so no fp32 copy of the chunk's logits plane is built."""
         vocab_size = logits.size(-1)
         targets = cp_local_targets(labels, self.cp_config.cp_rank, self.cp_config.cp_size).reshape(-1)
         local_loss_sum = chunked_token_sum(
@@ -324,9 +304,8 @@ class UlyssesModel(nn.Module):
 
 
 def apply_ulysses_attention(model: nn.Module, cp_group: dist.ProcessGroup, cp_size: int) -> int:
-    """Swap every supported attention layer of ``model`` for its Ulysses wrapper over ``cp_group``; returns how
-    many. Raises :class:`CPConfigError` when nothing was swapped, which would attend over each rank's chunk
-    alone."""
+    """Swap every supported attention layer for its Ulysses wrapper; returns how many. Raises when nothing was swapped,
+    which would attend over each rank's chunk alone."""
 
     def build(path: str, attention: nn.Module, wrapper_cls: type) -> nn.Module:
         wrapper = wrapper_cls(attention, cp_group, cp_size)
@@ -365,7 +344,6 @@ def stale_dense_mlp_keys(keys, ep_mlp_paths=frozenset()):
 
 
 def find_ulysses_model(model: nn.Module) -> UlyssesModel | None:
-    """The :class:`UlyssesModel` under framework and PEFT wrappers, or ``None``."""
     model = unwrap_framework_wrappers(model)
     if is_peft_model(model):
         model = model.get_base_model()

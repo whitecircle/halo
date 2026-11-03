@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """A remote-code module a peer is still copying into ``HF_MODULES_CACHE`` is never imported half-written.
-
-A node's ranks share the dynamic-module cache, and transformers copies a module into it by truncating
-and rewriting the file under a lock that is per process. A rank that finds the file present
-mid-copy imports the cut module, and a config cut mid-``__init__`` loads with no error but without
-its later attributes. ``halo.model_loading.remote_code`` makes the copies land whole; here one
-process's copy stops halfway while a second process resolves the same remote config into the same
-cold cache.
-
-Run: python tests/cpu/model_loading/test_remote_module_cache_writes.py
-"""
+transformers rewrites under a per-process lock, and a cut config loads with no error."""
 
 import multiprocessing
 import shutil
@@ -23,12 +14,12 @@ from halo.model_loading import remote_code
 from tests.common.models import BAILING_MOE_LING_MINI
 from tests.common.tokenizers import load_cached_config
 
-# Bound on every cross-process wait: a stuck peer fails the test instead of hanging it.
+# A stuck peer fails the test instead of hanging it.
 WAIT_S = 120.0
 
 
 def _copy_stalled_halfway(half_written, reader_done):
-    """A ``shutil.copyfile`` whose writer is descheduled after half the bytes, until the reader is done."""
+    """The writer is descheduled after half the bytes, until the reader is done."""
     real = shutil.copyfile
 
     def copyfile(src, dst, *args, **kwargs):

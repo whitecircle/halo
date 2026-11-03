@@ -88,8 +88,6 @@ class LoadedModule(NamedTuple):
 
 
 class PatchCall(NamedTuple):
-    """A patch call on a first-party target."""
-
     target: str  # dotted; the attribute is left off when the call lets it be absent
     string: ast.expr | None  # the string literal naming the target; None in the object form
     # False for ``patch.dict``, which edits the one object every holder shares, and for a patch that may
@@ -98,8 +96,6 @@ class PatchCall(NamedTuple):
 
 
 class _Binding(NamedTuple):
-    """What a name is bound to, as far as the source fixes it."""
-
     # "module" and "class" are first-party; "import" re-binds the first-party name ``target``;
     # "external" is bound by an import from outside the repo, "opaque" by an assignment or a def.
     kind: Literal["module", "class", "import", "external", "opaque"]
@@ -208,7 +204,6 @@ def _scope(statements: list[ast.stmt], module: str, package: str) -> _Scope:
 
 
 def _instance_attributes(cls: ast.ClassDef) -> set[str]:
-    """The attributes ``cls``'s methods assign on ``self`` or ``cls``."""
     return {
         target.attr
         for node in ast.walk(cls)
@@ -220,10 +215,9 @@ def _instance_attributes(cls: ast.ClassDef) -> set[str]:
 
 
 def own_bindings(scope: ast.AST) -> frozenset[str]:
-    """The names a function, lambda or comprehension binds in its own scope, which hide a module-level name
-    inside it: a comprehension's loop targets; a function's parameters and what its body binds, not what a
-    nested function, class or comprehension binds inside itself, nor a name it declares ``global`` or
-    ``nonlocal``."""
+    """Names a function, lambda or comprehension binds in its own scope, hiding a module-level name: a comprehension's
+    loop targets; a function's parameters and body bindings, not what a nested scope binds nor a name it declares
+    ``global`` or ``nonlocal``."""
     if isinstance(scope, COMPREHENSION_SCOPES):
         targets = (node for generator in scope.generators for node in ast.walk(generator.target))
         return frozenset(node.id for node in targets if isinstance(node, ast.Name))
@@ -270,7 +264,6 @@ def dotted_name(node: ast.expr) -> str | None:
 
 
 def string_constants(tree: ast.Module) -> dict[str, str]:
-    """The module-level names ``tree`` binds to a string literal."""
     constants = {}
     for node in tree.body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant):
@@ -297,7 +290,6 @@ def loaded_module(call: ast.Call, constants: dict[str, str]) -> LoadedModule | N
 
 
 def is_string_literal(node: ast.expr) -> bool:
-    """Whether ``node`` is a string literal or an f-string."""
     return isinstance(node, ast.JoinedStr) or (isinstance(node, ast.Constant) and isinstance(node.value, str))
 
 
@@ -344,10 +336,9 @@ def _may_be_absent(call: ast.Call) -> bool:
 
 
 def patch_call(call: ast.Call, owners: dict[str, str], constants: dict[str, str]) -> PatchCall | None:
-    """What ``call`` patches when it is a ``patch`` / ``monkeypatch`` call on a first-party target; None for any
-    other call. ``owners`` binds a module-level name to the first-party module or object it holds
-    (:meth:`RepoIndex.owners`), which an object-form target names; ``constants`` the module's string
-    constants an f-string target may format."""
+    """What ``call`` patches when it is a ``patch`` / ``monkeypatch`` call on a first-party target, else None.
+    ``owners`` binds a module-level name to what an object-form target names; ``constants`` are strings an f-string
+    target may format."""
     if not call.args:
         return None
     first, rest = call.args[0], call.args[1:]
@@ -375,19 +366,13 @@ def patch_call(call: ast.Call, owners: dict[str, str], constants: dict[str, str]
 
 
 class RepoIndex:
-    """A repository's files and the names its first-party modules bind, read off disk and syntax trees,
-    never imported.
+    """A repository's files and the names its first-party modules bind, read off disk and syntax trees, never imported.
 
-    A dotted name resolves when its longest module prefix exists and the next part is a submodule or a
-    name that module binds at its top level, in any block (``TYPE_CHECKING`` included); a submodule
-    wins over a name its package binds, as ``import`` and ``patch()`` resolve it. A name an import
-    binds is followed to its source. A part after a class must be one of its attributes: its body's,
-    its ``self.`` assignments' and its first-party bases'. A base from outside the repo adds only what
-    ``_EXTERNAL_BASE_ATTRIBUTES`` lists for it, so a renamed method stays caught under ``nn.Module`` or a
-    TRL trainer; a base the source does not fix (an assignment, a call) leaves the class's attributes
-    unchecked, as any other binding leaves the parts after it. A directory holding only bytecode caches
-    is no package and no path.
-    """
+    A dotted name resolves when its longest module prefix exists and the next part is a submodule or a name that module
+    binds at top level, in any block; a submodule wins over a name its package binds, as ``import`` and ``patch()``
+    resolve it. A part after a class must be one of its attributes. A base from outside the repo adds only what
+    ``_EXTERNAL_BASE_ATTRIBUTES`` lists, so a renamed method stays caught under ``nn.Module``; a base the source does
+    not fix leaves the class unchecked."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -405,11 +390,9 @@ class RepoIndex:
         return self._sources[module]
 
     def package_of(self, file: Path) -> str:
-        """The dotted package a file under the root belongs to: its directory's."""
         return ".".join(file.relative_to(self.root).parent.parts)
 
     def import_source(self, node: ast.ImportFrom, file: Path) -> str:
-        """The absolute module the ``from … import`` ``node`` in ``file`` reads."""
         return _import_source(node, self.package_of(file))
 
     def from_import_module(self, source: str, name: str) -> str:
@@ -442,7 +425,6 @@ class RepoIndex:
         return binding.target if binding is not None and binding.kind in ("import", "external") else None
 
     def unresolved_name(self, dotted: str) -> str | None:
-        """Why the first-party name ``dotted`` names nothing, or None when it resolves."""
         found = self._lookup(dotted.split("."), frozenset())
         return found if isinstance(found, str) else None
 

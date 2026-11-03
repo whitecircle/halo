@@ -1,5 +1,4 @@
-"""Trainer construction refusals as pure reject_* functions over explicit inputs, called by the trainer spine and
-the trainers' own hooks."""
+"""Trainer construction refusals, pure reject_* functions over explicit inputs."""
 
 from __future__ import annotations
 
@@ -16,10 +15,9 @@ from halo.models.moe.family_specs import wraps_experts
 from halo.models.unwrapping import find_peft_model
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, STOCK_ADAMW_OPTIMIZERS, optim_name
 
-# The FSDP2 shaping knobs only the trainer's own wrap implements; each one's "not requested" value is its
-# ParallelismConfig default.
+# FSDP2 shaping knobs only the trainer's own wrap implements; each one's unrequested value is its ParallelismConfig
+# default.
 FSDP_SHAPING_KNOBS = ("use_hsdp", "fsdp_reshard_after_forward", "fsdp_reshard_after_backward", "fsdp_defer_grad_sync")
-# Why the router aux loss is inert on a trainer whose loss is not built by ``*ForCausalLM.forward`` from labels.
 INERT_AUX_LOSS_DETAIL = (
     "{trainer} computes its loss from the model's outputs (no ``labels`` forward), so the HuggingFace router aux "
     "loss is never added: expert load is left unbalanced and the run still materializes a [B*S, num_experts] "
@@ -32,8 +30,8 @@ def reject_cp_trainer_args(
     compute_metrics=None,
     preprocess_logits_for_metrics=None,
 ) -> None:
-    """Refuse, with ``CPConfigError``, trainer settings that re-derive the loss or a metric from ``(logits, labels)``
-    outside the CP wrapper, pairing this rank's chunk of logits with the full-length labels."""
+    """Raises ``CPConfigError`` on settings that re-derive the loss or a metric from ``(logits, labels)`` outside the
+    CP wrapper, pairing this rank's logit chunk with full-length labels."""
     if getattr(training_args, "label_smoothing_factor", 0.0):
         raise CPConfigError(
             "label_smoothing_factor > 0 is not supported with Context Parallelism: the Trainer pops "
@@ -51,8 +49,7 @@ def reject_cp_trainer_args(
             "loss_type='nll', or train without CP."
         )
 
-    # Not gated on eval_strategy: a trainer built with eval_strategy='no' can still reach the
-    # misaligned metric path through a direct evaluate()/predict() call.
+    # Not gated on eval_strategy: a direct evaluate()/predict() can still reach the misaligned metric path.
     if compute_metrics is not None or preprocess_logits_for_metrics is not None:
         raise CPConfigError(
             "Evaluation under Context Parallelism is loss-only: compute_metrics / "
@@ -63,7 +60,7 @@ def reject_cp_trainer_args(
 
 
 def reject_conflicting_optimizer_choice(bf16_optimizer: bool, training_args) -> None:
-    """Refuse ``bf16_optimizer=True`` beside a toolkit-named ``optim``, which the bf16 path would silently discard."""
+    """The bf16 path would silently discard a toolkit-named ``optim``."""
     requested_optim = optim_name(training_args.optim if training_args is not None else None)
     if bf16_optimizer and requested_optim in NAMED_OPTIMIZER_BUILDERS:
         raise ValueError(
@@ -75,12 +72,9 @@ def reject_conflicting_optimizer_choice(bf16_optimizer: bool, training_args) -> 
 
 
 def reject_stock_adamw_on_mixed_params(optim: str, config, model_config) -> None:
-    """Refuse the stock fused/foreach AdamW where plain expert tensors coexist with FSDP2 DTensor peers.
-
-    ``aten._fused_adamw_`` raises 'mixed torch.Tensor and DTensor' at the first step over that set. Read off
-    the config so every PP stage agrees (a module walk would refuse on MoE stages while dense stages walked into
-    the collective); ep1 experts FSDP2 shards, and a MoE family with no EP layer class, are uniformly DTensor.
-    """
+    """``aten._fused_adamw_`` raises 'mixed torch.Tensor and DTensor' at the first step where plain expert tensors meet
+    FSDP2 DTensors. Read off the config so every PP stage agrees; ep1 experts FSDP2 shards, and a MoE family with no EP
+    layer class, are uniformly DTensor."""
     if optim not in STOCK_ADAMW_OPTIMIZERS:
         return  # named/per-parameter optimizers carry their own gates
     if not (
@@ -104,7 +98,7 @@ def reject_stock_adamw_on_mixed_params(optim: str, config, model_config) -> None
 
 
 def reject_trainer_router_aux_loss_coef(training_args) -> None:
-    """Refuse a ``router_aux_loss_coef`` on the trainer config: the balancing mode owns the term."""
+    """The balancing mode owns the term."""
     if training_args.router_aux_loss_coef is not None:
         raise ValueError(
             f"router_aux_loss_coef={training_args.router_aux_loss_coef} is set on the trainer config, but the "
@@ -114,7 +108,6 @@ def reject_trainer_router_aux_loss_coef(training_args) -> None:
 
 
 def reject_ep_layers_under_accelerate(ep_layers) -> None:
-    """Refuse EP layers on an ``accelerate launch``: they need the mixin-managed FSDP2 path."""
     if ep_layers:
         raise ValueError(
             "The model carries EP layers but this is an "
@@ -125,8 +118,6 @@ def reject_ep_layers_under_accelerate(ep_layers) -> None:
 
 
 def reject_sync_ref_model_on_sharded_policy(training_args, *, sharded: bool) -> None:
-    """Refuse TRL's ``sync_ref_model`` on an FSDP2/EP/TP policy: its callback zips policy and reference params
-    with plain ``.data`` ops, which crash on a DTensor/EP policy."""
     if sharded and getattr(training_args, "sync_ref_model", False):
         raise ValueError(
             "sync_ref_model is not supported under FSDP2/EP/TP: TRL's SyncRefModelCallback "
@@ -136,8 +127,8 @@ def reject_sync_ref_model_on_sharded_policy(training_args, *, sharded: bool) -> 
 
 
 def reject_fsdp_knobs_under_qlora(config) -> None:
-    """Refuse the FSDP-shaping knobs under QLoRA, which skips FSDP2 (``fully_shard`` cannot wrap bnb's
-    ``Params4bit``): a multi-node ``use_hsdp`` would otherwise run a flat replicated all-reduce."""
+    """QLoRA skips FSDP2 (``fully_shard`` cannot wrap bnb's ``Params4bit``), so a multi-node ``use_hsdp`` would run a
+    flat replicated all-reduce."""
     set_knobs = [name for name in FSDP_SHAPING_KNOBS if differs_from_default(config, name)]
     if set_knobs:
         raise ValueError(
@@ -149,9 +140,8 @@ def reject_fsdp_knobs_under_qlora(config) -> None:
 
 
 def reject_cp_packed_collator(collator, *, is_cp_mode: bool) -> None:
-    """Refuse a packing / padding-free collator handed to a trainer under CP: Ulysses drops ``attention_mask``
-    and calls flash-attn with no ``cu_seqlens``, so packed documents attend across each other. The collator
-    factory applies the same rule; the two roots cover the completion-only variants."""
+    """Ulysses drops ``attention_mask`` and calls flash-attn with no ``cu_seqlens``, so packed documents attend across
+    each other. The collator factory applies the same rule; the two roots cover the completion-only variants."""
     if is_cp_mode and isinstance(collator, DataCollatorWithPacking | DataCollatorWithFlattening):
         raise ValueError(
             f"{type(collator).__name__} is incompatible with context parallelism: the Ulysses "
@@ -161,11 +151,7 @@ def reject_cp_packed_collator(collator, *, is_cp_mode: bool) -> None:
 
 
 def reject_multi_document_collator(collator, model_config) -> None:
-    """Refuse the multi-document rows a packing or padding-free collator handed to a trainer builds that the
-    loaded ``model_config`` cannot keep apart, or its backend cannot serve
-    (:func:`~halo.data.collators.collator_rules.reject_multi_document_rows`, the rules the collator factory runs),
-    under the opt-in the collator carries. A packing collator that keeps its rows (``flatten_to_single_row`` off)
-    is a pipeline stage's; a tree row's plan carries its own rules."""
+    """A packing collator that keeps its rows is a pipeline stage's; a tree row's plan has its own rules."""
     if isinstance(collator, DataCollatorWithTreePacking) or not isinstance(
         collator, DataCollatorWithPacking | DataCollatorWithFlattening
     ):
@@ -182,9 +168,8 @@ def reject_multi_document_collator(collator, model_config) -> None:
 
 
 def reject_reference_sinks_mismatch(model, ref_model, alternatives: str) -> None:
-    """Refuse a reference whose attention sinks differ from the policy's: the pair compute different log-probs
-    for identical tokens, which biases the KL under every sharding. ``alternatives`` names the trainer's way
-    around holding a reference."""
+    """Attention sinks that differ from the policy's compute different log-probs for identical tokens, which biases the
+    KL under every sharding."""
     if model is None or has_live_attention_sinks(model) == has_live_attention_sinks(ref_model):
         return
     policy_sinks, reference_sinks = (
@@ -200,8 +185,7 @@ def reject_reference_sinks_mismatch(model, ref_model, alternatives: str) -> None
 
 
 def reject_inert_aux_loss_balancing(trainer_name: str, moe_balancing: str) -> None:
-    """Refuse ``moe_balancing='aux_loss'`` on a trainer whose loss never adds the router aux term, for a model
-    whose forward would compute one."""
+    """For a trainer whose loss never adds the router aux term, on a model whose forward would compute one."""
     if moe_balancing == "aux_loss":
         raise ValueError(
             f"moe_balancing='aux_loss' balances nothing on this trainer. "
@@ -212,12 +196,8 @@ def reject_inert_aux_loss_balancing(trainer_name: str, moe_balancing: str) -> No
 
 
 def reject_unreloadable_best_model(training_args, config, model) -> None:
-    """Refuse ``load_best_model_at_end`` on a full fine-tune whose end-of-run reload the checkpoint loader refuses.
-
-    Decidable only once PEFT is applied (adapter-only runs reload in place). Under EP/CP base weights load only
-    at construction; FSDP2 over TP stacks a 2-D placement ``distribute_tensor`` does not invert for packed
-    projections, while pure TP reloads into the live DTensor placements.
-    """
+    """Decidable once PEFT is applied. Under EP/CP base weights load only at construction; FSDP2 over TP stacks a 2-D
+    placement ``distribute_tensor`` does not invert for packed projections."""
     if not training_args.load_best_model_at_end:
         return
     # merge_expert_lora_on_save folds the adapter into a full base checkpoint, which the loader refuses.
@@ -245,12 +225,8 @@ def reject_unreloadable_best_model(training_args, config, model) -> None:
 
 
 def reject_unsaveable_external_tables(model, *, accelerate_manages_fsdp: bool) -> None:
-    """Refuse, before training, a model holding an external table that no save of the run could write.
-
-    Under accelerate-managed FSDP the base Trainer saves the flat-parameter state dict through transformers'
-    ``save_pretrained``, which holds no table, so the end of the run would leave no checkpoint that loads. A PEFT run
-    saves its adapters alone, which need no table.
-    """
+    """Under accelerate-managed FSDP the base Trainer saves through ``save_pretrained``, which holds no table, so the
+    run would end with no checkpoint that loads. A PEFT run saves adapters alone, which need no table."""
     if not accelerate_manages_fsdp or find_peft_model(model) is not None:
         return
     tables = [name for name, _ in named_external_tables(model)]
@@ -264,7 +240,6 @@ def reject_unsaveable_external_tables(model, *, accelerate_manages_fsdp: bool) -
 
 
 def reject_ep_gradient_checkpointing(ep_layers) -> None:
-    """Reject gradient checkpointing over EP layers whose family declares it unsupported."""
     unsupported = sorted(
         {type(module).__name__ for module in ep_layers if not module.FAMILY.supports_gradient_checkpointing}
     )
@@ -279,8 +254,7 @@ def reject_ep_gradient_checkpointing(ep_layers) -> None:
 
 
 def reject_batch_rebalance_on_dp_sharded_loader(training_args) -> None:
-    """Refuse HF's ``batch_rebalance`` sampler on the DP-sharded loader: it shards batches over every
-    process, not over data-parallel replicas."""
+    """HF's ``batch_rebalance`` sampler shards batches over every process, not over data-parallel replicas."""
     if training_args.train_sampling_strategy != "batch_rebalance":
         return
     raise ValueError(
@@ -292,8 +266,7 @@ def reject_batch_rebalance_on_dp_sharded_loader(training_args) -> None:
 
 
 def reject_dispatch_batches(dispatch_batches: bool | None, data_parallel_size: int, world_size: int) -> None:
-    """Refuse accelerate's dispatching loader on a loader sharded fewer ways than the world: it slices
-    rank 0's batches by global rank."""
+    """accelerate's dispatching loader slices rank 0's batches by global rank."""
     if not dispatch_batches or data_parallel_size == world_size:
         return
     raise ValueError(

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""One pipeline training step through each trainer's real loss adapter, on four gloo ranks: two stages of two
-data-parallel ranks.
-
-``_pp_training_step`` hands the runner the adapter's transformed batch, its normalizer (or the causal-LM
-default: the stage group's loss-token count over the data-parallel size) and its extra targets, and every rank
-returns the last stage's loss. The runner is the real :class:`PipelineRunner` over a stand-in schedule that
-splits the step into microbatches and scores each through the runner's loss on a fixed function of the
-tokens, so the adapter's token loss runs for real. Each loss is pinned against the trainer's objective written
-out on the collator's untransformed batch: an interleave that pairs the wrong rows, a normalizer off by the
-data-parallel size or a loss read from the wrong stage moves it.
-
-Run: python tests/cpu/parallelism/test_pp_training_step.py
-"""
+"""One pipeline step through each trainer's real loss adapter, on four gloo ranks, against its objective on the
+untransformed batch. Wrong row pairs, normalizers or stages move the loss."""
 
 import contextlib
 import json
@@ -39,7 +28,7 @@ from tests.common.pp_fakes import FakeSchedule, fake_runner
 
 WORLD, PP_SIZE, STAGE_WIDTH = 4, 2, 2
 VOCAB, SEQ, PAD = 16, 8, 0
-# Rows per data-parallel rank: four pairs for the paired objectives, split over two microbatches.
+# Four pairs for the paired objectives, split over two microbatches.
 ROWS, MICROBATCHES = 8, 2
 NUM_LABELS = 3
 BETA = 0.5
@@ -53,20 +42,19 @@ def _head_width(kind: str) -> int:
 
 
 def _logits(input_ids: torch.Tensor, kind: str) -> torch.Tensor:
-    """The stand-in model: each position's output is a fixed function of its token, identical on every rank."""
+    """Identical on every rank."""
     table = torch.randn(VOCAB, _head_width(kind), generator=torch.Generator().manual_seed(11))
     return table[input_ids]
 
 
 def _token_logprobs(input_ids: torch.Tensor, kind: str) -> torch.Tensor:
-    """``[rows, SEQ]`` log-probability of each token under the previous position's output (0 at position 0)."""
+    """0 at position 0."""
     logps = torch.log_softmax(_logits(input_ids, kind)[:, :-1], dim=-1)
     return F.pad(logps.gather(-1, input_ids[:, 1:, None]).squeeze(-1), (1, 0))
 
 
 def _ragged_rows(generator: torch.Generator, rows: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(input_ids, attention_mask, completion_mask)``: right-padded rows of real tokens (never the pad id), a
-    prompt of two tokens and a completion running to the row's end."""
+    """Real tokens are never the pad id; a prompt of two tokens, a completion to the row's end."""
     lengths = torch.randint(4, SEQ + 1, (rows,), generator=generator)
     real = torch.arange(SEQ)[None, :] < lengths[:, None]
     input_ids = torch.where(real, torch.randint(1, VOCAB, (rows, SEQ), generator=generator), PAD)
@@ -75,7 +63,6 @@ def _ragged_rows(generator: torch.Generator, rows: int) -> tuple[torch.Tensor, t
 
 
 def _batch(kind: str, dp_rank: int) -> dict:
-    """The collator's batch of data-parallel rank ``dp_rank``, as the pipeline's fixed-shape collator hands it."""
     generator = torch.Generator().manual_seed(100 + dp_rank)
     input_ids, attention_mask, completion_mask = _ragged_rows(generator, ROWS)
     if kind == "sft":
@@ -109,9 +96,8 @@ def _last_real_positions(input_ids: torch.Tensor) -> torch.Tensor:
 
 
 def _expected(kind: str, dp_rank: int) -> tuple[float, float]:
-    """``(loss, normalizer)`` of one step on ``dp_rank``'s batch, written out from the trainer's objective on the
-    untransformed batch: TRL's DPO sigmoid loss and KTO's apo_zero_unpaired, the Bradley-Terry loss on the score
-    at each row's last real token, the class cross-entropy there, and the causal-LM token mean over the stage."""
+    """TRL's DPO sigmoid and KTO's apo_zero_unpaired, the Bradley-Terry and class loss at the last real token, and
+    the causal-LM token mean."""
     batch = _batch(kind, dp_rank)
     input_ids = batch["input_ids"]
     if kind == "sft":
@@ -142,8 +128,7 @@ def _expected(kind: str, dp_rank: int) -> tuple[float, float]:
 
 
 class _ScoringSchedule(FakeSchedule):
-    """A single-stage schedule that splits the step as torch does and scores each microbatch through the
-    runner's loss on :func:`_logits`; with no target (a stage holding no loss) it scores nothing."""
+    """With no target (a stage holding no loss) it scores nothing."""
 
     def __init__(self, kind: str):
         super().__init__(n_microbatches=MICROBATCHES)
@@ -164,7 +149,7 @@ class _ScoringSchedule(FakeSchedule):
 
 
 def _trainer(kind: str):
-    """The trainer of ``kind`` built without ``__init__``, holding what its adapter and the PP step read."""
+    """Built without ``__init__``."""
     cls = {
         "sft": DistributedSFTTrainer,
         "dpo": DistributedDPOTrainer,
@@ -194,8 +179,6 @@ def _trainer(kind: str):
 
 
 def _step_worker(rank: int, out_dir: str) -> None:
-    """One rank's PP step under every adapter: its returned loss and the normalizer the runner got, beside the
-    expected pair, recorded to ``out_dir``."""
     config = ParallelismConfig(
         world_size=WORLD, gpus_per_node=STAGE_WIDTH, nvlink_domain_size=STAGE_WIDTH, pp_size=PP_SIZE
     )
@@ -227,9 +210,8 @@ def _step_worker(rank: int, out_dir: str) -> None:
 
 
 def test_a_pp_step_returns_each_objectives_last_stage_loss_on_every_rank(tmp_path):
-    """One spawn for every adapter: the loss each rank returns is its chain's last-stage loss of the trainer's
-    objective, and the runner got the adapter's normalizer (the paired objectives' pair count, KTO's and
-    classification's rows, the causal-LM default's stage loss tokens over the data-parallel size)."""
+    """The normalizer: paired objectives' pair count, KTO's and classification's rows, the causal-LM stage tokens
+    over DP size."""
     run_gloo_ranks(_step_worker, WORLD, str(tmp_path))
     records = [json.loads(Path(tmp_path, f"rank{rank}.json").read_text()) for rank in range(WORLD)]
 
@@ -242,7 +224,7 @@ def test_a_pp_step_returns_each_objectives_last_stage_loss_on_every_rank(tmp_pat
     ]
     assert not mismatches, "\n".join(mismatches)
     assert sorted(records[0]) == sorted(ADAPTERS)
-    # The two replicas of a stage hold different batches, so a loss read off the other replica cannot match.
+    # Stage replicas hold different batches, so a loss read off the other cannot match.
     for kind in ADAPTERS:
         assert records[0][kind]["expected_loss"] != pytest.approx(records[1][kind]["expected_loss"]), kind
 

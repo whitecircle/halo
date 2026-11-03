@@ -1,7 +1,5 @@
-"""Muon over gram-newton-schulz: 2D+ hidden matrices take Newton-Schulz orthogonalization, 1D params
-and the embedding/head an internal AdamWBF16. Fused Triton kernels (one launch per param) replace
-upstream's per-batch Python loops and torch.compile for the momentum and weight-decay updates.
-"""
+"""Muon over gram-newton-schulz: 2D+ hidden matrices take Newton-Schulz orthogonalization, 1D params and the
+embedding/head an internal AdamWBF16. Fused Triton kernels replace upstream's per-batch loops and torch.compile."""
 
 import contextlib
 import logging
@@ -34,8 +32,7 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# Key of the matrix step's rounding noise, apart from the internal AdamWBF16's, so neither
-# optimizer's noise depends on how many params the other routed.
+# Apart from the internal AdamWBF16's key, so neither's noise depends on how many params the other routed.
 _SR_KEY = 0xC0FFEE
 # Muon's recipe wants a shorter second-moment horizon than HF's adam_beta2 default (0.999).
 DEFAULT_SCALAR_BETAS: tuple[float, float] = (0.9, 0.95)
@@ -44,14 +41,13 @@ _GNS_CHUNK_SIZE = 32
 
 
 def _muon_kernels_available() -> bool:
-    """Whether the quack/cutlass Newton-Schulz kernels run: probed by a call, since the ABI can drift
-    under a successful import."""
+    """Probed by a call, since the quack/cutlass ABI can drift under a successful import."""
     if not torch.cuda.is_available():
         return False
     try:
         from quack.gemm_interface import gemm_symmetric  # noqa: PLC0415 — optional dep probe
 
-        # Mirror the real call: fp16, and FLOAT alpha/beta — int literals raise a non-ABI type error.
+        # Mirrors the real call, fp16 with float alpha/beta, as int literals raise a non-ABI type error.
         probe = torch.eye(16, device="cuda", dtype=torch.float16)
         gemm_symmetric(probe, probe, C=probe, alpha=1.0, beta=1.0)
         return True
@@ -71,8 +67,7 @@ def _momentum_nesterov_kernel(
     NESTEROV: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused momentum update and Nesterov lookahead for one param. ``skip_ptr`` (with ``HAS_SKIP``) is the step's
-    skip flag (:mod:`~halo.optimizers.step_skip`): set, the momentum is not written."""
+    """Fused momentum update and Nesterov lookahead for one param."""
     pid = tl.program_id(0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
@@ -104,9 +99,8 @@ def _weight_decay_update_kernel(
     HAS_SKIP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused ``p = p * decay - u`` with a stochastically rounded write: the orthogonalized update is ~lr,
-    below the bf16 weight ULP, so nearest rounding would truncate it to zero. ``skip_ptr`` (with ``HAS_SKIP``)
-    is the step's skip flag (:mod:`~halo.optimizers.step_skip`): set, the weight is not written."""
+    """Fused ``p = p * decay - u`` with a stochastically rounded write. The orthogonalized update is ~lr, below the
+    bf16 weight ULP, so nearest rounding would truncate it to zero."""
     pid = tl.program_id(0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
@@ -122,24 +116,16 @@ def _weight_decay_update_kernel(
 
 
 def _is_embedding_or_head(name: str) -> bool:
-    """Whether a parameter name is a token embedding or output head: the fallback for models without
-    embedding accessors (:func:`_embedding_and_head_param_ids`).
-
-    ``shared`` (T5's tied embedding) and ``head`` (a PP stage's relocated head) match only as whole
-    path components: a substring match would also catch MoE shared_expert matrices, which belong on Muon.
-    """
+    """Fallback for models without embedding accessors. ``shared`` (T5's tied embedding) and ``head`` (a PP stage's
+    relocated head) match whole path components, as a substring would catch MoE shared_expert matrices."""
     return any(marker in name for marker in EMBEDDING_HEAD_MARKERS) or not {"shared", "head"}.isdisjoint(
         name.split(".")
     )
 
 
 def _embedding_and_head_param_ids(model: torch.nn.Module) -> set[int]:
-    """Ids of every parameter of the token embedding, the output head, or a pooled score head.
-
-    Read from the module tree, not names, so a family naming its embedding ``tok_embeddings`` or its
-    head ``output`` routes correctly. Tied weights collapse to one id; a PP stage holding neither yields
-    an empty set.
-    """
+    """Read from the module tree, so a family naming its embedding ``tok_embeddings`` or its head ``output`` routes
+    correctly. A PP stage holding neither yields an empty set."""
     targets: list[torch.nn.Module] = []
     for which in ("input", "output"):
         # A stage/backbone without that end of the network raises rather than returning None.
@@ -155,11 +141,8 @@ def _embedding_and_head_param_ids(model: torch.nn.Module) -> set[int]:
 
 
 def _collect_params_with_sr_seeds(state: dict, params: list, names: list[str]) -> tuple[list, list[int]]:
-    """Count a step for every param and return those with grads, each with its SR seed.
-
-    A param with no grad counts the step too, so replicas whose grad presence differs agree on the
-    step its seed is keyed by. The momentum buffer is allocated on a param's first grad, as upstream does.
-    """
+    """Count a step for every param and return those with grads, each with its SR seed. A param with no grad counts
+    too, so replicas whose grad presence differs agree on its seed's step."""
     with_grad, seeds = [], []
     for p, name in zip(params, names, strict=True):
         param_state = state[p]
@@ -174,8 +157,6 @@ def _collect_params_with_sr_seeds(state: dict, params: list, names: list[str]) -
 
 
 def _resolve_adjust_lr_fn(adjust_lr):
-    """The per-shape learning-rate adjustment a group's ``adjust_lr`` names: upstream's RMS-norm match, a callable,
-    or ``None`` for the plain learning rate."""
     if adjust_lr == "rms_norm":
         return adjust_lr_rms_norm
     if callable(adjust_lr) or adjust_lr is None:
@@ -186,12 +167,8 @@ def _resolve_adjust_lr_fn(adjust_lr):
 
 
 class Muon(DeviceStepSkipMixin, UpstreamMuon):
-    """Upstream Muon with the fused Triton matrix step and a state dict that carries the scalar leg. A device skip
-    flag (:meth:`skip_next_step_if`) reaches both legs.
-
-    The class name is load-bearing: an optimizer shard records ``type(optimizer).__name__`` in its
-    ``OptimizerStateFingerprint``, and a resume whose recorded class differs is rejected.
-    """
+    """Upstream Muon with the fused Triton matrix step and a state dict that carries the scalar leg. A shard's
+    ``OptimizerStateFingerprint`` records the class name, and a resume whose recorded class differs is rejected."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -211,8 +188,6 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
             self.scalar_optimizer.settle_step(skipped)
 
     def _muon_step(self, param_groups: list[dict]) -> None:
-        """The matrix step: fused momentum, Newton-Schulz per shape group written back into each update,
-        fused weight decay and update."""
         skip = self._take_step_skip(param_groups)
         for group in param_groups:
             if group.get("param_split_fn") is not None or group.get("param_recombine_fn") is not None:
@@ -246,8 +221,6 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
     def _nesterov_updates(
         self, params: list, momentum: float, nesterov: bool, skip: torch.Tensor | None
     ) -> list[torch.Tensor]:
-        """Advance each param's momentum buffer by its gradient, unless ``skip`` is set, and return its (Nesterov)
-        update."""
         updates = []
         for p in params:
             m_local = to_local(self.state[p]["momentum"])
@@ -268,12 +241,8 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
         return updates
 
     def _orthogonalize_in_place(self, updates: list[torch.Tensor], lr: float, adjust_lr_fn) -> None:
-        """Replace each update with its Newton-Schulz orthogonalization scaled by the shape's adjusted ``lr``.
-
-        Same-shape matrices run stacked in ``_GNS_CHUNK_SIZE`` chunks, grouped and split as upstream groups
-        them, and each chunk's result is copied straight back into its matrices' views: stacking a whole
-        large MoE's expert updates reaches tens of GB, so the step holds one chunk beyond the updates.
-        """
+        """Same-shape matrices run stacked in ``_GNS_CHUNK_SIZE`` chunks, each copied straight back into its views, as
+        stacking a whole large MoE's expert updates reaches tens of GB."""
         views_by_shape, _, _ = get_newton_schulz_inputs_from_gradients(updates, None)
         for shape, views in views_by_shape.items():
             scale = lr if adjust_lr_fn is None else adjust_lr_fn(lr, shape)
@@ -282,10 +251,7 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
                 torch._foreach_copy_(chunk, self.newton_schulz(torch.stack(chunk)).mul_(scale).unbind(0))
 
     def state_dict(self) -> dict:
-        """The state dict with the scalar optimizer's state merged in under the combined param index.
-
-        Upstream serializes only ``self.state``, which would drop the AdamWBF16 moments on resume.
-        """
+        """Upstream serializes only ``self.state``, which would drop the AdamWBF16 moments on resume."""
         sd = super().state_dict()
         if self.scalar_optimizer is not None:
             index = {id(p): i for i, p in enumerate(p for g in self.param_groups for p in g["params"])}
@@ -294,10 +260,9 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
         return sd
 
     def load_state_dict(self, state_dict: dict) -> None:
-        """Inverse of :meth:`state_dict`: hand the restored scalar-param state back to the scalar optimizer."""
         super().load_state_dict(state_dict)
-        # Upstream's ``param_groups`` property shadows the instance-dict slot the base restore writes,
-        # so restored hyperparameters land in an unread attribute; copy them onto the live group dicts.
+        # Upstream's ``param_groups`` property shadows the slot the base restore writes, so restored hyperparameters
+        # land in an unread attribute.
         for live, saved in zip(self.param_groups, state_dict["param_groups"], strict=True):
             live.update({k: v for k, v in saved.items() if k != "params"})
         if self.scalar_optimizer is None:
@@ -322,11 +287,7 @@ def build_muon_optimizer(
     ns_algorithm: str = "gram_newton_schulz",
     decay_parameters: Collection[str] | None = None,
 ) -> Muon:
-    """Muon over ``model``'s trainable params, routing each to the matrix or the scalar leg.
-
-    ``scalar_lr`` / ``scalar_weight_decay`` default to ``lr`` / ``weight_decay``; ``ns_use_kernels``
-    falls back to pure torch when the CUDA kernels cannot run on every rank.
-    """
+    """``ns_use_kernels`` falls back to pure torch when the CUDA kernels cannot run on every rank."""
     if ns_use_kernels:
         # A mixed NS backend across ranks is equivalent but not bit-identical, which drifts replicas apart.
         kernels_ok = rank_consensus(_muon_kernels_available()).all_ok
@@ -369,8 +330,8 @@ def build_muon_optimizer(
     scalar_optimizer = None
     scalar_groups = decay_groups(scalar_named, decay_parameters, scalar_weight_decay)
     if scalar_groups:
-        # Not torch.optim.AdamW: its nearest-rounded bf16 writes truncate every sub-ULP step (norm
-        # weights would never move), and its foreach/fused paths reject the DTensor/plain mix under EP/TP.
+        # torch.optim.AdamW's nearest-rounded bf16 writes truncate every sub-ULP step (norm weights would never move),
+        # and its foreach/fused paths reject the DTensor/plain mix under EP/TP.
         scalar_optimizer = AdamWBF16(
             scalar_groups,
             lr=scalar_lr,
@@ -379,8 +340,8 @@ def build_muon_optimizer(
             weight_decay=scalar_weight_decay,
         )
 
-    # 2D first: gram_newton_schulz keys its 3D->2D split on the first tensor's dim-0, so a 3D-first
-    # group whose 3D params differ in dim-0 (qwen3.5) raises IndexError.
+    # gram_newton_schulz keys its 3D->2D split on the first tensor's dim-0, so a 3D-first group whose 3D params differ
+    # in dim-0 (qwen3.5) raises IndexError.
     muon_named.sort(key=lambda named: named[1].ndim)
 
     muon_groups = decay_groups(muon_named, decay_parameters, weight_decay)
@@ -400,9 +361,7 @@ def build_muon_optimizer(
 
 
 def muon_optimizer_from_args(model: torch.nn.Module, args: Any, decay_parameters: Sequence[str]):
-    """Muon built from the training args."""
-    # The Adam betas reach only the scalar leg, whose tuned defaults differ from HF's: forward a beta
-    # only when explicitly set, so a Muon YAML does not retune it by accident.
+    # The scalar leg's tuned betas differ from HF's, so a beta is forwarded only when set explicitly.
     default_beta1, default_beta2 = DEFAULT_SCALAR_BETAS
     scalar_betas = (
         args.adam_beta1 if differs_from_default(args, "adam_beta1") else default_beta1,
@@ -417,7 +376,7 @@ def muon_optimizer_from_args(model: torch.nn.Module, args: Any, decay_parameters
         decay_parameters=decay_parameters,
     )
     if is_global_main_process():
-        # Read off the built optimizer: the embedding and head are 2D yet routed to the scalar leg.
+        # The embedding and head are 2D yet routed to the scalar leg.
         scalar = optimizer.scalar_optimizer
         scalar_count = sum(p.numel() for g in scalar.param_groups for p in g["params"]) if scalar is not None else 0
         muon_count = sum(p.numel() for p in model.parameters() if p.requires_grad) - scalar_count

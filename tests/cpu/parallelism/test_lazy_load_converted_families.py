@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""The lazy loaders reproduce ``from_pretrained`` bitwise on every hub-converted family — on CPU.
-
-A family whose hub checkpoint needs transformers' conversion mapping declares its key(s) on the family
-spec (``hub_conversion_keys``) and the lazy loaders plan their keys on that mapping. This drives
-the REAL :func:`~halo.model_loading.parallel.ep.load_ep_model_lazy` (EP patching
-stubbed — it needs DeepEP and process groups) on a tiny checkpoint each family writes through its
-own ``save_pretrained`` (the hub layout: vendor namespaces, split or per-expert projections, the
-Step-3.5 vision tower's fused ``in_proj``), against the ``from_pretrained`` reference on the same
-directory:
-
-  * ep1 — every live tensor equals the reference (float parameters at the run's dtype, a buffer at
-    the checkpoint's own dtype), the lazy gate admits the checkpoint, and every disk key is consumed;
-  * ep2, rank 0 — every expert tensor equals the reference's FIRST half, sliced through the ranged
-    read, which for a multi-source fan-in slices EVERY source (a whole-source read would fail the
-    shape gate; a slice of the first source only would hand the second half garbage).
-
-The roster is read off the registry — a family is covered once it declares its keys, is
-lazy-loadable and has a tiny checkpoint builder here — so a family whose flag flips joins on its own.
-
-    python tests/cpu/parallelism/test_lazy_load_converted_families.py
-"""
+"""The lazy loaders reproduce ``from_pretrained`` bitwise on every hub-converted family, with EP patching stubbed.
+At ep2 a fan-in slices every source, or the second half reads garbage."""
 
 import pytest
 import torch
@@ -79,14 +60,12 @@ def _lazy_converted_families() -> list[str]:
     )
 
 
-# Families pinned on GPU instead (their own hub-layout checkpoint written by the test):
-# ``tests/gpu/parallelism/ep/test_lazy_load_inkling.py``.
+# Their own hub-layout checkpoint is written by ``tests/gpu/parallelism/ep/test_lazy_load_inkling.py``.
 _GPU_PINNED_MODEL_TYPES = frozenset({"inkling_mm_model"})
 
 
 def test_every_lazy_converted_family_is_pinned_here_or_on_gpu():
-    """The parametrization reads its builders, so a family that declares ``hub_conversion_keys``
-    without a tiny builder would silently drop out of the resume oracle."""
+    """A family declaring ``hub_conversion_keys`` without a builder would silently drop out of the oracle."""
     registry = ep_layer_class_by_model_type()
     declaring = {
         cls for cls in registry.values() if cls.FAMILY.hub_conversion_keys and cls.FAMILY.supports_lazy_loading
@@ -97,7 +76,6 @@ def test_every_lazy_converted_family_is_pinned_here_or_on_gpu():
 
 @pytest.fixture(scope="module", params=_lazy_converted_families())
 def family(request, tmp_path_factory):
-    """``(model_type, model class, checkpoint dir)`` — the tiny model saved in its HUB layout."""
     torch.manual_seed(0)
     model_class, model = _BUILDERS[request.param]()
     path = tmp_path_factory.mktemp(f"{request.param}_hub_ckpt")
@@ -133,17 +111,13 @@ def reference(family):
 
 
 def _is_expert_key(key: str) -> bool:
-    """Whether ``key`` names an expert bank of any family on the roster (no layer exists here to ask)."""
+    """No layer exists here to ask."""
     return key.rpartition(".")[2] in expert_weight_roots()
 
 
 def _mismatches(lazy_sd: dict, reference: dict, expert_slice: slice | None = None) -> list[str]:
-    """Keys whose lazy tensor differs from the reference (expert tensors: from its ``expert_slice``).
-
-    Compared at the narrower of the two dtypes: the lazy loader casts float PARAMETERS to the run's
-    dtype where ``from_pretrained`` honors a family's fp32 pins, and keeps a float BUFFER at the
-    checkpoint's dtype where ``from_pretrained`` casts it — both sides round the same stored value.
-    """
+    """At the narrower dtype: the lazy loader casts float parameters and keeps buffers, ``from_pretrained`` the
+    reverse, rounding one stored value."""
     bad = []
     for key, lazy in lazy_sd.items():
         expected = reference[key]
@@ -165,16 +139,14 @@ def test_ep1_lazy_load_equals_from_pretrained(family, reference):
     lazy_sd = model.state_dict()
     assert set(lazy_sd) == set(reference)
     assert not _mismatches(lazy_sd, reference)
-    # The loader's dtype contract: every float parameter at the run's dtype (FSDP2 refuses a mixed
-    # shard group), buffers untouched.
+    # FSDP2 refuses a mixed shard group; buffers stay untouched.
     off_dtype = [name for name, p in model.named_parameters() if p.is_floating_point() and p.dtype != RUN_DTYPE]
     assert not off_dtype, off_dtype
     assert not any(t.is_meta for t in lazy_sd.values())
 
 
 def test_ep1_load_consumes_every_disk_key(family, caplog):
-    """No hub key may fall through the mapping: an unexpected-key warning here means a tensor the
-    reference loads and the lazy model initializes from the meta shell instead."""
+    """An unexpected-key warning means a tensor the reference loads and the lazy model leaves at its shell init."""
     _, model_class, path = family
     with caplog.at_level("WARNING", logger=lazy_plan.logger.name):
         _lazy(model_class, path, ep_size=1)
@@ -195,8 +167,7 @@ def test_ep2_rank0_loads_the_first_expert_half_of_every_source(family, reference
 
 
 def test_the_hub_layout_is_not_the_canonical_one(family):
-    """Anti-vacuity: the saved checkpoint really is in a namespace the model does not spell, so the
-    equality above went through the conversion rather than a plain key-for-key read."""
+    """Anti-vacuity: the equality went through the conversion rather than a plain key-for-key read."""
     _, model_class, path = family
     weight_map = resolve_checkpoint_weights(path).weight_map
     with torch.device("meta"):

@@ -1,5 +1,4 @@
-"""Hand-built collectives over the default group: the backend's tensor device, barriers, broadcasts,
-fixed-order group creation and the rank-0 gather and combine of per-rank Python objects."""
+"""Hand-built collectives over the default group."""
 
 import itertools
 import pickle
@@ -15,16 +14,14 @@ from halo.runtime.ranks import has_process_group, is_multi_rank_run
 
 # NCCL has no 16-bit-integer type; such tensors ride the wire as a lossless uint8 bit view.
 _NCCL_UNSUPPORTED_DTYPES = (torch.int16, torch.uint16)
-# The most bytes one round of :func:`gather_on_rank0` holds on each rank's collective device: a larger
-# gather takes more rounds rather than a buffer as large as every rank's payloads together.
+# Per-round bytes :func:`gather_on_rank0` holds on each rank's collective device; a larger gather takes more rounds.
 _GATHER_WINDOW_BYTES = 64 * 1024 * 1024
 
 _Combined = TypeVar("_Combined")
 
 
 def collective_device(group: dist.ProcessGroup | None = None) -> torch.device:
-    """Where a hand-built collective tensor must live for ``group``'s backend (the default group when
-    None): CPU for gloo even on a GPU host, where :func:`current_device` answers ``cuda:N``."""
+    """Device for a hand-built collective tensor on ``group``'s backend; CPU for gloo even on a GPU host."""
     backend = dist.get_backend(group) if has_process_group() else None
     if backend is not None and backend.lower() == dist.Backend.NCCL and torch.cuda.is_available():
         return current_device()
@@ -32,14 +29,13 @@ def collective_device(group: dist.ProcessGroup | None = None) -> torch.device:
 
 
 def barrier(group: dist.ProcessGroup | None = None):
-    """Synchronize the ranks of ``group`` (the default group when None); a no-op without one."""
     if has_process_group():
         dist.barrier(group=group)
 
 
 def nccl_safe_broadcast(tensor: torch.Tensor, src: int, group: dist.ProcessGroup | None = None) -> None:
-    """In-place ``dist.broadcast`` that sends NCCL-unsupported dtypes as a uint8 view of the same
-    storage, an exact round trip. A non-contiguous such tensor fails in ``Tensor.view``."""
+    """In-place ``dist.broadcast``; NCCL-unsupported dtypes go as a uint8 view of the same storage, so a non-contiguous
+    one fails in ``Tensor.view``."""
     wire = tensor.view(torch.uint8) if tensor.dtype in _NCCL_UNSUPPORTED_DTYPES else tensor
     dist.broadcast(wire, src=src, group=group)
 
@@ -54,8 +50,7 @@ def broadcast_from_rank0(value):
 
 
 def _splits_default_group() -> bool:
-    """Whether new groups can come from one split of the default group's communicator: an NCCL default group
-    initialized on its bound device, the check ``DeviceMesh`` makes before ``split_group``."""
+    """Whether the default group is NCCL on a bound device, the check ``DeviceMesh`` makes before ``split_group``."""
     return (
         dist.get_backend() == dist.Backend.NCCL
         and getattr(dist.distributed_c10d._get_default_group(), "bound_device_id", None) is not None
@@ -63,17 +58,9 @@ def _splits_default_group() -> bool:
 
 
 def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.ProcessGroup:
-    """Create a process group for every rank list and return the ``mine``-th, which must hold this rank.
-    COLLECTIVE.
-
-    Every rank passes the identical, disjoint ``rank_lists``. Over an NCCL default group bound to its device the
-    call is one communicator split (``split_group``): a ``new_group`` per list splits the world communicator once
-    per list, each split blocking every rank of the job at startup.
-
-    Raises:
-        ValueError: the rank lists overlap.
-        RuntimeError: this rank is not in the ``mine``-th list.
-    """
+    """COLLECTIVE: create a group per rank list and return the ``mine``-th. Every rank passes identical, disjoint
+    ``rank_lists``. On a bound NCCL default group this is one ``split_group``; a ``new_group`` per list splits the
+    world communicator once per list, each split blocking every rank of the job at startup."""
     members = [rank for ranks in rank_lists for rank in ranks]
     if len(members) != len(set(members)):
         raise ValueError(f"The {what} rank lists overlap, so no split of the world holds them: {rank_lists}")
@@ -93,14 +80,9 @@ def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.P
 
 
 def gather_on_rank0(payload: Any) -> list[Any] | None:
-    """COLLECTIVE: every rank's ``payload`` in rank order on rank 0, None on the others; ``[payload]`` without a
-    process group.
-
-    The pickles are laid end to end in rank order and SUM-reduced to rank 0, each rank filling only its own span
-    of zeros, at most :data:`_GATHER_WINDOW_BYTES` a round. A reduce rides the ring the communicator already
-    holds; ``gather_object`` is a send per peer under NCCL, which connects every peer to rank 0 point to point,
-    those buffers (about 0.3 GiB per NVLink peer within one NVLink domain) held for the communicator's lifetime.
-    """
+    """COLLECTIVE: every rank's ``payload`` in rank order on rank 0, None on the others. SUM-reduces the pickles laid
+    end to end over the communicator's existing ring; ``gather_object`` under NCCL connects every peer to rank 0 point
+    to point, holding about 0.3 GiB per NVLink peer for the communicator's lifetime."""
     if not has_process_group():
         return [payload]
     rank, world = dist.get_rank(), dist.get_world_size()
@@ -126,25 +108,20 @@ def gather_on_rank0(payload: Any) -> list[Any] | None:
 
 
 def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined], *, what: str) -> _Combined:
-    """COLLECTIVE: ``combine`` every rank's ``payload`` on rank 0 and return the result on every rank.
-
-    Rank 0 gathers, combines and broadcasts the one result; an all-gather would leave every rank holding
-    one payload per rank of something only the result needs. The combine's failure travels in the result's
-    place, so it raises on every rank. Without a process group, ``combine([payload])``.
-    """
+    """COLLECTIVE: ``combine`` every rank's ``payload`` on rank 0 and return the result on every rank; its failure
+    raises on every rank. An all-gather would leave every rank holding one payload per rank."""
     if not has_process_group():
         return combine([payload])
 
     gathered = gather_on_rank0(payload)
 
-    # Any exception, not just the one the combine raises on purpose: one escaping rank 0 here would leave
-    # every peer in the next collective until the watchdog fires.
+    # Any exception: one escaping rank 0 here leaves every peer in the next collective until the watchdog fires.
     outcome: list[Any] = [None]
     if gathered is not None:
         try:
             outcome[0] = combine(gathered)
         except Exception as failure:
-            # Re-boxed because the failure travels by pickle and only its message is load-bearing.
+            # Re-boxed since it travels by pickle and only its message matters.
             outcome[0] = (
                 failure
                 if type(failure) is RuntimeError
@@ -161,12 +138,9 @@ def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined]
 
 
 def all_gather_cat(tensor: torch.Tensor, dim: int, group, world_size: int) -> torch.Tensor:
-    """COLLECTIVE over ``group``: every rank's equal-shaped ``tensor`` concatenated along ``dim`` in rank order;
-    ``tensor`` itself when ``world_size <= 1``.
-
-    ``dim == 0`` receives into one preallocated output: a shard list plus a ``cat`` would hold the gathered tensor
-    twice, and an expert-axis gather carries most of a fine-grained MoE's parameters.
-    """
+    """COLLECTIVE over ``group``: every rank's equal-shaped ``tensor`` concatenated along ``dim`` in rank order.
+    ``dim == 0`` receives into one preallocated output, since shards plus a ``cat`` would hold twice an expert-axis
+    gather, which carries most of a fine-grained MoE's parameters."""
     if world_size <= 1:
         return tensor
     tensor = tensor.contiguous()

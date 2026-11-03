@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Document-aware ``qwen4_exp`` PLE (``halo.models.qwen4_exp.documents``) against transformers' own PLE layer.
-
-Stock PLE resets its n-gram history only after eos and never resets its dilated conv, so a packed row leaks each
-document into the next. The document-aware pieces must equal the stock layer on a one-document row (eos resets
-included), keep every packed document equal to the same document alone, and refuse a packed row whose documents
-no ``seq_idx`` marks.
-
-    python tests/cpu/models/test_qwen4_exp_documents.py
-"""
+"""Document-aware ``qwen4_exp`` PLE against transformers' own. Stock PLE resets its n-gram history only after eos and
+never resets its dilated conv, so a packed row leaks each document into the next."""
 
 import pytest
 import torch
@@ -26,7 +19,7 @@ from tests.common.qwen4_exp import EOS_TOKEN_ID, packed_positions, packed_seq_id
 
 SEED = 1234
 TOLERANCE = 1e-6
-# Lengths of the packed documents: the middle one spans the conv's whole 9-token reach and the n-gram context.
+# The middle document spans the conv's whole 9-token reach and the n-gram context.
 DOCUMENTS = [9, 40, 23]
 # A stock leak below this would leave the isolation checks unable to tell a leaking path from an isolated one.
 LEAK_FLOOR = 1e-3
@@ -39,7 +32,7 @@ def config():
 
 @pytest.fixture(scope="module")
 def ple(config):
-    """Layer 2's PLE with random weights everywhere: the stock init zeroes the conv and centres the norms."""
+    """Layer 2's PLE with random weights: the stock init zeroes the conv and centres the norms."""
     torch.manual_seed(SEED)
     layer = qwen4_exp_modeling.Qwen4ExpTextPLELayer(config, layer_idx=1, ple_layer_index=0)
     with torch.no_grad():

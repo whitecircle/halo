@@ -1,9 +1,6 @@
-"""DeepEP buffer backends: the arenas that own DeepEP buffers, and the transport ops through them.
-
-``elastic`` (the default; ``auto``) is V2 ``ElasticBuffer``, Gin across NVLink domains and NVLink within
-one; ``legacy`` is the V1 CUDA-IPC ``Buffer``, intranode only, for long-context ep8 where the elastic
-combine barrier races FSDP2's reduce-scatter. The one ``deep_ep`` importer, lazily: it runs ``cuInit``.
-"""
+"""DeepEP buffer backends. ``elastic`` (default) is V2 ``ElasticBuffer``, Gin across NVLink domains and NVLink within
+one; ``legacy`` is the V1 CUDA-IPC ``Buffer``, intranode only, for long-context ep8 where the elastic combine barrier
+races FSDP2's reduce-scatter. The one ``deep_ep`` importer, lazily, since importing it runs ``cuInit``."""
 
 from __future__ import annotations
 
@@ -52,14 +49,12 @@ _deepep_env_configured = False
 
 @lru_cache(maxsize=1)
 def deep_ep() -> ModuleType:
-    """The native ``deep_ep`` module, imported on first use. Raises ``ImportError`` when absent."""
     import deep_ep  # noqa: PLC0415 — optional native extension; importing it runs cuInit
 
     return deep_ep
 
 
 def deep_ep_available() -> bool:
-    """Whether the native extension imports on this host."""
     try:
         deep_ep()
     except (ImportError, OSError):
@@ -68,7 +63,7 @@ def deep_ep_available() -> bool:
 
 
 def _destroy(buffers: list) -> None:
-    """Destroy each DeepEP buffer of ``buffers`` in order (collective over each buffer's group)."""
+    """COLLECTIVE over each buffer's group: destroy them in order."""
     for buffer in buffers:
         try:
             buffer.destroy()
@@ -92,12 +87,10 @@ class _Arena:
 
     @classmethod
     def is_shared(cls) -> bool:
-        """Whether the layers on one EP group share a buffer, or each layer keeps its own."""
         return True
 
     @classmethod
     def acquire(cls, group, *shape) -> Self:
-        """The arena of this class serving ``group`` at ``shape``, created on first use."""
         key = (cls.__name__, id(group), *shape)
         arena = _Arena._registry.get(key) if cls.is_shared() else None
         # The key carries the class name, so anything filed under it is of this class.
@@ -116,12 +109,11 @@ class _Arena:
             self._free()
 
     def _unclaimed_on_every_rank(self) -> bool:
-        """COLLECTIVE over the group. Whether no rank of the group still claims this arena."""
+        """COLLECTIVE over the group."""
         return rank_consensus(self._users <= 0, group=self.group).all_ok
 
     def free_retired(self) -> int:
-        """Destroy the buffers earlier grows retired, keeping the live one (collective over the group); returns how
-        many. Only a growing arena retires any."""
+        """COLLECTIVE over the group: destroy buffers earlier grows retired, keeping the live one; returns how many."""
         return 0
 
     def _free(self) -> None:
@@ -218,8 +210,7 @@ class _LegacyArena(_Arena):
 
 
 def _configure_deepep_env(spans_domains: bool) -> None:
-    """Set DeepEP's process-global env once per process: Gin only across NVLink domains unless ``EP_DISABLE_GIN``
-    is set; ``EP_SUPPRESS_NCCL_CHECK`` is latched at DeepEP import, so a missing one only warns."""
+    """Set DeepEP's process-global env once: Gin only across NVLink domains unless ``EP_DISABLE_GIN`` is set."""
     global _deepep_env_configured
     if _deepep_env_configured:
         return
@@ -241,8 +232,7 @@ def _configure_deepep_env(spans_domains: bool) -> None:
 
 
 class DeepEPBackend(ABC):
-    """A dispatcher's transport: its claim on an arena and the four dispatch/combine ops, reading the EP
-    topology off the dispatcher."""
+    """A dispatcher's transport: its claim on an arena and the four dispatch/combine ops."""
 
     def __init__(self, dispatcher: DeepEPDispatcher):
         self._d = dispatcher
@@ -250,19 +240,16 @@ class DeepEPBackend(ABC):
 
     @property
     def buffer(self):
-        """The arena's live DeepEP buffer (None before the first dispatch)."""
         return self._arena.buffer if self._arena is not None else None
 
     @abstractmethod
     def ensure(self, num_tokens: int, num_topk: int, *, deterministic: bool) -> None:
-        """COLLECTIVE over the EP group. Build or grow the buffer to serve ``num_tokens`` per rank, with
-        received tokens placed in a fixed order when ``deterministic``."""
+        """COLLECTIVE over the EP group. Build or grow the buffer to serve ``num_tokens`` per rank."""
 
     @abstractmethod
     def dispatch_forward(self, x, topk_idx, topk_weights):
         """Dispatch → ``(recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts)``; ``recv_counts`` is the
-        host-side tuple of (token, expert) slots each local expert received, exact at DeepEP's default
-        ``expert_alignment`` of 1."""
+        host-side (token, expert) slots per local expert, exact at DeepEP's default ``expert_alignment`` of 1."""
 
     @abstractmethod
     def dispatch_backward(self, grad_recv_x, grad_recv_topk_weights, handle):
@@ -277,7 +264,6 @@ class DeepEPBackend(ABC):
         """A combine's backward, a dispatch reusing the routing layout ``handle`` carries → ``grad_x``."""
 
     def destroy(self, *, free_buffer: bool) -> None:
-        """Drop this layer's claim on its buffer, freeing it when unclaimed and ``free_buffer``."""
         arena, self._arena = self._arena, None
         if arena is not None:
             arena.release(free_buffer=free_buffer)
@@ -516,7 +502,6 @@ class _LegacyBackend(DeepEPBackend):
 
 
 def resolve_ep_buffer_backend(choice: str | None) -> str:
-    """The backend ``choice`` selects, fixed for the run: ``auto`` is ``elastic``; an unknown name raises."""
     choice = (choice or "auto").strip().lower()
     if choice == "auto":
         choice = "elastic"
@@ -527,8 +512,7 @@ def resolve_ep_buffer_backend(choice: str | None) -> str:
 
 
 def build_ep_backend(dispatcher: DeepEPDispatcher, backend: str | None) -> DeepEPBackend:
-    """The transport ``backend`` selects for ``dispatcher``. A legacy one is checked against the dispatch
-    group first, the backstop for a hand-built ``EPConfig`` that bypassed ``ParallelismConfig``."""
+    """A legacy one is checked against the dispatch group first, the backstop for a hand-built ``EPConfig``."""
     if resolve_ep_buffer_backend(backend) == "elastic":
         return _ElasticBackend(dispatcher)
     reject_legacy_backend_topology(
@@ -541,12 +525,8 @@ def build_ep_backend(dispatcher: DeepEPDispatcher, backend: str | None) -> DeepE
 
 
 def free_unclaimed_ep_buffers() -> int:
-    """COLLECTIVE over each arena's EP group; call after a barrier. Free every DeepEP buffer no MoE layer on
-    any rank of its group claims, agreed arena by arena in build order; returns how many it freed.
-
-    It sweeps up the claims the garbage collector dropped, which a finalizer cannot free; an arena still
-    claimed on some rank (a teacher or reference model dispatching) stays until teardown.
-    """
+    """COLLECTIVE over each arena's EP group; call after a barrier. Free every buffer no MoE layer on any rank of its
+    group claims, in build order; returns how many. Sweeps up claims the GC dropped, which a finalizer cannot free."""
     unclaimed = [arena for arena in _Arena._registry.values() if arena._unclaimed_on_every_rank()]
     for arena in unclaimed:
         arena._free()
@@ -554,10 +534,9 @@ def free_unclaimed_ep_buffers() -> int:
 
 
 def free_retired_ep_buffers() -> int:
-    """COLLECTIVE over each arena's EP group: destroy the buffers every arena's grows retired, arena by arena in
-    build order, keeping each live buffer; returns how many it freed. Call it once a step's backwards are done,
-    when no handle names a retired buffer, on every rank: a grow reaches the group's all-reduced capacity, so every
-    rank of a group retired the same buffers."""
+    """COLLECTIVE over each arena's EP group: destroy every arena's retired buffers in build order; returns how many.
+    Call on every rank once a step's backwards are done, when no handle names a retired buffer. A grow reaches the
+    group's all-reduced capacity, so every rank retired the same buffers."""
     return sum(arena.free_retired() for arena in list(_Arena._registry.values()))
 
 

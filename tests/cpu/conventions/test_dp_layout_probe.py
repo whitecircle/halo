@@ -1,16 +1,7 @@
 #!/usr/bin/env python
-"""The FULL_SHARD layout probe of ``tests.common.dp_layout`` forwards the module a run's FSDP2 wrap is rooted at.
-
-The data-parallel GPU suites read ZeRO-3 off the trained model through a probe forward, and they run only on the GPU
-tiers. The root's own pre-forward unshards the root's group, so a probe entering below it meets the parameters that
-group holds as sharded DTensors: a backbone probe fails that way on the SentenceTransformer the embedding trainer
-wraps, while the pipeline probe enters at the root and its embedding reads gathered weights. The wrap passes the
-reshard mode explicitly, so FSDP2 reshards the root after its forward too: the probe tells FULL_SHARD, whose groups
-are back on their shards after it, from SHARD_GRAD_OP, which leaves them gathered, on that pipeline (whose one group
-is the root's) as on a causal LM wrapped per decoder layer. One rank, gloo.
-
-Run: python tests/cpu/conventions/test_dp_layout_probe.py
-"""
+"""The FULL_SHARD layout probe of ``tests.common.dp_layout`` forwards the module a run's FSDP2 wrap is rooted at. A
+probe below the root meets that group's sharded DTensors; at the root it tells FULL_SHARD, back on its shards,
+from SHARD_GRAD_OP, left gathered. One rank, gloo."""
 
 import pytest
 import torch

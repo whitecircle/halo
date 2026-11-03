@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""A multi-worker coordinated map or filter pickles its callable once, not once per worker task, and writes what a
-single-process run writes, under the same cache name.
-
-``datasets`` pickles the map callable into every worker's task one task after another in the calling process, about
-a second each for a captured tokenizer, so the coordinated seams pickle it once and ship the bytes. The cache name is
-taken from the bare callable before that wrapping: a load rank mapping with the whole count and a follower mapping
-with its share, or in process, must name the same file, and a name keyed on the wrapper would let two closures that
-differ only in a captured value share one. Real gloo ranks cover a shared filesystem, where one load rank writes and
-the other reads its files, and per-node storage, where each node's rank writes its own. The cache name also enters the
-fingerprint ``datasets`` takes of the wrapper, and a coroutine function is never wrapped.
-
-Run: python tests/cpu/data/test_map_callable_pickling.py
-"""
+"""A multi-worker coordinated map or filter pickles its callable once (``datasets`` does per worker task, about a
+second each for a captured tokenizer) and writes what a single-process run writes. The cache name comes from the
+bare callable, so ranks at different worker counts name one file."""
 
 import functools
 import json
@@ -163,9 +153,8 @@ def test_the_cache_name_keys_the_bare_callable_not_its_wrapper():
 
 
 def test_the_cache_name_enters_the_fingerprint_datasets_takes():
-    """Two maps of one callable that differ only in ``cache_key_extras``, a tunable its source and closure do not show,
-    end on different ``datasets`` fingerprints: a later uncoordinated map caches by fingerprint beside its input, and
-    on equal fingerprints the second would read the first one's file."""
+    """A later uncoordinated map caches by fingerprint beside its input, so on equal fingerprints the second would
+    read the first's file."""
     add = _closure_adding(7)
     mapped = [
         coordinated_map(_ROWS, add, desc="extras", num_proc=_WORKERS, cache_key_extras={"variant": variant})
@@ -229,9 +218,8 @@ def test_every_rank_holds_the_single_process_rows_under_its_cache_name(tmp_path,
     ids=["map", "filter"],
 )
 def test_a_coroutine_function_keeps_its_async_path(monkeypatch, load_rank, operation, fn, column, expected):
-    """``datasets``' map and filter read the coroutine flag off the callable they are handed: the filter in this
-    process, the map wherever its shard runs, which is here once a follower's share of the count drops below two. Read
-    off a wrapper, the map writes unawaited coroutines and the filter keeps every row."""
+    """``datasets`` reads the coroutine flag off the callable it is handed; read off a wrapper, the map writes
+    unawaited coroutines and the filter keeps every row."""
     monkeypatch.setattr(coordination, "is_fs_load_rank", lambda: load_rank)
     monkeypatch.setattr(coordination, "get_local_world_size", lambda: 2 * _WORKERS)
     assert operation(_ROWS, fn, desc="async", num_proc=_WORKERS)[column] == expected

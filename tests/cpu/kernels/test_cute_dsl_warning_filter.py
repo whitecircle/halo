@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the CuTe DSL deprecation filter installed at training setup.
-
-``nvidia_cutlass_dsl`` emits a ``DeprecationWarning`` per pointer construction while JIT-compiling the
-FA4 kernels, from one line it reaches thousands of times per rank — Python's once-per-location dedup
-never engages because each compile carries a fresh registry. The filter that mutes it is scoped two
-ways, and both matter: widen the module scope and a real deprecation from our own code disappears;
-widen the category and genuine ``cutlass`` warnings (an unsupported dtype, a fallback kernel) go with
-it. These tests pin the scope on both axes.
-
-Run: ``pytest -m cpu tests/cpu/kernels/test_cute_dsl_warning_filter.py``
-"""
+"""The CuTe DSL deprecation filter: ``nvidia_cutlass_dsl`` warns per pointer construction, thousands of times per rank,
+past Python's dedup. Scoped on both axes, or our own deprecations or real ``cutlass`` warnings go with it."""
 
 from __future__ import annotations
 
@@ -21,12 +12,8 @@ from halo.kernels.jit_cache import silence_cute_dsl_deprecations
 
 
 def _warner(module_name: str, category: type[Warning]):
-    """A callable that warns as if it lived in ``module_name``.
-
-    ``warnings`` attributes a warning to the ``__name__`` in its caller's globals, which is what the
-    filter's ``module`` regex is matched against — so faking that one global reproduces exactly what
-    the real ``cutlass.cute.core`` does, without a GPU or a kernel compile.
-    """
+    """``warnings`` matches the ``__name__`` in its caller's globals, so faking that one global reproduces
+    ``cutlass.cute.core`` without a GPU."""
     namespace = {"__name__": module_name, "warnings": warnings, "category": category}
     exec("def emit():\n    warnings.warn('pointer API is deprecated', category)", namespace)
     return namespace["emit"]
@@ -41,14 +28,12 @@ def _caught(module_name: str, category: type[Warning]) -> list:
 
 
 def test_the_cute_dsl_deprecation_is_silenced():
-    """The flood itself: a DeprecationWarning from the real module path must not reach the log."""
     assert not _caught("cutlass.cute.core", DeprecationWarning), (
         "the CuTe DSL deprecation still surfaces — every FA4 compile floods the run log with it"
     )
 
 
 def test_other_modules_keep_their_deprecations():
-    """Anti-over-reach on the module axis: only ``cutlass`` is muted, not every library."""
     assert _caught("halo.trainers.distributed_trainer", DeprecationWarning), (
         "the filter swallowed a deprecation from our own code; its module scope is too wide"
     )
@@ -58,7 +43,6 @@ def test_other_modules_keep_their_deprecations():
 
 
 def test_other_cutlass_warnings_still_surface():
-    """Anti-over-reach on the category axis: a real cutlass problem must still be visible."""
     assert _caught("cutlass.cute.core", UserWarning), (
         "the filter muted a non-deprecation cutlass warning — an unsupported dtype or a silent kernel "
         "fallback would now be invisible"

@@ -1,11 +1,5 @@
-"""The tokenizer a checkpoint loads with is written once per save, before its weights, on every saver.
-
-A save stopped after its index names the weight files is a loadable checkpoint, so the tokenizer must
-already be beside it; and a tokenizer write that fails on the save rank must stop every rank rather than
-strand the peers in the next collective.
-
-    python tests/cpu/checkpoint/test_save_tokenizer.py
-"""
+"""The tokenizer is written once per save, before the weights, on every saver. A save stopped after its index is
+loadable, and a failed write on the save rank stops every rank rather than stranding peers."""
 
 import datetime
 import os
@@ -24,7 +18,7 @@ PG_TIMEOUT_SEC = 15
 
 
 class _Killed(BaseException):
-    """The process dying: not an ``Exception``, so no deferred-failure guard records it."""
+    """Not an ``Exception``, so no deferred-failure guard records it."""
 
 
 def test_the_tokenizer_is_on_disk_when_the_save_dies_after_its_index(tmp_path, monkeypatch):

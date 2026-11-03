@@ -1,7 +1,5 @@
-"""Test-suite compaction for the code-contest pools: a bulky corpus (HardTests' encoded suites, open-r1/codeforces'
-generated tests) reduced to one capped row per problem, written as parquet parts (``key``, ``tests``, ``checker``)
-stamped with the caps that built them, and the parquet-part listing both the compaction and the pool preparation's
-tests-table join read. Behind ``scripts/environments/preparation/compact_code_tests.py``."""
+"""Test-suite compaction for the code-contest pools: a bulky corpus reduced to one capped row per problem, written as
+parquet parts stamped with the caps that built them."""
 
 import json
 import logging
@@ -24,7 +22,6 @@ logger = logging.getLogger(__name__)
 _HARDTESTS_GROUP_ORDER = ("LLMGen", "HackGen", "RPGen", "SPGen")
 _OUTPUT_SCHEMA = pa.schema([("key", pa.string()), ("tests", pa.string()), ("checker", pa.string())])
 CAP_DEFAULTS = {"max_tests": 40, "max_test_bytes": 262_144, "max_large_tests": 2, "max_large_bytes": 4_000_000}
-# Parquet key-value metadata slot holding the caps a part was written with.
 _CAPS_METADATA_KEY = b"caps"
 # A suite that fails to decode is skipped and counted; a payload naming a class or callable (the
 # unpickler's refusal) is not a decode failure and propagates.
@@ -32,8 +29,7 @@ _UNDECODABLE = (ValueError, TypeError, zlib.error, EOFError)
 
 
 def parquet_parts(directory: str | Path, *, non_empty: bool = False) -> list[str]:
-    """The parquet files under ``directory`` in sorted order; ``non_empty`` leaves out zero-row parts.
-    Raises when none remain, since every caller needs at least one."""
+    """``non_empty`` leaves out zero-row parts. Raises when none remain, since every caller needs at least one."""
     parts = sorted(
         str(p) for p in Path(directory).glob("*.parquet") if not non_empty or pq.read_metadata(p).num_rows > 0
     )
@@ -50,9 +46,8 @@ def cap_tests(
     max_large_tests: int,
     max_large_bytes: int,
 ) -> list[dict[str, str]]:
-    """The first ``max_tests`` tests within the size caps, in the given order. A test above
-    ``max_test_bytes`` takes one of the ``max_large_tests`` slots while it stays under
-    ``max_large_bytes``, and is dropped otherwise."""
+    """A test above ``max_test_bytes`` takes one of the ``max_large_tests`` slots while under ``max_large_bytes``, and
+    is dropped otherwise."""
     kept: list[dict[str, str]] = []
     large_slots = max_large_tests
     for test in tests:
@@ -79,22 +74,18 @@ def _flatten_indices(mapping: dict) -> list[int]:
 
 
 def _iter_rows(path: str, columns: list[str], batch_size: int) -> Iterator[dict]:
-    """Rows of a parquet shard a few at a time: a suite can decode to hundreds of megabytes, so a whole
-    shard in memory per worker is what an out-of-memory host looks like."""
+    """A suite can decode to hundreds of megabytes, so a whole shard per worker can run the host out of memory."""
     for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_size, columns=columns):
         yield from batch.to_pylist()
 
 
 class ShardResult(NamedTuple):
-    """One compacted shard: its rows, the suites that failed to decode, the suites the caps emptied."""
-
     rows: list[dict]
     undecodable: int
     emptied: int
 
 
 def compact_hardtests_shard(path: str, caps: dict) -> ShardResult:
-    """One HardTests shard: decode each problem's suite, order it by generator group, cap it."""
     rows: list[dict] = []
     undecodable = emptied = 0
     for row in _iter_rows(path, ["pid", "test_cases_kit", "mapping", "test_cases"], batch_size=2):
@@ -117,7 +108,7 @@ def compact_hardtests_shard(path: str, caps: dict) -> ShardResult:
 
 
 def compact_codeforces_generated_shard(path: str, caps: dict) -> ShardResult:
-    """One open-r1 ``generated_tests`` shard (a contest): group its rows per problem in ``test_i`` order."""
+    """A shard is one contest; rows group per problem in ``test_i`` order."""
     per_problem: dict[str, list[tuple[int, dict]]] = defaultdict(list)
     for row in _iter_rows(path, ["problem_id", "input", "output", "test_i"], batch_size=64):
         per_problem[row["problem_id"]].append((int(row["test_i"]), {"input": row["input"], "output": row["output"]}))
@@ -136,13 +127,12 @@ COMPACTORS = {"hardtests": compact_hardtests_shard, "codeforces_generated": comp
 
 
 def _part_caps(out_path: str) -> dict | None:
-    """The caps stamped on an existing part, or ``None`` when the file carries none."""
     raw = (pq.read_metadata(out_path).metadata or {}).get(_CAPS_METADATA_KEY)
     return json.loads(raw) if raw else None
 
 
 def _compact_one(args: tuple[str, str, str, dict]) -> tuple[str, int, int, int]:
-    """Compact one shard into its part: ``(shard, problems kept, undecodable suites, emptied suites)``."""
+    """Returns ``(shard, problems kept, undecodable suites, emptied suites)``."""
     source, path, out_path, caps = args
     if Path(out_path).exists():
         if _part_caps(out_path) == caps:
@@ -164,8 +154,7 @@ def _compact_one(args: tuple[str, str, str, dict]) -> tuple[str, int, int, int]:
 
 
 def compact_tests_table(source: str, input_dir: str, output_dir: str, caps: dict, num_proc: int | None) -> None:
-    """Compact every parquet shard under ``input_dir`` of the ``source`` corpus into its part under ``output_dir``,
-    one worker per shard, keeping a part already stamped with ``caps`` and logging the totals."""
+    """One worker per shard; a part already stamped with ``caps`` is kept."""
     shards = parquet_parts(input_dir)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,5 @@
-"""Tree attention for GLM-5 Next's DeepSeek sparse attention: every query selects its keys along its own path,
-from indexer pools that run along each token's path, and attends only its selected MLA latent rows, with the key
-projection folded into the query. agent-docs/optimization/tree-packing.md has the pool, selection and attention
-rules."""
+"""Tree attention for GLM-5 Next's DeepSeek sparse attention: every query selects its keys along its own path and
+attends only its selected MLA latent rows, with the key projection folded into the query."""
 
 import functools
 
@@ -20,8 +18,7 @@ INDEXER_SCORES_PER_CALL = 1 << 28
 # in the forward; the backward also holds two fp32 products of that shape, about 8 GiB in all.
 ATTENTION_KEYS_PER_CALL = 1 << 20
 
-# The projection the fold reads, by its path within a decoder layer: PEFT matches a list entry of its
-# targets against the end of a module's path.
+# PEFT matches a list entry of its targets against the end of a module's path.
 _FOLDED_PROJECTION_PATH = "self_attn.kv_b_proj"
 _FOLDED_ADAPTER_REFUSAL = (
     "tree packing runs GLM-5 Next's sparse attention on the MLA latent and folds kv_b_proj's weight into the "
@@ -37,8 +34,7 @@ _QUANTIZED_REFUSAL = (
 
 
 def _path_back(predecessor: torch.Tensor, tokens: torch.Tensor, steps: int) -> torch.Tensor:
-    """``[len(tokens), steps]``: each token and its ``steps - 1`` nearest predecessors on its path, ``-1``
-    past a root."""
+    """Each token and its ``steps - 1`` nearest predecessors on its path, ``-1`` past a root."""
     chain = [tokens]
     for _ in range(steps - 1):
         previous = chain[-1]
@@ -47,9 +43,7 @@ def _path_back(predecessor: torch.Tensor, tokens: torch.Tensor, steps: int) -> t
 
 
 def _pool_ends(links: dict, pool: int) -> dict[str, torch.Tensor]:
-    """The layer-independent pools of a tree row at pool width ``pool``, built once per plan (``links``, the plan's
-    ``sparse`` part, keeps them): ``ends``, one pool per last token in row order; ``members``, ``[pools, pool]``
-    in slot order; and ``end_bound``, each pool's subtree end. Finding the ends is a device sync."""
+    """Kept on ``links``, built once per plan, as finding the ends is a device sync."""
     key = ("pool_ends", pool)
     if key not in links:
         ends = (links["position"] % pool == pool - 1).nonzero().squeeze(-1)
@@ -62,9 +56,8 @@ def _pool_ends(links: dict, pool: int) -> dict[str, torch.Tensor]:
 
 
 def _query_chunk_pools(links: dict, pool: int, tokens: int, chunk: int) -> list[tuple[int, int, int, int]]:
-    """Per chunk of ``chunk`` queries, ``(start, stop, low, high)`` as host ints: ``[low, high)`` are the pools of the
-    trees its queries sit in that end before the chunk does. Built once per plan, pool width and chunk size with one
-    ``searchsorted`` and one host read, which every layer and every recompute then shares."""
+    """``(start, stop, low, high)`` as host ints, built once with one ``searchsorted`` and one host read, which every
+    layer and recompute shares. ``[low, high)`` are the pools of the chunk's trees that end before the chunk does."""
     key = ("query_chunk_pools", pool, chunk)
     if key not in links:
         ends = _pool_ends(links, pool)["ends"]
@@ -80,13 +73,7 @@ def _query_chunk_pools(links: dict, pool: int, tokens: int, chunk: int) -> list[
 
 @torch.no_grad()
 def tree_key_selection(indexer, hidden_states: torch.Tensor, q_resid: torch.Tensor, links: dict) -> torch.Tensor:
-    """The stock indexer's ``[1, T, index_topk (+ index_kpool - 1)]`` int32 key rows (``-1`` pads), per path.
-
-    ``links`` is the plan's ``sparse`` part: per token its path ``predecessor``, ``subtree_end``,
-    path ``position`` and ``tree_start`` (:func:`~halo.models.attention.tree_plan.build_tree_attention_plan`).
-    The pools and the query chunks' pool ranges are read off it once per plan (:func:`_pool_ends`,
-    :func:`_query_chunk_pools`) and kept there.
-    """
+    """The stock indexer's ``[1, T, index_topk (+ index_kpool - 1)]`` int32 key rows (``-1`` pads), per path."""
     hidden_states, q_resid = hidden_states[0], q_resid[0]
     tokens, pool = hidden_states.shape[0], indexer.index_kpool
     query = indexer.wq_b(q_resid).view(tokens, indexer.n_heads, indexer.head_dim)
@@ -135,15 +122,9 @@ def _query_chunks(keys: torch.Tensor):
 
 
 class _SparseLatentAttention(torch.autograd.Function):
-    """Every query's softmax over its own selected latent rows, a chunk of queries at a time.
-
-    ``query`` is ``[T, heads, rank]`` with the key projection folded in, ``latent`` ``[T, rank]`` in the same
-    dtype and ``keys`` ``[T, W]`` row indices (``-1`` for none). Scores and the softmax are fp32, the two
-    products run at the inputs' precision with fp32 results, so it is applied outside autocast; a query with
-    no key gets a zero output, as SDPA's safe softmax gives it. The backward recomputes each chunk's
-    probabilities from the saved log-sum-exp and sums a latent row's gradient over every query that selected
-    it in fp32, as a key gather does.
-    """
+    """Every query's softmax over its own selected latent rows. Scores and the softmax are fp32 and the two products
+    run at the inputs' precision with fp32 results, so it is applied outside autocast. A query with no key gets a zero
+    output, as SDPA's safe softmax gives it. The backward sums a latent row's gradient over its queries in fp32."""
 
     @staticmethod
     def forward(ctx, query, latent, keys, scale):
@@ -180,7 +161,7 @@ class _SparseLatentAttention(torch.autograd.Function):
             d_gathered = bmm_fp32(d_scores.transpose(1, 2), query[chunk]) + bmm_fp32(
                 probs.to(upstream.dtype).transpose(1, 2), upstream
             )
-            # Every slot is added, so no host read of the selected count: a pad slot adds an exact zero to a row
+            # Every slot is added, sparing a host read of the selected count; a pad slot adds an exact zero to a row
             # spread by its flat slot index, which keeps the pads' atomics off any one row.
             selected = rows >= 0
             spread = torch.arange(rows.numel(), device=rows.device).view_as(rows) % latent.shape[0]
@@ -194,9 +175,7 @@ def _dropout_refusal(attention_dropout: float) -> str:
 
 
 def _adapts_folded_projection(lora_target_modules: str | list[str]) -> bool:
-    """Whether PEFT wraps every sparse layer's ``kv_b_proj`` under ``lora_target_modules``, read without the
-    model: the ``all-linear`` sentinel, or a list entry naming the projection or its path within the decoder
-    layer. A regex, or an entry pinned to one layer's path, resolves only against the loaded module tree."""
+    """Read without the model. A regex, or an entry pinned to one layer's path, resolves only on the loaded tree."""
     if isinstance(lora_target_modules, str):
         return lora_target_modules.lower() == INCLUDE_LINEAR_LAYERS_SHORTHAND
     entries = [str(entry) for entry in lora_target_modules]
@@ -208,12 +187,8 @@ def _adapts_folded_projection(lora_target_modules: str | list[str]) -> bool:
 def reject_unfoldable_tree_options(
     model_config, lora_target_modules: str | list[str] | None, quantization_config=None
 ) -> None:
-    """Refuse, from the model config, the run's adapter targets (``None`` for no adapter) and the run's quantization
-    config, what the fold would skip or misread without a word: adapter targets that wrap ``kv_b_proj``
-    (:func:`_adapts_folded_projection`), a quantized ``kv_b_proj`` (the run's quantization, or the one the checkpoint
-    declares, which a loaded model's config carries too) and a training-time ``attention_dropout``. Needs no weights,
-    so a run checks it before the load; the first tree batch checks the loaded layers again
-    (:func:`_reject_unfoldable_layer`)."""
+    """Refuse, before the load, what the fold would skip or misread without a word: adapter targets that wrap
+    ``kv_b_proj``, a quantized ``kv_b_proj`` and a training-time ``attention_dropout``."""
     if lora_target_modules is not None and _adapts_folded_projection(lora_target_modules):
         raise ValueError(_FOLDED_ADAPTER_REFUSAL)
     if quantization_config is not None or getattr(model_config, "quantization_config", None) is not None:
@@ -223,10 +198,8 @@ def reject_unfoldable_tree_options(
 
 
 def _reject_unfoldable_layer(attention) -> None:
-    """The fold reads ``kv_b_proj``'s weight and the latent attention takes no dropout, so an adapter on
-    that projection and a training-time attention dropout would be skipped without a word. Checked on
-    every tree batch, behind :func:`reject_unfoldable_tree_options`: the trainer wraps its adapters after tree
-    attention is installed, and only the loaded module tree resolves every target spelling."""
+    """Checked on every tree batch, as the trainer wraps its adapters after tree attention is installed and only the
+    loaded module tree resolves every target spelling."""
     if isinstance(attention.kv_b_proj, BaseTunerLayer):
         raise ValueError(_FOLDED_ADAPTER_REFUSAL)
     if attention.training and attention.attention_dropout:
@@ -234,8 +207,6 @@ def _reject_unfoldable_layer(attention) -> None:
 
 
 def tree_sparse_forward(forward):
-    """``Glm5NextTextAttention.forward`` that reads a tree plan's ``sparse`` part; the stock forward otherwise."""
-
     @functools.wraps(forward)
     def with_tree_plan(self, hidden_states, attention_mask, past_key_values=None, prev_topk_indices=None, **kwargs):
         plan = kwargs.pop(TREE_ATTENTION_KEY, None)

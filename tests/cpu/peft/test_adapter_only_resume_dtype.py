@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """An adapter-only PEFT resume on one process or under DDP keeps the adapters at the run's dtype.
-
-The base Trainer reloads an adapter-only checkpoint with PEFT's ``load_adapter(is_trainable=True)``, whose
-``autocast_adapter_dtype`` recasts bf16 adapters to fp32. A resume loads before the optimizer exists, so the resumed
-run would build fp32 moments over fp32 adapters, step slower and save fp32 from then on. ``load_resume_weights``
-restores such a checkpoint through the adapter restorer instead, which copies into the live tensors at their dtype.
-Pinned through a real single-process SFT run that saves at step 2 and a second trainer that resumes from it, and
-through the weight resume on two gloo ranks, the shape a DDP run resumes in.
-
-    python tests/cpu/peft/test_adapter_only_resume_dtype.py
-"""
+PEFT's ``autocast_adapter_dtype`` recasts bf16 adapters to fp32, and a resume loads before the optimizer exists."""
 
 import json
 import os
@@ -120,8 +111,7 @@ def test_the_weight_resume_restores_an_adapter_only_checkpoint_in_place(adapter_
 
 
 def test_a_reload_the_base_loader_owns_or_a_whole_weight_peft_checkpoint_stays_with_it(adapter_dir):
-    """Accelerate-managed FSDP reads its own format, and a PEFT run never writes whole weights beside its adapter:
-    both keep the base Trainer's own load."""
+    """Accelerate-managed FSDP reads its own format, and a PEFT run never writes whole weights beside its adapter."""
     model = _peft_model(1, word_level_tokenizer(WORDS))
     before = {key: tensor.clone() for key, tensor in _trainable(model).items()}
     assert load_resume_weights(load_context(model, base_owns_whole_weight_load=True), adapter_dir, model) is False

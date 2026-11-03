@@ -37,14 +37,9 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_per_expert_layout(ckpt_dir: str) -> tuple[str, str, str]:
-    """The ``(gate, up, down)`` per-expert projection names ``ckpt_dir``'s family stores experts under.
-
-    The family is resolved the way the sharded merge resolves it, through the specs' declared
-    ``model_types`` rather than a key-spelling heuristic: the fused keys this script rewrites
-    are shared across the roster at identical shapes, so an unmatched checkpoint would split and be
-    written under names its own loader never reads, and transformers would then re-initialize the
-    whole expert bank with a warning rather than an error.
-    """
+    """The ``(gate, up, down)`` names ``ckpt_dir``'s family stores experts under, via the specs' declared
+    ``model_types``. Fused keys are shared across the roster at identical shapes, so a key-spelling guess would write
+    names its loader never reads, and transformers would re-initialize the whole expert bank with a warning."""
     if not os.path.isfile(os.path.join(ckpt_dir, CONFIG_NAME)):
         raise ValueError(
             f"{ckpt_dir} has no {CONFIG_NAME}, so the checkpoint's model_type — and with it the per-expert "
@@ -73,16 +68,11 @@ def resolve_per_expert_layout(ckpt_dir: str) -> tuple[str, str, str]:
 
 
 def _moe_dims(ckpt_dir: str) -> tuple[int | None, int | None, str]:
-    """(hidden_size, moe_intermediate_size, model_type) from config.json, VLM ``text_config`` fallback.
-
-    The family comes from :func:`detect_model_type`, which the family gates here also use (text_config
-    fallback included), rather than a second parse of the same key.
-    """
+    """``(hidden_size, moe_intermediate_size, model_type)`` from config.json, VLM ``text_config`` fallback."""
     cfg = read_checkpoint_config(ckpt_dir)
     tc = cfg.get("text_config", {})
     hidden = cfg.get("hidden_size") or tc.get("hidden_size")
-    # moe_intermediate_size names the expert FFN width on the contiguous fused-GLU families; fall back
-    # to intermediate_size for a config that declares only the dense width.
+    # moe_intermediate_size is the expert FFN width on contiguous fused-GLU families; some declare only the dense.
     inter = (
         cfg.get("moe_intermediate_size")
         or tc.get("moe_intermediate_size")
@@ -94,30 +84,19 @@ def _moe_dims(ckpt_dir: str) -> tuple[int | None, int | None, str]:
 
 @lru_cache(maxsize=1)
 def _fused_key_kinds() -> tuple[tuple[str, str, bool, bool], ...]:
-    """``(key suffix, expert container attr, splits_gate_up, is_bias)`` per fused expert tensor on the roster.
-
-    Cached: the roster is class-declared and fixed for the process, while ``_split_fused_key`` asks
-    for it once per tensor key in the checkpoint.
-
-    Names come from ``HF_FUSED_EXPERT_KEYS`` (the same tuple the sharded merge accepts), so a family
-    adding a fused tensor needs no second list here. A fused key that also names a per-expert
-    projection (a spec's ``per_expert_keys``) is the down matrix, since a fused gate+up name
-    never appears per-expert; everything else is split in half. Each suffix is matched at the end of a
-    key, so a ``…_bias`` entry and the weight sharing its prefix cannot shadow each other and the
-    generation order does not matter.
-    """
+    """``(key suffix, container attr, splits_gate_up, is_bias)`` per fused expert tensor on the roster; cached, as
+    ``_split_fused_key`` asks once per key. A fused key naming a per-expert projection is the down matrix; the rest
+    split in half."""
     per_expert_names = {name for layout in per_expert_layouts() for name in layout}
     kinds = []
-    # Every declared container spelling, not just ``experts``: a family nesting them under
-    # ``routed_experts`` would match nothing and be reported as already per-expert.
+    # Every declared container spelling, or a family nesting under ``routed_experts`` would read as already per-expert.
     for container in experts_container_attrs():
         for name in HF_FUSED_EXPERT_KEYS:
             is_bias = name.endswith("_bias")
             stem = name.removesuffix("_bias")
             kinds.append((f".{container}.{name}", container, stem not in per_expert_names, is_bias))
     if not any(not splits for _suffix, _container, splits, _bias in kinds):
-        # Everything classified as a gate/up pair means the declarations drifted apart, and splitting
-        # the down matrix in half would halve every expert's output projection.
+        # All gate/up means the declarations drifted; splitting the down matrix would halve every output projection.
         raise RuntimeError(
             f"No fused expert key {[k for k, _c, _s, _b in kinds]} matches a declared per-expert projection "
             f"{sorted(per_expert_names)}, so none can be identified as the single down matrix. "
@@ -127,11 +106,8 @@ def _fused_key_kinds() -> tuple[tuple[str, str, bool, bool], ...]:
 
 
 def _split_fused_key(key: str) -> tuple[str, bool, bool] | None:
-    """If ``key`` is a fused expert tensor, return (layer_prefix, splits_gate_up, is_bias); else None.
-
-    layer_prefix is everything up to and including the expert container, so per-expert keys become
-    ``{prefix}.{i}.<proj>.{weight,bias}``.
-    """
+    """``(layer_prefix, splits_gate_up, is_bias)`` for a fused expert tensor, else None; the prefix ends at the
+    container."""
     for suffix, container, splits_gate_up, is_bias in _fused_key_kinds():
         if key.endswith(suffix):
             return key[: -len(suffix)] + f".{container}", splits_gate_up, is_bias
@@ -139,12 +115,8 @@ def _split_fused_key(key: str) -> tuple[str, bool, bool] | None:
 
 
 def _assert_contiguous_gate_up(shape: torch.Size, hidden: int | None, inter: int | None, model_type: str | None):
-    """Check that a fused ``gate_up_proj`` really is the contiguous-halves ``[E, 2I, H]`` layout.
-
-    Checked on the tensor rather than the config's model_type: a mislabelled checkpoint, or a config
-    whose ``moe_intermediate_size`` does not describe the weights, would otherwise be split at the
-    wrong offset and corrupted.
-    """
+    """Check a fused ``gate_up_proj`` is the contiguous ``[E, 2I, H]`` layout, on the tensor, since a mislabelled
+    checkpoint or a config whose width does not describe the weights would be split at the wrong offset."""
     if hidden is None or inter is None:
         raise ValueError(
             "config.json lacks hidden_size / moe_intermediate_size (checked text_config too); "
@@ -152,7 +124,7 @@ def _assert_contiguous_gate_up(shape: torch.Size, hidden: int | None, inter: int
         )
     _, a, b = shape
     if a == 2 * inter and b == hidden:
-        return  # contiguous halves [E, 2I, H]: supported
+        return
     if b == 2 * inter and a == hidden:
         raise NotImplementedError(
             f"gate_up_proj {tuple(shape)} is the interleaved [E, H, 2M] layout, not the contiguous halves "
@@ -166,20 +138,13 @@ def _assert_contiguous_gate_up(shape: torch.Size, hidden: int | None, inter: int
 
 
 def _has_fused_expert_keys(ckpt_dir: str) -> bool:
-    """Whether any shard carries a fused expert tensor, from the safetensors headers alone.
-
-    Distinguishes an already-per-expert checkpoint from one that needs converting, without reading
-    tensor data.
-    """
+    """Whether any shard carries a fused expert tensor, from the safetensors headers alone."""
     return any(_split_fused_key(key) is not None for _shard, _reader, key in iter_checkpoint_shard_entries(ckpt_dir))
 
 
 def _validate_fused_layouts(in_dir: str) -> None:
-    """Assert every fused ``gate_up`` tensor really is the contiguous-halves layout, headers only.
-
-    Ahead of the first output write, because the split below is streamed: a shape refused halfway
-    through would leave a partial directory that a pipeline could mistake for a finished one.
-    """
+    """Assert every fused ``gate_up`` is contiguous, headers only, ahead of the first write: the split streams, so a
+    refusal halfway would leave a partial directory a pipeline could mistake for a finished one."""
     hidden, inter, model_type = _moe_dims(in_dir)
     for _shard, reader, key in iter_checkpoint_shard_entries(in_dir):
         parsed = _split_fused_key(key)
@@ -191,12 +156,8 @@ def _validate_fused_layouts(in_dir: str) -> None:
 
 
 def _iter_unfused(in_dir: str, layout: tuple[str, str, str] | None):
-    """Stream ``(key, tensor)`` for ``in_dir``, splitting fused expert tensors under ``layout``.
-
-    ``layout=None`` is the already-per-expert checkpoint: every tensor passes through verbatim.
-    Streamed rather than accumulated, so peak host memory is one fused expert bank plus the writer's
-    staged parts (the shard it is filling and one per write thread) instead of the whole model.
-    """
+    """Stream ``(key, tensor)``, splitting fused experts under ``layout``; ``None`` passes everything through. Peak
+    host memory is one fused bank plus the writer's staged parts."""
     if layout is None:
         yield from iter_checkpoint_tensors(in_dir)
         return
@@ -221,16 +182,10 @@ def _iter_unfused(in_dir: str, layout: tuple[str, str, str] | None):
 
 
 def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_MAX_SHARD_SIZE) -> None:
-    """Split fused expert tensors into per-expert keys under the family's own (gate, up, down) names.
-
-    The names come from the checkpoint's own family spec (``expert_layout.per_expert_keys``), so this
-    script never spells a projection name itself.
-    """
+    """Split fused expert tensors into per-expert keys under the names in the checkpoint's family spec."""
     reject_in_place_conversion(in_dir, out_dir)
 
-    # The family gate runs last: a per-rank sharded input has to be diagnosed as one, and an
-    # already-per-expert checkpoint needs no layout, so resolving the family first would refuse a
-    # no-op.
+    # The family gate runs last: a per-rank input must be diagnosed as one; a per-expert checkpoint needs no layout.
     layout = None
     if _has_fused_expert_keys(in_dir):
         layout = resolve_per_expert_layout(in_dir)
@@ -239,8 +194,7 @@ def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_M
         logger.info(f"No fused expert tensors under a rewritable container spelling in {in_dir} — copying through.")
 
     input_shards = checkpoint_shard_files(in_dir)
-    # Peak RAM is about the largest fused bank plus the per-expert copies split out of it, on top of
-    # the writer's staged output parts. On disk the per-expert artifact is about the input's size.
+    # Peak RAM is about the largest bank plus its split copies, on top of staged parts; on disk about the input's size.
     largest_tensor = max(
         (header_nbytes(reader.get_slice(key)) for _shard, reader, key in iter_checkpoint_shard_entries(in_dir)),
         default=0,
@@ -259,7 +213,6 @@ def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_M
             writer.add(key, tensor)
         writer.close_as_hf_checkpoint()
 
-    # Non-weight files carry over (config, tokenizer, templates, …), the README.md card gaining the
-    # Halo Hub tag; the old safetensors shards and index are not copied, since the writer rewrites them.
+    # The writer rewrote shards and index; non-weight files carry over, the README.md card gaining the Halo Hub tag.
     copy_checkpoint_aux_files(in_dir, out_dir)
     logger.info(f"✓ Wrote per-expert checkpoint to {out_dir}")

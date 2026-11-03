@@ -1,5 +1,4 @@
-"""The ``<split>/shard_index.json`` contract of a sharded preprocessed dataset, and the stamp both halves of an
-artifact carry."""
+"""The ``<split>/shard_index.json`` contract, and the stamp both halves of an artifact carry."""
 
 import json
 from dataclasses import asdict, dataclass, field
@@ -13,19 +12,16 @@ SHARD_INDEX_FILE = "shard_index.json"
 
 
 class IncompatiblePreprocessedDataset(ValueError):
-    """A preprocessed-dataset payload (index or metadata stamp) this build cannot read; the remedy is to
-    re-prepare the dataset."""
+    """A preprocessed-dataset payload this build cannot read; the remedy is to re-prepare the dataset."""
 
 
 def write_stamped_sidecar(path: str, stamp: Any) -> None:
-    """Write one stamped half of a preprocessed artifact, a :class:`ShardIndex` or the metadata stamp."""
     with open(path, "w") as f:
         json.dump(asdict(stamp), f, indent=2)
 
 
 def reject_incompatible_stamp(cls, data: dict[str, Any], artifact: str) -> None:
-    """Refuse a stamped payload this build cannot read: another version, or a field ``cls`` does not declare;
-    ``artifact`` names the half in the message."""
+    """Another version, or a field ``cls`` does not declare; ``artifact`` names the half in the message."""
     version = data.get("version")
     if version != PREPROCESSING_VERSION:
         raise IncompatiblePreprocessedDataset(
@@ -43,8 +39,6 @@ def reject_incompatible_stamp(cls, data: dict[str, Any], artifact: str) -> None:
 
 @dataclass
 class ShardInfo:
-    """One shard of a split."""
-
     id: int
     path: str
     num_examples: int
@@ -53,8 +47,6 @@ class ShardInfo:
 
 @dataclass
 class ShardIndex:
-    """The index of a sharded split."""
-
     version: str = PREPROCESSING_VERSION
     split: str = "train"
     num_shards: int = 0
@@ -66,7 +58,6 @@ class ShardIndex:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ShardIndex":
-        """Read a ``shard_index.json`` payload, refusing a stamp this build cannot read."""
         reject_incompatible_stamp(cls, data, "Shard index")
         return cls(
             version=data["version"],

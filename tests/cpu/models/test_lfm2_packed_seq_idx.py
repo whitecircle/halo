@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""LFM2 packed documents cross the ShortConv unless ``seq_idx`` is supplied.
-
-LFM2's conv mixer reads per-token segment ids from forward kwargs (``seq_idx``); both its
-causal_conv1d fast path and the per-segment fallback honor them, and nothing model-side derives
-them. The packing/padding-free collators emit the key when the factory sees an LFM2 config —
-without it the conv carries state across document boundaries on EVERY attention backend, with
-attention itself correctly isolated.
-
-    python tests/cpu/models/test_lfm2_packed_seq_idx.py
-"""
+"""LFM2's conv mixer reads ``seq_idx`` from forward kwargs and nothing model-side derives it, so packed documents cross
+the ShortConv on every attention backend unless the collators emit it."""
 
 from unittest.mock import MagicMock
 
@@ -75,10 +67,7 @@ def _doc_b_drift(
     token_shift: int = 17,
     perturb_doc_b: bool = False,
 ) -> float:
-    """Doc B's max activation drift when doc A changes, or doc B with ``perturb_doc_b``.
-
-    Doc-A changes expose state crossing the boundary; doc-B changes are the positive control.
-    """
+    """Doc B's max activation drift when doc A changes, or doc B with ``perturb_doc_b`` (the positive control)."""
     lens = (6, 6)
     g = torch.Generator().manual_seed(7)
     input_ids = torch.randint(4, 128, (1, sum(lens)), generator=g)
@@ -110,10 +99,7 @@ def _doc_b_drift(
 @pytest.mark.parametrize("sparse_ffn", [False, True], ids=["dense-logits", "moe-conv"])
 @pytest.mark.parametrize("token_shift", [17, 31])
 def test_seq_idx_isolates_the_conv(sparse_ffn, token_shift):
-    """Without seq_idx the conv leaks (the defect pin — if this half fails, transformers made LFM2
-    derive segments itself and the collator emission can retire); with it, isolation is exact."""
-    # A's routing changes expert GEMM batch sizes, so MoE logits can differ by rounding alone.
-    # Check its conv exactly; dense feed-forwards also pin the full hybrid stack's logits.
+    # A's routing changes expert GEMM batch sizes, so MoE logits can differ by rounding alone; check its conv exactly.
     model = _tiny_model(sparse_ffn=sparse_ffn)
     position_ids = torch.cat([torch.arange(6), torch.arange(6)]).unsqueeze(0)
     seq_idx = ((position_ids == 0).cumsum(dim=1) - 1).to(torch.int32)
@@ -137,8 +123,7 @@ def test_factory_emits_seq_idx_for_lfm2_only():
     assert batch["seq_idx"].tolist() == [[0, 0, 1, 1]]
     assert batch["seq_idx"].dtype == torch.int32
 
-    # Through the factory, not a hand-built collator: the negative half must exercise the family
-    # gate itself, or widening segment_markers_for's seq_idx to every family would pass unnoticed.
+    # Through the factory, so widening segment_markers_for's seq_idx to every family would fail here.
     qwen3_config = Qwen3Config(num_hidden_layers=1)
     qwen3_config._attn_implementation = "flash_attention_2"
     other = select_data_collator(

@@ -10,13 +10,9 @@ from halo.models.moe.family_specs import BAILING
 
 
 class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
-    """EP layer for Bailing MoE (BailingMoeV2/V3SparseMoeBlock) using DeepEP.
-
-    Per-expert ``nn.ModuleList`` experts, stacked into 3D here at init. The gate returns
-    ``(topk_idx, topk_weight, logits)`` with all routing (sigmoid, group-limited top-k, expert bias,
-    normalization, scaling) internal; ``shared_experts`` runs on all tokens, not distributed. V3 (Ling 3.0)
-    shares V2's layout and gate arithmetic. Bias-update balancing adopts the gate's own ``expert_bias``.
-    """
+    """EP layer for BailingMoeV2/V3SparseMoeBlock. Per-expert ``nn.ModuleList`` experts, stacked into 3D at init. The
+    gate returns ``(topk_idx, topk_weight, logits)`` with all routing internal; bias-update balancing adopts its
+    ``expert_bias``. V3 shares V2's layout and gate arithmetic."""
 
     HF_MODULE_NAMES = ("BailingMoeV2SparseMoeBlock", "BailingMoeV3SparseMoeBlock")
     FAMILY = BAILING
@@ -32,17 +28,12 @@ class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
     _NUM_EXPERTS_ATTR_PATHS = ("experts", "gate.num_experts")
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.ModuleList) -> None:
-        """Resolve the activation off the first expert this rank fuses: each ``BailingMoeV2MLP``
-        holds ``ACT2FN[config.hidden_act]``, the plain ``nn.ModuleList`` container holds none."""
+        """Resolve the activation off the first expert this rank fuses; the ``nn.ModuleList`` container holds none."""
         self._resolve_activation(experts[self.expert_start], original_layer=original_layer)
 
     def _adopt_expert_params(self, experts: nn.ModuleList, weights_already_sharded: bool = False):
-        """Stack per-expert weights (nn.Linear convention) into 3D matmul-convention tensors.
-
-        The lazy loader materializes only this rank's experts, at their global indices (remote ones
-        stay on meta), so the global slice ``[expert_start, expert_end)`` applies in both cases;
-        ``weights_already_sharded`` does not re-index here.
-        """
+        """Stack per-expert weights into 3D matmul-convention tensors. The lazy loader materializes this rank's experts
+        at their global indices, so the global slice applies either way."""
         start, end = self.expert_start, self.expert_end
         local_experts = [experts[i] for i in range(start, end)]
 
@@ -53,17 +44,13 @@ class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
         self._store_separate_glu_params(gate_stacked, up_stacked, down_stacked)
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
-        """``BailingMoeV2Gate`` weights at ``indices``: sigmoid scores, gather, floored top-k renorm,
-        then ``routed_scaling_factor``. The gate's ``expert_bias`` perturbs selection only, so it does
-        not appear here."""
+        """``BailingMoeV2Gate`` weights at ``indices``; its ``expert_bias`` perturbs selection only."""
         scores = torch.sigmoid(router_logits.float()).type_as(router_logits)
         scores = torch.gather(scores, dim=1, index=indices).type_as(router_logits)
         weights = self._renormalize_topk_weights(scores) if self.top_k > 1 else scores
         return weights * float(self.gate.routed_scaling_factor)
 
     def _route_hidden_states(self, flat: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
-        """The gate's own choice: sigmoid, group-limited top-k, expert bias, normalization and scaling all
-        happen inside it."""
         with torch.amp.autocast("cuda", enabled=False):
             topk_idx, topk_weight, router_logits = self.gate(self._router_input(flat))
         topk_idx, topk_weight = self._replay_router_choice(router_logits, topk_idx, topk_weight)

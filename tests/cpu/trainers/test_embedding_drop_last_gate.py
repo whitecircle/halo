@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""Embedding training refuses a sentence-transformers train loader whose ranks would run unequal steps.
-
-Plain DP and pure EP batch through sentence-transformers' own train loader, which turns accelerate's
-``even_batches`` off:
-
-* a map-style dataset keeping its remainder: accelerate's batch-sampler shard hands the low ranks one
-  batch more whenever the batch count is not a multiple of the world size, and that step hangs;
-* a ``datasets.IterableDataset`` runs only with ``dispatch_batches: false`` and either ``split_batches``
-  or at most one file shard per process. With more shards accelerate splits it by shard, unevenly,
-  whatever ``drop_last`` says; dispatched (accelerate's default for an iterable), the collated batches
-  are concatenated and the collator's string modality fields raise.
-
-The toolkit's DP-sharded loader (TP/ETP, a pre-sharded dataset) and a single process are unaffected.
-
-Run: pytest tests/cpu/trainers/test_embedding_drop_last_gate.py
-"""
+"""Embedding training refuses a sentence-transformers train loader whose ranks would run unequal steps, which hangs.
+That loader turns ``even_batches`` off; the toolkit's DP-sharded loader and a single process are unaffected."""
 
 import ast
 import inspect
@@ -63,8 +49,7 @@ def _sharded_iterable(n_shards: int):
 
 
 def test_the_kept_remainder_gives_ranks_unequal_batch_counts():
-    """Premise, on the sampler and shard the sentence-transformers loader builds: five batches over two
-    ranks give rank 0 three and rank 1 two unless the remainder is dropped."""
+    """On the sampler and shard the sentence-transformers loader builds."""
 
     def lengths(drop_last: bool) -> list[int]:
         sampler = DefaultBatchSampler(SequentialSampler(range(10)), batch_size=2, drop_last=drop_last)
@@ -78,8 +63,7 @@ def test_the_kept_remainder_gives_ranks_unequal_batch_counts():
 
 @pytest.mark.parametrize("drop_last", [False, True])
 def test_a_shard_split_iterable_gives_ranks_unequal_batch_counts(drop_last):
-    """Premise: with dispatch off, 3 file shards over 2 ranks are split by shard, and drop_last does not
-    even the ranks out."""
+    """With dispatch off, 3 file shards over 2 ranks are split by shard, and ``drop_last`` does not even them out."""
     counts = [
         sum(
             1
@@ -110,8 +94,8 @@ def test_a_kept_remainder_is_refused_on_the_sentence_transformers_loader(train_d
 def test_an_iterable_the_loader_cannot_split_evenly_is_refused(
     n_shards, dispatch_batches, drop_last, tmp_path, monkeypatch
 ):
-    """Split by shard, the ranks' row counts differ; dispatched (accelerate's default for an iterable), the
-    collator's string modality fields cannot be concatenated. Neither depends on ``drop_last``."""
+    """Split by shard, the ranks' row counts differ.
+    Dispatched (accelerate's default for an iterable), the collator's string modality fields cannot concatenate."""
     with pytest.raises(
         ValueError,
         match="Set dispatch_batches: false, and either reshard the dataset to at most 2 shards or set split_batches: true",
@@ -129,8 +113,7 @@ def test_an_iterable_the_loader_cannot_split_evenly_is_refused(
     "n_shards, split_batches", [(2, False), (1, False), (3, True)], ids=["2-shards", "1-shard", "split-batches"]
 )
 def test_an_evenly_sharded_iterable_passes(n_shards, split_batches, tmp_path, monkeypatch):
-    """Not dispatched, with at most one shard per process or split batches: accelerate's
-    ``IterableDatasetShard`` gives every rank the same batches, whether or not the remainder is kept."""
+    """With at most one shard per process or split batches, ``IterableDatasetShard`` gives every rank equal batches."""
     _check(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,

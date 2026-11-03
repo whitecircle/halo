@@ -10,14 +10,10 @@ from halo.models.moe.family_specs import ZAYA
 
 
 class EPZayaMoELayer(EPMoELayerBase):
-    """EP layer for ``ZayaSparseMoeBlock`` (gate + experts) using DeepEP.
-
-    The gate's forward runs unchanged: it holds the cross-layer EDA state threaded through
-    ``prev_router_hidden_states``, and it is the balancing router in every mode, adding its checkpointed
-    ``balancing_biases`` to the selection scores and recording loads (``patch_zaya_router_load_recording``). It
-    returns flattened ``[T, top_k]`` probabilities/indices with its learned discard slot masked to expert 0 at
-    weight 0, which EP dispatches as ``-1`` so they never reach expert 0's rank.
-    """
+    """EP layer for ``ZayaSparseMoeBlock``. The gate's forward runs unchanged: it holds the cross-layer EDA state and
+    is the balancing router in every mode (``patch_zaya_router_load_recording``). It returns flattened ``[T, top_k]``
+    probabilities/indices with its learned discard slot masked to expert 0 at weight 0, which EP dispatches as ``-1``
+    so they never reach expert 0's rank."""
 
     HF_MODULE_NAMES = ("ZayaSparseMoeBlock",)
     FAMILY = ZAYA
@@ -44,10 +40,8 @@ class EPZayaMoELayer(EPMoELayerBase):
 
         experts = router_indices.long()
         if self.ep_size > 1:
-            # A masked discard would otherwise ride the all-to-all to expert 0's rank in every layer,
-            # loading it with rows that contribute nothing. Zero weight is the same test the gate's
-            # load recording uses. At ep1 nothing is dispatched and the grouped path takes only real
-            # local ids, so the upstream spelling stays.
+            # A masked discard would otherwise ride the all-to-all to expert 0's rank in every layer, loading it with
+            # rows that contribute nothing. At ep1 nothing is dispatched and the grouped path takes only local ids.
             experts = experts.masked_fill(router_probs == 0, -1)
         expert_output = self._dispatch_compute_combine(
             hidden_states_flat,
@@ -57,7 +51,6 @@ class EPZayaMoELayer(EPMoELayerBase):
         )
         expert_output = expert_output.reshape(batch_size, seq_length, emb_dim)
 
-        # The EDA state stays attached, as ``ZayaSparseMoeBlock`` returns it: it is the only path by
-        # which this layer's routing loss reaches the previous gate's
-        # ``down_proj``/``router_states_scale``.
+        # The EDA state stays attached: it is the only path by which this layer's routing loss reaches the previous
+        # gate's ``down_proj``/``router_states_scale``.
         return expert_output, prev_router_hidden_states

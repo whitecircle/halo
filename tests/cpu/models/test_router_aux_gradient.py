@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""The router aux loss must train routers under reentrant gradient checkpointing, exactly as without it.
-
-Every MoE run with gradient checkpointing is forced reentrant, whose original forward runs under
-``no_grad``. transformers collects ``outputs.router_logits`` in that pass, so without
-:func:`~halo.models.moe.router_aux_gradient.install_router_aux_gradient` each checkpointed layer's aux term reaches
-the loss with no graph and the router gets none of its gradient. The reference throughout is the same
-model with checkpointing off, where the family's own ``load_balancing_loss_func`` backpropagates
-natively: with ``moe_balancing: aux_loss`` applied, a checkpointed backward must land the same router
-gradient, and an unchecked one must stay exactly native (no term counted twice).
-
-Families differ in router: Qwen3-MoE (softmax over bf16-convention logits), GPT-OSS (biased linear, a
-``(hidden, scores)`` block output), Laguna (sigmoid routing on fp32 logits behind a dense first layer),
-GLM-5 Next (the composite wrapper, whose text tower is the collecting backbone), and Qwen3-Next and
-Qwen3.5-MoE (a top-k router returning logits, scores and indices beside a sigmoid-gated shared expert,
-renormalized under Qwen3-Next's ``norm_topk_prob``).
-
-Run: python tests/cpu/models/test_router_aux_gradient.py
-"""
+"""The router aux loss trains routers under reentrant checkpointing as it does with it off. That forward runs under
+``no_grad``, so without ``install_router_aux_gradient`` each layer's aux term reaches the loss with no graph."""
 
 from __future__ import annotations
 
@@ -93,11 +77,8 @@ FAMILIES = {
 
 
 def _build(family: str, *, balanced: bool, ep: bool = False):
-    """The seeded tiny model in fp32 with eager attention, the aux loss on at ``COEF``.
-
-    ``balanced`` applies ``moe_balancing: aux_loss`` through the real strategy seam; routers get a
-    wide init so the aux term moves them by far more than any recompute rounding.
-    """
+    """``balanced`` applies ``moe_balancing: aux_loss``. Routers get a wide init so the aux term moves them by far more
+    than any recompute rounding."""
     torch.manual_seed(0)
     model = FAMILIES[family]().float()
     for level in (model.config, model.config.get_text_config()):
@@ -136,8 +117,7 @@ def _batches(model, count: int = 1, padded: bool = False) -> list[dict]:
 
 
 def _step(model, batches, *, labels: bool = True):
-    """Forward + backward per micro-batch, the aux term added by the model (``labels``) or outside it
-    (the KTO / CP shape); returns the router gradients and the last micro-batch's logged values."""
+    """The aux term is added by the model (``labels``) or outside it (the KTO / CP shape)."""
     for batch in batches:
         if labels:
             outputs = model(**batch, labels=batch["input_ids"].masked_fill(batch["attention_mask"] == 0, -100))
@@ -151,8 +131,7 @@ def _step(model, batches, *, labels: bool = True):
 
 
 def _assert_matches_native(got: torch.Tensor, native: torch.Tensor, dropped: torch.Tensor) -> None:
-    """``got`` equals the unchecked gradient, where plain reentrant checkpointing (``dropped``) is far
-    enough off it that a missing aux gradient could not pass for rounding."""
+    """``dropped`` is far enough off that a missing aux gradient cannot pass for rounding."""
     assert (native - dropped).norm() > 1e-2 * native.norm(), "the aux term barely moves the routers"
     torch.testing.assert_close(got, native, rtol=1e-5, atol=1e-6)
 
@@ -160,8 +139,7 @@ def _assert_matches_native(got: torch.Tensor, native: torch.Tensor, dropped: tor
 @pytest.mark.parametrize("padded", [False, True], ids=["unpadded", "padded"])
 @pytest.mark.parametrize("family", FAMILIES)
 def test_reentrant_checkpoint_trains_routers_like_no_checkpoint(family, padded):
-    """The pooled load, the attention mask and the coefficient all arrive through the family's own
-    loss; the recomputed routers must receive exactly the unchecked gradient."""
+    """The pooled load, the attention mask and the coefficient all arrive through the family's own loss."""
     model = _build(family, balanced=True)
     batches = _batches(model, padded=padded)
     native, native_loss, native_aux = _step(_build(family, balanced=False), batches)
@@ -173,8 +151,7 @@ def test_reentrant_checkpoint_trains_routers_like_no_checkpoint(family, padded):
     _checkpoint(unrouted)
     dropped = _step(unrouted, batches)[0]
     _assert_matches_native(got, native, dropped)
-    # The coefficient is never rewritten, so the logged loss keeps the coefficient-weighted aux term
-    # and the export carries the configured value.
+    # The coefficient is never rewritten, so the logged loss keeps its aux term and the export the configured value.
     assert loss == pytest.approx(native_loss, rel=1e-6) and aux == pytest.approx(native_aux, rel=1e-6)
     with config_export_ready(model.config):
         exported = model.config.get_text_config().to_dict()
@@ -183,8 +160,7 @@ def test_reentrant_checkpoint_trains_routers_like_no_checkpoint(family, padded):
 
 @pytest.mark.parametrize("family", ["qwen3_moe", "gpt_oss"])
 def test_uncheckpointed_layers_keep_the_native_path(family):
-    """No checkpoint, and the layers ``every_n_layers`` leaves unchecked, collect logits with a graph:
-    those must stay bit-for-bit native, not gain a second copy of the term."""
+    """Unchecked layers collect logits with a graph and must not gain a second copy of the term."""
     batches = _batches(_build(family, balanced=False))
     native = _step(_build(family, balanced=False), batches)[0]
 
@@ -197,8 +173,7 @@ def test_uncheckpointed_layers_keep_the_native_path(family):
 
 @pytest.mark.parametrize("family", ["qwen3_moe", "gpt_oss"])
 def test_aux_term_added_outside_the_forward(family):
-    """TRL's KTO and the CP wrapper add ``coef * outputs.aux_loss`` themselves, from a forward without
-    labels; the gradient must follow that term with whatever weight the trainer gives it."""
+    """TRL's KTO and the CP wrapper add ``coef * outputs.aux_loss`` themselves, from a forward without labels."""
     batches = _batches(_build(family, balanced=False))
     native = _step(_build(family, balanced=False), batches, labels=False)[0]
     model = _build(family, balanced=True)
@@ -210,8 +185,8 @@ def test_aux_term_added_outside_the_forward(family):
 
 @pytest.mark.parametrize("family", ["qwen3_moe", "gpt_oss"])
 def test_gradient_accumulation_and_interleaved_no_grad_forwards(family):
-    """Each micro-batch's backward consumes only its own forward's gradients, and a ``no_grad``
-    forward between a forward and its backward (a reference or KL pass) leaves no trace."""
+    """Each backward consumes only its own forward's gradients; a ``no_grad`` pass between them (reference or KL)
+    leaves no trace."""
     batches = _batches(_build(family, balanced=False), count=3)
     native = _step(_build(family, balanced=False), batches)[0]
 
@@ -228,9 +203,8 @@ def test_gradient_accumulation_and_interleaved_no_grad_forwards(family):
 
 @pytest.mark.parametrize("family", FAMILIES)
 def test_ep_layer_checkpoint_replay(family):
-    """The EP layer owns the router at ``ep_size=1`` and replays its dispatch inside a checkpoint
-    scope; the gradient must ride the wrapper's output back to the adopted router. Every MoE block the EP
-    roster claims runs its family's EP layer."""
+    """The EP layer owns the router at ``ep_size=1`` and replays its dispatch inside a checkpoint scope, so the
+    gradient must ride the wrapper's output back to the adopted router."""
     batches = _batches(_build(family, balanced=False))
     native = _step(_build(family, balanced=False, ep=True), batches)[0]
     claimed = {path: MOE_LAYER_MAP[type(block).__name__] for path, block in ep_claimed_blocks(FAMILIES[family]())}
@@ -245,8 +219,7 @@ def test_ep_layer_checkpoint_replay(family):
 
 
 def test_cp_wrapper_resolves_and_routes_through_its_inner_model(tmp_path):
-    """The CP wrapper forwards ``output_router_logits`` into the causal LM it wraps, so ``auto``
-    reads that model's forward, and the hooks land on the backbone beneath the wrapper."""
+    """The CP wrapper forwards ``output_router_logits`` into its causal LM, so ``auto`` reads that model's forward."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         inner = _build("qwen3_moe", balanced=False)
@@ -261,7 +234,6 @@ def test_cp_wrapper_resolves_and_routes_through_its_inner_model(tmp_path):
 
 
 def test_a_gradient_no_recompute_takes_fails_the_backward(monkeypatch):
-    """A kept gradient that never reaches its router must stop the step, not vanish silently."""
     monkeypatch.setattr(router_aux_gradient._RouterAuxGradient, "_on_owner", lambda self, owner, args, output: None)
     model = _build("qwen3_moe", balanced=True)
     _checkpoint(model)

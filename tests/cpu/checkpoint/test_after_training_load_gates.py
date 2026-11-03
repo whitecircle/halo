@@ -1,24 +1,5 @@
-"""How the after-training tools LOAD the checkpoints they rewrite.
-
-Three ways a merge or conversion produces a plausible, wrong artifact:
-
-  * the classification branch of ``merge_peft_adapters``, and every ``convert_to_bf16`` path except
-    the causal-LM one, must not reach ``AutoModel*.from_pretrained`` directly and bypass the coverage
-    gate every other loader in the toolkit goes through. A truncated or wrong-architecture source
-    random-initializes the absent tensors with a log line nobody sees, and the tool writes them out
-    as a finished reward model / bf16 checkpoint. The seq-cls head is the one absence that can be
-    legitimate — a classification adapter trained on a plain causal-LM base carries it in
-    ``modules_to_save`` — and it is legitimate only then, so the excuse is driven by what the
-    adapter declares.
-  * PEFT's own auto-classes load the base through that same raw ``from_pretrained``, so a tool that
-    hands them an adapter directory inherits the hole for every ``--peft`` run.
-  * a remote-code base (every Bailing/Ling checkpoint) needs the compat shims applied BEFORE its
-    modeling file is imported. They belong to the shared loader itself, not to a convention each
-    standalone CLI has to remember — the config fetch inside it is already enough to import a
-    remote modeling file.
-
-    python tests/cpu/checkpoint/test_after_training_load_gates.py
-"""
+"""How after-training tools load the checkpoints they rewrite: through the coverage gate, with the remote-code shims
+first. A raw ``from_pretrained`` random-initializes absent tensors with a log line nobody sees."""
 
 from __future__ import annotations
 
@@ -40,8 +21,7 @@ from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
 from tests.common.source_sweep import imports_name
 
-# The shared model loader: a script that binds it builds a transformers model from a checkpoint
-# directory, remote-code families included. Derived rather than listed, so a new tool is swept in.
+# Derived rather than listed, so a new tool is swept in.
 SHARED_MODEL_LOADER = "auto_load_model"
 REMOTE_CODE_SHIMS = "apply_remote_code_compat_shims"
 WEIGHTS_FILE = "model.safetensors"
@@ -49,7 +29,6 @@ WEIGHTS_FILE = "model.safetensors"
 
 @pytest.fixture(scope="module")
 def causal_lm_checkpoint(tmp_path_factory) -> str:
-    """A plain causal-LM base — the case a classification adapter is normally trained on top of."""
     path = tmp_path_factory.mktemp("causal_base")
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(path)
     return str(path)
@@ -57,18 +36,13 @@ def causal_lm_checkpoint(tmp_path_factory) -> str:
 
 @pytest.fixture(scope="module")
 def reward_checkpoint(tmp_path_factory) -> str:
-    """A base that already carries a trained score head."""
     path = tmp_path_factory.mktemp("reward_base")
     Qwen3ForSequenceClassification(Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=1)).save_pretrained(path)
     return str(path)
 
 
 def _truncate(checkpoint_dir: str, tmp_path) -> str:
-    """A copy of ``checkpoint_dir`` with one backbone tensor missing.
-
-    The shape of a partially uploaded or interrupted checkpoint: the file loads, the config is
-    intact, and ``from_pretrained`` fills the hole with random weights and a log line.
-    """
+    """The shape of a partially uploaded or interrupted checkpoint."""
     truncated = tmp_path / "truncated"
     truncated.mkdir()
     for entry in pathlib.Path(checkpoint_dir).iterdir():
@@ -82,7 +56,6 @@ def _truncate(checkpoint_dir: str, tmp_path) -> str:
 
 
 def _adapter_for(base_path: str, tmp_path) -> str:
-    """A LoRA adapter directory naming ``base_path`` as its base model."""
     adapter_dir = tmp_path / "adapter"
     model = get_peft_model(
         Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)),
@@ -106,22 +79,20 @@ def _load(path: str, *, excuse_task_head: bool):
 
 
 def test_a_missing_score_head_the_adapter_cannot_supply_is_refused(causal_lm_checkpoint):
-    """Ungated, this returns a model with a random ``score`` and the merge saves it: every reward
-    the checkpoint goes on to produce is noise that looks like a score."""
+    """Ungated, the merge saves a random ``score``: every reward from the checkpoint is noise that looks like a
+    score."""
     with pytest.raises(RuntimeError, match="randomly initialized"):
         _load(causal_lm_checkpoint, excuse_task_head=False)
 
 
 def test_the_adapters_own_head_is_a_legitimate_absence(causal_lm_checkpoint):
-    """``modules_to_save`` is how a classification adapter carries the head its base lacks — the
-    merge supplies it, so the base may load without one."""
+    """``modules_to_save`` is how a classification adapter carries the head its base lacks."""
     model = _load(causal_lm_checkpoint, excuse_task_head=True)
     assert isinstance(model, Qwen3ForSequenceClassification)
 
 
 def test_a_base_that_carries_the_head_loads_the_trained_one(reward_checkpoint):
-    """The gate must not refuse the ordinary case — and the head that comes back has to be the one
-    on disk: a re-initialized ``score`` of the right shape is exactly the failure being guarded."""
+    """A re-initialized ``score`` of the right shape is the failure guarded here."""
     model = _load(reward_checkpoint, excuse_task_head=False)
     saved = load_file(str(pathlib.Path(reward_checkpoint) / WEIGHTS_FILE))
     assert torch.equal(model.score.weight, saved["score.weight"].to(model.score.weight.dtype))
@@ -137,7 +108,6 @@ def _calls(source_path: pathlib.Path, call_name: str) -> list[ast.Call]:
 
 
 def _keyword_values(source_path: pathlib.Path, call_name: str, keyword: str) -> list[ast.expr]:
-    """The value node passed as ``keyword`` at every call of ``call_name`` in a source file."""
     calls = _calls(source_path, call_name)
     assert calls, f"no {call_name} call in {source_path.name}"
     values = [kw.value for call in calls for kw in call.keywords if kw.arg == keyword]
@@ -146,10 +116,7 @@ def _keyword_values(source_path: pathlib.Path, call_name: str, keyword: str) -> 
 
 
 def test_the_excuse_is_derived_from_the_adapter_config():
-    """The flag must come from what the adapter declares, not from a caller's default: excusing the
-    head unconditionally is the ungated behaviour under another name — and a literal ``True`` here
-    is exactly that. Read at the shared merge, which is where every merge tool's base load goes: the
-    one call that derives it, and every base load below it forwarding what it was handed."""
+    """Excusing the head unconditionally, as a literal ``True`` does, is the ungated behaviour under another name."""
     source = pathlib.Path(adapter_merge.__file__)
     (derived,) = _keyword_values(source, "load_base_for_adapter", "excuse_task_head")
     assert not isinstance(derived, ast.Constant), (
@@ -162,35 +129,28 @@ def test_the_excuse_is_derived_from_the_adapter_config():
         )
 
 
-# --- convert_to_bf16: every load path is gated, not just the causal-LM one --------------------
-
-
 @pytest.mark.parametrize("task", ["causal_lm", "classification", "base"])
 def test_a_truncated_source_is_refused_on_every_conversion_path(task, causal_lm_checkpoint, tmp_path):
-    """Through a direct ``from_pretrained``, ``--task classification`` / ``base`` would
-    random-initialize a checkpoint's missing tensors and write them out as a complete-looking bf16
-    model."""
+    """A direct ``from_pretrained`` under ``--task classification`` / ``base`` writes random tensors as a
+    complete-looking bf16 model."""
     with pytest.raises(RuntimeError, match="randomly initialized"):
         bf16_conversion.load_model(_truncate(causal_lm_checkpoint, tmp_path), task, dtype=torch.float32)
 
 
 def test_a_truncated_base_is_refused_under_peft(causal_lm_checkpoint, tmp_path):
-    """PEFT's auto-class loads the base through a raw ``from_pretrained``, so ``--peft`` would inherit
-    the hole for the merge that follows."""
+    """PEFT's auto-class loads the base through a raw ``from_pretrained``."""
     adapter_dir = _adapter_for(_truncate(causal_lm_checkpoint, tmp_path), tmp_path)
     with pytest.raises(RuntimeError, match="randomly initialized"):
         bf16_conversion.load_model(adapter_dir, "causal_lm", is_peft=True, dtype=torch.float32)
 
 
 def test_an_intact_base_still_loads_under_peft(causal_lm_checkpoint, tmp_path):
-    """The gate must not refuse the ordinary adapter: the merge has to keep working."""
     adapter_dir = _adapter_for(causal_lm_checkpoint, tmp_path)
     model = bf16_conversion.load_model(adapter_dir, "causal_lm", is_peft=True, dtype=torch.float32)
     assert model.merge_and_unload() is not None
 
 
 def _direct_auto_model_loads(path: pathlib.Path) -> list[str]:
-    """``AutoModel*.from_pretrained(...)`` calls in a source file — the ungated way in."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     return [
         node.func.value.id
@@ -207,23 +167,16 @@ def _direct_auto_model_loads(path: pathlib.Path) -> list[str]:
     "script", sorted((REPO_ROOT / "scripts").rglob("*.py")), ids=lambda p: str(p.relative_to(REPO_ROOT))
 )
 def test_no_tool_loads_a_model_around_the_coverage_gate(script):
-    """Derived rather than listed, so a new tool cannot reintroduce the hole: every model load in
-    ``scripts/`` goes through ``from_pretrained_verified`` (directly, or via ``auto_load_model`` /
-    ``load_distributed_model``), which raises on a randomly initialized tensor instead of logging
-    it."""
+    """``from_pretrained_verified`` raises on a randomly initialized tensor instead of logging it."""
     assert not _direct_auto_model_loads(script), (
         f"{script.name} calls AutoModel*.from_pretrained directly — a truncated or "
         f"wrong-architecture checkpoint would load with random weights and only a log line"
     )
 
 
-# --- the remote-code shims belong to the shared loader ----------------------------------------
-
-
 def test_the_shared_loader_applies_the_remote_code_shims_before_the_config_fetch(causal_lm_checkpoint):
-    """A standalone CLI is by definition the first remote-code load of its process, so the shims
-    cannot depend on the caller having applied them — and the config fetch inside the loader is
-    already enough to import a remote modeling file, so the order matters as much as the call."""
+    """The config fetch inside the loader is already enough to import a remote modeling file, so order matters as
+    much as the call."""
     order: list[str] = []
     real_from_pretrained = model_preparation.AutoConfig.from_pretrained
 
@@ -241,12 +194,8 @@ def test_the_shared_loader_applies_the_remote_code_shims_before_the_config_fetch
 
 
 def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights(causal_lm_checkpoint):
-    """``resolve_trainer_model`` is the seam SMPO / offline-GRPO / teacher-distillation reach
-    when their ``model:`` is a path string, and a terminal loader there that skipped the shims would
-    import a Bailing/Ling modeling file with the v4-era ``_tied_weights_keys`` list intact (``save_pretrained`` crashes) and without the
-    SDPA dispatch shim (the ~190 GiB eager score plane). The shims must also precede the WEIGHT load,
-    not just the config fetch: a caller that pins ``model_cls`` skips the fetch entirely.
-    """
+    """Without the shims, a Bailing/Ling file keeps its v4-era ``_tied_weights_keys`` (``save_pretrained`` crashes)
+    and lacks the SDPA dispatch shim; a pinned ``model_cls`` skips the fetch."""
     order: list[str] = []
     real_verified = model_preparation.from_pretrained_verified
 
@@ -265,8 +214,7 @@ def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights
 
 
 def test_a_pinned_backend_reads_its_config_after_the_shims(causal_lm_checkpoint):
-    """A pinned ``attn_implementation`` sends the string-path loader to the config for the family patches
-    before its build, and that fetch can already import a remote modeling file."""
+    """That fetch can already import a remote modeling file."""
     order: list[str] = []
     real_from_pretrained = model_preparation.AutoConfig.from_pretrained
 
@@ -291,17 +239,14 @@ def _calls_name(func: ast.FunctionDef, name: str) -> bool:
     )
 
 
-# Every module that owns a from-a-path loader: the Auto*-class seam on the utils side, the frozen
-# teacher/reference loader and the reward-model scorer materialize weights themselves; the dispatcher and
-# ``resolve_trainer_model`` reach the shims through the first.
+# The Auto*-class seam, the frozen teacher/reference loader and the reward-model scorer materialize weights themselves.
 LOADER_MODULES = [
     REPO_ROOT / "halo/model_loading/model_preparation.py",
     REPO_ROOT / "halo/model_loading/parallel/loader.py",
     REPO_ROOT / "halo/model_loading/parallel/frozen_models.py",
     REPO_ROOT / "halo/entrypoints/reward_scoring.py",
 ]
-# Public entry points only: the private per-mode helpers inside the dispatcher are reached through it,
-# and it applies the shims once for all of them.
+# The dispatcher applies the shims once for its private per-mode helpers.
 _LOADER_FUNCS = {
     node.name: node
     for path in LOADER_MODULES
@@ -311,7 +256,6 @@ _LOADER_FUNCS = {
     and _calls_name(node, "from_pretrained_verified")
 }
 WEIGHT_MATERIALIZING_LOADERS = sorted(_LOADER_FUNCS)
-# The shims, and the shared loading helpers that apply them before their own config or weight read.
 _SHIM_APPLYING_CALLS = {REMOTE_CODE_SHIMS} | {
     node.name
     for node in ast.walk(ast.parse(LOADER_MODULES[0].read_text(encoding="utf-8")))
@@ -320,16 +264,15 @@ _SHIM_APPLYING_CALLS = {REMOTE_CODE_SHIMS} | {
 
 
 def test_the_sweep_found_the_string_path_loaders():
-    """Guard the derivation: an empty sweep would pass the assertion below vacuously."""
+    """An empty sweep would pass the assertion below vacuously."""
     assert SHARED_MODEL_LOADER in WEIGHT_MATERIALIZING_LOADERS, WEIGHT_MATERIALIZING_LOADERS
     assert len(WEIGHT_MATERIALIZING_LOADERS) >= 2, WEIGHT_MATERIALIZING_LOADERS
 
 
 @pytest.mark.parametrize("loader", WEIGHT_MATERIALIZING_LOADERS)
 def test_every_loader_that_materializes_weights_applies_the_shims(loader):
-    """Derived from the module rather than listed, so a NEW loader that forgets the shims fails here
-    instead of in a Bailing/Ling run whose export crashes hours later. A loader applies them itself or
-    through a shared helper that applies them before its read (``resolve_build_config``)."""
+    """A new loader that forgets the shims fails here instead of in a Bailing/Ling run whose export crashes hours
+    later."""
     assert any(_calls_name(_LOADER_FUNCS[loader], name) for name in _SHIM_APPLYING_CALLS - {loader}), (
         f"{loader}() loads weights from a path but never calls {REMOTE_CODE_SHIMS}() or a helper that does "
         f"({sorted(_SHIM_APPLYING_CALLS - {REMOTE_CODE_SHIMS})}) — a remote-code modeling file imported through it "
@@ -337,7 +280,6 @@ def test_every_loader_that_materializes_weights_applies_the_shims(loader):
     )
 
 
-# The tool CLIs and the offline checkpoint drivers they call.
 MODEL_LOADING_TOOLS = sorted(
     path
     for root in ("scripts", "halo/checkpoint")
@@ -347,14 +289,13 @@ MODEL_LOADING_TOOLS = sorted(
 
 
 def test_the_sweep_found_the_model_loading_tools():
-    """Guard the derivation itself: an empty sweep would pass the assertion below vacuously."""
+    """An empty sweep would pass the assertion below vacuously."""
     assert len(MODEL_LOADING_TOOLS) >= 2, MODEL_LOADING_TOOLS
 
 
 @pytest.mark.parametrize("script", MODEL_LOADING_TOOLS, ids=lambda p: p.stem)
 def test_no_tool_re_applies_the_shims_around_the_loader(script):
-    """The shims live INSIDE the loader, so a tool applying them again is a second copy of a contract
-    with one owner — and a per-tool copy is what makes "did this CLI remember?" a live question."""
+    """The shims live inside the loader; a per-tool copy makes "did this CLI remember?" a live question."""
     assert not imports_name(script, REMOTE_CODE_SHIMS), (
         f"{script.name} applies the remote-code shims itself; {SHARED_MODEL_LOADER} owns them"
     )

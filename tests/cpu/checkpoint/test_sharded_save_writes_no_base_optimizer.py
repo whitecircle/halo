@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""A save whose optimizer state is per-rank shards writes no ``optimizer.pt``, and still writes ``scheduler.pt``.
-
-Under FSDP2 or pure TP each rank's optimizer state goes to its own ``optimizer_shard_<rank>.pt``. The base
-Trainer's ``_save_optimizer_and_scheduler`` would also write the save rank's state whole as ``optimizer.pt`` — the
-same bytes a second time, a full device-to-host copy and write on every save — together with the
-``scheduler.pt`` the resume restores the LR schedule from. The mixin skips that base call where the store writes
-shards and writes ``scheduler.pt`` itself; every other mode keeps the base call. The trainer here runs the mixin's
-``_save_checkpoint`` over HF's own ``_save_optimizer_and_scheduler`` and the real shard store, recording every file
-``torch.save`` writes.
-
-    python tests/cpu/checkpoint/test_sharded_save_writes_no_base_optimizer.py
-"""
+"""A per-rank shard save writes no ``optimizer.pt``, the same bytes a second time with a full device-to-host copy,
+and still writes ``scheduler.pt``."""
 
 import os
 from types import SimpleNamespace
@@ -33,8 +23,6 @@ SCHEDULER_STEPS = 3
 
 
 class _HFOptimizerSave(BaseTrainerSave):
-    """HF's save order with HF's own optimizer and scheduler writer."""
-
     _save_optimizer_and_scheduler = Trainer._save_optimizer_and_scheduler
 
 
@@ -70,7 +58,7 @@ class _Trainer(DistributedTrainerMixin, _HFOptimizerSave):
 
 
 def _save(tmp_path, monkeypatch, *, sharded: bool, save_only_model: bool = False) -> tuple[list[str], str]:
-    """Every file name ``torch.save`` wrote during one checkpoint save, and the checkpoint directory."""
+    """Every file name ``torch.save`` wrote, and the checkpoint directory."""
     written = []
     real_save = torch.save
 

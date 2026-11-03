@@ -1,12 +1,6 @@
-"""A full-sequence bake (``train_on_completions_only`` off) stores the rows the runtime path collates, with no
-``labels`` column, and packed rows with no ``attention_mask``: every collator such an artifact reaches derives
-both from ``input_ids``, so the copies the bake used to store only doubled the artifact. Each collator must batch
-the lean rows exactly as it batched rows carrying them, with ``pad != eos`` and with ``pad == eos`` (the
-turn-ending EOS a derived label must keep).
-
-Usage:
-    python tests/cpu/data/test_full_sequence_bake.py
-"""
+"""A full-sequence bake stores no ``labels`` column, and packed rows no ``attention_mask``, since every collator
+derives both from ``input_ids``. Each collator batches the lean rows as it batched rows carrying them, with ``pad
+!= eos`` and ``pad == eos``."""
 
 import pytest
 import torch
@@ -68,7 +62,7 @@ def _collate(collator, rows: list[dict]) -> dict:
 
 
 def _assert_same_batches(collator, rows: list[dict]) -> None:
-    """The lean rows against the same rows carrying the labels copy and all-ones mask the bake used to store."""
+    """The lean rows against the same rows carrying a labels copy and an all-ones mask."""
     with_copy = [
         {**row, "labels": list(row["input_ids"]), "attention_mask": [1] * len(row["input_ids"])} for row in rows
     ]

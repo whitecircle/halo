@@ -1,9 +1,5 @@
-"""Pluggable text→ids backend for dataset tokenization.
-
-"hf" (default) encodes with the HuggingFace tokenizer itself; "gigatoken" (optional extra
-``halo[gigatoken]``) wraps it in a proxy that encodes through gigatoken's Rust encoder, after verifying
-on a probe set that both produce identical ids.
-"""
+"""Pluggable text→ids backend for dataset tokenization: ``hf`` (default), or ``gigatoken`` (optional extra), a proxy
+encoding through gigatoken's Rust encoder after verifying on a probe set that both produce identical ids."""
 
 from __future__ import annotations
 
@@ -30,8 +26,7 @@ _PROBE_TEXTS = (
 )
 # Cap the special-token join probe (a tokenizer can declare hundreds of specials).
 _MAX_SPECIAL_TOKEN_PROBES = 8
-# Shorter than every probe's token count, so the truncated comparison actually truncates. Production
-# paths encode with truncation=True (e.g. tokenize_rendered), so parity must hold there too.
+# Shorter than every probe, so the comparison truncates; production paths encode with truncation=True.
 _TRUNCATION_PROBE_LENGTH = 4
 
 
@@ -44,12 +39,9 @@ def _rebuild_proxy(tokenizer: Any) -> GigatokenTokenizerProxy:
 
 
 class GigatokenTokenizerProxy:
-    """Transparent stand-in for an HF tokenizer that encodes via gigatoken.
-
-    Only ``__call__`` reaches the Rust backend; attribute reads and writes pass through, and
-    ``__class__`` reports the wrapped type so trainer/collator ``isinstance`` checks behave (``type()``
-    still reveals the proxy). The backend is dropped on pickling and rebuilt lazily in map workers.
-    """
+    """Stand-in for an HF tokenizer encoding via gigatoken. Only ``__call__`` reaches Rust; ``__class__`` reports the
+    wrapped type so ``isinstance`` checks behave. The backend is dropped on pickling and rebuilt lazily in map
+    workers."""
 
     def __init__(self, tokenizer: PreTrainedTokenizer) -> None:
         if gigatoken is None:
@@ -109,8 +101,7 @@ def _equivalence_probes(tokenizer: PreTrainedTokenizer) -> list[str]:
 
 
 def _verify_backend_equivalence(tokenizer: PreTrainedTokenizer, proxy: GigatokenTokenizerProxy) -> None:
-    """Raise if the proxy and the HF tokenizer disagree on any probe's token IDs,
-    untruncated or truncated."""
+    """Raise if the proxy and the HF tokenizer disagree on any probe's token IDs, untruncated or truncated."""
     for text in _equivalence_probes(tokenizer):
         for add_special_tokens in (False, True):
             for extra in ({}, {"truncation": True, "max_length": _TRUNCATION_PROBE_LENGTH}):
@@ -142,11 +133,7 @@ def resolve_tokenizer_backend(tokenizer: PreTrainedTokenizer, backend: str) -> P
 
 
 def resolve_processor_backend(processor: Any, backend: str) -> Any:
-    """Install the ``backend`` tokenizer on a VLM processor ("hf" passes through).
-
-    VLM processors tokenize internally, so the proxy is set as ``processor.tokenizer``;
-    image processing is untouched.
-    """
+    """Install the ``backend`` tokenizer as ``processor.tokenizer`` on a VLM processor, which tokenizes internally."""
     if backend == "hf":
         return processor
     tokenizer = getattr(processor, "tokenizer", None)

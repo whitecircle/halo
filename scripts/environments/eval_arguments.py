@@ -1,5 +1,4 @@
-"""The flags every environment eval script registers: the dataset source, the endpoint, the training contract,
-the sampling overrides and the outputs. Flags only; the readers they feed live in
+"""The flags every environment eval script registers; the readers they feed live in
 :mod:`halo.entrypoints.eval_contract`."""
 
 import argparse
@@ -10,9 +9,8 @@ from scripts.cli_arguments import add_openai_endpoint_args
 
 
 def add_eval_args(parser: argparse.ArgumentParser) -> None:
-    """Register the dataset-source, endpoint and output flags every eval script shares; ``--split`` and the
-    task flags stay the runner's own. The sampling flags default to ``None``, so :func:`rollout_config_from_args`
-    tells an explicit value from an omitted one: explicit flag > ``--training_config`` > the script's default."""
+    """``--split`` and the task flags stay the runner's own. Sampling flags default to ``None``, so
+    :func:`rollout_config_from_args` tells explicit from omitted: flag > ``--training_config`` > default."""
     parser.add_argument(
         "--dataset", required=True, help="HF Hub id, s3:// URI, local data file or local save_to_disk dir."
     )

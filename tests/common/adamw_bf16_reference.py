@@ -1,12 +1,6 @@
-"""The per-parameter AdamWBF16 step the fused launch replaced: the bit-for-bit oracle both test tiers hold it to.
-
-``_per_parameter_kernel`` and ``PerParameterAdamWBF16.step`` are the one-launch-per-parameter implementation;
-:func:`per_parameter_step` launches it with its float arguments rounded to fp32 first, which the CUDA launcher
-does itself and the interpreter does not. :func:`fused_kernel_mismatches` runs the fused kernel and the oracle over
-the same parameter set and names every output that differs. It runs on CUDA and, with ``TRITON_INTERPRET=1`` set
-before Triton is imported, on CPU. :func:`lookup_mismatches` holds the fused kernel's block lookup to the per-block
-scan of the block-start row (``_block_scan_kernel``), the one-block-per-program lookup the fused kernel ran before.
-"""
+"""The per-parameter AdamWBF16 step the fused launch replaced: the bit-for-bit oracle both test tiers hold it to. Runs
+on CUDA and, with ``TRITON_INTERPRET=1`` set before Triton is imported, on CPU. Float arguments round to fp32 first, as
+the CUDA launcher does."""
 
 import math
 import struct
@@ -39,11 +33,9 @@ LR = 1e-2
 BETAS = (0.9, 0.999)
 EPS = 1e-8
 # (element count, optimizer step, weight decay, aligned): empty, sub-block, block-boundary and multi-block tensors at
-# mixed steps, as a resumed run can hold them, and one tensor of three programs, the last one short. ``aligned``
-# starts all four of a tensor's roles on 16-byte boundaries; otherwise its grad, and every second param, sits at an
-# odd element offset. The launches split by specialization, each over a table padded to the cap: the three aligned
-# tensors, five with only the param and moments aligned (the three-program one among them), two with only the
-# moments, and the unaligned 1024-element one alone (its element count is a multiple of 16).
+# mixed steps, as a resumed run holds them, and one of three programs. ``aligned`` starts all four roles on 16-byte
+# boundaries; otherwise the grad and every second param sit at an odd offset. Launches split by specialization, each
+# padded to the cap.
 CASE = (
     (0, 1, 0.0, False),
     (1, 1, 0.1, False),
@@ -58,9 +50,8 @@ CASE = (
     (3 * 1024 + 16, 6, 0.1, True),
     ((2 * _BLOCKS_PER_PROGRAM + 3) * 1024 + 5, 4, 0.1, False),
 )
-# bf16 elements per 16-byte boundary.
 _BOUNDARY = _DIVISIBILITY.value // torch.bfloat16.itemsize
-# Block counts a lookup table's tensors draw from: empty, one-block, program-boundary and multi-program tensors.
+# Empty, one-block, program-boundary and multi-program tensors.
 _LOOKUP_BLOCKS = (0, 1, 2, *(_BLOCKS_PER_PROGRAM + d for d in (-1, 0, 1)), 2 * _BLOCKS_PER_PROGRAM + 3)
 
 
@@ -116,7 +107,7 @@ def _per_parameter_kernel(
 
 
 def _fp32(value: float) -> float:
-    """``value`` rounded to fp32, as the CUDA launcher passes a float argument; the interpreter keeps the double."""
+    """``value`` rounded to fp32, as the CUDA launcher passes a float; the interpreter keeps the double."""
     return struct.unpack("f", struct.pack("f", value))[0]
 
 
@@ -134,7 +125,6 @@ def per_parameter_step(
     seed: int,
     grad_scale: Tensor | None = None,
 ) -> None:
-    """One launch of the per-parameter kernel over one parameter's local shard."""
     p_flat = to_local(p.detach()).view(-1)
     grad_flat = to_local(grad).view(-1)
     n = p_flat.numel()
@@ -204,8 +194,7 @@ class PerParameterAdamWBF16(AdamWBF16):
 
 
 def _packed_views(buffer: Tensor, order: list[int]) -> list[Tensor]:
-    """Views of :data:`CASE`'s tensors packed into ``buffer`` in ``order``: an aligned one starts on a 16-byte
-    boundary, any other at an odd element offset."""
+    """Views of :data:`CASE`'s tensors in ``buffer``: an aligned one on a 16-byte boundary, others at an odd offset."""
     views: list[Tensor | None] = [None] * len(CASE)
     cursor = 0
     for i in order:
@@ -217,9 +206,8 @@ def _packed_views(buffer: Tensor, order: list[int]) -> list[Tensor]:
 
 
 def _case_tensors(device: str) -> list[list[Tensor]]:
-    """``[params, grads, exp_avgs, exp_avg_sqs]`` over :data:`CASE`. Every second param is a view into one shared
-    buffer, as fused-parameter slices are; every grad is a view into another, packed in reverse as an FSDP2
-    reduce-scatter output can be, so the grad role carries negative offsets from its base."""
+    """``[params, grads, exp_avgs, exp_avg_sqs]``; second params view a shared buffer and grads another, in reverse as
+    FSDP2 reduce-scatter can give, for negative offsets."""
     generator = torch.Generator().manual_seed(1)
     sizes = [n for n, _, _, _ in CASE]
     room = sum(sizes) + _BOUNDARY * (len(CASE) + 1)
@@ -237,13 +225,9 @@ def _case_tensors(device: str) -> list[list[Tensor]]:
 
 
 def fused_kernel_mismatches(device: str, *, seed_shift: int = 0) -> list[str]:
-    """Step :data:`CASE` three times (grad scale off, on, off) through the fused kernel, one launch per
-    specialization as ``step()`` groups them, each over the full table an sm_100/103 launch searches, and through the
-    oracle; name each differing output and each tensor whose divisibility is not what :data:`CASE` placed.
-
-    ``seed_shift`` offsets the fused launch's seeds: a comparison that still reports nothing then is blind to the
-    rounding noise.
-    """
+    """Step :data:`CASE` three times through the fused kernel and the oracle, naming each differing output and
+    misplaced tensor. ``seed_shift`` offsets the fused seeds: a comparison still reporting nothing is blind to rounding
+    noise."""
     oracle, fused = _case_tensors(device), _case_tensors(device)
     mismatches = []
     for grad_scale in (None, torch.tensor(0.3, device=device), None):
@@ -276,8 +260,8 @@ def fused_kernel_mismatches(device: str, *, seed_shift: int = 0) -> list[str]:
 
 @triton.jit
 def _block_scan_kernel(block_starts, num_tensors, out, TABLE_SIZE: tl.constexpr):
-    """The block-start scan: one program per block scans the whole block-start row for the last tensor that starts
-    at or before it, and stores that tensor and the block's index within it."""
+    """One program per block scans the block-start row for the last tensor starting at or before it, storing it and the
+    block's index."""
     pid = tl.program_id(0).to(tl.int64)
     slots = tl.arange(0, TABLE_SIZE)
     starts = tl.load(block_starts + slots, mask=slots < num_tensors, other=2**63 - 1)
@@ -295,7 +279,7 @@ def _program_blocks_kernel(
     BLOCKS_PER_PROGRAM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Each program's tensor and block indices as the fused kernel resolves them, one row per block it steps."""
+    """Each program's tensor and block indices as the fused kernel resolves them."""
     tensor, _, first, end = _program_blocks(
         index_table, num_tensors, False, TABLE_SIZE, BLOCKS_PER_PROGRAM, BLOCK_SIZE
     )
@@ -306,8 +290,8 @@ def _program_blocks_kernel(
 
 
 def _lookup_tables() -> list[tuple[list[int], int]]:
-    """(block counts per tensor, TABLE_SIZE): one tensor and two (TABLE_SIZE 1 and 2), three in a table padded to the
-    cap, a full table at the cap whose first and last tensors are empty, and a table just past a power of two."""
+    """(block counts per tensor, TABLE_SIZE): one and two tensors, padded to the cap, full with empty ends, just past a
+    power of two."""
     generator = torch.Generator().manual_seed(5)
 
     def ragged(count: int) -> list[int]:
@@ -324,15 +308,11 @@ def _lookup_tables() -> list[tuple[list[int], int]]:
 
 
 def lookup_mismatches() -> list[str]:
-    """Resolve every program of each :func:`_lookup_tables` table, built by :func:`_launch_tables`, to the tensor and
-    block indices it steps, and every block to them by the block scan; name each table where the two lists differ.
-
-    The fused lookup also runs on each table with every tensor but the first moved one program on: if no table then
-    differs, the comparison is blind to the lookup and that is reported too.
-    """
+    """Each table where the fused lookup and the block scan differ; also reports if a shifted table does not differ,
+    since then the comparison is blind."""
     mismatches, blind = [], True
     for blocks, table_size in _lookup_tables():
-        # Alternate full and short last blocks; the element count, not the block count, is what the table holds.
+        # Alternate full and short last blocks; the table holds the element count, not the block count.
         numels = [b * SR_BLOCK_SIZE - (i % 2) * 7 if b else 0 for i, b in enumerate(blocks)]
         storage = torch.empty(max(numels), dtype=torch.bfloat16)
         updates = [_FusedUpdate(storage, (storage[:n],) * 4, (0.0,) * 6, 0, (False,) * 5) for n in numels]

@@ -1,7 +1,5 @@
-"""The low-precision vocabulary: the ``lowp_precision`` modes and the block-scaled formats they compute
-in, the run's :class:`LowpSpec`, and the projections and layer window both the training-time conversion
-and the export read, so a checkpoint quantizes what its forward quantized.
-"""
+"""The low-precision vocabulary, and the projections and layer window both the training-time conversion and the export
+read, so a checkpoint quantizes what its forward quantized."""
 
 from __future__ import annotations
 
@@ -12,7 +10,7 @@ LowpPrecision = Literal["bf16", "fp8", "fp4", "mxfp4"]
 # Block-scaled: mxfp8 = e4m3 + e8m0/32, mxfp4 = e2m1 + e8m0/32, nvfp4 = e2m1 + e4m3/16 (two-level).
 QuantFormat = Literal["mxfp8", "mxfp4", "nvfp4"]
 
-# Attention q/k/v/o stay bf16: small GEMMs, FA4's domain.
+# Attention q/k/v/o stay bf16, as small GEMMs are FA4's domain.
 MLP_PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 
 
@@ -34,8 +32,7 @@ LOWP_RECIPES: dict[LowpPrecision, LowpRecipe] = {
 
 @dataclass(frozen=True)
 class LowpSpec:
-    """Low-precision GEMM compute, built from the ``lowp_<field>`` keys; masters and checkpoints stay
-    bf16/fp32. ``keep_{first,last}_blocks`` pin decoder layers at the network ends to bf16."""
+    """Masters and checkpoints stay bf16/fp32. ``keep_{first,last}_blocks`` pin decoder layers at the ends to bf16."""
 
     precision: LowpPrecision = "bf16"
     apply_dense_mlp: bool = True
@@ -48,7 +45,6 @@ class LowpSpec:
         return self.precision != "bf16"
 
     def validate(self) -> None:
-        """Reject an unknown mode, a negative keep window, and an enabled mode that applies to nothing."""
         if self.precision not in get_args(LowpPrecision):
             raise ValueError(
                 f"lowp_precision must be one of {', '.join(map(repr, get_args(LowpPrecision)))} "
@@ -67,7 +63,6 @@ class LowpSpec:
             )
 
     def non_default_shape_fields(self) -> list[str]:
-        """The ``lowp_<field>`` keys other than ``lowp_precision`` set away from their default."""
         default = LowpSpec()
         return [
             f"lowp_{f.name}"
@@ -77,7 +72,6 @@ class LowpSpec:
 
 
 def kept_block_indices(n_blocks: int, keep_first: int, keep_last: int) -> set[int]:
-    """Decoder layers held at bf16 at the two ends of an ``n_blocks``-deep backbone; out-of-range ends
-    clamp, so keeping more blocks than exist keeps all of them."""
+    """Out-of-range ends clamp, so keeping more blocks than exist keeps all of them."""
     kept = set(range(keep_first)) | {n_blocks - 1 - i for i in range(keep_last)}
     return {block for block in kept if 0 <= block < n_blocks}

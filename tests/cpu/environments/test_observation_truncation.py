@@ -1,11 +1,5 @@
-"""CPU test: tool observations are capped (``max_observation_chars``) at the source.
-
-An unbounded tool output (e.g. a python_repl that prints megabytes) otherwise bloats the trajectory
-and makes the per-turn chat-template re-render take minutes — stalling the whole training step. The cap
-is applied where the observation is built, so the rollout and the trainer's recompute see identical text.
-
-    python tests/cpu/environments/test_observation_truncation.py
-"""
+"""Tool observations are capped (``max_observation_chars``) at the source, so the rollout and the trainer's
+recompute see identical text. An unbounded output would make the per-turn re-render take minutes."""
 
 import pytest
 

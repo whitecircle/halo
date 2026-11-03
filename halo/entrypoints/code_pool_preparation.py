@@ -1,7 +1,5 @@
-"""The code-contest pool preparation's run: a contest dataset's rows normalized, filtered and joined with their
-compacted suites, formatted as environmental-GRPO rows (prompt + packed grading payload), checked for a sound
-judge and a suite no constant answer passes, split into train and a rating-stratified hold-out, and published as
-one Hub config or one per rating band. Behind ``scripts/environments/preparation/prepare_code_dataset.py``."""
+"""The code-contest pool preparation behind ``scripts/environments/preparation/prepare_code_dataset.py``: rows
+normalized, filtered and joined with compacted suites, checked for a sound judge and constant-proof suite."""
 
 import argparse
 import functools
@@ -27,26 +25,20 @@ from halo.environments.tasks.coding.verdicts import build_verdict
 logger = logging.getLogger(__name__)
 
 
-# What a sound judge must reject: not a wrong answer to any problem, but no answer at all.
+# A sound judge must reject this: no answer at all.
 _GARBAGE_OUTPUT = "\x00 garbage \x00\n"
 # Answers a sound suite fails on at least one test: one every test accepts pays the problem's reward for no work.
 CONSTANT_ANSWERS = ("0", "1", "-1", "YES", "NO", "Yes", "No", "IMPOSSIBLE", "Impossible", "")
 
-# Training stages on the Codeforces rating scale: ``--push_bands`` publishes one Hub config per band
-# over the pool's shared test split, and ``--holdout_per_band`` stratifies the hold-out by them (plus
-# the rows below the first band).
+# Codeforces rating stages: ``--push_bands`` publishes one Hub config per band, ``--holdout_per_band`` stratifies.
 RATING_BANDS: dict[str, tuple[int, int]] = {"medium": (1500, 1999), "hard": (2000, 2599), "extra-hard": (2600, 3500)}
 _FULL_CONFIG = "full"
 HOLDOUT_SEED = 42
 
 
 def rating_in_bounds(row: dict, min_rating: int | None, max_rating: int | None) -> bool:
-    """Whether ``row`` satisfies the requested rating bounds.
-
-    A dataset with no ``rating`` column (deepcoder) ignores the bounds rather than filtering every row
-    out. Where the column exists, an unrated row cannot be shown to satisfy a bound and is dropped,
-    so a rating-filtered pool does not carry problems of unknown difficulty.
-    """
+    """A dataset with no ``rating`` column (deepcoder) ignores the bounds. Where it exists an unrated row is dropped,
+    so a rating-filtered pool carries no problems of unknown difficulty."""
     if "rating" not in row:
         return True
     rating = row["rating"]
@@ -56,13 +48,11 @@ def rating_in_bounds(row: dict, min_rating: int | None, max_rating: int | None) 
 
 
 def keep_row(row: dict, adapter, min_rating: int | None, max_rating: int | None) -> bool:
-    """Whether the adapter accepts ``row`` and it satisfies the rating bounds."""
     return adapter.keep(row) and rating_in_bounds(row, min_rating, max_rating)
 
 
 def load_exclusions(path: str | None) -> tuple[set[str], tuple[str, ...]]:
-    """Problem ids to drop, one per line; a line ending in ``*`` excludes every id with that prefix.
-    Blank lines and ``#`` comments are ignored."""
+    """Ids to drop, one per line; a line ending in ``*`` excludes that prefix. Blank and ``#`` lines are skipped."""
     if not path:
         return set(), ()
     exact: set[str] = set()
@@ -79,12 +69,10 @@ def load_exclusions(path: str | None) -> tuple[set[str], tuple[str, ...]]:
 
 
 def excluded_by(problem_id: str, exact: set[str], prefixes: tuple[str, ...]) -> bool:
-    """Whether ``problem_id`` is listed exactly or under one of the prefixes."""
     return problem_id in exact or problem_id.startswith(prefixes)
 
 
 def drop_listed_rows(split: Dataset, path: str, num_proc: int | None = None) -> Dataset:
-    """``split`` without the rows whose ``id`` the exclusion file at ``path`` lists (:func:`load_exclusions`)."""
     exact, prefixes = load_exclusions(path)
     kept = split.filter(lambda row: not excluded_by(str(row.get("id") or ""), exact, prefixes), num_proc=num_proc)
     report_rejected_rows(len(split), len(kept), f"drop {path}")
@@ -92,9 +80,8 @@ def drop_listed_rows(split: Dataset, path: str, num_proc: int | None = None) -> 
 
 
 def load_tests_table(path: str) -> tuple[Dataset, dict[str, int]]:
-    """A compacted tests table (parquet parts written by ``compact_code_tests.py``) and its key index.
-    The table stays memory-mapped; only the keys are materialized. A key present twice means a
-    problem's suite was split across parts, and the join would keep one half silently."""
+    """The table stays memory-mapped; only the keys are materialized. A duplicate key means a suite was split across
+    parts, and the join would keep one half silently."""
     table = load_dataset("parquet", data_files=parquet_parts(path, non_empty=True), split="train")
     index: dict[str, int] = {}
     for position, key in enumerate(table["key"]):
@@ -105,9 +92,8 @@ def load_tests_table(path: str) -> tuple[Dataset, dict[str, int]]:
 
 
 def join_suites(splits: dict[str, Dataset], table: Dataset, index: dict[str, int]) -> dict[str, Dataset]:
-    """Each split with its compacted suites joined on (:func:`join_tests`), its matches logged. A table may
-    cover some splits only (generated tests for train alone); one matching no row of any split is the wrong
-    table, or keys spelled otherwise than the ids, and exits before any split is filtered."""
+    """Join and log matches. A table may cover some splits only; one matching no row of any split is the wrong table,
+    or keys spelled otherwise than the ids, and exits before any filtering."""
     joined: dict[str, Dataset] = {}
     for split, split_ds in splits.items():
         # Single process: the join indexes a memory-mapped table, and forked workers would copy it.
@@ -121,7 +107,7 @@ def join_suites(splits: dict[str, Dataset], table: Dataset, index: dict[str, int
 
 
 def join_tests(row: dict, table: Dataset, index: dict[str, int]) -> dict:
-    """The compacted suite for ``row`` (matched on its prepared ``id``), or nulls when it has none."""
+    """The compacted suite matched on the prepared ``id``, or nulls."""
     position = index.get(row.get("id") or "")
     if position is None:
         return {JOINED_TESTS_FIELD: None, JOINED_CHECKER_FIELD: None}
@@ -135,10 +121,8 @@ def _sandbox():
 
 
 def checker_is_sound(row: dict) -> bool:
-    """Whether a prepared row's special judge accepts every test's own reference output and rejects garbage on
-    the first. A judge rejecting a reference fails every correct solution on that test, and one accepting garbage
-    grades every answer the same way, so its problem is dropped. A sandbox backend failure propagates as
-    :class:`CheckerInfraError` instead of dropping rows."""
+    """The special judge must accept every test's reference output and reject garbage on the first, else its problem is
+    dropped. A sandbox failure propagates as :class:`CheckerInfraError` instead of dropping rows."""
     payload = json.loads(row[DEFAULT_ANSWER_FIELD])
     checker, tests = payload.get("checker"), payload.get("tests") or []
     if not checker or not tests:
@@ -150,9 +134,8 @@ def checker_is_sound(row: dict) -> bool:
 
 
 def suite_rejects_constants(row: dict) -> bool:
-    """Whether every answer of :data:`CONSTANT_ANSWERS` fails at least one of a prepared row's tests, under its
-    checker or the token comparison. A suite that accepts a constant everywhere (a lax checker, or a problem
-    whose every expected answer is the same) pays its reward to a program that never reads the input."""
+    """Every constant answer must fail at least one test: a suite accepting one everywhere (a lax checker, one expected
+    answer throughout) pays its reward to a program that never reads the input."""
     payload = json.loads(row[DEFAULT_ANSWER_FIELD])
     checker, tests = payload.get("checker"), payload.get("tests") or []
     if not tests:
@@ -165,7 +148,6 @@ def suite_rejects_constants(row: dict) -> bool:
 
 
 def band_of(rating: int | None) -> str | None:
-    """The :data:`RATING_BANDS` name a rating falls in, ``None`` when it lies outside every band."""
     for name, (low, high) in RATING_BANDS.items():
         if rating is not None and low <= rating <= high:
             return name
@@ -173,8 +155,8 @@ def band_of(rating: int | None) -> str | None:
 
 
 def carve_holdout(train: Dataset, per_band: int, seed: int = HOLDOUT_SEED) -> tuple[Dataset, Dataset]:
-    """Split ``train`` into ``(train, test)`` with ``per_band`` rows from every rating band, and from the
-    rows below the first band, drawn deterministically. A band short of ``per_band`` rows raises."""
+    """``(train, test)`` with ``per_band`` rows from every band and from the rows below the first, drawn
+    deterministically; a short band raises."""
     buckets: dict[str, list[int]] = {}
     for position, rating in enumerate(train["rating"]):
         buckets.setdefault(band_of(rating) or "below", []).append(position)
@@ -189,7 +171,7 @@ def carve_holdout(train: Dataset, per_band: int, seed: int = HOLDOUT_SEED) -> tu
 
 
 def band_configs(prepared: DatasetDict) -> dict[str, DatasetDict]:
-    """The stage configs of a pool: ``full`` plus one per rating band, every one over the same test split."""
+    """``full`` plus one per rating band, every one over the same test split."""
     configs = {_FULL_CONFIG: prepared}
     for name, (low, high) in RATING_BANDS.items():
         band_train = prepared["train"].filter(lambda row, low=low, high=high: low <= (row["rating"] or 0) <= high)
@@ -198,10 +180,9 @@ def band_configs(prepared: DatasetDict) -> dict[str, DatasetDict]:
 
 
 def to_rl_row(row: dict, adapter) -> dict:
-    """One source row as the environmental-GRPO contract: prompt + packed grading payload."""
     return {
-        # Coerce to a stable string: a dataset without an "id" (deepcoder) would otherwise emit an
-        # all-None column that Arrow types as `null`, breaking save_to_disk/push_to_hub.
+        # A dataset without an "id" (deepcoder) would emit an all-None column Arrow types as `null`, breaking
+        # save_to_disk/push_to_hub.
         "id": str(row.get("id") or row.get("problem_id") or row.get("name") or ""),
         "prompt": adapter.format_prompt(row),
         DEFAULT_ANSWER_FIELD: json.dumps(adapter.pack_verification(row)),
@@ -211,7 +192,6 @@ def to_rl_row(row: dict, adapter) -> dict:
 
 
 def _stage_splits(ds: DatasetDict, adapter, args: argparse.Namespace, num_proc: int | None) -> dict[str, Dataset]:
-    """Each source split normalized and its excluded ids dropped, then the compacted suites joined on."""
     exact, prefixes = load_exclusions(args.exclude_keys)
     tests_table = load_tests_table(args.tests_table) if args.tests_table else None
 
@@ -287,8 +267,7 @@ def _settle_train_and_test(
 
 
 def _publish(prepared: DatasetDict, args: argparse.Namespace) -> None:
-    """The pool saved to ``--output_dir`` and pushed to ``--push_to_hub``, as one config or as the full config
-    plus one per rating band."""
+    """Save and/or push, as one config or as the full config plus one per rating band."""
     if args.output_dir:
         prepared.save_to_disk(args.output_dir)
         logger.info("Saved to %s", args.output_dir)
@@ -308,8 +287,6 @@ def _publish(prepared: DatasetDict, args: argparse.Namespace) -> None:
 
 
 def prepare_code_pool(args: argparse.Namespace) -> None:
-    """Prepare the ``--adapter`` pool from ``--dataset`` and save it to ``--output_dir`` and/or push it to
-    ``--push_to_hub``, each filtering step's drops reported."""
     if not args.output_dir and not args.push_to_hub:
         raise SystemExit("Provide --output_dir and/or --push_to_hub.")
 
@@ -317,8 +294,8 @@ def prepare_code_pool(args: argparse.Namespace) -> None:
     ds = load_dataset(args.dataset, args.config)
     logger.info("Loaded %s (%s): %s", args.dataset, args.config, {k: len(v) for k, v in ds.items()})
 
-    # An adapter's code is not part of the map fingerprint (imported functions hash by name), so a
-    # cached step would outlive the adapter change that should have rewritten it.
+    # An adapter's code is not part of the map fingerprint (imported functions hash by name), so a cached step would
+    # outlive an adapter change.
     disable_caching()
     num_proc = resolve_map_num_proc(args.num_proc)
     prepared = {}

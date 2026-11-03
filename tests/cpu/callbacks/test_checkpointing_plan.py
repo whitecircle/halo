@@ -1,12 +1,5 @@
-"""``gradient_checkpointing_plan: auto`` on CPU: the three-phase prediction from one fully checkpointed step, the
-flag-only policy switch over every family's text decoder layers, the refusals, the world consensus, and the record
-whose unfinished plan floors the next launch's one step tighter, so a plan cannot replay into the same OOM on every
-restart.
-
-Exact live bytes come from a ``TorchDispatchMode`` ledger, the CPU stand-in for ``torch.cuda.memory_allocated``.
-
-    python tests/cpu/callbacks/test_checkpointing_plan.py
-"""
+"""``gradient_checkpointing_plan: auto``: the three-phase prediction, policy switch, refusals, consensus and record.
+Exact live bytes come from a ``TorchDispatchMode`` ledger, the CPU stand-in for ``torch.cuda.memory_allocated``."""
 
 import dataclasses
 import functools
@@ -83,9 +76,9 @@ WORLD = 4
 VOCAB = 4096
 SEQ = 512
 FINGERPRINT = {"model": "tiny", "max_length": SEQ, "world_size": WORLD}
-# Above any tiny step's peak: what a transient allocation before the measured step leaves in the allocator's peak.
+# Above any tiny step's peak: the allocator peak a transient allocation leaves before the measured step.
 SPIKE_BYTES = 256 * 2**20
-# Every tiny family, keyed by roster; the Bailing remote code checkpoints at the model level, so no plan applies.
+# The Bailing remote code checkpoints at the model level, so no plan applies.
 ROSTER = {
     **{f"moe/{name}": family for name, family in TINY_MOE_FAMILIES.items()},
     **{f"vlm/{name}": family for name, family in TINY_MOE_VLM_FAMILIES.items()},
@@ -130,7 +123,7 @@ class _LiveBytes(TorchDispatchMode):
 
 
 def _reader(tracker: _LiveBytes) -> MemoryReader:
-    # The ledger has no caching allocator: what it reserves is what it hands out.
+    # The ledger has no caching allocator, so reserved equals allocated.
     return MemoryReader(lambda: tracker.cur, lambda: tracker.peak, lambda: tracker.peak, tracker.reset_peak, lambda: 0)
 
 
@@ -157,9 +150,8 @@ def _tiny(kind: str, layers: int = LAYERS):
 
 
 def _enabled(kind: str, aux_gradient: bool = True):
-    """A tiny model under Halo's scoped enable, reentrant where Halo forces it (every MoE), HF's non-reentrant
-    default otherwise; the aux-loss row also carries the router aux gradient through the reentrant checkpoints, as
-    balancing installs it."""
+    """Reentrant where Halo forces it (every MoE), HF's non-reentrant default otherwise. The aux-loss row carries the
+    router aux gradient through the reentrant checkpoints, as balancing installs it."""
     model = _tiny(kind)
     reentrant = kind != "dense"
     enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": reentrant})
@@ -171,7 +163,6 @@ def _enabled(kind: str, aux_gradient: bool = True):
 
 
 def _grads(model):
-    """One forward and backward from the model's current weights: the loss and every gradient."""
     model.zero_grad(set_to_none=True)
     ids = torch.randint(0, VOCAB, (1, SEQ), generator=torch.Generator().manual_seed(1))
     loss = model(input_ids=ids, labels=ids).loss
@@ -195,8 +186,7 @@ def _train_step(
     accumulation: int = 1,
     reset_peak: bool = True,
 ) -> int:
-    """One optimizer step of ``accumulation`` micro-steps under the ledger in the Trainer's order
-    (``before_optimizer`` where ``on_pre_optimizer_step`` fires); returns the step's peak live bytes."""
+    """One optimizer step in the Trainer's order (``before_optimizer`` where ``on_pre_optimizer_step`` fires)."""
     if reset_peak:
         tracker.reset_peak()
     with tracker:
@@ -212,10 +202,8 @@ def _train_step(
 
 
 def _measured(kind: str, tracker: _LiveBytes, batch: int = 1, seq: int = SEQ, accumulation: int = 1):
-    """A model, its optimizer, and the reading of its second step (the first allocates the optimizer's moments).
-
-    A transient allocation before the probe opens sets the ledger's peak above the step's, and the measured step
-    leaves the peak to the probe, as production does where nothing else resets it."""
+    """Reads the second step, since the first allocates the optimizer's moments. A transient allocation before the
+    probe sets the ledger's peak above the step's, and the measured step leaves it to the probe, as production does."""
     model = _enabled(kind)
     optimizer = _optimizer(model)
     _train_step(model, optimizer, tracker, batch=batch, seq=seq, accumulation=accumulation)
@@ -251,7 +239,7 @@ def test_one_checkpointed_step_predicts_every_relaxed_policy_and_numerics_do_not
     # A switch that never reached the layers would read as full checkpointing.
     apply_checkpointing_policy(model, 1)
     assert _train_step(model, optimizer, tracker) < 0.8 * predict_peak(reading, LAYERS, CHECKPOINTING_OFF)
-    # Every policy replays the same forward: bitwise against a fully checkpointed copy of the same weights.
+    # Every policy replays the same forward, bitwise against a fully checkpointed copy.
     reference = _enabled(kind)
     reference.load_state_dict(model.state_dict())
     loss_full, grads_full = _grads(reference)
@@ -263,8 +251,8 @@ def test_one_checkpointed_step_predicts_every_relaxed_policy_and_numerics_do_not
 
 @pytest.mark.parametrize("kind", ["dense", "moe"])
 def test_the_prediction_holds_under_gradient_accumulation(kind):
-    """Each micro-step's backward starts above the last one's, on the gradients it accumulated: the head phase is
-    read at every micro-step's first recompute, not only the first micro-step's."""
+    """Each micro-step's backward starts on the gradients it accumulated, so the head phase is read at every
+    micro-step's first recompute."""
     tracker = _LiveBytes()
     model, optimizer, reading = _measured(kind, tracker, accumulation=2)
     for k in (CHECKPOINTING_OFF, 4, 2):
@@ -275,8 +263,8 @@ def test_the_prediction_holds_under_gradient_accumulation(kind):
 
 
 def test_the_backward_peak_keeps_the_optimizer_phase_out_of_the_relaxed_prediction():
-    """Negative control for the backward reading: priced from the whole step's peak, the backward phase over-reads a
-    relaxed policy once the optimizer phase is the fully checkpointed step's peak (short rows, few activations)."""
+    """Priced from the whole step's peak, the backward phase over-reads a relaxed policy once the optimizer phase is
+    the fully checkpointed step's peak (short rows, few activations)."""
     tracker = _LiveBytes()
     model, optimizer, reading = _measured("dense", tracker, seq=SEQ // 4)
     assert reading.peak > reading.backward_peak
@@ -289,8 +277,7 @@ def test_the_backward_peak_keeps_the_optimizer_phase_out_of_the_relaxed_predicti
 
 
 def test_aux_loss_row_needs_the_router_gradient_hand_off_to_stay_bitwise():
-    """Negative control for the moe_aux row: without the hand-off, full checkpointing loses the aux gradient the
-    off policy keeps, so the bitwise assertion above is what proves the switch is numerics-neutral."""
+    """Without the hand-off, full checkpointing loses the aux gradient the off policy keeps."""
     model = _enabled("moe_aux", aux_gradient=False)
     _, grads_full = _grads(model)
     apply_checkpointing_policy(model, CHECKPOINTING_OFF)
@@ -319,10 +306,8 @@ def test_a_layer_count_no_policy_divides_prices_what_the_switch_checkpoints():
 
 @pytest.mark.parametrize("name", sorted(ROSTER))
 def test_the_plan_counts_and_sets_the_text_decoder_layers_on_every_family(name):
-    """A multimodal checkpoint's vision blocks are GradientCheckpointingLayer too and come first in ``modules()``:
-    counted or indexed with the decoder layers, they would be priced as text layers and take the ratchet's first
-    step (every_n_layers = the count checkpoints index 0 only). The plan sees the text decoder list alone and leaves
-    every other layer's flag as checkpointing set it."""
+    """A multimodal checkpoint's vision blocks are GradientCheckpointingLayer too and come first in ``modules()``.
+    Counted with the decoder layers they would be priced as text layers and take the ratchet's first step."""
     torch.manual_seed(0)
     model = tiny_family_model(ROSTER[name])
     layers = plan_layers(model)
@@ -359,11 +344,11 @@ def _memory(**fields) -> StepMemory:
 def test_resolve_policy_takes_the_least_recompute_that_fits_a_reserved_and_non_torch_net_budget():
     step = _memory()
     assert candidate_policies(LAYERS) == [CHECKPOINTING_OFF, 8, 4, 3, 2, 1]
-    # Past off every policy checkpoints at least an eighth of the layers: no "every 40th" step that saves one layer.
+    # Past off every policy checkpoints at least an eighth of the layers.
     assert candidate_policies(40) == [CHECKPOINTING_OFF, 8, 4, 3, 2, 1]
     assert candidate_policies(3) == [CHECKPOINTING_OFF, 3, 2, 1]
     assert candidate_policies(1) == [CHECKPOINTING_OFF, 1]
-    # Every step checkpoints more layers than the last: at 4, 5 and 9 layers two policies would checkpoint as many.
+    # Every step checkpoints more layers than the last; at 4, 5 and 9 layers two policies would checkpoint as many.
     for layers, policies in {4: [4, 3], 5: [4, 2], 6: [4, 2], 9: [8, 4, 2]}.items():
         assert candidate_policies(layers) == [CHECKPOINTING_OFF, *policies, 1], layers
     for layers in range(1, 65):
@@ -372,12 +357,12 @@ def test_resolve_policy_takes_the_least_recompute_that_fits_a_reserved_and_non_t
     assert resolve_policy(step, LAYERS, 10**9) == (CHECKPOINTING_OFF, predict_peak(step, LAYERS, CHECKPOINTING_OFF))
     # off adds 8 * 10 to the head phase (170); every 4 checkpoints 2 layers: +60 -> head 150, backward 160.
     assert resolve_policy(step, LAYERS, 160) == (4, 160)
-    assert resolve_policy(step, LAYERS, 99)[0] == 1  # nothing lighter fits: keep full checkpointing
+    assert resolve_policy(step, LAYERS, 99)[0] == 1  # nothing lighter fits
     # A floor bounds the choice from below and never relaxes what the budget needs.
     assert resolve_policy(step, LAYERS, 10**9, floor_index=1)[0] == 8
     assert resolve_policy(step, LAYERS, 160, floor_index=1)[0] == 4
     assert resolve_policy(step, LAYERS, 10**9, floor_index=5)[0] == 1
-    # The optimizer phase is the same under every policy: it floors the prediction.
+    # The optimizer phase is the same under every policy, so it floors the prediction.
     assert predict_peak(_memory(peak=300), LAYERS, CHECKPOINTING_OFF) == 300
     assert plan_budget_bytes(step, 1000, ep_group_size=1) == 850
     assert plan_budget_bytes(step, 1000, ep_group_size=8) == 750
@@ -418,8 +403,7 @@ _CLEAN = PlanContext(
     ],
 )
 def test_each_refusal_fires_alone(change):
-    """Each reason refuses on its own, and the refusal names the setting that runs without a plan, since a reason
-    can be a property of the run the user keeps (unpacked rows, a generation trainer)."""
+    """The refusal names the setting that runs without a plan, since a reason can be a property of the user's run."""
     assert refusal_reasons(_CLEAN) == []
     reject_unplannable_run(_CLEAN)
     refused = dataclasses.replace(_CLEAN, **change)
@@ -465,7 +449,7 @@ def test_world_reduced_readings_give_every_rank_one_plan_and_a_divergence_raises
     # The most memory outside any rank's allocator: every 4 fits the min-reduced budget, not this one.
     assert results[0]["world"]["non_torch_bytes"] == 30 * (WORLD - 1)
     assert results[0]["plan"] == 3  # relaxed, not the full-checkpointing fallback
-    # It names the field and the bypass that works: an explicit every_n_layers is itself refused under auto.
+    # It names the field and the bypass that works, since an explicit every_n_layers is itself refused under auto.
     assert all(r["diverged"] and "every_n_layers" in r["diverged"] for r in results)
     assert all("gradient_checkpointing_plan: off" in r["diverged"] for r in results)
 
@@ -482,14 +466,12 @@ def _ratio_worker(rank: int, out_dir: str):
 
 
 def test_the_budget_takes_the_reserve_ratio_of_the_most_fragmented_rank(tmp_path):
-    """Each device holds its own reserve: the world view prices the hottest rank's peak at the largest reserved-to-
-    allocated ratio any rank measured, not the hottest peak over the largest reserve, which can come from another
-    rank."""
+    """The world view prices the hottest rank's peak at the largest reserved-to-allocated ratio any rank measured,
+    since each device holds its own reserve."""
     run_gloo_ranks(_ratio_worker, 2, str(tmp_path))
     results = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(2)]
     assert all(r == {"peak": 100, "reserved": 134, "budget": 850 * 100 // 134} for r in results)
-    # At the world budget the fragmented rank's own reserve fits its 850-byte share; at max(peak) / max(reserved)
-    # it would not.
+    # At this budget the fragmented rank's reserve fits its 850-byte share; at max(peak) / max(reserved) it would not.
     assert results[0]["budget"] * 120 / 90 <= 850 < plan_budget_bytes(_memory(reserved_peak=120), 1000, 1) * 120 / 90
 
 
@@ -517,10 +499,9 @@ class _State:
 
 
 def _drive(callback, kind: str, tracker, output_dir: str, steps: int, *, state=None, batch=1, seq=SEQ, finish=True):
-    """One launch: a fresh model and optimizer through the callback's hooks in the Trainer's order for ``steps``
-    optimizer steps, train end only when the run ``finish``es (else it crashed). Per step, its peak and the plan
-    in force after it; and the layers' checkpointing flags at the end. The model dies with the call: the ledger
-    counts the weights a forward views, and an earlier launch's would sit under this one's peaks."""
+    """One launch through the callback's hooks in the Trainer's order, with train end only when the run ``finish``es.
+    The model dies with the call because the ledger counts the weights a forward views, and an earlier launch's would
+    sit under this one's peaks."""
     gc.collect()
     model = _enabled(kind)
     optimizer = _optimizer(model)
@@ -540,7 +521,6 @@ def _drive(callback, kind: str, tracker, output_dir: str, steps: int, *, state=N
 
 
 def _launch(tracker, output_dir: str, *, finish: bool, total_device_bytes: int = 2**40, steps: int = 3) -> int:
-    """A launch into ``output_dir``, floored by the record there; the plan it ran."""
     callback = CheckpointingPlanCallback(
         _CLEAN,
         total_device_bytes=total_device_bytes,
@@ -554,8 +534,7 @@ def _launch(tracker, output_dir: str, *, finish: bool, total_device_bytes: int =
 
 
 def test_restarts_after_unfinished_runs_tighten_to_full_and_a_finished_run_lifts_the_floor(tmp_path):
-    """The OOM-loop guard: every launch after one that did not finish its plan checkpoints at least one step more,
-    down to full checkpointing, which stays; a run that finishes leaves no floor, so the next launch plans afresh."""
+    """The OOM-loop guard: each launch after an unfinished plan checkpoints at least one step more, down to full."""
     tracker, out = _LiveBytes(), str(tmp_path)
     plans = [_launch(tracker, out, finish=False) for _ in range(7)]  # roomy: each measures off, then it crashes
     assert plans == [CHECKPOINTING_OFF, 8, 4, 3, 2, 1, 1]
@@ -571,18 +550,17 @@ def test_restarts_after_unfinished_runs_tighten_to_full_and_a_finished_run_lifts
 
 
 def test_a_floor_never_relaxes_the_plan_the_launch_measures(tmp_path):
-    """The record bounds a plan from below, it does not stand in for the measurement: a relaunch whose own step
-    needs more recompute than the floor (another optimizer, adapters, kernels: what the fingerprint does not hold)
-    gets what its budget needs, and the floor still rises one step over a tighter unfinished plan."""
+    """A relaunch whose own step needs more recompute than the floor gets what its budget needs, and the floor still
+    rises one step over a tighter unfinished plan. The fingerprint does not hold the optimizer, adapters or kernels."""
     reading = _measured("dense", _LiveBytes())[2]
-    # Between the every-4 and every-8 predictions: every 4 is what this launch's own step fits.
+    # Between the every-4 and every-8 predictions, so every 4 is what this launch's step fits.
     target = (predict_peak(reading, LAYERS, 4) + predict_peak(reading, LAYERS, 8)) // 2
     tight = int(target / DENSE_BUDGET_FRACTION)
     tracker, out = _LiveBytes(), str(tmp_path)
     save_run_plan(out, RunPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT))
     assert _launch(tracker, out, finish=False, total_device_bytes=tight) == 4  # not the floor's every 8
     assert _launch(tracker, out, finish=False, total_device_bytes=tight) == 3  # every 4 did not finish
-    # Negative control: the same budget with no record measures every 4.
+    # The same budget with no record measures every 4.
     os.remove(tmp_path / RUN_PLAN_FILE)
     assert _launch(tracker, out, finish=False, total_device_bytes=tight) == 4
 
@@ -674,7 +652,7 @@ def test_run_context_refuses_what_the_config_and_trainer_rule_out(tmp_path):
     )
     clean = build(sft(packing=True))
     assert refusal_reasons(clean) == [] and clean.num_layers == LAYERS
-    # The rows the collator builds decide, not the flag: a corpus pre-processed packed under packing: false.
+    # The rows the collator builds decide: here a corpus pre-processed packed under packing: false.
     assert refusal_reasons(build(sft(packing=False))) == []
     fingerprint = build_plan_fingerprint(
         sft(packing=True), model, ParallelismConfig(), num_layers=clean.num_layers, total_device_bytes=2**30
@@ -702,7 +680,7 @@ def test_run_context_refuses_what_the_config_and_trainer_rule_out(tmp_path):
 
 def _callback_worker(rank: int, out_dir: str, budget_case: str):
     torch.set_num_threads(2)
-    batch = 1 + rank  # rank 1 runs twice the rows: the hot rank of a skewed EP group
+    batch = 1 + rank  # rank 1 runs twice the rows, the hot rank of a skewed EP group
     # The world reading the callback's own second step takes: the same model, rows and seeds.
     world = step_memory_across_ranks(_measured("moe", _LiveBytes(), batch=batch)[2])
     if budget_case == "roomy":
@@ -756,7 +734,7 @@ def test_callback_measures_step_two_relaxes_every_rank_alike_and_a_relaunch_afte
     assert all(r["plan"] == plan and r["restarted"] == plan and r["restarted_floor"] == 0 for r in results)
     assert all(r["late"][0] is None and r["late"][1] in candidate_policies(LAYERS) for r in results)
     hot = results[1]
-    # Steps 1-2 fully checkpointed, steps 3-4 at the plan: the hot rank stays under the world prediction.
+    # Steps 1-2 fully checkpointed, steps 3-4 at the plan. The hot rank stays under the world prediction.
     assert hot["peaks"][1] < hot["peaks"][2] <= hot["predicted"] <= hot["budget"]
     # The world view over-reads the hot rank only by the min-reduced checkpoint input.
     assert hot["peaks"][2] >= 0.97 * hot["predicted"]
@@ -765,9 +743,8 @@ def test_callback_measures_step_two_relaxes_every_rank_alike_and_a_relaunch_afte
 
 
 def test_the_callback_prices_the_backward_phase_at_its_own_pre_optimizer_mark(tmp_path):
-    """The callback's own three-phase wiring: on short rows the optimizer phase is the fully checkpointed step's
-    peak, so a budget between the off prediction from the marked backward peak and the one from the whole step's
-    peak relaxes to off only when ``on_pre_optimizer_step`` marks the backward end."""
+    """On short rows the optimizer phase is the fully checkpointed step's peak, so a budget between the two off
+    predictions relaxes to off only when ``on_pre_optimizer_step`` marks the backward end."""
     seq = SEQ // 4
     reading = _measured("dense", _LiveBytes(), seq=seq)[2]
     marked = predict_peak(reading, LAYERS, CHECKPOINTING_OFF)
@@ -821,7 +798,6 @@ def _builder_worker(rank: int, out_dir: str, case: str):
             outcome["floor"] = fresh.floor_index
             outcome["layers"] = fresh.context.num_layers
             outcome["total_device_bytes"] = [fresh.total_device_bytes, fresh.context.fingerprint["total_device_bytes"]]
-            # The record a launch leaves when it ends on every 4 before finishing, then once it finished.
             save_run_plan(out_dir, RunPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint))
             outcome["after_unfinished"] = build().floor_index
             save_run_plan(out_dir, RunPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint, finished=True))
@@ -835,7 +811,7 @@ def test_the_builder_agrees_one_plan_input_across_ranks_and_floors_on_an_unfinis
     run_gloo_ranks(_builder_worker, 2, str(tmp_path), case)
     results = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(2)]
     if case in ("agreed", "mixed_memory"):
-        # Every rank budgets on the smallest device: one plan that fits every one.
+        # Every rank budgets on the smallest device, so one plan fits them all.
         smallest = 2**34 - (2**30 if case == "mixed_memory" else 0)
         for outcome in results:
             assert outcome["floor"] == 0 and outcome["layers"] == LAYERS
@@ -889,15 +865,14 @@ def test_the_script_hands_the_plan_the_rows_its_caller_names():
 
 
 class _Stop(Exception):
-    """Raised by the stubbed callback builder: ``main()`` runs only as far as it."""
+    """Raised by the stubbed callback builder, so ``main()`` runs only as far as it."""
 
 
 _TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
 
 
 def _sft_main_rows(tmp_path, yaml_body: str, *, preprocessed_packed: bool | None = None, vlm: bool = False) -> dict:
-    """The rows ``sft.py:main()`` hands the callback builder: ``preprocessed_packed`` stands the dataset in for a
-    corpus pre-processed packed (True) or unpacked (False), ``None`` keeps it raw; ``vlm`` makes it an image run."""
+    """The rows ``sft.py:main()`` hands the callback builder; ``preprocessed_packed=None`` keeps the dataset raw."""
     module = load_script_module("scripts/training/sft.py", "halo_test_sft_checkpointing_plan")
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
@@ -965,8 +940,7 @@ def _sft_main_rows(tmp_path, yaml_body: str, *, preprocessed_packed: bool | None
     [
         ("packing: true\n", None, False, True),
         ("", None, False, False),
-        # A corpus pre-processed packed packs under packing: false, and one pre-processed unpacked does not pack
-        # under packing: true: the collator builds what the corpus was baked as.
+        # The collator builds what the corpus was baked as, whatever ``packing`` says.
         ("", True, False, True),
         ("packing: true\n", False, False, False),
         ("packing: true\n", None, True, True),

@@ -36,18 +36,13 @@ _ProbeKey = tuple[type, int, int]
 
 
 def split_expert_lora_targets(model_config: ModelArguments) -> ExpertLoraSpec | None:
-    """Peel the expert-weight entries out of ``lora_target_modules`` (in place) into an
-    :class:`ExpertLoraSpec` for native EP grouped-LoRA, since stock PEFT cannot wrap grouped expert tensors.
-
-    COLLECTIVE-EQUIVALENT (a main-rank-first config read). Runs before ``load_distributed_model``; ``None``
-    when PEFT is off, the model is dense, or no entry names an expert projection.
-    """
+    """Peel expert entries out of ``lora_target_modules`` (in place) into an :class:`ExpertLoraSpec`, as stock PEFT
+    cannot wrap grouped expert tensors. COLLECTIVE-EQUIVALENT; runs before ``load_distributed_model``."""
     if not model_config.use_peft:
         return None
     targets = model_config.lora_target_modules
-    # A bare string is PEFT's own spelling: a sentinel or regex ("all-linear", ".*gate_proj") peels
-    # nothing, while one naming an expert projection ("experts"), which as a regex would match no
-    # module, peels as the one-entry list does.
+    # A bare string is PEFT's own spelling: a sentinel or regex peels nothing, one naming an expert projection peels as
+    # the one-entry list does.
     if isinstance(targets, str):
         targets = [targets] if expert_target_projections(targets) else []
     elif not isinstance(targets, (list, tuple, set)):
@@ -101,11 +96,8 @@ def split_expert_lora_targets(model_config: ModelArguments) -> ExpertLoraSpec | 
 
 
 def wraps_in_peft_model(model_config: ModelArguments) -> bool:
-    """Whether stock PEFT has targets left after the expert peel, i.e. the run gets a ``PeftModel``.
-
-    ``None`` targets mean the architecture defaults; ``[]`` means every target was an expert
-    projection (expert-only LoRA), and conflating the two would full-finetune a ``use_peft`` run.
-    """
+    """Whether stock PEFT has targets left after the peel. ``None`` means architecture defaults, ``[]`` expert-only
+    LoRA; conflating them would full-finetune a ``use_peft`` run."""
     targets = model_config.lora_target_modules
     return model_config.use_peft and (targets is None or bool(targets))
 
@@ -120,12 +112,9 @@ def _inherits_its_layer_forward(cls: type) -> bool:
 
 
 def _computes_its_layers_affine_map(linear: torch.nn.Linear, verdicts: dict[_ProbeKey, bool]) -> bool:
-    """Whether the layer maps ``(1, in_features)`` to ``(1, out_features)``, as ``F.linear`` does.
-
-    Measured, once per class and geometry: an ``nn.Linear.forward`` override may only change how the map
-    is computed (a quantized kernel) or compute a different one (a block-diagonal grouped projection),
-    and nothing in the class tells the two apart. A device fault is not an answer about the layer.
-    """
+    """Whether the layer maps ``(1, in_features)`` to ``(1, out_features)``, measured once per class and geometry, as
+    nothing in a class tells a quantized kernel from a block-diagonal grouped projection. A device fault is no answer
+    about the layer."""
     key = (type(linear), linear.in_features, linear.out_features)
     if (verdict := verdicts.get(key)) is None:
         probe = torch.zeros(1, linear.in_features, device=linear.weight.device, dtype=linear.weight.dtype)
@@ -141,9 +130,8 @@ def _computes_its_layers_affine_map(linear: torch.nn.Linear, verdicts: dict[_Pro
 
 
 def _is_probeable_linear(module: torch.nn.Module) -> bool:
-    """Whether a forward probe on this module is both meaningful and free of side effects: a float
-    ``nn.Linear`` weight of at least 2 bytes (fp8 has no CPU kernel), neither meta nor a ``DTensor``
-    (the probe would become a collective)."""
+    """Whether a forward probe is meaningful and free of side effects: a float ``nn.Linear`` weight of at least 2 bytes
+    (fp8 has no CPU kernel), neither meta nor a ``DTensor`` (the probe would become a collective)."""
     weight = getattr(module, "weight", None)
     return (
         isinstance(module, torch.nn.Linear)
@@ -156,12 +144,9 @@ def _is_probeable_linear(module: torch.nn.Module) -> bool:
 
 
 def _unadaptable_reason(module: torch.nn.Module, verdicts: dict[_ProbeKey, bool]) -> str | None:
-    """Why stock LoRA cannot adapt this module, or ``None`` when it can.
-
-    PEFT decomposes the matched module's own weight and adds the delta to its output, which misses a
-    wrapper holding its weight in a child module and a layer computing something other than its affine
-    map. An adapted layer is read through its base layer, as PEFT reads it.
-    """
+    """Why stock LoRA cannot adapt this module, or ``None``: PEFT decomposes the module's own weight and adds to its
+    output, missing a wrapper holding its weight in a child and a layer computing something other than its affine
+    map."""
     base = module.get_base_layer() if isinstance(module, BaseTunerLayer) else module
     if not any(True for _ in base.parameters(recurse=False)):
         return "hold their weight in a child module" if any(True for _ in base.parameters()) else None
@@ -181,15 +166,10 @@ def _excluded_detail(model: torch.nn.Module, excluded: dict[str, list[str]]) -> 
 
 
 def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> None:
-    """COLLECTIVE: exclude, by full module path, the target-name matches PEFT cannot adapt.
-
-    Targets match by name suffix over the whole tree (a vision tower's ``q_proj`` too, and ``all-linear``
-    every custom projection), through PEFT's own matcher. The rejection and the exclusion list are agreed
-    across ranks: a rank adapting a different parameter set would only surface as a hang.
-    """
-    # `all-linear` is a sentinel PEFT resolves against the model at injection time; resolve a copy the
-    # same way so the scan sees what injection will target while the config the caller holds — the one
-    # the warning and raise below quote — still reads the sentinel; PEFT rewrites it in place at injection.
+    """COLLECTIVE: exclude, by full path, the target-name matches PEFT cannot adapt. Rejection and exclusions are
+    agreed across ranks, as a rank adapting a different parameter set would surface only as a hang."""
+    # PEFT resolves `all-linear` at injection; resolve a copy so the scan sees its targets while the caller's config,
+    # which the messages below quote, still reads the sentinel.
     scan_config = _maybe_include_all_linear_layers(copy.deepcopy(peft_config), model)
     preset = peft_config.exclude_modules
     if isinstance(preset, str):
@@ -212,7 +192,6 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
     reason = None
     if excluded and not adaptable:
         total = sum(len(names) for names in excluded.values())
-        # Native grouped expert adapters, when present, would train on without any attention adapter.
         consequence = (
             "The native expert adapters would train alone, with no attention adapter at all"
             if model_has_expert_lora(model)
@@ -264,14 +243,10 @@ def configure_adapter_training(
     model_config: ModelArguments,
     expected_task_type: str = "CAUSAL_LM",
 ) -> object | None:
-    """COLLECTIVE: set which parameters train and return the PEFT config to wrap the model with, if any.
-
-    No adapters: the freeze/unfreeze patterns, else a full fine-tune. Any adapter: a frozen base with the
-    native EP expert adapters trainable, and the ``LoraConfig`` unless the run is expert-LoRA only.
-    """
-    # lora_target_parameters makes PEFT wrap the module holding the parameter, which for an expert weight
-    # is the EP layer itself: its adapters would sit outside the EP validators and gradient sync. Without
-    # EP layers the experts are ordinary modules stock PEFT handles.
+    """COLLECTIVE: set which parameters train and return the PEFT config, if any. No adapters: the freeze/unfreeze
+    patterns or a full fine-tune. Any adapter: a frozen base with native expert adapters trainable."""
+    # lora_target_parameters makes PEFT wrap the module holding the parameter, here the EP layer, outside the EP
+    # validators and gradient sync. Without EP layers stock PEFT handles the experts.
     if getattr(model_config, "lora_target_parameters", None) and named_ep_layers(model):
         raise ValueError(
             f"lora_target_parameters={list(model_config.lora_target_parameters)} is not supported under "
@@ -323,9 +298,7 @@ def configure_adapter_training(
             adapter.requires_grad_(True)
 
     if not attention_peft:
-        # Expert-LoRA only: no PeftModel exists, so every remaining LoraConfig field is inert.
-        # modules_to_save is the one a user can reasonably expect to apply, and ignoring it would
-        # leave the router/head frozen without an error.
+        # Expert-LoRA only: no PeftModel exists, and ignoring modules_to_save would silently leave router/head frozen.
         if model_config.lora_modules_to_save:
             raise ValueError(
                 f"lora_modules_to_save={list(model_config.lora_modules_to_save)} cannot be honoured by an "
@@ -335,7 +308,7 @@ def configure_adapter_training(
                 "lora_modules_to_save. Either way merge_expert_lora_on_save still produces a merged "
                 "servable checkpoint — it folds the attention half of a mixed run too."
             )
-        return None  # expert-LoRA only
+        return None
 
     if model_config.lora_task_type != expected_task_type:
         warnings.warn(
@@ -352,8 +325,7 @@ def _peft_module_casting_to_bf16(model):
         if isinstance(module, BaseTunerLayer):
             module.to(torch.bfloat16)
         elif is_normalization_module(module):
-            # Class-derived rather than name-derived: norm modules at a path without "norm" in it are
-            # still kept in fp32, and a non-norm module under a "norm"-named parent is not upcast.
+            # Class-derived: norms at a path without "norm" stay fp32; a non-norm under a "norm" parent is not upcast.
             module.to(torch.float32)
         elif any(marker in name for marker in EMBEDDING_HEAD_MARKERS):  # noqa: SIM102  keep guard separate from the weight-dtype check
             if hasattr(module, "weight") and module.weight.dtype == torch.float32:
@@ -361,11 +333,8 @@ def _peft_module_casting_to_bf16(model):
 
 
 def build_peft_model(model, peft_config, args, *, merge_existing: bool = True):
-    """Wrap ``model`` with ``peft_config``: k-bit prep, adapters, optional bf16 cast. Returns
-    ``(model, casted_to_bf16)``; ``merge_existing=False`` returns a ``PeftModel`` unchanged.
-
-    The k-bit prep freezes every parameter, so it must precede ``get_peft_model``.
-    """
+    """Wrap ``model`` with ``peft_config``; returns ``(model, casted_to_bf16)``. ``merge_existing=False`` returns a
+    ``PeftModel`` unchanged. The k-bit prep freezes every parameter, so it must precede ``get_peft_model``."""
     if isinstance(model, PeftModel):
         if not merge_existing:
             return model, False
@@ -387,13 +356,9 @@ def build_peft_model(model, peft_config, args, *, merge_existing: bool = True):
 
 
 def prepare_policy_model(model, peft_config, args, *, disable_dropout: bool, merge_existing: bool = True):
-    """A trainer's policy wrapped by ``peft_config`` when one is given (:func:`build_peft_model`), then its
-    dropout disabled when ``disable_dropout`` is set. Returns ``(model, casted_to_bf16)``, the flag
-    :func:`peft_bf16_autocast` takes.
-
-    The input-grad hook gradient checkpointing needs over frozen embeddings is not installed here:
-    ``gradient_checkpointing_enable`` installs it on a model whose main input is ``input_ids``.
-    """
+    """A policy wrapped by ``peft_config`` when given, dropout disabled on request; returns
+    ``(model, casted_to_bf16)``. ``gradient_checkpointing_enable`` installs the input-grad hook frozen embeddings need,
+    not this."""
     casted = False
     if peft_config is not None:
         model, casted = build_peft_model(model, peft_config, args, merge_existing=merge_existing)

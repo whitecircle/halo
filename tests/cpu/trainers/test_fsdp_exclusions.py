@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""What an FSDP2 wrap leaves out of its shard groups — CPU-only.
-
-A parameter outside every ``fully_shard`` group gets no reduce-scatter. Frozen, that is harmless; trainable,
-it keeps its own rank's gradient unless an EP layer's hooks or the deferred sweep average it, and the
-ranks drift apart while every loss stays finite. So the dtype exclusion is taken per parameter: a frozen
-fp32 parameter must not take the trainable adapter under the same module with it. The guard on what is
-left out is ``tests/cpu/parallelism/test_ep_unsynced_param_guard.py``'s.
-
-Run: python tests/cpu/trainers/test_fsdp_exclusions.py  (or pytest)
-"""
+"""A trainable parameter left out of FSDP2's shard groups keeps its rank's gradient, so exclusion is per parameter.
+The guard on what is left out is in ``tests/cpu/parallelism/test_ep_unsynced_param_guard.py``."""
 
 from types import SimpleNamespace
 
@@ -30,7 +22,6 @@ class _ForgetGate(nn.Module):
 
 
 def _trainer(model: nn.Module) -> SimpleNamespace:
-    """Only what the exclusion walk reads."""
     trainer = SimpleNamespace(
         model=model,
         parallelism_config=SimpleNamespace(experts_fsdp_managed=False),

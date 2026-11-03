@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""Every golden over the shape grid, pinned against today's code: the process groups and rank
-coordinates each shape builds (``rank_layout``), and the ``new_group`` calls its ``EPConfig`` makes
-(``ep_group_order``). A golden holds a digest per shape, and the full record of its literal shapes so
-a failure reads as a diff.
-
-Run: python tests/cpu/parallelism/test_grid_goldens.py
-"""
+"""Goldens over the shape grid: process groups, rank coordinates (``rank_layout``) and ``new_group`` calls
+(``ep_group_order``). A digest per shape, and the full record of its literal shapes so a failure reads as a diff."""
 
 import json
 

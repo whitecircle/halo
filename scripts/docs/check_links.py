@@ -1,19 +1,8 @@
-"""Resolve every relative markdown link and every code reference in the doc trees; fail on a dangling one.
+"""Resolve every relative markdown link and code reference in the doc trees; fail on a dangling one.
 
-All doc trees are plain GitHub-rendered markdown, so this is the link gate. A ``#fragment`` into a
-markdown file (or ``#fragment`` alone, into the same file) must name a heading anchor GitHub
-generates for that file or an explicit ``<a id>`` / ``<a name>`` (:mod:`scripts.docs.markdown`); a
-fragment on a directory link is checked against the directory's ``README.md``, the page GitHub renders
-there. A ``{#id}`` heading attribute is refused: GitHub renders the braces as heading text, so the id
-never exists. Links inside code are not links; external URLs are skipped; a fragment into any other
-target is checked for its path only.
-
-Code spans and fenced code are checked as references instead (:mod:`scripts.docs.references`): a
-repo-root path must exist, with its ``#heading`` when it names one on a page, and a first-party dotted
-name, bare or in a ``from … import`` line, must name a module and a name it binds. Standard library
-only; parsing the package's grammar needs Python 3.12.
-
-usage: scripts/docs/check_links.sh [path ...]   (default: agent-docs, human-docs, skills + root markdown)
+A ``#fragment`` must name a heading anchor GitHub generates or an explicit ``<a id>`` / ``<a name>``; a ``{#id}``
+heading attribute is refused, as GitHub renders the braces as text. Code spans and fenced code are checked as
+references (:mod:`scripts.docs.references`). Standard library only; parsing the package's grammar needs Python 3.12.
 """
 
 from __future__ import annotations
@@ -53,8 +42,7 @@ def markdown_files(paths: list[str]) -> list[Path]:
 
 
 def check_file(file: Path, index: RepoIndex) -> list[str]:
-    """Every broken link, broken anchor, ``{#id}`` heading attribute and code reference that resolves to
-    nothing in ``file``, one line each."""
+    """Every broken link, anchor, ``{#id}`` attribute and reference in ``file``, one line each."""
     document = load_document(file.resolve())
     problems = [
         f"HEADING ID  {file}:{lineno}  {attribute}  (GitHub renders it as text; link the generated slug)"

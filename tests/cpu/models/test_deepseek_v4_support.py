@@ -1,10 +1,4 @@
 #!/usr/bin/env python
-"""CPU tests for DeepSeek-V4 support: registrations, tiny-config save/load roundtrip, the
-eager-only guards, clamped-GLU equivalence against the HF module, hash-layer input_ids handling,
-the per-rope-type inv_freq buffer fix, and the moe_balancing auto resolution.
-
-    python tests/cpu/models/test_deepseek_v4_support.py
-"""
 
 import tempfile
 from types import SimpleNamespace
@@ -47,15 +41,11 @@ def _tiny_model(config: DeepseekV4Config | None = None):
 
 
 def _bare_ep_layer(**attrs) -> EPDeepseekV4MoELayer:
-    """An EPDeepseekV4MoELayer skeleton without EP process-group state (CPU unit tests)."""
     layer = object.__new__(EPDeepseekV4MoELayer)
     nn.Module.__init__(layer)
     for name, value in attrs.items():
         setattr(layer, name, value)
     return layer
-
-
-# Registrations
 
 
 def test_registrations():
@@ -68,12 +58,8 @@ def test_registrations():
     assert EPDeepseekV4MoELayer.SEVERS_AUX_LOSS
 
 
-# Tiny-config save/load roundtrip
-
-
 def test_tiny_config_save_load_roundtrip():
-    """save_pretrained → from_pretrained must reproduce identical logits (guards persistent-buffer
-    coverage: e_score_correction_bias and the hash tid2eid table must survive the checkpoint)."""
+    """Persistent buffers ``e_score_correction_bias`` and the hash ``tid2eid`` table must survive the checkpoint."""
     model = _tiny_model()
     torch.manual_seed(SEED)
     input_ids = torch.randint(0, model.config.vocab_size, (2, 64))
@@ -91,28 +77,21 @@ def test_tiny_config_save_load_roundtrip():
     assert torch.allclose(ref, out, atol=1e-5), f"roundtrip logits diverged: {(ref - out).abs().max()}"
 
 
-# Eager-only guards
-
-
 @pytest.mark.parametrize("requested", [None, "flash_attention_2", "sdpa", "flex_attention"])
 def test_every_requested_attention_resolves_to_eager(requested):
-    """The family spec declares DeepSeek-V4 eager-only, so no request (or auto-detection) reaches a kernel that
-    drops its sink column or misreads its compressor's KV."""
+    """No request reaches a kernel that drops its sink column or misreads its compressor's KV."""
     assert find_moe_family_spec("deepseek_v4").eager_only_attention
     resolved = resolve_attn_implementation(_tiny_config(), requested, torch.bfloat16, sinks_policy=SinksPolicy.LIVE)
     assert resolved == "eager"
 
 
 def test_collator_factory_refuses_multi_document_rows():
-    """DeepSeek-V4 trains one document per row: ``padding_free`` and ``packing`` are both refused by the
-    compressed-KV rule, ahead of the backend checks: the CSA/HCA compressors cut their KV windows at row
-    indices while positions restart per document, so every document after the first attends the row-start
-    windows — pinned behaviorally in ``test_deepseek_v4_packed_isolation.py``.
-    """
+    """The CSA/HCA compressors cut KV windows at row indices while positions restart per document, so every later
+    document attends the row-start windows. Pinned behaviorally in ``test_deepseek_v4_packed_isolation.py``."""
     config = _tiny_config()
     config._attn_implementation = "eager"
 
-    class _Tok:  # minimal stub — the guard fires before any real tokenizer use
+    class _Tok:  # the guard fires before any real tokenizer use
         pad_token = "<pad>"
         eos_token_id = 1
 
@@ -141,9 +120,8 @@ def _legacy_compress_ratios_config() -> DeepseekV4Config:
     ids=["layer-types", "legacy-compress-ratios", "wrapper", "no-compressed-layer"],
 )
 def test_the_refusal_follows_the_compressed_layer_types(build, refused):
-    """The refusal reads the layer kinds, not the model type: a wrapper resolves like its decoder, the
-    legacy spelling resolves through the config's own ``layer_types`` fill, and a V4 stack with no
-    compressed layer is isolated by its masked attention alone, so it packs."""
+    """The refusal reads the layer kinds, not the model type.
+    A V4 stack with no compressed layer is isolated by its masked attention alone, so it packs."""
     config = build()
     if refused:
         with pytest.raises(ValueError, match=COMPRESSED_KV_REFUSAL):
@@ -152,28 +130,21 @@ def test_the_refusal_follows_the_compressed_layer_types(build, refused):
         reject_compressed_kv_rows(config, "packing")
 
 
-# Clamped-GLU equivalence vs the HF experts module
-
-
 def test_clamped_glu_matches_hf_apply_gate():
-    """`_glu_combine` (compiled and generic fallback) must reproduce DeepseekV4Experts._apply_gate
-    exactly — a missed clamp silently diverges only on out-of-range activations."""
+    """A missed clamp silently diverges only on out-of-range activations."""
     config = _tiny_config()
     experts = DeepseekV4Experts(config)
     torch.manual_seed(SEED)
-    # Scale up so the clamps actually engage (|x| > swiglu_limit): a formula missing the clamp
-    # would still pass on small inputs.
+    # Scale up so the clamps engage (|x| > swiglu_limit); a formula missing the clamp would pass on small inputs.
     gate_up = torch.randn(64, 2 * config.moe_intermediate_size) * 3 * config.swiglu_limit
     expected = experts._apply_gate(gate_up)
     gate, up = gate_up.chunk(2, dim=-1)
 
     assert (gate.abs() > config.swiglu_limit).any(), "test inputs must exceed the clamp limit"
 
-    # Un-compiled reference formula.
     assert torch.allclose(clamped_silu_mul_eager(gate, up, config.swiglu_limit), expected, atol=1e-6)
 
-    # The layer seam: the compiled SiLU combine, and the eager fallback a non-SiLU gate takes, as
-    # _adopt_expert_compute latches them into _fused_glu_mul.
+    # The compiled SiLU combine and the eager fallback a non-SiLU gate takes, as _adopt_expert_compute latches them.
     for hidden_act in ("silu", "gelu"):
         act_experts = DeepseekV4Experts(_tiny_config(hidden_act=hidden_act))
         layer = _bare_ep_layer(
@@ -182,21 +153,18 @@ def test_clamped_glu_matches_hf_apply_gate():
         out = layer._glu_combine(gate, up)
         assert torch.allclose(out, act_experts._apply_gate(gate_up), atol=1e-6), f"{hidden_act} combine diverged"
 
-    # The clamp must be load-bearing: dropping it changes the output on these inputs.
+    # Dropping the clamp must change the output on these inputs.
     assert not torch.allclose(experts.act_fn(gate) * up, expected)
 
 
 def _real_moe_layer(hidden_act: str) -> EPDeepseekV4MoELayer:
-    """The wrapper over the library's own non-hash MoE block, built through its real ``__init__``."""
     config = _tiny_config(hidden_act=hidden_act)
     block = next(layer.mlp for layer in _tiny_model(config).model.layers if not getattr(layer.mlp, "is_hash", True))
     return EPDeepseekV4MoELayer(block, single_process_ep_config(config.n_routed_experts)).cpu()
 
 
 def test_real_block_delivers_non_neutral_routing_knobs():
-    """Against the installed module with a non-neutral scaling factor — the wrapper resolves its
-    routing knobs by ``getattr`` with defaults, and a knob that moves upstream (the 5.14
-    *TopkRouter refactor did exactly this to Mistral4) silently unscales every routed weight."""
+    """A routing knob that moves upstream falls to its ``getattr`` default and silently unscales routed weights."""
     config = _tiny_config(routed_scaling_factor=2.5)
     block = next(layer.mlp for layer in _tiny_model(config).model.layers if not getattr(layer.mlp, "is_hash", True))
     layer = EPDeepseekV4MoELayer(block, single_process_ep_config(config.n_routed_experts)).cpu()
@@ -205,10 +173,9 @@ def test_real_block_delivers_non_neutral_routing_knobs():
 
 @pytest.mark.parametrize(("hidden_act", "fused"), [("silu", True), ("gelu", False)])
 def test_the_real_constructor_arms_the_compiled_silu_path(hidden_act, fused, monkeypatch):
-    """The latched combine decides whether the compiled clamped SwiGLU runs. The equivalence test above
-    latches it by hand, so only this — the real ``__init__`` over the library block — pins which branch
-    production takes, and a nominal `isinstance(act_fn, nn.SiLU)` test answers False for BOTH rows
-    (`ACT2FN["silu"]` is a `SiLUActivation`), disarming the kernel with no numerical trace."""
+    """Only the real ``__init__`` pins which branch production takes, since the test above latches it by hand.
+    A nominal `isinstance(act_fn, nn.SiLU)` answers False for both rows (`ACT2FN["silu"]` is a `SiLUActivation`),
+    disarming the kernel with no numerical trace."""
     calls: list[float] = []
     real_call = GluCombine.__call__
 
@@ -224,21 +191,16 @@ def test_the_real_constructor_arms_the_compiled_silu_path(hidden_act, fused, mon
     gate, up = torch.randn(16, 8) * 3 * layer.limit, torch.randn(16, 8) * 3 * layer.limit
     out = layer._glu_combine(gate, up)
 
-    # The flag is only interesting if it actually routes the compute.
     assert calls == ([layer.limit] if fused else [])
     silu_gated = clamped_silu_mul_eager(gate, up, layer.limit)
     if fused:
         assert torch.allclose(out, silu_gated)
     else:
-        assert not torch.allclose(out, silu_gated)  # same clamps, gelu gate — the eager branch really ran
-
-
-# Hash-layer selection
+        assert not torch.allclose(out, silu_gated)  # same clamps, gelu gate: the eager branch ran
 
 
 def _selection_layer(is_hash: bool, num_experts: int = 8, top_k: int = 2):
-    """A layer whose router logits and scores are its input (identity weight and score function), so a test's
-    scores are what selection sees."""
+    """Identity weight and score function, so a test's scores are what selection sees."""
     gate = nn.Module()
     gate.tid2eid = torch.randint(0, num_experts, (32, top_k))
     gate.e_score_correction_bias = torch.zeros(num_experts)
@@ -274,21 +236,16 @@ def test_hash_layer_selects_tid2eid_rows():
 
 
 def test_topk_layer_selects_biased_but_gates_unbiased():
-    """Selection follows scores + e_score_correction_bias; a large bias must flip the pick."""
     layer = _selection_layer(is_hash=False, top_k=1)
     scores = torch.zeros(2, layer.num_experts)
-    scores[:, 0] = 1.0  # natural winner: expert 0
-    layer.gate.e_score_correction_bias[5] = 10.0  # correction bias promotes expert 5
+    scores[:, 0] = 1.0
+    layer.gate.e_score_correction_bias[5] = 10.0
     indices = _select(layer, scores)
     assert (indices == 5).all(), "e_score_correction_bias must steer top-k selection"
 
 
-# Per-rope-type inv_freq buffer fix
-
-
 def test_finalize_covers_all_rotary_instances():
-    """Every DeepseekV4RotaryEmbedding (model-level + CSA/HCA compressors + indexer) must get its
-    {main,compress}_inv_freq recomputed — a missed instance keeps garbage frequencies silently."""
+    """Model-level, CSA/HCA compressor and indexer rotaries: a missed instance keeps garbage frequencies silently."""
     model = _tiny_model()
     rotaries = [m for m in model.modules() if type(m).__name__ == "DeepseekV4RotaryEmbedding"]
     assert len(rotaries) >= 4, "expected model + CSA compressor + indexer + HCA compressor rotaries"
@@ -307,22 +264,14 @@ def test_finalize_covers_all_rotary_instances():
         assert fixed.dtype == torch.float32
 
 
-# moe_balancing auto resolution
-
-
 def test_moe_balancing_auto_resolves_bias_update_for_v4_ep():
-    """auto must NOT resolve to the severed aux_loss for an EP-wrapped V4 model."""
-    # The real layer always adopts the hub gate — its ``e_score_correction_bias`` is the exported
-    # native slot auto's commit condition keys on; a gate-less skeleton reads as slot-less and
-    # resolves to none (the transient trade-off auto never defaults into).
+    # The real layer always adopts the hub gate; a gate-less skeleton reads as slot-less and resolves to none.
     gate = nn.Module()
     gate.register_buffer("e_score_correction_bias", torch.zeros(4, dtype=torch.float32))
     host = nn.Module()
     host.moe = _bare_ep_layer(gate=gate)
     assert resolve_balancing_mode("auto", host, is_moe=True) == "bias_update"
-    # Control: a plain module tree carries no bias, and V4's forward takes no output_router_logits
-    # either, so nothing there can balance — auto resolves to none rather than to an aux_loss the
-    # strategy would refuse (tests/cpu/models/test_balancing_auto_resolution.py).
+    # A plain module tree carries no bias and V4's forward takes no output_router_logits, so nothing there can balance.
     assert resolve_balancing_mode("auto", nn.Module(), is_moe=True) == "none"
 
 

@@ -1,5 +1,4 @@
-"""The generation CLIs' run plumbing: the S3 prompt dataset with its resume, the merged push, the empty-run
-refusal, the assistant-turn and follow-up spellings, the batched generation run and the async CLI runner."""
+"""The generation CLIs' run plumbing: the S3 prompt dataset with resume, the merged push, batched run, async runner."""
 
 import asyncio
 import logging
@@ -21,12 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 def load_prompts_with_resume(args, output_uri: str) -> tuple[list[dict], list[dict]]:
-    """``(pending rows, rows already written to output_uri)`` for the S3 prompt dataset.
-
-    Ids present in the output dataset are dropped from the input, and the existing rows come back so
-    the caller can write them out again alongside the new ones. An empty first element means every
-    prompt is already done.
-    """
+    """``(pending rows, rows already written to output_uri)``; the existing rows come back so the caller can rewrite
+    them with the new ones. An empty first element means every prompt is done."""
     dataset_uri = build_s3_uri(args.dataset, args.subfolder, given_as="--dataset")
     logger.info(f"Loading dataset from S3: {dataset_uri}")
     dataset = load_dataset_from_s3_uri(dataset_uri)
@@ -48,15 +43,9 @@ def load_prompts_with_resume(args, output_uri: str) -> tuple[list[dict], list[di
 
 
 def reject_empty_results(produced: int, pending: int, destination, *, drops: str = "", check: str) -> None:
-    """Abort a run that produced no usable row at all, instead of writing an empty result.
-
-    Every pending row failed, which means a dead endpoint or a misconfigured model. Exiting 0 there
-    would report a total failure as a completed run and, on the S3 paths, republish the resumed rows
-    as the whole job. Keyed on "nothing produced" rather than a single failure counter, since rows
-    also drop for reasons no counter tracks.
-
-    ``drops`` is the caller's own per-reason tally, ``check`` the knobs to look at first.
-    """
+    """Abort a run that produced no usable row (a dead endpoint or misconfigured model): exiting 0 would report total
+    failure as a completed run and, on S3, republish the resumed rows as the whole job. ``drops`` is the caller's
+    per-reason tally, ``check`` the knobs to look at first."""
     if produced:
         return
     raise RuntimeError(
@@ -66,13 +55,8 @@ def reject_empty_results(produced: int, pending: int, destination, *, drops: str
 
 
 def save_results_to_s3(existing_results: list[dict], results: list[dict], output_uri: str) -> None:
-    """Push ``existing_results + results`` to the S3 dataset at ``output_uri``, with the record keys unioned.
-
-    A resume mixes records reloaded from a previously-saved dataset (carrying every column that run
-    wrote) with freshly-built ones, whose optional source columns, or whole output format, may differ.
-    ``Dataset.from_list`` infers its schema from the leading records and drops keys absent there, so
-    the union (missing filled with ``None``) preserves the just-generated batch's own columns.
-    """
+    """Push with the record keys unioned: a resume mixes reloaded records with fresh ones whose columns may differ, and
+    ``Dataset.from_list`` infers its schema from the leading records and drops keys absent there."""
     all_results = existing_results + results
     all_keys = {key for record in all_results for key in record}
     all_results = [{key: record.get(key) for key in all_keys} for record in all_results]
@@ -82,21 +66,15 @@ def save_results_to_s3(existing_results: list[dict], results: list[dict], output
 
 
 def follow_up_messages(row, field: str) -> list[dict] | None:
-    """The row's follow-up turns (``--follow_up_prompt_field``), sent after its first answer: a non-empty
-    message list, else ``None``. An empty list is no follow-up: a second request on a conversation that
-    already ends on the assistant's answer would record two assistant turns in a row."""
+    """The row's follow-up turns, or ``None``. An empty list is no follow-up: a second request on a conversation
+    already ending on the answer would record two assistant turns in a row."""
     follow_up = row.get(field)
     return follow_up if isinstance(follow_up, list) and follow_up else None
 
 
 def assistant_turn(content: str | None, tool_calls: list | None = None) -> dict:
-    """A generated assistant turn as the wire and every saved record spell it: ``role`` and
-    ``content``, plus ``tool_calls`` where the reply made any — never the reply object's other,
-    mostly null, SDK and engine fields.
-
-    ``content`` stays ``None`` on a tool-call-only or empty reply: ``str(None)`` sends the literal
-    text "None" to the next turn, which the model reads as the assistant's answer.
-    """
+    """``role`` and ``content``, plus ``tool_calls`` where the reply made any, never the reply's other SDK and engine
+    fields. ``content`` stays ``None`` on a tool-call-only or empty reply: ``str(None)`` would send "None" onward."""
     message: dict = {"role": "assistant", "content": content}
     if tool_calls:
         message["tool_calls"] = [tool_call.model_dump() for tool_call in tool_calls]
@@ -104,18 +82,14 @@ def assistant_turn(content: str | None, tool_calls: list | None = None) -> dict:
 
 
 def _signal_handler(signum, frame):
-    """Exit on an interrupt with the shell's own convention for a signalled process: 128 + signo.
-
-    Exiting 0 here would report an interrupted, incomplete job as a successful one, and a wrapper
-    script, CI step or `&&` chain would then consume a partial output dataset as a finished run. The
-    resume hint makes the non-zero exit actionable.
-    """
+    """Exit 128 + signo: exiting 0 would report an interrupted job as successful, and a wrapper or `&&` chain would
+    consume partial output as finished."""
     logger.info(f"\nReceived signal {signum}. Progress has been saved — resume by re-running.")
     sys.exit(128 + signum)
 
 
 def run_async_cli(main: Callable[[], Coroutine]) -> None:
-    """Run an async CLI ``main`` under SIGINT/SIGTERM handling, exiting non-zero on a fatal error."""
+    """Run under SIGINT/SIGTERM handling, exiting non-zero on a fatal error."""
     configure_cli_logging()
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -123,21 +97,18 @@ def run_async_cli(main: Callable[[], Coroutine]) -> None:
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # Same event as the handler above, which a library restoring the default handler can bypass,
-        # so it reports the same way.
+        # A library restoring the default handler can bypass the handler above, so this reports the same way.
         logger.info("\nInterrupted. Progress has been saved — resume by re-running.")
         sys.exit(128 + signal.SIGINT)
     except Exception:
-        # With the traceback: the failures that land here (a raised result guard, an S3 or schema
-        # error inside the merge) are diagnosed from where they were raised, not from the message.
+        # With the traceback: a raised result guard or an S3 or schema error in the merge is diagnosed from its origin.
         logger.exception("Fatal error")
         sys.exit(1)
 
 
 def reject_per_row_response_format(rows: list[dict]) -> None:
-    """Refuse rows carrying a structured ``response_format``: every request here goes out as plain
-    text, so a per-row schema (the reward-model scripts honour one) would be dropped from the output
-    unapplied. A ``{"type": "text"}`` format asks for exactly that and passes."""
+    """Refuse a structured ``response_format``: every request here is plain text, so a per-row schema would be dropped
+    unapplied. ``{"type": "text"}`` passes."""
     carrying = [row for row in rows if (row.get("response_format") or {}).get("type", "text") != "text"]
     if carrying:
         raise ValueError(
@@ -154,15 +125,6 @@ def _generation_record(
     initial_messages: list[dict],
     follow_up_response=None,
 ) -> dict:
-    """Process API response into output record.
-
-    Args:
-        row: Original dataset row
-        response: First OpenAI response
-        args: CLI arguments (for field names and the model)
-        initial_messages: Messages sent to API (including system prompt)
-        follow_up_response: Optional follow-up response
-    """
     conversation = list(initial_messages)
     conversation.append(assistant_turn(response.answer, response.tool_calls))
 
@@ -179,7 +141,6 @@ def _generation_record(
         prompt_tokens += follow_up_response.prompt_tokens
         completion_tokens += follow_up_response.completion_tokens
 
-    # Build output record (drop prompt-related source fields)
     record = dict(row)
     for field in [
         args.prompt_field,
@@ -202,8 +163,7 @@ def _generation_record(
 
 
 async def run_batched_generation(args) -> None:
-    """Generate every pending prompt of the S3 dataset (first turn, then any follow-up turn) and push the
-    merged result; a row whose first request failed is dropped and retried by the next run."""
+    """A row whose first request failed is dropped and retried by the next run."""
     client = build_openai_client(
         base_url=args.base_url,
         api_key_override=args.api_key,
@@ -219,7 +179,6 @@ async def run_batched_generation(args) -> None:
 
     logger.info(f"Generating responses for {len(rows)} prompts...")
 
-    # Build messages with system prompts and collect per-row tools
     messages = []
     tools_list = []
     for row in rows:
@@ -240,7 +199,6 @@ async def run_batched_generation(args) -> None:
         tools=tools_list,
     )
 
-    # Split: rows with follow-up vs. complete
     results = []
     rows_with_followup = []
     dropped_first_response = 0
@@ -288,8 +246,7 @@ async def run_batched_generation(args) -> None:
                 logger.warning(f"Row {idx}: follow-up failed, saving first response only")
             results.append(_generation_record(row, first_response, args, initial_msg, followup_response))
 
-    # A follow-up failure still records the first response, so an empty result set means every
-    # pending row failed its first request.
+    # A follow-up failure still records the first response, so an empty result means every first request failed.
     if dropped_first_response:
         logger.warning(
             f"Dropped {dropped_first_response} of {len(rows)} pending row(s) whose first request "

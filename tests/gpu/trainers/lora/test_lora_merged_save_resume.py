@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Test: a ``merge_expert_lora_on_save`` checkpoint serves AND resumes exactly (tiny MoE, 2 ranks).
-
-The merged-resume body (``tests/common/merged_resume_e2e.py``, whose docstring lists the four phases) on
-each family of :data:`~tests.common.tiny_models.TINY_MOE_FAMILIES`, expert-only and mixed adapters, at
-``--ep-size 2``, at ``--ep-size 1`` (DTensor experts) and under EP+CP (``--cp-size 2``). The core rows run
-the per-expert unfused (Qwen3-MoE) and interleaved fused (GptOss, with attention sinks) expert layouts;
-``tests/cpu/conventions/test_tiny_family_roster.py`` holds the rows to the registry.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family qwen3_moe --adapters mixed --ep-size 2
-"""
+"""A ``merge_expert_lora_on_save`` checkpoint serves and resumes exactly, on each tiny MoE family; body and phases in
+``tests/common/merged_resume_e2e.py``."""
 
 from tests.common.harness import gpu_test_main
 from tests.common.merged_resume_e2e import WORLD_SIZE, merged_resume_parser, run_merged_resume

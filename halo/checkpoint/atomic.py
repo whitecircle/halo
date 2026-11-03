@@ -1,5 +1,4 @@
-"""Checkpoint-file writes under ordinary umask permissions, safetensors files included, staged and durably
-published, and the staged directory publish of a tool that may be replacing the only copy of its input."""
+"""Staged, durably published checkpoint-file writes under umask permissions, and staged directory publishes."""
 
 import errno
 import os
@@ -15,8 +14,7 @@ import torch
 from safetensors.torch import save_file
 
 _FILE_STAGING_SUFFIX = ".tmp"
-# A complete file held off its published name, as ``.<name>.uncommitted``, until the rest of its checkpoint is
-# on disk.
+# A complete file waits as ``.<name>.uncommitted`` until the rest of its checkpoint is on disk.
 WITHHELD_FILE_SUFFIX = ".uncommitted"
 # A staged directory publish builds beside the target and swaps in; a failed swap prints these paths.
 PUBLISH_STAGING_SUFFIX = ".halo-staging"
@@ -32,27 +30,19 @@ def create_staged_file(directory: str | Path, filename: str) -> Path:
 
 
 def is_atomic_staging_file(name: str) -> bool:
-    """Whether ``name`` is an unpublished stage a crash left: one :func:`create_staged_file` made, or a
-    withheld file (:data:`WITHHELD_FILE_SUFFIX`)."""
+    """Whether ``name`` is an unpublished stage a crash left, from :func:`create_staged_file` or a withheld file."""
     return name.startswith(".") and name.endswith((_FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX))
 
 
 def _is_same_entry(path: str | Path, other: str | Path) -> bool:
-    """Whether ``path`` and ``other`` name one directory entry, however their directories are reached (a symlink
-    or a bind mount), rather than two links to one file."""
+    """Whether two paths name one directory entry, however their directories are reached, not two links to a file."""
     path, other = Path(path), Path(other)
     return path.name == other.name and os.path.samefile(path.parent, other.parent)
 
 
 def link_or_copy_file(source: str | Path, destination: str | Path) -> None:
-    """Hard-link ``source`` to ``destination``, or copy it with its mode and times where the filesystem refuses
-    links, so the copy reads like the link would.
-
-    An existing ``destination`` is replaced, never written through: it may be a link to another file.
-
-    Raises:
-        ValueError: ``destination`` is the entry holding ``source``'s data, which replacing it would delete.
-    """
+    """Hard-link, or copy with mode and times where links are refused; ``destination`` is replaced, never written
+    through, and refused when it is the entry holding ``source``'s data."""
     if os.path.lexists(destination) and _is_same_entry(os.path.realpath(source), destination):
         raise ValueError(
             f"{destination} names {source} itself: replacing it would delete the only copy. Write to a "
@@ -86,11 +76,7 @@ def publish_staged_file(staged: str | Path, destination: str | Path) -> None:
 
 @contextmanager
 def staged_file(directory: str | Path, filename: str, *, durable: bool = True) -> Iterator[Path]:
-    """Yield an exclusive staged sibling of ``directory/filename``, published there on a clean exit.
-
-    ``durable`` publishes through :func:`publish_staged_file`; without it the rename alone. The stage
-    never outlives the block.
-    """
+    """Yield an exclusive staged sibling, published on a clean exit (``durable`` adds fsyncs); dies with the block."""
     staged = create_staged_file(directory, filename)
     try:
         yield staged
@@ -106,11 +92,7 @@ def staged_file(directory: str | Path, filename: str, *, durable: bool = True) -
 def atomic_torch_save(
     path: str, payload: Callable[[], object], previous: str | None = None, *, pickle_module=pickle
 ) -> None:
-    """Durably publish ``payload()`` at ``path``, hard-linking ``previous`` instead where it exists.
-
-    The payload stays lazy so an unchanged file is not materialized again; ``pickle_module`` is
-    ``torch.save``'s.
-    """
+    """Durably publish ``payload()`` at ``path``, hard-linking ``previous`` where it exists, hence the lazy payload."""
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with staged_file(destination.parent, destination.name) as staged:
@@ -121,13 +103,8 @@ def atomic_torch_save(
 
 
 def apply_umask_mode(path: str | Path) -> None:
-    """Give the file ``path``, or every ``*.safetensors`` directly under ``path``, a directory its save owns
-    whole, the mode a new file there gets: safetensors, and the ``save_pretrained`` writers over it, create
-    theirs ``0600``.
-
-    The mode is read off a probe file, so the umask and any default ACL apply without the process-wide,
-    thread-racy ``os.umask`` swap.
-    """
+    """Give ``path``, or every ``*.safetensors`` directly under it, the mode a new file there gets (safetensors creates
+    ``0600``). Read off a probe file, so umask and default ACLs apply without the thread-racy ``os.umask`` swap."""
     path = Path(path)
     files = sorted(path.glob("*.safetensors")) if path.is_dir() else [path]
     if not files:
@@ -148,12 +125,8 @@ def save_safetensors_file(tensors: dict[str, torch.Tensor], path: str | Path, *,
 
 
 def clear_staging_path(target: str | os.PathLike, suffix: str = PUBLISH_STAGING_SUFFIX) -> str:
-    """``target`` + ``suffix`` (:data:`PUBLISH_STAGING_SUFFIX` or :data:`DISPLACED_SUFFIX`), cleared of what
-    an earlier run left there.
-
-    Found at the start of a run it belongs to a run that failed before its swap, so it is never the only
-    copy; left after a failed swap it is, and the caller must name it in its error and keep it.
-    """
+    """``target`` + ``suffix``, cleared of what an earlier run left. Found at run start that is never the only copy;
+    left by a failed swap it is, and the caller must name it in its error and keep it."""
     path = f"{os.fspath(target)}{suffix}"
     shutil.rmtree(path, ignore_errors=True)
     return path

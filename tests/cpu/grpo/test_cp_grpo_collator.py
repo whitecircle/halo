@@ -60,7 +60,6 @@ def test_cp_rows_keep_completion_targets_and_reference_in_full_row_positions():
     torch.testing.assert_close(
         batch[REF_PER_TOKEN_LOGPS_COLUMN][0], torch.tensor([0.0, 0.0, -1.0, -2.0, -3.0, 0, 0, 0])
     )
-    # The causal shift predicts each completion token from the position immediately before it.
     shifted_targets = batch["labels"][:, 1:]
     shifted_refs = batch[REF_PER_TOKEN_LOGPS_COLUMN][:, 1:]
     torch.testing.assert_close(shifted_refs[shifted_targets != -100], torch.tensor([-1.0, -2.0, -3.0, -4.0]))

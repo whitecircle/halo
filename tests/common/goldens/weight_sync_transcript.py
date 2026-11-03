@@ -1,9 +1,6 @@
-"""Weight-sync request-transcript golden: every HTTP request each engine's client sends through its public
-lifecycle, step by step, in scenarios that succeed and that fail at each step, plus what each step puts on
-the NCCL wire, does to the local group, and leaves registered at exit. A request is recorded as it leaves
-the client (route, query, body, timeout, retrying session or single shot, retry policy) and counted where
-the fake engine receives it, so a retry shows as a second receipt.
-"""
+"""Weight-sync request-transcript golden: every HTTP request each engine's client sends through its public lifecycle,
+step by step. Recorded leaving the client and counted where the fake engine receives it, so a retry shows as a second
+receipt."""
 
 from __future__ import annotations
 
@@ -44,8 +41,8 @@ DEVICE = "cpu"
 _RETRY_DEFAULTS = Retry()
 _RETRY_FIELDS = tuple(inspect.signature(Retry).parameters)
 
-# (name, dtype, shape) per tensor, pushed in order. The MoE payload puts a chunk boundary between the
-# halves of the MLA pair SGLang's loader fuses, and fused 3D experts beside an fp32 router bias.
+# (name, dtype, shape) per tensor. The MoE payload puts a chunk boundary between the halves of SGLang's fused MLA pair,
+# and fused 3D experts beside an fp32 router bias.
 PAYLOADS = {
     "single": (("model.norm.weight", torch.bfloat16, (64,)),),
     "dense": (
@@ -76,7 +73,6 @@ PAYLOADS = {
 }
 
 
-# How the trainer-side group formation goes (:class:`_Transport`).
 Formation = Literal["ok", "fail", "block"]
 
 
@@ -100,8 +96,6 @@ class _Event:
 
 
 class _Communicator:
-    """The vLLM client's NCCL communicator: carries its device and reports its abort."""
-
     def __init__(self, transport: _Transport, device):
         self.device = torch.device(device)
         self.aborted = False
@@ -113,12 +107,8 @@ class _Communicator:
 
 
 class _Transport:
-    """The NCCL half of one client: forms its group as ``formation`` says and records what reaches it.
-
-    ``ok`` forms it. ``fail`` raises once ``engine_asked_to_join`` returns, as a formation failing after
-    the engine dialed in, so the record does not race that request. ``block`` waits for :meth:`release`,
-    as an init whose peer never joins, then raises.
-    """
+    """One client's NCCL half: forms its group per ``formation`` and records what reaches it. ``fail`` raises once
+    ``engine_asked_to_join`` returns so the record does not race; ``block`` waits for :meth:`release`, then raises."""
 
     def __init__(self, formation: Formation, engine_asked_to_join: Callable[[], None]):
         self.formation = formation
@@ -184,8 +174,8 @@ def _sglang_transport(transport: _Transport) -> list:
 
 @dataclasses.dataclass(frozen=True)
 class Engine:
-    """One engine's client, the patches that put its transport on the CPU, and the routes a scenario
-    scripts failures on."""
+    """One engine's client, the patches putting its transport on the CPU, and the routes a scenario scripts failures
+    on."""
 
     client_class: type[WeightSyncClientBase]
     transport_patches: Callable[[_Transport], list]
@@ -242,11 +232,7 @@ def _fail_second_declaration(engine: Engine, server: FakeEngineServer) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class Scenario:
-    """``steps``, each a :class:`Driver` method, run in order whatever each one raises, pushing ``payload``.
-
-    ``script`` sets the server's failures, ``formation`` how the trainer-side group forms
-    (:class:`_Transport`), and ``formation_thread_fails`` fails the start of that formation's thread.
-    """
+    """``steps``, each a :class:`Driver` method run in order whatever each raises, pushing ``payload``."""
 
     key: str
     payload: str
@@ -299,8 +285,6 @@ class _Call:
 
 
 class _RequestRecorder:
-    """Records every ``requests`` call as it leaves the client, and stamps the request with its index."""
-
     def __init__(self):
         self.calls: list[_Call] = []
         self._lock = threading.Lock()
@@ -325,7 +309,7 @@ class _RequestRecorder:
 
 
 def _normalized(value, server: FakeEngineServer):
-    """``value`` with what the host picks written as what it is: the group port, the server's address."""
+    """``value`` with host-picked values written as what they are: the group port, the server's address."""
     if isinstance(value, dict):
         return {
             key: "<group port>" if key == "master_port" else _normalized(item, server) for key, item in value.items()
@@ -369,9 +353,8 @@ def _request_line(call_id: int, call: _Call, client: WeightSyncClientBase | None
 
 @contextmanager
 def _failing_formation_thread(engine_asked_to_join: Callable[[], None]) -> Iterator[None]:
-    """Fail the start of the second thread the caller starts: an init starts its request to the engine
-    first, then its trainer-side group formation. It fails once ``engine_asked_to_join`` returns, so the
-    record does not race the engine's request."""
+    """Fail the start of the second thread the caller starts (init's group formation) once ``engine_asked_to_join``
+    returns."""
     caller = threading.current_thread()
     start = threading.Thread.start
     started = 0
@@ -390,15 +373,14 @@ def _failing_formation_thread(engine_asked_to_join: Callable[[], None]) -> Itera
 
 
 class Driver:
-    """The client's public lifecycle against one fake server: one method per scenario step, then the
-    process the client runs in."""
+    """The client's public lifecycle against one fake server: one method per scenario step."""
 
     def __init__(self, engine: Engine, server: FakeEngineServer, scenario: Scenario):
         self.engine = engine
         self.server = server
         self.scenario = scenario
         self.client: WeightSyncClientBase | None = None
-        # (fn, args, kwargs) per at-exit hook a weight-sync client registered, in order.
+        # (fn, args, kwargs) per at-exit hook a client registered, in order.
         self.at_exit_hooks: list[tuple[Callable, tuple, dict]] = []
 
     def construct(self) -> None:
@@ -427,13 +409,12 @@ class Driver:
             fn(*args, **kwargs)
 
     def engine_asked_to_join(self) -> None:
-        """Block until the engine received the client's request to join the group."""
         self.server.wait_for_request(f"POST {self.engine.init_route}")
 
     @contextmanager
     def process(self, transport: _Transport) -> Iterator[None]:
-        """The client's process: its transport on the CPU, its at-exit hooks captured, the chunk budget at
-        :data:`CHUNK_BYTES`, and no override of the group address or its listener in the environment."""
+        """Transport on the CPU, at-exit hooks captured, the chunk budget at :data:`CHUNK_BYTES`, no group-address
+        override in the env."""
         register_at_exit, unregister_at_exit = atexit.register, atexit.unregister
 
         def registers_a_client(fn) -> bool:
@@ -468,8 +449,7 @@ class Driver:
 
 
 def scenario_record(engine_key: str, scenario: Scenario) -> list[dict]:
-    """Run ``scenario`` against ``engine_key``'s fake server: one record per step, with its outcome (``ok``
-    or the type it raised), its requests, its transport events and the at-exit hooks held after it."""
+    """Run ``scenario``: one record per step with its outcome, requests, transport events and at-exit hooks held."""
     engine = ENGINES[engine_key]
     server = fake_server_class(engine.client_class)()
     driver = Driver(engine, server, scenario)
@@ -484,7 +464,7 @@ def scenario_record(engine_key: str, scenario: Scenario) -> list[dict]:
                 try:
                     getattr(driver, step)()
                     outcome = "ok"
-                except Exception as error:  # the outcome is part of the record
+                except Exception as error:
                     outcome = type(error).__name__
                 calls = range(first_call, len(recorder.calls))
                 record.append(
@@ -503,7 +483,7 @@ def scenario_record(engine_key: str, scenario: Scenario) -> list[dict]:
 
 
 def render_golden() -> str:
-    # The scenarios that fail on purpose log their failures, which the record already holds as outcomes.
+    # Scenarios that fail on purpose log failures the record already holds as outcomes.
     previous = logging.root.manager.disable
     logging.disable(logging.ERROR)
     try:

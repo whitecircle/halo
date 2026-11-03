@@ -1,9 +1,4 @@
-"""The per-case records the EP and CP harnesses compare, and the verdict pieces every harness shares: bit-level
-equality, every kind of difference named, a raising case recorded as what it raised, accepted deltas kept apart
-and a negative control that raised counted as unseen.
-
-Run: python tests/cpu/parallelism/test_tensor_records.py
-"""
+"""The per-case records the EP and CP harnesses compare, and the verdict pieces every harness shares."""
 
 import pytest
 import torch

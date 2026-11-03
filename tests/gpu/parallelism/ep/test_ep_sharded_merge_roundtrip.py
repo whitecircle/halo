@@ -1,22 +1,9 @@
 #!/usr/bin/env python
-"""``merge_ep_shards.py`` on a REAL per-rank EP save must reproduce the gathered save bit for bit.
+"""``merge_ep_shards.py`` on a real per-rank EP save reproduces the gathered save bit for bit, on tiny models without
+DeepEP dispatch.
 
-The sharded EP layout (``save_sharded_ep: true``) is loadable only through the merge, and the CPU
-suite pins that merge against synthetic shard dicts and a single-process gather. This
-is the end-to-end pin: on 2 GPUs, each family's tiny model is EP-patched at ``ep_size=2``, saved
-BOTH ways (``save_ep_gathered_checkpoint`` / ``save_ep_sharded_checkpoint``), the per-rank shards
-are merged by the real script, and the merged directory must be key-and-tensor identical to the
-gathered one — and load back through the toolkit's verified ``from_pretrained``. Any drift between the
-merge and the gather around the family's one ``ExpertLayout`` (a transpose, a lost re-interleave, a
-hub rename applied on one side only, a balancing tensor cast on one side only) shows up as a tensor
-diff here. A model whose names the gathered save reverts to a namespace the
-key-by-key merge cannot respell must have its sharded save refused instead, on every rank.
-
-Hermetic: tiny random-init models, no download, and no DeepEP — the transport buffer is built at
-the first dispatch, which a save never issues.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_sharded_merge_roundtrip.py
+A model whose names the gather reverts to a namespace the key-by-key merge can't respell has its sharded save refused
+on every rank.
 """
 
 from __future__ import annotations
@@ -41,18 +28,14 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, t
 EP_SIZE = 2
 
 _ROSTER = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
-# One family per expert layout the merge has to invert: interleaved fused (GptOss, stored
-# de-interleaved under grouped GEMM), per-expert (Qwen3), fused (Qwen3.5), per-expert under the
-# family's own key renames (Laguna), fused with tied embeddings (Cohere2), and a fused text tower
-# inside a composite VLM wrapper (Qwen3.5). Every family here is one the sharded save admits.
+# One family per expert layout the merge must invert: interleaved fused, per-expert, fused, per-expert under key
+# renames, fused with tied embeddings, and a fused text tower in a composite VLM.
 _FAMILIES = ("gpt_oss", "qwen3_moe", "qwen3_5_moe_text", "laguna", "cohere2_moe", "qwen3_5_moe")
-# Whose gathered save writes a namespace the merge cannot respell: a vendor one (DeepSeek-V4, GLM-5
-# Next) and a SigLIP tower's ``vision_model`` level (Command A+).
+# A vendor namespace (DeepSeek-V4, GLM-5 Next) and a SigLIP tower's ``vision_model`` level (Command A+).
 _REFUSED = ("deepseek_v4", "glm5_next", "cohere2_vision")
 
 
 def _ep_patched(family: str, device: torch.device) -> torch.nn.Module:
-    """The family's tiny model, identically initialized on every rank, EP-patched at ``EP_SIZE``."""
     torch.manual_seed(0)
     model = tiny_family_model(_ROSTER[family]).to(device=device, dtype=torch.bfloat16)
     config = EPConfig(
@@ -62,7 +45,6 @@ def _ep_patched(family: str, device: torch.device) -> torch.nn.Module:
 
 
 def _compare(merged_dir: str, gathered_dir: str) -> list[str]:
-    """Every key of the gathered save, at the same dtype and bytes, in the merged one — and nothing else."""
     merged, gathered = safetensors_state_dict(merged_dir), safetensors_state_dict(gathered_dir)
     problems = []
     if set(merged) != set(gathered):
@@ -96,8 +78,7 @@ def _roundtrip(family: str, root: str, device: torch.device, rank: int) -> list[
     merge_ep_shards(sharded_dir, merged_dir, verbose=False)
     problems = _compare(merged_dir, gathered_dir)
     try:
-        # The merged artifact must also be what the loaders consume: every key present, at the
-        # family's hub spelling, through the coverage gate that raises on anything missing.
+        # The merged artifact must also pass the coverage gate, which raises on anything missing.
         auto_load_model(merged_dir, dtype=torch.bfloat16)
     except Exception as exc:
         problems.append(f"merged checkpoint does not load: {type(exc).__name__}: {exc}")
@@ -113,8 +94,8 @@ def run(ctx) -> dict:
 
     checks = {}
     for family in _FAMILIES:
-        # Rank 0 alone reads back, so its verdict travels to the peers as data: a rank-0-only raise
-        # would leave them in the next family's collectives.
+        # Rank 0 alone reads back, so its verdict travels as data: a rank-0-only raise would leave peers in the next
+        # family's collectives.
         verdict = [_roundtrip(family, root, ctx.device, ctx.rank)]
         dist.broadcast_object_list(verdict, src=0)
         problems = verdict[0]

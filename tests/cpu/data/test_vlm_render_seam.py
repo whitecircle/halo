@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: every VLM render goes through one seam, with one call contract.
-
-``render_vlm_text`` exists because the chat-template call has two things that are easy to get wrong
-and invisible when they are: ``add_generation_prompt=False`` (a preference/reward side is a complete
-conversation, never a prompt awaiting a completion) and the ``tools`` branch, where ``is None`` and
-falsiness differ — a row declaring ``tools: []`` renders under a template branch that tests
-``tools is defined``. A path that re-spells ``processing_class.apply_chat_template(...)`` itself
-opts out of both, so the same conversation can tokenize differently in a preference pair than in the
-SFT run it was distilled from — with no shape anywhere to catch it.
-
-These tests pin the contract rather than the output text: a stub cannot express every template's
-reaction to a missing kwarg, but the kwargs the seam passes are exactly what a re-inlined call drops.
-
-Run: python tests/cpu/data/test_vlm_render_seam.py  (or pytest)
-"""
+"""Every VLM render goes through ``render_vlm_text``: ``add_generation_prompt=False``, and a ``tools`` branch where
+``is None`` and falsiness differ. A re-spelled call opts out of both, so one conversation can tokenize
+differently in a preference pair than in SFT. Pins the kwargs, which a stub can see."""
 
 import pytest
 from PIL import Image
@@ -74,9 +62,7 @@ def _seam_contract(processor):
 
 
 def test_the_preference_map_renders_through_the_seam():
-    """A VLM preference/reward row and a VLM SFT row must reach ``apply_chat_template`` identically —
-    the reward head scores a complete conversation, so a generation prompt appended to one side and
-    not the other is a silent difference in what the model is scored on."""
+    """The reward head scores a complete conversation, so a generation prompt on one side is a silent difference."""
     processor = _RecordingProcessor()
     contract = _seam_contract(processor)
 
@@ -91,8 +77,7 @@ def test_the_preference_map_renders_through_the_seam():
 
 
 def test_the_smpo_vlm_row_renders_through_the_seam(monkeypatch):
-    """SMPO's VLM row prep renders the prompt and each full side; both must take the same seam, or
-    its prefix-strip invariant compares two dialects of the same conversation."""
+    """Otherwise the prefix-strip invariant compares two dialects of one conversation."""
     processor = _RecordingProcessor()
     contract = _seam_contract(processor)
     monkeypatch.setattr("halo.data.pipeline.preferences.resolve_tokenizer", lambda _p: _RecordingTokenizer())
@@ -112,8 +97,7 @@ def test_the_smpo_vlm_row_renders_through_the_seam(monkeypatch):
 
 
 def test_the_seam_declares_tools_only_when_the_row_has_them():
-    """The discriminating half: an explicit ``tools=[]`` still declares the key, so a row whose tools
-    list is empty renders under the template's tool branch rather than its toolless one."""
+    """An explicit ``tools=[]`` still declares the key, so the row renders under the template's tool branch."""
     processor = _RecordingProcessor()
 
     render_vlm_text(processor, [{"role": "user", "content": "x"}], tools=[])

@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: every checkpoint conversion tool must REFUSE an input it cannot handle.
-
-These tools (``scripts/after_training`` plus the ``scripts/before_training`` converters) are the last
-stop before a checkpoint is served, and each failure mode here is silent — the tool prints success and
-exits 0 while the experts are gone:
-
-* **Per-rank EP sharded input.** The index filename is the ordinary one but every expert tensor is
-  one rank's partial slice under a ``.shard_N`` key. A ``from_pretrained``-based tool therefore sees
-  the real expert keys as MISSING, and transformers RANDOMLY INITIALIZES them with a warning rather
-  than an exception (``test_missing_keys_only_warn`` pins that premise). ``reset_sinks --in_place``
-  then overwrites the source, so the shards are unrecoverable.
-* **Wrong model family.** ``experts.gate_up_proj`` / ``experts.down_proj`` are spelled identically at
-  identical shapes across most of the roster, so ``unfuse_moe_experts`` must emit the projection
-  names the checkpoint's OWN family declares — LFM-2 reads ``w1``/``w3``/``w2``, not GLM-4's
-  ``gate_proj``/``up_proj``/``down_proj`` — and refuse a family that declares none.
-* **In-place output.** ``save_pretrained`` deletes the weight files it does not overwrite.
-* **Asymmetric key sets in a merge.** A tensor present in a later model but not the reference is
-  never visited and is dropped from the merged checkpoint.
-* **A reader that re-types the writer's shard pattern.** An index-less sharded save is reachable
-  only through the shard glob, so that glob is derived from the pattern the writer stamps; two
-  spellings drift into "no weights found" on a checkpoint that is perfectly intact.
-
-    python tests/cpu/checkpoint/test_after_training_input_guards.py
-"""
+"""Checkpoint conversion tools refuse inputs they cannot handle; each failure is silent, exit 0 with the experts
+gone. Missing keys only warn (``test_missing_keys_only_warn``)."""
 
 from __future__ import annotations
 
@@ -58,7 +36,6 @@ from tests.common.repo import REPO_ROOT
 
 
 def _write_ep_sharded_checkpoint(path, *, model_type="gpt_oss"):
-    """A per-rank EP-sharded save: experts under ``.shard_N`` keys, ``format: ep_sharded`` metadata."""
     os.makedirs(path, exist_ok=True)
     shards = {}
     for rank in range(2):
@@ -76,10 +53,7 @@ def _write_ep_sharded_checkpoint(path, *, model_type="gpt_oss"):
 
 
 def _write_gathered_checkpoint(path, tensors, *, model_type="qwen3_moe", config_extra=None):
-    """An ordinary gathered single-file checkpoint.
-
-    ``config_extra`` adds config fields a specific tool reads (e.g. ``moe_intermediate_size``).
-    """
+    """``config_extra`` adds config fields a specific tool reads."""
     os.makedirs(path, exist_ok=True)
     save_file(tensors, os.path.join(path, "model.safetensors"), metadata={"format": "pt"})
     with open(os.path.join(path, "config.json"), "w") as f:
@@ -87,7 +61,6 @@ def _write_gathered_checkpoint(path, tensors, *, model_type="qwen3_moe", config_
     return path
 
 
-# Fused expert tensors for a hidden=8 / moe_intermediate=3 MoE layer: gate_up [E, 2I, H], down [E, H, I].
 _FUSED_MOE_CONFIG = {"hidden_size": 8, "moe_intermediate_size": 3}
 
 
@@ -99,10 +72,8 @@ def _fused_moe_tensors(prefix="model.layers.0.mlp", num_experts=2):
 
 
 def _write_pp_per_node_checkpoint(path, *, model_type="qwen3_moe", complete=False):
-    """What one node's directory holds after a pipeline-parallel save on a non-shared output
-    filesystem: the WORLD-WIDE index (standard HF metadata, no format marker) beside this node's own
-    stage parts only. ``complete=True`` adds the other stage's part, as gathering the nodes' directories
-    into one would."""
+    """One node's directory after a PP save on a non-shared filesystem: the world-wide index beside this node's
+    parts only."""
     os.makedirs(path, exist_ok=True)
     parts = {
         "model-pp00000-of-00002-00001.safetensors": {"model.layers.0.mlp.experts.gate_up_proj": torch.randn(2, 6, 8)},
@@ -121,7 +92,6 @@ def _write_pp_per_node_checkpoint(path, *, model_type="qwen3_moe", complete=Fals
 
 
 def test_fixture_is_recognized_as_per_rank_sharded(tmp_path):
-    """Anti-vacuity: the guards below are only meaningful if the fixture really trips the detector."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep")
     assert is_ep_sharded_checkpoint(str(ep))
     assert not is_ep_sharded_checkpoint(str(_write_gathered_checkpoint(tmp_path / "ok", {"a": torch.zeros(2)})))
@@ -134,11 +104,8 @@ def test_reject_partial_checkpoint_raises_and_names_the_merge_scripts(tmp_path):
 
 
 def test_an_index_naming_absent_shards_is_refused_and_names_them(tmp_path):
-    """One node's directory from a PP save on a non-shared filesystem: the index is whole, the parts
-    are not. A ``from_pretrained``-based tool would random-initialize the other stage's layers; a
-    streaming one would die inside ``safe_open`` with its output directory already created. The
-    refusal must name the absent file and the merge-the-nodes fix, and a gathered (complete)
-    directory of the same shape must pass — the PP layout is loadable once every part is present."""
+    """A ``from_pretrained``-based tool would random-initialize the other stage's layers; a streaming one would die
+    inside ``safe_open``."""
     node = _write_pp_per_node_checkpoint(tmp_path / "node0")
     with pytest.raises(ValueError, match="does not hold") as excinfo:
         reject_partial_checkpoint(str(node))
@@ -166,8 +133,7 @@ def _convert(src, out):
 
 @pytest.mark.parametrize("tool", [_unfuse, _quantize, _convert], ids=["unfuse", "quantize", "convert_to_bf16"])
 def test_tools_refuse_a_per_node_pp_directory_before_writing(tmp_path, tool):
-    """Every tool's first read of the source goes through the completeness gate, ahead of its
-    ``os.makedirs`` — so the refusal leaves no half-made output for a pipeline to mistake for one."""
+    """The gate runs ahead of ``os.makedirs``, so the refusal leaves no half-made output."""
     node = _write_pp_per_node_checkpoint(tmp_path / "node0")
     out = tmp_path / "out"
     with pytest.raises(ValueError, match="does not hold"):
@@ -176,9 +142,8 @@ def test_tools_refuse_a_per_node_pp_directory_before_writing(tmp_path, tool):
 
 
 def test_reset_sinks_refuses_a_per_rank_sharded_checkpoint(tmp_path):
-    """Without the guard an ``--in_place`` run loads the dir via from_pretrained (no
-    ``model.safetensors`` to shortcut on), re-initializes the experts, and writes the result back
-    over the source shards."""
+    """Without the guard an ``--in_place`` run re-initializes the experts and writes the result over the source
+    shards."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep")
     before = sorted(os.listdir(ep))
     with pytest.raises(ValueError, match="per-rank sharded checkpoint"):
@@ -196,8 +161,7 @@ def test_convert_to_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path):
 
 
 def test_unfuse_moe_experts_emits_the_familys_own_projection_names(tmp_path):
-    """LFM-2's loader reads ``experts.{i}.w{1,3,2}.weight``. Emitting GLM-4's spelling instead exits 0
-    over keys nothing reads, and transformers then re-initializes the whole expert bank on load."""
+    """Emitting GLM-4's spelling exits 0 over keys nothing reads, and the whole expert bank re-initializes on load."""
     tensors = _fused_moe_tensors()
     src = _write_gathered_checkpoint(tmp_path / "lfm2", tensors, model_type="lfm2_moe", config_extra=_FUSED_MOE_CONFIG)
     out = tmp_path / "out"
@@ -214,8 +178,6 @@ def test_unfuse_moe_experts_emits_the_familys_own_projection_names(tmp_path):
 
 
 def test_unfuse_moe_experts_emits_glm4_spelling_for_glm4(tmp_path):
-    """Anti-over-rejection, and the other half of the derivation: the family that DOES declare
-    gate/up/down still gets it."""
     src = _write_gathered_checkpoint(
         tmp_path / "glm4", _fused_moe_tensors(), model_type="glm4_moe_lite", config_extra=_FUSED_MOE_CONFIG
     )
@@ -229,10 +191,8 @@ def test_unfuse_moe_experts_emits_glm4_spelling_for_glm4(tmp_path):
 
 
 def test_unfuse_moe_experts_converts_a_fused_qwen3_moe_checkpoint(tmp_path):
-    """Qwen3 MoE's hub layout IS per-expert (transformers fuses on load and reverts on save), and a
-    FUSED one is reachable — with ``use_grouped_gemm: false`` and no EP the gathered save writes the raw
-    module state dict, never routing through ``save_pretrained``'s revert. Refusing it would turn away
-    exactly the checkpoint this tool exists to repair."""
+    """Reachable with ``use_grouped_gemm: false`` and no EP, where the gathered save skips ``save_pretrained``'s
+    revert; this is what the tool repairs."""
     src = _write_gathered_checkpoint(
         tmp_path / "qwen3", _fused_moe_tensors(), model_type="qwen3_moe", config_extra=_FUSED_MOE_CONFIG
     )
@@ -247,11 +207,8 @@ def test_unfuse_moe_experts_converts_a_fused_qwen3_moe_checkpoint(tmp_path):
 
 @pytest.mark.parametrize("model_type", ["mistral4", "zaya", "step3p7"])
 def test_unfuse_moe_experts_refuses_a_fused_only_family(tmp_path, model_type):
-    """Mistral4, Gemma4 and Zaya register no per-expert converter with transformers at all and serve
-    from the fused halves, so a per-expert rewrite produces keys their loaders never read — and their
-    fused tensors carry these very names at these very shapes, so nothing else would catch it.
-    Step-3.7's hub layout is per-layer fused-but-split (``moe.gate_proj [E, M, H]``), which is not a
-    per-expert spelling either — the same refusal applies."""
+    """These families serve from fused tensors with these same names and shapes, so a per-expert rewrite produces
+    keys their loaders never read."""
     src = _write_gathered_checkpoint(
         tmp_path / model_type, _fused_moe_tensors(), model_type=model_type, config_extra=_FUSED_MOE_CONFIG
     )
@@ -262,8 +219,7 @@ def test_unfuse_moe_experts_refuses_a_fused_only_family(tmp_path, model_type):
 
 
 def test_unfuse_moe_experts_converts_a_qwen3_5_checkpoint(tmp_path):
-    """Qwen3.5/3.6's hub layout IS per-expert — transformers fuses it on load and reverts on save — so a
-    gathered save that bypassed that revert is exactly what this script exists to repair."""
+    """A gathered save that bypassed the revert is what this script exists to repair."""
     src = _write_gathered_checkpoint(
         tmp_path / "qwen35", _fused_moe_tensors(), model_type="qwen3_5_moe", config_extra=_FUSED_MOE_CONFIG
     )
@@ -277,9 +233,7 @@ def test_unfuse_moe_experts_converts_a_qwen3_5_checkpoint(tmp_path):
 
 
 def test_unfuse_moe_experts_converts_a_glm5_next_composite_checkpoint(tmp_path):
-    """GLM-5 Next's hub layout is per-expert under the composite wrapper's ``model.language_model``
-    tree, with the MoE dimensions on ``text_config``: the EP-gathered artifact is fused, and the
-    split must land under the family's ``gate/up/down_proj`` names at the wrapper prefix."""
+    """The split must land under the family's ``gate/up/down_proj`` names at the wrapper prefix."""
     prefix = "model.language_model.layers.1.mlp"
     src = _write_gathered_checkpoint(
         tmp_path / "glm5",
@@ -297,8 +251,7 @@ def test_unfuse_moe_experts_converts_a_glm5_next_composite_checkpoint(tmp_path):
 
 
 def test_unfuse_moe_experts_writes_deepseek_v4_under_its_own_w_names(tmp_path):
-    """The layout is the checkpoint family's, not the roster's most common: DeepSeek-V4 stores
-    ``w1``/``w3``/``w2``, and emitting GLM-4's spelling would re-initialize the whole expert bank."""
+    """Emitting GLM-4's spelling would re-initialize the whole expert bank."""
     src = _write_gathered_checkpoint(
         tmp_path / "dsv4", _fused_moe_tensors(), model_type="deepseek_v4", config_extra=_FUSED_MOE_CONFIG
     )
@@ -313,7 +266,6 @@ def test_unfuse_moe_experts_writes_deepseek_v4_under_its_own_w_names(tmp_path):
 
 
 def test_unfuse_moe_experts_refuses_an_unregistered_model_type(tmp_path):
-    """No registered family claims it, so nothing declares what its loader reads."""
     src = _write_gathered_checkpoint(
         tmp_path / "unknown", _fused_moe_tensors(), model_type="some_future_moe", config_extra=_FUSED_MOE_CONFIG
     )
@@ -322,8 +274,8 @@ def test_unfuse_moe_experts_refuses_an_unregistered_model_type(tmp_path):
 
 
 def test_unfuse_moe_experts_names_the_missing_config(tmp_path):
-    """Without config.json the family is unresolvable; reporting model_type '' as an unclaimed family
-    sends the user looking for a roster entry instead of the missing file."""
+    """Reporting model_type '' as an unclaimed family sends the user looking for a roster entry instead of the
+    missing file."""
     src = tmp_path / "no_config"
     os.makedirs(src)
     save_file(_fused_moe_tensors(), os.path.join(src, "model.safetensors"), metadata={"format": "pt"})
@@ -332,17 +284,14 @@ def test_unfuse_moe_experts_names_the_missing_config(tmp_path):
 
 
 def test_unfuse_moe_experts_diagnoses_a_per_rank_sharded_input_as_one(tmp_path):
-    """Ordering: the sharded-input check owns this diagnosis and names the merge scripts. Resolving the
-    family first would answer "no per-expert hub layout" for a checkpoint whose real problem is that every
-    expert tensor is one rank's slice."""
+    """Resolving the family first would answer "no per-expert hub layout" for a per-rank input."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep", model_type="qwen3_5_moe")
     with pytest.raises(ValueError, match="per-rank sharded checkpoint"):
         unfuse_checkpoint(str(ep), str(tmp_path / "out"))
 
 
 def test_unfuse_moe_experts_copies_through_an_already_per_expert_checkpoint(tmp_path):
-    """Ordering, other half: a checkpoint with nothing fused needs no layout at all, so the family gate
-    must not refuse a no-op — including for a family that has no per-expert hub layout to resolve."""
+    """A checkpoint with nothing fused needs no layout, so the family gate must not refuse a no-op."""
     tensors = {"model.layers.0.mlp.experts.0.gate_proj.weight": torch.randn(3, 8)}
     src = _write_gathered_checkpoint(
         tmp_path / "already", tensors, model_type="mistral4", config_extra=_FUSED_MOE_CONFIG
@@ -353,14 +302,8 @@ def test_unfuse_moe_experts_copies_through_an_already_per_expert_checkpoint(tmp_
 
 
 def test_unfuse_moe_experts_convertible_set_is_the_declared_per_expert_families():
-    """Anti-vacuity for the refusals: the advertised set has to be the families whose hub checkpoint
-    really is per-expert — the two declaration paths (base-gather split, hub-layout declaration) unioned
-    from the classes, never a list restated in the script.
-
-    Membership is checked against transformers' own converter registry, which is what decides the names
-    ``from_pretrained`` reads: a family with a ``mlp.experts.*.<proj>`` source pattern is convertible,
-    and one with no converter at all serves from whatever its module layout is.
-    """
+    """Membership is checked against transformers' own converter registry, which decides the names
+    ``from_pretrained`` reads."""
     convertible = set(per_expert_hub_model_types())
     assert {
         "glm4_moe_lite",
@@ -378,9 +321,7 @@ def test_unfuse_moe_experts_convertible_set_is_the_declared_per_expert_families(
 
 
 def test_convert_mistral4_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, monkeypatch):
-    """A converter that reads ``model.safetensors.index.json`` itself: without the refusal an
-    EP-sharded save is streamed through and re-indexed as if each partial expert slice were the whole
-    tensor."""
+    """Without the refusal each partial expert slice is streamed through and re-indexed as the whole tensor."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep", model_type="mistral4")
     before = sorted(os.listdir(ep))
     out = tmp_path / "out"
@@ -392,8 +333,7 @@ def test_convert_mistral4_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, m
 
 
 def test_convert_glm5_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, monkeypatch):
-    """Same streaming class as the Mistral4 converter: without the refusal, each rank's partial
-    expert slice would be block-dequantized and re-indexed as if it were the whole tensor."""
+    """Without the refusal each partial expert slice is block-dequantized and re-indexed as the whole tensor."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep", model_type="glm5_next")
     before = sorted(os.listdir(ep))
     out = tmp_path / "out"
@@ -405,9 +345,8 @@ def test_convert_glm5_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, monke
 
 
 def test_convert_deepseek_v4_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path, monkeypatch):
-    """``--model_id`` also accepts a local directory, and ``from_pretrained`` cannot tell a per-rank
-    EP save from a whole one: it reports the real expert keys as MISSING and randomly initializes
-    them, warning only, so the converter would write a ~580 GB checkpoint with no experts in it."""
+    """``from_pretrained`` cannot tell a per-rank save from a whole one, so the converter would write ~580 GB with
+    no experts in it."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep", model_type="deepseek_v4")
     before = sorted(os.listdir(ep))
     out = tmp_path / "out"
@@ -419,9 +358,8 @@ def test_convert_deepseek_v4_bf16_refuses_a_per_rank_sharded_checkpoint(tmp_path
 
 
 def test_convert_deepseek_v4_bf16_refuses_an_in_place_conversion(tmp_path, monkeypatch):
-    """``save_pretrained`` clears the ``model*.safetensors`` it does not overwrite, so pointing
-    ``--output_dir`` at ``--model_id`` destroys the FP8 source the run is still reading its tokenizer
-    from — 100+ GiB, and the dequantized result is not a substitute for it."""
+    """``save_pretrained`` clears the ``model*.safetensors`` it does not overwrite, destroying the FP8 source the
+    run still reads."""
     src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="deepseek_v4")
     before = sorted(os.listdir(src))
     monkeypatch.setattr(sys, "argv", ["convert_deepseek_v4_bf16.py", "--model_id", str(src), "--output_dir", str(src)])
@@ -431,9 +369,8 @@ def test_convert_deepseek_v4_bf16_refuses_an_in_place_conversion(tmp_path, monke
 
 
 def test_convert_to_bf16_refuses_an_in_place_conversion(tmp_path, monkeypatch):
-    """``save_pretrained``
-    clears the ``model*.safetensors`` it does not overwrite, so an in-place run destroys the source
-    checkpoint it is still reading — the same reason every sibling converter refuses it."""
+    """``save_pretrained`` clears the ``model*.safetensors`` it does not overwrite, destroying the source it is
+    still reading."""
     src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="qwen3_moe")
     before = sorted(os.listdir(src))
     with pytest.raises(ValueError, match="input and output directory are the same"):
@@ -442,10 +379,8 @@ def test_convert_to_bf16_refuses_an_in_place_conversion(tmp_path, monkeypatch):
 
 
 def test_merge_ep_shards_refuses_a_sibling_adapter(tmp_path):
-    """An adapter beside the shards must stop the merge BEFORE it writes: the aux copy carries
-    ``adapter_config.json`` across but skips every weight file, so the merged directory would claim
-    an adapter whose weights are missing — and the merge cannot tell whether the shards already hold
-    the delta."""
+    """The aux copy carries ``adapter_config.json`` but no weights, and the merge cannot tell whether the shards
+    already hold the delta."""
     src = _write_ep_sharded_checkpoint(tmp_path / "ep")
     adapter = {"base_model.model.layers.0.q_proj.lora_A.weight": torch.zeros(2, 8)}
     save_file(adapter, os.path.join(src, "adapter_model.safetensors"))
@@ -466,12 +401,7 @@ def test_detect_model_type_reads_config_and_tolerates_absence(tmp_path):
 
 
 def test_index_less_shards_are_found_under_the_writers_own_pattern(tmp_path):
-    """The reader's fallback glob must follow ``SAFETENSORS_SHARD_PATTERN``, not a second spelling.
-
-    Written by the toolkit's own writer, then stripped of its index — the resolution path where the
-    glob is the only thing left. A reader that re-types the pattern reports "no weights found" for a
-    real checkpoint the moment the two spellings drift.
-    """
+    """A reader that re-types the pattern reports "no weights found" for a real checkpoint once the spellings drift."""
     state = {f"model.layers.{i}.weight": torch.zeros(512) for i in range(3)}
     writer = StreamingShardWriter(str(tmp_path), "1KB", enabled=True)
     for key, tensor in state.items():
@@ -494,17 +424,14 @@ def test_merge_peft_adapters_refuses_in_place_output(tmp_path):
 
 
 def _merge(*, models, output_dir):
-    """A linear merge with only the knobs linear consumes — an unused knob raises up front.
-
-    ``allow_missing_tokenizer``: these fixtures are bare weight directories, and the merge otherwise
-    refuses a tokenizer-less artifact — a separate contract, covered in test_after_training_tool_guards.
-    """
+    """``allow_missing_tokenizer``: these fixtures are bare weight directories; that contract is in
+    test_after_training_tool_guards."""
     merge_models(models, output_dir, "linear", dtype="bfloat16", verbose=False, allow_missing_tokenizer=True)
 
 
 def test_merge_models_refuses_asymmetric_key_sets(tmp_path):
-    """A tensor only model B has is never visited by the reference-keyed loop — without this guard it
-    is dropped from the merged checkpoint with no warning at all."""
+    """A tensor only model B has is never visited by the reference-keyed loop, so it would be dropped with no
+    warning."""
     shared = {"model.embed_tokens.weight": torch.zeros(4, 8)}
     a = _write_gathered_checkpoint(tmp_path / "a", dict(shared))
     b = _write_gathered_checkpoint(tmp_path / "b", {**shared, "lm_head.weight": torch.ones(4, 8)})
@@ -513,7 +440,6 @@ def test_merge_models_refuses_asymmetric_key_sets(tmp_path):
 
 
 def test_merge_models_accepts_symmetric_key_sets(tmp_path):
-    """Anti-over-rejection: identical key sets must still merge, and average correctly."""
     a = _write_gathered_checkpoint(tmp_path / "a", {"w": torch.zeros(4, 8)})
     b = _write_gathered_checkpoint(tmp_path / "b", {"w": torch.ones(4, 8) * 2})
     out = tmp_path / "out"
@@ -523,7 +449,6 @@ def test_merge_models_accepts_symmetric_key_sets(tmp_path):
 
 
 def _write_truncated_checkpoint(path):
-    """A tiny causal-LM checkpoint missing every layer-1 tensor; returns (path, dropped_keys)."""
     config = AutoConfig.for_model(
         "qwen3",
         hidden_size=16,
@@ -545,28 +470,22 @@ def _write_truncated_checkpoint(path):
 
 
 def test_missing_keys_only_warn(tmp_path):
-    """The premise behind every gate above: transformers does NOT raise on missing checkpoint keys.
-
-    If a future transformers starts raising, these guards become belt-and-braces rather than the only
-    thing standing between a sharded input and randomly initialized experts — and this test says so.
-    """
+    """The premise behind every gate above: transformers does not raise on missing checkpoint keys."""
     src, dropped = _write_truncated_checkpoint(tmp_path / "trunc")
     assert dropped, "fixture dropped no layer-1 tensors"
 
-    reloaded = AutoModelForCausalLM.from_pretrained(src)  # must not raise
+    reloaded = AutoModelForCausalLM.from_pretrained(src)
     live = reloaded.state_dict()
     assert all(k in live for k in dropped)
     assert not any(live[k].is_meta for k in dropped), "missing keys were left on meta, not re-initialized"
 
 
 def test_patch_vocab_refuses_a_truncated_checkpoint(tmp_path, monkeypatch):
-    """patch_vocab loads through the coverage gate (``auto_load_model``): a truncated source would
-    otherwise be re-saved as a complete-looking patched checkpoint whose absent tensors are random
-    (missing keys only warn — the premise test above)."""
+    """A truncated source would otherwise be re-saved as a complete-looking checkpoint whose absent tensors are
+    random."""
     src, dropped = _write_truncated_checkpoint(tmp_path / "trunc")
     assert dropped
     out = tmp_path / "out"
-    # The fixture ships no tokenizer; the load gate must fire before the tokenizer is ever used.
     monkeypatch.setattr(vocab_patch, "load_processing_class", lambda *a, **k: object())
     monkeypatch.setattr(sys, "argv", ["patch_vocab.py", "--model_id", src, "--output_dir", str(out)])
     with pytest.raises(RuntimeError, match="randomly initialized"):
@@ -575,9 +494,8 @@ def test_patch_vocab_refuses_a_truncated_checkpoint(tmp_path, monkeypatch):
 
 
 def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, monkeypatch):
-    """Unrefused, ``--reset_sinks`` on a sink-less family would print its banner and exit 0 over an
-    unchanged checkpoint: the flag's entire effect drops silently, and the artifact then reads to every
-    downstream tool (provenance, the merge tools, the RL sink gate) as deliberately sink-free."""
+    """Unrefused, the flag's whole effect drops silently and the artifact reads downstream as deliberately
+    sink-free."""
     src, out = tmp_path / "src", tmp_path / "out"
     Qwen3ForCausalLM(
         Qwen3Config(
@@ -589,7 +507,6 @@ def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, mon
             num_key_value_heads=1,
         )
     ).save_pretrained(str(src))
-    # The fixture ships no tokenizer; with no --patterns it is never consulted.
     monkeypatch.setattr(vocab_patch, "load_processing_class", lambda *a, **k: object())
     monkeypatch.setattr(
         sys, "argv", ["patch_vocab.py", "--model_id", str(src), "--output_dir", str(out), "--reset_sinks"]
@@ -601,11 +518,8 @@ def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, mon
 
 
 def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monkeypatch):
-    """The converter must route its load through ``from_pretrained_verified`` — a raw
-    ``from_pretrained`` only warns on missing keys, and the tool would re-save random experts as a
-    complete-looking ~580 GB BF16 checkpoint. (The gate's raise behavior is pinned in
-    test_checkpoint_coverage.py; the real FP8 load path needs the hub checkpoint, so this pins the
-    wiring.)"""
+    """A raw ``from_pretrained`` only warns, re-saving random experts as ~580 GB; the real FP8 load needs the hub
+    checkpoint, so this pins the wiring."""
     src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="deepseek_v4")
     out = tmp_path / "out"
 
@@ -626,21 +540,14 @@ def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monk
 @pytest.mark.parametrize(
     ("module", "progress_logger"),
     [
-        # The shared FP8 driver logs the per-shard progress of the converters that delegate to it.
         ("scripts.before_training.convert_mistral4_bf16", "halo.checkpoint.tools.fp8_dequant"),
         ("scripts.before_training.convert_deepseek_v4_bf16", "halo.checkpoint.tools.deepseek_v4_dequant"),
         ("scripts.before_training.convert_glm5_bf16", "halo.checkpoint.tools.fp8_dequant"),
     ],
 )
 def test_converter_progress_lines_survive_the_src_root_handler(module, progress_logger):
-    """Importing anything under ``halo`` installs a root handler at WARNING, and ``basicConfig`` is a
-    no-op once the root has handlers — so an unforced call leaves these converters mute for the whole
-    of a multi-hour, 100+ GiB run, with no way to tell progress from a hang. The entry point configures
-    logging before it parses, so ``--help`` reaches it.
-
-    Checked in a subprocess: the root logger is process-wide, so an in-session assertion would read
-    whatever an earlier test left behind.
-    """
+    """Importing ``halo`` installs a root handler at WARNING and ``basicConfig`` is then a no-op, leaving converters
+    mute through a multi-hour run. Checked in a subprocess because the root logger is process-wide."""
     probe = "\n".join(
         [
             "import contextlib, importlib, logging, sys",

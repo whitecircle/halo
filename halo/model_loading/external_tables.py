@@ -20,12 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 def _weights_directory(model, weights_dir: str | None) -> str:
-    """The local checkpoint directory ``model``'s weights were read from: ``weights_dir``, where the loader read its
-    agreed source (a Hub id's snapshot at the commit every rank loaded), else the directory its config names.
-
-    A Hub id without the loader's directory is refused: transformers records no revision on the model, so its cached
-    snapshot could hold another commit's table than the weights the load read at a pinned revision.
-    """
+    """``weights_dir`` (a Hub id's snapshot at the agreed commit), else the directory the config names. A bare Hub id
+    is refused, as transformers records no revision and its cache could hold another commit's table."""
     if weights_dir is not None:
         return weights_dir
     source = getattr(model.config, "_name_or_path", "") or ""
@@ -59,17 +55,9 @@ def _prefetch_files(paths: list[str]) -> None:
 def attach_external_tables(
     model, weights_dir: str | None = None, checkpoint_name: Callable[[str], str] | None = None
 ) -> None:
-    """Attach every unattached external table of ``model`` from its checkpoint (``weights_dir`` when the loader names
-    it, :func:`_weights_directory`), prefetch the table files once per node, and record the build stamp on
-    ``model.config`` as run-scoped so no export of it carries the stamp.
-
-    ``checkpoint_name`` maps a module path in ``model`` to its name in the checkpoint's key space (a pipeline stage's
-    re-based layer index to the unsplit model's), so a table is planned against the keys of its own layer.
-
-    Raises:
-        FileNotFoundError: the config names no checkpoint, or the checkpoint holds no keys for a table.
-        ValueError: a table's keys, shapes or dtypes do not match the module built for it.
-    """
+    """Attach every unattached external table from its checkpoint, prefetch the files once per node and stamp
+    ``model.config`` run-scoped. ``checkpoint_name`` maps a module path to its checkpoint name (a PP stage's re-based
+    layer index)."""
     name_of = checkpoint_name or str
     tables = {
         f"{name_of(name)}.{table.stock_key}": table

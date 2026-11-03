@@ -1,10 +1,4 @@
 #!/usr/bin/env python
-"""
-Tests for safe execution helpers (sandbox).
-
-Run: python tests/cpu/environments/test_execution.py
-"""
-
 import math
 import time
 
@@ -17,8 +11,6 @@ from halo.environments.sandbox.inprocess import (
     run_python_sandboxed,
 )
 from halo.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE
-
-# calculate_sandboxed
 
 
 def test_calc_basic_arithmetic():
@@ -79,9 +71,6 @@ def test_calc_whitespace():
     assert calculate_sandboxed("  2 + 3  ") == "5"
 
 
-# run_python_sandboxed
-
-
 def test_sandbox_expression():
     assert run_python_sandboxed("2 + 3") == "5"
 
@@ -98,12 +87,8 @@ def test_sandbox_print_capture():
 
 
 def test_sandbox_no_output():
-    """No print, two locals bound -> the LAST bound local (y = sum(x) = 6) is reported.
-
-    A check like `"6" in result or "success" in result.lower()` passes regardless of which
-    branch held, so a regression that returned the success line (or the wrong variable)
-    would not be caught. Pin the exact last-variable value.
-    """
+    """The last bound local is reported; a ``"6" in result or "success" in result.lower()`` check would pass on
+    either branch."""
     result = run_python_sandboxed("x = [1, 2, 3]\ny = sum(x)")
     assert result == "6", f"expected last-variable value '6', got {result!r}"
 
@@ -128,11 +113,7 @@ def test_sandbox_error_handling():
 
 
 def test_sandbox_blocks_dunder_escape():
-    """The classic ().__class__.__bases__[0].__subclasses__() escape must be rejected.
-
-    Overriding __builtins__ alone does not contain it; AST validation must block dunder
-    attribute access before execution.
-    """
+    """Overriding __builtins__ alone does not contain it, so AST validation blocks dunder access before execution."""
     result = run_python_sandboxed("().__class__.__bases__[0].__subclasses__()")
     assert "Error" in result
     assert "dunder" in result.lower()
@@ -150,12 +131,8 @@ def test_sandbox_blocks_getattr_builtin():
 
 
 def test_sandbox_blocks_frame_introspection_escape():
-    """A generator frame walk reaches the REAL builtins dict and __import__ — a confirmed RCE.
-
-    ``gi_frame``/``f_back``/``f_globals`` are not dunders, so the dunder-attr guard misses them;
-    the introspection-prefix guard must reject them. Without that guard this returns ``/`` (real cwd);
-    with it, an Error string.
-    """
+    """A generator frame walk reaches the real builtins dict and __import__. ``gi_frame``/``f_back``/``f_globals``
+    are no dunders, so the introspection-prefix guard must reject them."""
     escape = (
         "def f(b):\n"
         "    yield b[0].gi_frame.f_back\n"
@@ -169,8 +146,7 @@ def test_sandbox_blocks_frame_introspection_escape():
 
 
 def test_sandbox_blocks_dunder_subscript():
-    """Subscripting with a dunder string key (``d['__builtins__']``) is rejected — the general form
-    of the frame-escape's final hop."""
+    """The general form of the frame-escape's final hop."""
     result = run_python_sandboxed("{}['__class__']")
     assert "Error" in result
     assert "dunder" in result.lower()
@@ -184,7 +160,6 @@ def test_sandbox_allows_normal_attributes_and_subscripts():
 
 
 def test_sandbox_times_out_on_infinite_loop():
-    """A runaway loop must not hang the caller — it returns a timeout error."""
     result = run_python_sandboxed("while True:\n    pass", timeout=0.5)
     assert "Error" in result
     assert "timeout" in result.lower()
@@ -197,37 +172,33 @@ def test_sandbox_multiline():
 
 
 def test_sandbox_no_output_no_vars_success_message():
-    """A statement that produces neither print output nor a bound local returns the success line."""
     # A bare for-loop would bind its loop variable, so use a no-op that binds nothing.
     result = run_python_sandboxed("pass")
     assert "executed successfully" in result.lower()
 
 
 def test_sandbox_last_var_is_returned_not_first():
-    """When several locals are bound (no print), the LAST one is reported."""
     result = run_python_sandboxed("a = 1\nb = 2\nc = 99")
     assert result == "99"
 
 
 def test_sandbox_statement_nameerror_caught():
-    """A NameError in statement form is caught and returned as an Error string (not raised)."""
-    # Multi-line forces the exec path.
     result = run_python_sandboxed("y = 1\nz = undefined_name + y")
     assert "Error" in result
     assert "undefined_name" in result
 
 
 def test_sandbox_functions_see_their_own_name_and_the_names_beside_them():
-    """The code runs in one namespace, as a module does: a recursive function and one reading a top-level
-    name both work, where class-body scoping (separate globals and locals) raises NameError on each."""
+    """Code runs in one namespace, as a module does; class-body scoping raises NameError on recursion and on a
+    top-level read."""
     recursive = "def fact(n):\n    return 1 if n < 2 else n * fact(n - 1)\nprint(fact(5))"
     assert run_python_sandboxed(recursive) == "120"
     assert run_python_sandboxed("k = 3\ndef f(x):\n    return x * k\nprint(f(2))") == "6"
 
 
 def test_calc_walrus_binding_stays_in_its_own_call():
-    """A walrus binds into the call's own namespace: on a table shared across calls one episode's
-    ``pi := 3`` (or ``sqrt := abs``) would answer every later calculation in the process."""
+    """On a table shared across calls, one episode's ``pi := 3`` would answer every later calculation in the
+    process."""
     assert calculate_sandboxed("(pi := 3)") == "3"
     assert calculate_sandboxed("pi") == str(math.pi)
     assert calculate_sandboxed("(sqrt := abs)(-4)") == "4"
@@ -239,13 +210,8 @@ def test_calc_function_bodies_see_the_math_names():
 
 
 def test_sandbox_renders_the_real_message_for_every_user_error():
-    """Whatever the submitted code raises must come back as an actionable ``Error: <message>``.
-
-    An enumerated except tuple on the exec branch that omits ``SyntaxError`` (the exec compile
-    re-raises it) or ``AssertionError`` lets the two most common failures escape the sandbox worker
-    thread: the model sees the opaque "execution produced no result" plus a raw traceback in the
-    actor log, no signal it can act on.
-    """
+    """An except tuple omitting ``SyntaxError`` or ``AssertionError`` lets them escape the worker thread, and the
+    model sees only an opaque no-result message."""
     syntax = run_python_sandboxed("def f(:\n    pass")
     assert syntax.startswith("Error:") and "produced no result" not in syntax
     assert "syntax" in syntax.lower() or "invalid" in syntax.lower()
@@ -257,18 +223,13 @@ def test_sandbox_renders_the_real_message_for_every_user_error():
 
 
 def test_sandbox_print_with_separator():
-    """capture_print joins multiple args with the default space separator."""
     result = run_python_sandboxed("print('a', 'b', 'c')")
     assert result == "a b c"
 
 
 def test_sandbox_bare_print_outputs():
-    """A bare ``print(...)`` expression captures its output instead of erroring.
-
-    The tool's own description tells the model to "use print() for output", so the eval path (which a
-    single ``print(...)`` expression takes) must define the capturing ``print`` too: without it the
-    call returns ``Error: name 'print' is not defined``.
-    """
+    """The tool's description says to use print(), and a single ``print(...)`` expression takes the eval path, which
+    must define it too."""
     assert run_python_sandboxed("print('hi')") == "hi"
 
 
@@ -283,9 +244,7 @@ def test_sandbox_bare_print_outputs():
     ],
 )
 def test_sandbox_print_writes_what_python_s_print_writes(code, printed):
-    """``end`` replaces the newline, ``sep`` the space, ``None`` keeps either default and ``flush`` is
-    accepted, as in Python: a capture that joins one line per call turns ``end=''`` output into one
-    value per line, and a program written for real Python reads back differently than it would run."""
+    """A capture joining one line per call turns ``end=''`` output into one value per line."""
     assert run_python_sandboxed(code) == printed
 
 
@@ -297,20 +256,12 @@ def test_sandbox_print_of_nothing_reads_as_no_output():
 
 
 def test_calc_negative_result():
-    """Negative arithmetic results are formatted as strings, not errored."""
     assert calculate_sandboxed("3 - 10") == "-7"
 
 
-# Builtins completeness
-
-
 def test_math_builtins_subset_of_python():
-    """SAFE_PYTHON_BUILTINS is built as {**SAFE_MATH_BUILTINS, ...}; the spread must hold.
-
-    This is a real invariant (the python sandbox must offer everything the calculator does); a
-    refactor that drops the spread would regress it. The reverse (extra data-structure builtins)
-    is exercised behaviorally below rather than by constant membership.
-    """
+    """The python sandbox must offer everything the calculator does; a refactor dropping the spread would regress
+    it."""
     for key in SAFE_MATH_BUILTINS:
         assert key in SAFE_PYTHON_BUILTINS, f"{key} in SAFE_MATH_BUILTINS but not in SAFE_PYTHON_BUILTINS"
     assert set(SAFE_MATH_BUILTINS).issubset(SAFE_PYTHON_BUILTINS)
@@ -318,24 +269,20 @@ def test_math_builtins_subset_of_python():
 
 
 def test_calc_factorial_and_gcd_execute():
-    """Essential math builtins are not just present — they evaluate correctly through calculate_sandboxed."""
     assert calculate_sandboxed("factorial(5)") == "120"
     assert calculate_sandboxed("gcd(12, 18)") == "6"
     assert calculate_sandboxed("log2(8)") == "3.0"
 
 
 def test_sandbox_data_structure_builtins_execute():
-    """Data-structure builtins (zip/enumerate/dict/list) actually run inside the sandbox."""
     assert run_python_sandboxed("dict(zip(['a', 'b'], [1, 2]))") == "{'a': 1, 'b': 2}"
     result = run_python_sandboxed("list(enumerate(['x', 'y']))")
     assert result == "[(0, 'x'), (1, 'y')]"
 
 
 def test_calc_timeout_on_slow_evaluation():
-    """A slow evaluation must hit the wall-clock timeout instead of blocking the caller — sync tool
-    execution runs on a Ray actor's event loop, so an unbounded eval would wedge every episode on the
-    actor. Driven via an injected slow builtin: it yields the GIL (like any Python-level loop), the
-    class of runaway the daemon-thread timeout can preempt."""
+    """Sync tool execution runs on a Ray actor's event loop, so an unbounded eval wedges every episode there. The
+    injected builtin yields the GIL, the class the daemon-thread timeout can preempt."""
     SAFE_MATH_BUILTINS["hang"] = lambda: time.sleep(30) or 0
     try:
         result = calculate_sandboxed("hang() + 1", timeout=0.2)
@@ -349,9 +296,8 @@ def test_calc_fast_expression_unaffected_by_timeout():
 
 
 def test_pow_bomb_rejected_not_hung():
-    """``9**9**9`` passes the AST escape-guard but is a SINGLE GIL-holding C-level pow — the timeout
-    thread can never preempt it, so it would wedge the worker (and its Ray actor) forever. The pow
-    guard must reject it immediately, in both the calculator and the python sandbox."""
+    """A single GIL-holding C-level pow that the timeout thread can never preempt, which would wedge the worker and
+    its actor."""
     assert calculate_sandboxed("9**9**9", timeout=5.0) == "Error: exponentiation result too large for the sandbox"
     assert run_python_sandboxed("9**9**9", timeout=5.0) == "Error: exponentiation result too large for the sandbox"
     assert "too large" in calculate_sandboxed("pow(9, 387420489)", timeout=5.0)
@@ -374,17 +320,14 @@ def test_legitimate_pow_and_factorial_still_work():
 
 
 def test_shift_bomb_rejected_not_hung():
-    """``1 << 268435456`` builds a 32 MB int in one unpreemptible C call and any use of it (str,
-    ``*``) then holds the GIL for minutes — same wedge class as the pow bomb. The shift guard must
-    reject it immediately in both sandboxes, statement/augmented forms included."""
+    """Builds a 32 MB int in one unpreemptible C call, and any use then holds the GIL for minutes."""
     assert calculate_sandboxed("1 << 268435456", timeout=5.0) == "Error: shift result too large for the sandbox"
     assert run_python_sandboxed("1 << 268435456", timeout=5.0) == "Error: shift result too large for the sandbox"
     assert "too large" in run_python_sandboxed("x = 1\nx <<= 268435456", timeout=5.0)
 
 
 def test_mul_bomb_rejected_not_hung():
-    """Big-int ``*`` (x*x on a pow-bound-sized int) is a single GIL-holding C multiplication the
-    timeout can never preempt; the product-size guard must reject it immediately."""
+    """A single GIL-holding C multiplication the timeout can never preempt."""
     assert (
         calculate_sandboxed("(1 << 900000) * (1 << 900000)", timeout=5.0)
         == "Error: multiplication result too large for the sandbox"
@@ -397,9 +340,8 @@ def test_mul_bomb_rejected_not_hung():
 
 
 def test_range_c_iterator_bomb_rejected_not_hung():
-    """``sum(range(10**18))`` (also min/max/sorted/list/any/all over a range) drains the range inside
-    ONE GIL-holding C loop, never returning to bytecode — unguarded, a 1s-timeout ``sum(range(8*10**7))``
-    runs to completion (1.2s) instead of timing out, so a 10**18 range would wedge the worker forever. The guarded ``range`` must reject construction immediately."""
+    """The range drains inside one GIL-holding C loop: with a 1s timeout ``sum(range(8*10**7))`` runs to completion
+    (1.2s), so a 10**18 range would wedge the worker."""
     start = time.monotonic()
     assert "range too large" in run_python_sandboxed("sum(range(10**18))", timeout=1.0)
     assert time.monotonic() - start < 1.0, "must be rejected by the guard, not saved by the bypassable timeout"
@@ -409,8 +351,8 @@ def test_range_c_iterator_bomb_rejected_not_hung():
 
 
 def test_sequence_repetition_bomb_rejected_not_hung():
-    """``[0] * 10**9`` / ``'a' * 10**9`` allocate the whole multi-GB result in one C call — an
-    int×int-only mul guard passes them through untouched. The guard bounds len × count for any sized operand, both operand orders and the augmented form."""
+    """These allocate the whole multi-GB result in one C call; an int-only mul guard passes them. The guard bounds
+    len x count, both orders and the augmented form."""
     assert "sequence repetition" in run_python_sandboxed("[0] * 10**9", timeout=5.0)
     assert "sequence repetition" in run_python_sandboxed("10**9 * [0]", timeout=5.0)
     assert "sequence repetition" in run_python_sandboxed("'a' * 10**9", timeout=5.0)
@@ -421,15 +363,13 @@ def test_sequence_repetition_bomb_rejected_not_hung():
 
 
 def test_modpow_cost_bomb_rejected_not_hung():
-    """Guard-admitted ``pow(3, 1 << 999999, (1 << 999999) + 1)`` runs ~1e6 modmuls of 1e6-bit numbers
-    inside one C call (minutes of GIL hold); the bits(exp)·bits(mod) cost bound rejects it."""
+    """~1e6 modmuls of 1e6-bit numbers inside one C call (minutes of GIL hold); the bits(exp)*bits(mod) cost bound
+    rejects it."""
     assert "too expensive" in run_python_sandboxed("pow(3, 1 << 999999, (1 << 999999) + 1)", timeout=5.0)
     assert "too expensive" in calculate_sandboxed("pow(3, 1 << 999999, (1 << 999999) + 1)", timeout=5.0)
 
 
 def test_realistic_model_code_unaffected_by_new_bounds():
-    """Model-realistic snippets far below the caps must pass: 10**6-scale loops and C-iterator
-    builtins, list building, string join, comprehensions, modest repetition, small modpow."""
     expected = str(sum(range(10**6)))
     assert run_python_sandboxed("print(sum(range(10**6)))", timeout=15.0) == expected
     assert run_python_sandboxed("t = 0\nfor i in range(10**6):\n    t = t + i\nprint(t)", timeout=15.0) == expected

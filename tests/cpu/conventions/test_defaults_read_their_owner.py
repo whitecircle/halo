@@ -1,6 +1,5 @@
 """A default lives with the config that owns it: a callable below the config classes takes the value from its
-caller instead of restating a literal that can drift from the config's, and two constants never spell one
-default twice."""
+caller, and two constants never spell one default twice."""
 
 import argparse
 import inspect

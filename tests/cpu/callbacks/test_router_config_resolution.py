@@ -1,12 +1,5 @@
-"""Router balancing must read/write the config the modeling code actually reads.
-
-A composite (multimodal) config keeps ``output_router_logits`` / ``router_aux_loss_coef`` on its
-``text_config``, and ``PreTrainedConfig`` defines no ``__getattr__``. A wrapper-only read therefore
-returns the default rather than raising: ``moe_balancing: auto`` resolves to ``aux_loss``, reads
-``router_aux_loss_coef`` as ``None``, concludes the model has no aux-loss term, and stamps router
-logits forced-off — leaving the flagship MoE VLMs with NO balancing and NO ``moe/*`` metrics, in
-silence, on the default setting.
-"""
+"""Router balancing must read and write the config the modeling code reads. A wrapper-only read of a composite
+config returns the default, so ``auto`` sees no aux-loss term and MoE VLMs silently get no balancing or ``moe/*``."""
 
 from __future__ import annotations
 
@@ -21,8 +14,6 @@ from halo.models.moe.router_logits import mark_router_logits_forced_off, router_
 
 
 class _TextConfig:
-    """Stands in for a text sub-config carrying the router fields."""
-
     def __init__(self, **fields):
         self.model_type = "fake_moe_text"
         self.__dict__.update(fields)
@@ -32,10 +23,7 @@ class _TextConfig:
 
 
 class _CompositeConfig:
-    """Wrapper config that declares NO router fields — they live on ``text_config`` only.
-
-    Mirrors ``Qwen3_5MoeConfig``: sub-configs, and no ``__getattr__`` delegation.
-    """
+    """Declares no router fields and no ``__getattr__`` delegation, like ``Qwen3_5MoeConfig``."""
 
     def __init__(self, text_config: _TextConfig):
         self.model_type = "fake_moe"
@@ -46,12 +34,8 @@ class _CompositeConfig:
 
 
 class _Model(nn.Module):
-    """Stands in for a causal-LM MoE family, which honours ``config.output_router_logits``.
-
-    That is what the ``output_router_logits`` forward parameter marks: HF resolves the flag against
-    the config only on classes that declare it, so a stand-in without it would stand in for a
-    multimodal wrapper — where ``aux_loss`` cannot reach the loss and is rejected.
-    """
+    """The ``output_router_logits`` forward parameter marks a class HF resolves the flag on. Without it this would be a
+    multimodal wrapper, where ``aux_loss`` is rejected."""
 
     def __init__(self, config):
         super().__init__()
@@ -66,7 +50,6 @@ def _composite(**text_fields) -> _Model:
 
 
 def test_aux_loss_enables_router_logits_on_the_text_config():
-    """aux_loss must find the text config's coef and turn router logits ON, not force them off."""
     model = _composite(router_aux_loss_coef=0.001, output_router_logits=False)
 
     apply_balancing_mode(model, "aux_loss", is_moe=True)
@@ -83,8 +66,6 @@ def test_aux_loss_enables_router_logits_on_the_text_config():
 
 
 class _NativeBiasRouter(nn.Module):
-    """Router carrying an exported (registered-buffer) balancing bias, so bias_update has an acceptor."""
-
     def __init__(self):
         super().__init__()
         self.register_buffer("balancing_biases", torch.zeros(4))
@@ -92,7 +73,6 @@ class _NativeBiasRouter(nn.Module):
 
 
 def test_bias_update_zeroes_the_text_config_coef():
-    """bias_update must neutralize the aux loss where the model reads it, or it double-balances."""
     model = _composite(router_aux_loss_coef=0.001, output_router_logits=True)
     model.router = _NativeBiasRouter()  # without an acceptor the balance-nothing gate raises first
 
@@ -123,7 +103,6 @@ def test_forced_off_stamp_is_visible_from_either_config_object():
 
 
 def test_plain_config_is_untouched_by_the_resolver():
-    """A non-composite config reads and writes its own fields — one source, no aliasing."""
     model = _Model(_TextConfig(router_aux_loss_coef=0.001, output_router_logits=False))
 
     apply_balancing_mode(model, "aux_loss", is_moe=True)
@@ -149,11 +128,8 @@ def test_set_config_field_writes_both_configs():
 
 
 def test_gemma4_style_top_k_experts_is_detected():
-    """Gemma4 names its router top-k ``top_k_experts``; missing it silently yields topk=0.
-
-    A zero top-k makes MoEMetricsCallback measure a top-1 distribution the model never routes,
-    and makes EfficiencyCallback's sparsity factor 1.0 so S-MFU degenerates to dense MFU.
-    """
+    """A zero top-k makes MoEMetricsCallback measure a top-1 distribution the model never routes, and makes
+    EfficiencyCallback's sparsity factor 1.0, so S-MFU degenerates to dense MFU."""
     model = _Model(_TextConfig(num_experts=128, top_k_experts=4))
 
     num_experts, top_k = (resolve_expert_count(model.config), resolve_router_topk(model.config))

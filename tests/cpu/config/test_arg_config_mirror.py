@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""Parity between ``ParallelismArguments`` (the YAML/CLI surface) and ``ParallelismConfig``.
-
-Every knob is declared TWICE: once as a script argument the parser gates, once as a
-``ParallelismConfig`` field the runtime reads. The argument defaults read the config's (the ``lowp_*``
-ones ``LowpSpec``'s), so only the wiring can drift: ``parallelism_config_from_args`` forwards the
-same-named fields as themselves — by a derived loop or line by line, this file asserts the RESULT either
-way — but spells the renames and derivations by hand, so a knob whose two declarations disagree on the
-name and has no explicit entry is one that parses and does nothing.
-
-The last section carries that reachability question one step further: a knob the configuration
-reference never names cannot be set either, since the reference is the only place its spelling is
-written down. (``tests/cpu/conventions/test_env_var_catalogue.py`` holds the same contract for the
-env-var half of that page.)
-
-Run: pytest tests/cpu/config/test_arg_config_mirror.py
-"""
+"""Parity between ``ParallelismArguments`` (the YAML/CLI surface) and ``ParallelismConfig``: a knob whose two
+declarations disagree on the name and has no explicit entry in ``parallelism_config_from_args`` parses and does
+nothing, and one the configuration reference never names cannot be set."""
 
 import ast
 import inspect
@@ -34,18 +21,14 @@ from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 
-# Knobs the two dataclasses spell identically. The builder forwards them as themselves; whether it
-# does so in a derived loop or a line each is its own business, so this is read off the declarations
-# rather than off the builder — the source it would otherwise be checked against.
+# Knobs the two dataclasses spell identically, read off the declarations since the builder is what is being checked.
 _SAME_NAME_FIELDS = {f.name for f in fields(ParallelismArguments)} & {
     f.name for f in fields(ParallelismConfig) if f.init
 }
 
-# The lowp_<field> knobs build ParallelismConfig.lowp, a LowpSpec.
 _LOWP_ARG_FIELDS = {f"lowp_{f.name}": f.name for f in fields(LowpSpec)}
 
-# ParallelismConfig fields the builder cannot supply: both are resolved from the live process group
-# in ``__post_init__``, not from a YAML/CLI knob.
+# Resolved from the live process group in ``__post_init__``, not from a YAML/CLI knob.
 _CONFIG_FIELDS_NOT_FROM_ARGS = {"world_size", "gpus_per_node"}
 
 
@@ -112,9 +95,8 @@ def test_every_lowp_knob_lands_on_the_built_spec(arg_field, spec_field):
 
 
 def test_ep_scope_auto_default_resolves_a_hand_built_cross_domain_config():
-    """The behavior the shared ``"auto"`` default buys: a hand-built config for 16 GPUs of EP over
-    two 8-GPU NVLink domains resolves to global scope. With a ``"node"`` default it is rejected while
-    the identical YAML run (which passes ep_scope='auto') is accepted."""
+    """A hand-built config for 16 GPUs of EP over two 8-GPU NVLink domains resolves to global scope. A ``"node"``
+    default would reject it while the identical YAML run, which passes ep_scope='auto', is accepted."""
     config = make_parallelism_config(ep_size=16, world_size=16, gpus_per_node=8)
     assert config.ep_scope == "global"
 
@@ -125,10 +107,8 @@ def test_ep_scope_auto_default_stays_node_local_within_one_domain():
 
 
 def test_every_declared_argument_reaches_the_builder():
-    """A knob whose two declarations disagree on the NAME needs an explicit line in
-    ``parallelism_config_from_args``; without one it parses, shows in ``--help``, and silently keeps
-    the runtime default.
-    (Same-named fields are forwarded by construction — see ``parallelism_config_from_args``.)"""
+    """A knob whose two declarations disagree on the name needs an explicit line in
+    ``parallelism_config_from_args``, or it parses, shows in ``--help`` and silently keeps the runtime default."""
     declared = {f.name for f in fields(ParallelismArguments)}
     unforwarded = declared - _dist_args_names_read_by_builder()
     assert unforwarded == set(), (
@@ -139,11 +119,7 @@ def test_every_declared_argument_reaches_the_builder():
 
 
 def _non_default_value(arg_field: str):
-    """A valid value for ``ParallelismArguments.<arg_field>`` that is not its default.
-
-    Derived from the declared type, so the sweep below covers every same-name knob without a table of
-    values to keep in step with the dataclass.
-    """
+    """A valid non-default value, derived from the declared type so the sweep needs no table of values."""
     annotation = get_type_hints(ParallelismArguments)[arg_field]
     default = _defaults(ParallelismArguments)[arg_field]
     choices = _literal_choices(annotation)
@@ -159,11 +135,7 @@ def _non_default_value(arg_field: str):
 
 @pytest.mark.parametrize("arg_field", sorted(_SAME_NAME_FIELDS))
 def test_every_same_name_knob_lands_on_the_built_config(arg_field):
-    """The by-name half of the wiring, asserted on the RESULT instead of on how it is spelled: set one
-    knob away from its default, build through the real entry point, and read it back off the config
-    the trainers are handed. A forward that goes missing — a dropped line, or a derivation that stops
-    covering this field — leaves the runtime default standing, which is the value the user overrode.
-    """
+    """A forward that goes missing leaves the runtime default standing, which is the value the user overrode."""
     requested = _non_default_value(arg_field)
 
     config = parallelism_config_from_args(
@@ -178,13 +150,9 @@ def test_every_same_name_knob_lands_on_the_built_config(arg_field):
 
 
 class _WithFieldRemoved:
-    """A ``ParallelismArguments`` proxy with one attribute made absent.
-
-    No production caller looks like this — that is the point. A ``getattr(..., <default>)`` read of
-    the five declared fields hands back the default instead of failing when one is absent, and for
-    ``context_parallel_size`` the silent ``1`` lets the CP-rejection guard ACCEPT a config that
-    requested CP.
-    """
+    """A ``ParallelismArguments`` proxy with one attribute absent: a ``getattr(..., <default>)`` read hands back the
+    default, and for ``context_parallel_size`` the silent ``1`` lets the CP-rejection guard accept a config that
+    requested CP."""
 
     def __init__(self, real, missing: str):
         self._real = real
@@ -206,17 +174,13 @@ def test_a_missing_declared_field_is_loud(missing):
 
 
 def test_every_settable_config_field_has_an_argument_surface():
-    """Reverse direction: a ``ParallelismConfig`` field the builder never sets is a runtime knob with
-    no YAML/CLI reach — only settable from a hand-built config."""
+    """A field the builder never sets has no YAML/CLI reach."""
     settable = {f.name for f in fields(ParallelismConfig) if f.init}
     unreachable = settable - _config_kwargs_built_by_builder() - _CONFIG_FIELDS_NOT_FROM_ARGS
     assert unreachable == set(), (
         f"{sorted(unreachable)} are settable ParallelismConfig fields that parallelism_config_from_args "
         "never passes: no YAML or CLI can reach them."
     )
-
-
-# Documentation reach: a knob nobody documents is unreachable in practice
 
 
 def _documented_names() -> set[str]:
@@ -232,13 +196,12 @@ _SETTABLE_CONFIG_FIELDS = sorted(f.name for f in fields(ParallelismConfig) if f.
 
 
 def test_the_documentation_sweep_sees_the_reference():
-    """Guards the parser: a moved or renamed page would otherwise make every check below vacuous."""
     assert len(_DOCUMENTED) > 100, f"the configuration reference parsed to {len(_DOCUMENTED)} identifiers"
 
 
 @pytest.mark.parametrize("arg_field", sorted(f.name for f in fields(ParallelismArguments)))
 def test_every_argument_is_documented(arg_field):
-    """The YAML/CLI surface is only reachable through the reference — nothing else lists these names."""
+    """The YAML/CLI surface is only reachable through the reference; nothing else lists these names."""
     assert arg_field in _DOCUMENTED, (
         f"ParallelismArguments.{arg_field} appears nowhere in agent-docs/reference/configuration-reference.md: "
         "a user cannot set a knob whose name is not written down. Add its row, or delete the field."

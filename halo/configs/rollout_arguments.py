@@ -1,5 +1,4 @@
-"""The rollout argument bundles ``AsyncRolloutConfig`` mixes in: what every rollout request samples with, and the
-token budgets of a turn, an episode and a training row."""
+"""The rollout argument bundles ``AsyncRolloutConfig`` mixes in: sampling settings and token budgets."""
 
 from dataclasses import dataclass, field
 
@@ -9,8 +8,6 @@ from halo.environments.rollout_config import REASONING_END_TOKEN_EXAMPLES, Rollo
 
 @dataclass
 class RolloutSamplingArguments(ValidatedConfig):
-    """The sampling settings every rollout request carries."""
-
     rollout_temperature: float = field(
         default=RolloutConfig.temperature, metadata={"help": "Temperature for rollout generation."}
     )
@@ -46,8 +43,8 @@ class RolloutSamplingArguments(ValidatedConfig):
         owner = type(self).__name__
         # The trainer scores at the sampling temperature, so a 0 is a ZeroDivisionError mid-step.
         require_finite(owner, gt=0, rollout_temperature=self.rollout_temperature)
-        # Sent verbatim on the wire; outside these ranges the server rejects every rollout request
-        # (SGLang's, the narrower of the two engines': it refuses top_k 0 and a penalty above 2).
+        # Sent verbatim; outside these ranges the server rejects every rollout request (SGLang's, the narrower of the
+        # two engines', refuses top_k 0 and a penalty above 2).
         require_finite(owner, gt=0, le=1, rollout_top_p=self.rollout_top_p)
         # True would pass as 1 and sample every rollout greedily; a fractional top-k fails every request.
         require_int(owner, rollout_top_k=self.rollout_top_k)
@@ -120,9 +117,8 @@ class RolloutBudgetArguments(ValidatedConfig):
         # Doubles as the dr_grpo loss normalizer, and is the request's max_tokens, which no engine reads as a fraction.
         require_int(owner, ge=1, rollout_max_tokens=self.rollout_max_tokens)
         max_tokens = self.rollout_max_tokens
-        # A thinking cap at rollout_max_tokens leaves the turn no room for the answer or tool call it exists to
-        # produce, and a cap of 0 would be sent as 1 while counting as no cap; an answer bound at or above it shrinks
-        # no turn, and below 1 leaves a force-closed turn no room to answer.
+        # A thinking cap at rollout_max_tokens leaves the turn no room for its answer or tool call, and 0 would be sent
+        # as 1 while counting as no cap; an answer bound at or above it shrinks no turn, and below 1 leaves no room.
         require_int(
             owner,
             ge=1,
@@ -141,9 +137,8 @@ class RolloutBudgetArguments(ValidatedConfig):
             why=" (at least rollout_max_tokens)",
             **present(rollout_max_episode_tokens=self.rollout_max_episode_tokens),
         )
-        # A row is a turn's prompt plus its completion, and the completion alone may run to
-        # rollout_max_tokens: a cap at or below it leaves out every turn that used its budget — a
-        # length bias against long turns, not the memory bound the knob is.
+        # A row is a turn's prompt plus its completion, which may run to rollout_max_tokens: a cap at or below that
+        # leaves out every turn that used its budget, a length bias rather than a memory bound.
         require_int(
             owner,
             gt=max_tokens,

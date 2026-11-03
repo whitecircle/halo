@@ -1,40 +1,8 @@
 #!/usr/bin/env python
-"""
-SFT with node-local Expert Parallelism across SIMULATED multi-node (2 NVLink domains).
+"""SFT with node-local EP on two simulated NVLink domains: the ``num_ep_groups > 1`` replica-grad-sync path.
 
-Real multi-node node-local EP cannot run on one box, so this SIMULATES two NVLink domains by
-telling ``ParallelismConfig`` each domain is ``world_size // 2`` GPUs (``gpus_per_node =
-world_size // 2``) and setting ``ep_size = gpus_per_node`` — one node-local EP group per domain.
-That is the canonical production multi-node MoE shape: experts distributed node-locally (NVLink
-all-to-all), DP across nodes, and expert gradients averaged across nodes via the
-cross-domain expert-replica groups. It exercises the membership math in
-``halo.distributed.group_layout`` (``NodeLocalLayout.group_ranks`` / ``replica_ranks``) and the
-``num_ep_groups > 1`` replica-grad-sync path — the parts that only run when there is more than one
-EP group, i.e. only in multi-node.
-
-``--mode full_ft`` validates, on GptOss-20B (32 experts):
-1. Topology: 2 node-local EP groups with a deferred cross-replica sync (asserted on the config before
-   the load), the experts split ``ep_size``-way on the model, and the non-expert params FSDP-sharded
-   over the EP group.
-2. The cross-domain replica grad-sync actually runs and converges: expert weights are bit-identical
-   across the two domains' replica ranks after training (a malformed replica/dispatch group from a
-   rank-math bug would diverge or hang instead).
-3. The sweep lands the DP average its contract names — replica ``SUM`` divided by
-   ``world_size / expert_tp_size``. Bit-identity above cannot see a wrong divisor: it leaves every
-   replica equally wrong, the loss finite and the curve decreasing.
-4. Training is healthy: loss finite and decreasing.
-
-``--mode expert_lora_resume`` saves and resumes expert-only LoRA on a tiny Qwen3-MoE in the same
-topology. Every trainable param is an expert adapter on the EP layer, so each replica group's lowest
-rank writes the adapters' optimizer moments for the group and the other ranks' shards hold no state
-at all. Every rank is seeded before each load, as the entry scripts seed it, so the replicas' adapters
-start bit-identical. The resume must still restore every rank's moments bit for bit before the first
-resumed step, log the restore with no warm restart, keep the replicas' adapters bit-identical through
-the resumed steps and replay the unbroken run's losses.
-
-Run with 4 or 8 GPUs (simulates 2 domains of world//2):
-    torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_ep_multinode_sim.py --mode full_ft
-    torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_ep_multinode_sim.py --mode expert_lora_resume
+Replica bit-identity can't see a wrong sweep divisor, so it is probed separately. ``expert_lora_resume``: only each
+replica group's lowest rank writes adapter moments, and the load draws lora_A per rank, so every rank is seeded first.
 """
 
 import argparse
@@ -82,10 +50,9 @@ NUM_TRAIN_STEPS = 6
 BATCH_SIZE = 1
 LEARNING_RATE = 2e-5
 SEED = 42
-# The sweep reduces through bucketed fp32-optional kernels while the probe re-reduces the whole
-# tensor in one call, so only the reduction ORDER differs; a wrong divisor is a factor of 2.
+# The sweep reduces through bucketed kernels and the probe in one call, so only the order differs; a wrong divisor is
+# 2x.
 SWEEP_DIVISOR_REL_TOL = 2e-2
-# The expert-LoRA resume row: a tiny random-init MoE, a checkpoint midway, and a LoRA learning rate.
 LORA_FAMILY = TINY_MOE_FAMILIES["qwen3_moe"]
 LORA_TOTAL_STEPS = 6
 LORA_SAVE_STEP = 3
@@ -100,9 +67,8 @@ ARGS = parser.parse_args()
 
 
 def _simulated_two_domain_config(world_size: int) -> ParallelismConfig:
-    """Node-local EP with one EP group per simulated domain of ``world_size // 2`` GPUs and the cross-domain
-    replica average deferred to the post-backward sweep. Fresh per phase: ``ep_config`` caches the groups it
-    builds on the config."""
+    """One EP group per simulated domain, the cross-domain average deferred to the post-backward sweep. Fresh per
+    phase: ``ep_config`` caches the groups it builds on the config."""
     domain = world_size // 2
     return ParallelismConfig(
         ep_size=domain,
@@ -113,28 +79,15 @@ def _simulated_two_domain_config(world_size: int) -> ParallelismConfig:
 
 
 def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
-    """Verify the deferred sweep lands expert grads at the DP average its contract names.
-
-    Replica bit-identity (below) cannot see a WRONG DIVISOR: a sweep dividing by ``ep_group_size``
-    instead of ``world_size``, or skipping the replica SUM entirely, leaves every replica equally
-    wrong, the loss finite and the curve decreasing. This is the only check here that reads the
-    magnitude.
-
-    Recomputed from the CONTRACT rather than the implementation (agent-docs/parallelism/multi-node.md →
-    Deferred cross-replica sync): the combine has already summed the dispatch group, so the sweep
-    owes ``all_reduce(SUM)`` over the expert-replica group divided by ``world_size /
-    expert_tp_size``. Wrapping the sweep is what makes the pre-image observable — after ``train()``
-    the grads are gone, and the sweep is not idempotent so it cannot simply be re-run.
-
-    Rank-uniform: the wrapper runs on every rank and its own all-reduce is over a group every rank
-    is in, so the collective sequence stays identical across the world.
-    """
+    """The sweep lands expert grads at the DP average (agent-docs/parallelism/multi-node.md): replica SUM over
+    ``world_size / expert_tp_size``. Wrapping exposes the pre-image, since the sweep isn't idempotent and ``train()``
+    drops the grads."""
     original = trainer._sync_deferred_expert_grads
     expert_ids = trainer._get_sharded_expert_param_ids()
     divisor = ep_config.stage_world_size // ep_config.expert_tp_size
 
     def probed() -> None:
-        if "sweep_divisor" in verdict:  # first optimizer step only; later ones add nothing
+        if "sweep_divisor" in verdict:  # First optimizer step only.
             original()
             return
         named = [(n, p) for n, p in trainer._top_level_model().named_parameters() if id(p) in expert_ids]
@@ -150,7 +103,7 @@ def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
             diffs.append((actual - expected).abs().max().item())
             scale = max(scale, expected.abs().max().item())
         worst = max_or_nan(diffs, default=0.0)
-        # Anti-vacuity: a zero pre-image would make any divisor look right.
+        # A zero pre-image would make any divisor look right.
         verdict["sweep_pre_image_nonzero"] = scale > 0.0
         verdict["sweep_divisor"] = scale > 0.0 and worst <= SWEEP_DIVISOR_REL_TOL * scale
         log(f"  Sweep divisor (/{divisor}): worst|Δ|={worst:.3e} vs scale={scale:.3e}")
@@ -159,16 +112,8 @@ def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
 
 
 def _check_replica_consistency(model, ep_config) -> bool:
-    """Expert weights must be bit-identical across the cross-domain expert-replica group.
-
-    The replica group all-reduces expert gradients across domains every step; with matching init
-    and optimizer, the expert weights stay identical across replicas. A wrong replica-group layout
-    would let them diverge.
-
-    Each precondition below is itself a failure this test exists to catch — a missing replica group,
-    absent EP layers or unreachable expert params all mean the multi-group path never ran — so none
-    of them may pass by default.
-    """
+    """Expert weights are bit-identical across the expert-replica group. A missing group, absent EP layers or
+    unreachable expert params all mean the multi-group path never ran, so none may pass by default."""
     replica_group = getattr(ep_config, "expert_replica_group", None)
     if replica_group is None or dist.get_world_size(replica_group) <= 1:
         log(f"  Replica consistency: FAIL (no cross-domain replica group; got {replica_group!r})")
@@ -179,7 +124,6 @@ def _check_replica_consistency(model, ep_config) -> bool:
         log("  Replica consistency: FAIL (no EP layers found — expert parallelism did not engage)")
         return False
 
-    # Probe the first expert parameter of the first EP layer.
     named = list(layers[0].expert_named_params())
     if not named:
         log("  Replica consistency: FAIL (EP layer exposes no expert params)")
@@ -192,9 +136,8 @@ def _check_replica_consistency(model, ep_config) -> bool:
 
 
 def _replica_adapter_max_diff(model, replica_group) -> float:
-    """Largest ``|Δ|`` of any trainable EP-layer param (the expert adapters) between the ranks of
-    ``replica_group``; ``0.0`` is bit-identical, NaN when nothing on the EP layer trains. Collective over the
-    group."""
+    """COLLECTIVE over the group. Largest ``|Δ|`` of a trainable EP-layer param; NaN when nothing on the layer
+    trains."""
     params = [param for layer in ep_layers(model) for param in layer.parameters() if param.requires_grad]
     return max_or_nan((group_max_abs_diff(param, replica_group) for param in params), default=float("nan"))
 
@@ -222,9 +165,8 @@ def _expert_lora_sft_config(output_dir: str, *, save: bool) -> SFTConfig:
 
 
 def _run_expert_lora_resume(ctx) -> dict:
-    """Expert-only LoRA saved midway and resumed on the simulated two-domain topology: every rank's optimizer
-    state at ``on_train_begin`` against its own at the save, the replicas' adapters after the resumed steps,
-    and the resumed losses against the unbroken run's."""
+    """Expert-only LoRA saved midway and resumed: each rank's optimizer state, the replicas' adapters and the
+    losses."""
     # A replay compares two runs, which DeepEP's atomic receive order would part by rounding alone.
     pin_deterministic_ep_dispatch()
     checks: dict[str, bool] = {}
@@ -236,9 +178,8 @@ def _run_expert_lora_resume(ctx) -> dict:
     )
 
     def make_trainer(*, save: bool) -> tuple[DistributedSFTTrainer, ParallelismConfig]:
-        """The production expert-LoRA load and trainer over a fresh config."""
-        # The load draws expert lora_A from each rank's own RNG, so the replicas start bit-identical only when
-        # every rank is seeded first, as the entry scripts do.
+        # The load draws lora_A from each rank's RNG, so replicas start bit-identical only when every rank is seeded
+        # first.
         set_seed(SEED)
         config = _simulated_two_domain_config(ctx.world_size)
         model, tokenizer, peft_config = load_peft_model(
@@ -274,7 +215,7 @@ def _run_expert_lora_resume(ctx) -> dict:
     saved.trainer = None
     ctx.barrier()
 
-    # The premise this row exists for: the dedup left the followers' shards no state at all.
+    # The premise of this row: the dedup left the followers' shards no state.
     shard = torch.load(
         os.path.join(checkpoint, f"optimizer_shard_{ctx.rank:05d}.pt"), map_location="cpu", weights_only=False
     )
@@ -315,8 +256,7 @@ def _run_expert_lora_resume(ctx) -> dict:
 
 
 def _run_full_ft(ctx) -> dict:
-    """The GptOss-20B full fine-tune and its four checks above."""
-    simulated_gpus_per_node = ctx.world_size // 2  # ep_size per domain
+    simulated_gpus_per_node = ctx.world_size // 2
 
     log(f"\n{'#' * 70}")
     log("  SFT node-local EP across SIMULATED 2 NVLink domains")
@@ -332,14 +272,10 @@ def _run_full_ft(ctx) -> dict:
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 100)
 
-    # Node-local multi-group EP across the two simulated domains: FSDP shards the non-expert
-    # params over each EP group, and the cross-domain replica average is DEFERRED to a
-    # post-backward sweep (is_deferred_dp) — this is the production multi-node MoE shape. HSDP is
-    # deliberately NOT used: for multi-group EP it is a no-op (the deferred sync already shards
-    # within-domain + replicates cross-domain) and ParallelismConfig rejects hsdp+EP.
+    # HSDP is deliberately unused: for multi-group EP it is a no-op, since the deferred sync already shards
+    # within-domain and replicates cross-domain, and ParallelismConfig rejects hsdp+EP.
     parallelism_config = _simulated_two_domain_config(ctx.world_size)
     log(f"Config: {parallelism_config.summary()}")
-    # The whole point — confirm we got the multi-group (multi-node) deferred-DP topology.
     assert parallelism_config.num_ep_groups == 2, (
         f"expected 2 node-local EP groups, got {parallelism_config.num_ep_groups}"
     )
@@ -391,9 +327,7 @@ def _run_full_ft(ctx) -> dict:
 
     train_result = trainer.train()
 
-    # Non-expert params are FSDP-sharded over the EP group (1D mesh of ep_group_size), NOT a 2D
-    # HSDP mesh — the deferred sweep handles the cross-domain replica average. Confirm the
-    # sharding mesh is the expected 1D EP-group shape.
+    # Non-expert params are FSDP-sharded over the EP group (1D mesh of ep_group_size), with no 2D HSDP mesh.
     ep_group_size = parallelism_config.ep_group_size
     sharded_over_ep_group = any(
         isinstance(p.data, DTensor) and p.data.device_mesh.ndim == 1 and p.data.device_mesh.size() == ep_group_size
@@ -409,8 +343,7 @@ def _run_full_ft(ctx) -> dict:
         **training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True, loss_decreased=True),
         "sharded_over_ep_group": sharded_over_ep_group,
         "replica_consistency": _check_replica_consistency(model, ep_config),
-        # Absent keys mean the probe never ran — the sweep did not fire, which is itself the
-        # failure this file exists to catch, so they must not default to True.
+        # An absent key means the sweep did not fire, the failure this file exists to catch, so none defaults to True.
         "sweep_pre_image_nonzero": sweep_verdict.get("sweep_pre_image_nonzero", False),
         "sweep_divisor": sweep_verdict.get("sweep_divisor", False),
     }

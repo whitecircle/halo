@@ -1,6 +1,6 @@
-"""The construction spine and generation-round geometry of the on-policy GRPO trainers (online and
-environmental): :class:`OnPolicyGRPOInitMixin` opens and closes both constructors in one load-bearing order,
-:class:`GenerationRoundMixin` fits TRL's loader, sampler and buffer to the DP-sharded loader."""
+"""The construction spine and generation-round geometry of the on-policy GRPO trainers. The init mixin's open and close
+run in one load-bearing order; :class:`GenerationRoundMixin` fits TRL's loader, sampler and buffer to the DP-sharded
+loader."""
 
 import contextlib
 import logging
@@ -25,31 +25,21 @@ from halo.trainers.training_args_overrides import disable_trl_liger
 
 logger = logging.getLogger(__name__)
 
-# TRL's ctor slots of the policy and its config, read off the installed signature for a positional call.
 GRPO_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "model", "args")
 # The slot of the adapter config, which with the model decides whether TRL holds a KL reference.
 _PEFT_CONFIG_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "peft_config")
 
 
 class GenerationRoundMixin:
-    """One generation round per fetch: TRL's train loader and sampler sized to the DP-sharded loader, the
-    accumulation-vs-generation cadence, and the TP re-sync of the micro-batch drawn from TRL's buffer. Mixed in
-    ahead of ``DistributedTrainerMixin`` so ``super()`` reaches TRL's."""
+    """Mixed in ahead of ``DistributedTrainerMixin`` so ``super()`` reaches TRL's."""
 
     def _train_loader_batch_size(self) -> int:
-        """One generation round per fetch: ``steps_per_generation`` micro-batches are drawn together."""
+        """``steps_per_generation`` micro-batches are drawn together."""
         return self._train_batch_size * self.args.steps_per_generation
 
     def _get_train_sampler(self, dataset: Dataset | None = None) -> Sampler:
-        """``RepeatSampler`` sized to the custom DP-sharded dataloader's consumption rate.
-
-        TRL derives the sampler geometry from ``generation_batch_size`` (world-rate: one full prompt
-        block consumed per generation round across ``accelerator.num_processes``). The custom
-        dataloader consumes only ``data_parallel_size`` batches per fetch (TP/ETP siblings replay the
-        same DP slice), so under the world-rate geometry each generation round re-rolls only the
-        leading ``dp/world`` fraction of every prompt block. Rebuild the sampler from the loader's
-        per-round consumption; a pre-sharded dataset is consumed per DP rank, so the rate is one rank's.
-        """
+        """TRL's ``generation_batch_size`` geometry is world-rate, while this loader consumes ``data_parallel_size``
+        batches per fetch, so each round would re-roll only the leading ``dp/world`` fraction of a prompt block."""
         if not self._needs_custom_dataloader():
             return super()._get_train_sampler(dataset)
         if dataset is None:
@@ -85,41 +75,27 @@ class GenerationRoundMixin:
 
     @property
     def _misaligned_accumulation(self) -> bool:
-        """Whether ``gradient_accumulation_steps`` straddles TRL's buffer refill every ``steps_per_generation *
-        num_iterations`` steps, so one optimizer step consumes micro-batches of two policies and TRL recomputes
-        the old log-probs; the construction validators and the runtime recompute gates read this one predicate.
-        """
+        """``gradient_accumulation_steps`` straddling TRL's buffer refill, so one optimizer step consumes micro-batches
+        of two policies and TRL recomputes the old log-probs."""
         generate_every = self.args.steps_per_generation * self.num_iterations
         return self.args.gradient_accumulation_steps % generate_every != 0
 
     def _prepare_inputs(self, generation_batch):
-        """Re-sync the selected micro-batch across the TP/ETP group after TRL's buffer shuffle.
-
-        TRL shuffles the generation buffer with ``torch.randperm`` on the per-rank-seeded CPU
-        generator (``set_seed(seed, device_specific=True)``), so TP siblings would buffer
-        different row orders and all-reduce partial activations of different samples.
-        """
+        """Re-sync the micro-batch across the TP/ETP group: TRL shuffles the buffer with ``torch.randperm`` on the
+        per-rank-seeded CPU generator, so TP siblings would all-reduce partial activations of different samples."""
         inputs = super()._prepare_inputs(generation_batch)
         return self._broadcast_tensors_from_tp_leader(inputs)
 
 
 class OnPolicyGRPOInitMixin:
-    """Open/close halves of an on-policy GRPO constructor. Mixed into the trainer."""
-
     POLICY_GRADIENT_LOSS = True
     SYNCS_TO_EXTERNAL_GENERATOR = True
     REFERENCE_ALTERNATIVES = ON_POLICY_GRPO_REFERENCE_ALTERNATIVES
 
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
-        """Resolve the training config and extract the distributed kwargs; ``(config, kwargs)``.
-
-        The config is resolved here, positionally or by keyword, because TRL's Liger flag has to be switched
-        off on it before ``_init_distributed_config`` runs; the positionals are forwarded so that a positional
-        model reaches the mixin's MoE gates too. ``save_completions`` and ``ref_model`` are taken here, since
-        TRL's ctor would refuse either. A ``ref_model`` the run would never read is refused ahead of TRL's
-        ctor, which on online GRPO opens the rollout client, and so are the TRL options the trainer cannot
-        honor, which read ``_use_chunked_grpo_logprobs``: each constructor sets it first.
-        """
+        """Returns ``(config, kwargs)``. TRL's Liger flag must go off before ``_init_distributed_config``, and
+        ``save_completions`` and ``ref_model`` are taken since TRL's ctor would refuse either. Refusals run ahead of
+        TRL's ctor, which on online GRPO opens the rollout client."""
         self._save_completions = kwargs.pop("save_completions", True)
         self._supplied_ref_model = kwargs.pop("ref_model", None)
         training_args = get_ctor_config(args, kwargs, GRPO_CTOR_POSITIONS)
@@ -155,15 +131,9 @@ class OnPolicyGRPOInitMixin:
 
     @contextlib.contextmanager
     def _supplying_kl_reference(self) -> Iterator[None]:
-        """Run TRL's constructor with the frozen KL reference the caller loaded in place of the one TRL builds.
-
-        TRL builds one at ``beta != 0`` on a policy no PEFT adapter wraps through ``create_model_from_path`` on
-        the policy's name (fp32, default revision and attention, no buffer repair or vocabulary resize). Here
-        that call returns the passed ``ref_model``, placed and frozen, and TRL's dropout, head cast and
-        ``prepare_model`` run on it. TRL's own rule decides when it asks, so both refusals follow it: a
-        reference asked for with none passed (before the rollout client connects), and a passed one never asked
-        for (the backstop of the check in :meth:`_begin_on_policy_init`).
-        """
+        """Hand TRL's constructor the caller's frozen KL reference in place of its own ``create_model_from_path`` build
+        (fp32, default revision and attention, no buffer repair or resize). Refuses one asked for with none passed and
+        a passed one never asked for."""
         supplied, self._supplied_ref_model = self._supplied_ref_model, None
         handed = False
         build = trl_grpo_trainer.create_model_from_path
@@ -194,13 +164,8 @@ class OnPolicyGRPOInitMixin:
         reject_unread_reference(supplied, self.args.beta, read=handed)
 
     def _finish_on_policy_init(self) -> None:
-        """Realize the parallel modes, gate the reference model, the chunked head path, the full-logits plane
-        (the trainer's ``_loss_logits_width``) and the engine weight sync, wire the sync, then disable dropout.
-
-        Dropout goes last, so it reaches the EP expert-LoRA dropout ``_configure_distributed_modes`` realizes; the
-        plane is weighed once the model is placed, against real free memory; the sync gate refuses a model the
-        ``_rollout_backend`` engine cannot update here rather than at the first push.
-        """
+        """Dropout goes last to reach the EP expert-LoRA dropout; the full-logits plane is weighed once the model is
+        placed; the sync gate refuses a model the engine cannot update here rather than at the first push."""
         self._configure_distributed_modes()
         self._validate_held_reference_model()
         self._resolve_chunked_head_transform()
@@ -210,15 +175,11 @@ class OnPolicyGRPOInitMixin:
         self._disable_dropout_for_onpolicy()
 
     def _install_weight_sync(self) -> None:
-        """Install this trainer's engine weight sync. Nothing by default: a trainer whose rollout side owns
-        its client (the environmental one) pushes through it."""
+        """No-op by default: a trainer whose rollout side owns its client (the environmental one) pushes through it."""
 
     def _disable_dropout_for_onpolicy(self):
-        """Force dropout off, after the parallel modes so it reaches the EP grouped expert-LoRA dropout. Idempotent.
-
-        The recomputed log-probs must match vLLM's dropout-free sampling: active dropout lowers every
-        recomputed log-prob (Jensen), biasing the importance ratio, the k3 KL estimator and the PPO ratio.
-        """
+        """Recomputed log-probs must match vLLM's dropout-free sampling: active dropout lowers every recomputed
+        log-prob (Jensen), biasing the importance ratio, the k3 KL estimator and the PPO ratio. Idempotent."""
         if not self.args.disable_dropout:
             if is_global_main_process():
                 logger.info("On-policy RL: disabling dropout for importance-sampling / vLLM consistency.")

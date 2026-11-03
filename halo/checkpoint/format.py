@@ -1,8 +1,5 @@
-"""Every on-disk checkpoint name two modules share, and the builders that spell them.
-
-One spelling per artifact: a typo degrades silently (a weightless checkpoint, an LR schedule re-warming
-from step 0, an orphaned shard).
-"""
+"""Every on-disk checkpoint name two modules share. One spelling per artifact, since a typo degrades silently (a
+weightless checkpoint, an LR schedule re-warming from step 0, an orphaned shard)."""
 
 from __future__ import annotations
 
@@ -14,17 +11,17 @@ from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME, VIDEO_PROCE
 
 from halo.checkpoint.atomic import WITHHELD_FILE_SUFFIX
 
-# Per-file cap for gathered safetensors saves, shared by every save path and the arg default.
+# Shared by every save path and the arg default.
 DEFAULT_MAX_SHARD_SIZE = "5GB"
 
 SAFETENSORS_INDEX_FILE = "model.safetensors.index.json"
-# The marker every safetensors writer stamps, without which readers do not resolve torch tensors.
+# Without this stamp readers do not resolve torch tensors.
 SAFETENSORS_METADATA = {"format": "pt"}
 # The index ``metadata.format`` stamp of a per-rank EP save, and the key infix of one rank's expert slice.
 EP_SHARDED_FORMAT = "ep_sharded"
 EP_SHARD_KEY_INFIX = ".shard_"
 EP_SHARD_KEY_RE = re.compile(rf"(.+)\{EP_SHARD_KEY_INFIX}(\d+)$")
-# HF's shard filename pattern and the spellings derived from it, so a writer and a sweep cannot disagree.
+# HF's shard filename pattern; the rest derive from it so a writer and a sweep cannot disagree.
 SAFETENSORS_SHARD_PATTERN = "model{suffix}.safetensors"
 SAFETENSORS_WEIGHTS_FILE = SAFETENSORS_SHARD_PATTERN.format(suffix="")
 SAFETENSORS_FAMILY_GLOB = SAFETENSORS_SHARD_PATTERN.format(suffix="*")
@@ -33,15 +30,14 @@ _EP_SHARD_FILE_RE = re.compile(
 )
 # A renaming writer's in-flight parts: outside HF's final pattern, inside the sweep's glob.
 STREAM_PART_PREFIX = "model-streaming"
-# A PP checkpoint's part names. Each stage picks its own prefix without coordinating with the other writers: a
-# global "k-of-n" counter is not derivable locally once a stage emits a variable number of parts.
+# Each stage picks its own part prefix without coordinating, since a global k-of-n is not derivable locally once a
+# stage emits a variable number of parts.
 PP_WRAPPER_PART_PREFIX = "model-wrapper"
-# A pipeline stage's part-name prefix (:func:`pp_stage_part_prefix`) and its matcher: group 1 is the stage,
-# group 2 the stage count.
+# Matcher groups: stage, stage count.
 _PP_STAGE_PART = "model-pp{}-of-{}"
 PP_STAGE_PART_RE = re.compile(_PP_STAGE_PART.format(r"(\d+)", r"(\d+)"))
 LEGACY_WEIGHTS_FILE = "pytorch_model.bin"
-# Every filename that makes a directory a whole-model checkpoint, in the layout cascade's order.
+# In the layout cascade's order.
 WHOLE_MODEL_WEIGHT_FILES = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE, LEGACY_WEIGHTS_FILE)
 
 # HF Trainer's own filenames, spelled here because ``transformers.trainer`` is a ~1 s import.
@@ -53,7 +49,7 @@ SCHEDULER_STATE_FILE = "scheduler.pt"
 OPTIMIZER_STATE_FILES = ("optimizer.pt", "optimizer.bin")
 # Written after every rank's optimizer shard, so its presence vouches for a complete shard set.
 OPTIMIZER_META_FILE = "optimizer_meta.pt"
-# The warm-restart remedies name the per-rank optimizer shards by this glob, so every filename derives from it.
+# The warm-restart remedies name the shards by this glob, so every filename derives from it.
 OPTIMIZER_SHARD_GLOB = "optimizer_shard_*.pt"
 ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
@@ -67,8 +63,7 @@ INCOMPLETE_CHECKPOINTS_DIR_NAME = f"{RUN_INTERNAL_PREFIX}incomplete_checkpoints"
 CHECKPOINT_STEP_DIR_RE = re.compile(rf"^{PREFIX_CHECKPOINT_DIR}-(\d+)$")
 PREFETCH_PENDING_PREFIX = "prefetch_pending"
 
-# PEFT's adapter filenames, spelled here because ``peft`` is a multi-second import; weights in
-# load-preference order.
+# PEFT's adapter filenames, spelled here because ``peft`` is a multi-second import; weights in load-preference order.
 ADAPTER_SAFETENSORS_FILE = "adapter_model.safetensors"
 ADAPTER_BIN_FILE = "adapter_model.bin"
 ADAPTER_CONFIG_FILE = "adapter_config.json"
@@ -77,15 +72,13 @@ ADAPTER_WEIGHT_NAMES = (ADAPTER_SAFETENSORS_FILE, ADAPTER_BIN_FILE)
 MERGED_ADAPTER_CONFIG_DIR = "original_adapter_config"
 # A sidecar, never adapter_config.json, so stock PEFT loads the adapter unchanged.
 TRAINING_PROVENANCE_FILE = "training_provenance.json"
-# The training-state records an exported artifact carries beside its weights.
 EXPORT_SIDECAR_FILES = (ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE)
 PROCESSOR_FILES = (PROCESSOR_NAME, IMAGE_PROCESSOR_NAME, VIDEO_PROCESSOR_NAME)
 # A merged checkpoint's unmerged resume adapter lives in a subdirectory, since a root one would load on
 # top of weights already holding its delta; the marker's presence alone is the resume verdict.
 RESUME_ADAPTER_DIR = "resume_adapter"
 RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
-# The files that vouch for a checkpoint, each written last in its own half: the trainer state (and its
-# uncommitted spelling), the meta that vouches for the optimizer shard set, and the resume adapter marker.
+# Each written last in its own half: the trainer state (either spelling), the optimizer meta, the resume marker.
 CHECKPOINT_COMPLETION_MARKERS = (
     TRAINER_STATE_FILE,
     UNCOMMITTED_TRAINER_STATE_FILE,
@@ -97,7 +90,7 @@ UNSUFFIXED_RESUME_ENTRIES = (TRAINER_STATE_FILE, RESUME_ADAPTER_DIR, RESUME_ADAP
 
 # Never carried over by the aux copy: a stray weight file would shadow the fresh safetensors.
 WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")
-# Foreign-framework exports, which the aux copy skips.
+# Skipped by the aux copy.
 FOREIGN_EXPORT_SUFFIXES = (".pth", ".gguf", ".h5", ".msgpack", ".onnx", ".onnx_data", ".tflite", ".ot", ".mlmodel")
 # Resume state exempt from the weight skip, by name and by prefix: losing one restarts the LR schedule,
 # zeroes the router biases, re-draws every shuffle or skips a pending prefetch batch.
@@ -109,7 +102,7 @@ WEIGHT_DUMP_DIRS = ("original", "consolidated", "metal")
 # The dumps as Hub-download patterns: a checkpoint tool's fetch skips them as the aux copy does.
 WEIGHT_DUMP_IGNORE_PATTERNS = tuple(f"{name}/*" for name in WEIGHT_DUMP_DIRS)
 
-# A sentence-transformers checkpoint's pipeline: its modules in order, and its model-level settings.
+# sentence-transformers checkpoint files.
 ST_MODULES_FILE = "modules.json"
 ST_MODEL_SETTINGS_FILE = "config_sentence_transformers.json"
 # The model-level settings the embedding trainer writes back and the parallel embedding loader carries over.
@@ -117,25 +110,21 @@ ST_CARRIED_MODEL_SETTINGS = ("prompts", "default_prompt_name", "similarity_fn_na
 
 
 def ep_shard_filename(rank: int, world_size: int) -> str:
-    """Filename of one rank's slice of a per-rank EP save: 0-based and always suffixed, since an
-    unsuffixed ``model.safetensors`` reads as a whole model."""
+    """One rank's slice of a per-rank EP save, suffixed, as a bare ``model.safetensors`` reads as a whole model."""
     return SAFETENSORS_SHARD_PATTERN.format(suffix=f"-{rank:05d}-of-{world_size:05d}")
 
 
 def optimizer_shard_filename(rank: int) -> str:
-    """Filename of one rank's optimizer-state shard."""
     return OPTIMIZER_SHARD_GLOB.replace("*", f"{rank:05d}")
 
 
 def prefetch_pending_filename(rank: int, world_size: int) -> str:
-    """Filename of one rank's pending prefetch rounds; the world size in it keeps a resume at another
-    width from reading another layout's prompts."""
+    """The world size in the name keeps a resume at another width from reading another layout's prompts."""
     return f"{PREFETCH_PENDING_PREFIX}-{rank:05d}-of-{world_size:05d}.pt"
 
 
 def is_per_rank_resume_file(name: str) -> bool:
-    """Whether ``name`` is one rank's own resume file of a save: its optimizer shard, RNG state or pending
-    prefetch rounds."""
+    """Whether ``name`` is one rank's own resume file: optimizer shard, RNG state or pending prefetch rounds."""
     return fnmatch(name, OPTIMIZER_SHARD_GLOB) or name.startswith(RESUME_SIDECAR_PREFIXES)
 
 
@@ -145,29 +134,24 @@ def is_ep_shard(name: str) -> bool:
 
 
 def hf_shard_filename(part: int, total_parts: int, *, indexed: bool = False) -> str:
-    """HF's own name for part ``part`` of ``total_parts``: the unsharded file when there is only one and no index
-    names other files beside it, since ``from_pretrained`` reads a ``model.safetensors`` over an index."""
+    """HF's name for a part; the bare file only when alone and unindexed, as ``from_pretrained`` prefers it."""
     suffix = "" if total_parts == 1 and not indexed else f"-{part:05d}-of-{total_parts:05d}"
     return SAFETENSORS_SHARD_PATTERN.format(suffix=suffix)
 
 
 def stream_part_filename(prefix: str, part_index: int) -> str:
-    """Name of a renaming writer's in-flight part ``part_index`` under ``prefix``."""
     return f"{prefix}-{part_index:05d}.safetensors"
 
 
 def pp_stage_part_prefix(pp_rank: int, pp_size: int) -> str:
-    """The part-name prefix of pipeline stage ``pp_rank``'s checkpoint shards."""
     return _PP_STAGE_PART.format(f"{pp_rank:05d}", f"{pp_size:05d}")
 
 
 def index_declares_ep_shards(index: dict) -> bool:
-    """Whether a parsed safetensors index marks a per-rank EP save (a gathered or PP index carries no
-    marker)."""
+    """Whether a parsed index marks a per-rank EP save (a gathered or PP index carries no marker)."""
     meta = index.get("metadata", {}) or {}
     return meta.get("format") == EP_SHARDED_FORMAT
 
 
 def ep_sharded_index_metadata(total_size: int, ep_size: int) -> dict:
-    """The index ``metadata`` block a per-rank EP save writes, carrying the :data:`EP_SHARDED_FORMAT` marker."""
     return {"total_size": total_size, "ep_size": ep_size, "format": EP_SHARDED_FORMAT}

@@ -1,16 +1,7 @@
 #!/usr/bin/env python
-"""``tests.common.training_checks.weight_update_checks`` holds a full fine-tune's tensors to being stepped and moved.
-
-The full fine-tune GPU suites hold layer 0 to it after three updates at ``1e-5``, and they run only on the GPU tiers.
-At that rate a bf16 element moves only below ``2**-8``, so norm gains near 1 stay bit-identical in a healthy run and
-only the optimizer's first moment shows that they train; the bit-for-bit check stays on the tensors one update moves,
-where a zero rate or a lost write shows. A tiny Qwen3 trains here as those rows train: FSDP2 over two gloo ranks and
-the toolkit's AdamWBF16 (stochastic rounding) over the trainer's weight-decay split, each rank checking its own
-shards. Negative controls: the no-decay group (every norm) left out of the optimizer, the norms' gradients dropped
-before each step, and a zero learning rate.
-
-Run: python tests/cpu/conventions/test_weight_update_checks.py
-"""
+"""``tests.common.training_checks.weight_update_checks`` holds a full fine-tune's tensors to being stepped and
+moved. At the rows' rate of ``1e-5`` a bf16 element moves only below ``2**-8``, so norm gains near 1 stay
+bit-identical in a healthy run and only the optimizer's first moment shows they train."""
 
 import json
 import types
@@ -92,7 +83,6 @@ def _worker(rank: int, out_dir: str) -> None:
 
 @pytest.fixture(scope="module")
 def runs(tmp_path_factory) -> list[dict]:
-    """Per rank, per variant: the checks and the name sets they were read from."""
     out_dir = tmp_path_factory.mktemp("weight_update_checks")
     run_gloo_ranks(_worker, WORLD, str(out_dir))
     return [json.loads((out_dir / f"rank{rank}.json").read_text()) for rank in range(WORLD)]

@@ -1,5 +1,4 @@
-"""Tree-packing collator: packed rows of prefix-sharing trees as one flattened row plus the index
-tensors that give every token exactly its own path as context."""
+"""Tree-packing collator: prefix-sharing trees as one flattened row plus tensors giving each token its own path."""
 
 from itertools import chain
 from typing import Any
@@ -20,14 +19,9 @@ from halo.models.attention.tree_plan import (
 
 
 class DataCollatorWithTreePacking(DataCollatorWithPacking):
-    """Collate rows packed from trees (:mod:`halo.data.pipeline.tree_rows`) into one ``[1, total]`` row whose
-    labels are the trained tokens, plus the :func:`~halo.models.attention.tree_plan.build_tree_attention_plan`
-    under ``tree_attention`` (skipped for plain documents unless ``conv_kernel`` layers or key-selecting
-    ``sparse_attention`` layers read their segments off it).
-
-    A packing collator by class, so every trainer gate that matches one applies; ``sliding_window``,
-    ``full_form``, ``conv_kernel`` and ``sparse_attention`` are the plan's.
-    """
+    """One ``[1, total]`` row whose labels are the trained tokens, plus the attention plan under ``tree_attention``
+    (skipped for plain documents unless ``conv_kernel`` or key-selecting ``sparse_attention`` layers read segments off
+    it). A packing collator by class, so every trainer gate matching one applies."""
 
     required_dataset_columns: tuple[str, ...] = (TRAINED_COLUMN, POSITION_COLUMN, DEPTH_COLUMN)
 

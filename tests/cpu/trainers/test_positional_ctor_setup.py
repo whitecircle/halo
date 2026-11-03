@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""A trainer built with a positional ``model``/``args`` gets the setup a keyword-built one gets, and a
-CP save finds the Ulysses wrapper beneath ``torch.compile``.
-
-``_init_distributed_config`` runs before ``super().__init__`` and reads both arguments: the config to
-resolve AdamWBF16, filter Liger and force ``save_on_each_node``, and the model's config to force
-reentrant checkpointing on a MoE. Arguments passed positionally never reach ``kwargs``, so each
-``(*args, **kwargs)`` trainer hands its positionals over and the mixin reads them off the slot table
-of the TRL base they are forwarded to. The construction is cut short right after
-that setup (TRL's own ctor needs a live model and, for GRPO, a server).
-
-    python tests/cpu/trainers/test_positional_ctor_setup.py
+"""A trainer built with a positional ``model``/``args`` gets the setup a keyword-built one gets.
+Positionals never reach ``kwargs``, so the mixin reads them off the slot table of the TRL base they are forwarded to.
 """
 
 import types
@@ -44,7 +35,6 @@ TRAINERS = [
 ]
 
 
-# Ctor knobs a trainer requires beyond the model and config.
 REQUIRED_KWARGS = {
     DistributedSelfDistillationTrainer: {
         "reference_kl_coef": 0.0,
@@ -116,7 +106,6 @@ def test_positional_model_and_config_get_the_setup(trainer_cls, args_slot):
 
 @pytest.mark.parametrize(("trainer_cls", "args_slot"), TRAINERS, ids=lambda v: getattr(v, "__name__", str(v)))
 def test_keyword_model_and_config_get_the_same_setup(trainer_cls, args_slot):
-    """The calling convention every script uses must be unaffected."""
     training_args = _training_args()
     _construct(trainer_cls, model=_moe_model(), args=training_args)
     _assert_setup_applied(training_args)
@@ -124,8 +113,7 @@ def test_keyword_model_and_config_get_the_same_setup(trainer_cls, args_slot):
 
 @pytest.mark.parametrize(("trainer_cls", "args_slot"), TRAINERS, ids=lambda v: getattr(v, "__name__", str(v)))
 def test_the_special_token_snapshot_precedes_trls_construction(trainer_cls, args_slot, stop_after_distributed_setup):
-    """TRL writes the tokenizer's pad id onto the model config in its own ``__init__``; the snapshot every
-    save restores has to hold the checkpoint's id, so it is taken before TRL runs."""
+    """TRL writes the tokenizer's pad id onto the model config, so the snapshot of the checkpoint's id comes first."""
     model = _moe_model()
     model.config.pad_token_id = 7
     _construct(trainer_cls, model=model, args=_training_args())
@@ -134,15 +122,12 @@ def test_the_special_token_snapshot_precedes_trls_construction(trainer_cls, args
 
 
 class _OwnSignatureSFTTrainer(DistributedSFTTrainer):
-    """A user subclass with its own positional signature, forwarding positionally to the base."""
-
     def __init__(self, model, config, note=None, **kwargs):
         super().__init__(model, config, **kwargs)
 
 
 def test_a_subclass_with_its_own_signature_is_read_through_the_base_it_forwards_to():
-    """The slots are the forwarded base's, not the runtime class's: this subclass names its config
-    ``config``, and a lookup of ``args`` in its own signature would find none."""
+    """This subclass names its config ``config``, so a lookup of ``args`` in its own signature would find none."""
     training_args = _training_args()
     _construct(_OwnSignatureSFTTrainer, _moe_model(), training_args, "note")
     _assert_setup_applied(training_args)

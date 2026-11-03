@@ -1,28 +1,5 @@
-"""Unit tests for three env-GRPO stability mechanisms (no GPU / no live model):
-
-1. ``_update_breaker_tripped`` — the IS trust-region circuit breaker (``skip_update_masked_frac``):
-   when the mask stages (geo-band / veto / OPSM) have zeroed the ratio of more than the configured
-   fraction of IS-corrected trajectories, the step must be declared broken so the caller zeroes the
-   whole step's policy gradient (training on the surviving selection-biased sample amplifies the
-   drift). Below the threshold, and with the knob unset, the verdict must be False. The verdict is
-   returned, not applied, so its EFFECT is read off the real batch build
-   (``tests/common/env_grpo_batch.py``): both advantage tensors zeroed, the completions record and the
-   step diagnostics written after that. The same build pins what the step around the breaker trains:
-   the empty-step halt, the token-mass balance and the engine's forced closes.
-
-2. Group-level reasoning-effort conditioning — ``_stamp_group_efforts`` (trainer side) draws ONE
-   effort per generation group and stamps it into every member's rollout context;
-   ``bind_episode_effort`` (Ray-actor side) must prefer that context level over the env's own
-   per-episode draw. Together they keep GRPO group members identically conditioned, so the effort
-   lottery can never become intra-group advantage noise.
-
-3. The ``_build_training_tensors`` phase helpers — three of them issue collectives behind config- or
-   mode-derived gates, so a data-dependent early ``return`` in any helper would let one rank skip a
-   collective its peers enter (a watchdog hang at scale). No single-process run can show a rank skipping
-   a collective, so these are read off the source tree.
-
-    python tests/cpu/grpo/test_grpo_update_breaker_and_group_effort.py
-"""
+"""Three env-GRPO stability mechanisms: the IS trust-region breaker, group-level reasoning-effort conditioning, and the
+``_build_training_tensors`` phase helpers, read off the source: one process cannot show a rank skip a collective."""
 
 import ast
 import inspect
@@ -55,24 +32,21 @@ class _TrainerStandIn(types.SimpleNamespace):
 
 
 def _skip_hook(host):
-    """The breaker's pre-optimizer-step hook over ``host``, as the trainer registers it."""
     callback = _BreakerOptimizerSkipCallback(host)
     return lambda: callback.on_pre_optimizer_step(None, None, None)
 
 
 def _breaker_host(threshold):
-    """Minimal stand-in exposing exactly what ``_update_breaker_tripped`` reads."""
     host = types.SimpleNamespace(
         async_config=types.SimpleNamespace(skip_update_masked_frac=threshold),
         _breaker_tripped_this_step=False,
-        accelerator=types.SimpleNamespace(gather=lambda x: x),  # single-process: identity
+        accelerator=types.SimpleNamespace(gather=lambda x: x),
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
     )
     return DistributedAsyncEnvironmentalGRPOTrainer._update_breaker_tripped.__get__(host), host
 
 
 def _masked_batch(masked_trajs: list[bool], tokens_per_row: int = 4):
-    """One row per trajectory; a masked trajectory has ALL corrected-token ratios zeroed."""
     n = len(masked_trajs)
     ratio = torch.ones(n, tokens_per_row)
     for i, masked in enumerate(masked_trajs):
@@ -101,9 +75,7 @@ def test_breaker_inert_below_threshold():
 
 
 def test_breaker_partial_token_masking_is_not_a_masked_trajectory():
-    # A trajectory with ANY surviving corrected token is not fully masked (a per-token zero such as
-    # ``zero_engine_forced_closes`` masks tokens, not trajectories) — it must not count toward the
-    # breaker fraction.
+    # A per-token zero such as ``zero_engine_forced_closes`` masks tokens, not trajectories.
     breaker, host = _breaker_host(0.5)
     ratio, corr, ids, _adv = _masked_batch([False, False])
     ratio[0, :3] = 0.0  # 3 of 4 tokens masked, 1 survives
@@ -121,7 +93,6 @@ def test_breaker_disabled_and_eval_are_noops():
 
 
 def test_breaker_ignores_dummy_rows():
-    # Dummy padding rows (traj_row_ids == -1) must not enter the fraction.
     breaker, host = _breaker_host(0.5)
     ratio, corr, ids, _adv = _masked_batch([True, False])
     ids = torch.tensor([0, 1, -1, -1])
@@ -132,9 +103,8 @@ def test_breaker_ignores_dummy_rows():
 
 
 def test_breaker_trips_on_masked_token_share():
-    """One masked trajectory in four is 25% by count but can carry most of the step's tokens; the
-    breaker reads the token share too, or a step that lost its long trajectories trains on the
-    short survivors alone."""
+    """One masked trajectory in four can carry most of the step's tokens; without the token share, a step that lost its
+    long trajectories trains on the short survivors alone."""
     tripped, host = _breaker_host(0.4)
     ratio = torch.ones(4, 20)
     ratio[0] = 0.0
@@ -156,10 +126,8 @@ def test_breaker_below_both_fractions_leaves_the_optimizer_skip_unarmed():
 
 
 def test_a_tripped_breaker_drops_the_gradients_on_every_optimizer_step_of_the_round():
-    """A zeroed loss still hands the optimizer zero gradients, on which Adam steps by momentum; the
-    skip must set every grad to None (what makes an optimizer skip a parameter) on EVERY optimizer
-    step the round feeds — a generation round spans ``num_iterations`` of them, all trained on the
-    zeroed advantages — so the skip must not consume the flag. Only the next round's verdict does."""
+    """A zeroed loss still hands the optimizer zero gradients, on which Adam steps by momentum. Grads must be None on
+    every optimizer step the round feeds, so the skip must not consume the flag; only the next round's verdict does."""
     calls = []
     host = _TrainerStandIn(
         _breaker_tripped_this_step=True,
@@ -176,8 +144,7 @@ def test_a_tripped_breaker_drops_the_gradients_on_every_optimizer_step_of_the_ro
 
 
 def test_none_gradients_leave_adam_state_and_weights_untouched():
-    """The skip relies on an optimizer contract: a parameter with ``grad=None``
-    is skipped outright, so neither its weights nor its moments move even with momentum built up."""
+    """The skip relies on this optimizer contract, even with momentum built up."""
     param = torch.nn.Parameter(torch.ones(4))
     opt = torch.optim.AdamW([param], lr=0.1, weight_decay=0.0)
     param.grad = torch.ones(4)
@@ -194,14 +161,13 @@ def test_none_gradients_leave_adam_state_and_weights_untouched():
 
 
 def test_toolkit_optimizers_skip_none_gradients():
-    """Guards the same contract for the toolkit's own optimizers, whose step loops are hand-written."""
+    """The toolkit's own optimizers have hand-written step loops."""
     for name in ("adamw_bf16", "flash_adamw", "muon"):
         source = (pathlib.Path("halo/optimizers") / f"{name}.py").read_text()
         assert "grad is None" in source or "grad is not None" in source, f"{name}: no None-grad guard in the step loop"
 
 
 def _armed(threshold: float | None) -> DistributedAsyncEnvironmentalGRPOTrainer:
-    """A trainer shell after ``_arm_update_breaker``, the step ``__init__`` takes, recording its callbacks."""
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncRolloutConfig(skip_update_masked_frac=threshold)
     host.callbacks = []
@@ -211,8 +177,6 @@ def _armed(threshold: float | None) -> DistributedAsyncEnvironmentalGRPOTrainer:
 
 
 def test_the_optimizer_skip_hook_is_attached_only_behind_the_breaker_knob():
-    """Without the knob no verdict trips, so the hook would only run on every optimizer step for nothing;
-    with it, the one hook turns a tripped verdict into this trainer's skipped optimizer step."""
     assert _armed(None).callbacks == []
     host = _armed(0.3)
     (hook,) = host.callbacks
@@ -225,8 +189,6 @@ def test_the_optimizer_skip_hook_is_attached_only_behind_the_breaker_knob():
     hook.on_pre_optimizer_step(None, None, None)
     assert calls == [True]
 
-
-# --- what the batch build trains around the breaker -------------------------------------------------
 
 _SAMPLED = -1.0
 _FORCED_CLOSE = 77
@@ -250,8 +212,7 @@ def _vetoed_round(threshold: float):
 
 
 def test_a_tripped_breaker_zeroes_the_trained_and_the_recorded_advantages():
-    """The verdict alone trains nothing away: a tripped step zeroes the per-row advantages the loss reads
-    AND the per-trajectory ones the durable completions record reports. Below the threshold both stand."""
+    """The per-row advantages are what the loss reads, the per-trajectory ones what the completions record reports."""
     host, batch = _vetoed_round(0.4)
     assert host._metrics["train"]["sampling/update_skipped"] == [1.0]
     assert torch.equal(batch["advantages"], torch.zeros(2))
@@ -264,8 +225,7 @@ def test_a_tripped_breaker_zeroes_the_trained_and_the_recorded_advantages():
 
 
 def test_the_step_diagnostics_read_the_advantages_the_breaker_left():
-    """``logps/advantage_cov`` describes the update the step takes: zero on a tripped step, whatever the
-    advantages were before the breaker zeroed them (the solve's low log-prob against its positive advantage)."""
+    """``logps/advantage_cov`` describes the update the step takes: zero on a tripped step."""
     host, _ = _vetoed_round(0.4)
     assert host._metrics["train"]["logps/advantage_cov"] == [0.0]
     host, _ = _vetoed_round(0.9)
@@ -273,8 +233,7 @@ def test_the_step_diagnostics_read_the_advantages_the_breaker_left():
 
 
 def _gathered_with_a_peer(monkeypatch, rewards: list[float], state: list[int]) -> None:
-    """The world gather of a two-rank run whose peer holds ``rewards`` and per-trajectory ``state``
-    (1 valid, 0 invalid)."""
+    """The world gather of a two-rank run whose peer holds ``rewards`` and ``state`` (1 valid, 0 invalid)."""
     peer = {torch.float32: torch.tensor(rewards), torch.int8: torch.tensor(state, dtype=torch.int8)}
     monkeypatch.setattr(step_batch, "gather", lambda t: torch.cat([t, peer[t.dtype]]))
 
@@ -286,8 +245,8 @@ def _failed_round(training: bool):
 
 
 def test_the_empty_step_halt_reads_the_world_not_this_rank(monkeypatch):
-    """A rank whose own episodes all failed trains on while a peer's survived: judged on its local mask it
-    would raise alone and leave the peers in the next collective. Empty world-wide, the step halts."""
+    """Judged on its local mask, a rank whose own episodes all failed would raise alone and leave the peers in the next
+    collective."""
     host, failed = _failed_round(training=True)
     _gathered_with_a_peer(monkeypatch, rewards=[1.0, 0.0], state=[1, 1])
     build(host, failed)
@@ -317,8 +276,7 @@ def _mass_round(balance: bool, training: bool = True):
 
 
 def test_the_token_mass_balance_weighs_the_corrected_ratio_and_reaches_both_advantage_sets():
-    """The failure's three tokens at IS ratio 1/2 weigh 3/2 against the solve's one, so the negatives
-    shrink to 2/3: on the per-row advantages the loss reads and the per-trajectory ones the record reports."""
+    """The failure's three tokens at IS ratio 1/2 weigh 3/2 against the solve's one, so the negatives shrink to 2/3."""
     _, plain = _mass_round(balance=False)
     host, balanced = _mass_round(balance=True)
     expected = plain["advantages"] * torch.tensor([1.0, 2 / 3])
@@ -327,10 +285,8 @@ def test_the_token_mass_balance_weighs_the_corrected_ratio_and_reaches_both_adva
 
 
 def test_the_token_mass_balance_leaves_a_negative_only_row_raw_and_records_the_trainable_rows():
-    """Per turn: a one-token solve against a failure of a 2-token turn and a 4-token cut turn. The balance
-    weighs the solve's 1/2 against the failure's trainable 1 and halves the negatives there; the cut turn
-    keeps its raw -1/2 and its 2 of mass is the round's net push. The record carries the failure's trainable
-    turn."""
+    """The balance weighs the solve's 1/2 against the failure's trainable 1 and halves the negatives there; the cut
+    turn keeps its raw -1/2 and its 2 of mass is the round's net push."""
     solve, failure, cut = row([6]), row([7, 8]), row([9, 10, 11, 12], negative_only=True)
     host = batch_host(
         [solve, failure, cut],
@@ -358,9 +314,7 @@ def test_an_eval_round_is_never_balanced():
 
 
 def test_an_engine_forced_close_trains_no_gradient():
-    """The reasoning close the engine appended at the budget (sampling log-prob 0) carries ratio 0 whatever
-    the correction computed for it, or it trains with its episode's advantage and teaches the model to stop
-    closing its reasoning; the turn's own tokens keep their ratio."""
+    """Otherwise the close trains with its episode's advantage and teaches the model to stop closing its reasoning."""
     rows = [row([6, 7, _FORCED_CLOSE], sampling=[_SAMPLED, _SAMPLED, 0.0]), row([8, 9, 10], sampling=[_SAMPLED] * 3)]
     host = batch_host(
         rows, torch.full((2, 3), _SAMPLED), training=True, is_correction=True, forced_close_ids=(_FORCED_CLOSE,)
@@ -380,7 +334,6 @@ def _build_training_tensors_ast() -> ast.FunctionDef:
 
 
 def _calls(stmt: ast.stmt, name: str) -> list[ast.Call]:
-    """The calls of ``name`` in ``stmt``, as a method (``x.name(...)``) or a bare function (``name(...)``)."""
     return [
         node
         for node in ast.walk(stmt)
@@ -408,7 +361,7 @@ _RECORDING = ("fraction", "maximum", "effective_sample_frac", "covariance", "_re
 
 
 def test_build_training_tensors_routes_through_every_phase_helper():
-    """A helper the parent no longer calls pins nothing, so the early-return check below would go vacuous."""
+    """A helper the parent does not call pins nothing, so the early-return check below would go vacuous."""
     fn = _build_training_tensors_ast()
     missing = [name for name in _PHASE_HELPERS if not _calls(fn, name)]
     assert not missing, f"phase helpers no longer called: {missing}"
@@ -428,9 +381,8 @@ def test_rewards_are_built_once_tokenizing_has_settled_the_baseline():
 
 
 def test_world_metrics_flush_once_after_every_recording_site_with_no_return_between():
-    """The step's rank-local counts fold in ONE collective, in the last phase of ``_build_training_tensors``:
-    a second flush or a return before it strands the peers in the fold, and a site recording after it
-    logs its count a step late."""
+    """The step's rank-local counts fold in one collective, in the last phase of ``_build_training_tensors``: a second
+    flush or a return before it strands the peers, and a site recording after it logs its count a step late."""
     parent = _build_training_tensors_ast()
     assert not _calls(parent, "flush"), "the batch build flushes outside its metrics phase"
     phase_at = [i for i, stmt in enumerate(parent.body) if _calls(stmt, "_record_step_metrics")]
@@ -450,10 +402,8 @@ def test_world_metrics_flush_once_after_every_recording_site_with_no_return_betw
 
 
 def test_phase_helpers_never_early_return():
-    """Each phase helper returns exactly once, as its final statement. Several issue collectives (the
-    uniform raise, the row padding, the recompute forward's EP dispatch, the normalizer and token-mass
-    gathers, the metrics fold), so a data-dependent early-out would let one rank skip a collective its
-    peers enter."""
+    """Several issue collectives (the uniform raise, row padding, the recompute's EP dispatch, the normalizer and
+    token-mass gathers, the metrics fold), so a data-dependent early-out would let a rank skip one its peers enter."""
     for name in _PHASE_HELPERS + _NESTED_HELPERS:
         fn = _method_ast(name)
         returns = [node for node in ast.walk(fn) if isinstance(node, ast.Return)]
@@ -473,13 +423,13 @@ def _effort_host(num_generations: int, training: bool = True, num_generations_ev
 
 
 def _group_prompts(rows: int, group: int) -> list[str]:
-    """Group-expanded prompts, as the RepeatSampler hands them: ``group`` consecutive rows per problem."""
+    """As the RepeatSampler hands them: ``group`` consecutive rows per problem."""
     return [f"problem {i // group}" for i in range(rows)]
 
 
 def test_stamp_group_efforts_uniform_within_group():
     stamp, _ = _effort_host(4)
-    contexts = [None] * 12  # 3 groups of 4
+    contexts = [None] * 12
     stamp(_group_prompts(12, 4), contexts)
     levels = [ctx["reasoning_effort"] for ctx in contexts]
     assert all(lv in VALID_REASONING_EFFORTS for lv in levels)
@@ -496,10 +446,8 @@ def test_stamp_group_efforts_preserves_existing_context_keys():
 
 
 def test_stamp_group_efforts_records_a_split_group_rather_than_raising():
-    """Every batch-construction failure goes through the rank-uniform fence, so a rank-local raise
-    here would strand the peers in the caller's all-reduce. The failure is RECORDED and raised
-    uniformly one call later (the collective half is pinned in
-    ``test_env_ragged_eval_batch_uniform_raise.py``)."""
+    """A rank-local raise here would strand the peers in the caller's all-reduce;
+    ``test_env_ragged_eval_batch_uniform_raise.py`` pins the collective half."""
     stamp, host = _effort_host(4)
     contexts = [None] * 6
     stamp(_group_prompts(6, 4), contexts)
@@ -509,14 +457,13 @@ def test_stamp_group_efforts_records_a_split_group_rather_than_raising():
 
 def test_stamp_group_efforts_eval_uses_eval_group_size():
     stamp, _ = _effort_host(4, training=False, num_generations_eval=1)
-    contexts = [None] * 3  # not a multiple of 4 — fine in eval (group size 1)
+    contexts = [None] * 3  # not a multiple of 4, fine in eval (group size 1)
     stamp(_group_prompts(3, 1), contexts)
     assert all(ctx["reasoning_effort"] in VALID_REASONING_EFFORTS for ctx in contexts)
 
 
 def test_training_groups_of_one_problem_still_draw_their_levels_at_random():
-    """The stable draw is the eval's alone: a training group's level is the lottery the effort-conditioned
-    policy learns over, so one problem drawn in many rounds must see more than one level."""
+    """A training group's level is the lottery the effort-conditioned policy learns over."""
     stamp, _ = _effort_host(2)
     contexts = [None] * 60
     stamp(["the same problem"] * 60, contexts)
@@ -524,8 +471,7 @@ def test_training_groups_of_one_problem_still_draw_their_levels_at_random():
 
 
 def test_an_eval_scores_each_problem_at_one_level_whatever_the_draw_order():
-    """Every eval round must put a problem at the same level, or the checkpoints' per-level scores (and the
-    level mix behind the headline one) are not comparable."""
+    """Otherwise the checkpoints' per-level scores, and the level mix behind the headline one, are not comparable."""
     stamp, _ = _effort_host(4, training=False, num_generations_eval=1)
     prompts = [f"problem {i}" for i in range(60)]
     first, second = [None] * 60, [None] * 60
@@ -543,10 +489,9 @@ def test_bind_episode_effort_prefers_the_context_level():
         return bind_episode_effort(context, env, max_tokens=1000).level
 
     assert level({"reasoning_effort": "high"}, "random") == "high"
-    # No context level → falls back to the env setting ('random' draws a concrete level).
+    # No context level falls back to the env setting ('random' draws a concrete level).
     assert level({}, "random") in VALID_REASONING_EFFORTS
     assert level(None, "random") in VALID_REASONING_EFFORTS
-    # Fixed env setting passes through; no setting at all → None.
     assert level(None, "low") == "low"
     assert level(None, None) is None
 

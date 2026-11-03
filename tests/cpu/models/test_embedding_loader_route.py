@@ -1,17 +1,6 @@
 #!/usr/bin/env python
 """The embedding script loads a MoE through the parallel loader wherever the run asks for its EP layers.
-
-The grouped-GEMM EP layers (``use_grouped_gemm``, the default) exist only on the parallel loader's path, which
-every other training script always takes: sentence-transformers' own load builds the stock experts, and with them
-``use_grouped_gemm`` and ``fsdp_shard_ep1_experts`` would be inert while the resume resolver, the best-model gate and
-the balancing resolution read the run as wrapped. So at ``expert_parallel_size`` 1 an EP family's backbone (its
-multimodal wrapper too) takes the parallel loader, while a dense backbone, a MoE no EP layer class wraps (Mixtral)
-and any backbone at ``use_grouped_gemm: false`` keep sentence-transformers' load and the checkpoint's pipeline.
-
-Injected LoRA, which those EP layers refuse, is refused by the script before the model loads, on the same verdict.
-
-    python tests/cpu/models/test_embedding_loader_route.py
-"""
+A sentence-transformers load builds stock experts, so ``use_grouped_gemm`` would sit inert on a run read as wrapped."""
 
 import ast
 import inspect
@@ -46,7 +35,7 @@ SENTENCE_TRANSFORMERS = "sentence-transformers"
 
 @pytest.fixture(scope="module")
 def checkpoints(tmp_path_factory) -> dict[str, str]:
-    """Each family's tiny config saved alone: the route reads the checkpoint's config, never its weights."""
+    """Config only: the route reads the checkpoint's config, never its weights."""
     root = tmp_path_factory.mktemp("embedding_loader_route")
     paths = {}
     for name, family in {**EP_FAMILIES, **STOCK_FAMILIES}.items():
@@ -62,7 +51,6 @@ def _context(checkpoint: str, **parallelism) -> ScriptContext:
 
 
 def _route(monkeypatch, tmp_path, checkpoint: str, **parallelism) -> list[str]:
-    """The loaders ``build_sentence_transformer`` takes for ``checkpoint`` under ``parallelism``."""
     taken = []
     pipeline = SimpleNamespace(model_card_data=SimpleNamespace(add_tags=lambda tags: None))
     monkeypatch.setattr(

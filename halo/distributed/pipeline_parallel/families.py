@@ -1,9 +1,6 @@
-"""Per-family pipeline-split contracts, keyed by the HF backbone class: the registered families and the
-refused ones. A backbone no spec claims is refused by name.
-
-The hyper-connection families' non-first stages run their own forward minus the embedding widen:
-collapsing the widened residual stream mid-network is lossy.
-"""
+"""Per-family pipeline-split contracts, keyed by HF backbone class; a backbone no spec claims is refused by name.
+Hyper-connection families' non-first stages run their own forward minus the embedding widen, since collapsing the
+widened residual mid-network is lossy."""
 
 from __future__ import annotations
 
@@ -26,21 +23,17 @@ class PPFamilySpec:
     """A family's pipeline-split contract.
 
     Attributes:
-        hf_module_names: the backbone classes (the module holding the decoder-layer list) claimed.
-        refusal: why the family is refused: the state a cut would sever.
-        final_norm_attrs: the post-layers norm, probed in order; neutralized off the last stage.
-        head_attrs: the model's task head, probed in order; held by the last stage only.
-        tail_module_attrs: further post-layers backbone modules (the hyper-connection collapse
-            ``hc_head``), neutralized off the last stage. Exact names; each must exist.
-        layer_types_rebase_safe: every per-layer input is selected by the layer's own attributes
-            rather than its list position, so stage offsets need not land on a ``layer_types`` period.
-        stream_forward: the backbone forward a non-first stage runs; ``None`` = the upstream forward,
-            driven through ``inputs_embeds``.
-        token_ids_kwarg: the backbone kwarg a non-first stage takes the microbatch's token ids under, for
-            layers that read them mid-network (per-layer embeddings); ``None`` = only stage 0 reads them.
-        reject_severed_boundaries: ``(model, partition)`` raising when a boundary severs the
-            family's cross-layer state.
-        validated: the family is registered: its stages reproduce the unsplit model on the pipeline GPU tier.
+        hf_module_names: backbone classes claimed.
+        refusal: why the family is refused (the state a cut would sever).
+        final_norm_attrs: post-layers norm, probed in order; neutralized off the last stage.
+        head_attrs: task head, probed in order; held by the last stage only.
+        tail_module_attrs: further post-layers modules (``hc_head``), neutralized off the last stage; each must exist.
+        layer_types_rebase_safe: per-layer inputs come from the layer's own attributes, so offsets need not land on a
+            ``layer_types`` period.
+        stream_forward: the forward a non-first stage runs; ``None`` = upstream, through ``inputs_embeds``.
+        token_ids_kwarg: kwarg a non-first stage takes token ids under, for layers reading them mid-network.
+        reject_severed_boundaries: ``(model, partition)`` raising when a boundary severs cross-layer state.
+        validated: the family is registered; its stages reproduce the unsplit model on the pipeline GPU tier.
     """
 
     hf_module_names: tuple[str, ...] = ()
@@ -56,11 +49,7 @@ class PPFamilySpec:
 
 
 def _boundary_stream(backbone, inputs_embeds: torch.Tensor | None, stream_shape: tuple[int, ...]) -> torch.Tensor:
-    """The previous stage's hyper-connection stream, refused unless it is ``[B, S, *stream_shape]``.
-
-    Anything else means the previous stage collapsed the stream, and widening it by replication would
-    train on a lossy mean of the streams.
-    """
+    """The previous stage's hyper-connection stream, refused unless it is ``[B, S, *stream_shape]``."""
     if inputs_embeds is None or tuple(inputs_embeds.shape[2:]) != stream_shape:
         got = "None" if inputs_embeds is None else f"shape {tuple(inputs_embeds.shape)}"
         raise RuntimeError(
@@ -80,11 +69,8 @@ def _stacked_stream_shape(config) -> tuple[int, int]:
 def _stream_prologue(
     backbone, inputs_embeds, position_ids, past_key_values, use_cache
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Cache | None]:
-    """``(stream, [B, S, D] view of one stream, position_ids, cache)`` for a stacked-stream mid-chain forward.
-
-    The mask and rotary constructors read only batch, sequence, dtype and device off
-    ``inputs_embeds``, so the one-stream view stands in for it.
-    """
+    """``(stream, one-stream [B, S, D] view, position_ids, cache)``. The mask and rotary constructors read only batch,
+    sequence, dtype and device, so the view stands in for ``inputs_embeds``."""
     hidden_states = _boundary_stream(backbone, inputs_embeds, _stacked_stream_shape(backbone.config))
     embeds_ref = hidden_states[:, :, 0]
     if use_cache and past_key_values is None:
@@ -150,12 +136,8 @@ def glm5_next_stream_forward(
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``Glm5NextTextModel.forward`` (transformers ~5.20) minus the embedding widen.
-
-    Each layer's mask is keyed by its own ``block_type`` (set from its global index at construction)
-    rather than ``config.layer_types[i]`` at loop position ``i``, which a sliced list re-bases.
-    Upstream both mask entries hold the same tensor, so the two spellings agree today.
-    """
+    """``Glm5NextTextModel.forward`` (transformers ~5.20) minus the embedding widen. Each layer's mask is keyed by its
+    own ``block_type``, since ``config.layer_types[i]`` at loop position ``i`` re-bases on a sliced list."""
     hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
         self, inputs_embeds, position_ids, past_key_values, use_cache
     )
@@ -207,9 +189,7 @@ def qwen4_exp_stream_forward(
     **kwargs,
 ) -> BaseModelOutputWithPast:
     """``Qwen4ExpTextModel.forward`` (transformers ~5.20) under the toolkit's document forward, minus the embedding
-    widen: the received ``[B, S, hc_count * D]`` stream runs the layers, each reading the 2-D padding mask, and
-    ``ple_input_ids`` (the microbatch's token ids, which the spec's ``token_ids_kwarg`` routes here) feed the
-    per-layer embeddings. Uncached rows only, as a pipeline stage runs them."""
+    widen; ``ple_input_ids`` feed the per-layer embeddings. Uncached rows only."""
     config = self.config
     if past_key_values is not None or use_cache:
         raise RuntimeError(
@@ -260,8 +240,6 @@ def qwen4_exp_stream_forward(
 
 
 def _reject_stranded_hash_routers(model: nn.Module, partition: list[tuple[int, int]]) -> None:
-    """Every DeepSeek-V4 ``hash_moe`` layer must land on stage 0, the only stage holding the
-    ``input_ids`` its ``tid2eid`` router reads."""
     mlp_layer_types = getattr(text_config(getattr(model, "config", None)), "mlp_layer_types", None) or ()
     hash_layers = [i for i, kind in enumerate(mlp_layer_types) if kind == "hash_moe"]
     stage0_hi = partition[0][1]
@@ -275,8 +253,6 @@ def _reject_stranded_hash_routers(model: nn.Module, partition: list[tuple[int, i
 
 
 def _reject_severed_dsa_chains(model: nn.Module, partition: list[tuple[int, int]]) -> None:
-    """No GLM-5 stage may begin on a "shared" DSA layer: it reuses the previous full indexer layer's
-    top-k indices, handed layer to layer by the model loop."""
     indexer_types = getattr(text_config(getattr(model, "config", None)), "indexer_types", None) or ()
     severed = [lo for lo, _ in partition[1:] if lo < len(indexer_types) and indexer_types[lo] == "shared"]
     if severed:
@@ -366,18 +342,12 @@ if len(PP_SPEC_MAP) != sum(len(spec.hf_module_names) for spec in PP_FAMILY_SPECS
 
 
 def resolve_pp_spec(backbone: nn.Module) -> PPFamilySpec:
-    """The spec claiming ``backbone``'s class, or the unregistered :data:`GENERIC_PP`."""
     return PP_SPEC_MAP.get(type(backbone).__name__, GENERIC_PP)
 
 
 def require_pp_attr(module: nn.Module, candidates: tuple[str, ...], what: str) -> str:
-    """Name of the first attribute in ``candidates`` that ``module`` carries; the probe for the final
-    norm, the task head and the family's tail modules.
-
-    Raises:
-        ValueError: none is present. Always fatal — a caller would otherwise skip a step (an
-            un-neutralized norm, a head left on every stage) and produce wrong numbers.
-    """
+    """First attribute in ``candidates`` that ``module`` carries. Raises when none is, since a caller would otherwise
+    skip a step (an un-neutralized norm, a head on every stage) and produce wrong numbers."""
     name = find_attr_name(module, candidates)
     if name is None:
         raise ValueError(

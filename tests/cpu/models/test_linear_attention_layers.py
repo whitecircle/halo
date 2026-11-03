@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: one predicate reads whether a model declares linear-attention layers.
-
-``has_linear_attention_layers`` reads ``layer_types`` through a VLM wrapper, where the composite releases
-(Qwen3.5/3.6, GLM-5 Next, Qwen3.8-Flash-Next) keep it: their top-level config declares none. The GatedDeltaNet
-predicate and the refusal of linear attention no segment marker reaches both build on it, so a composite
-checkpoint resolves exactly as its text tower does. Every transformers config declaring such layers is swept.
-
-    python tests/cpu/models/test_linear_attention_layers.py
-"""
+"""``has_linear_attention_layers`` reads ``layer_types`` through a VLM wrapper, where composite releases keep it, so a
+composite checkpoint resolves as its text tower does."""
 
 import pytest
 import transformers
@@ -20,7 +13,6 @@ from halo.models.attention.layout import (
 )
 from halo.models.segment_markers import find_unmarked_sequence_mixer, segment_markers_for
 
-# Composite configs whose text sub-config alone carries the linear-attention layer types.
 COMPOSITE_RELEASES = ("qwen3_5", "qwen3_5_moe", "glm5_next", "qwen4_exp")
 GATED_DELTA_NET = ("qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "qwen3_next", "qwen4_exp")
 UNMARKED = ("glm5_next", "glm5_next_text", "kimi_linear", "bailing_hybrid", "minimax", "jamba")
@@ -59,7 +51,6 @@ def test_both_consumers_resolve_from_the_shared_predicate(model_type):
 
 
 def test_hybrid_layer_groups_are_unmarked_without_layer_types():
-    """A group-declared hybrid with no ``layer_types`` reaches the refusal through its groups alone."""
     config = transformers.PretrainedConfig(layer_group_size=4)
     assert declares_linear_layer_groups(config) and not has_linear_attention_layers(config)
     assert find_unmarked_sequence_mixer(config) == "linear-attention layers"

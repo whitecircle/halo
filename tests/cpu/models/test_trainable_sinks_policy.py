@@ -1,14 +1,5 @@
 #!/usr/bin/env python
-"""The GptOss sink policies and their gates.
-
-Pins: the two user knobs resolve to one ``SinksPolicy`` (the contradiction raises); every policy
-leaves the sink values untouched except the reset, and sets ``requires_grad`` the way its name says;
-TRAINABLE counts as live for the trainer gates and is refused under an implementation without a sink
-gradient, under an adapter run, and under weight-sync RL.
-
-Fails if: the trainable branch mutates sink values or leaves them frozen, the reset stops freezing,
-the live branch stops freezing, any of the refusals disappears, or TRAINABLE stops counting as live.
-"""
+"""The GptOss sink policies and their gates."""
 
 from types import SimpleNamespace
 
@@ -89,9 +80,8 @@ def test_live_branch_freezes_and_reset_branch_neutralizes_frozen():
 
 @pytest.mark.parametrize("attn_implementation", ["flash_attention_2", "eager"])
 def test_an_attention_without_sinks_is_refused_on_every_branch(attn_implementation):
-    """A sink-less attention (an out-of-tree or remote-code GptOss variant) must fail the same way on
-    both branches: the FA2 branch's ``attn.sinks = None`` would otherwise CREATE the attribute and
-    stamp NEUTRALIZED over a model whose attention never had a sink to disable."""
+    """The FA2 branch's ``attn.sinks = None`` would otherwise create the attribute and stamp NEUTRALIZED over a model
+    that never had a sink to disable."""
     model, config = _tiny_gpt_oss()
     for layer in model.model.layers:
         del layer.self_attn._parameters["sinks"]
@@ -130,8 +120,7 @@ def test_weight_sync_refuses_trainable_sinks():
     apply_sinks_policy(model, config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
     with pytest.raises(ValueError, match="SFT-only"):
         reject_unsyncable_model(model, "vllm")
-    # The frozen live policy on an EP-wrapped MoE — the shipped RL shape — passes the same gate
-    # (a wrapper-less MoE is refused before the sink verdict matters).
+    # The frozen live policy on an EP-wrapped MoE, the shipped RL shape, passes. A wrapper-less MoE is refused earlier.
     model, config = _tiny_gpt_oss()
     apply_sinks_policy(model, config, policy=SinksPolicy.LIVE, attn_implementation="eager")
     layer = object.__new__(EPGptOssMoELayer)

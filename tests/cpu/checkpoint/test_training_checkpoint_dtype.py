@@ -1,16 +1,6 @@
 #!/usr/bin/env python
 """A training checkpoint writes every tensor at its live dtype; an export casts to the save dtype.
-
-fp32 master weights (``fp32_router``, ``fp32_experts``, ``fp32_non_ep_params``) rounded to bf16 in a
-training checkpoint stay rounded through every load that reads them back exactly (Path A, the PP
-stage load, an adapter restore), so the writers keep the live dtype when the trainer's
-``_save_checkpoint`` is the caller (``CheckpointContext.training_checkpoint``) and cast to the save
-dtype for the ``save_model`` export. Pinned here: the gathered writer the FSDP2 / CP / TP saves
-share, the TP save's own hand-off to it, the EP gathered writer, the PP stage writer (on a real
-gloo group), the hand-written adapter file, and the trainer seam that marks which save is which.
-
-    python tests/cpu/checkpoint/test_training_checkpoint_dtype.py
-"""
+fp32 masters rounded to bf16 stay rounded through every load that reads them back exactly."""
 
 import dataclasses
 import os
@@ -40,11 +30,11 @@ from tests.common.models import TINY_QWEN3_CONFIG
 from tests.cpu.checkpoint.test_pp_sharded_save_roundtrip import PP_SIZE, WORLD_SIZE, _context, _parallelism_config
 
 SHARD_SIZE = "64KB"
-# The live parameters the tiny MoE trains as fp32 masters: a router, an attention projection and a
-# fused expert bank, whose hub keys are the per-expert split the save reverts it to.
+# A router, an attention projection and a fused expert bank, whose hub keys are the per-expert split the save reverts
+# it to.
 FP32_MASTERS = ("model.layers.0.mlp.gate.weight", "model.layers.0.self_attn.q_proj.weight")
 FP32_EXPERTS = "model.layers.1.mlp.experts.gate_up_proj"
-# One fp32 master in each of the two pipeline stages of the 8-layer tiny Qwen3.
+# One in each of the two pipeline stages of the 8-layer tiny Qwen3.
 PP_FP32_MASTERS = ("model.layers.0.self_attn.q_proj.weight", "model.layers.7.mlp.down_proj.weight")
 
 
@@ -65,13 +55,13 @@ def _tiny_moe_with_fp32_masters():
     model = AutoModelForCausalLM.from_config(config).to(torch.bfloat16)
     named = dict(model.named_parameters())
     for name in (*FP32_MASTERS, FP32_EXPERTS):
-        # Off the bf16 grid, as a trained fp32 master is: a round trip through bf16 would move it.
+        # Off the bf16 grid: a round trip through bf16 would move it.
         named[name].data = named[name].data.float() + 1e-5
     return model
 
 
 def _tiny_dense_with_fp32_masters():
-    """Identically initialized on every rank, as the PP replicas of one stage must be."""
+    """PP replicas of one stage must be identical."""
     torch.manual_seed(0)
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, pad_token_id=0, eos_token_id=1)).to(torch.bfloat16)
     named = dict(model.named_parameters())
@@ -92,8 +82,8 @@ def _stream(model, output_dir, *, keep_live_dtype):
 
 
 def _expert_keys(state: dict) -> list[str]:
-    """The keys the fp32 ``gate_up_proj`` bank is written under: per-expert hub keys where the writer
-    reverts the fusion (the gathered one), the live fused key where it does not (EP without EP layers)."""
+    """Per-expert hub keys where the writer reverts the fusion, the live fused key where it does not (EP without EP
+    layers)."""
     prefix = "model.layers.1.mlp.experts."
     suffixes = ("gate_proj.weight", "up_proj.weight", "gate_up_proj")
     return [key for key in state if key.startswith(prefix) and key.endswith(suffixes)]
@@ -118,19 +108,16 @@ def test_a_training_checkpoint_keeps_fp32_masters_and_an_export_casts_them(tmp_p
         if keep_live_dtype:
             for name in FP32_MASTERS:
                 assert state[name].dtype == torch.float32 and torch.equal(state[name], live[name]), name
-            # Decided on the tensor, not its name: a per-expert hub key names no live parameter.
+            # On the tensor, since a per-expert hub key names no live parameter.
             assert all(state[key].dtype == torch.float32 for key in experts), experts
         else:
             assert all(state[name].dtype == torch.bfloat16 for name in FP32_MASTERS)
             assert all(state[key].dtype == torch.bfloat16 for key in experts)
-        # bf16 parameters are written as they live either way.
         assert state["model.embed_tokens.weight"].dtype == torch.bfloat16
 
 
 def test_the_ep_gathered_export_holds_its_replicated_tensors_at_the_save_dtype(tmp_path, monkeypatch):
-    """The save rank holds the whole non-expert chunk at once. Cast as each tensor resolves, an export
-    holds it at the save dtype; cast only when the chunk is written, it holds every fp32 master at its
-    full width and then a bf16 copy beside it."""
+    """Cast only when the chunk is written, it holds every fp32 master at full width and then a bf16 copy beside it."""
     staged: dict[str, torch.dtype] = {}
     stream = ep.stream_gathered_checkpoint
 
@@ -186,9 +173,8 @@ def test_the_adapter_file_keeps_fp32_adapters_only_in_a_training_checkpoint():
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
-    """The mixin's ``_save_checkpoint`` and ``_checkpoint_context`` over HF's save, which saves the model
-    through ``save_model``; ``save_model`` records the context each save is handed. The base's
-    optimizer write after it fails on ``base_save_fails``."""
+    """``save_model`` records the context each save is handed; the base's optimizer write fails on
+    ``base_save_fails``."""
 
     def _ep_layers(self):
         return []

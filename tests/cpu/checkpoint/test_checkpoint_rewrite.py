@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""A save that rewrites a step directory in place replaces its per-rank resume files, on every rank, and clears
-the earlier save's completion markers.
-
-A shard merge on the save's filesystem hard-links the per-rank optimizer shards and RNG states into its output,
-and their writers truncate an existing name, so a run saving that step again would rewrite the merged copy
-through the links. Each filesystem's save rank unlinks them before any rank writes. Two ranks on a gloo group,
-as one shared output filesystem (rank 0 clears both ranks' files) and as two nodes with their own disks (each
-rank clears its own node's), save into a ``checkpoint-2`` whose per-rank files are linked into a sibling
-directory; that directory must keep every file as it was.
-
-The completion markers go by name: a listing that misses one, as a save rank's stale cached listing can, must
-not leave it to vouch for a re-save torn before its own.
-
-    python tests/cpu/checkpoint/test_checkpoint_rewrite.py
-"""
+"""A save rewriting a step directory in place replaces its per-rank resume files and clears earlier completion
+markers. A merge hard-links them, so a truncating re-save would rewrite the merged copy."""
 
 import datetime
 import json
@@ -63,7 +50,7 @@ def _worker(rank: int, root: str, per_node: bool) -> None:
 
         outcome["rewritten"] = [name for name in _rank_files(rank) if (step_dir / name).read_bytes() != before[name]]
         outcome["changed"] = [name for name in sorted(before) if (linked / name).read_bytes() != before[name]]
-    except Exception as e:  # a failing rank must still leave a verdict file, naming the phase that raised
+    except Exception as e:  # A failing rank must still leave a verdict file, naming the phase that raised.
         outcome["error"] = f"{phase}: {type(e).__name__}: {e}"
     finally:
         reset_shared_filesystem_consensus()

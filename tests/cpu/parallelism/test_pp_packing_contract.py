@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""Packing under pipeline parallelism: fixed shapes without losing cross-document isolation.
-
-PP freezes its P2P buffers on the first step, so every batch must have one shape. Packing normally
-flattens ``[B, L] -> [1, B*L]`` because transformers only engages packed-sequence handling at batch
-size 1 — but a ``[1, N]`` tensor cannot be microbatched at all (the schedule splits dim 0), and its
-width varies with the bin lengths. Under PP the rows stay, and the microbatch split IS the
-flattening: each microbatch arrives as ``[1, max_length]``.
-
-These tests pin the three things that make that safe, each of which fails SILENTLY if broken:
-the rows survive the collator, the pad tail is an inert document, and ``seq_lengths`` survives
-HF's column pruning (without it every packed row collates as ONE document).
-
-Run: pytest tests/cpu/parallelism/test_pp_packing_contract.py
-"""
+"""Packing under pipeline parallelism: PP freezes P2P buffers on the first step, so the rows stay and the microbatch
+split is the flattening. Each contract here fails silently if broken."""
 
 from unittest.mock import MagicMock
 
@@ -44,7 +32,7 @@ def make_tokenizer() -> MagicMock:
 
 
 def _pad(encoded: list[dict]) -> dict:
-    """Right-pad to the batch max, mirroring tokenizer.pad(padding=True)."""
+    """Mirrors tokenizer.pad(padding=True)."""
     width = max(len(row["input_ids"]) for row in encoded)
     out: dict[str, torch.Tensor] = {}
     for key, fill in (("input_ids", PAD), ("attention_mask", 0)):
@@ -53,7 +41,7 @@ def _pad(encoded: list[dict]) -> dict:
 
 
 def packed_rows(*bins: list[int]) -> list[dict]:
-    """One dataset row per packed bin; ``seq_lengths`` is what marks it as packed."""
+    """``seq_lengths`` marks it as packed."""
     return [{"input_ids": [i + 100 for i in range(sum(lengths))], "seq_lengths": list(lengths)} for lengths in bins]
 
 
@@ -62,12 +50,7 @@ def collate(collator, rows: list[dict]) -> dict:
 
 
 def test_pp_mode_keeps_rows_so_the_batch_can_be_microbatched():
-    """``flatten_to_single_row = False`` must preserve dim 0 — the axis the schedule splits on.
-
-    The default (flattening) collapses the batch to one row, which the pipeline cannot chunk: this
-    asserts the torch behavior directly, so a torch upgrade that changed it would surface here
-    rather than as a mid-training ``Expecting N arg_mbs but got 1``.
-    """
+    """A torch upgrade changing this surfaces here rather than as a mid-training ``Expecting N arg_mbs but got 1``."""
     collator = DataCollatorWithPacking(tokenizer=make_tokenizer())
     rows = packed_rows([4, 4], [3, 5])
 
@@ -86,11 +69,7 @@ def test_pp_mode_keeps_rows_so_the_batch_can_be_microbatched():
 
 
 def test_ragged_bins_pad_to_one_fixed_shape():
-    """Bins are ``<= max_length`` and vary per batch; the pipeline needs one frozen shape.
-
-    Two batches whose packed widths differ must both leave ``FixedShapeCollator`` at
-    ``[B, max_length]`` — otherwise the second step writes into P2P buffers sized for the first.
-    """
+    """Otherwise the second step writes into P2P buffers sized for the first."""
     inner = DataCollatorWithPacking(tokenizer=make_tokenizer())
     inner.flatten_to_single_row = False
     fixed = FixedShapeCollator(inner, MAX_LENGTH, resolve_batch_pad_values(PAD))
@@ -104,15 +83,8 @@ def test_ragged_bins_pad_to_one_fixed_shape():
 
 
 def test_pad_tail_is_an_inert_document():
-    """The trailing pad region must contribute no loss, open no attention path into the real
-    documents, and stay a HANDFUL of segments.
-
-    The tail's position_ids are a ramp restarting every ``PAD_TAIL_SEGMENT_CHUNK`` tokens: the reset
-    at its start seals it off from the last real document, and the chunking is load-bearing — a
-    constant-0 tail makes every pad its own varlen segment, and the FA4 backward pays a fixed cost
-    per segment (measured 275x, 6.9 s vs 25 ms per layer, on a 34k-pad partial pack). A pad value
-    that drifted to the tokenizer pad id would splice the tail onto the last real document instead.
-    """
+    """A constant-0 tail makes every pad a varlen segment, and FA4's backward pays per segment (275x, 6.9 s vs 25 ms
+    per layer, on a 34k-pad partial pack)."""
     inner = DataCollatorWithPacking(tokenizer=make_tokenizer())
     inner.flatten_to_single_row = False
     fixed = FixedShapeCollator(inner, MAX_LENGTH, resolve_batch_pad_values(PAD))
@@ -138,12 +110,8 @@ def test_pad_tail_is_an_inert_document():
 
 
 def test_row_form_and_flat_form_score_the_same_tokens():
-    """The pipeline's loss normalizer must not change because the rows were kept.
-
-    ``loss_token_counts_per_row`` drops one target per row; in the kept-rows form that extra dropped target
-    is the next row's first token, which is already ignored (it sits at ``position_ids == 0``). So
-    both forms must count identically — if they diverge, PP packing silently rescales the loss.
-    """
+    """The extra dropped target in row form is already ignored at ``position_ids == 0``; if counts diverge, PP
+    silently rescales the loss."""
     tokenizer = make_tokenizer()
     rows = packed_rows([4, 4], [3, 5])
 
@@ -160,25 +128,11 @@ def test_row_form_and_flat_form_score_the_same_tokens():
 
 @pytest.mark.parametrize("collator_cls", [DataCollatorWithPacking, DataCollatorForCompletionOnlyLMWithPacking])
 def test_the_column_survives_the_pipeline_wrapper(collator_cls):
-    """``seq_lengths`` is what tells the collator a row is packed, and the pin reads the WRAPPED
-    collator — so the collator class declaring the column is not enough on its own.
-
-    PP overwrites ``_signature_columns`` with its own pin, and HF prunes every dataset column
-    outside it. If ``seq_lengths`` is dropped the collator sees an unpacked row: no resetting
-    position_ids, no boundary label masking, and the dense mask retained — the whole row attends as
-    ONE document, with no error anywhere.
-
-    ``_configure_pipeline_parallel`` wraps the collator in ``FixedShapeCollator`` first — deliberately,
-    so the pin can union the inner collator's columns — and then reads
-    ``getattr(self.data_collator, "required_dataset_columns", ())`` off the wrapper. A wrapper that
-    does not forward the attribute answers ``()``, HF prunes ``seq_lengths``, and every packed row
-    collates as ONE attended document with a finite, plausible loss and no error. Asserting the
-    class attribute alone passes in exactly that state, which is why this reproduces the real
-    expression instead.
-    """
+    """The pin reads the wrapped collator; a wrapper not forwarding the attribute lets HF prune ``seq_lengths``, and
+    every row attends as one document."""
     kwargs = {"tokenizer": make_tokenizer()}
     if collator_cls is DataCollatorForCompletionOnlyLMWithPacking:
-        kwargs["response_prompt_template"] = [1, 2]  # required; irrelevant to the column contract
+        kwargs["response_prompt_template"] = [1, 2]  # Required; irrelevant to the column contract.
     wrapped = FixedShapeCollator(
         inner=collator_cls(**kwargs), max_length=MAX_LENGTH, pad_values=resolve_batch_pad_values(PAD)
     )
@@ -190,15 +144,12 @@ def test_the_column_survives_the_pipeline_wrapper(collator_cls):
 
 
 def test_the_wrapper_reports_nothing_extra_for_a_plain_collator():
-    """Anti-over-fitting: forwarding must not invent columns a non-packing collator never declared,
-    which would keep dead columns alive through HF's pruning and into the runtime contract."""
+    """Forwarding must not invent columns, which would keep dead columns alive through HF's pruning."""
     wrapped = FixedShapeCollator(inner=object(), max_length=MAX_LENGTH, pad_values=resolve_batch_pad_values(PAD))
     assert wrapped.required_dataset_columns == ()
 
 
 def test_over_length_raises_in_each_callers_words():
-    """An over-length tensor raises rather than being truncated: the collator says the frozen shape,
-    the trainers' own pre-padding the pipeline's fixed shape, each followed by its caller's remedy."""
     batch = {"input_ids": torch.ones(1, MAX_LENGTH + 1, dtype=torch.long)}
     fixed = FixedShapeCollator(lambda features: dict(batch), MAX_LENGTH, resolve_batch_pad_values(PAD))
     with pytest.raises(ValueError, match=rf"tokens but the frozen shape is max_length={MAX_LENGTH};.*Truncate in"):

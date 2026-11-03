@@ -1,7 +1,5 @@
-"""Distributed embedding trainer (sentence-transformers losses) with EP/TP support.
-
-CP is not supported: embedding models require full-sequence pooling.
-"""
+"""Distributed embedding trainer (sentence-transformers losses). CP is unsupported: embedding models need full-sequence
+pooling."""
 
 import dataclasses
 import inspect
@@ -100,10 +98,8 @@ LOSS_REGISTRY: dict[str, type] = {
 
 
 def build_embedding_loss(model: SentenceTransformer, config: EmbeddingConfig) -> nn.Module:
-    """The configured sentence-transformers loss, wrapped in ``MatryoshkaLoss`` when dimensions are set."""
     loss_cls = LOSS_REGISTRY[config.loss_type]
     loss_kwargs: dict = {}
-    # Read off the loss class's own signature, so it tracks sentence-transformers adding or removing it.
     if "scale" in inspect.signature(loss_cls.__init__).parameters:
         loss_kwargs["scale"] = config.loss_scale
     if config.loss_type == "cached_mnrl":
@@ -121,8 +117,7 @@ def build_embedding_loss(model: SentenceTransformer, config: EmbeddingConfig) ->
 
 
 def _group_samples(inputs: dict[str, Any]) -> list[int]:
-    """The sample count of each text group of a collated batch, in column order: a packed (varlen) group's
-    sequences, a padded group's rows."""
+    """The sample count of each text group, in column order: a packed group's sequences, a padded group's rows."""
     samples = []
     for key, input_ids in inputs.items():
         if key.endswith("_input_ids"):
@@ -132,8 +127,8 @@ def _group_samples(inputs: dict[str, Any]) -> list[int]:
 
 
 def _group_heads(chunks: list[torch.Tensor], group_samples: list[int]) -> list[torch.Tensor] | None:
-    """The first :data:`_METRIC_MAX_SAMPLES` rows of each text group, the groups laid back to back over
-    ``chunks`` with ``group_samples`` rows each, or ``None`` when ``chunks`` do not hold exactly those rows."""
+    """The first :data:`_METRIC_MAX_SAMPLES` rows of each group, or ``None`` when ``chunks`` do not hold exactly its
+    rows."""
     if not group_samples or sum(chunk.size(0) for chunk in chunks) != sum(group_samples):
         return None
     heads: list[list[torch.Tensor]] = [[] for _ in group_samples]
@@ -149,13 +144,9 @@ def _group_heads(chunks: list[torch.Tensor], group_samples: list[int]) -> list[t
 
 
 def _apply_umask_mode_to_module(output_dir: str, module_path: str) -> None:
-    """Give the weights a sentence-transformers module saved at ``module_path`` (its ``modules.json`` path)
-    the umask mode (:func:`~halo.checkpoint.atomic.apply_umask_mode`) in place of the ``0600`` it writes them at.
-
-    A module past the first owns its folder whole, nested module folders included (a ``Router``'s
-    ``2_Router/query_0_Dense/``); the first module's path ``""`` is ``output_dir`` itself, which also holds other
-    saves' folders, so there only the files directly under it.
-    """
+    """ST writes weights at ``0600``. A module past the first owns its folder whole (a ``Router``'s
+    ``2_Router/query_0_Dense/``); the first module's path ``""`` is ``output_dir`` itself, so there only the files
+    directly under it."""
     module_dir = os.path.join(output_dir, module_path)
     folders = [folder for folder, _, _ in os.walk(module_dir)] if module_path else [module_dir]
     for folder in folders:
@@ -163,8 +154,6 @@ def _apply_umask_mode_to_module(output_dir: str, module_path: str) -> None:
 
 
 class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
-    """SentenceTransformerTrainer + DistributedTrainerMixin (FSDP/EP/TP)."""
-
     # SBERT losses return the batch's own mean and ignore num_items_in_batch, while
     # SentenceTransformer.forward's **kwargs would otherwise make HF infer the opposite.
     LOSS_IS_OWN_MEAN = True
@@ -266,8 +255,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         return_outputs: bool = False,
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]]:
-        """The sentence-transformers loss; on every eval batch and before each log step, the embedding metrics
-        of the sentence embeddings the loss forward computed."""
+        """The sentence-transformers loss; on every eval batch and before each log step, also the embedding metrics."""
         is_eval = self._in_eval_loop
         group_samples = _group_samples(inputs) if isinstance(inputs, dict) else []
         if not group_samples or not (is_eval or self._should_capture_embedding_metrics()):
@@ -304,7 +292,6 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         return result
 
     def log(self, logs: dict[str, float], start_time: float | None = None):
-        """Inject embedding metrics into logs before delegating to mixin/Trainer."""
         if self._embedding_metrics:
             logs.update(self._embedding_metrics)
             self._embedding_metrics = {}
@@ -335,7 +322,6 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         return output
 
     def _backbone_model(self) -> nn.Module:
-        """The transformer backbone (``auto_model``) of the SentenceTransformer's first module."""
         model = self._top_level_model()
         if isinstance(model, SentenceTransformer):
             first_module = model[0]
@@ -356,8 +342,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     @staticmethod
     def _compute_embedding_metrics(embeddings: list[torch.Tensor]) -> dict[str, float]:
         """``embed/norm`` and ``embed/std``; 2+ groups add ``embed/cos_sim``, ``embed/mrr`` and
-        ``embed/recall@{1,3,10}``, 3+ groups ``embed/neg_cos_sim`` and ``embed/triplet_margin``; read to the host
-        in one transfer."""
+        ``embed/recall@{1,3,10}``, 3+ groups ``embed/neg_cos_sim`` and ``embed/triplet_margin``."""
         normed = [F.normalize(e, p=2, dim=1) for e in embeddings]
         anchor_n = normed[0]
 
@@ -391,12 +376,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     def _load_from_checkpoint(
         self, resume_from_checkpoint: str, model: nn.Module = None, *, for_best_model: bool = False
     ) -> None:
-        """Resume an injected-LoRA run from its checkpoint's resume adapter, any other run through the mixin.
-
-        The folded weights are never read: the run was rebuilt from the base with fresh adapters, restored
-        exactly from :data:`RESUME_ADAPTER_DIR`. The marker, read on rank 0, is the verdict: a run without
-        injected LoRA refuses a marked checkpoint, and an injected-LoRA run an unmarked one.
-        """
+        """The marker, read on rank 0, is the verdict: a run without injected LoRA refuses a marked checkpoint, an
+        injected-LoRA run an unmarked one."""
         marked = broadcast_from_rank0(
             is_global_main_process() and resume_adapter_dir(resume_from_checkpoint) is not None
         )
@@ -420,9 +401,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         self._restore_state_beside_weights(resume_from_checkpoint, for_best_model=for_best_model)
 
     def _weights_load_context(self) -> CheckpointLoadContext:
-        """The load context over the backbone, whose names every save writes; an unsharded reload stays with
-        sentence-transformers' own, which rebuilds the whole pipeline. The optimizer store keeps the
-        SentenceTransformer (:meth:`_checkpoint_load_context`), whose parameters the optimizer steps."""
+        """Over the backbone, whose names every save writes; an unsharded reload stays with ST's own, which rebuilds
+        the whole pipeline. The optimizer store keeps the SentenceTransformer, whose parameters the optimizer steps."""
         return dataclasses.replace(
             self._checkpoint_load_context(), model=self._backbone_model(), base_owns_whole_weight_load=True
         )
@@ -432,14 +412,9 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         SentenceTransformerTrainer._load_from_checkpoint(self, checkpoint)
 
     def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
-        """COLLECTIVE. Write what an injected-LoRA checkpoint resumes from; the mixin's hook for any other run.
-
-        A fold cannot resume: it rounds the delta to the save dtype and leaves no adapter tensors for the
-        restored optimizer moments. Each training checkpoint therefore also carries the trainable tensors
-        unfolded, at their live dtype and under the top-level model's names, in
-        :data:`~halo.checkpoint.format.RESUME_ADAPTER_DIR`, and each save rank marks its copy complete; with
-        older markers removed before the save began, a failed write leaves the checkpoint unmarked.
-        """
+        """COLLECTIVE. A fold cannot resume: it rounds the delta to the save dtype and leaves no adapter tensors for
+        the restored moments. So each checkpoint also carries the trainable tensors unfolded in
+        :data:`~halo.checkpoint.format.RESUME_ADAPTER_DIR`, each save rank marking its copy complete last."""
         if not has_injected_lora(self._backbone_model()):
             super()._save_merged_checkpoint_resume_adapter(checkpoint_dir)
             return
@@ -459,8 +434,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         mark_resume_adapter_complete(checkpoint_dir, is_save_rank=is_save_rank)
 
     def _checkpoint_context(self) -> CheckpointContext:
-        """The mixin's context, re-pointed from the ``SentenceTransformer`` at its ``auto_model`` backbone, which
-        the savers write, with the tokenizer of the pipeline's first module when the trainer has none."""
+        """Re-pointed at the ``auto_model`` backbone the savers write, with the tokenizer of the pipeline's first
+        module when the trainer has none."""
         model = self._top_level_model()
         return dataclasses.replace(
             super()._checkpoint_context(),
@@ -469,25 +444,21 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         )
 
     def _export_tokenizer(self, model: nn.Module) -> PreTrainedTokenizerBase | None:
-        """The tokenizer the export writes: the trainer's, else the pipeline's first module's."""
         tokenizer = getattr(self, "processing_class", None)
         if tokenizer is None and isinstance(model, SentenceTransformer):
             tokenizer = getattr(model[0], "tokenizer", None)
         return tokenizer
 
     def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
-        """Write the backbone through :meth:`_save_distributed_embedding_model` where ST's own writer cannot:
-        EP/TP and mixin-managed FSDP2 DTensors it would write un-gathered, EP layers' experts, which only the
-        ladder's EP saver writes in the hub layout, and injected-LoRA adapter keys that reload as random base
-        weights. Every other run takes the mixin's payload, whose fallback is ST's."""
+        """ST's writer cannot take EP/TP and FSDP2 DTensors (written un-gathered), EP experts (only the ladder's EP
+        saver writes the hub layout), or injected-LoRA adapter keys, which reload as random base weights."""
         if self._saves_rank_locally() or has_injected_lora(self._backbone_model()):
             self._save_distributed_embedding_model(ctx, output_dir, _internal_call=_internal_call)
         else:
             super()._write_model_payload(ctx, output_dir, _internal_call)
 
     def _save(self, output_dir: str | None = None, state_dict=None) -> None:
-        """sentence-transformers' save, each module's weights (``2_Dense/``, say) given the umask mode
-        (:func:`_apply_umask_mode_to_module`)."""
+        """ST's save, each module's weights (``2_Dense/``, say) given the umask mode."""
         super()._save(output_dir, state_dict=state_dict)
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         with open(os.path.join(output_dir, ST_MODULES_FILE)) as f:
@@ -495,16 +466,13 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                 _apply_umask_mode_to_module(output_dir, module["path"])
 
     def _saves_rank_locally(self) -> bool:
-        """Whether the backbone saves through the distributed ladder, which writes the other pipeline modules
-        rank-locally: FSDP2, TP, EP, and EP layers on one process."""
+        """Whether the backbone saves through the distributed ladder, which writes the other modules rank-locally."""
         config = self.parallelism_config
         return self._fsdp_wrapped or config.is_tp_mode or config.has_ep_group or bool(self._ep_layers())
 
     def _save_distributed_embedding_model(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool = False):
-        """COLLECTIVE. Save the backbone through the ``save_checkpoint`` ladder, or, under injected LoRA (no
-        ``PeftModel``), streamed through the gathered writer with its adapters folded in
-        (:func:`folded_backbone_chunks`); then the ST pipeline config. Only the save rank writes.
-        """
+        """COLLECTIVE. Through the ``save_checkpoint`` ladder or, under injected LoRA, streamed with its adapters
+        folded in; then the ST pipeline config. Only the save rank writes."""
         backbone = ctx.model
         # Fenced: a failed write (ENOSPC, say) raises on every rank instead of leaving the peers blocked.
         with barrier_on_exit(f"Writing the embedding model to {output_dir}"):
@@ -519,9 +487,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                     normalize=partial(normalize_gathered_state_dict, backbone),
                 )
             elif not save_checkpoint(ctx, output_dir):
-                # No active parallelism left to gather: ST's own writer handles the plain-tensor
-                # layout. Not the mixin's save_model, which would rebuild a context around the ST
-                # Sequential.
+                # Nothing left to gather: ST's own writer handles the plain layout. The mixin's save_model would
+                # rebuild a context around the ST Sequential.
                 SentenceTransformerTrainer.save_model(self, output_dir, _internal_call=_internal_call)
 
             # Same FS-aware save rank, so each node's dir is complete on a non-shared filesystem.
@@ -530,7 +497,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                 self._save_st_pipeline_config(model, output_dir)
 
     def _save_st_pipeline_config(self, model: SentenceTransformer, output_dir: str):
-        """Write the ST pipeline config so the output loads with ``SentenceTransformer(output_dir)``."""
+        """So the output loads with ``SentenceTransformer(output_dir)``."""
         modules_config = []
         for idx, (name, module) in enumerate(model.named_children()):
             if idx == 0:

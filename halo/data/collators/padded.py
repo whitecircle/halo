@@ -15,10 +15,8 @@ from halo.models.segment_markers import single_row_varlen_kwargs
 
 
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
-    """Completion-only collator: every label outside the assistant completions is ignored.
-    ``response_prompt_template`` marks the response start; pass token ids where the tokenizer encodes it
-    context-dependently. ``emit_varlen_one_document`` hands a one-document batch its varlen set
-    (:func:`~halo.models.segment_markers.single_row_varlen_kwargs`)."""
+    """Every label outside the assistant completions is ignored. Pass ``response_prompt_template`` as token ids where
+    the tokenizer encodes it context-dependently."""
 
     def __init__(
         self,
@@ -54,8 +52,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
 
 
 class DataCollatorForLanguageModelingWithVarlen(TRLDataCollatorForLanguageModeling):
-    """TRL's SFT collator, which an SFT run otherwise leaves TRL to build, handing a one-document batch its varlen set
-    (:func:`~halo.models.segment_markers.single_row_varlen_kwargs`)."""
+    """TRL's SFT collator, handing a one-document batch its varlen set."""
 
     def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
         batch = super().torch_call(examples)
@@ -68,14 +65,9 @@ def collate_preserving_precomputed_labels(
     examples: list[Any],
     tokenizer: PreTrainedTokenizerBase,
 ) -> dict[str, Any]:
-    """Run the parent LM collator over ``examples`` while preserving precomputed ragged ``labels``.
-
-    ``tokenizer.pad`` pads only model inputs, so ragged precomputed labels (offline-baked completion
-    masks) fail the parent's tensor conversion: pop them, collate, then re-pad them to the batch
-    shape with the ignore index on the tokenizer's padding side. Only rows without precomputed labels get
-    the pad == eos restore; baked ``-100`` spans are authoritative. ``examples`` must already be a copy,
-    since the pop mutates the rows.
-    """
+    """``tokenizer.pad`` pads only model inputs, so ragged precomputed ``labels`` would fail the parent's tensor
+    conversion: pop them, collate, then re-pad with the ignore index. Only rows without precomputed labels get the pad
+    == eos restore. ``examples`` must already be a copy, since the pop mutates rows."""
     has_precomputed = bool(examples) and all(isinstance(ex, Mapping) and "labels" in ex for ex in examples)
     label_rows = [ex.pop("labels") for ex in examples] if has_precomputed else None
 
@@ -99,13 +91,8 @@ def collate_preserving_precomputed_labels(
 
 
 class DataCollatorForCausalLMWithPadding(DataCollatorForLanguageModeling):
-    """Padded causal-LM batches (CP route) that preserve precomputed ``labels``.
-
-    The parent builds labels from ``input_ids`` and cannot convert ragged precomputed ``labels``
-    (``tokenizer.pad`` pads only model inputs); this pads them with the ignore index instead,
-    keeping offline prompt-masking intact. On the raw-labels path the turn-ending EOS is restored
-    when pad == eos, since the parent masks every pad-valued label.
-    """
+    """CP route: the parent cannot convert ragged precomputed ``labels``, so they are padded with the ignore index,
+    keeping offline prompt-masking intact."""
 
     def torch_call(self, examples: list) -> dict:
         examples = [dict(ex) for ex in examples]  # pop must not mutate the caller's rows

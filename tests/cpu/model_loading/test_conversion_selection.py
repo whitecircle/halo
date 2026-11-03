@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the lazy loaders' hub-conversion seam: the op vocabulary, the key plan translated into it,
-the conversions a load plans with, and the planner integration.
-
-Hand-built entries drive the seam; each declaring family's real mapping is pinned bitwise against
-``from_pretrained`` by ``tests/cpu/parallelism/test_lazy_load_converted_families.py``, and the lazy plan
-against the resume's by ``tests/cpu/model_loading/test_checkpoint_keys.py``.
-
-    python tests/cpu/model_loading/test_conversion_selection.py
-"""
+"""The lazy loaders' hub-conversion seam on hand-built entries. Real mappings are pinned by
+``tests/cpu/parallelism/test_lazy_load_converted_families.py``."""
 
 import json
 from functools import cache
@@ -60,7 +53,6 @@ E, M, H = 4, 6, 8
 
 
 def _interleaved(gate: torch.Tensor, up: torch.Tensor, dim: int) -> torch.Tensor:
-    """The vendor layout: rows of ``gate`` and ``up`` alternating along ``dim``."""
     stacked = torch.stack([gate, up], dim=dim + 1)
     shape = list(gate.shape)
     shape[dim] *= 2
@@ -76,7 +68,7 @@ def test_deinterleave_recovers_contiguous_halves():
 
 
 def test_deinterleave_matches_transformers_op():
-    """The op is a reimplementation of transformers' Interleave forward — pinned equal to it."""
+    """A reimplementation of transformers' Interleave forward, pinned equal to it."""
     tensor = torch.randn(E, 2 * M, H)
     theirs = Interleave(dim=1).convert({"src": tensor}, ["src"], ["tgt"])["tgt"]
     assert torch.equal(Deinterleave(dim=1)(tensor), theirs)
@@ -89,8 +81,7 @@ def test_take_chunk_fan_out():
 
 
 def test_permute_rope_matches_transformers_op():
-    """The op is a reimplementation of transformers' PermuteForRope forward — pinned equal to it on
-    a 2-D weight and a 1-D bias, in both directions."""
+    """A reimplementation of transformers' PermuteForRope forward, pinned equal to it."""
     n_heads, rows = 4, 32
     config = SimpleNamespace(vision_config=SimpleNamespace(num_attention_heads=n_heads))
     for tensor in (torch.randn(rows, H), torch.randn(rows)):
@@ -98,7 +89,7 @@ def test_permute_rope_matches_transformers_op():
             theirs = PermuteForRope(subconfig_key="vision_config", permute_layer_names=["q_proj"], inverse=inverse)
             expected = theirs.convert({"attn.q_proj.weight": tensor}, [], [], config=config)["attn.q_proj.weight"]
             assert torch.equal(PermuteRope(n_heads, inverse=inverse)(tensor), expected)
-    # Anti-vacuity: the permutation is not the identity on a non-trivial tensor.
+    # Anti-vacuity: the permutation is not the identity.
     assert not torch.equal(
         PermuteRope(n_heads)(torch.arange(rows * H, dtype=torch.float32).view(rows, H)),
         torch.arange(rows * H, dtype=torch.float32).view(rows, H),
@@ -111,13 +102,13 @@ def test_unsupported_ops_are_refused():
     )
     with pytest.raises(ValueError, match="Unsupported conversion ops"):
         translate_converter(entry)
-    # A single-source Concatenate has nothing to concatenate — it is not the fan-in form.
+    # A single-source Concatenate is not the fan-in form.
     with pytest.raises(ValueError, match="Unsupported conversion ops"):
         translate_converter(WeightConverter(source_patterns="a", target_patterns="b", operations=[Concatenate(dim=0)]))
 
 
 def test_multi_source_entry_translates_to_a_fan_in():
-    """GLM-5 Next's ``q/k/v_conv1d → conv1d`` shape: N sources, one Concatenate, one target."""
+    """GLM-5 Next's ``q/k/v_conv1d → conv1d`` shape."""
     entry = WeightConverter(
         source_patterns=["attn.q_conv1d.weight", "attn.k_conv1d.weight", "attn.v_conv1d.weight"],
         target_patterns="attn.conv1d.weight",
@@ -125,8 +116,7 @@ def test_multi_source_entry_translates_to_a_fan_in():
     )
     assert translate_converter(entry) == (((),), 0)
 
-    # Any other op pipeline on a multi-source entry is refused (transformers itself rejects a
-    # many-to-many entry at construction, so a second target never reaches the translator).
+    # transformers rejects a many-to-many entry at construction, so a second target never reaches the translator.
     bad = WeightConverter(
         source_patterns=["a", "b"], target_patterns="c", operations=[Concatenate(dim=0), Chunk(dim=1)]
     )
@@ -135,8 +125,7 @@ def test_multi_source_entry_translates_to_a_fan_in():
 
 
 def test_chunk_then_permute_for_rope_lands_on_the_named_targets():
-    """Step-3.5 vision's ``in_proj_weight`` shape: chunk into q/k/v, permute q and k only, with the
-    head count read off the config's sub-config — and refused without a config."""
+    """Step-3.5 vision's ``in_proj_weight`` shape, with the head count read off the sub-config."""
     entry = WeightConverter(
         source_patterns=r"attn\.in_proj_weight",
         target_patterns=[r"attn.q_proj.weight", r"attn.k_proj.weight", r"attn.v_proj.weight"],
@@ -158,7 +147,6 @@ def test_chunk_then_permute_for_rope_lands_on_the_named_targets():
 
 
 def _mapping(keys, live, conversions, base_model_prefix=None, config=None):
-    """The lazy loaders' key mapping of ``keys`` onto ``live`` through ``conversions``."""
     return lazy_key_mapping(build_key_plan(keys, live, conversions, base_model_prefix), config)
 
 
@@ -170,8 +158,6 @@ _FAN_IN = WeightConverter(
 
 
 def test_a_fan_in_groups_by_target_in_declared_source_order():
-    """Each layer's sources group under the target they produce; the first declared source's key carries the
-    group as a leading Concat naming the others in DECLARED order, whatever the key order."""
     keys = [f"decoder.layers.{layer}.self_attn.{n}_conv1d.weight" for n in "vkq" for layer in (1, 0)]
     live = [f"model.layers.{layer}.self_attn.conv1d.weight" for layer in (0, 1)]
     rename = WeightRenaming(source_patterns=r"^decoder\.", target_patterns="model.")
@@ -208,8 +194,7 @@ def test_an_unsupported_converter_raises_only_when_it_claims_a_live_name():
 
 
 def test_an_expert_bank_merge_keeps_the_renamed_per_expert_spelling():
-    """The ``ExpertFuser`` stacks per-expert keys itself, off the spelling the renames give them; a merge
-    carrying an op it cannot reproduce is refused rather than dropped."""
+    """The ``ExpertFuser`` stacks per-expert keys itself; a merge with an op it cannot reproduce is refused."""
     rename = WeightRenaming(source_patterns=r"model\.llm\.", target_patterns="model.")
     merge = WeightConverter(
         source_patterns=["mlp.experts.*.gate_proj.weight", "mlp.experts.*.up_proj.weight"],
@@ -249,18 +234,15 @@ def test_planner_carries_ops_and_rejects_shard_axis_ops():
 
 
 class _EP:
-    """Every field EPConfig declares for the planner, two of four experts on this rank. A stub short
-    of one field models a config that cannot exist (they are set together at construction, filled
-    together at finalization)."""
+    """A stub short of one field models a config that cannot exist."""
 
     expert_start_idx, expert_end_idx = 0, 2
     num_experts = 4
 
 
 def test_planner_consumes_fan_in_siblings_and_checks_the_concat_axis():
-    """Step-3.7's shape: ``moe.gate_proj + moe.up_proj → experts.gate_up_proj`` is ONE expert-sharded
-    plan reading two disk keys; the sibling is neither planned nor unexpected, and a Concat on the
-    expert axis is refused like any other shard-axis op."""
+    """Step-3.7's ``moe.gate_proj + moe.up_proj → experts.gate_up_proj`` is one expert-sharded plan reading two disk
+    keys."""
     gate, up = "l.moe.gate_proj.weight", "l.moe.up_proj.weight"
     weight_map = {gate: "a.safetensors", up: "b.safetensors"}
     model_keys = {"l.mlp.experts.gate_up_proj"}
@@ -276,8 +258,7 @@ def test_planner_consumes_fan_in_siblings_and_checks_the_concat_axis():
 
 
 def test_materializer_reads_every_fan_in_source_through_the_expert_slice(tmp_path):
-    """The fused expert tensor of a fan-in is this rank's slice of EACH source concatenated — never
-    a whole source — and a sibling living in a shard no plan names opens on demand."""
+    """This rank's slice of each source, and a sibling in a shard no plan names opens on demand."""
     gate, up = torch.randn(E, M, H), torch.randn(E, M, H)
     save_file({"l.moe.gate_proj.weight": gate}, str(tmp_path / "a.safetensors"))
     save_file({"l.moe.up_proj.weight": up}, str(tmp_path / "b.safetensors"))
@@ -305,7 +286,7 @@ def test_materializer_reads_every_fan_in_source_through_the_expert_slice(tmp_pat
     model.l.mlp.experts.gate_up_proj = torch.nn.Parameter(torch.empty(E, 2 * M, H, device="meta"))
     loader.load_into_model(model, [plan])
     assert torch.equal(model.l.mlp.experts.gate_up_proj, torch.cat([gate[1:3], up[1:3]], dim=1))
-    # The expert-count guard covers the sibling too: a wider sibling must not be silently sliced.
+    # A wider sibling must not be silently sliced.
     save_file({"l.moe.up_proj.weight": torch.randn(2 * E, M, H)}, str(tmp_path / "b.safetensors"))
     model.l.mlp.experts.gate_up_proj = torch.nn.Parameter(torch.empty(E, 2 * M, H, device="meta"))
     with pytest.raises(RuntimeError, match="config declares"):
@@ -313,13 +294,8 @@ def test_materializer_reads_every_fan_in_source_through_the_expert_slice(tmp_pat
 
 
 def _shell(model_type: str):
-    """The family's model on the meta device from its default config — zero bytes, no hub access —
-    through the same ``resolve_auto_model_class`` the loaders use, so a composite family carries its
-    vision/audio-tower sub-models too. A text sub-config with no generative class (``glm5_next_text``)
-    builds the bare backbone ``AutoModel`` builds for embedding training; one that NO Auto mapping
-    instantiates (``step3p5``, Step-3.7's text tower) exists only inside its composite, so no
-    checkpoint is typed by it — the composite's own model_type drives the same layer class, and
-    thereby the same conversions, through this oracle."""
+    """A sub-config no Auto mapping instantiates (``step3p5``) exists only inside its composite, so the composite's
+    model_type drives the same conversions."""
     config = AutoConfig.for_model(model_type)
     with torch.device("meta"):
         try:
@@ -333,38 +309,31 @@ def _shell(model_type: str):
 
 
 def _declaring_model_types() -> list[str]:
-    """Every model_type whose EP layer class declares hub-conversion keys — read off the classes, so
-    a family that grows a declaration is covered without touching this file."""
+    """Read off the classes, so a family growing a declaration is covered."""
     return sorted(mt for mt, cls in ep_layer_class_by_model_type().items() if cls.FAMILY.hub_conversion_keys)
 
 
 @cache
 def _canonical_checkpoint_keys(model_type: str) -> tuple[str, ...]:
-    """The key space a CANONICAL checkpoint of this family carries (see :func:`_shell`)."""
     return tuple(sorted(_shell(model_type).state_dict()))
 
 
 def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
-    """A declaring family whose mapping is absent must not plan as canonical — the loader would read the
-    vendor namespace unconverted, the planner would skip every unmatched key, and the model would train
-    from its meta-device init values with no error anywhere."""
+    """Unconverted, the planner would skip every unmatched key and the model trains from its meta-device init."""
     monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
     with pytest.raises(ValueError, match="declares hub-conversion key"):
         family_key_mapping(_shell("inkling_mm_model"), [])
 
 
 def test_a_non_declaring_family_is_untouched_by_an_absent_mapping(monkeypatch):
-    """Anti-vacuity: the raise keys on the family's declaration — a family that declares nothing never
-    looks one up."""
     monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
     keys = list(_canonical_checkpoint_keys("qwen3_moe"))
     assert family_key_mapping(_shell("qwen3_moe"), keys) == ({key: key for key in keys}, {})
 
 
 def test_a_text_model_reads_its_composites_vendor_checkpoint(tmp_path):
-    """Inkling's text-only artifact: the composite's vendor-namespace checkpoint under a text config.
-    transformers keys the conversions under the composite alone, so the text model takes the declared
-    entries and drops the composite's text level: every text tensor is planned, the experts converted."""
+    """transformers keys conversions under the composite alone, so the text model takes the entries and drops the
+    text level."""
     build_tiny_family_checkpoint(TINY_MOE_VLM_FAMILIES["inkling_mm_model"], str(tmp_path))
     weight_map = resolve_checkpoint_weights(str(tmp_path)).weight_map
     with torch.device("meta"):
@@ -378,14 +347,8 @@ def test_a_text_model_reads_its_composites_vendor_checkpoint(tmp_path):
 
 @pytest.mark.parametrize("model_type", _declaring_model_types())
 def test_canonical_checkpoint_keys_resume_untouched(model_type):
-    """A canonical checkpoint of a declaring family must map every key to ITSELF, conversion-free.
-
-    The family's mapping is applied on every lazy load, including an EP/PP RESUME from a checkpoint this
-    toolkit itself wrote in the canonical namespace. transformers' conversion sources are not
-    vendor-anchored (deepseek_v4 maps ``\\.norm\\.`` → ``.kv_norm.``, which also matches the canonical
-    final ``model.norm.weight``), so the identity rests on the planner's live-key retry, the same one
-    transformers' own loader applies before accepting a rename.
-    """
+    """Conversion sources are not vendor-anchored (deepseek_v4's norm rename also matches the final
+    ``model.norm.weight``); identity rests on the planner's live-key retry."""
     layer_cls = ep_layer_class_by_model_type()[model_type]
     layout = layer_cls.FAMILY.expert_layout
     assert layout.kind is ExpertLayoutKind.FUSED and not layer_cls.FAMILY.export_key_renames, (
@@ -433,8 +396,7 @@ def test_eager_replay_accepts_text_only_prefix_changes():
 
 
 def test_eager_replay_reproduces_a_conditional_group_rename_on_a_copy():
-    """A ``GroupWeightRename`` renames its dependents only once its guard key has been seen: the replay plans
-    it as transformers' loader does, on a copy, so the load's record keeps its guard unlatched."""
+    """Planned on a copy, so the load's record keeps its guard unlatched."""
     model = module_with_weight_keys(["a.norm1.weight", "a.norm2.weight"])
     model.config = SimpleNamespace(model_type="qwen3")
     group = GroupWeightRename(source_patterns=[r"norm0", r"norm1"], target_patterns=["norm1", "norm2"])

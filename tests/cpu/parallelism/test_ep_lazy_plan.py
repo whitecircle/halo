@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-"""Unit tests for the EP lazy loader planner logic (CPU-only, no GPU required)."""
-
 import json
 import re
 from types import SimpleNamespace
@@ -34,8 +32,6 @@ from tests.common.tiny_models import module_with_weight_keys  # noqa: E402
 
 
 class MockEPConfig:
-    """Minimal mock EPConfig for planner tests."""
-
     def __init__(self, start=4, end=8, total=16):
         self.expert_start_idx = start
         self.expert_end_idx = end
@@ -44,7 +40,6 @@ class MockEPConfig:
 
 
 def _fused_expert_weight_map():
-    """Weight map with fused 3D expert keys (GptOss-style)."""
     wm = {}
     for layer in range(2):
         wm[f"model.layers.{layer}.mlp.experts.gate_up_proj"] = "shard-00001.safetensors"
@@ -59,7 +54,6 @@ def _fused_expert_weight_map():
 
 
 def _individual_expert_weight_map():
-    """Weight map with individual expert keys (Qwen3-style ModuleList)."""
     wm = {}
     for layer in range(2):
         for expert in range(16):
@@ -126,7 +120,6 @@ def test_individual_experts_local_replicate_remote_ignore():
 
 
 def test_expert_shard_slicing(tmp_path):
-    """Verify that EXPERT_SHARD only materializes the requested slice."""
     full_weight = torch.randn(16, 128, 256)
     save_file({"experts.gate_up_proj": full_weight}, str(tmp_path / "model.safetensors"))
 
@@ -150,7 +143,6 @@ def test_expert_shard_slicing(tmp_path):
 
 
 def test_replicate_loads_full(tmp_path):
-    """Verify that REPLICATE loads the full tensor."""
     weight = torch.randn(512, 512)
     save_file({"attn.weight": weight}, str(tmp_path / "model.safetensors"))
 
@@ -200,28 +192,23 @@ def test_detect_individual_format():
 
 
 def test_detect_routed_experts_fused():
-    """GLM4 uses ``routed_experts.gate_up_proj`` — still the fused 3D format."""
     wm = {"model.layers.0.mlp.routed_experts.gate_up_proj": "s.safetensors"}
     assert ExpertKeyLayout.detect(wm) == ExpertKeyLayout.FUSED
 
 
 def test_detect_dense_defaults_fused():
-    """A non-MoE (dense) checkpoint has no expert keys → treated as fused (no-op)."""
     wm = {"model.embed_tokens.weight": "s", "model.layers.0.self_attn.q_proj.weight": "s"}
     assert ExpertKeyLayout.detect(wm) == ExpertKeyLayout.FUSED
 
 
 def test_detect_bias_keys_are_fused():
-    """Fused expert bias keys (GptOss) classify as fused, not individual."""
     wm = {"model.layers.0.mlp.experts.gate_up_proj_bias": "s"}
     assert ExpertKeyLayout.detect(wm) == ExpertKeyLayout.FUSED
 
 
 def _nested_expert_weight_map():
-    """A layout nesting one module per expert under the expert container (as pre-5.14 Zaya
-    checkpoints did: ``experts.local_experts.N.linear_fc{1,2}``) — an individual layout neither
-    expert pattern matches, so detect() misclassifies it as FUSED (fuser skipped, plan dropped,
-    params left on meta). The lazy loader must decline these checkpoints."""
+    """As pre-5.14 Zaya checkpoints did: ``experts.local_experts.N.linear_fc{1,2}``. detect() misclassifies it as
+    FUSED, so the lazy loader must decline."""
     wm = {}
     for layer in range(2):
         for expert in range(8):
@@ -232,15 +219,11 @@ def _nested_expert_weight_map():
 
 
 def test_nested_expert_layout_misdetected_as_fused():
-    """The nested-individual layout falls through detect() to FUSED (the silent-corruption
-    trigger) — which is exactly why is_lazy_loadable must reject it."""
+    """Why is_lazy_loadable must reject it."""
     assert ExpertKeyLayout.detect(_nested_expert_weight_map()) == ExpertKeyLayout.FUSED
 
 
 def test_unmapped_fused_experts_fail_loud():
-    """A fused checkpoint whose expert keys all miss the model namespace must raise, not train
-    freshly-initialized experts."""
-
     def check(layout, weight_map, *actions):
         plans = [SimpleNamespace(action=action) for action in actions]
         _check_fused_experts_mapped(SimpleNamespace(expert_layout=layout, weight_map=weight_map, plans=plans))
@@ -248,14 +231,14 @@ def test_unmapped_fused_experts_fail_loud():
     wm = _fused_expert_weight_map()
     with pytest.raises(RuntimeError, match="none map"):
         check(ExpertKeyLayout.FUSED, wm, WeightAction.REPLICATE)
-    # Anti-vacuity: mapped experts, individual format and expertless maps must all pass.
+    # Anti-vacuity: mapped experts, individual format and expertless maps all pass.
     check(ExpertKeyLayout.FUSED, wm, WeightAction.REPLICATE, WeightAction.EXPERT_SHARD)
     check(ExpertKeyLayout.PER_EXPERT, _individual_expert_weight_map())
     check(ExpertKeyLayout.FUSED, {"model.embed_tokens.weight": "s.safetensors"})
 
 
 def test_load_ep_model_lazy_raises_on_unmapped_fused_experts(monkeypatch):
-    """The guard must be wired into ``load_ep_model_lazy`` itself — a helper alone protects nothing."""
+    """A helper alone protects nothing."""
     wm = _fused_expert_weight_map()
     monkeypatch.setattr(
         lazy_plan,
@@ -265,7 +248,7 @@ def test_load_ep_model_lazy_raises_on_unmapped_fused_experts(monkeypatch):
     shell = module_with_weight_keys(["unrelated.weight"])
     shell.config = SimpleNamespace(model_type="")
     monkeypatch.setattr(ep_loading, "instantiate_on_meta", lambda *a, **k: shell)
-    # num_experts must be real: require_expert_count fails loud rather than guessing.
+    # require_expert_count fails loud rather than guessing.
     config = SimpleNamespace(dtype=torch.bfloat16, num_experts=MockEPConfig().num_experts)
     with pytest.raises(RuntimeError, match="none map"):
         ep_loading.load_ep_model_lazy("/nonexistent", MockEPConfig(), config=config)
@@ -277,26 +260,23 @@ def _write_index(tmp_path, weight_map):
 
 
 def test_lazy_unsupported_for_nested_expert_layout(tmp_path):
-    """``local_experts.N.linear_fc*`` keys → lazy loader declines (routes to HF path)."""
     path = _write_index(tmp_path, _nested_expert_weight_map())
     assert is_lazy_loadable(path) is False
 
 
 def test_lazy_supported_for_fused_layout(tmp_path):
-    """GptOss/GLM fused 3D experts are handled by the lazy loader."""
     path = _write_index(tmp_path, _fused_expert_weight_map())
     assert is_lazy_loadable(path) is True
 
 
 def test_lazy_supported_for_individual_layout(tmp_path):
-    """Qwen3/Bailing ``experts.N.gate_proj`` (digit directly after experts) is handled by the fuser."""
+    """Digit directly after experts is handled by the fuser."""
     path = _write_index(tmp_path, _individual_expert_weight_map())
     assert is_lazy_loadable(path) is True
 
 
 def test_lazy_supported_ignores_shared_experts_index(tmp_path):
-    """``shared_experts.0.*`` must NOT trip the guard: ``_experts`` has no preceding dot, so the
-    unsupported-layout pattern (which anchors on ``.experts.``) does not match — no false fallback."""
+    """``_experts`` has no preceding dot, so the pattern anchored on ``.experts.`` does not match."""
     wm = {
         "model.layers.0.mlp.experts.gate_up_proj": "s.safetensors",
         "model.layers.0.mlp.shared_experts.0.gate_proj.weight": "s.safetensors",
@@ -307,22 +287,21 @@ def test_lazy_supported_ignores_shared_experts_index(tmp_path):
 
 
 def test_lazy_unsupported_for_a_natively_quantized_checkpoint(tmp_path):
-    """A checkpoint-native ``quantization_config`` must route to from_pretrained: the lazy loaders
-    read weight tensors raw and map nothing for the scale tensors, so the coverage gate cannot fire
-    and the experts load as garbage."""
+    """The lazy loaders read tensors raw and map nothing for the scale tensors, so the coverage gate cannot fire and
+    experts load as garbage."""
     path = _write_index(tmp_path, _fused_expert_weight_map())
     (tmp_path / "config.json").write_text(
         json.dumps({"model_type": "gpt_oss", "quantization_config": {"quant_method": "mxfp4"}})
     )
     assert is_lazy_loadable(path) is False
 
-    # Anti-vacuity: the same checkpoint without the key is the accepted branch, not a blanket refusal.
+    # Anti-vacuity: without the key it is accepted.
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "gpt_oss"}))
     assert is_lazy_loadable(path) is True
 
 
 def test_lazy_supported_missing_index_defaults_true(tmp_path):
-    """Best-effort: an unreadable/missing index → True so the normal load path runs and diagnoses."""
+    """Best-effort: True so the normal load path runs and diagnoses."""
     assert is_lazy_loadable(str(tmp_path)) is True
 
 
@@ -332,14 +311,8 @@ def test_lazy_supported_missing_index_defaults_true(tmp_path):
     ids=("strip", "add"),
 )
 def test_key_mapping_aligns_the_base_model_prefix(disk_class, shell_class):
-    """A ``*ForCausalLM`` checkpoint (``model.layers.*``) loaded into the bare backbone (``layers.*``) has
-    the prefix stripped, and a backbone checkpoint loaded into ``*ForCausalLM`` has it added.
-
-    ``scripts/training/embedding.py`` loads with ``model_class=AutoModel`` under EP, so the shell is
-    ``GptOssModel`` while the checkpoint on disk is ``GptOssForCausalLM``. A key that maps to nothing
-    is dropped by :class:`WeightPlanner` without a word, so an unaligned prefix leaves the ENTIRE
-    backbone unplanned — every weight random.
-    """
+    """``scripts/training/embedding.py`` uses ``model_class=AutoModel`` under EP; an unaligned prefix leaves the
+    whole backbone unplanned, every weight random."""
     config = GptOssConfig(**TINY_GPTOSS_CONFIG)
     with torch.device("meta"):
         disk_keys = sorted(disk_class(config).state_dict())
@@ -358,7 +331,6 @@ def test_key_mapping_aligns_the_base_model_prefix(disk_class, shell_class):
 
 
 def _individual_fuse_map(experts, layer=0):
-    """A weight map with per-expert gate/up/down keys for one layer."""
     wm = {}
     for e in experts:
         wm[f"model.layers.{layer}.mlp.experts.{e}.gate_proj.weight"] = "model.safetensors"
@@ -368,12 +340,10 @@ def _individual_fuse_map(experts, layer=0):
 
 
 def _identity_mapping(weight_map):
-    """disk_to_model for a checkpoint whose keys already match the model's."""
     return {k: k for k in weight_map}
 
 
 def test_fuser_detect_only_local_experts():
-    """detect_tasks emits fusion tasks only for the rank's local expert range."""
     wm = _individual_fuse_map(range(16))
     model_keys = {
         "model.layers.0.mlp.experts.gate_up_proj",
@@ -388,10 +358,8 @@ def test_fuser_detect_only_local_experts():
 
 
 def test_fuser_raises_when_expert_group_resolves_to_nothing():
-    """A layer the model DID build, whose experts match neither a fused nor a per-expert model
-    param: they would stay on meta and only surface much later as "Cannot copy out of meta tensor",
-    so this must fail loud here. The layer's non-expert params are what separates it from an absent
-    MTP tail."""
+    """They would stay on meta until a late "Cannot copy out of meta tensor". The layer's non-expert params separate
+    it from an absent MTP tail."""
     wm = _individual_fuse_map(range(4))
     built_layer = {"model.layers.0.input_layernorm.weight", "model.layers.0.self_attn.q_proj.weight"}
     fuser = ExpertFuser(ep_start=0, ep_end=4)
@@ -400,12 +368,10 @@ def test_fuser_raises_when_expert_group_resolves_to_nothing():
 
 
 def test_fuser_skips_experts_of_a_layer_the_model_never_builds():
-    """GLM-4 declares num_hidden_layers=N plus num_nextn_predict_layers=1, so the checkpoint carries
-    a trailing MTP layer transformers never instantiates. Its expert keys are legitimately dropped —
-    a resolve guard that reads them as "these weights would never load" refuses to load
+    """GLM-4's checkpoint carries a trailing MTP layer transformers never instantiates; raising refuses
     GLM-4.5/4.6/4.7 at all."""
     wm = _individual_fuse_map(range(4), layer=0) | _individual_fuse_map(range(4), layer=1)
-    # The model holds every parameter of layer 0 and NOTHING of layer 1 (the MTP tail).
+    # Every parameter of layer 0 and nothing of layer 1 (the MTP tail).
     model_keys = {
         "model.layers.0.mlp.experts.gate_up_proj",
         "model.layers.0.mlp.experts.down_proj",
@@ -421,26 +387,23 @@ def test_fuser_skips_experts_of_a_layer_the_model_never_builds():
 
 
 def test_fuser_still_raises_for_the_built_sibling_of_an_absent_layer():
-    """The absent-layer skip must not become a blanket amnesty: with an unresolvable target on a
-    layer the model DID build, the raise still fires even though a later layer is absent."""
+    """The absent-layer skip must not become a blanket amnesty."""
     wm = _individual_fuse_map(range(4), layer=0) | _individual_fuse_map(range(4), layer=1)
-    model_keys = {"model.layers.0.input_layernorm.weight"}  # layer 0 built, no expert target
+    model_keys = {"model.layers.0.input_layernorm.weight"}  # Layer 0 built, no expert target.
     fuser = ExpertFuser(ep_start=0, ep_end=4)
     with pytest.raises(RuntimeError, match="layout mismatch"):
         fuser.detect_tasks(wm, _identity_mapping(wm), model_keys)
 
 
 def test_fuser_defers_to_planner_when_model_stores_individual_experts():
-    """A model shell that keeps one module per expert is covered by WeightPlanner — no fusion task,
-    and no raise."""
+    """WeightPlanner covers a shell keeping one module per expert."""
     wm = _individual_fuse_map(range(4))
     fuser = ExpertFuser(ep_start=0, ep_end=4)
     assert fuser.detect_tasks(wm, _identity_mapping(wm), model_keys=set(wm)) == []
 
 
 def test_fuser_resolves_target_through_the_disk_to_model_mapping():
-    """Families whose keys need the base_model_prefix or a declared hub rename spell the disk keys
-    differently; the fusion target must follow that mapping, not string surgery on the disk key."""
+    """The target follows that mapping, not string surgery on the disk key."""
     wm = _individual_fuse_map(range(2))
     disk_to_model = {k: f"model.{k}" for k in wm}
     model_keys = {
@@ -453,7 +416,6 @@ def test_fuser_resolves_target_through_the_disk_to_model_mapping():
 
 
 def test_fuser_fuse_gate_up_values(tmp_path):
-    """_fuse_gate_up stacks [gate; up] per expert into [E_local, 2M, H]."""
     H, M = 8, 5
     gate = {e: torch.randn(M, H) for e in range(2)}
     up = {e: torch.randn(M, H) for e in range(2)}
@@ -481,7 +443,6 @@ def test_fuser_fuse_gate_up_values(tmp_path):
 
 
 def test_fuser_handles_routed_experts_prefix():
-    """GLM4-style ``routed_experts.N`` keys fuse to the routed_experts target."""
     wm = {
         "model.layers.0.mlp.routed_experts.0.gate_proj.weight": "model.safetensors",
         "model.layers.0.mlp.routed_experts.0.up_proj.weight": "model.safetensors",

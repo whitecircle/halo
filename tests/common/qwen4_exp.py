@@ -1,9 +1,5 @@
-"""The tiny Flash-Next family the ``qwen4_exp`` tests share: the text config the layer and model tests build
-(``TINY_QWEN4_EXP_CONFIG``: GatedDeltaNet x3 + QSA, partial M-RoPE, 4 hyper-connection streams, PLE on layer 2, one
-indexer key head, 4-token key blocks); the tiny model in the release's checkpoint layout, loaded as a run loads it,
-with the family patches on its config, so its n-gram table is a host-resident external table that
-``finalize_loaded_model`` attaches; the inputs the tests feed it; the keys a QSA selection attends; transformers' own
-forwards for a stock reference; and an allocation probe."""
+"""The tiny Flash-Next family the ``qwen4_exp`` tests share, in the release's checkpoint layout with a host-resident
+n-gram table."""
 
 import contextlib
 import dataclasses
@@ -41,8 +37,8 @@ NGRAM_TABLE_PATH = "model.layers.1.ple.ple_embedding.ngram_embedding"
 
 
 def tiny_qwen4_exp_text_config(**overrides) -> Qwen4ExpTextConfig:
-    """The tiny text config on SDPA; its ``indexer_budget=8`` makes every document past two 4-token blocks plus
-    its tail sparse."""
+    """The tiny text config on SDPA; ``indexer_budget=8`` makes every document past two 4-token blocks plus its tail
+    sparse."""
     config = Qwen4ExpTextConfig(**{**TINY_QWEN4_EXP_CONFIG, **overrides})
     config._attn_implementation = "sdpa"
     return config
@@ -57,18 +53,17 @@ def rotary_embeddings(
 
 
 def packed_positions(rows: list[list[int]]) -> torch.Tensor:
-    """``[len(rows), length]`` position ids restarting at 0 at each document of each row's lengths."""
+    """``[len(rows), length]`` position ids restarting at 0 at each document."""
     return torch.stack([torch.cat([torch.arange(n) for n in lengths]) for lengths in rows])
 
 
 def packed_seq_idx(position_ids: torch.Tensor) -> torch.Tensor:
-    """The ``seq_idx`` the packing collators emit for ``position_ids``."""
     return document_ids(position_ids).to(torch.int32)
 
 
 def packed_markers(config, position_ids: torch.Tensor, *, cu_seq_lens: bool = True) -> dict:
-    """Every segment marker the packing collators emit for ``config``'s family on a ``[1, total]`` packed row;
-    ``cu_seq_lens=False`` leaves out the varlen set GatedDeltaNet's chunked delta rule reads."""
+    """Every segment marker the packing collators emit on a ``[1, total]`` row; ``cu_seq_lens=False`` leaves out
+    GatedDeltaNet's varlen set."""
     markers = segment_markers_for(config)
     if not cu_seq_lens:
         markers = dataclasses.replace(markers, cu_seq_lens=False)
@@ -76,8 +71,8 @@ def packed_markers(config, position_ids: torch.Tensor, *, cu_seq_lens: bool = Tr
 
 
 def selection_keys(selection: QSASelection, batch: int, length: int) -> torch.Tensor:
-    """``[batch, length, length]`` on the CPU: the keys ``selection`` lets each query attend, spelled out query by
-    query, to compare with transformers' dense mask."""
+    """``[batch, length, length]`` on the CPU: the keys ``selection`` lets each query attend, to compare with
+    transformers' dense mask."""
     keys = torch.zeros(batch, length, length, dtype=torch.bool)
     blocks = selection.blocks.cpu().long()
     ratio = selection.compress_ratio
@@ -94,8 +89,7 @@ def selection_keys(selection: QSASelection, batch: int, length: int) -> torch.Te
 
 @contextlib.contextmanager
 def transformers_forwards():
-    """transformers' own model, decoder-layer and attention forwards in place of the toolkit's document forwards,
-    for a stock reference inside a process that installed them."""
+    """transformers' own forwards in place of the toolkit's document forwards, for a stock reference."""
     patch_qwen4_exp_document_forwards()
     installed = {cls: cls.forward for cls in _DOCUMENT_FORWARD_CLASSES}
     for cls, forward in installed.items():
@@ -108,8 +102,6 @@ def transformers_forwards():
 
 
 class LargestTensor(TorchDispatchMode):
-    """The largest tensor any op returns while active, backward included."""
-
     def __init__(self):
         super().__init__()
         self.numel, self.shape = 0, ()
@@ -123,8 +115,7 @@ class LargestTensor(TorchDispatchMode):
 
 
 def build_tiny_qwen4_exp_checkpoint(directory: str, *, seed: int = 0, overrides: dict | None = None) -> None:
-    """The seeded tiny text model in bf16 as the release stores it: fused expert banks beside the n-gram table's
-    ``shard_*`` keys, which a save reverting only the table's concatenation writes."""
+    """The seeded tiny text model in bf16 as the release stores it: fused banks beside the table's ``shard_*`` keys."""
     torch.manual_seed(seed)
     model = tiny_family_model(TINY_QWEN4_EXP_FAMILY, overrides=overrides).to(torch.bfloat16)
     model._weight_conversions = [
@@ -145,13 +136,12 @@ def stamped_config(directory: str):
 def load_host_table_model(
     directory: str, *, dtype: torch.dtype = torch.float32, model_class=AutoModelForCausalLM
 ) -> PreTrainedModel:
-    """``directory`` loaded through the family patches and ``finalize_loaded_model``, as the loaders do."""
+    """``directory`` through the family patches and ``finalize_loaded_model``, as the loaders do."""
     model = model_class.from_pretrained(directory, config=stamped_config(directory), dtype=dtype)
     finalize_loaded_model(model)
     return model
 
 
 def ngram_table(model: torch.nn.Module) -> ExternalTable:
-    """The model's one external table."""
     (table,) = (table for _, table in named_external_tables(model))
     return table

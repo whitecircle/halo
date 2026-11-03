@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for GptOss attention-sink reconstruction in the EP save path.
-
-flash_attention_2 fine-tuning sets ``layer.self_attn.sinks = None``
-(Blackwell FA2 rejects a non-None s_aux). A ``None`` parameter drops out of
-``named_parameters()``, so an EP save reading that alone omits all 36 ``self_attn.sinks``
-tensors — producing a checkpoint that ``GptOssForCausalLM`` reports as missing
-weights (and that auto-inits to non-disabled values on load). ``neutralized_gpt_oss_sinks``
-reconstructs the disabled (dtype-min) sinks so the saved checkpoint stays complete.
-"""
+"""GptOss sink reconstruction in the EP save: FA2 sets ``sinks = None``, dropping them from ``named_parameters()``,
+so the checkpoint would miss all 36, which auto-init to non-disabled values."""
 
 import pytest
 import torch
@@ -28,7 +21,7 @@ class _Attn(nn.Module):
         self.q_proj = nn.Linear(8, 8, bias=False).to(torch.bfloat16)
         self.register_parameter("sinks", nn.Parameter(torch.zeros(4, dtype=torch.bfloat16)))
         if sinks_none:
-            self.sinks = None  # mimic _reset_gpt_oss_sinks FA2 path
+            self.sinks = None  # Mimics the _reset_gpt_oss_sinks FA2 path.
 
 
 class _Layer(nn.Module):
@@ -51,7 +44,6 @@ class _Model(nn.Module):
 
 
 def test_reconstructs_sinks_when_none():
-    """gpt_oss layers with sinks=None get one dtype-min sink tensor each."""
     m = _Model("gpt_oss", n_layers=3, heads=4, sinks_none=True)
     sinks = neutralized_gpt_oss_sinks(m)
     assert set(sinks) == {f"model.layers.{i}.self_attn.sinks" for i in range(3)}, sinks.keys()
@@ -62,36 +54,30 @@ def test_reconstructs_sinks_when_none():
 
 
 def test_none_sinks_drop_from_named_parameters():
-    """Confirms the root cause: a None param is absent from named_parameters()."""
     m = _Model("gpt_oss", n_layers=2, sinks_none=True)
     names = dict(m.named_parameters())
     assert "model.layers.0.self_attn.sinks" not in names
 
 
 def test_skips_when_sinks_present():
-    """When sinks are real tensors (eager/flex fill path), the normal param loop
-    saves them, so the helper returns nothing."""
+    """The normal param loop saves real sinks."""
     m = _Model("gpt_oss", n_layers=2, sinks_none=False)
     assert neutralized_gpt_oss_sinks(m) == {}
 
 
 def test_empty_for_non_gpt_oss():
-    """Non-GptOss models never get synthetic sinks."""
     m = _Model("qwen3_moe", n_layers=2, sinks_none=True)
     assert neutralized_gpt_oss_sinks(m) == {}
 
 
 def test_no_config_is_safe():
-    """A model without a config returns empty, not an error."""
     m = nn.Linear(2, 2)
     assert neutralized_gpt_oss_sinks(m) == {}
 
 
 def test_only_none_layers_reconstructed():
-    """A mix of None and present sinks: only the dropped (None) layers are rebuilt;
-    the present ones are left to the normal param loop (no duplicate save)."""
+    """Otherwise a present sink is saved twice."""
     m = _Model("gpt_oss", n_layers=3, heads=4, sinks_none=True)
-    # Give layer 1 a real (present) sink — it must NOT appear in the result.
     m.model.layers[1].self_attn.sinks = nn.Parameter(torch.zeros(4, dtype=torch.bfloat16))
     sinks = neutralized_gpt_oss_sinks(m)
     assert set(sinks) == {
@@ -101,21 +87,18 @@ def test_only_none_layers_reconstructed():
 
 
 def test_sink_width_follows_num_attention_heads():
-    """The reconstructed sink length is num_attention_heads, not a fixed 4."""
+    """Not a fixed 4."""
     m = _Model("gpt_oss", n_layers=1, heads=7, sinks_none=True)
     (sink,) = neutralized_gpt_oss_sinks(m).values()
     assert tuple(sink.shape) == (7,)
 
 
 def test_zero_heads_returns_empty():
-    """A degenerate config with num_attention_heads <= 0 yields no sinks."""
     m = _Model("gpt_oss", n_layers=2, heads=0, sinks_none=True)
     assert neutralized_gpt_oss_sinks(m) == {}
 
 
 def test_dtype_inferred_from_q_proj():
-    """The neutralized sink takes its dtype from the layer's q_proj weight."""
-
     class _F32Attn(nn.Module):
         def __init__(self):
             super().__init__()
@@ -130,8 +113,7 @@ def test_dtype_inferred_from_q_proj():
 
 
 def test_nested_model_wrapper_unwrapped():
-    """A wrapper that nests ``.model.model.layers`` (e.g. a CP/EP layer) is
-    unwrapped to the decoder that owns ``.layers``."""
+    """A CP/EP wrapper nesting ``.model.model.layers``."""
 
     class _Wrapper(nn.Module):
         def __init__(self, inner):

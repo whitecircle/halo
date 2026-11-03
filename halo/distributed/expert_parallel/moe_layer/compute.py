@@ -1,5 +1,4 @@
-"""Expert compute for EP MoE layers: the activation and GLU combine, the per-expert loop and grouped-GEMM
-paths, the expert-weight layout and the kernel warm-up."""
+"""Expert compute for EP MoE layers: GLU combine, per-expert loop and grouped-GEMM paths, weights, kernel warm-up."""
 
 from __future__ import annotations
 
@@ -58,8 +57,8 @@ class EPExpertComputeMixin:
         return self._use_grouped_mm
 
     def _resolve_activation(self, *sources, original_layer: nn.Module | None = None, default: str = "silu") -> None:
-        """Set ``act_fn`` from the first source carrying one, else by name off ``original_layer`` (its
-        ``hidden_act``, its config's, ``default``), and latch the fused combine that activation has."""
+        """Set ``act_fn`` from the first source carrying one, else by name off ``original_layer``, and latch the fused
+        combine that activation has."""
         for source in sources:
             act_fn = getattr(source, "act_fn", None) if source is not None else None
             if act_fn is not None:
@@ -91,8 +90,7 @@ class EPExpertComputeMixin:
 
     @staticmethod
     def _require_fused_experts(experts: nn.Module) -> nn.Module:
-        """``experts`` when it carries the fused ``gate_up_proj``/``down_proj`` pair; else raise, rather than
-        register no expert weight and train an empty expert set."""
+        """Raise rather than register no expert weight and train an empty expert set."""
         missing = [name for name in ("gate_up_proj", "down_proj") if not hasattr(experts, name)]
         if missing:
             raise AttributeError(
@@ -115,8 +113,7 @@ class EPExpertComputeMixin:
             self.down_proj = nn.Parameter(down.transpose(1, 2).contiguous())  # [E, M, H]
 
     def _etp_narrow(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
-        """A view of this ETP rank's contiguous slice of ``tensor`` along the expert-intermediate axis
-        ``dim``."""
+        """A view of this ETP rank's contiguous slice of ``tensor`` along the expert-intermediate axis ``dim``."""
         shard = self._etp_shard_size(tensor.shape[dim])
         return tensor.narrow(dim, self.expert_tp_rank * shard, shard)
 
@@ -153,11 +150,9 @@ class EPExpertComputeMixin:
 
     def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
         """Launch this layer's expert kernels, forward and backward, before its first dispatch: a kernel's first launch
-        compiles it (Triton) and loads it (CUDA lazy loading), and inside the span either stalls every peer in DeepEP's
-        barrier. The grouped path warms its GEMM (:meth:`_warm_expert_gemm`), routing sort and permute at every
-        ``ep_size``: which GEMM tile and ``index_select`` kernel a step runs follows its receive, at ``ep_size`` 1 its
-        micro-batch's token count, so without a barrier a rank first needing one in a later step still holds up the
-        expert-TP reduce or FSDP's next collective."""
+        compiles (Triton) and loads (CUDA lazy loading) it, and inside the span either stalls every peer in DeepEP's
+        barrier. The grouped path warms at every ``ep_size``: its GEMM tile and ``index_select`` kernel follow the
+        receive, and a rank first needing one later still holds up the expert-TP reduce or FSDP's next collective."""
         grouped, dispatched = self._use_grouped_mm, self.ep_size > 1
         if self._activation_warmed or not (grouped or dispatched):
             return
@@ -170,7 +165,7 @@ class EPExpertComputeMixin:
             # Identity saved-tensor hooks: under a non-reentrant checkpoint the backward below would unpack a
             # packed tensor, run the recompute mid-forward and replay a dispatch the original pass has not made.
             with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
-                if grouped:  # the routing sort and fused permute run only on the grouped path
+                if grouped:
                     self._warm_expert_gemm(device, dtype, hidden)
                     warm_route_sort_kernels(top_k, self.experts_per_rank, device)
                     warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
@@ -183,13 +178,10 @@ class EPExpertComputeMixin:
 
     def _warm_expert_gemm(self, device: torch.device, dtype: torch.dtype, hidden: int) -> None:
         """Run :meth:`_grouped_expert_ffn`, forward and backward, over zero tokens at one row per local expert and at
-        one past :data:`GROUPED_MM_SMALL_TILE_DIM`: torch's bf16 grouped GEMM picks the tile of the forward and the
-        input gradient by the mean rows per group, which change with every receive. The backward takes the gradients
-        of the tokens and of every trainable expert parameter, as the training backward does, and discards them: the
-        expert-bias gather's backward, off the tokens' path, runs too, its one-hot GEMM at these two receive sizes only,
-        since cuBLAS picks that kernel by the receive's length. The RNG is restored after, since expert-LoRA dropout
-        draws. The expert adapters run even when the first forward has them off (a reference pass), as training runs
-        them."""
+        one past :data:`GROUPED_MM_SMALL_TILE_DIM`: torch's bf16 grouped GEMM picks its tile by mean rows per group,
+        which change with every receive. The backward also covers the expert-bias gather, whose one-hot GEMM cuBLAS
+        picks by receive length. The RNG is restored, since expert-LoRA dropout draws; adapters run even if the first
+        forward has them off, as training does."""
         experts, adapters_enabled = self.experts_per_rank, self._expert_adapters_enabled
         self._expert_adapters_enabled = True
         try:
@@ -223,9 +215,8 @@ class EPExpertComputeMixin:
         *,
         recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
-        """Expert outputs for the dispatched tokens: grouped GEMM when enabled and non-empty, else the
-        per-expert loop. ``experts``/``weights`` are ``[T, top_k]`` local ids and gate weights;
-        ``recv_counts`` is the dispatch's host-side count per local expert, None at ``ep_size`` 1."""
+        """Grouped GEMM when enabled and non-empty, else the per-expert loop. ``experts``/``weights`` are
+        ``[T, top_k]`` local ids and gate weights; ``recv_counts`` counts per local expert, None at ``ep_size`` 1."""
         if self._use_grouped_mm and tokens.shape[0] > 0:
             return self._compute_experts_gmm(tokens, experts, weights, output_dtype, recv_counts=recv_counts)
         return self._compute_experts_weighted(
@@ -241,8 +232,6 @@ class EPExpertComputeMixin:
         *,
         recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
-        """Grouped-GEMM experts: :meth:`_grouped_expert_ffn` over the dispatched tokens sorted by expert."""
-
         def compute(sorted_tokens, offs, eids):
             return self._grouped_expert_ffn(sorted_tokens, offs, eids, output_dtype)
 
@@ -257,8 +246,7 @@ class EPExpertComputeMixin:
         sorted_expert_ids: torch.Tensor,
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
-        """The expert FFN over tokens sorted by expert, ``offs`` their int32 group ends and ``sorted_expert_ids`` each
-        token's local expert, on either :meth:`_glu_ffn` layout."""
+        """The expert FFN over tokens sorted by expert; ``offs`` are their int32 group ends."""
         return self._glu_ffn(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
 
     def _compute_experts_with_grouped_mm(
@@ -288,8 +276,7 @@ class EPExpertComputeMixin:
         )
 
     def _require_recv_counts(self, recv_counts: tuple[int, ...] | None) -> tuple[int, ...]:
-        """``recv_counts`` when it holds one count per local expert; raises otherwise (``ep_size > 1``, where the
-        expert compute sizes its index reads off them)."""
+        """``recv_counts`` when it holds one count per local expert; at ``ep_size > 1`` it sizes the index reads."""
         if recv_counts is None or len(recv_counts) != self.experts_per_rank:
             raise RuntimeError(
                 f"{type(self).__name__}: the expert compute at ep_size={self.ep_size} needs the dispatch's "
@@ -305,10 +292,9 @@ class EPExpertComputeMixin:
         *,
         recv_counts: tuple[int, ...] | None,
     ):
-        """``(sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map)`` over the valid
-        local assignments, by expert; DeepEP's -1 padding is dropped (it would misalign the groups). At
-        ``ep_size > 1`` the dispatch's host-side counts size the sort (:func:`sort_routing_by_expert`), so it
-        reads nothing back from the device; ``ep_size`` 1 has no padding and no counts."""
+        """``(sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map)`` over the valid local
+        assignments; DeepEP's -1 padding is dropped (it would misalign the groups). At ``ep_size > 1`` the host-side
+        counts size the sort, so it reads nothing back from the device."""
         counts = self._require_recv_counts(recv_counts) if self.ep_size > 1 else None
         sorted_token_idx, sorted_weights, sorted_expert_ids, offs, inv_map = sort_routing_by_expert(
             experts, weights, self.experts_per_rank, counts
@@ -386,7 +372,6 @@ class EPExpertComputeMixin:
         return output
 
     def _expert_forward(self, idx: int, x: torch.Tensor) -> torch.Tensor:
-        """One local expert's GLU forward for the loop."""
         return self._glu_ffn(x, lambda t, attr: self._expert_proj_single(idx, t, attr))
 
     @property
@@ -401,7 +386,6 @@ class EPExpertComputeMixin:
         return proj(self._glu_combine(proj(x, "gate_proj"), proj(x, "up_proj")), "down_proj")
 
     def _expert_proj_single(self, idx: int, x: torch.Tensor, weight_attr: str) -> torch.Tensor:
-        """Loop-path projection ``x @ W[weight_attr][idx]``, plus the LoRA delta."""
         out = x @ getattr(self, weight_attr)[idx]
         if self._expert_adapters_enabled and weight_attr in self._expert_lora_attrs:
             lora_a = getattr(self, f"{weight_attr}_lora_A")[idx]
@@ -410,23 +394,21 @@ class EPExpertComputeMixin:
         return out
 
     def _glu_combine(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-        """``act_fn(gate) * up`` through the latched fused kernel where one exists; a family with its own
-        combine latches it in ``_fused_glu_mul`` rather than overriding this."""
+        """``act_fn(gate) * up`` through the latched fused kernel where one exists; a family with its own combine
+        latches it in ``_fused_glu_mul``."""
         if self._fused_glu_mul is not None:
             return self._fused_glu_mul(gate, up)
         return self.act_fn(gate) * up
 
     def _glu_combine_packed(self, gate_up: torch.Tensor) -> torch.Tensor:
-        """:meth:`_glu_combine` over a fused ``[gate | up]`` output, in place for a :class:`GluCombine` latch
-        (:meth:`GluCombine.packed`)."""
+        """:meth:`_glu_combine` over a fused ``[gate | up]`` output, in place for a :class:`GluCombine` latch."""
         if isinstance(self._fused_glu_mul, GluCombine):
             return self._fused_glu_mul.packed(gate_up)
         gate, up = gate_up.chunk(2, dim=-1)
         return self._glu_combine(gate, up)
 
     def _glu_combine_name(self) -> str:
-        """The combine this layer runs, read off the latch: a :class:`GluCombine`'s name, else the latched
-        callable's (a ``partial`` names its function); ``eager`` under ``HALO_FUSED_GLU=0``."""
+        """The combine this layer runs, read off the latch; ``eager`` under ``HALO_FUSED_GLU=0``."""
         combine = self._fused_glu_mul
         if combine is None or not fused_glu_enabled():
             return "eager"

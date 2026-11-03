@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The pipeline runner's dict targets: per-example side tensors split in lockstep with the rows.
-
-``_step_with_dict_targets`` must split every extra target with the same ``tensor_split`` torch applies
-to the rows. A drift pairs advantages or reference log-probs with the wrong examples while the loss
-stays finite. These tests drive the method against a fake schedule and fail on any lockstep,
-housekeeping or validation break.
-
-Run: python tests/cpu/parallelism/test_pp_dict_targets.py
-"""
+"""The runner's dict targets split in lockstep with the rows, or side tensors pair with wrong examples at a finite
+loss."""
 
 import pytest
 import torch
@@ -32,7 +25,7 @@ def test_extras_split_in_lockstep_with_labels(rows, n_mb):
     for i, target in enumerate(target_mbs):
         assert set(target) == {"labels", "advantages", "ref_logps"}
         assert torch.equal(target["labels"], expected_labels[i])
-        # Row r must carry advantage 10r and ref -r — any mispairing breaks this.
+        # Row r carries advantage 10r and ref -r.
         row_ids = target["labels"][:, 0]
         assert torch.equal(target["advantages"], row_ids.float() * 10)
         assert torch.equal(target["ref_logps"], row_ids.float() * -1)
@@ -47,8 +40,8 @@ def test_housekeeping_matches_torch_step_preamble():
 
 
 def test_eval_suppresses_backward_and_restores_the_schedule_flag():
-    """backward=False must reach the stage, or eval runs a backward into the next step's gradients;
-    the schedule's own flag must come back so the following step still trains."""
+    """Otherwise eval runs a backward into the next step's gradients; the schedule's flag must come back for the
+    next step."""
     schedule = FakeSchedule(2, has_backward=True)
     rt = fake_runner(schedule)
     with torch.no_grad():

@@ -9,20 +9,18 @@ from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
 
 
 def _rendered_splits(dataset: DatasetDict) -> list[str]:
-    """The splits of ``dataset`` a loader renders: ``train`` and its held-out split (:func:`eval_split_name`),
-    a lone ``validation`` split included."""
+    """``train`` and its held-out split, a lone ``validation`` included."""
     return [split for split in ("train", eval_split_name(dataset)) if split in dataset]
 
 
 def missing_render_column_splits(dataset: DatasetDict, column: str) -> list[str]:
-    """The rendered splits that do not carry ``column``; an extra split a source carries is never rendered, so its
-    schema is no contract."""
+    """An extra split a source carries is never rendered, so its schema is no contract."""
     return sorted(split for split in _rendered_splits(dataset) if column not in dataset[split].column_names)
 
 
 def reject_missing_render_column(dataset: DatasetDict, path: str, knob: str, column: str) -> None:
-    """Refuse a declared render column a raw dataset lacks, naming ``knob`` (a config field or a CLI flag): else a
-    typo surfaces as a map worker's bare ``KeyError`` after the model load, or, for ``tools_field``, not at all."""
+    """Refuse a declared render column a raw dataset lacks: a typo otherwise surfaces as a map worker's bare
+    ``KeyError`` after the model load, or, for ``tools_field``, not at all."""
     missing = missing_render_column_splits(dataset, column)
     if not missing:
         return
@@ -34,8 +32,7 @@ def reject_missing_render_column(dataset: DatasetDict, path: str, knob: str, col
 
 
 def filter_empty_conversations(dataset: Dataset, conversation_field: str, split_name: str) -> Dataset:
-    """Drop the rows whose ``conversation_field`` is None or empty; a no-op when the field is absent.
-    ``split_name`` keeps the train and test filter caches apart."""
+    """A no-op when the field is absent; ``split_name`` keeps the train and test filter caches apart."""
     if conversation_field not in dataset.column_names:
         return dataset
 
@@ -54,8 +51,8 @@ def filter_empty_conversations(dataset: Dataset, conversation_field: str, split_
 def _alias_render_column(
     dataset: DatasetDict, knob: str, field: str | None, target: str, accepted: tuple[str, ...], path: str
 ) -> DatasetDict:
-    """Rename the column ``knob`` declares onto ``target``, the spelling a trainer hard-codes, after checking it
-    exists; a name already ``accepted`` stays, and a split carrying ``target`` beside it is refused."""
+    """Rename the column ``knob`` declares onto ``target``, the spelling a trainer hard-codes; a name already
+    ``accepted`` stays, and a split carrying ``target`` beside it is refused."""
     if not field:
         return dataset
     reject_missing_render_column(dataset, path, knob, field)
@@ -94,11 +91,7 @@ def alias_tools_column(dataset: DatasetDict, tools_field: str | None, path: str)
 def apply_conversation_field(
     dataset: DatasetDict, path: str, conversation_field: str | None, *, required: bool, knob: str
 ) -> None:
-    """Drop rows with an empty conversation from whichever of train/test ``dataset`` carries, in place.
-
-    ``required`` (the caller declared the column) makes its absence fatal instead of a no-op, naming
-    ``knob``, the config field the script reads the column name from.
-    """
+    """Drop rows with an empty conversation, in place. ``required`` makes a missing column fatal, naming ``knob``."""
     if conversation_field is None:
         return
     if required:

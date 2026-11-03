@@ -1,14 +1,7 @@
 #!/usr/bin/env python
 """The verdicts the save, exact-resume and export phase grades with fail on the artifact they exist to catch.
-
-``tests.common.resume_export`` runs only on the GPU tiers, so a verdict that stopped failing would pass every
-row there unnoticed. Each is driven here with inputs that pass, then with the one defect it must see: a
-checkpoint served through the wrong head class, a head or backbone left untrained, a dropped weight, a
-rewritten architecture, a missing sidecar, a warm restart, a moment or schedule not restored, a resumed
-loss or final weight off the unbroken run, and run state not carried over.
-
-Run: python tests/cpu/conventions/test_resume_export_checks.py
-"""
+``tests.common.resume_export`` runs only on the GPU tiers, so each verdict runs here with passing inputs, then
+with its one defect."""
 
 import json
 import logging
@@ -68,7 +61,6 @@ def _model() -> Qwen3ForSequenceClassification:
 
 
 def _trained(*, head: bool = True, backbone: bool = True) -> Qwen3ForSequenceClassification:
-    """The base model with its head and/or backbone moved by a step."""
     model = _model()
     with torch.no_grad():
         for name, param in model.named_parameters():

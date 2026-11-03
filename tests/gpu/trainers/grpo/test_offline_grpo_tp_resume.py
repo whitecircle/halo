@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""OfflineGRPOTrainer saves a mid-training checkpoint and resumes from it, under TP=2 or EP=2.
-
-``HALO_TEST_OFFGRPO_PARALLEL=tp`` (default) trains Qwen3-0.6B, ``ep`` gpt-oss-20b. The resume builds the
-model from the checkpoint by the production rule; the checks are
-:func:`~tests.common.checkpoint_io.run_two_phase_resume`'s.
-"""
+"""OfflineGRPOTrainer saves a mid-training checkpoint and resumes from it, under TP=2 or EP=2
+(``HALO_TEST_OFFGRPO_PARALLEL``)."""
 
 from types import SimpleNamespace
 
@@ -37,8 +33,7 @@ def run(ctx) -> dict:
 
     def build_trainer(checkpoint: str | None, **schedule) -> OfflineGRPOTrainer:
         parallelism_config = ParallelismConfig(ep_size=2) if IS_EP else ParallelismConfig(tp_size=2)
-        # EP skips the loader's weight reload, so its trained weights come only from a model built on the
-        # checkpoint; TP is built on it too, and its loader then skips the re-read.
+        # EP skips the loader's weight reload, so its trained weights come only from a model built on the checkpoint.
         weights = resolve_resume_weights_source(
             checkpoint, SimpleNamespace(model_name_or_path=MODEL_NAME), parallelism_config
         )

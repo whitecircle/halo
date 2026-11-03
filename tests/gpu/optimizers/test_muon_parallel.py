@@ -1,21 +1,9 @@
 #!/usr/bin/env python
-"""Muon (``optim: muon``) through ``DistributedSFTTrainer`` under EP2, TP2 and expert TP2, on a tiny Qwen3-MoE.
+"""Muon through ``DistributedSFTTrainer`` under EP2, TP2 and expert TP2, on a tiny Qwen3-MoE: train, then save, exact
+resume and export.
 
-Muon steps each rank's local shard: the Newton-Schulz leg on the 2D+ weights (3D expert stacks whole under EP,
-split under expert TP) and its internal AdamWBF16 leg on the norms, embedding and head, a mix of DTensor shards and
-plain replicated tensors. One row per layout:
-
-  1. **Train.** ``TOTAL_STEPS`` steps, the last rank poisoning step ``POISON_STEP``: the loss descends over the
-     finite steps; a clean step moves parameters of both legs, and the poisoned step moves none (the non-finite
-     step guard skips it on both); every parameter the ranks replicate (TP's norms and embedding, EP's routers)
-     ends the run bitwise equal across them, which the stochastic rounding keyed by step and name, not rank, has
-     to give; every rank took the same Newton-Schulz kernel choice (the availability probe is an all-ranks
-     agreement).
-  2. **Save, exact resume, export** (:func:`tests.common.resume_export.run_resume_export`): Muon's state dict
-     carries the scalar leg's moments, its restore primes the state with a zero-LR step, and the resumed run must
-     replay the unbroken one bit for bit.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/optimizers/test_muon_parallel.py --mode tp2
+Stochastic rounding is keyed by step and name, never rank, so replicated parameters must end bitwise equal across
+ranks.
 """
 
 import argparse
@@ -96,8 +84,7 @@ def leg_names(model, optimizer) -> tuple[set[str], set[str]]:
 
 
 def replicated_parameter_spread(model) -> tuple[int, float]:
-    """``(count, largest difference)`` over the parameters every rank holds whole and alike: plain tensors that are
-    neither FSDP2/TP shards nor an EP layer's (per-rank or expert-TP-split) experts. COLLECTIVE."""
+    """COLLECTIVE. Over plain tensors every rank holds whole: neither FSDP2/TP shards nor an EP layer's experts."""
     experts = {id(param) for layer in ep_layers(model) for _, param in layer.expert_named_params()}
     replicated = [
         param

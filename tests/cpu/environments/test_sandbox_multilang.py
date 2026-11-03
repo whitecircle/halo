@@ -1,33 +1,6 @@
 #!/usr/bin/env python
-"""
-Tests for multi-language sandbox execution, persistent sessions, and the bubblewrap backend.
-
-Covers the behaviour layered over the python-only backend (see test_sandbox.py for the
-python/remote/grading basics):
-
-- Language registry: name/alias resolution, the compiled-vs-interpreted distinction.
-- bash: a command run in the session working directory — it sees the session's files, its own writes
-  stay there, a non-zero exit is its own verdict — on the local backend and in a bwrap jail; on the
-  remote backend the shell tool puts the canonical ``bash`` on the wire.
-- C/C++ compile-and-run: stdout, stdin plumbing, a compile error reported as a *program* fault
-  (returncode set, ``error`` unset) so grading buckets it as a failed solution, a runtime timeout,
-  and the memory cap on a compiled binary.
-- Missing-compiler handling (a backend error) via a sandbox pointed at a bogus toolchain.
-- Sessions: state persists across runs (write a file, read it next run; cross-language sharing),
-  two sessions are isolated, concurrent sessions on one shared instance don't cross-contaminate, and
-  the host never follows a link the program planted (writing sources, ``read_file``, ``reset_to_prepared``).
-- Session build reuse: a compiled source is built once across runs with different stdin (the grader's
-  one-session-per-submission pattern), rebuilt when the source, an auxiliary header, a session-written
-  file or an interpreted run changes the working dir, and a rejected compile is cached as
-  ``compile_failed`` instead of recompiling per test.
-- RemoteSession: client-side file accumulation resent on every request (no network — fake session).
-- BubblewrapSandbox: construction guard when bwrap is absent, a probe that names the clean-proc
-  remedy, the init reap and status read-back against a stand-in ``bwrap`` (no namespaces needed), and —
-  when bwrap IS present — network is unshared and the host filesystem is hidden while the working dir
-  stays writable, and no run leaves a process behind.
-
-Run: python tests/cpu/environments/test_sandbox_multilang.py
-"""
+"""Multi-language sandbox execution, persistent sessions and the bubblewrap backend, layered over the python-only
+basics of test_sandbox.py."""
 
 import os
 import shutil
@@ -57,12 +30,8 @@ _HAS_GCC = shutil.which("gcc") is not None
 
 
 def _usable_bubblewrap():
-    """Return a working BubblewrapSandbox, or None if bwrap is absent OR can't create a sandbox here.
-
-    ``BubblewrapSandbox`` probes at construction and raises when user/mount namespaces are blocked
-    (e.g. under Docker's default seccomp) — so functional bubblewrap tests skip unless a real,
-    working jail is available (not merely the binary).
-    """
+    """A working BubblewrapSandbox, or None: ``BubblewrapSandbox`` raises when user/mount namespaces are blocked, so
+    functional tests skip unless a real jail is available."""
     if shutil.which("bwrap") is None:
         return None
     try:
@@ -80,25 +49,18 @@ int main() { long n; std::cin >> n; std::cout << n * 2 << std::endl; return 0; }
 
 
 def _skip(reason: str):
-    """Register a genuine skip (not a silent pass).
-
-    ``unittest.SkipTest`` is what pytest treats as a skip, so a bubblewrap functional test that
-    cannot run here is reported as skipped, never as a passing test that exercised nothing.
-    """
+    """A genuine skip: ``unittest.SkipTest`` is what pytest treats as one."""
     raise unittest.SkipTest(reason)
-
-
-# Language registry
 
 
 def test_language_registry_resolves_aliases():
     assert find_language("python").name == "python"
     assert find_language("py").name == "python"
     assert find_language("c++").name == "cpp"
-    assert find_language("CXX").name == "cpp"  # case-insensitive
+    assert find_language("CXX").name == "cpp"
     assert find_language("c").name == "c"
     assert find_language("sh").name == "bash"
-    assert find_language("SHELL").name == "bash"  # case-insensitive
+    assert find_language("SHELL").name == "bash"
     assert find_language("ruby") is None
     assert set(LANGUAGES) == {"python", "bash", "cpp", "c"}
 
@@ -127,9 +89,6 @@ def test_bash_nonzero_exit_is_the_command_s_own_verdict():
     assert res.error is None and not res.compile_failed and not res.timed_out
 
 
-# C/C++ compile-and-run (local backend)
-
-
 def test_cpp_compiles_and_runs_with_stdin():
     if not _HAS_GPP:
         return _skip("g++ not installed")
@@ -156,8 +115,8 @@ def test_c_compiles_and_runs():
 
 
 def test_cpp_compile_error_is_program_fault_not_backend_error():
-    """A compile error must read as the solution's fault (returncode set, error unset),
-    so grading counts it as a failed test rather than a sandbox outage."""
+    """A compile error reads as the solution's fault (returncode set, error unset), so grading counts it as a failed
+    test."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
     res = LocalSubprocessSandbox().run("int main(){ this is not valid c++ }", language="cpp")
@@ -240,9 +199,8 @@ def _slow_launch(backend: str):
 
 @pytest.mark.parametrize("backend", ["local", "bubblewrap"])
 def test_a_runs_time_limit_starts_when_its_program_does(backend):
-    """The launch (the limit shell, on bubblewrap the jail's namespaces and mounts) is the host's cost: a
-    program that finishes within the limit passes however slow the launch, one that does not times out,
-    and the program holds no descriptor the launch used to mark its start."""
+    """The launch is the host's cost: a program finishing within the limit passes however slow the launch, one that
+    does not times out, and the program holds no descriptor that marked its start."""
     sandbox = _slow_launch(backend)
     fast = sandbox.run("import os\nprint(sorted(os.listdir('/proc/self/fd')))", timeout=1.0)
     assert fast.ok, fast
@@ -275,7 +233,6 @@ def test_a_launcher_that_exits_early_ends_the_run_at_its_exit():
 
 
 def test_missing_compiler_is_backend_error():
-    """Pointing the spec at a non-existent compiler surfaces a backend error, not a crash."""
     sb = LocalSubprocessSandbox()
 
     original = _languages.LANGUAGES["cpp"]
@@ -303,11 +260,7 @@ def test_cpp_auxiliary_header_file():
     assert res.ok and res.stdout.strip() == "7"
 
 
-# Parallel safety (one shared instance, concurrent runs)
-
-
 def test_parallel_runs_do_not_cross_contaminate():
-    """Concurrent executions on a single shared sandbox must not see each other's output."""
     sb = LocalSubprocessSandbox()
     results = {}
 
@@ -321,9 +274,6 @@ def test_parallel_runs_do_not_cross_contaminate():
     for t in threads:
         t.join()
     assert results == {i: str(i * i) for i in range(16)}
-
-
-# Sessions (persistent state across runs)
 
 
 def test_session_persists_files_across_runs():
@@ -347,8 +297,8 @@ def test_session_write_read_list_files():
 
 
 def test_session_reads_a_file_the_program_wrote_in_bytes_that_are_not_utf8():
-    """A program's output file is the program's own bytes: read back under the strict locale codec, a
-    stray ``\\xff`` raises out of ``read_file`` and turns the model's file read into a broken tool."""
+    """A program's output file is its own bytes: read under the strict locale codec, a stray non-UTF-8 byte raises
+    out of ``read_file`` and breaks the model's file read."""
     with LocalSubprocessSandbox().open_session() as session:
         res = session.run("open('out.bin', 'wb').write(b'ok\\xff\\n')")
         assert res.ok, res
@@ -356,7 +306,6 @@ def test_session_reads_a_file_the_program_wrote_in_bytes_that_are_not_utf8():
 
 
 def test_session_cross_language_sharing():
-    """A file written via the session is visible to BOTH a python run and a compiled-cpp run."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
     sb = LocalSubprocessSandbox()
@@ -411,10 +360,8 @@ def _plant_link(workdir: str, name: str, target: str) -> None:
 
 
 def test_writing_sources_never_writes_through_a_link_the_program_planted(tmp_path):
-    """Under bubblewrap the working directory is a plain rw bind: a program can replace the written
-    ``main.py`` with a symlink to a host file, and the next run's source write — the host process, as
-    root — would write the new source through it. The program is judged for it (a runtime error of
-    its own), never handed an infra error it could void its episode with."""
+    """Under bubblewrap the working directory is a plain rw bind: a ``main.py`` symlink to a host file would have
+    the next source write go through it. The program is judged for it, never handed an infra error."""
     host_file = tmp_path / "credentials"
     host_file.write_text("SECRET")
     sb = LocalSubprocessSandbox()
@@ -434,8 +381,8 @@ def test_writing_sources_never_writes_through_a_link_the_program_planted(tmp_pat
 
 
 def test_reset_to_prepared_drops_a_prepared_entry_whose_type_changed(tmp_path):
-    """The grader resets the session between hidden tests, so a link planted over a prepared entry by
-    test 1 must be gone before test 2 is prepared — a name-only diff keeps it."""
+    """The grader resets the session between hidden tests, so a link planted over a prepared entry must be gone
+    before the next; a name-only diff keeps it."""
     host_file = tmp_path / "credentials"
     host_file.write_text("SECRET")
     sb = LocalSubprocessSandbox()
@@ -472,7 +419,6 @@ def test_read_file_returns_none_for_a_link_and_never_reads_the_host_through_it(t
 
 
 def test_concurrent_sessions_keep_separate_state():
-    """One shared sandbox, many sessions stepped from threads: each keeps its own files."""
     sb = LocalSubprocessSandbox()
     sessions = {i: sb.open_session() for i in range(8)}
     try:
@@ -491,9 +437,6 @@ def test_concurrent_sessions_keep_separate_state():
     finally:
         for session in sessions.values():
             session.close()
-
-
-# Session build reuse (one compile per distinct source across a session's runs)
 
 
 class _CountingSandbox(LocalSubprocessSandbox):
@@ -516,8 +459,7 @@ def _header(value: int) -> str:
 
 
 def test_session_compiles_same_source_once_across_runs():
-    """The grader's pattern: one session per submission, one run per hidden test. The source must be
-    built once and rerun from the binary, not recompiled per test."""
+    """One session per submission, one run per hidden test: built once and rerun from the binary."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
     sb = _CountingSandbox()
@@ -530,8 +472,8 @@ def test_session_compiles_same_source_once_across_runs():
 
 
 def test_session_rebuilds_when_source_changes():
-    """A different source must not run the previous build's binary (the output check would read the
-    stale program's answer); the same source again rebuilds too, since a session holds one build."""
+    """A different source must not run the previous binary, and the same source again rebuilds too, since a session
+    holds one build."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
     triple = "#include <iostream>\nint main() { long n; std::cin >> n; std::cout << n * 3; return 0; }"
@@ -559,8 +501,8 @@ def test_session_rebuilds_when_auxiliary_header_changes():
 
 
 def test_session_write_file_and_interpreted_run_drop_the_build():
-    """A header rewritten outside the compiled run's own ``files`` — via ``write_file`` or by an
-    interpreted run — must invalidate the build, or the same source keeps answering from a stale binary."""
+    """A header rewritten via ``write_file`` or an interpreted run invalidates the build, or the source answers from
+    a stale binary."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
     sb = _CountingSandbox()
@@ -576,8 +518,7 @@ def test_session_write_file_and_interpreted_run_drop_the_build():
 
 
 def test_session_caches_a_rejected_compile():
-    """A source the compiler rejects is compiled once; every later run of it returns the cached
-    ``compile_failed`` verdict with the diagnostics, never a backend error."""
+    """Compiled once; every later run returns the cached ``compile_failed`` verdict, never a backend error."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
     sb = _CountingSandbox()
@@ -593,17 +534,12 @@ def test_session_caches_a_rejected_compile():
 
 
 def test_one_shot_run_builds_every_time():
-    """``SandboxExecutor.run`` is a throwaway session: back-to-back one-shot runs of one source each
-    compile (nothing persists across them)."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
     sb = _CountingSandbox()
     assert sb.run(_CPP_DOUBLE, stdin="1", language="cpp").stdout.strip() == "2"
     assert sb.run(_CPP_DOUBLE, stdin="2", language="cpp").stdout.strip() == "4"
     assert sb.compiles == 2
-
-
-# RemoteSession (client-side file accumulation, no network)
 
 
 def test_remote_session_resends_accumulated_files():
@@ -623,9 +559,8 @@ def test_remote_session_resends_accumulated_files():
 
 
 def test_remote_shell_tool_sends_the_command_as_a_bash_program():
-    """The service, not the registry, runs the program on this backend: the shell tool has to put the
-    canonical ``bash`` on the wire, or a SandboxFusion service runs the command through its Python
-    runner and every call comes back a syntax error."""
+    """The service runs the program on this backend, so the tool puts the canonical ``bash`` on the wire, or
+    SandboxFusion runs the command as Python."""
     sess = RecordingSandboxSession()
     remote_session = RemoteSandbox("http://sandbox:8080", session=sess).open_session()
     build_session_bash_tools(lambda: remote_session).get("run_bash_command").execute(command="echo hi")
@@ -633,11 +568,7 @@ def test_remote_shell_tool_sends_the_command_as_a_bash_program():
     assert sess.posts[0].payload["code"] == "echo hi"
 
 
-# BubblewrapSandbox
-
-
 def test_bubblewrap_missing_binary_raises_clearly():
-    """A bogus explicit bwrap_path must fail construction with a clear error (never silently pass)."""
     raised = False
     try:
         BubblewrapSandbox(bwrap_path="/nonexistent/bwrap_xyz")
@@ -647,8 +578,7 @@ def test_bubblewrap_missing_binary_raises_clearly():
 
 
 def test_bubblewrap_probe_fails_fast_when_cannot_sandbox(monkeypatch, tmp_path):
-    """A bwrap that cannot create its namespaces fails construction with an actionable error, never a
-    per-run failure grading would read as the program's."""
+    """Construction fails with an actionable error, never a per-run failure grading would read as the program's."""
     blocked = "#!/bin/sh\necho 'bwrap: No permissions to create new namespace' >&2\nexit 1\n"
     _use_stand_in_jail(monkeypatch, tmp_path, bwrap=blocked)
     with pytest.raises(RuntimeError, match="cannot create a sandbox in this environment .*namespaces"):
@@ -776,9 +706,8 @@ _STAND_IN_JAIL_ID = 165536
 
 
 def _stand_in_jail(tmp_path, bwrap: str = "") -> tuple[str, tuple[str, str]]:
-    """A ``PATH`` directory of stand-in jail launchers — ``bwrap`` (``_STAND_IN_BWRAP`` unless given),
-    ``unshare``, and the id-map helpers, which need only exist — and subordinate-id files granting this
-    user a range at :data:`_STAND_IN_JAIL_ID`."""
+    """A ``PATH`` directory of stand-in jail launchers (``bwrap``, ``unshare`` and the id-map helpers, which need
+    only exist) and subordinate-id files granting this user a range at :data:`_STAND_IN_JAIL_ID`."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     scripts = {
@@ -857,16 +786,9 @@ print({_LEFT_BEHIND!r} + "|".join(findings))
 
 
 def test_bubblewrap_runs_leave_no_process_behind():
-    """``bwrap`` exits without reaping the jail's init, so each run would leave a ``[bwrap] <defunct>`` to
-    the container's PID 1 (a ``torchrun`` never reaps it) unless the backend reaps it itself.
-
-    Needs a working jail, skipped otherwise; to run it in the image:
-
-        docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined \\
-            --security-opt apparmor=unconfined -v "$(pwd)":/workspace -w /workspace halo:blackwell \\
-            bash -c "mkdir -p /run/fullproc && mount -t proc proc /run/fullproc && \\
-                pytest tests/cpu/environments/test_sandbox_multilang.py -k bubblewrap"
-    """
+    """``bwrap`` exits without reaping the jail's init, so each run would leave a defunct process to the container's
+    PID 1 unless the backend reaps it. Needs a working jail: ``--cap-add SYS_ADMIN``, seccomp and apparmor
+    unconfined, and a clean proc mounted at /run/fullproc."""
     if _BWRAP is None or not _HAS_GPP:
         return _skip("bubblewrap not usable here or g++ absent")
     left = probe_findings(_non_reaping_ancestor(_JAILED_HOST), _LEFT_BEHIND)

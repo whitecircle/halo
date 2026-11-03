@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the block-scaled quantization oracle (halo/kernels/lowp/quantization.py).
-
-Pins the MX / NVFP4 quant math against an INDEPENDENT first-principles reference
-(not by re-calling the module's own helpers):
-
-  * the e8m0 block scale exponent == ceil(log2(amax / format_max)), biased by 127;
-  * the per-element e2m1 code == sign<<3 | round-to-nearest magnitude level,
-    including values that straddle a bucket boundary (e.g. 2.5, the midpoint of
-    levels 2.0 and 3.0);
-  * the MXFP4 (power-of-two scale) round-trip is bit-identical with
-    HALO_LOWP_COMPILE on vs off (the module documents this);
-  * NVFP4's two-level scaling makes the round-trip scale-invariant;
-  * every registered format propagates NaN instead of absorbing it.
-
-The last two are enumerated over the module's own format registry, so a format
-added later is policed by them without touching this file.
-
-Run: python tests/cpu/kernels/test_block_scale_oracle.py  (or pytest)
-"""
+"""The block-scaled quantization oracle (halo/kernels/lowp/quantization.py) against an independent first-principles
+reference. The registry-enumerated checks police a format added later."""
 
 import math
 import os
@@ -30,28 +13,22 @@ import halo.kernels.lowp.quantization as q
 E2M1_MAX = 6.0
 E4M3_MAX = 448.0
 E8M0_BIAS = 127
-# e2m1 magnitudes, codes 0..7 (independent copy of the format definition).
+# Independent copy of the format definition.
 _LEVELS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
 def _expected_e8m0_exp(amax: float, fmt_max: float) -> int:
-    """Reference e8m0 biased exponent: ceil(log2(amax / fmt_max)) + 127, clamped."""
     raw = math.ceil(math.log2(amax / fmt_max))
     raw = max(-E8M0_BIAS, min(E8M0_BIAS, raw))
     return raw + E8M0_BIAS
 
 
 def _ref_e2m1_code(value: float, divisor: float) -> int:
-    """Reference e2m1 code for one element: sign<<3 | nearest-level index.
-
-    Round-to-nearest using the midpoints between adjacent levels, an exact midpoint going to the
-    LOWER level — what the module's round-half-to-even does wherever the lower level's code is even
-    (the 2.5 tie this file pins).
-    """
+    """An exact midpoint goes to the lower level, what round-half-to-even does wherever the lower level's code is
+    even."""
     scaled = value / divisor
     sign = 1 if scaled < 0 else 0
     mag = min(abs(scaled), E2M1_MAX)
-    # Nearest level by midpoint boundaries; mag <= edge sends an exact midpoint to the lower level.
     boundaries = [(a + b) / 2 for a, b in zip(_LEVELS[:-1], _LEVELS[1:], strict=False)]
     level = len(_LEVELS) - 1
     for i, edge in enumerate(boundaries):
@@ -61,13 +38,9 @@ def _ref_e2m1_code(value: float, divisor: float) -> int:
     return (sign << 3) | level
 
 
-# MXFP8 scale exponent
-
-
 def test_mxfp8_scale_exponent_first_principles():
-    """A single 32-element block: the stored e8m0 scale == ceil(log2(amax/448))+127."""
     block = torch.zeros(32, dtype=torch.float32)
-    block[0] = 100.0  # amax = 100
+    block[0] = 100.0
     block[5] = -12.5
     bst = q.quantize_mxfp8(block, axis=-1)
     assert bst.pow2_scale is True
@@ -76,11 +49,7 @@ def test_mxfp8_scale_exponent_first_principles():
     assert int(bst.scales.item()) == expected, f"mxfp8 e8m0 scale {int(bst.scales.item())} != reference {expected}"
 
 
-# MXFP4 e2m1 codes — incl. bucket-boundary straddle
-
-
 def _unpack_codes(bst) -> list[int]:
-    """Recover the per-element e2m1 codes from a packed fp4 BlockScaledTensor (single block)."""
     packed = bst.data.view(-1)
     codes = []
     for byte in packed.tolist():
@@ -90,9 +59,7 @@ def _unpack_codes(bst) -> list[int]:
 
 
 def test_mxfp4_codes_match_first_principles():
-    """Hand-built block: every e2m1 code matches the independent reference, and
-    the e8m0 scale matches ceil(log2(amax/6))+127."""
-    # amax = 6.0 -> ceil(log2(6/6)) = 0 -> divisor = 2^0 = 1.0, so codes map levels directly.
+    """amax = 6.0 makes the divisor 1.0, so codes map levels directly."""
     vals = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.5, -6.0]
     block = torch.zeros(32, dtype=torch.float32)
     for i, v in enumerate(vals):
@@ -113,32 +80,24 @@ def test_mxfp4_codes_match_first_principles():
 
 
 def test_mxfp4_boundary_straddle_2p5_rounds_to_lower():
-    """2.5 is the exact midpoint between levels 2.0 and 3.0; round-half-to-even sends it
-    to the LOWER level (2.0, the even code 4). This pins the tie-break direction so a
-    flip in rounding mode breaks the test."""
+    """Pins the tie-break direction so a flip in rounding mode breaks the test."""
     block = torch.zeros(32, dtype=torch.float32)
-    block[0] = 6.0  # forces amax=6 -> divisor 1.0
-    block[1] = 2.5  # exactly on the 2.0/3.0 boundary
-    block[2] = 2.6  # clearly above -> level 3.0 (code 5)
-    block[3] = 2.4  # clearly below -> level 2.0 (code 4)
+    block[0] = 6.0  # Forces amax=6, so divisor 1.0.
+    block[1] = 2.5
+    block[2] = 2.6
+    block[3] = 2.4
     bst = q.quantize_mxfp4(block, axis=-1)
     codes = _unpack_codes(bst)
     assert codes[1] == 4, f"2.5 must round to level 2.0 (code 4), got {codes[1]}"
     assert codes[2] == 5, f"2.6 must round to level 3.0 (code 5), got {codes[2]}"
     assert codes[3] == 4, f"2.4 must round to level 2.0 (code 4), got {codes[3]}"
-    # Cross-check against the independent reference too.
     for i, v in [(1, 2.5), (2, 2.6), (3, 2.4)]:
         assert codes[i] == _ref_e2m1_code(v, 1.0)
 
 
 def test_nvfp4_scale_is_two_level_e4m3_not_pow2():
-    """NVFP4 stores an e4m3 (non-power-of-two) block scale RELATIVE to a per-tensor fp32 global scale.
-
-    Reference (the NVFP4 contract): ``global = 2**ceil(log2(amax_tensor / (448*6)))`` and
-    ``block_scale = e4m3(amax_block / 6 / global)``, so an element decodes as
-    ``level * block_scale * global``. The power-of-two rounding is what makes an EP shard and the
-    gathered export agree; see ``test_quantizing_an_expert_shard_matches_quantizing_the_gathered_bank``.
-    """
+    """``global = 2**ceil(log2(amax_tensor / (448*6)))``, ``block_scale = e4m3(amax_block / 6 / global)``; the
+    power-of-two rounding makes an EP shard and the gathered export agree."""
     block = torch.zeros(16, dtype=torch.float32)
     block[0] = 30.0
     bst = q.quantize_nvfp4(block, axis=-1)
@@ -159,25 +118,12 @@ def test_nvfp4_scale_is_two_level_e4m3_not_pow2():
 
 @pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 def test_round_trip_is_scale_invariant_across_magnitudes(fmt):
-    """A block-scaled round-trip's RELATIVE error must not depend on the tensor's magnitude.
-
-    Every format here carries a per-block scale precisely so that only the shape of the distribution
-    matters. Two ways of breaking that, both silent — the block quantizes to all zeros and nothing
-    warns:
-
-    * a single-level absolute NVFP4 ``e4m3`` block scale underflows to zero once
-      ``amax_block < E2M1_MAX x`` half of e4m3's smallest subnormal (5.86e-3), which covers the
-      residual-scaled ``down_proj`` init ``0.02/sqrt(2L)``;
-    * an amax floor set to a round epsilon rather than fp32's smallest normal rescales every block of
-      a tensor whose amax falls below it.
-
-    Enumerated over the module's format registry and over the magnitude range a bf16 master can hold,
-    so either failure mode is caught for any format, present or future.
-    """
+    """Both breakages are silent: a single-level NVFP4 ``e4m3`` scale underflows to zero, and an amax floor above
+    fp32's smallest normal rescales every block."""
     torch.manual_seed(0)
     base = torch.randn(128, 256, dtype=torch.float32)
     errors = {}
-    for exponent in range(4, -32, -4):  # 1e4 down to 1e-28
+    for exponent in range(4, -32, -4):
         std = 10.0**exponent
         x = base * std
         recon = q.dequantize(q.QUANTIZERS[fmt](x)).double()
@@ -192,13 +138,8 @@ def test_round_trip_is_scale_invariant_across_magnitudes(fmt):
         )
 
 
-# MXFP4 round-trip: bit-identical with compile on vs off
-
-
 def test_mxfp4_round_trip_compile_bit_identical():
-    """The module claims the e8m0 (power-of-two) MXFP4 round-trip compiles
-    bit-identically. Run the WEIGHT round-trip (which compiles) with
-    HALO_LOWP_COMPILE=1 and =0 on the same input and assert exact equality."""
+    """The module claims the e8m0 MXFP4 round-trip compiles bit-identically."""
     torch.manual_seed(0)
     weight = torch.randn(64, 128, dtype=torch.float32) * 3.0
 
@@ -207,10 +148,8 @@ def test_mxfp4_round_trip_compile_bit_identical():
         prev_compiled = q._compiled_round_trip
         prev_failed = q._compile_failed
         os.environ["HALO_LOWP_COMPILE"] = flag
-        # Reset the module's compile caches for this flag. Do NOT importlib.reload:
-        # reloading re-executes the module in its shared dict, rebinding its classes
-        # and poisoning every earlier ``from halo.kernels.lowp.quantization import ...``
-        # (isinstance checks in sibling tests then fail order-dependently).
+        # Reset the compile caches. importlib.reload would rebind the classes and fail isinstance checks in sibling
+        # tests order-dependently.
         q._compiled_round_trip = None
         q._compile_failed = False
         try:
@@ -233,19 +172,11 @@ def test_mxfp4_round_trip_compile_bit_identical():
 @pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 @pytest.mark.parametrize("ep_size", [2, 4, 8])
 def test_quantizing_an_expert_shard_matches_quantizing_the_gathered_bank(fmt, ep_size):
-    """Slicing a fused expert bank along the expert axis must not change any block's quantization.
-
-    This is the QAT<->export contract: training quantizes the ``[E/ep, ...]`` slice an EP rank holds,
-    while ``quantize_to_lowp`` quantizes the gathered ``[E, ...]`` checkpoint. They must produce the same
-    dequantized weight, or the exported model is not the model that was trained.
-
-    It is what constrains NVFP4's per-tensor global scale to a POWER OF TWO: e4m3 rounding is invariant
-    under a power-of-two rescale, so the two tensors' differing amax cannot move a block scale. The bank
-    below spans three orders of magnitude across experts, so a plain ``amax/2688`` global fails here.
-    """
+    """Training quantizes the slice an EP rank holds and the export the gathered bank; e4m3 is invariant under a
+    power-of-two rescale, so a plain ``amax/2688`` global fails here."""
     torch.manual_seed(0)
     bank = torch.randn(8, 64, 256, dtype=torch.float32) * 0.02
-    bank[0] *= 1e-3  # one expert far below the bank amax
+    bank[0] *= 1e-3  # One expert far below the bank amax.
 
     gathered = q.dequantize(q.QUANTIZERS[fmt](bank, axis=-1))
     sharded = torch.cat([q.dequantize(q.QUANTIZERS[fmt](s, axis=-1)) for s in bank.chunk(ep_size, dim=0)], dim=0)
@@ -255,21 +186,11 @@ def test_quantizing_an_expert_shard_matches_quantizing_the_gathered_bank(fmt, ep
     )
 
 
-# NaN must survive every format
-
-
 @pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 @pytest.mark.parametrize("poison", [float("nan"), float("inf"), float("-inf")])
 def test_non_finite_input_propagates_through_every_format(fmt, poison):
-    """A non-finite element must come back non-finite, for every registered block-scaled format.
-
-    A format that absorbs it lets a diverged run continue with plausible-looking weights: MXFP4 is the
-    trap, because ``e2m1`` has no NaN encoding and casting a NaN exponent to ``uint8`` gives 0, so an
-    unguarded block decodes as a finite ~3.5e-38. Enumerated over the registry so a new format cannot
-    regress the invariant silently, and asserted on the DEQUANTIZED value rather than on any storage
-    field, because each format carries the poison differently (e4m3 data, e4m3 scale, e8m0's 0xFF code)
-    and NVFP4's per-tensor global scale spreads it across the whole tensor rather than one block.
-    """
+    """``e2m1`` has no NaN encoding and a NaN exponent casts to 0, so an unguarded MXFP4 block decodes as a finite
+    ~3.5e-38; asserted on the dequantized value since each format stores the poison differently."""
     torch.manual_seed(0)
     x = torch.randn(4, 64, dtype=torch.float32) * 0.3
     x[1, 7] = poison
@@ -281,11 +202,11 @@ def test_non_finite_input_propagates_through_every_format(fmt, poison):
 
 @pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
 def test_finite_input_never_produces_nan(fmt):
-    """The other direction: no finite input may manufacture a NaN (the 0xFF code is reserved)."""
+    """The 0xFF code is reserved."""
     torch.manual_seed(0)
     x = torch.randn(4, 64, dtype=torch.float32) * 0.3
-    x[0, 0] = 5e4  # scale-saturating outlier
-    x[2, :] = 0.0  # all-zero block
+    x[0, 0] = 5e4
+    x[2, :] = 0.0
     recon = q.dequantize(q.QUANTIZERS[fmt](x))
     assert torch.isfinite(recon).all(), f"{fmt} produced a non-finite value from finite input"
 

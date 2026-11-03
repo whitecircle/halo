@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""``tests/cpu/conftest.py`` sends the CPU tier's remote-code copies to a cache of the process's own.
-
-Left on ``$HF_HOME/modules``, the copies of every temp checkpoint a test loads go into the HF home
-that every xdist worker and every concurrent session share, and a read-only mount of it fails the
-first remote-code load. The probe imports the conftest ahead of transformers, as a pytest session
-does, then loads a remote-code config from a local checkpoint, in a fresh interpreter so this
-process's import history cannot decide it. The session check holds this process to the same cache:
-a plugin that imports transformers before the conftest would leave it on the default one.
-
-Run: python tests/cpu/conventions/test_cpu_tier_modules_cache.py
-"""
+"""``tests/cpu/conftest.py`` sends the CPU tier's remote-code copies to a cache of the process's own. On
+``$HF_HOME/modules`` they are shared by every xdist worker and session, and a read-only mount fails the first
+remote-code load."""
 
 import json
 import sys

@@ -1,9 +1,5 @@
-"""Checkpoint artifact harness: what every saver writes, compared between two commits (``make verify-artifacts
-BASE=<sha>``) into ``evidence/checkpoint_artifacts-<head sha>.json``. Each tree saves a tiny model of every family
-through every saver mode one CPU process runs, at fp32 and bf16, as an export and as a training checkpoint, and
-the outputs are compared file by file: file sets and permission bits, safetensors headers and tensor digests,
-JSON by value, torch files by key and tensor, any other file by its bytes.
-"""
+"""Checkpoint artifact harness: what every saver writes, compared file by file between two commits (``make
+verify-artifacts BASE=<sha>``)."""
 
 from __future__ import annotations
 
@@ -65,20 +61,18 @@ RUN_DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16}
 FULL_WEIGHT_MODES = ("fsdp2", "cp", "cp_fsdp2", "tp", "ep1", "ep")
 CP_MODES = ("cp", "cp_fsdp2")
 EXPERT_LORA_MODES = ("ep_expert_lora", "ep_expert_lora_merged")
-# Written in place of a case's files when its save raises: the exception's type and message.
+# Written in place of a case's files when its save raises.
 RAISED_FILE = f"{RAISED}.json"
-# Reseeded before the adapters are drawn, so their values do not hang on how much randomness the model
-# build and the EP patch consumed.
+# Reseeded before the adapters are drawn, so their values do not hang on how much randomness the build consumed.
 ADAPTER_SEED = 1
-# Both trees' producers run under one string hash seed: a set's iteration order follows it, and reaches
-# adapter_config.json's target_modules and the tensor names of a safetensors refusal.
+# A set's iteration order follows the seed and reaches adapter_config.json's target_modules and safetensors refusal
+# names.
 PRODUCER_ENV = {"PYTHONHASHSEED": "0"}
 
 
 @dataclass(frozen=True)
 class ArtifactCase:
-    """One save: a tiny family's model at one run dtype through one saver mode, as an export or a training
-    checkpoint."""
+    """One save: a tiny family at one run dtype through one saver mode, as an export or a training checkpoint."""
 
     family: str
     mode: str
@@ -118,8 +112,7 @@ def _context(model, parallelism_config=None, *, training: bool, **fields):
 
 
 def _shard(model, mesh: DeviceMesh, dtype: torch.dtype, ignored: Iterable = ()) -> None:
-    """FSDP2 in the wrap's decoder-layer units under the run's mixed-precision policy, as a run's DP wrap applies
-    it."""
+    """FSDP2 in the wrap's decoder-layer units under the run's mixed-precision policy."""
     policy = mixed_precision_policy(dtype, fp32_reduce=False, cast_forward_inputs=True)
     apply_fsdp2_per_layer(model, mesh, policy, False, IdentityParamSet(ignored))
 
@@ -196,8 +189,8 @@ def _single_rank_group(scratch: Path) -> Iterator[DeviceMesh]:
 
 
 def produce(output: Path, cases: Iterable[ArtifactCase] = ARTIFACT_CASES) -> None:
-    """Save every case under ``output/<case path>``, on a single-rank gloo group this process holds for the
-    duration; a case that raises writes :data:`RAISED_FILE` there instead."""
+    """Save every case under ``output/<case path>`` on a single-rank gloo group; a raising case writes
+    :data:`RAISED_FILE` instead."""
     output.mkdir(parents=True, exist_ok=True)
     with quiet_logs(), tempfile.TemporaryDirectory() as scratch, _single_rank_group(Path(scratch)) as mesh:
         for case in cases:
@@ -212,7 +205,7 @@ def produce(output: Path, cases: Iterable[ArtifactCase] = ARTIFACT_CASES) -> Non
 
 
 def _safetensors(path: Path) -> dict:
-    """A safetensors file's metadata and each tensor's dtype, shape and byte digest, read off its header."""
+    """Metadata and each tensor's dtype, shape and byte digest, read off the header."""
     data = path.read_bytes()
     header_size = int.from_bytes(data[:8], "little")
     header = json.loads(data[8 : 8 + header_size])
@@ -261,8 +254,7 @@ def _content(path: Path) -> object:
 
 
 def describe(root: Path) -> dict[str, dict]:
-    """Each file under ``root``, by relative path, as the comparison reads it: its permission bits (octal) and
-    its content."""
+    """Each file under ``root`` as the comparison reads it: permission bits (octal) and content."""
     return {
         str(path.relative_to(root)): {"mode": f"{stat.S_IMODE(path.stat().st_mode):o}", "content": _content(path)}
         for path in sorted(path for path in root.rglob("*") if path.is_file())
@@ -270,7 +262,6 @@ def describe(root: Path) -> dict[str, dict]:
 
 
 def raised_cases(description: Mapping[str, dict]) -> dict[str, object]:
-    """The cases of a described output that raised, by case path, with what they raised."""
     return {
         path.rpartition("/")[0]: described["content"]
         for path, described in description.items()

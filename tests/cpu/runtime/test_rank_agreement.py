@@ -1,23 +1,6 @@
 #!/usr/bin/env python
 """Cross-rank agreement and rejection are one fixed-size all-reduce on a real 3-rank gloo world.
-
-``agree_across_ranks`` compares a canonical blake2b digest with one int64 MAX all-reduce of
-``[d, -d]``, so the common case of a check that runs every log step, or once per
-setting at startup, costs nothing proportional to the world: no object gather, no per-rank
-unpickle. Only a disagreement gathers the objects, to name them. The pins:
-
-* agreement issues exactly one all-reduce and no object collective, for ``reject_divergent_settings``;
-* the digest is canonical across processes (a mapping's insertion order does not matter, and
-  Python's per-process ``hash`` salt never enters);
-* a disagreement still raises on every rank with the caller's message;
-* ``reject_across_ranks`` (and so every ``DeferredRankFailure.reject``) with no failure anywhere is
-  one all-reduce of a has-reason flag and no object gather, and one rank's failure still raises on
-  every rank with the gathered message;
-* ``rank_max`` / ``rank_min`` take each int's world MAX / MIN in one all-reduce per call, and hand a
-  single process its values back.
-
-    python tests/cpu/runtime/test_rank_agreement.py
-"""
+A canonical blake2b digest with one int64 MAX of ``[d, -d]``, so only a disagreement gathers objects."""
 
 import datetime
 import json
@@ -41,7 +24,7 @@ WORLD = 3
 
 @contextmanager
 def _counted_collectives(counts: dict[str, int]):
-    """Count the collectives the block issues, by name, delegating to the real ones."""
+    """Delegates to the real collectives."""
     names = ("all_reduce", "all_gather_object", "broadcast_object_list")
     originals = {name: getattr(dist, name) for name in names}
 
@@ -66,7 +49,7 @@ def _worker(rank: int, out: str) -> None:
 
     counts: dict[str, int] = {}
     with _counted_collectives(counts):
-        # Built in a different insertion order on every rank: the digest must not see it.
+        # Different insertion order on every rank: the digest must not see it.
         items = [("b", 2), ("a", 1), ("c", (3, None))]
         agreement = agree_across_ranks(dict(items[rank:] + items[:rank]))
     results["agree"] = [agreement, counts]
@@ -97,13 +80,13 @@ def _worker(rank: int, out: str) -> None:
         except ValueError as exc:
             results[f"equal_{name}"] = str(exc)
 
-    # Rank 2's mapping mixes a str key with an int one, which the canonical digest cannot sort.
+    # A mixed str/int mapping, which the canonical digest cannot sort.
     try:
         reject_divergent_settings({"x": 1, 2: 3} if rank == 2 else {"x": 1}, "Mixed-key settings", "Align it.")
         results["undigestible"] = "agreed"
     except ValueError as exc:
         results["undigestible"] = str(exc)
-    # Every rank undigestible, the values still differing: no shared fallback digest may agree them.
+    # No shared fallback digest may agree differing undigestible values.
     try:
         reject_divergent_settings({"x": 1, 2: rank}, "All mixed-key settings", "Align it.")
         results["all_undigestible"] = "agreed"
@@ -162,8 +145,7 @@ def test_a_settings_mismatch_raises_on_every_rank_with_the_callers_message(per_r
 
 @pytest.mark.parametrize("name", ["set", "nested_dict", "int_and_float", "none_and_absent"])
 def test_values_equal_under_eq_but_spelled_differently_agree(per_rank, name):
-    """The digest only fast-paths agreement; a set iterated in salted order, a dict built in another
-    order, ``30`` beside ``30.0`` and ``None`` beside an absent key are the same setting."""
+    """The digest only fast-paths agreement; a salted set order or ``30`` beside ``30.0`` are one setting."""
     for rank, results in enumerate(per_rank):
         assert results[f"equal_{name}"] == "agreed", f"rank {rank}: {results[f'equal_{name}']}"
 
@@ -180,7 +162,7 @@ def test_an_object_one_rank_cannot_digest_reaches_the_gather_and_is_named(per_ra
 
 
 def test_a_rejection_nobody_needs_is_one_all_reduce(per_rank):
-    """Two rejections here (a bare one and a deferred guard's), so two all-reduces and no gather."""
+    """A bare rejection and a deferred guard's."""
     for rank, results in enumerate(per_rank):
         assert results["reject_fast_path"] == {"all_reduce": 2}, f"rank {rank}: {results['reject_fast_path']}"
 

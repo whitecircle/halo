@@ -1,14 +1,7 @@
 #!/usr/bin/env python
 """``tests.common.parallel_shape.expert_tp_group_problems`` names an expert-TP layout that does not tile the world.
-
-The EP-modes GPU suite gates its pure-ETP rows on this verdict over every rank's reported group, and runs only on
-the GPU tiers; with several DP replicas the loss and gradient comparisons on an identical batch cannot tell which
-ranks pair up, or which batch each partner would read. These pins hold the verdict to the layouts that are valid
-(contiguous or strided pairs whose partners read one batch) and to each way a layout can be wrong, and the gather
-to one view per rank, a rank without a group included.
-
-Run: python tests/cpu/conventions/test_expert_tp_group_layout.py
-"""
+With several DP replicas, loss and gradient comparisons on one batch cannot tell which ranks pair up, so the GPU
+suite gates on this verdict."""
 
 import types
 
@@ -21,15 +14,13 @@ from tests.common.parallel_shape import ExpertTPMembership, expert_tp_group_prob
 def _views(
     groups: dict[int, tuple[int, ...] | None], shard_ranks: dict[int, int], dp_ranks: dict[int, int] | None = None
 ) -> list[ExpertTPMembership]:
-    """Per global rank, in order, the group it reports, the expert-TP rank it holds and its DP rank (``rank //
-    2``, contiguous pairs' layout, unless given)."""
+    """Per global rank, the group it reports, its expert-TP rank and its DP rank (``rank // 2`` unless given)."""
     dp_ranks = dp_ranks or {rank: rank // 2 for rank in groups}
     return [ExpertTPMembership(groups[rank], shard_ranks[rank], dp_ranks[rank]) for rank in sorted(groups)]
 
 
 def _pairs(*pairs: tuple[int, int]) -> list[ExpertTPMembership]:
-    """Every rank in its pair, holding its position in the pair as its expert-TP rank and the pair's index as its DP
-    rank."""
+    """Every rank in its pair: its position in the pair is its expert-TP rank, the pair's index its DP rank."""
     groups = {rank: pair for pair in pairs for rank in pair}
     shard_ranks = {rank: pair.index(rank) for pair in pairs for rank in pair}
     dp_ranks = {rank: index for index, pair in enumerate(pairs) for rank in pair}

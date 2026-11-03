@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""No save/load path may call a MODEL's ``state_dict()`` under a rank gate.
-
-Under FSDP2 ``state_dict()`` is not a read: a registered pre-hook reshards the module's parameters
-back to ``DTensor(Shard(0))``. With ``reshard_after_forward=False`` (the toolkit default) the params
-sit UNSHARDED between a forward and its backward, so a call made on one rank alone leaves that rank
-holding DTensors while its peers hold plain tensors. The next op over them is then collective on the
-gated rank and local on everyone else — a desync that surfaces far from its cause, as a peer timing
-out in an unrelated barrier.
-
-The two sites that invite the shape are ``persistent_buffers`` (a writer-only PEFT unmerge goes
-collective alone and the peer dies in DeepEP teardown) and ``load_resume_weights``' FSDP2 rank-0
-coverage gate. Both read live FQNs from ``named_parameters()``/``named_buffers()`` instead, which
-touch no state dict.
-
-This is a structural test because reproducing the divergence needs 2 ranks and a real FSDP2 wrap
-(covered in the GPU tier). It fails the moment the shape is reintroduced anywhere in the save/load
-surface. Run: ``pytest -m cpu tests/cpu/checkpoint/test_no_rank_gated_model_state_dict.py``
-"""
+"""No save/load path calls a model's ``state_dict()`` under a rank gate: under FSDP2 a pre-hook reshards, leaving ranks
+in different states. Structural, since reproducing the desync needs 2 ranks and a real FSDP2 wrap (the GPU tier)."""
 
 from __future__ import annotations
 
@@ -27,10 +11,10 @@ import pytest
 
 from tests.common.repo import REPO_ROOT
 
-# The surface that writes or restores model weights; optimizer/scheduler state is per-rank by design.
+# Optimizer and scheduler state is per-rank by design.
 _SCANNED = (REPO_ROOT / "halo" / "distributed", REPO_ROOT / "halo" / "checkpoint")
 
-# Names that decide "this rank writes" — the gates that make a call rank-asymmetric.
+# The gates that make a call rank-asymmetric.
 _RANK_GATES = (
     "is_global_main_process",
     "is_local_main_process",
@@ -42,12 +26,11 @@ _RANK_GATES = (
     "is_pp_shard_writer",
 )
 
-# Receivers whose state_dict() is a MODEL's. Optimizer/scheduler receivers are deliberately absent.
+# Optimizer and scheduler receivers are deliberately absent.
 _MODEL_RECEIVERS = ("model", "module", "stage", "wrapper", "backbone", "policy")
 
 
 def _is_model_state_dict_call(node: ast.AST) -> str | None:
-    """``<receiver>.state_dict()`` where the receiver looks like a model → the receiver's source."""
     if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
         return None
     if node.func.attr != "state_dict":
@@ -58,7 +41,6 @@ def _is_model_state_dict_call(node: ast.AST) -> str | None:
 
 
 def _gate_in(test: ast.AST) -> str | None:
-    """The rank-gate name an ``if`` test depends on, if any."""
     return next((name for name in _RANK_GATES if name in ast.unparse(test)), None)
 
 
@@ -92,13 +74,13 @@ def test_no_model_state_dict_under_a_rank_gate():
 
 
 def test_detector_catches_the_shape():
-    """Anti-vacuity: the scanner must actually flag the pattern it exists to forbid."""
+    """Anti-vacuity: the scanner must flag the pattern."""
     source = (
         "def save(model):\n"
         "    if is_global_main_process():\n"
         "        matched = len(set(state) & set(model.state_dict()))\n"
     )
-    tmp = REPO_ROOT / "halo" / "distributed" / "checkpoint" / "__init__.py"  # any real path for relative_to
+    tmp = REPO_ROOT / "halo" / "distributed" / "checkpoint" / "__init__.py"  # Any real path for relative_to.
     tree = ast.parse(source)
     hits = []
     for node in ast.walk(tree):
@@ -108,7 +90,7 @@ def test_detector_catches_the_shape():
 
 
 def test_detector_ignores_optimizer_state_dict():
-    """Anti-false-positive: a rank-gated OPTIMIZER state_dict is correct and must not be flagged."""
+    """A rank-gated optimizer state_dict is correct."""
     source = "def save(optimizer):\n    if is_global_main_process():\n        blob = optimizer.state_dict()\n"
     tree = ast.parse(source)
     hits = [

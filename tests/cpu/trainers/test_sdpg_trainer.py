@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Unit tests for the on-policy SDPG trainer's own logic (no GPU / vLLM).
-
-DistributedSDPGTrainer layers a privileged-teacher reverse-KL OPD term onto the online GRPO loop.
-The GRPO loop itself is covered elsewhere; here we test the pieces SDPG adds and that must be correct
-for the OPD to align: ``_build_teacher_prompts`` (left-padded ``[prompt + hint]``), the completion
-logits both forwards are read at, and the OPD term itself — the gate on positive advantages and on
-the tokens the GRPO loss trains, its token mean and its grad-accum scaling — read off the student's
-one forward, the GRPO loss's own, on every scorer path.
-
+"""The on-policy SDPG trainer's own logic (no GPU or vLLM): teacher prompts, completion logits and the OPD term.
 A real tokenizer is needed for the hint encoding; the test skips when none is cached.
-
-Run: pytest tests/cpu/trainers/test_sdpg_trainer.py
 """
 
 import types
@@ -32,7 +22,6 @@ from tests.common.tokenizers import load_cached_tokenizer
 
 
 def _bare_trainer(tokenizer):
-    """A DistributedSDPGTrainer shell with only the attributes the unit-under-test reads."""
     t = object.__new__(DistributedSDPGTrainer)
     t.processing_class = tokenizer
     t.sdpg = SDPGArguments(sdpg_hint_template="\n[Hint] answer: {answer}\n")
@@ -47,7 +36,6 @@ def test_build_teacher_prompts_appends_hint_and_left_pads():
         tok.pad_token = tok.eos_token
     t = _bare_trainer(tok)
 
-    # Two left-padded prompts of different real lengths.
     p_a = tok.encode("What is 2+2?", add_special_tokens=False)
     p_b = tok.encode("Capital of France is", add_special_tokens=False)
     width = max(len(p_a), len(p_b)) + 2
@@ -58,7 +46,7 @@ def test_build_teacher_prompts_appends_hint_and_left_pads():
 
     prompt_ids = torch.tensor([left_pad(p_a), left_pad(p_b)])
     prompt_mask = (prompt_ids != pad).long()
-    # ensure the masked positions are exactly the real tokens (handles pad==eos collisions)
+    # Exactly the real tokens, even where pad == eos.
     prompt_mask = torch.tensor([[0] * (width - len(p_a)) + [1] * len(p_a), [0] * (width - len(p_b)) + [1] * len(p_b)])
 
     answers = ["4", "Paris"]
@@ -70,17 +58,13 @@ def test_build_teacher_prompts_appends_hint_and_left_pads():
         expected = real + tok.encode(f"\n[Hint] answer: {ans}\n", add_special_tokens=False)
         got = tids[i][tmask[i].bool()].tolist()
         assert got == expected, f"row {i}: teacher prompt must be real-prompt + hint(answer)"
-    # Left padding: the first real teacher token sits at column (width' - len) with mask 1.
     assert tmask[:, -1].tolist() == [1, 1]  # last column always real (left-padded)
 
 
 @pytest.mark.parametrize("answer", [None, "", "   "])
 def test_a_missing_answer_yields_no_hint_instead_of_a_blank_one(answer):
-    """The template STATES the answer, so a blank renders "answer: " as fact.
-
-    The privileged teacher would then be misled rather than privileged, and the OPD term distils the
-    student toward it. Dropping the hint leaves the teacher on the plain prompt, which is honest.
-    """
+    """The template states the answer, so a blank renders "answer: " as fact and the OPD term distils the student
+    toward a misled teacher."""
     tok = load_cached_tokenizer(QWEN3_0_6B)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
@@ -97,21 +81,18 @@ def test_a_missing_answer_yields_no_hint_instead_of_a_blank_one(answer):
 
 
 def test_positive_advantage_gate_zeroes_nonpositive_rows():
-    """The real gate, not a transcription of it: a zero advantage is a tied/unscorable group, so a
-    ``>= 0`` there would pull the student toward the teacher on rows the verifier did not prefer."""
+    """A zero advantage is a tied or unscorable group, so a ``>= 0`` gate would pull the student toward the teacher on
+    rows the verifier did not prefer."""
     completion_mask = torch.ones(3, 2)
-    advantages = torch.tensor([0.5, -0.3, 0.0])  # only row 0 is strictly positive
+    advantages = torch.tensor([0.5, -0.3, 0.0])
     gate = positive_advantage_gate(completion_mask, advantages, enabled=True)
     assert gate.tolist() == [[1.0, 1.0], [0.0, 0.0], [0.0, 0.0]]
 
-    # Disabled, the gate is the completion mask alone — every row contributes.
     ungated = positive_advantage_gate(completion_mask, advantages, enabled=False)
     assert ungated.sum().item() == 6.0
 
 
 def _construct_over(columns, **kwargs):
-    """Run the real ctor over a train dataset of ``columns``, the GRPO parent stubbed out."""
-
     def parent_init(self, *args, **kw):
         self.train_dataset = Dataset.from_dict({name: ["x"] for name in columns})
 
@@ -120,8 +101,8 @@ def _construct_over(columns, **kwargs):
 
 
 def test_the_answer_column_is_demanded_only_where_the_hint_names_it():
-    """A hint naming ``{answer}`` over a dataset without the column would assert an empty answer; a
-    template naming no answer reads no column, so it must not be refused for lacking one."""
+    """A hint naming ``{answer}`` over a dataset without the column would assert an empty answer; a template naming no
+    answer reads no column."""
     with pytest.raises(ValueError, match="needs the gold answer in column 'answer'"):
         _construct_over(["prompt"], sdpg_hint_template="the answer is {answer}")
     _construct_over(["prompt"], sdpg_hint_template="think it through once more")
@@ -130,8 +111,8 @@ def test_the_answer_column_is_demanded_only_where_the_hint_names_it():
 
 @pytest.mark.parametrize(("beta", "raises"), [(0.5, True), (0.0, False)])
 def test_a_batch_without_teacher_prompts_raises_while_opd_is_on(monkeypatch, beta, raises):
-    """With the OPD term on, a batch missing its privileged teacher prompts would skip the term and
-    train plain GRPO; with it off (``sdpg_beta_base: 0``) no teacher prompt is built or needed."""
+    """With the OPD term on, a batch missing its teacher prompts would skip the term and train plain GRPO; with
+    ``sdpg_beta_base: 0`` no teacher prompt is built."""
     monkeypatch.setattr(DistributedOnlineGRPOTrainer, "_compute_loss", lambda self, model, inputs: torch.tensor(1.0))
     t = object.__new__(DistributedSDPGTrainer)
     t.sdpg = SDPGArguments(sdpg_beta_base=beta)
@@ -158,8 +139,7 @@ def _right_padded(rows, pad=0):
 
 
 class _NoTrimForward(nn.Module):
-    """A forward that declares no ``logits_to_keep`` and swallows extra kwargs, as remote-code Bailing
-    does: handed one, it still returns every position."""
+    """Declares no ``logits_to_keep`` and swallows extra kwargs, as remote-code Bailing does; returns all positions."""
 
     def __init__(self, inner):
         super().__init__()
@@ -173,9 +153,7 @@ class _NoTrimForward(nn.Module):
 
 @pytest.mark.parametrize("trims", [True, False], ids=["logits_to_keep", "full-forward"])
 def test_completion_logits_match_each_rows_own_unpadded_forward(trims):
-    """The rows kept must be the ones that predict each completion token, for left-padded prompts of
-    different lengths, whether the head is trimmed (``logits_to_keep``) or the forward takes no such
-    argument and returns every position."""
+    """The rows kept must predict each completion token, whether the head is trimmed or every position comes back."""
     torch.manual_seed(0)
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")).eval()
     prompts, completions = [[5, 9, 3], [7, 2, 8, 4, 6]], [[11, 12, 13, 14], [21, 22]]
@@ -197,8 +175,7 @@ def test_completion_logits_match_each_rows_own_unpadded_forward(trims):
 
 
 class _ContextTable(nn.Module):
-    """Logits for each position from a random table keyed by (token id + 3 x prefix length), so the
-    student and the hinted teacher forwards score the same completion token differently."""
+    """Logits keyed by (token id + 3 x prefix length), so student and hinted teacher score a token differently."""
 
     def __init__(self):
         super().__init__()
@@ -210,8 +187,8 @@ class _ContextTable(nn.Module):
 
 
 def _scored_grpo_loss(self, model, inputs):
-    """TRL's GRPO loss as far as SDPG sees it: one student forward of ``[prompt ⧺ completion]`` through the
-    full-logits scorer's capture, and a constant loss."""
+    """TRL's GRPO loss as far as SDPG sees it: one student forward through the full-logits scorer's capture and a
+    constant loss."""
     with self._capturing_forward_logits(model, inputs["completion_ids"].size(1)):
         self._completion_logits(
             model, inputs["prompt_ids"], inputs["prompt_mask"], inputs["completion_ids"], inputs["completion_mask"]
@@ -271,8 +248,8 @@ def _per_token_opd(trainer, model, inputs) -> torch.Tensor:
 
 
 def test_the_opd_term_is_gated_to_trained_tokens_of_positive_advantage_rows(monkeypatch):
-    """``beta * mean_{gated tokens} sum_v KL`` divided by grad-accum, the gate being the GRPO loss's
-    own token mask (a tool-output token is attention-valid but untrained) on rows with advantage > 0."""
+    """``beta * mean_{gated tokens} sum_v KL`` over grad-accum. The gate is the GRPO loss's token mask (a tool-output
+    token is attention-valid but untrained) on rows with advantage > 0."""
     monkeypatch.setattr(DistributedOnlineGRPOTrainer, "_compute_loss", _scored_grpo_loss)
     model = _ContextTable().train()
     trainer, stored = _opd_trainer(model, positive_advantage_only=True)
@@ -289,8 +266,7 @@ def test_the_opd_term_is_gated_to_trained_tokens_of_positive_advantage_rows(monk
 
 
 def test_an_eval_split_s_padding_rows_leave_the_opd_mean(monkeypatch):
-    """Row 2 pads the eval split's final round: the OPD mean (no grad-accum division in eval) runs over
-    rows 0 and 1's trained tokens alone, stored with their two rows as the weight."""
+    """Row 2 pads the eval split's final round, and eval has no grad-accum division."""
     monkeypatch.setattr(DistributedOnlineGRPOTrainer, "_compute_loss", _scored_grpo_loss)
     model = _ContextTable().eval()
     trainer, stored = _opd_trainer(model, positive_advantage_only=False)
@@ -357,9 +333,7 @@ def _real_inputs() -> dict[str, torch.Tensor]:
     ids=["full-logits", "chunked-padded", "chunked-dense"],
 )
 def test_the_student_runs_once_and_the_loss_matches_two_forwards(chunked, batch_size):
-    """TRL's loss forward hands the OPD term its completion logits, so the student's backbone runs with grad
-    once per scorer call (one padded batch, or one per dense row) instead of once more for OPD; the loss
-    and every gradient match the GRPO loss plus the OPD term over a separate student forward."""
+    """The backbone runs with grad once per scorer call (one padded batch, or one per dense row); OPD adds none."""
     torch.manual_seed(0)
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")).train()
     inputs = _real_inputs()

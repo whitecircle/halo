@@ -1,16 +1,5 @@
-"""Numerical-equivalence test for the atomic-free MoE permute (the production scatter-back).
-
-`MoEGatherPermute` and `MoEWeightedUnpermute` (halo/kernels/moe_permute.py) replace the bf16-atomic
-`index_add_` expert scatter-back with an atomic-free gather+sum via a precomputed `inv_map`
-(`build_inv_map`); the unpermute also
-folds in the routing-weight multiply. They are the production permute for every grouped-GEMM MoE family
-at every top_k and EP size, so they must match the index_select / weighted index_add reference they
-replace, in float64, in BOTH forward and backward (the routing-weight gradient included). On CPU both
-run their eager forms, which this file pins; the Triton kernels are tests/gpu/kernels/test_moe_permute.py's.
-
-This is a CPU test (pure torch); run it inside the container:
-    python tests/cpu/parallelism/test_moe_permute_equivalence.py
-"""
+"""The atomic-free MoE permute (halo/kernels/moe_permute.py) against the index_select / weighted index_add
+reference, in float64, forward and backward. CPU pins the eager forms."""
 
 import pytest
 import torch
@@ -20,21 +9,17 @@ from tests.common.ep_stubs import StubEPLayerBase
 
 
 def _make_routing(recv_N: int, width: int, seed: int):
-    """Build a sorted_token_idx where each token appears 0..width times (real MoE invariant:
-    a received token lands on at most top_k local experts), in a random (expert-sorted-like) order.
-    Returns (sorted_token_idx, inv_map)."""
+    """A received token lands on at most top_k local experts. Returns (sorted_token_idx, inv_map)."""
     g = torch.Generator().manual_seed(seed)
     counts = torch.randint(0, width + 1, (recv_N,), generator=g)
     idx = torch.repeat_interleave(torch.arange(recv_N), counts)
-    perm = torch.randperm(idx.numel(), generator=g)  # simulate expert-sort ordering
+    perm = torch.randperm(idx.numel(), generator=g)  # Simulate expert-sort ordering.
     sorted_token_idx = idx[perm].contiguous()
     inv_map = build_inv_map(sorted_token_idx, recv_N, width)
     return sorted_token_idx, inv_map
 
 
 def _weighted_unpermute_and_grads(expert_out, weights, sorted_token_idx, inv_map, grad_out, *, reference):
-    """The weighted unpermute's output and its ``(expert_out, weights)`` gradients: the Function under
-    test, or (``reference``) ``index_add_`` of the weighted rows through autograd."""
     eo = expert_out.clone().requires_grad_(True)
     w = weights.clone().requires_grad_(True)
     if reference:
@@ -78,12 +63,12 @@ def _check_case(recv_N, width, H, seed):
 
 def test_permute_equivalence():
     cases = [
-        (64, 8, 16, 0),  # qwen3.6-like top_k=8
-        (128, 4, 8, 1),  # gpt-oss-like top_k=4
-        (32, 1, 4, 2),  # width=1 edge
-        (100, 8, 5, 3),  # tokens with gaps (some count=0) and some at the width cap
+        (64, 8, 16, 0),
+        (128, 4, 8, 1),
+        (32, 1, 4, 2),
+        (100, 8, 5, 3),  # Tokens with gaps (some count=0) and some at the width cap.
         (256, 8, 7, 4),
-        (1, 8, 3, 5),  # single token
+        (1, 8, 3, 5),
         (50, 2, 6, 6),
     ]
     for recv_N, width, H, seed in cases:
@@ -92,8 +77,7 @@ def test_permute_equivalence():
 
 
 def test_build_inv_map_properties():
-    """inv_map sentinel = n_sorted (indexes the zero pad row); valid entries are a permutation
-    of the sorted positions; each token's row holds exactly its occurrences."""
+    """The sentinel n_sorted indexes the zero pad row."""
     sorted_token_idx, inv_map = _make_routing(64, 8, seed=7)
     n_sorted = sorted_token_idx.numel()
     assert inv_map.shape == (64, 8)
@@ -109,13 +93,11 @@ def test_build_inv_map_properties():
 
 
 def test_empty_routing_is_all_sentinel():
-    """Empty dispatch (no token routed to any local expert) → inv_map is all-sentinel
-    and the weighted unpermute yields exactly zeros (the n_sorted==0 fast path)."""
     recv_N, width, H = 8, 4, 5
     sorted_token_idx = torch.empty(0, dtype=torch.long)
     inv_map = build_inv_map(sorted_token_idx, recv_N, width)
     assert inv_map.shape == (recv_N, width)
-    assert torch.all(inv_map == 0)  # n_sorted == 0, so the sentinel equals 0
+    assert torch.all(inv_map == 0)  # n_sorted == 0, so the sentinel equals 0.
 
     expert_out = torch.empty(0, H, dtype=torch.float64)
     got = MoEWeightedUnpermute.apply(expert_out, torch.empty(0, dtype=torch.float64), sorted_token_idx, inv_map)
@@ -125,7 +107,6 @@ def test_empty_routing_is_all_sentinel():
 
 
 def _saved_and_expert_grad(expert_out, weights, sorted_token_idx, inv_map, grad_out, *, weights_need_grad):
-    """What the weighted unpermute keeps for backward, and the ``expert_out`` gradient."""
     eo = expert_out.clone().requires_grad_(True)
     w = weights.clone().requires_grad_(weights_need_grad)
     saved = []
@@ -136,9 +117,7 @@ def _saved_and_expert_grad(expert_out, weights, sorted_token_idx, inv_map, grad_
 
 
 def test_weights_needing_no_grad_keep_no_expert_outputs():
-    """The expert outputs feed only the routing-weight gradient. Weights that need none (a frozen router
-    over activations that need no gradient) must not keep them alive until backward — an ``[n_sorted, H]``
-    tensor per MoE layer — and the expert-output gradient must not change."""
+    """Otherwise an ``[n_sorted, H]`` tensor per MoE layer stays alive until backward."""
     sorted_token_idx, inv_map = _make_routing(64, 8, seed=11)
     n_sorted, hidden = sorted_token_idx.numel(), 16
     expert_out = torch.randn(n_sorted, hidden, dtype=torch.float64)
@@ -155,14 +134,12 @@ def test_weights_needing_no_grad_keep_no_expert_outputs():
 
 
 def test_full_width_token_all_experts():
-    """A token routed to all `width` local experts: its inv_map row is fully valid
-    (no sentinel) and the gather/scatter still match the index_add reference."""
     width, H = 4, 6
-    # token 0 lands on 4 sorted positions, token 1 on none.
+    # Token 0 lands on 4 sorted positions, token 1 on none.
     sorted_token_idx = torch.tensor([0, 0, 0, 0], dtype=torch.long)
     inv_map = build_inv_map(sorted_token_idx, recv_N=2, width=width)
     assert torch.equal(torch.sort(inv_map[0]).values, torch.arange(width))
-    assert torch.all(inv_map[1] == 4)  # token 1 absent → all sentinel
+    assert torch.all(inv_map[1] == 4)
 
     expert_out = torch.randn(4, H, dtype=torch.float64)
     weights = torch.rand(4, dtype=torch.float64)
@@ -175,8 +152,6 @@ def test_full_width_token_all_experts():
 
 
 class _GroupedPathLayer(StubEPLayerBase):
-    """The grouped expert path of an EP layer with ``ep_size`` ranks, without process groups."""
-
     def __init__(self, ep_size: int, experts_per_rank: int):
         super().__init__()
         self.ep_size = ep_size
@@ -188,10 +163,7 @@ class _GroupedPathLayer(StubEPLayerBase):
     ("top_k", "ep_size"), ((4, 8), (2, 2), (1, 2)), ids=("top_k_below_ep_size", "top_k_at_ep_size", "top_1")
 )
 def test_the_grouped_path_permutes_atomic_free_at_every_top_k_and_ep_size(monkeypatch, top_k, ep_size):
-    """Every shape, gpt-oss's top-4 at EP8 (``top_k < ep_size``) included, builds ``inv_map`` and goes
-    through both fused Functions rather than ``index_select`` and a bf16 ``index_add_``, and the
-    scatter-back equals the weighted ``index_add_`` reference, with dispatch padding (``-1``) and other
-    ranks' expert ids dropped."""
+    """gpt-oss's top-4 at EP8 included; dispatch padding (``-1``) and other ranks' ids are dropped."""
     calls = []
     for cls in (MoEGatherPermute, MoEWeightedUnpermute):
         apply = cls.apply
@@ -202,7 +174,7 @@ def test_the_grouped_path_permutes_atomic_free_at_every_top_k_and_ep_size(monkey
     g = torch.Generator().manual_seed(top_k * 10 + ep_size)
     recv_n, hidden = 11, 5
     tokens = torch.randn(recv_n, hidden, dtype=torch.float64, generator=g)
-    experts = torch.randint(-1, 5, (recv_n, top_k), generator=g)  # -1 padding, 3..4 are not this rank's
+    experts = torch.randint(-1, 5, (recv_n, top_k), generator=g)  # -1 padding; 3..4 are not this rank's.
     weights = torch.rand(recv_n, top_k, dtype=torch.float64, generator=g)
     scale = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
 

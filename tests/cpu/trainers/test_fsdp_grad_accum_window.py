@@ -1,20 +1,6 @@
 #!/usr/bin/env python
 """The FSDP2 grad-accum window toggles per window, never pinned for the run.
-
-``fsdp_reshard_after_backward=False`` and ``fsdp_defer_grad_sync=True`` both lean on torch contracts
-that are per window: ``set_reshard_after_backward`` / ``set_requires_gradient_sync`` off for
-microbatches 1..n-1, back on for the last. Pinning the reshard off leaves the transient unsharded
-params registered forever (0 grad norm, nothing clipped, the next forward blind to the optimizer's
-update); pinning the reduce off never delivers a gradient to the sharded params the optimizer steps.
-This pins the trainer-side wiring: which runs arm the toggle at all, which setter each knob drives,
-and the exact flag sequence a window writes.
-
-The runtime invariants it protects are GPU-only —
-``tests/gpu/trainers/sft/test_sft_fsdp_backward_reshard.py`` and
-``tests/gpu/trainers/sft/test_sft_fsdp_defer_grad_sync.py``.
-
-    python tests/cpu/trainers/test_fsdp_grad_accum_window.py
-"""
+Pinned off, the reshard leaves unsharded params registered and the reduce never delivers a gradient to the shards."""
 
 import types
 
@@ -31,8 +17,6 @@ REDUCE = "set_requires_gradient_sync"
 
 
 class RecordingFSDPModule:
-    """Stands in for an ``FSDPModule``, recording every per-window setter write."""
-
     def __init__(self):
         self.writes: list[tuple[str, bool, bool]] = []
 
@@ -44,8 +28,6 @@ class RecordingFSDPModule:
 
 
 class StubTrainer(GradientSyncMixin):
-    """The real mixin methods over the minimum state they read."""
-
     def __init__(self, *, fsdp_wrapped=True, reshard_after_backward=True, defer_grad_sync=False):
         self.parallelism_config = types.SimpleNamespace(
             fsdp_reshard_after_backward=reshard_after_backward, fsdp_defer_grad_sync=defer_grad_sync
@@ -63,7 +45,6 @@ def _run_windows(trainer, n_windows=1):
 
 
 def test_unwrapped_module_tree_yields_no_fsdp_modules():
-    """The toggle can only ever reach modules ``fully_shard`` actually wrapped."""
     model = nn.Sequential(nn.Linear(4, 4), nn.ModuleList([nn.Linear(4, 4)]))
     assert fsdp2_modules(model) == []
 
@@ -71,7 +52,7 @@ def test_unwrapped_module_tree_yields_no_fsdp_modules():
 @pytest.mark.parametrize(
     "fsdp_wrapped, reshard_after_backward, defer_grad_sync, setters",
     [
-        (True, True, False, ()),  # default run: torch reshards and reduces after every backward
+        (True, True, False, ()),  # the defaults: torch reshards and reduces after every backward
         (True, False, False, (RESHARD,)),
         (True, True, True, (REDUCE,)),
         (True, False, True, (RESHARD, REDUCE)),
@@ -81,7 +62,7 @@ def test_unwrapped_module_tree_yields_no_fsdp_modules():
 def test_each_knob_drives_only_its_own_setter(
     monkeypatch, fsdp_wrapped, reshard_after_backward, defer_grad_sync, setters
 ):
-    """Arming needs this mixin's own wrap and a knob off its default; each knob writes only its setter."""
+    """Arming needs this mixin's own wrap and a knob off its default."""
     module = RecordingFSDPModule()
     monkeypatch.setattr(grad_sync, "fsdp2_modules", lambda model: [module])
 
@@ -98,7 +79,6 @@ def test_each_knob_drives_only_its_own_setter(
 
 
 def test_window_writes_off_for_microsteps_and_back_on_for_the_last():
-    """One window: disarm once at its first microstep, re-arm once at its last, on every module."""
     trainer = StubTrainer(defer_grad_sync=True)
     modules = [RecordingFSDPModule() for _ in range(3)]
     trainer._window_modules = modules
@@ -111,7 +91,7 @@ def test_window_writes_off_for_microsteps_and_back_on_for_the_last():
 
 
 def test_two_windows_each_end_armed():
-    """Every window must END armed, or the optimizer step reads unsharded params or unreduced grads."""
+    """Every window must end armed, or the optimizer step reads unsharded params or unreduced grads."""
     trainer = StubTrainer(reshard_after_backward=False, defer_grad_sync=True)
     module = RecordingFSDPModule()
     trainer._window_modules = [module]

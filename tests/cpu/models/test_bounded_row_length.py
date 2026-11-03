@@ -1,6 +1,5 @@
-"""The one row-length rule: a bounded ``max_length`` wins, else a prompt + completion budget only when
-both halves are bounded. A one-sided budget is no row cap: the unbounded half can be any length, unless
-the caller takes a lone bounded half (``one_sided``)."""
+"""A bounded ``max_length`` wins, else a prompt + completion budget only when both halves are bounded.
+A one-sided budget is no row cap unless the caller passes ``one_sided``."""
 
 from types import SimpleNamespace
 

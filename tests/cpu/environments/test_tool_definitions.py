@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Tests for the native tool data structures, registry and the environment registry
-(``halo/environments/tools/`` + ``halo/environments/registry.py``).
-
-The vLLM parsing/formatting helpers are covered by
-``tests/cpu/environments/test_openai_tool_format.py`` and the pre-built tool factories by
-``test_environments.py``; this file owns the tool/registry/schema surface.
-
-Run: ``pytest tests/cpu/environments/test_tool_definitions.py``.
-"""
+"""The native tool data structures, registry and environment registry (``halo/environments/tools/`` +
+``halo/environments/registry.py``); this file owns the tool, registry and schema surface."""
 
 import asyncio
 import functools
@@ -38,8 +31,6 @@ from halo.environments.tools.toolsets import (
     build_session_file_tools,
     build_simulated_file_tools,
 )
-
-# NativeTool.to_openai_schema
 
 
 def test_to_openai_schema_required_and_optional_params():
@@ -84,9 +75,6 @@ def test_to_openai_schema_no_params():
     schema = NativeTool(name="noop", description="d").to_openai_schema()
     assert schema["function"]["parameters"]["properties"] == {}
     assert schema["function"]["parameters"]["required"] == []
-
-
-# NativeTool.execute / execute_async
 
 
 def _add_tool() -> NativeTool:
@@ -137,12 +125,8 @@ def test_execute_async_without_any_handler_raises():
 
 
 def test_execute_refuses_arguments_the_tool_does_not_declare():
-    """A model-supplied extra must not reach the handler.
-
-    The handlers are ``functools.partial`` objects carrying pre-bound safety keywords, and a call-time
-    keyword of the same name overrides them, so an undeclared argument would let the model rewrite the
-    tool's own configuration. The call is refused instead, naming the extras and the declared names.
-    """
+    """Handlers are ``functools.partial`` objects with pre-bound safety keywords, which a call-time keyword
+    overrides, so an undeclared argument could rewrite the tool's configuration."""
     seen: dict = {}
 
     def handler(code, timeout=1.0, allow_imports=False):
@@ -164,8 +148,8 @@ def test_execute_refuses_arguments_the_tool_does_not_declare():
 
 
 def test_execute_passes_arguments_through_when_the_tool_declares_no_schema():
-    """No declared parameters = nothing to filter against (an MCP server may advertise a tool with no
-    ``properties``); dropping its arguments would silently break the call."""
+    """An MCP server may advertise a tool with no ``properties``; dropping its arguments would silently break the
+    call."""
     seen: dict = {}
     tool = NativeTool(name="passthrough", description="d", handler=lambda **kw: seen.update(kw) or "ok")
     tool.execute(anything=1, else_=2)
@@ -173,9 +157,8 @@ def test_execute_passes_arguments_through_when_the_tool_declares_no_schema():
 
 
 def test_execute_refuses_a_call_missing_a_required_argument_before_the_handler_runs():
-    """The arguments are model-authored: ``submit_solution`` with no ``code`` is a routine slip, and the
-    handler's own ``TypeError`` would hand the model a Python signature and the protocol a traceback.
-    Every execute path refuses up front, naming the tool and the parameter, and the handler never runs."""
+    """A routine slip; the handler's ``TypeError`` would hand the model a Python signature and the protocol a
+    traceback."""
     calls = []
 
     def submit(code, timeout=1.0):
@@ -231,8 +214,7 @@ def _string_tool(seen: list):
 
 @pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}, ("print(1)",)])
 def test_a_list_or_object_for_a_string_parameter_is_refused_before_the_handler_runs(value):
-    """A list ``code`` passed on fails inside the sandbox, read as the backend's fault; no string reading
-    of a list or an object exists, so the call is refused, naming the type, on both execute paths."""
+    """A list ``code`` passed on fails inside the sandbox, read as the backend's fault."""
     seen = []
     tool = _string_tool(seen)
     refusal = rf"^run_code: code must be a string, got {type(value).__name__}$"
@@ -291,9 +273,6 @@ def test_python_tool_cannot_have_its_timeout_raised_by_the_model():
     assert time.monotonic() - started < 5, "the configured cap no longer bounds the run"
 
 
-# NativeToolCall.from_openai_format
-
-
 def test_tool_call_parses_json_string_arguments():
     tc = NativeToolCall.from_openai_format(
         {"id": "call_123", "function": {"name": "calculate", "arguments": '{"expression": "2+3"}'}}
@@ -321,9 +300,8 @@ def test_tool_call_missing_fields_defaults():
 
 
 def test_tool_call_null_function_degrades_instead_of_raising():
-    """An explicit ``"function": null`` (or a non-dict) in a model's tool-call payload must degrade to
-    an empty-name call the registry rejects as unknown-tool — an AttributeError here escapes env.step
-    and kills the whole episode."""
+    """An AttributeError here escapes env.step and kills the episode, so it degrades to an empty-name call the
+    registry rejects."""
     for malformed in ({"id": "c1", "function": None}, {"id": "c1", "function": "not-a-dict"}, {"function": []}):
         tc = NativeToolCall.from_openai_format(malformed)
         assert (tc.name, tc.arguments) == ("", {})
@@ -337,9 +315,6 @@ def test_tool_result_to_message():
     assert msg.content == "42"
     assert msg.tool_call_id == "call_abc"
     assert msg.name == "calculate"
-
-
-# NativeToolRegistry
 
 
 def test_registry_register_get_and_miss():
@@ -392,9 +367,6 @@ def test_registry_to_openai_tools():
     assert tools[0]["function"]["name"] == "calc"
 
 
-# Pre-built tool factories
-
-
 def test_factory_file_tools_execute_round_trip():
     reg = build_simulated_file_tools()
     reg.get("write_file").execute(path="/home/user/x.txt", content="hello")
@@ -403,9 +375,8 @@ def test_factory_file_tools_execute_round_trip():
 
 
 def test_file_tool_wording_is_per_store_while_the_schema_is_shared():
-    """The two stores share one builder but not one set of instructions: a simulated absolute-path
-    filesystem and a persistent relative-path workspace need different wording for the same three
-    tools, so a fold that shared one description set would mis-instruct one of them."""
+    """A simulated absolute-path filesystem and a persistent relative-path workspace need different wording for the
+    same three tools."""
     simulated = build_simulated_file_tools()
     session = build_session_file_tools(lambda: None)
     for name in ("read_file", "write_file", "list_files"):
@@ -415,9 +386,6 @@ def test_file_tool_wording_is_per_store_while_the_schema_is_shared():
             p.description for p in session.get(name).parameters
         ]
     assert "workspace" in session.get("read_file").description
-
-
-# Environment registry
 
 
 def test_env_registry_lists_builtins_sorted():
@@ -446,19 +414,12 @@ def test_env_registry_register_resolve_and_override_round_trip(isolated_registry
     assert build_environment(name, {}) is sentinel_b
 
 
-# Declared parameter names vs the handlers they bind to
-
-
 def _registries_under_test() -> dict[str, NativeToolRegistry]:
-    """Every statically-built tool registry the toolkit ships, keyed by how it is built.
-
-    Read off the factories and the environments that own their own tools, so a new tool arrives
-    covered. MCP is out of scope by construction: its parameters come from the live server's schema
-    and its handler is ``**kwargs``.
-    """
+    """Every statically-built tool registry, read off the factories and environments. MCP is out of scope: its
+    parameters come from the live server."""
 
     def no_session():
-        """The session getter is never called here — only the declared schema is read."""
+        """The session getter is never called here; only the declared schema is read."""
         return None
 
     return {
@@ -476,7 +437,6 @@ def _registries_under_test() -> dict[str, NativeToolRegistry]:
 
 
 def _bindable(handler, name: str) -> bool:
-    """True when ``handler`` accepts ``name`` as a keyword (directly or through ``**kwargs``)."""
     signature = inspect.signature(handler)
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()):
         return True
@@ -489,14 +449,9 @@ def _bindable(handler, name: str) -> bool:
 
 @pytest.mark.parametrize("source", sorted(_registries_under_test()))
 def test_every_declared_parameter_binds_to_its_handler(source):
-    """A declared name the handler does not accept breaks that tool for the whole run.
-
-    Binding admits only the DECLARED schema, so a declared name the handler has no keyword for is
-    passed straight to it: the handler raises, and the protocol
-    books a tool error on every call the model makes — while the keyword the handler does own can
-    never be reached, silently keeping its default. Neither failure is visible in a config review.
-    ``functools.partial`` is unwrapped because that is how the pre-bound safety keywords arrive.
-    """
+    """Binding admits only the declared schema, so a name the handler has no keyword for raises on every call, while
+    the keyword it owns keeps its default. ``functools.partial`` is unwrapped, as pre-bound keywords arrive that
+    way."""
     mismatches = []
     for tool in _registries_under_test()[source].list_tools():
         for handler in (tool.handler, tool.async_handler):
@@ -511,8 +466,7 @@ def test_every_declared_parameter_binds_to_its_handler(source):
 
 
 def test_the_binding_check_would_catch_a_misspelled_parameter():
-    """Anti-vacuity: the check above must fail on the defect it exists to find, and nothing else
-    catches it before a run does — the model's call raises inside the handler, once per call."""
+    """The check must fail on the defect it exists to find; nothing else catches it before a run."""
     tool = NativeTool(
         name="misdeclared",
         description="",
@@ -531,9 +485,8 @@ def test_the_binding_check_would_catch_a_misspelled_parameter():
 
 
 def test_code_tool_advertises_no_input_channel_it_cannot_bind():
-    """The description is the model's only account of the tool. One promising stdin with no ``stdin``
-    parameter declared and bound would run every program on empty input while telling the model to
-    write programs that read it."""
+    """The description is the model's only account of the tool; promising stdin with no bound parameter runs every
+    program on empty input."""
     for source in ("code", "python", "session_code", "session_bash"):
         for tool in _registries_under_test()[source].list_tools():
             declared = {parameter.name for parameter in tool.parameters}
@@ -545,11 +498,7 @@ def test_code_tool_advertises_no_input_channel_it_cannot_bind():
 
 
 def test_calculator_timeout_is_plumbed_from_the_factory():
-    """``build_combined_tools(timeout=...)`` must reach the calculator, not just the code tool.
-
-    The bound value has to be a pre-bound handler keyword: a call-time one is refused at binding
-    (deliberately — a model must not raise its own execution cap).
-    """
+    """A call-time keyword is refused at binding, so the bound value must be a pre-bound handler keyword."""
     assert build_combined_tools(timeout=0.25).get("calculate").handler.keywords["timeout"] == 0.25
     assert build_math_tools().get("calculate").handler.keywords["timeout"] == SANDBOX_DEFAULT_TIMEOUT
     # And the model cannot raise it back: an undeclared call-time keyword refuses the call.

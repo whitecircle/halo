@@ -1,9 +1,5 @@
-"""The device skip flag's contract for an optimizer (``halo/optimizers/step_skip.py``), checked on any device.
-
-Under a False flag a step writes what an unflagged step does, bit for bit; under a True one it changes no parameter or
-moment, and settling it as skipped returns its state dict to what it was, lazily created state included. It runs on CUDA
-and, for the Triton paths, on CPU under ``TRITON_INTERPRET=1``.
-"""
+"""The device skip flag's contract for an optimizer, on any device: a False flag writes as unflagged, a True one
+changes nothing, state included."""
 
 import copy
 from collections.abc import Callable, Sequence
@@ -14,13 +10,12 @@ import torch.nn as nn
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.optimizers.muon import build_muon_optimizer
 
-# Optimizer steps of the run, and the non-finite ones: the first (no state yet) and a later one. On those the first
-# parameter's gradient holds a NaN and the first fp32 one's an inf; the rest stay finite, as a rank's do when another
-# rank overflowed.
+# On the non-finite steps the first parameter's gradient holds a NaN and the first fp32 one's an inf; the rest stay
+# finite, as a rank's do when another rank overflowed.
 STEPS = 5
 NONFINITE_STEPS = (1, 3)
-# AdamWBF16's parameters, (shape, dtype, weight decay): bf16 under, near and over one SR block of 1024 elements, and
-# an fp32 one (an ``fp32_router`` / ``fp32_experts`` master) with and without weight decay.
+# (shape, dtype, weight decay): bf16 under, near and over one SR block of 1024 elements, and an fp32 master with and
+# without decay.
 ADAMW_BF16_PARAMS = (
     ((40, 24), torch.bfloat16, 0.1),
     ((24,), torch.bfloat16, 0.0),
@@ -36,7 +31,7 @@ def adamw_bf16_builder(
     device, *, optimizer_cls: type[AdamWBF16] = AdamWBF16, parameter_cls: type[nn.Parameter] = nn.Parameter
 ) -> Build:
     """A builder of :data:`ADAMW_BF16_PARAMS` on ``device`` under ``optimizer_cls``, two weight-decay groups, the
-    undecayed one on its own betas, the parameters made as ``parameter_cls``."""
+    undecayed on its own betas."""
 
     def build():
         generator = torch.Generator().manual_seed(0)
@@ -59,7 +54,7 @@ def adamw_bf16_builder(
 
 
 def muon_builder(device) -> Build:
-    """A builder of Muon over two bf16 matrices (the Newton-Schulz leg) and a norm's vectors (its AdamWBF16 leg)."""
+    """Muon over two bf16 matrices (Newton-Schulz) and a norm's vectors (its AdamWBF16 leg)."""
 
     def build():
         torch.manual_seed(0)
@@ -88,7 +83,6 @@ def _state_differences(expected: dict, got: dict, what: str) -> list[str]:
 
 
 def _written_state_tensors(before: dict, after: dict, what: str) -> list[str]:
-    """The state tensors held before a step that it changed."""
     return [
         f"{what}: param {index} {key!r} written"
         for index, entry in before["state"].items()
@@ -106,10 +100,8 @@ def _param_differences(expected: Sequence[torch.Tensor], params: Sequence[torch.
 
 
 def device_skip_mismatches(build_reference: Build, build: Build) -> list[str]:
-    """Run :data:`STEPS` steps of the optimizer ``build()`` returns under the device flag, :data:`NONFINITE_STEPS`
-    on non-finite gradients and the rest on finite ones, beside ``build_reference()``'s unflagged steps on the finite
-    ones; name each departure from the contract. Both builders return equal parameters on one device and an optimizer
-    holding no state yet."""
+    """Run :data:`STEPS` steps under the device flag beside ``build_reference()``'s unflagged finite steps, naming each
+    departure. Both builders return equal parameters on one device and an optimizer with no state yet."""
     reference_params, reference = build_reference()
     params, optimizer = build()
     device = params[0].device

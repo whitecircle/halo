@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the torch chunked delta rule over packed segments starts each one from its own state.
-
-The CUDA kernel takes ``cu_seqlens`` with one ``initial_state`` row per segment; on CPU the toolkit's dispatch runs
-the torch body once per segment and must hand each its own row. Two segments with distinct initial states, through
-the dispatch-installed public function and through the fixup directly, each match a call on that segment alone, in
-output and final state.
-
-    python tests/cpu/kernels/test_delta_rule_segment_states.py
-"""
+"""The torch chunked delta rule over packed segments starts each one from its own state, matching a call on that
+segment alone."""
 
 import inspect
 
@@ -36,7 +29,6 @@ def _segments_problem():
 
 
 def _alone(body, query, key, value, g, beta, initial_state, cu_seqlens):
-    """Each segment's ``(output, final state)`` from a call on that segment alone."""
     edges = cu_seqlens.tolist()
     return [
         body(
@@ -68,7 +60,7 @@ def body():
 
 
 def test_premise_the_two_initial_states_lead_apart(body):
-    """With either segment started from the other's state, its output moves, or the checks below compare nothing."""
+    """Otherwise the checks below compare nothing."""
     query, key, value, g, beta, initial_state, cu_seqlens = _segments_problem()
     alone = _alone(body, query, key, value, g, beta, initial_state, cu_seqlens)
     swapped = _alone(body, query, key, value, g, beta, initial_state.flip(0), cu_seqlens)
@@ -93,8 +85,7 @@ def test_the_fixup_runs_each_segment_from_its_own_state(body):
 
 
 def test_the_dispatched_function_routes_a_cpu_call_through_the_fixup(body):
-    """The torch body decorated as a modeling module decorates it once the toolkit's dispatch is installed, called
-    as a GatedDeltaNet layer calls it with its varlen set."""
+    """Decorated as a modeling module decorates it, called as a GatedDeltaNet layer calls it."""
     ensure_device_aware_kernel_dispatch()
     dispatched = hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")(body)
     query, key, value, g, beta, initial_state, cu_seqlens = _segments_problem()

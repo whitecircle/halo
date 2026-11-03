@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""Tiled QSA (``halo.models.qwen4_exp.sparse_attention``) against transformers' own ``Qwen4ExpTextAttention``.
-
-transformers' indexer selects each query's key blocks in a Python loop over a dense ``[B, 1, T, T]`` mask. The tiled
-path must select the same blocks for every query, tie rows included, give the same outputs and gradients, read
-each tile's K/V from its document's first key to the tile's end, allocate nothing that grows with T x T, and attend
-the forward's keys in a checkpoint recompute.
-
-    python tests/cpu/models/test_qwen4_exp_qsa.py
-"""
+"""Tiled QSA against transformers' ``Qwen4ExpTextAttention``, whose indexer selects each query's key blocks in a Python
+loop over a dense ``[B, 1, T, T]`` mask."""
 
 import functools
 from dataclasses import dataclass
@@ -45,7 +38,7 @@ ALLOCATION_ROW = 2048
 
 @dataclass(frozen=True)
 class Rows:
-    """Per row, its document lengths; ``padding`` per row: ``+n`` pads the last n tokens, ``-n`` the first n."""
+    """Each row's document lengths; in ``padding``, ``+n`` pads the last n tokens and ``-n`` the first n."""
 
     documents: tuple[tuple[int, ...], ...]
     padding: tuple[int, ...] | None = None
@@ -87,8 +80,7 @@ class Inputs:
 
 
 def _inputs(config, rows: Rows, hidden: torch.Tensor | None = None) -> Inputs:
-    """The tiled path's inputs and transformers' dense mask for the same rows: packed rows isolate their documents
-    through ``position_ids``, padded rows through the 2-D mask."""
+    """Packed rows isolate their documents through ``position_ids``, padded rows through the 2-D mask."""
     position_ids = packed_positions([list(lengths) for lengths in rows.documents])
     batch, length = position_ids.shape
     if hidden is None:
@@ -137,8 +129,8 @@ def test_selection_matches_transformers_per_query(attention, config, rows):
 
 
 def test_tie_rows_resolve_in_transformers_order(attention, config, monkeypatch):
-    """Blocks of zero hidden states score exactly 0 for every query, and a zero query scores every block 0, so
-    most rows tie at their k-th block; transformers' ``topk`` order on its one-query row must decide them."""
+    """Blocks of zero hidden states score exactly 0 for every query, and a zero query scores every block 0, so most
+    rows tie at their k-th block. transformers' ``topk`` order on its one-query row decides them."""
     rows = Rows(((96, 160),))
     torch.manual_seed(SEED + 2)
     hidden = torch.zeros(1, 256, config.hidden_size)
@@ -163,8 +155,7 @@ def _max_difference(expected, actual) -> float:
 
 
 def _max_relative_difference(expected, actual) -> float:
-    """The largest difference over each tensor's own scale: a parameter gradient sums the row's tokens, so its
-    rounding grows with its magnitude."""
+    """Over each tensor's own scale: a parameter gradient sums the row's tokens, so its rounding grows with it."""
     return max(
         ((e - a).abs().max() / e.abs().max().clamp_min(1.0)).item() for e, a in zip(expected, actual, strict=True)
     )
@@ -172,7 +163,6 @@ def _max_relative_difference(expected, actual) -> float:
 
 @pytest.mark.parametrize("rows", ROWS.values(), ids=ROWS.keys())
 def test_attention_core_matches_sdpa_under_the_dense_mask(attention, config, rows):
-    """Outputs and q/k/v gradients of the tiled function against transformers' SDPA interface fed its own mask."""
     inputs = _inputs(config, rows)
     batch, length = inputs.hidden.shape[:2]
     selection = select_qsa_keys(
@@ -201,8 +191,7 @@ def test_attention_core_matches_sdpa_under_the_dense_mask(attention, config, row
 
 @pytest.mark.parametrize("rows", ROWS.values(), ids=ROWS.keys())
 def test_attention_forward_matches_transformers(attention, config, rows):
-    """The whole layer: output, input gradient and every parameter gradient (none for the indexer in either), each
-    within ``TOLERANCE`` of its own scale."""
+    """The whole layer, gradients included; the indexer gets none in either."""
     inputs = _inputs(config, rows)
     parameters = list(attention.parameters())
     torch.manual_seed(SEED + 4)

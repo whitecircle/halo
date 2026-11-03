@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for ``jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja``: the Qwen3.6 rollout template that states
-the episode's reasoning effort and thinking budget in the system block and otherwise renders the hub
-template's ``preserve_thinking=true`` form token-for-token (tool calls, tool responses, carried reasoning).
-
-Run: python tests/cpu/config/test_qwen36_effort_template.py  (or pytest)
-"""
+"""``jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`` states the episode's reasoning effort and budget in the
+system block and otherwise renders the hub template's ``preserve_thinking=true`` form token-for-token."""
 
 from pathlib import Path
 
@@ -64,11 +60,8 @@ def template() -> str:
 
 
 def _stock_template() -> str | None:
-    """The hub template at the revision ``from_pretrained`` loads, from the local cache only.
-
-    A glob over the snapshots would pick whichever revision sorts first (a stale one left in the cache,
-    or another checkpoint's) and compare against a template this one was never cut from.
-    """
+    """The hub template at the revision ``from_pretrained`` loads, from the local cache only. A glob over the
+    snapshots could compare against a template this one was never cut from."""
     path = try_to_load_from_cache(STOCK_TEMPLATE_REPO, "chat_template.jinja")
     return Path(path).read_text() if isinstance(path, str) else None
 

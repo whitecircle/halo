@@ -31,19 +31,14 @@ logger = logging.getLogger(__name__)
 WARMUP_MIN_SEQ_LEN = 512
 _WARMUP_WINDOW_MARGIN = 8
 
-# Marker on the wrapped ``flash_attn.cute`` entry points.
 _FA4_VARLEN_SOFTCAP_ATTR = "_halo_fa4_varlen_softcap_refusal"
-# The attribute a padding mask keeps its derived unpad set in, as ``(version, set)``.
+# On the padding mask, as ``(version, set)``.
 _UNPAD_MEMO_ATTR = "_halo_unpad_data"
 
 
 def patch_transformers_flash_varlen_int_seqlen() -> None:
-    """Make transformers pass varlen ``max_seqlen_{q,k}`` to the flash kernel as python ints (idempotent).
-
-    In eager it forwards a 0-dim CUDA tensor. FA4 compiles its head_dim-256 varlen kernels one way for a host-int
-    bound and another for a tensor one, and :func:`warm_fa4_kernels` warms the int variant, the one packed rows reach
-    with their host-built varlen set; the coercion keeps masked batches on it too, at one ``.item()`` per call.
-    """
+    """Pass varlen ``max_seqlen_{q,k}`` as python ints. FA4 compiles its head_dim-256 varlen kernels one way for a
+    host-int bound and another for a tensor one; the warm-up warms the int variant, at one ``.item()`` per call."""
     fn = flash_utils._process_flash_attention_kwargs
     if getattr(fn, "_halo_int_seqlen", False):
         return
@@ -68,19 +63,9 @@ def patch_transformers_flash_varlen_int_seqlen() -> None:
 
 
 def patch_transformers_flash_unpad_memo() -> None:
-    """Make transformers' flash path derive a padding mask's unpad set (token indices, ``cu_seqlens``, max length)
-    once per mask instead of once per attention layer (idempotent).
-
-    The layers of a forward that read one mask kind, and their checkpoint recompute, receive the same mask tensor,
-    and each derivation is a ``nonzero`` and a host read. The set is kept on that tensor, keyed on its version
-    counter, so an in-place write re-derives; an inference tensor, which keeps no counter, derives on every call. It
-    is not a single-entry :class:`~halo.models.attention.tensor_memo.TensorMemo`: transformers converts the mask once
-    per mask kind, so a model that alternates sliding and full layers would derive again in every layer.
-
-    Raises:
-        RuntimeError: transformers' ``_upad_input`` no longer reads the module-level ``_get_unpad_data``, so the
-            replacement would never be called.
-    """
+    """Derive a padding mask's unpad set once per mask instead of once per layer, each derivation being a ``nonzero``
+    and a host read. Kept on the mask tensor, keyed on its version counter; a single-entry ``TensorMemo`` would derive
+    again in every layer of a model that alternates sliding and full layers."""
     fn = flash_utils._get_unpad_data
     if getattr(fn, "_halo_unpad_memo", False):
         return
@@ -106,8 +91,7 @@ def patch_transformers_flash_unpad_memo() -> None:
 
 
 def fa4_varlen_softcap_refusal(fn, varlen: bool):
-    """``fn`` (an FA4 entry point), its varlen one raising on a softcapped call (:func:`fa4_varlen_refusal`). The
-    dense entry point, which trains it, is returned as is."""
+    """The dense entry point, which trains a softcap, is returned as is."""
     if not varlen:
         return fn
 
@@ -126,20 +110,15 @@ def fa4_varlen_softcap_refusal(fn, varlen: bool):
 
 
 def install_fa4_varlen_softcap_refusal() -> bool:
-    """Make FA4's varlen entry point refuse a softcapped call (:func:`fa4_varlen_softcap_refusal`) before it
-    launches (idempotent). False when ``flash_attn.cute`` is not importable."""
     return install_fa4_entry_point_wrapper(
         _FA4_VARLEN_SOFTCAP_ATTR, fa4_varlen_softcap_refusal, "the softcap refusal on the varlen kernel"
     )
 
 
 def patch_sdpa_for_wide_heads() -> None:
-    """Force SDPA to its mem-efficient kernel, process-wide, for heads past :data:`FLASH_MAX_HEAD_DIM`.
-
-    FA2 and cuDNN SDPA reject such a head and the math kernel OOMs on the full score matrix. GQA is
-    forced to the manual KV repeat: native ``enable_gqa`` under mem-efficient-only is unverified on the
-    narrower sliding heads, the repeat is the measured path. Idempotent.
-    """
+    """FA2 and cuDNN SDPA reject a head past :data:`FLASH_MAX_HEAD_DIM` and the math kernel OOMs on the full score
+    matrix. GQA takes the manual KV repeat, the measured path, as native ``enable_gqa`` under mem-efficient-only is
+    unverified on the narrower sliding heads. Process-wide and idempotent."""
     if is_global_main_process():
         logger.warning(
             "Wide-head SDPA patch: forcing mem-efficient SDPA and use_gqa_in_sdpa=False PROCESS-GLOBALLY — "
@@ -166,18 +145,8 @@ def patch_sdpa_for_wide_heads() -> None:
 
 
 def patch_transformers_packed_sequence_probe() -> None:
-    """Make transformers' mask construction skip its packed-sequence probe of ``position_ids`` for a model whose mask
-    interface is ``flash_attention_mask`` (idempotent).
-
-    The probe (``find_packed_sequence_indices``) reads a device flag back on every causal or sliding-window mask built
-    from ``position_ids`` without a padding mask, at the start of each forward, and ``flash_attention_mask`` discards
-    the packed mask it feeds: the flash path finds the documents in ``position_ids`` itself. The interface is read off
-    the registry the mask builders dispatch through, per call, so an SDPA, eager or flex model keeps the probe.
-
-    Raises:
-        RuntimeError: ``_preprocess_mask_arguments`` takes other parameters than the replacement, which would then
-            misroute them.
-    """
+    """Skip the packed-sequence probe for a ``flash_attention_mask`` model, as it reads a device flag back at the start
+    of each forward and the flash path finds the documents in ``position_ids`` itself. Other backends keep it."""
     fn = masking_utils._preprocess_mask_arguments
     if getattr(fn, "_halo_packed_probe_skip", False):
         return
@@ -206,9 +175,8 @@ def patch_transformers_packed_sequence_probe() -> None:
 
 
 def patch_flex_attention_compile(reason: str):
-    """Run raw flex_attention instead of transformers' compiled wrapper; call before the first flex
-    forward. The wrapper's seq-length recompiles deadlock EP's all-to-all, and its backward NaNs under
-    FSDP2 with GptOss sinks."""
+    """Call before the first flex forward. The compiled wrapper's seq-length recompiles deadlock EP's all-to-all, and
+    its backward NaNs under FSDP2 with GptOss sinks."""
     WrappedFlexAttention._is_flex_compiled = False
     WrappedFlexAttention._compiled_flex_attention = None
 
@@ -225,15 +193,9 @@ def patch_flex_attention_compile(reason: str):
 
 
 def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torch.device | None = None) -> None:
-    """Pre-compile this model's FA4 forward and backward kernels, dense and varlen, for each attention layer's
-    own geometry (:func:`~halo.models.attention.layout.attention_calls`) at the run's ``dtype``, in transformers'
-    deterministic mode as set at the load (:func:`flash_attention_deterministic`), which FA4's backward keys on. A
-    softcapped layer warms its dense call only: a softcap stays off FA4's varlen kernels
-    (:func:`~halo.models.attention.selection.fa4_varlen_refusal`), so no varlen call is launched for it.
-
-    Rank-local and best-effort: a first-use JIT compile on one rank lets its peers race into the next
-    collective, so the caller fences every rank around it and nothing here may gate a collective.
-    """
+    """Rank-local and best-effort. A first-use JIT compile on one rank lets its peers race into the next collective, so
+    the caller fences every rank around it and nothing here may gate a collective. A softcapped layer warms its dense
+    call only, as a softcap stays off FA4's varlen kernels."""
     try:
         config = getattr(model, "config", None)
         if config is None:
@@ -241,9 +203,8 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
         if effective_attn_implementation(config) != "flash_attention_4":
             return
 
-        # Each layer's own geometry, both with and without its window: a row no longer than the window
-        # dispatches the windowless kernel. The value takes the query/key width, which transformers' flash
-        # path pads it up to, so the value width keys no kernel of its own.
+        # With and without the window, as a row no longer than it dispatches the windowless kernel. transformers' flash
+        # path pads the value up to the query/key width, so the value width keys no kernel of its own.
         windows: dict[tuple[int, int, int, float | None], set[int | None]] = {}
         for call in attention_calls(model):
             windows.setdefault((call.heads, call.kv_heads, call.head_dim, call.softcap), {None}).add(call.window)
@@ -261,7 +222,7 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
             k = torch.randn(*kv_shape, device=device, dtype=dtype, requires_grad=True)
             v = torch.randn(*kv_shape, device=device, dtype=dtype, requires_grad=True)
             out = flash_fn(q, k, v, softmax_scale=q_shape[-1] ** -0.5, causal=True, deterministic=deterministic, **kw)
-            (out[0] if isinstance(out, tuple) else out).sum().backward()  # fwd+bwd both compile
+            (out[0] if isinstance(out, tuple) else out).sum().backward()
 
         # Two documents, so the varlen kernel compiles against a real cu_seqlens.
         cu_seqlens = torch.arange(0, 3 * seq_len, seq_len, device=device, dtype=torch.int32)
@@ -272,7 +233,7 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
             "max_seqlen_k": seq_len,
         }
         dense_fn, varlen_fn = flash_kernel("flash_attention_4", varlen=False), flash_kernel("flash_attention_4")
-        # Every dispatched variant (geometry x dense/varlen x full/sliding x sink): a missed one compiles mid-run.
+        # Geometry x dense/varlen x full/sliding x sink; a missed variant compiles mid-run.
         variants = 0
         for (heads, kv_heads, head_dim, softcap), layer_windows in sorted(windows.items(), key=str):
             layer_kwargs = {"softcap": softcap} if softcap else {}
@@ -294,5 +255,5 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
                 f"variants={variants})"
             )
     except Exception as e:
-        # Every rank: the skip is rank-local, and a rank without the warm-up desyncs later.
+        # On every rank, as the skip is rank-local and a rank without the warm-up desyncs later.
         logger.warning(f"FA4 kernel warmup skipped (non-fatal): {type(e).__name__}: {e}")

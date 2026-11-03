@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""The engine-cut finish reasons must be recognised in the spelling both rollout engines put on the
-OpenAI wire: a plain ``"abort"`` string (vLLM's abort-mode pause, SGLang's abort-mode quiesce) and
-``"length"``, while a normal stop stays a natural termination.
-
-Run: python tests/cpu/inference/test_finish_reason_wire.py
-"""
+"""The engine-cut finish reasons are recognised in the spelling both rollout engines put on the OpenAI wire (a plain
+``"abort"`` string and ``"length"``), while a normal stop stays a natural termination."""
 
 from types import SimpleNamespace
 
@@ -37,9 +33,8 @@ def test_a_natural_stop_and_a_stop_token_id_are_not_cuts():
 
 
 def test_a_completion_that_consumed_its_cap_is_a_cut_whatever_the_engine_labelled_it():
-    """vLLM reports ``tool_calls`` whenever its parser salvaged a call from the text, so a turn cut
-    inside its tool call arrives labelled complete with empty arguments. The token count is the
-    ground truth: a completion that used its whole ``max_tokens`` did not stop on its own."""
+    """vLLM reports ``tool_calls`` whenever its parser salvaged a call, so a turn cut inside its tool call arrives
+    labelled complete. A completion that used its whole ``max_tokens`` did not stop on its own."""
     assert (
         get_finish_reason({"finish_reason": "tool_calls"}, completion_tokens=4300, max_tokens=4300)
         == FINISH_REASON_LENGTH

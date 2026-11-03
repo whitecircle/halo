@@ -1,27 +1,7 @@
 #!/usr/bin/env python3
-"""``prepare_dataset.py`` publishing and defaults.
-
-Three contracts pinned here:
-
-* **Destructive publish.** An ``--overwrite`` that removes the destination before writing (local
-  ``rmtree`` then write; the Hub upload replacing files in place) lets a run that dies mid-write
-  destroy the only copy AND leave a partial tree whose ``metadata.json`` makes
-  ``is_preprocessed_dataset`` accept it — training then runs on a silently truncated dataset.
-  ``metadata.json`` is the completion marker, so the local path bakes into a sibling of the
-  destination and swaps it in (one write, no copy), and the Hub path clears it first and uploads it
-  last.
-* **Defaults contradicting training.** ``--conversation_field`` must default to ``prompt`` — the
-  training side and the documented SFT shape — not ``conversation``, and
-  ``--train_on_completions_only`` must default on in chat mode as training does; otherwise preparing
-  with defaults produces a dataset the training defaults reject.
-* **A bake idling the host.** The tool runs alone, so unset its worker count takes every CPU the process may run
-  on but a small reserve, not the training default's three-quarter share capped at 64.
-* **Unrecorded tokenizer mutations.** ``--pad_token/--eos_token/--bos_token/--chat_template`` change
-  the ids that get baked, so they must reach ``PreprocessingConfig`` or the compatibility check cannot
-  see them.
-
-Run: pytest tests/cpu/data/test_prepare_dataset_publish.py
-"""
+"""``prepare_dataset.py`` publishing and defaults. ``metadata.json`` is the completion marker, so the local path
+bakes into a sibling and swaps it in, and the Hub path clears it first and uploads it last. CLI defaults match
+training's, and tokenizer overrides reach ``PreprocessingConfig``."""
 
 import os
 import sys
@@ -55,9 +35,6 @@ def _staged(tmp_path, name="staged"):
 
 def _publish(dest, overwrite: bool) -> None:
     publishing.publish_local_output(_fill(publishing.stage_local_output(str(dest), overwrite)), str(dest))
-
-
-# Local publish: bake beside the destination, then swap
 
 
 def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
@@ -118,8 +95,7 @@ def test_a_local_output_is_baked_beside_its_destination_and_written_once(tmp_pat
 
 
 def test_a_failed_bake_keeps_the_old_dataset_and_leaves_no_staging(tmp_path, monkeypatch):
-    """The load-bearing case: an --overwrite that rmtrees the destination FIRST leaves nothing at
-    all when the bake dies. The old dataset must survive a failed run untouched."""
+    """An --overwrite that rmtrees first leaves nothing when the bake dies; the old dataset must survive."""
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "metadata.json").write_text('{"preprocessed": true}')
@@ -138,8 +114,8 @@ def test_a_failed_bake_keeps_the_old_dataset_and_leaves_no_staging(tmp_path, mon
 
 
 def test_a_rerun_reaps_the_map_copies_a_killed_bake_left(tmp_path, monkeypatch):
-    """A SIGKILLed bake runs no cleanup, leaving every intermediate map's full corpus copy in the datasets cache:
-    the scratch directory is named after the destination, so the next bake to it starts by removing them."""
+    """A SIGKILLed bake leaves every intermediate map's corpus copy in the datasets cache, and the scratch directory
+    is named after the destination, so the next bake removes them."""
     dest = tmp_path / "out"
     seen = []
 
@@ -167,8 +143,8 @@ def test_a_rerun_reaps_the_map_copies_a_killed_bake_left(tmp_path, monkeypatch):
 
 
 def test_local_publish_restores_the_old_dataset_if_the_swap_fails(tmp_path, monkeypatch):
-    """The staged copy succeeded and the destination was rotated aside; if the final rename fails,
-    the old dataset must go BACK to the destination rather than stay under a scratch name."""
+    """The destination was rotated aside; if the final rename fails, the old dataset goes back and does not stay
+    under a scratch name."""
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "data.arrow").write_text("old-payload")
@@ -198,19 +174,13 @@ def test_local_publish_refuses_an_existing_destination_without_overwrite(tmp_pat
 
 
 def test_local_publish_creates_a_fresh_destination(tmp_path):
-    """Anti-over-rejection: the ordinary first-run publish still works."""
     dest = tmp_path / "brand-new"
     _publish(dest, overwrite=False)
     assert (dest / "metadata.json").exists()
 
 
-# Hub publish: completion marker cleared first, uploaded last
-
-
 def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, monkeypatch):
-    """While the payload uploads, the repo must not carry a metadata.json — otherwise a reader (or a
-    run that dies mid-upload) sees a complete-looking dataset whose shards are a mix of the old and
-    the partly-uploaded new one."""
+    """A repo carrying metadata.json during the upload looks complete to a reader, with shards mixing old and new."""
     calls = []
 
     class _FakeApi:
@@ -243,11 +213,7 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
     assert publishing.METADATA_FILE in folder_call[1], "the payload upload must exclude the completion marker"
 
 
-# CLI defaults line up with the training side
-
-
 def _parse(argv_extra):
-    """The PreprocessingConfig the command line builds."""
     argv = ["prepare_dataset.py", "--input", "in", "--output", "out", "--model_name_or_path", "model", *argv_extra]
     old = sys.argv
     sys.argv = argv
@@ -258,14 +224,13 @@ def _parse(argv_extra):
 
 
 def test_conversation_field_default_matches_the_training_side():
-    """Preparing with defaults must render the field training reads, 'prompt' — the documented SFT
-    shape. Rendering 'conversation' instead makes the default pairing KeyError or (post-check) raise."""
+    """Rendering ``conversation`` instead makes the default pairing raise."""
     assert _parse(["--assistant_message_template", "<a>"]).conversation_field == "prompt"
 
 
 def test_train_on_completions_only_defaults_on_and_is_still_switchable():
-    """Training defaults masking ON and refuses a dataset whose baked labels disagree, so preparing
-    with masking defaulted off produces an artifact the training defaults reject."""
+    """Training refuses a dataset whose baked labels disagree, so masking defaulted off yields an artifact the
+    training defaults reject."""
     assert _parse(["--assistant_message_template", "<a>"]).train_on_completions_only is True
     assert _parse(["--train_on_completions_only", "false"]).train_on_completions_only is False
     assert _parse(["--mode", "text"]).train_on_completions_only is False
@@ -282,8 +247,7 @@ def test_the_bake_takes_every_usable_cpu_but_a_reserve_unless_told_otherwise(mon
 
 
 def test_bos_token_override_exists():
-    """bos must be overridable alongside pad/eos; without it one tokenizer mutation stays outside
-    anything the recorded config can describe."""
+    """Without it one tokenizer mutation stays outside what the recorded config can describe."""
     assert _parse(["--train_on_completions_only", "false", "--bos_token", "<s>"]).bos_token == "<s>"
 
 
@@ -295,10 +259,8 @@ def test_apply_tokenizer_overrides_sets_every_recorded_knob():
 
 
 def test_tokenizer_overrides_reach_the_recorded_config(tmp_path):
-    """The knobs mutate the tokenizer that bakes the ids; if they do not reach PreprocessingConfig
-    the artifact is byte-indistinguishable from an unmutated one and the training-time
-    compatibility check passes on a dataset tokenized by a different tokenizer. A template file is
-    recorded as its resolved text, which is what the training side compares."""
+    """Otherwise the artifact is indistinguishable from an unmutated one and the compatibility check passes on
+    another tokenizer's ids. A template file is recorded as its resolved text."""
     template = tmp_path / "chat.jinja"
     template.write_text("{{ messages }}")
     overrides = [
@@ -317,9 +279,7 @@ def test_tokenizer_overrides_reach_the_recorded_config(tmp_path):
 
 
 def test_script_uses_the_shared_chat_template_resolver():
-    """A second, differently-behaving copy of the path-vs-text resolver would make the recorded
-    template and the training-side one disagree on what counts as a file. Asserted on the bound OBJECT, not
-    on an import line: a re-implementation that kept the import would satisfy the string."""
+    """Asserted on the bound object: a re-implementation keeping the import would satisfy a string check."""
     assert prepare_dataset.load_chat_template is tokenizer_setup.load_chat_template
 
 

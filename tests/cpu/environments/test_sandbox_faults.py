@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: a sandbox fault is booked by its class, never priced as the other one.
-
-- An infrastructure fault (:class:`SandboxInfraError`) says nothing about the policy: the tool call is
-  unpriced, the episode ends and is marked invalid, so the trainer's ``rollout_valid_mask`` drops it
-  from the GRPO group baseline.
-- A sandbox the program broke itself (:class:`SandboxAgentFault` — its working directory replaced by
-  a link or file) is the policy's: the call is a failed one and the episode ends uncompleted, inside the
-  baseline, where it is scored against its group like any other episode.
-- Nothing the program controls may read as infra: a remote ``Failed`` run, a build past the compile
-  limit, an output flood, a removed working directory (recreated) and a FIFO where the host writes or
-  reads are verdicts or ordinary results, never an ``error`` that voids the episode or a host open that
-  blocks.
-
-    python tests/cpu/environments/test_sandbox_faults.py
-"""
+"""A sandbox fault is booked by its class. An infrastructure fault (:class:`SandboxInfraError`) is unpriced and
+voids the episode; a sandbox the program broke (:class:`SandboxAgentFault`) is the policy's and stays in the
+baseline; nothing the program controls may read as infra."""
 
 import asyncio
 import errno
@@ -123,9 +111,6 @@ def _react_episode(mode: str):
     env = ReActEnvironment(tool_registry=_registry(), thought_reward=0.0, no_thought_penalty=0.0, **_knobs())
     ids, _ = env.reset(["task"], [{"answer": "4"}])
     return env.step(ids, [f'Thought: go\nAction: run(mode="{mode}")'], [{}])[0], env
-
-
-# The protocols book each class by type
 
 
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
@@ -271,9 +256,6 @@ def test_the_trainer_trains_on_the_repercussion_and_drops_the_outage():
     assert advantages[0].item() == pytest.approx((rewards[0] - baseline).item()), "the outage is out of the mean"
 
 
-# The sandbox layer: nothing the program controls reads as infra
-
-
 def test_the_repl_raises_each_fault_class_by_the_result():
     with pytest.raises(SandboxInfraError):
         format_sandbox_repl_output(SandboxResult(error="remote sandbox error: 503"), timeout=5)
@@ -287,9 +269,8 @@ def test_the_repl_raises_each_fault_class_by_the_result():
 
 
 def test_remote_failed_run_is_the_programs_verdict():
-    """SandboxFusion answers ``Failed`` for any run that exited non-zero: that is a runtime error of
-    the program, not the service's failure. A ``Failed`` body that names no failing step, and a
-    ``SandboxError``, stay the service's."""
+    """SandboxFusion answers ``Failed`` for any non-zero exit: a runtime error of the program. A ``Failed`` body
+    naming no step, and a ``SandboxError``, stay the service's."""
     payload = {
         "status": "Failed",
         "message": "",
@@ -332,9 +313,8 @@ def test_the_run_step_file_size_limit_is_the_documented_one():
 
 
 def test_an_output_flood_is_the_programs_failure_at_the_file_size_limit():
-    """Output is captured in files under the child's ``RLIMIT_FSIZE``, so a flood ends as the program's
-    own failure at the limit, never as gigabytes of host memory the grader runs out of (an infra error
-    that would void the episode)."""
+    """Output is captured in files under the child's ``RLIMIT_FSIZE``, so a flood ends as the program's failure and
+    not as gigabytes of host memory."""
     chunks = LOCAL_FSIZE_LIMIT // (1 << 20) + 16
     flood = f"import sys\nchunk = 'x' * (1 << 20)\nfor _ in range({chunks}):\n    sys.stdout.write(chunk)\n"
     result = LocalSubprocessSandbox().run(flood, timeout=60)

@@ -41,19 +41,14 @@ logger = logging.getLogger(__name__)
 # "<label>-rank<NN>.trace.json[.gz]" with the rank zero-padded to the world-size width.
 _TRACE_NAME_RE = re.compile(r"^(?P<label>.+)-rank(?P<rank>\d+)\.trace(?P<suffix>\.json(?:\.gz)?)$")
 
-# The perf report hangs every GPU kernel off the cpu_op that launched it, so a CUDA-only capture
-# carries no tree to report on. Detected by scanning for the category rather than parsing the whole
-# trace, since these files reach hundreds of MB uncompressed.
+# The perf report hangs GPU kernels off the cpu_op that launched them, so a CUDA-only capture has no tree. Scanned for
+# rather than parsed, since traces reach hundreds of MB.
 _CPU_OP_MARKER = b'"cpu_op"'
 _SCAN_CHUNK = 1 << 20
 
 
 def discover_trace_sets(trace_dir: Path) -> dict[str, dict[int, Path]]:
-    """Group the trace files in ``trace_dir`` into per-label rank sets.
-
-    Returns ``{label: {rank: path}}`` for every file matching the exporter's naming contract,
-    labels and ranks sorted. Non-matching files are ignored.
-    """
+    """``{label: {rank: path}}`` for files matching the exporter's naming contract, sorted; others are ignored."""
     sets: dict[str, dict[int, Path]] = {}
     for path in sorted(trace_dir.iterdir()):
         match = _TRACE_NAME_RE.match(path.name)
@@ -64,7 +59,6 @@ def discover_trace_sets(trace_dir: Path) -> dict[str, dict[int, Path]]:
 
 
 def has_cpu_ops(trace_path: Path) -> bool:
-    """Whether the trace holds CPU-side op events, i.e. was not a CUDA-only capture."""
     opener = gzip.open if trace_path.suffix == ".gz" else open
     carry = b""
     with opener(trace_path, "rb") as handle:
@@ -76,7 +70,6 @@ def has_cpu_ops(trace_path: Path) -> bool:
 
 
 def write_rank_report(trace_path: Path) -> Path:
-    """Run the TraceLens per-trace perf report for one rank's trace; return the .xlsx path."""
     match = _TRACE_NAME_RE.match(trace_path.name)
     if match is None:
         raise ValueError(f"not a profiler trace artifact: {trace_path.name}")
@@ -86,8 +79,7 @@ def write_rank_report(trace_path: Path) -> Path:
             "TorchProfilerCallback(cpu_activity=False). The perf report attributes every kernel to "
             "the cpu_op that launched it, so re-capture with cpu_activity left at its default."
         )
-    # Deferred import: TraceLens is an optional (profiling-group) dependency, so discovery and
-    # --help stay usable and the error is raised only when a report is requested.
+    # Deferred: TraceLens is an optional (profiling-group) dependency, so discovery and --help stay usable.
     from TraceLens.Reporting.generate_perf_report_pytorch import (  # noqa: PLC0415 — optional profiling-group dep, kept out of --help
         generate_perf_report_pytorch,
     )
@@ -98,12 +90,9 @@ def write_rank_report(trace_path: Path) -> Path:
 
 
 def write_collective_report(label: str, ranks: dict[int, Path]) -> Path | None:
-    """Run the TraceLens multi-rank NCCL collective report for one trace set.
-
-    TraceLens expands its ``trace_pattern`` placeholder with unpadded ranks ``0..world_size-1`` while
-    these artifacts are zero-padded, so consecutively-named symlinks bridge the two. Sets whose ranks
-    are not dense from 0 (a ``ranks="0,8"`` capture) are skipped with a warning.
-    """
+    """TraceLens expands ``trace_pattern`` with unpadded ranks while these artifacts are zero-padded, so
+    consecutively-named symlinks bridge the two. Sets with ranks not dense from 0 (a ``ranks="0,8"`` capture) are
+    skipped with a warning."""
     if sorted(ranks) != list(range(len(ranks))):
         logger.warning("[%s] ranks %s not dense from 0 — skipping collective report", label, sorted(ranks))
         return None
@@ -159,8 +148,7 @@ def main() -> None:
     if not trace_sets:
         parser.error(f"no traces matching '<label>-rankNN.trace.json[.gz]' found in {args.trace_dir}")
 
-    # Trace sets are independent, so one unreportable capture (a CUDA-only trace, a truncated file
-    # from a killed run) must not block the reports for the other labels in the directory.
+    # Trace sets are independent, so one unreportable capture must not block the other labels.
     failed = []
     for label, ranks in trace_sets.items():
         logger.info("[%s] %d rank trace(s)", label, len(ranks))
@@ -178,8 +166,7 @@ def main() -> None:
     if failed:
         logger.error("%d of %d trace set(s) failed: %s", len(failed), len(trace_sets), ", ".join(failed))
         if not args.keep_going:
-            # Exiting 0 on a partial run would report missing workbooks as generated ones, and the
-            # caller would analyse whichever labels survived without knowing any are missing.
+            # Exiting 0 on a partial run would report missing workbooks as generated ones.
             raise SystemExit(
                 f"{len(failed)} of {len(trace_sets)} trace set(s) produced no report "
                 f"({', '.join(failed)}); the failures are logged above. Pass --keep_going to accept "

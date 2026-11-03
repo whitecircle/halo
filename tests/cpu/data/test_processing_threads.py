@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""Dataset map worker counts: HALO_DATASET_NUM_PROC resolution and the share a follower rank maps with.
-
-Unset, the worker count comes from the CPUs the process may use: its affinity set, not the host count a container
-cpuset hides, capped by the cgroup CPU quotas over the process, which the affinity set does not show. The load rank
-runs a coordinated map alone while its node's other ranks wait, so it takes most of them, capped. Those ranks compute
-only on a per-rank key (a pre-sharded load), all at once, so each maps with its share of the count; on a shared key
-they read the load rank's cache back at their own count and spawn nothing.
-Falsy-override guard: applying the override as ``env_int(...) or derived`` makes an explicit ``0`` falsy and
-silently replaces it with the derived value. The resolver fails loud on an override below 1 (``num_proc``
-counts worker processes; 1 disables multiprocessing) and honors any valid explicit value.
-
-Run: pytest tests/cpu/data/test_processing_threads.py
-"""
+"""Dataset map worker counts: ``HALO_DATASET_NUM_PROC`` resolution and a follower rank's share. Unset, the count
+comes from the affinity set capped by cgroup CPU quotas. A follower computes only on a per-rank key, when all of
+them map at once, so each takes its share. An override below 1 fails loud."""
 
 import os
 
@@ -46,7 +36,6 @@ def _double(row):
 
 @pytest.fixture(autouse=True)
 def _clear_pin(monkeypatch):
-    """Unset unless a test sets it."""
     monkeypatch.delenv("HALO_DATASET_NUM_PROC", raising=False)
 
 
@@ -116,9 +105,9 @@ def test_unset_takes_most_of_the_cpus_the_process_may_use(monkeypatch, tmp_path,
 def test_unset_takes_most_of_the_tightest_cgroup_cpu_quota(
     monkeypatch, tmp_path, usable_cpus, membership, cgroup, expected
 ):
-    """``docker --cpus``, a Kubernetes CPU limit or a systemd ``CPUQuota`` leaves the affinity set whole: sized off it
-    alone, a map runs 64 workers on the quota's few CPUs. The quota sits on the process's own cgroup or an ancestor,
-    and a host cgroup namespace mounts the whole hierarchy, so reading the mount's root alone misses it."""
+    """``docker --cpus``, a Kubernetes CPU limit or a systemd ``CPUQuota`` leaves the affinity set whole. The quota
+    sits on the process's cgroup or an ancestor, and a host cgroup namespace mounts the whole hierarchy, so
+    reading the mount's root alone misses it."""
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(usable_cpus)))
     _cgroups(monkeypatch, tmp_path, cgroup, membership)
     assert _resolve_dataset_num_proc() == expected
@@ -136,7 +125,7 @@ def test_pin_of_one_disables_multiprocessing_but_is_valid(monkeypatch):
 
 
 def test_zero_pin_fails_loud_not_silently_ignored(monkeypatch):
-    """An explicit 0 is falsy → a truthiness fallback silently swaps in the derived value; it must raise."""
+    """A truthiness fallback would silently swap in the derived value for an explicit 0."""
     monkeypatch.setenv("HALO_DATASET_NUM_PROC", "0")
     with pytest.raises(ValueError, match="HALO_DATASET_NUM_PROC"):
         _resolve_dataset_num_proc()
@@ -172,15 +161,14 @@ def _map_as(monkeypatch, *, load_rank: bool, local_world_size: int, num_proc: in
     ids=["load-rank-takes-the-count", "follower-takes-its-share", "a-share-below-two-runs-in-process"],
 )
 def test_a_follower_maps_with_its_share_of_the_node(monkeypatch, tmp_path, load_rank, local_world_size, handed):
-    """A follower computes only on a per-rank key, when every follower of the node maps its own shard at once:
-    at the whole count each, a node of 8 ranks would run 8x the workers the count names."""
+    """At the whole count each, a node of 8 ranks would run 8x the workers the count names."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
     assert _map_as(monkeypatch, load_rank=load_rank, local_world_size=local_world_size, num_proc=4) == [handed]
 
 
 def test_a_follower_reads_the_load_ranks_cache_at_its_own_count_without_workers(monkeypatch, tmp_path):
-    """The premise of the share: on a shared key the follower's smaller count still finds the load rank's
-    per-worker cache files, so it neither recomputes nor spawns a worker."""
+    """On a shared key the smaller count still finds the load rank's per-worker cache files, so it neither
+    recomputes nor spawns."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
     _map_as(monkeypatch, load_rank=True, local_world_size=2, num_proc=4)
     monkeypatch.setenv(_FORBID_RECOMPUTE, "1")

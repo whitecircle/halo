@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""A bf16 conversion of a training checkpoint is still that run's resume source.
-
-``convert_to_bf16.py`` changes no state a resume reads, so the converted directory must resume
-exactly as its source does. For a ``merge_expert_lora_on_save`` checkpoint that means the marker,
-which keeps the resume on base plus ``resume_adapter/``, and that adapter directory arriving whole
-behind it; for a precompute DPO/KTO run, ``reference_logps.pt``; for every run, ``scheduler.pt``.
-The adapter directory must also stay out of the conversion's own load and write: its
-``adapter_config.json`` sits one level down, where ``from_pretrained`` never looks.
-
-    python tests/cpu/checkpoint/test_convert_to_bf16_resume_state.py
-"""
+"""A bf16 conversion of a training checkpoint stays that run's resume source. The adapter directory stays out of the
+load and write: its ``adapter_config.json`` sits one level down, where ``from_pretrained`` never looks."""
 
 import json
 from pathlib import Path
@@ -44,8 +35,6 @@ _RESUME_ENTRIES = (
 
 
 def _merged_training_checkpoint(path: Path) -> Path:
-    """A merge-on-save checkpoint as the trainer leaves it: merged weights at the root, the resume
-    adapter beside them under its marker, and the run's resume sidecars."""
     torch.manual_seed(0)
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(path)
     adapter_dir = path / RESUME_ADAPTER_DIR

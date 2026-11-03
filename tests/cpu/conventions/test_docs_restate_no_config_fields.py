@@ -1,8 +1,5 @@
-"""A configuration field's type and default are tabled on one page: the configuration reference.
-
-A feature page explains behavior and links the field's row there. A second table of the same field
-and its default drifts from the first the next time either changes, and nothing catches it.
-"""
+"""A configuration field's type and default are tabled only on the configuration reference; a second table drifts
+silently."""
 
 import dataclasses
 import importlib
@@ -22,9 +19,8 @@ REFERENCE = "agent-docs/reference/configuration-reference.md"
 
 
 def _config_field_names() -> frozenset[str]:
-    """Every field a training script parses: those of the dataclasses ``halo.configs`` defines (their
-    transformers, TRL and sentence-transformers bases included), the TRL trainer configs the scripts take
-    as-is, and ``ParallelismConfig``'s."""
+    """Every field a training script parses: the ``halo.configs`` dataclasses with their upstream bases, the TRL
+    trainer configs the scripts take as-is, and ``ParallelismConfig``."""
     classes = {
         obj
         for module in pkgutil.iter_modules(halo.configs.__path__)

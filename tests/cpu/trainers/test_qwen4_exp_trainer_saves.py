@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """Every trainer save of a model holding an external table leaves a checkpoint that loads, or the run is refused.
-
-Qwen3.8-Flash-Next holds its n-gram table outside the module state, so transformers' ``save_pretrained``, the base
-Trainer's save, writes none of it. A run no parallel saver claims (one process or DDP at ``use_grouped_gemm: false``)
-streams through the gathered writer instead, which writes the table beside the weights: pinned through a real
-single-process SFT trainer whose ``save_model`` export reloads in stock transformers into the trained model's
-logits. Under accelerate-managed FSDP the save keeps the base Trainer's path, so the trainer refuses the model at
-construction, before any step, unless it trains adapters, whose save needs no table.
-
-    python tests/cpu/trainers/test_qwen4_exp_trainer_saves.py
-"""
+Qwen3.8-Flash-Next holds its n-gram table outside the module state, so the base Trainer's save writes none of it."""
 
 import pytest
 import torch

@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""The weight-sync pool keeps several rollout servers in step with one push.
-
-What is pinned: each server's group port (its own, else the run's base port plus its index, a kernel-assigned
-one under a base of 0) and the refusal of two servers on one fixed port; ONE snapshot per param on the pool's
-resolved sync device, shared read-only by every client and released once every server has sent the chunk
-holding it; no server quiesced before a full chunk exists, and none
-for a param the pool refuses; a failed server isolated from its healthy siblings and the failure raised;
-a server that failed AFTER its first chunk went out NOT reconnected (the trainer kept no copy of what
-landed, so a reconnect would leave that engine part old and part new while still answering /health),
-one that failed before streaming reconnected and re-sent; and a reconnect that retires the old client
-first and builds the replacement like the first connect (port, NIC, device and co-load scope).
-
-Run: ``python tests/cpu/weight_sync/test_pool.py`` (or ``pytest -m cpu``).
-"""
+"""The weight-sync pool keeps several rollout servers in step with one push: group ports, one shared snapshot per
+param, failure isolation, and which failures reconnect."""
 
 from __future__ import annotations
 
@@ -35,7 +23,6 @@ def _live(refs: list[weakref.ref]) -> int:
 
 
 def _bare_pool(num_clients: int, wires: list[Wire] | None = None) -> tuple[WeightSyncPool, list[VLLMWeightSyncClient]]:
-    """A pool over ``num_clients`` bare clients, without the NCCL/HTTP handshake."""
     configs = [{"url": f"http://server{i}:8000", "group_port": 51216 + i} for i in range(num_clients)]
     pool = WeightSyncPool(
         server_configs=configs, connection_timeout=0.0, client_cls=VLLMWeightSyncClient, base_group_port=51216
@@ -51,12 +38,8 @@ def _bare_pool(num_clients: int, wires: list[Wire] | None = None) -> tuple[Weigh
 
 
 def test_unconfigured_group_ports_are_seeded_from_the_run_knob():
-    """``rollout_group_port`` must mean the same thing whichever client shape is built.
-
-    An entry without its own ``group_port`` takes ``base_group_port + index``; binding the module
-    default instead would listen on 51216/51217 for a run that configured 52000, while the engines
-    dial the port they were launched with — every sync then times out with nothing to point at.
-    """
+    """Binding the module default instead would listen on 51216/51217 for a run that configured 52000, while the
+    engines dial the port they were launched with, so every sync times out with nothing to point at."""
     pool = WeightSyncPool(
         server_configs=[
             {"url": "http://s0:8000"},
@@ -80,8 +63,7 @@ def _pool(configs: list[dict], base_group_port: int) -> WeightSyncPool:
 
 
 def test_a_base_port_of_zero_gives_each_unpinned_server_a_kernel_assigned_port():
-    """``rollout_group_port: 0`` asks for kernel-assigned ports; offset by the index it would bind 1, 2, ...,
-    privileged ports nobody chose."""
+    """Offset by the index, ``rollout_group_port: 0`` would bind 1, 2, ..., privileged ports nobody chose."""
     pool = _pool(
         [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}, {"url": "http://s2:8000", "group_port": 9000}], 0
     )
@@ -96,7 +78,6 @@ def test_two_servers_may_share_a_kernel_assigned_port_but_never_a_fixed_one():
 
 
 def test_pool_stages_one_snapshot_per_param(monkeypatch):
-    """The multi-server fan-out must stage ONE snapshot per param, not one per client."""
     pool, clients = _bare_pool(3)
 
     allocations = []
@@ -121,9 +102,7 @@ def test_pool_stages_one_snapshot_per_param(monkeypatch):
 
 
 def test_pool_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
-    """``init_communicator(0)`` must stage on CUDA device 0: the pool stores the resolved
-    ``torch.device``, so an int index (0 included, which is falsy) or a bare ``"cuda"`` names the same
-    GPU the clients join on."""
+    """An int index (0 included, which is falsy) or a bare ``"cuda"`` must name the same GPU the clients join on."""
     assert resolve_sync_device(0) == torch.device("cuda", 0)
     joined: list = []
 
@@ -161,8 +140,6 @@ def test_pool_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
 
 
 def test_pool_shared_snapshot_is_immutable_copy():
-    """The shared snapshot must still be a copy: a post-buffer in-place mutation (the next optimizer
-    step) must not revert any client's buffered weight."""
     pool, clients = _bare_pool(2)
     weights = torch.randn(4, 4)  # contiguous, so an aliasing .contiguous() would return it as-is
     original = weights.clone()
@@ -177,9 +154,7 @@ def test_pool_shared_snapshot_is_immutable_copy():
 
 
 def test_pool_releases_a_chunks_snapshots_once_every_server_sent_it(monkeypatch):
-    """Multi-server: a shared snapshot must die once the chunk holding it went out everywhere — the
-    pool keeps no store of its own, so a reference kept anywhere would grow the staged footprint with
-    the model rather than the chunk."""
+    """The pool keeps no store of its own, so a reference kept anywhere would grow the staged footprint."""
     monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     pool, clients = _bare_pool(2, wires=[Wire(retain=False), Wire(retain=False)])
     refs: list[weakref.ref] = []
@@ -195,11 +170,7 @@ def test_pool_releases_a_chunks_snapshots_once_every_server_sent_it(monkeypatch)
 
 
 def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
-    """The quiesce window opens at the first FULL chunk, not at the first gathered parameter.
-
-    Every server stops serving for as long as its update is open, so the update must not be opened
-    while the gather is still assembling the first chunk's worth of weights.
-    """
+    """Every server stops serving while its update is open, so assembling a chunk must not open one."""
     monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     wires = [Wire(), Wire()]
     pool, _clients = _bare_pool(2, wires=wires)
@@ -216,8 +187,7 @@ def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
 
 
 def test_the_pool_refuses_an_unsyncable_param_before_any_server_gets_the_pending_chunk(monkeypatch):
-    """The pool snapshots for its clients, so their own check never runs: with a full chunk pending, a
-    0-dim param must be refused before that chunk quiesces a server for a sync that cannot complete."""
+    """The pool snapshots for its clients, so their own check never runs."""
     monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
     wires = [Wire(), Wire()]
     pool, clients = _bare_pool(2, wires=wires)
@@ -234,8 +204,7 @@ def test_the_pool_refuses_an_unsyncable_param_before_any_server_gets_the_pending
 
 
 def test_pool_flush_failure_isolation():
-    """A failed flush on server A clears only A's buffer; B still flushes the intact shared
-    snapshot afterwards, and the pool raises (fail loud, no stale-policy rollouts)."""
+    """The others flush the intact shared snapshot and the pool raises, so no rollout runs on a stale policy."""
     wires = [Wire(fail_on_send=True), Wire(), Wire()]
     pool, clients = _bare_pool(3, wires=wires)
 
@@ -255,12 +224,8 @@ def test_pool_flush_failure_isolation():
 
 
 def test_a_server_that_already_streamed_a_chunk_is_not_retried(monkeypatch):
-    """No replay once the engine holds part of the new weights.
-
-    The trainer keeps no copy of what already went out, so a reconnect + re-flush would hand the
-    fresh engine the tail alone — a model that is part old and part new, serving happily and
-    answering /health. The failure has to reach the caller with that reason instead.
-    """
+    """The trainer keeps no copy of what went out, so a re-flush would hand the fresh engine the tail alone: a model
+    part old and part new that still answers /health."""
     monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     wire = Wire()
     pool, clients = _bare_pool(1, wires=[wire])
@@ -281,8 +246,7 @@ def test_a_server_that_already_streamed_a_chunk_is_not_retried(monkeypatch):
 
 
 def test_a_server_that_failed_before_streaming_is_still_retried(monkeypatch):
-    """Anti-over-rejection: the dominant recovery case — an engine restarted BETWEEN syncs, whose
-    first chunk fails — is still reconnected and re-sent, because nothing has landed on it yet."""
+    """The dominant recovery case: an engine restarted between syncs, whose first chunk fails with nothing landed."""
     wire = Wire(fail_on_send=True)
     pool, clients = _bare_pool(1, wires=[wire])
 
@@ -294,14 +258,13 @@ def test_a_server_that_failed_before_streaming_is_still_retried(monkeypatch):
     pool.update_named_param("w", torch.zeros(64, dtype=torch.float32))
     assert clients[0].can_replay_sync, "nothing was streamed yet — this sync must still be replayable"
 
-    pool.finish_weight_update()  # must NOT raise
+    pool.finish_weight_update()  # must not raise
 
     assert [name for name, _ in wire.sent] == ["w"], "the recovered flush did not deliver the params"
 
 
 def test_reconnect_retires_the_old_client_before_probing_the_replacement():
-    """The old client owns the ``/resume`` for the pause its failed sync left; a replacement probed
-    first would only time out against the still-paused server."""
+    """The old client owns the ``/resume`` for the pause its failed sync left; a replacement probed first times out."""
     order: list[str] = []
 
     class RecordingClient:
@@ -346,7 +309,7 @@ def test_reconnect_retires_the_old_client_before_probing_the_replacement():
     )
     assert [name for name, _ in new_client._param_buffer] == ["w"], "the pending buffer was not carried over"
     assert new_client is not old, "the replacement was not swapped into the client pool"
-    # The engine node dials back to the configured port, so the replacement must rebind it, not drift.
+    # The engine node dials back to the configured port, so the replacement must rebind it.
     assert new_client.group_port == 51216, f"reconnect moved off the configured group_port: {new_client.group_port}"
 
 
@@ -387,9 +350,8 @@ def test_a_pool_keeps_the_engines_groups_until_a_push_scopes_them():
 
 
 def test_a_reconnected_client_is_built_like_the_first_connect():
-    """A reconnect re-flushes the failed sync's buffer through the replacement, so it must dial back on
-    the server's configured port and NIC and keep the scope the push gave the pool: an unscoped
-    replacement would hold a model without ``q_a_proj`` back for a partner it never declares."""
+    """A reconnect re-flushes through the replacement, and an unscoped one would hold a model without ``q_a_proj`` back
+    for a partner it never declares."""
     pool = WeightSyncPool(
         [{"url": "http://localhost:30000", "group_port": 52000, "group_host": "10.0.0.7"}],
         connection_timeout=0.0,

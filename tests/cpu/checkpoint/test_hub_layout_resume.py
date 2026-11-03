@@ -1,30 +1,6 @@
 #!/usr/bin/env python
-"""Every whole-weight reload maps a hub-layout checkpoint onto the live model's names — across the roster.
-
-transformers holds a MoE's experts fused in memory while the wrapper-less writers save them in the
-layout the model was loaded from: one tensor per expert where the family's hub is per-expert. A reload
-into an already-built model that matches checkpoint keys to live names must replay the load
-conversion, or the experts keep the weights the model was built with (at scale the coverage gate
-refuses the resume instead). Those reloads are:
-
-  * a plain FSDP2 resume (``use_grouped_gemm: false``, no EP/CP/TP), whose policy is built from the
-    BASE (``resolve_resume_weights_source`` keeps it) and then reads the checkpoint, and its
-    best-model load;
-  * a TP best-model load (a TP resume constructs from the checkpoint and skips the read);
-  * a single-process / DDP resume and best-model load, which the base Trainer would read by raw key;
-  * an ``init_from_scratch`` FSDP2 run, whose model is built from its config and records no load
-    conversions, so both its save and its resume go through the family's registered ones — read off
-    a model whose classes FSDP2 has swapped for its own ``FSDP<Name>``.
-
-Each case saves through the FSDP2 writer from an FSDP2-wrapped model (CPU, a one-rank fake process
-group) and reloads through :func:`load_resume_weights`, comparing every live tensor with the
-trained one. The per-expert hubs are the cases that fail without the conversion; the fused hubs and the
-dense models must load unchanged. The reload also reads layouts the model's own load never met, as
-``from_pretrained`` does: the module layout an EP-gathered save writes, and a per-expert checkpoint of
-the fused Qwen3.5/3.6 hub.
-
-    python tests/cpu/checkpoint/test_hub_layout_resume.py
-"""
+"""Every whole-weight reload maps a hub-layout checkpoint onto the live model's names, across the roster. Experts are
+fused in memory and saved in the load's layout; without replaying the conversion they keep the built weights."""
 
 import itertools
 import os
@@ -61,8 +37,8 @@ FAMILIES = {**TINY_MOE_FAMILIES, **TINY_DENSE_FAMILIES}
 
 
 def _fused_hub(family, path: str) -> None:
-    """The Qwen3.5/3.6 release layout: experts stored as the fused module tensors, so the load converts
-    nothing — where ``save_pretrained`` of a model built from its config writes them per-expert."""
+    """Experts stored fused, so the load converts nothing; ``save_pretrained`` of a config-built model writes them
+    per-expert."""
     torch.manual_seed(0)
     model = tiny_family_model(family).to(torch.bfloat16)
     model.config.save_pretrained(path)
@@ -87,7 +63,7 @@ def _load(family, path: str):
 
 
 def _live_state(model) -> dict[str, torch.Tensor]:
-    """Every parameter and persistent buffer by live name, a one-rank FSDP2 shard read as the whole tensor."""
+    """A one-rank FSDP2 shard reads as the whole tensor."""
     return {
         name: (t.to_local() if isinstance(t, DTensor) else t).detach().clone()
         for name, t in itertools.chain(model.named_parameters(), persistent_buffers(model))
@@ -104,7 +80,6 @@ def _per_expert_hub(path: str) -> bool:
 
 
 def _perturbed(model, seed: int):
-    """``model`` with every float parameter moved off its initial value, as training would."""
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for param in model.parameters():
@@ -114,14 +89,12 @@ def _perturbed(model, seed: int):
 
 
 def _save_fsdp2(model, mesh, checkpoint: str) -> None:
-    """The FSDP2 writer's save of ``model``, wrapped as a plain FSDP2 run wraps it."""
     save_fsdp2_checkpoint(save_context(_fsdp2(model, mesh), training_checkpoint=True), checkpoint)
 
 
 @pytest.fixture(scope="module", params=sorted(CASES))
 def trained(request, tmp_path_factory):
-    """``(case, family, hub dir, checkpoint dir, trained live state)``: the tiny model's hub, then a
-    "trained" copy of it saved by the FSDP2 writer — the save a plain FSDP2 run makes."""
+    """A perturbed copy saved by the FSDP2 writer, the save a plain FSDP2 run makes."""
     family, write_hub = CASES[request.param]
     hub = str(tmp_path_factory.mktemp(f"{request.param}_hub"))
     checkpoint = str(tmp_path_factory.mktemp(f"{request.param}_checkpoint"))
@@ -143,8 +116,6 @@ def _ctx(model, *, fsdp_wrapped=False, is_tp_mode=False, base_owns_whole_weight_
 
 
 def _reload(shape: str, family, hub: str, checkpoint: str, tmp_path) -> dict[str, torch.Tensor]:
-    """Build the policy from the hub as the shape's resume does, reload ``checkpoint`` into it, and
-    return its live state."""
     best_model = shape.endswith("best_model")
     if shape.startswith("fsdp2"):
         with fake_process_group_mesh(0, 1) as mesh:
@@ -165,8 +136,7 @@ def _reload(shape: str, family, hub: str, checkpoint: str, tmp_path) -> dict[str
 
 
 def test_a_plain_fsdp2_resume_builds_from_the_base(trained):
-    """The premise of the FSDP2 rows: this shape's policy is built from the base, so the loader below is
-    what puts the trained weights back."""
+    """The premise of the FSDP2 rows: the loader below is what puts the trained weights back."""
     _, _, hub, checkpoint, _ = trained
     pc = ParallelismConfig(use_grouped_gemm=False, nvlink_domain_size=1, max_concurrent_loading=0)
     assert resolve_resume_weights_source(checkpoint, SimpleNamespace(model_name_or_path=hub), pc) == hub
@@ -189,9 +159,7 @@ def _stale(state: dict, reloaded: dict) -> list[str]:
 
 
 def test_a_module_layout_checkpoint_passes_through(trained, tmp_path):
-    """What an EP-gathered save writes for the families it keeps fused (Cohere2, DeepSeek-V4, GLM-5
-    Next, Qwen3.5/3.6): the live names as they are, which a model whose load recorded the per-expert
-    converters must read untouched."""
+    """A model whose load recorded the per-expert converters must read the live names untouched."""
     name, family, hub, _, state = trained
     shutil.copy(os.path.join(hub, "config.json"), tmp_path)
     save_file({key: tensor.contiguous() for key, tensor in state.items()}, str(tmp_path / "model.safetensors"))
@@ -202,9 +170,7 @@ def test_a_module_layout_checkpoint_passes_through(trained, tmp_path):
 
 
 def test_a_fused_hub_load_reads_a_per_expert_checkpoint(tmp_path):
-    """The Qwen3.5/3.6 hub ships its experts fused, so its load records no conversion. A per-expert
-    checkpoint of it (``unfuse_moe_experts.py``'s output) is still read, through the family's mapping,
-    as ``from_pretrained`` reads it."""
+    """Its load records no conversion, yet ``unfuse_moe_experts.py``'s output is read through the family's mapping."""
     family = TINY_MOE_FAMILIES["qwen3_5_moe_text"]
     hub, fused, unfused = (str(tmp_path / name) for name in ("hub", "fused", "unfused"))
     _fused_hub(family, hub)
@@ -246,8 +212,7 @@ def test_an_init_from_scratch_run_saves_the_hub_layout_and_resumes_from_it(name,
 
 
 def test_a_reload_the_base_loader_owns_stays_with_it(trained):
-    """Accelerate-managed FSDP reads its own sharded format, and sentence-transformers rebuilds its whole
-    pipeline: there the base loader is the one that reads the checkpoint, and the model is left to it."""
+    """Accelerate-managed FSDP reads its own sharded format, and sentence-transformers rebuilds its whole pipeline."""
     _, family, hub, checkpoint, _ = trained
     model = _load(family, hub)
     before = _live_state(model)

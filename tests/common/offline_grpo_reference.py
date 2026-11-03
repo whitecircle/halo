@@ -1,5 +1,5 @@
-"""Mapped-reference fixtures shared by offline GRPO storage and trainer tests, and the run-start reference
-lifecycle (:func:`run_reference_lifecycle`) the non-CP full fine-tuning GPU suites run on their layouts."""
+"""Mapped-reference fixtures for offline GRPO tests, and the run-start reference lifecycle the non-CP GPU suites
+run."""
 
 import math
 import os
@@ -112,8 +112,6 @@ class ReferenceStorageTrainer(OfflineGRPOReferenceMixin, _CheckpointBase):
 
 
 class _RunDirs(NamedTuple):
-    """The lifecycle's directories under the suite's shared output directory."""
-
     base: str
     run: str
     checkpoint: str
@@ -122,8 +120,8 @@ class _RunDirs(NamedTuple):
 
 
 def _lifecycle_trainer(ctx, parallelism, source, output, train, evaluation=None, *, checkpoint=None, beta=_KL_BETA):
-    """The suite's trainer on ``source``; one resumed from ``checkpoint`` must restore its reference scores,
-    so a re-sweep raises."""
+    """The suite's trainer on ``source``; one resumed from ``checkpoint`` must restore its reference scores, so a
+    re-sweep raises."""
     args = offline_grpo_config(
         output,
         steps=_STEPS,
@@ -140,8 +138,8 @@ def _lifecycle_trainer(ctx, parallelism, source, output, train, evaluation=None,
 
 
 def _uninterrupted_run(ctx, parallelism, label, dirs, train, evaluation, expected, *, snapshot, layout_checks):
-    """The uninterrupted run's checks, and what its resume is held to: the run-start reference rows, the
-    step losses and the save-point capture."""
+    """The uninterrupted run's checks, and what its resume is held to: reference rows, step losses and the save-point
+    capture."""
     trainer = _lifecycle_trainer(ctx, parallelism, dirs.base, dirs.run, train, evaluation)
     checks = {
         "noncp_full_ft_without_live_reference": not trainer.parallelism_config.is_cp_mode
@@ -178,8 +176,8 @@ def _uninterrupted_run(ctx, parallelism, label, dirs, train, evaluation, expecte
 
 
 def _resumed_run(ctx, parallelism, label, dirs, train, evaluation, references, losses, captured, *, restore_checks):
-    """The run resumed from the save step: references restored without a re-sweep, optimizer, scheduler and
-    losses replayed exactly, and its export bit-equal to the uninterrupted run's. Returns checks and metrics."""
+    """The resumed run: references restored with no re-sweep, state and losses replayed exactly, export bit-equal.
+    Returns checks and metrics."""
     resumed = _lifecycle_trainer(
         ctx, parallelism, dirs.checkpoint, dirs.run, train, evaluation, checkpoint=dirs.checkpoint
     )
@@ -228,14 +226,9 @@ def run_reference_lifecycle(
     layout_checks=lambda trainer: {},
     restore_checks=lambda resumed, captured: {},
 ) -> dict:
-    """COLLECTIVE. A non-CP full fine-tune's run-start KL scores through train, resume, evaluation and HF
-    export, held to a full-logits oracle: the ``gpu_test_main`` body of the layout suites.
-
-    ``parallelism()`` builds each trainer's ``ParallelismConfig`` and ``save_base(path, seed)`` writes the
-    base checkpoint on rank 0. A layout adds its own checks on the uninterrupted trainer
-    (``layout_checks(trainer)``) and on the resumed one against the save point ``snapshot`` captured
-    (``restore_checks(resumed, captured)``); ``label`` names the layout in the log.
-    """
+    """COLLECTIVE. A non-CP full fine-tune's run-start KL scores through train, resume, evaluation and export, held to
+    a full-logits oracle. A layout adds its own via ``layout_checks(trainer)`` and ``restore_checks(resumed,
+    captured)``."""
     shared = shared_output_dir(ctx)
     run = os.path.join(shared, "train")
     dirs = _RunDirs(

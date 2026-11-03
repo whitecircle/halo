@@ -1,5 +1,4 @@
-"""The per-family Ulysses attention wrappers, and the HF attention class name -> wrapper map read off their
-``HF_MODULE_NAMES``."""
+"""Per-family Ulysses attention wrappers and the HF class name -> wrapper map."""
 
 from __future__ import annotations
 
@@ -14,10 +13,8 @@ from halo.subclass_registry import build_class_claim_map
 
 
 class BailingMoeV2UlyssesAttention(UlyssesAttention):
-    """Bailing MoE / Ling 2.0 (v4-era remote code): a fused ``query_key_value`` projection, optional Q/K RMSNorm,
-    partial rotary, a ``dense`` output projection, an inline softmax scale and a three-value return. All three
-    backend classes are claimed (same weights); the Lightning-Attention-2 sibling sharing their names is refused
-    by :func:`~halo.distributed.context_parallel.model_rules.reject_unsupported_ulysses_model`."""
+    """Bailing MoE / Ling 2.0 (v4-era remote code): fused ``query_key_value``, optional Q/K RMSNorm, partial rotary,
+    ``dense`` output, three-value return. ``reject_unsupported_ulysses_model`` refuses the same-named LA-2 sibling."""
 
     HF_MODULE_NAMES = ("BailingMoeV2Attention", "BailingMoeV2FlashAttention2", "BailingMoeV2SdpaAttention")
 
@@ -213,9 +210,8 @@ class Qwen3MoeUlyssesAttention(UlyssesAttention):
 
 
 class Qwen3_5MoeUlyssesAttention(Qwen3MoeUlyssesAttention):
-    """Qwen3.5 / Qwen3.6 full-attention layers: a double-width ``q_proj`` splits into Q and a sigmoid gate,
-    computed on the local chunk and applied after the all-to-all. The family's GatedDeltaNet layers are refused by
-    :func:`~halo.distributed.context_parallel.model_rules.reject_unsupported_ulysses_model`."""
+    """Qwen3.5 / Qwen3.6 full-attention layers: a double-width ``q_proj`` splits into Q and a sigmoid gate, applied
+    after the all-to-all. GatedDeltaNet layers are refused by ``reject_unsupported_ulysses_model``."""
 
     HF_MODULE_NAMES = ("Qwen3_5MoeAttention", "Qwen3_5Attention")
 

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU test: the TP pre-step replicated-grad sync must run STRUCTURALLY, not grad-gated.
-
-``_register_grad_sync_step_hooks``' TP pre-step hook issues a TP-group collective
-(``_sync_tp_replicated_grads``). Grad presence is rank-local (sparse routing / idle VLM tower can
-leave every grad ``None`` on one rank only), so gating the call on ``any(p.grad is not None)``
-desyncs the TP ranks into a hang — the codebase's structural-collective invariant (see the TP
-clip, ``_install_tp_clip``). The hook must call the sync unconditionally; the sync itself agrees grad
-presence over the TP group, so the collective count stays uniform.
-
-Run: ``python tests/cpu/parallelism/test_tp_grad_sync_hook_structural.py`` (or ``pytest -m cpu``).
-"""
+"""The TP pre-step replicated-grad sync runs structurally: grad presence is rank-local, so a grad-gated call desyncs TP
+ranks into a hang. The sync itself agrees presence over the TP group, keeping the collective count uniform."""
 
 from __future__ import annotations
 
@@ -46,8 +37,7 @@ def test_pre_step_sync_runs_even_when_all_grads_are_none():
     DistributedTrainerMixin._register_grad_sync_step_hooks(trainer)
     assert trainer._tp_grad_sync_hook_registered is True
 
-    # No backward ran on this rank — every grad is None. Another TP rank may have grads, so the
-    # sync collective must still be issued here (an any(grad) gate skips it → hang).
+    # Another TP rank may have grads, so the sync collective must still be issued here.
     assert all(p.grad is None for p in trainer.model.parameters())
     trainer.optimizer.step()
 
@@ -57,14 +47,14 @@ def test_pre_step_sync_runs_even_when_all_grads_are_none():
 
 
 def test_pre_step_sync_skipped_when_clip_path_owns_it():
-    trainer = _trainer(max_grad_norm=1.0)  # clipping enabled → the TP clip syncs instead
+    trainer = _trainer(max_grad_norm=1.0)  # Clipping enabled, so the TP clip syncs instead.
     DistributedTrainerMixin._register_grad_sync_step_hooks(trainer)
     trainer.optimizer.step()
     trainer._sync_tp_replicated_grads.assert_not_called()
 
 
 def _syncing_trainer(global_step: int):
-    """A TP trainer whose sync reaches its reduce: a bare TP mesh whose group has peers under :func:`_tp_sync`."""
+    """A bare TP mesh whose group has peers under :func:`_tp_sync`."""
     trainer = _trainer(max_grad_norm=0.0)
     trainer.state = SimpleNamespace(global_step=global_step)
     trainer.parallelism_config = SimpleNamespace(is_tp_mode=True, fp32_grad_reduce=False)
@@ -85,10 +75,8 @@ def _tp_sync(reduce_calls: Mock):
 
 
 def test_sync_is_idempotent_within_one_step():
-    """At ``max_grad_norm == 0`` transformers still reaches the patched clip (``_get_grad_norm``
-    calls it with ``inf``), so the pre-step hook is a SECOND call in the same step. The AVG bucket
-    survives that; the per-head-norm SUM would double (S → tp_size·S), so the sync itself must be
-    marker-gated rather than the hook guessing when transformers skips clipping."""
+    """At ``max_grad_norm == 0`` transformers still reaches the patched clip, so the hook is a second call; the
+    per-head SUM would double, hence the marker."""
     trainer = _syncing_trainer(global_step=7)
     params = list(trainer.model.parameters())
 
@@ -110,8 +98,7 @@ def test_sync_is_idempotent_within_one_step():
 
 
 def test_each_run_syncs_its_own_first_step():
-    """``global_step`` restarts at 0 with every ``train()``'s fresh state: a sync at an earlier run's step 0 must not
-    mark the new run's step 0 synced, which would leave its TP replicas drifting apart."""
+    """``global_step`` restarts at 0 with every ``train()``; a stale mark would leave TP replicas drifting apart."""
     trainer = _syncing_trainer(global_step=0)
     params = list(trainer.model.parameters())
 

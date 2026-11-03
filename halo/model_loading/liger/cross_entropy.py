@@ -39,11 +39,8 @@ def liger_cross_entropy(
     reduction: str = "mean",
     label_smoothing: float = 0.0,
 ) -> torch.Tensor:
-    """Drop-in replacement for ``F.cross_entropy`` backed by Liger.
-
-    CPU tensors and deprecated ``size_average``/``reduce`` stay on torch (Liger is Triton/CUDA-only); the
-    common ``(no weight, -100, 'mean')`` path reuses one cached loss module.
-    """
+    """Drop-in ``F.cross_entropy`` backed by Liger; CPU tensors and deprecated ``size_average``/``reduce`` stay on
+    torch, as Liger is Triton/CUDA-only."""
     if not input.is_cuda or size_average is not None or reduce is not None:
         return _TORCH_CROSS_ENTROPY(
             input,
@@ -66,11 +63,8 @@ def liger_cross_entropy(
 
 
 class _AttributeOverride:
-    """Read-through view of a module with selected attributes replaced, for one importing module.
-
-    Writes go through to the wrapped module, so a later writer reaching ``torch.nn`` through this view
-    (upstream Liger's appliers do) mutates the real module rather than shadowing an override.
-    """
+    """Read-through view of a module with attributes replaced; writes reach the wrapped module, so a later writer
+    through ``torch.nn`` (upstream Liger's appliers) mutates the real one."""
 
     def __init__(self, wrapped, **overrides):
         object.__setattr__(self, "_wrapped", wrapped)
@@ -84,9 +78,8 @@ class _AttributeOverride:
         setattr(self.__dict__["_wrapped"], name, value)
 
 
-# ``loss_utils`` reaches cross-entropy only as ``nn.functional.cross_entropy`` (its one call site, in
-# ``fixed_cross_entropy``), so overriding its ``nn`` global redirects exactly that call. Assigning to
-# ``torch.nn.functional.cross_entropy`` instead would swap the kernel under every caller in the process,
+# ``loss_utils`` reaches cross-entropy only as ``nn.functional.cross_entropy``, so overriding its ``nn`` global
+# redirects that call alone. Assigning ``torch.nn.functional.cross_entropy`` would swap the kernel process-wide,
 # including CP's fp32 loss and any 3-D or soft-target call, which this replacement cannot serve.
 _LOSS_UTILS_NN = _AttributeOverride(
     nn, functional=_AttributeOverride(nn.functional, cross_entropy=liger_cross_entropy)
@@ -99,9 +92,8 @@ def patch_loss_utils_cross_entropy() -> None:
 
 
 def _resolve_fused_scoring(model: nn.Module, skip_logits: bool | None, has_labels: bool) -> tuple[bool, HeadTransform]:
-    """Whether a forward scores through the fused loss (``skip_logits``; unset, a training forward with labels does),
-    and the family's head transform. Checked before the backbone runs, so a forward that cannot score is refused
-    without running it."""
+    """Whether a forward scores through the fused loss (unset, a training forward with labels does), and the family's
+    head transform; checked before the backbone runs."""
     if skip_logits and not has_labels:
         raise ValueError("skip_logits is True, but labels and shift_labels are None")
     if skip_logits is None:
@@ -118,9 +110,8 @@ def _resolve_fused_scoring(model: nn.Module, skip_logits: bool | None, has_label
 
 
 def _resolve_router_logits_flag(model: nn.Module, explicit: bool | None, router_aux_loss_in_head: bool) -> bool | None:
-    """The ``output_router_logits`` to forward to the backbone as the family's own head forwards it: an explicit
-    value as given (a caller's False over a config True included), True where only the config asks, else ``None``
-    (the backbone resolves an omitted flag from the config)."""
+    """The ``output_router_logits`` to forward as the family's head does: an explicit value as given, True where only
+    the config asks, else ``None`` (the backbone resolves an omitted flag from the config)."""
     requested = explicit if explicit is not None else get_config_field(model.config, "output_router_logits", False)
     if requested and router_aux_loss_in_head:
         raise ValueError(
@@ -146,10 +137,9 @@ def _fused_causal_lm_loss(
             f"differ from the unfused one. Set fused_linear_cross_entropy: false for this "
             f"checkpoint."
         )
-    # LigerForCausalLMLoss, not the bare loss module: it applies the shift, the
-    # `num_items_in_batch` normalisation that matches transformers' ForCausalLMLoss (a mean
-    # reduction would normalise per-rank, scaling the loss by world_size), and the token
-    # accuracy TRL reads whenever use_liger_kernel is on.
+    # LigerForCausalLMLoss applies the shift, the `num_items_in_batch` normalisation matching ForCausalLMLoss (a mean
+    # would normalise per-rank, scaling the loss by world_size), and the token accuracy TRL reads under
+    # use_liger_kernel.
     fused_hidden_states = transform.scale_hidden(hidden_states)
     if transform.logit_scale is not None:
         fused_hidden_states = fused_hidden_states * transform.logit_scale
@@ -158,8 +148,7 @@ def _fused_causal_lm_loss(
         lm_head_weight=model.lm_head.weight,
         labels=labels,
         shift_labels=shift_labels,
-        # Read off the head, not the config: a composite wrapper's `config.hidden_size` is
-        # the wrapper's, and the fused loss reshapes against the projection's own width.
+        # Off the head, as a composite wrapper's `config.hidden_size` is the wrapper's.
         hidden_size=model.lm_head.weight.shape[-1],
         **kwargs,
     )
@@ -168,18 +157,10 @@ def _fused_causal_lm_loss(
 
 
 def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
-    """A fused-loss ``forward`` for one family, applying the head transform its ``HeadTransformSpec`` declares.
-
-    The fused path folds a logit scale onto the hidden states, the same product
-    (``(s·h) @ Wᵀ == s·(h @ Wᵀ)``) reassociated so the scale survives the fusion; in bf16 it is
-    bit-exact for the power-of-two scales the shipped checkpoints use. A softcap or a vocabulary cut
-    cannot be folded, so the fused path refuses it.
-
-    ``router_aux_loss_in_head`` states that the family's own head adds the router aux loss after the
-    projection the fused loss replaces, so ``output_router_logits`` is refused: nothing would add that
-    term to the objective. A head that only forwards the flag (Zaya, Mistral4) passes it through to
-    the backbone, whose router logits then reach the output as they do unfused.
-    """
+    """A fused-loss ``forward`` applying the family's head transform. A logit scale folds onto the hidden states
+    (``(s·h) @ Wᵀ == s·(h @ Wᵀ)``), bit-exact in bf16 for power-of-two scales; a softcap or vocabulary cut is refused.
+    ``router_aux_loss_in_head`` refuses ``output_router_logits``, since nothing would add that term to the
+    objective."""
 
     def lce_forward(
         self,
@@ -195,9 +176,8 @@ def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
         **kwargs,
     ) -> LigerMoeCausalLMOutputWithPast:
         shift_labels = kwargs.pop("shift_labels", None)
-        # Taken from kwargs rather than declared: `honors_router_logits_flag` looks for this
-        # parameter on the forward the model runs, and declaring it would report that a family whose own
-        # head lacks it honors the flag, moving its router balancing off `bias_update`.
+        # From kwargs: `honors_router_logits_flag` looks for this parameter on the forward, and declaring it would
+        # report that a family whose head lacks it honors the flag, moving its router balancing off `bias_update`.
         explicit_router_logits = kwargs.pop("output_router_logits", None)
         skip_logits, transform = _resolve_fused_scoring(
             self, skip_logits, labels is not None or shift_labels is not None
@@ -252,15 +232,10 @@ class FusedHeadLossUnavailable(ValueError):
 def fused_head_ce_sum(
     head: nn.Linear, transform: HeadTransform, hidden: torch.Tensor, targets: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The fp32 cross-entropy of ``targets`` ``[N]`` summed over the rows of ``hidden`` ``[N, H]`` under the head
-    path ``transform.project(head, hidden)``, and the argmax of each row a target supervises (``-1`` at an ignored
-    row), through Liger's fused linear cross-entropy.
-
-    No ``[N, V]`` logits plane exists: the kernel projects one token chunk at a time and writes its gradients in the
-    forward, the weight's accumulated in fp32 as the unfused GEMM accumulates it. The logit scale is folded onto
-    the hidden states (``(s·h) @ Wᵀ == s·(h @ Wᵀ)``), which needs a bias-free head (:func:`fused_head_loss`
-    checks); the softcap runs inside the kernel; a vocabulary cut keeps the head's leading rows.
-    """
+    """The fp32 cross-entropy summed over the rows of ``hidden`` under ``transform.project(head, hidden)``, and each
+    supervised row's argmax (``-1`` when ignored), through Liger's fused kernel. No ``[N, V]`` logits plane exists: the
+    kernel projects a chunk at a time and writes gradients in the forward. A logit scale needs a bias-free head; the
+    softcap runs in the kernel."""
     weight, bias = transform.kept_rows(head.weight, head.bias)
     fused_hidden = transform.scale_hidden(hidden)
     if transform.logit_scale is not None:
@@ -280,12 +255,8 @@ def fused_head_ce_sum(
 
 
 def fused_head_loss(model: nn.Module) -> Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-    """:func:`fused_head_ce_sum` bound to ``model``'s output embedding and verified head transform.
-
-    Raises :class:`FusedHeadLossUnavailable` where the kernel's ``hidden @ weight.T + bias`` cannot stand in for
-    the head: a PEFT tuner or a low-precision module on the output embedding, a head path the transform probe
-    cannot verify, or a logit scale over a biased head.
-    """
+    """:func:`fused_head_ce_sum` bound to ``model``'s head. Raises :class:`FusedHeadLossUnavailable` on a PEFT tuner or
+    a low-precision module on the output embedding, an unverifiable head path, or a logit scale over a biased head."""
     base = base_transformers_model(model)
     head = base.get_output_embeddings()
     if not isinstance(head, nn.Linear) or type(head).forward is not nn.Linear.forward:

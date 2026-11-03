@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""An engine abort is re-issued, never stepped: the fragment is the engine's doing, not the policy's.
-
-SGLang's sync pause aborts every in-flight request, and ``finish_reason: abort`` is an engine-cut
-reason — stepping the env with it spends the episode's length-cutoff recovery cap and, past the cap,
-truncates the episode, all for a cut the model did not make. The actor re-issues the turn for the
-same observation, bounded by ``max_retries`` aborts per turn; past that the episode errors into a
-masked row.
-
-    python tests/cpu/environments/test_ray_engine_abort_retry.py
-"""
+"""An engine abort is re-issued, never stepped: stepping it spends the recovery cap on a cut the model did not make.
+The actor re-issues the turn for the same observation, bounded by ``max_retries`` aborts per turn, and past that
+the episode errors into a masked row."""
 
 import pytest
 

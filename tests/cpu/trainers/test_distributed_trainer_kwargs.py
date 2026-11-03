@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""The shared constructor bundle reaches every trainer, and its checkpoint knobs reach the savers.
-
-``distributed_trainer_kwargs`` is the one bundle every entry script splats into its trainer. A trainer
-whose explicit signature lacks one of its keys raises a ``TypeError`` at construction; one that stops
-forwarding a checkpoint knob to ``_init_distributed_config``, or a spine that stops popping it, turns
-``save_max_shard_size`` / ``allow_optimizer_warm_restart`` into silent no-ops, since the savers read them
-only off the contexts the trainer builds; the same holds for ``max_consecutive_nonfinite_steps``, which the step
-guard reads off the trainer. ``_init_distributed_config`` also owns the HF settings every distributed trainer
-needs (``fsdp`` off, ``ddp_find_unused_parameters`` under EP).
-
-Run: python tests/cpu/trainers/test_distributed_trainer_kwargs.py
-"""
+"""``distributed_trainer_kwargs`` reaches every trainer, and its checkpoint knobs reach the savers.
+A signature missing a key raises at construction; a dropped checkpoint knob is a silent no-op."""
 
 import inspect
 from types import SimpleNamespace
@@ -41,7 +31,7 @@ def _bundle(parallelism_config) -> dict:
 
 
 def test_the_derived_roster_covers_every_trainer():
-    """Anti-vacuity: a roster that stopped finding trainers would make the checks below assert nothing."""
+    """A roster that stopped finding trainers would make the checks below assert nothing."""
     assert len(TRAINERS) >= 13, f"the roster collapsed to {sorted(cls.__name__ for cls in TRAINERS)}"
 
 
@@ -51,8 +41,6 @@ def test_the_bundle_binds_to_every_trainer_signature(trainer_cls):
 
 
 def test_the_binding_check_rejects_a_signature_missing_a_key():
-    """Anti-tautology: an explicit signature without ``**kwargs`` that drops a key must fail the bind."""
-
     def narrow(self, parallelism_config=None, moe_balancing="auto", save_sharded_ep=False, dataset_presharded=False):
         pass
 

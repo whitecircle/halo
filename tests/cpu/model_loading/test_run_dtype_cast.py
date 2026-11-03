@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""``cast_parameters_to_run_dtype``: the loaded-parameter cast every training and scoring loader applies.
-
-transformers keeps a family's ``_keep_in_fp32_modules_strict`` parameters in fp32 (DeepSeek-V4 norms
-and hyper-connections, GLM-5 Next KDA state, Inkling short convolutions). The EP loaders cast them to
-the run dtype; a loader that does not leaves a mixed-dtype model that FSDP2 refuses to shard and whose
-fp32 DeepSeek-V4 norms feed fp32 activations into bf16 projections. These tests pin (1) the helper's
-contract, fp8, quantized storage and fp32-master handling included, (2) that the unsharded loaders a
-CPU run reaches hand back a uniform run-dtype model for every pinned family, (3) that under fp32
-masters the lazy loaders preserve every configured non-EP master (including stored pins), while
-without the flag they load all bf16, and (4) that every model build in
-``halo/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
-new loader that forgets either fails here rather than on its first GPU step. The path-string trainer load
-also warms its attention kernels last, at the dtype it cast to.
-
-Run: python tests/cpu/model_loading/test_run_dtype_cast.py  (or pytest)
-"""
+"""``cast_parameters_to_run_dtype`` and the sweep that every training load casts and finalizes.
+FSDP2 refuses a mixed-dtype model, and DeepSeek-V4's fp32 norms feed fp32 activations into bf16 projections."""
 
 import functools
 import types
@@ -57,20 +43,16 @@ from tests.common.source_sweep import builds_a_model, functions_calling
 from tests.common.tiny_models import PINNED_FP32_FAMILIES, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 from tests.common.tokenizers import load_cached_tokenizer
 
-# The run-dtype cast, directly or through its EP-aware wrapper.
 CASTS = frozenset({cast_parameters_to_run_dtype.__name__, cast_loaded_parameters.__name__})
 FINALIZE = finalize_loaded_model.__name__
 
-# Where a training or scoring load lives; every model build there inherits the fp32 pins.
-# ``halo/model_loading/`` defines the entry points and is left out: conversion tools load through it
-# too and must keep the pins, so the cast belongs to each training loader rather than to the shared core.
-# Its ``parallel/`` dispatch holds the training loaders and is swept.
+# ``halo/model_loading/`` is left out: conversion tools load through it and must keep the pins. Its ``parallel/``
+# dispatch is swept.
 SWEPT_ROOTS = ("halo", "scripts/training")
 LOAD_CORE = "halo/model_loading/"
 TRAINING_LOADERS = "halo/model_loading/parallel/"
 
-# Every function the sweep below finds. Pinned exactly so a renamed or new loader is a deliberate
-# edit rather than a silently shrunk sweep.
+# Pinned exactly so a renamed or new loader is a deliberate edit rather than a silently shrunk sweep.
 EAGER_LOADERS = frozenset(
     {
         ("scripts/training/embedding.py", "_load_sentence_transformer"),
@@ -81,17 +63,13 @@ EAGER_LOADERS = frozenset(
     }
 )
 
-# The dense TP load materializes straight into DTensors, which the cast cannot re-dtype (it skips one
-# already at the run dtype and raises on any other). No dense family pins a parameter, and a mixed load
-# there would fail FSDP2's wrap loudly.
+# The dense TP load materializes into DTensors, which the cast cannot re-dtype. No dense family pins a parameter.
 UNCAST_LOADERS = frozenset({("halo/model_loading/parallel/tp.py", "load_tp_model")})
 
-# Pipelines assembled around a backbone the parallel loader already cast and finalized.
 ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_preloaded_pipeline")})
 
-# Model builds that are no training or scoring load: the PEFT adapter load applies an adapter to the base a
-# conversion tool loaded (conversions keep the pins), and the head-transform probe builds an fp32 meta
-# shell that holds no weights.
+# The PEFT adapter load applies to a conversion tool's base, and the head-transform probe's fp32 meta shell holds no
+# weights.
 NON_TRAINING_BUILDS = frozenset(
     {
         ("halo/checkpoint/tools/adapter_merge.py", "apply_adapter"),
@@ -99,8 +77,8 @@ NON_TRAINING_BUILDS = frozenset(
     }
 )
 
-# The standalone tools' own loads, which run no training step: tests/cpu/model_loading/test_load_finalization.py
-# classifies each by what it does with the model (a forward, or only a cast and a save).
+# No training step here: tests/cpu/model_loading/test_load_finalization.py classifies each by what it does with the
+# model.
 TOOL_BUILDS = frozenset(
     {
         ("halo/checkpoint/tools/adapter_merge.py", "load_task_base_model"),
@@ -113,8 +91,7 @@ TOOL_BUILDS = frozenset(
     }
 )
 
-# Functions whose ``from_config`` builds the toolkit's own config-driven objects (the example-generation
-# callback, the reward terms), not a model.
+# ``from_config`` builds config-driven objects here, not a model.
 NON_MODEL_BUILDERS = frozenset(
     {
         ("scripts/training/grpo/offline.py", "main"),
@@ -125,14 +102,12 @@ NON_MODEL_BUILDERS = frozenset(
     }
 )
 
-# The fp32-masters loader cases. A lazy loader plans against ``from_pretrained``'s meta shell, or the
-# config-built one for a ``config_shell`` case; the PP cases load the single stage of a one-stage split.
+# A lazy loader plans against ``from_pretrained``'s meta shell or, for ``config_shell``, the config-built one; PP loads
+# the single stage of a one-stage split.
 FP32_MASTER_LOADERS = ("path_string", "ep_lazy", "ep_lazy_config_shell", "pp_stage", "pp_stage_config_shell")
 
 
 class _Mixed(nn.Module):
-    """Every parameter and buffer kind the cast must tell apart."""
-
     def __init__(self):
         super().__init__()
         self.pinned = nn.Linear(4, 4).float()
@@ -168,8 +143,7 @@ def test_the_cast_keeps_values_to_the_target_precision():
 
 
 def test_fp32_masters_keep_fp32_parameters_as_stored():
-    """Under ``fp32_non_ep_params`` the run upcasts to fp32 anyway; a bf16 round trip first would lose
-    the stored precision. Other off-dtype parameters still take the run dtype."""
+    """The run upcasts to fp32 anyway; a bf16 round trip first would lose the stored precision."""
     model = _Mixed()
     stored = model.pinned.weight.detach().clone()
 
@@ -181,7 +155,7 @@ def test_fp32_masters_keep_fp32_parameters_as_stored():
 
 
 def test_an_fp8_parameter_refuses_the_cast():
-    """A plain cast of an fp8 weight drops its block scales, and the fp8 linear then runs unscaled."""
+    """A plain cast drops the block scales, and the fp8 linear then runs unscaled."""
     model = _Mixed()
     model.pinned.weight = nn.Parameter(model.pinned.weight.detach().to(torch.float8_e4m3fn), requires_grad=False)
 
@@ -191,9 +165,7 @@ def test_an_fp8_parameter_refuses_the_cast():
 
 @pytest.mark.parametrize("run_dtype", [torch.float16, torch.float32])
 def test_a_quantized_parameter_keeps_its_float_storage(run_dtype):
-    """A QLoRA base stored as ``bnb_4bit_quant_storage: bfloat16`` holds packed 4-bit codes in a bf16
-    tensor; casting that tensor to another run dtype would rewrite the codes as if they were values.
-    Compared as bytes: a code pair can read as a bf16 NaN."""
+    """Packed 4-bit codes in a bf16 tensor; compared as bytes because a code pair can read as a bf16 NaN."""
     model = _Mixed()
     model.quantized = Linear4bit(64, 64, bias=False, quant_storage=torch.bfloat16, quant_type="nf4")
     model.quantized.weight = Params4bit(
@@ -216,8 +188,6 @@ class _TaggedParameter(nn.Parameter):
 
 
 def test_any_other_parameter_subclass_refuses_the_cast():
-    """Only bnb's 4-bit storage is known to hold packed codes; another subclass off the run dtype raises
-    rather than being cast or silently left mixed."""
     model = _Mixed()
     model.pinned.weight = _TaggedParameter(model.pinned.weight.detach())
 
@@ -226,14 +196,13 @@ def test_any_other_parameter_subclass_refuses_the_cast():
 
 
 def test_an_unresolved_dtype_name_is_refused():
-    """A name reaching the cast unresolved would otherwise leave the pins mixed in silently."""
+    """It would otherwise leave the pins mixed in silently."""
     with pytest.raises(TypeError, match="'bfloat16'"):
         cast_parameters_to_run_dtype(_Mixed(), "bfloat16")
 
 
 def test_a_sharded_parameter_refuses_the_cast():
-    """A DTensor's ``.data`` rebind keeps its local shard in the old dtype, so a cast of one off the run
-    dtype must raise."""
+    """A DTensor's ``.data`` rebind keeps its local shard in the old dtype."""
     with fake_process_group_mesh(rank=0, world_size=1) as mesh:
         model = nn.Linear(4, 4)
         model.weight = nn.Parameter(distribute_tensor(model.weight.detach(), mesh, [Shard(0)], src_data_rank=None))
@@ -253,7 +222,6 @@ def test_a_request_that_is_not_a_dtype_leaves_the_model_as_loaded(dtype):
 
 
 def _tiny_checkpoints(tmp_path_factory, name: str, families, *, fp32_pins: bool = False) -> dict[str, str]:
-    """``families``' tiny checkpoints under a fresh ``name`` directory, keyed by family."""
     root = tmp_path_factory.mktemp(name)
     checkpoints = {family: str(root / family) for family in families}
     for family, path in checkpoints.items():
@@ -273,7 +241,7 @@ def pinned_checkpoints(roster_checkpoints) -> dict[str, str]:
 
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_a_bf16_from_pretrained_keeps_the_family_pins(pinned_checkpoints, family):
-    """The premise the loader tests rest on: without the cast, these checkpoints load mixed."""
+    """The premise: without the cast, these checkpoints load mixed."""
     model = TINY_MOE_FAMILIES[family].load_class.from_pretrained(pinned_checkpoints[family], dtype=torch.bfloat16)
 
     assert params_off_dtype(model, torch.bfloat16)
@@ -290,8 +258,7 @@ def test_the_frozen_loader_scores_in_the_run_dtype(pinned_checkpoints, family):
 
 @pytest.mark.parametrize("model_init_kwargs", [{"dtype": "bfloat16"}, {"dtype": "auto"}, {}], ids=repr)
 def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_init_kwargs):
-    """An explicit dtype is the target; an unset or "auto" one loads at the checkpoint's own (bf16) dtype
-    and the pins are unified to it."""
+    """Unset or "auto" loads at the checkpoint's own (bf16) dtype and the pins are unified to it."""
     args = types.SimpleNamespace(model_init_kwargs=dict(model_init_kwargs), gradient_checkpointing=False)
 
     model = resolve_trainer_model(pinned_checkpoints["deepseek_v4"], args, parallelism_config=None)
@@ -303,9 +270,8 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
 def test_the_path_string_loader_warms_its_kernels_last_at_the_run_dtype(
     pinned_checkpoints, model_init_kwargs, monkeypatch
 ):
-    """Every rank runs this load, so it ends in the fenced attention warm-up as the other loaders do: after the
-    buffer repair, at the dtype the parameters were cast to, not at one rank's first forward while its peers wait
-    in a collective."""
+    """After the buffer repair, at the cast dtype, rather than at one rank's first forward while its peers wait in a
+    collective."""
     order = []
     monkeypatch.setattr(
         whole_model,
@@ -324,9 +290,7 @@ def test_the_path_string_loader_warms_its_kernels_last_at_the_run_dtype(
 
 @pytest.mark.parametrize("ep_wrapped", [True, False])
 def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpoints, ep_wrapped):
-    """``fp32_non_ep_params`` upcasts non-EP parameters alone, so a parameter inside a block that gets EP
-    layers trains at the run dtype even when it loaded fp32; without them it is upcast too, and
-    keeps its stored value like the pins."""
+    """``fp32_non_ep_params`` upcasts non-EP parameters alone, so a block getting EP layers trains at the run dtype."""
     model = TINY_MOE_FAMILIES["inkling_text"].load_class.from_pretrained(
         pinned_checkpoints["inkling_text"], dtype=torch.bfloat16
     )
@@ -344,8 +308,8 @@ def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpo
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
 def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, family):
-    """Holds ``PINNED_FP32_FAMILIES`` to the roster: a family whose class starts pinning parameters, or
-    stops, fails here. None pins one inside a MoE block, the premise of the EP loaders' block cast."""
+    """A family that starts or stops pinning fails here. None pins inside a MoE block, the premise of the EP
+    loaders' block cast."""
     tiny = TINY_MOE_FAMILIES[family]
     model = tiny.load_class.from_pretrained(
         roster_checkpoints[family], dtype=torch.bfloat16, trust_remote_code=tiny.trust_remote_code
@@ -359,7 +323,7 @@ def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, fa
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
 def test_a_config_built_shell_selects_the_same_masters_as_pretrained(roster_checkpoints, family):
-    """Master ownership depends on the family tree and configured flags, not the meta shell dtype."""
+    """Ownership depends on the family tree and flags, not the meta shell's dtype."""
     tiny = TINY_MOE_FAMILIES[family]
     path = roster_checkpoints[family]
     config = AutoConfig.from_pretrained(path, trust_remote_code=tiny.trust_remote_code)
@@ -383,7 +347,7 @@ def test_a_config_built_shell_selects_the_same_masters_as_pretrained(roster_chec
 
 @pytest.fixture(scope="module")
 def stored_fp32_checkpoints(tmp_path_factory) -> dict[str, str]:
-    """The pinned families saved as a release stores them: the pins at full fp32, the rest bf16."""
+    """As a release stores them: the pins at full fp32, the rest bf16."""
     return _tiny_checkpoints(tmp_path_factory, "stored_fp32", PINNED_FP32_FAMILIES, fp32_pins=True)
 
 
@@ -394,11 +358,7 @@ def _config_built_shell(*args, **kwargs):
 def _load_with(
     loader: str, family: str, path: str, keep_fp32: bool, monkeypatch, *, pp_rank: int = 0, pp_size: int = 1
 ) -> nn.Module:
-    """``family`` loaded at bf16 through ``loader``, with ``fp32_non_ep_params`` as ``keep_fp32``.
-
-    The lazy loaders run with EP patching stubbed (it needs DeepEP and process groups) under an ep1
-    config, the PP loader as stage ``pp_rank`` of ``pp_size``.
-    """
+    """EP patching is stubbed because it needs DeepEP and process groups."""
     tiny = TINY_MOE_FAMILIES[family]
     if loader == "path_string":
         args = types.SimpleNamespace(model_init_kwargs={"dtype": torch.bfloat16}, gradient_checkpointing=False)
@@ -427,9 +387,7 @@ def _load_with(
 
 
 def _outside_moe_blocks(model: nn.Module, *, aliases: bool = False) -> frozenset[str]:
-    """Every parameter name outside the family's MoE blocks, read off the blocks' module paths: the
-    masters ``fp32_non_ep_params`` configures when no router or expert master is (:func:`_load_with`'s
-    ep1 config). ``aliases`` lists a tied parameter under each of its names."""
+    """What ``fp32_non_ep_params`` configures when no router or expert master is."""
     blocks = tuple(f"{path}." for path, _block in ep_claimed_blocks(model))
     assert blocks, "the premise is a MoE family whose blocks EP claims"
     return frozenset(
@@ -440,7 +398,6 @@ def _outside_moe_blocks(model: nn.Module, *, aliases: bool = False) -> frozenset
 def _assert_keeps_exactly(
     model: nn.Module, pinned: dict[str, str], stored: dict, keep_fp32: bool, *, masters: frozenset[str] | None = None
 ) -> None:
-    """``pinned`` maps each pin's name in ``model`` to its checkpoint name."""
     fp32 = {name for name, param in model.named_parameters() if param.dtype == torch.float32}
     assert set(params_off_dtype(model, torch.bfloat16)) == fp32
     expected_fp32 = set(pinned) if masters is None else set(masters) & set(dict(model.named_parameters()))
@@ -451,9 +408,8 @@ def _assert_keeps_exactly(
 
 @pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
 def test_every_loader_keeps_a_pinned_buffer_fp32(roster_checkpoints, loader, monkeypatch):
-    """GLM-5 Next pins its router's ``e_score_correction_bias`` buffer. The tiny checkpoint stores it
-    bf16 and ``from_pretrained`` loads it fp32, so every training loader must too: the lazy ones read a
-    buffer at its stored dtype unless it is pinned."""
+    """The tiny checkpoint stores it bf16 and ``from_pretrained`` loads it fp32; the lazy loaders read a buffer at
+    its stored dtype unless pinned."""
     stored = {
         name: tensor.dtype
         for name, tensor in safetensors_state_dict(roster_checkpoints["glm5_next"]).items()
@@ -470,7 +426,6 @@ def test_every_loader_keeps_a_pinned_buffer_fp32(roster_checkpoints, loader, mon
 @pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, family, loader, keep_fp32, monkeypatch):
-    """Stored pins remain exact within the configured master set; flags, not shell dtype, select it."""
     path = stored_fp32_checkpoints[family]
     pinned, stored = stored_fp32_pins(family, path)
 
@@ -482,10 +437,8 @@ def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, fami
 
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
 def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoints, keep_fp32, monkeypatch):
-    """The second of two stages re-bases its layers to 0, so its masters must be taken in the stage's
-    numbering, after the slice. DeepSeek-V4's layer types pin different parameters (only a compressed
-    layer pins its compressor's norm), so a keep set in the checkpoint's numbering names other layers'
-    parameters (the premise, checked below)."""
+    """A later stage re-bases to 0, so masters follow the stage's numbering; DeepSeek-V4's layer types pin different
+    parameters."""
     path = stored_fp32_checkpoints["deepseek_v4"]
     pinned, stored = stored_fp32_pins("deepseek_v4", path)
 
@@ -501,8 +454,7 @@ def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoin
 
 @pytest.mark.parametrize("ep_wrapped", [True, False])
 def test_the_lazy_keep_set_leaves_out_ep_wrapped_blocks(pinned_checkpoints, ep_wrapped):
-    """The lazy loaders' twin of :func:`cast_loaded_parameters`: a parameter inside a block EP wraps
-    trains at the run dtype, so only an unwrapped load keeps it fp32."""
+    """A parameter inside a block EP wraps trains at the run dtype."""
     tiny = TINY_MOE_FAMILIES["inkling_text"]
     checkpoint = pinned_checkpoints["inkling_text"]
     shell = instantiate_on_meta(
@@ -586,8 +538,6 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
 
 @functools.cache
 def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
-    """(file, function) -> the names it calls, for every function under :data:`SWEPT_ROOTS` that builds a
-    model."""
     return {
         loader: calls
         for loader, calls in functions_calling(SWEPT_ROOTS, builds_a_model).items()

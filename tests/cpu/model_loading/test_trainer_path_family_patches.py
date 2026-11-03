@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""A model a trainer is handed as a path string, and a frozen reference or teacher, builds on the config the family
-patches were applied to, whether or not a backend is pinned.
-
-``resolve_trainer_model`` builds the model a trainer constructor was given as a path (SMPO, offline GRPO, a
-teacher-distillation student); ``load_frozen_auxiliary_model`` builds every frozen reference and teacher. Zaya's
-patches are process-wide and key on the family alone: the router's load recording, which its native
-``balancing_biases`` buffer needs, and the gradient-checkpointing refusal (backward recompute through the CCA convs
-faults in cuDNN); they are checked in a fresh interpreter, since an earlier test in this process may already have
-installed them. Qwen3.8-Flash-Next's patches also stamp the config, and only a build handed that config holds its
-n-gram table as a frozen host table instead of a trainable embedding. A build handed a config passes every keyword
-it does not read to the model's ``__init__``, so ``model_init_kwargs`` entries that name config fields go onto the
-config first.
-
-    python tests/cpu/model_loading/test_trainer_path_family_patches.py
-"""
+"""A model handed to a trainer as a path string, and a frozen reference or teacher, builds on the config the family
+patches stamped. Zaya's patches are checked in a fresh interpreter."""
 
 import inspect
 import json
@@ -68,7 +55,7 @@ def flash_next_checkpoint(tmp_path_factory) -> str:
 
 
 def _assert_host_table(model: PreTrainedModel) -> None:
-    """``model`` holds its n-gram table as the attached host table, with no n-gram parameter to train."""
+    """No n-gram parameter to train."""
     table = model.get_submodule(NGRAM_TABLE_PATH)
     assert isinstance(table, HostNGramTable), type(table).__name__
     assert table.is_attached
@@ -96,16 +83,14 @@ def test_a_trainer_path_zaya_load_installs_the_family_patches(zaya_checkpoint, m
 
 @pytest.mark.parametrize("model_init_kwargs", [{}, {"attn_implementation": "sdpa"}], ids=_PINNED_IDS)
 def test_a_trainer_path_flash_next_load_builds_its_host_table(flash_next_checkpoint, model_init_kwargs):
-    """The trainer path builds on the stamped config, so the table is the host one, attached from the checkpoint
-    every rank agreed on, and not a trainable embedding the size of the release's 95 GiB table."""
+    """Otherwise a trainable embedding the size of the release's 95 GiB table."""
     args = types.SimpleNamespace(model_init_kwargs=dict(model_init_kwargs), gradient_checkpointing=False)
     _assert_host_table(whole_model.resolve_trainer_model(flash_next_checkpoint, args, parallelism_config=None))
 
 
 @pytest.mark.parametrize("download_tag", [None, "reference_model"], ids=["single_process", "agreed_source"])
 def test_a_frozen_flash_next_load_builds_its_host_table(flash_next_checkpoint, download_tag):
-    """A frozen reference or teacher builds on its own stamped config too, and attaches the table from the directory
-    it read the weights from."""
+    """It attaches the table from the directory it read the weights from."""
     model = load_frozen_auxiliary_model(
         flash_next_checkpoint,
         dtype=torch.float32,
@@ -117,9 +102,7 @@ def test_a_frozen_flash_next_load_builds_its_host_table(flash_next_checkpoint, d
 
 
 def test_model_init_kwargs_that_name_config_fields_reach_the_built_config(flash_next_checkpoint):
-    """Entries naming a config field go onto the config the build receives, as ``from_pretrained`` applies them to a
-    config it reads itself; handed to the build beside the config they would reach the model's ``__init__``, which
-    takes no such keyword."""
+    """Beside the config they would reach the model's ``__init__``, which takes no such keyword."""
     args = types.SimpleNamespace(
         model_init_kwargs={"use_cache": False, "dtype": "float32", "attn_implementation": "sdpa"},
         gradient_checkpointing=False,
@@ -131,9 +114,7 @@ def test_model_init_kwargs_that_name_config_fields_reach_the_built_config(flash_
 
 
 def test_the_load_arguments_kept_off_the_config_are_those_from_pretrained_reads_before_its_config():
-    """``from_pretrained`` takes its own arguments out of its keywords before the config reads the rest, so the
-    split keeps every one of them that also names a config field (on a config carrying every optional one) off the
-    config: the dtype the load casts to and the quantization it applies."""
+    """``from_pretrained`` takes its own arguments out before the config reads the rest."""
     source = inspect.getsource(PreTrainedModel.from_pretrained)
     arguments = set(inspect.signature(PreTrainedModel.from_pretrained).parameters) | set(
         re.findall(r'kwargs\.pop\("(\w+)"', source)
@@ -144,8 +125,7 @@ def test_the_load_arguments_kept_off_the_config_are_those_from_pretrained_reads_
 
 
 def test_the_embedding_path_refuses_a_backbone_with_external_tables(flash_next_checkpoint, tmp_path):
-    """sentence-transformers reads the backbone's config itself, so the stamp the family patches set never reaches
-    its build: the load refuses before it, rather than train the table as an embedding on every rank."""
+    """sentence-transformers reads the backbone's config itself, so the stamp never reaches its build."""
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(
             has_ep_group=False, is_tp_mode=False, needs_ep_layers=False, max_concurrent_loading=None

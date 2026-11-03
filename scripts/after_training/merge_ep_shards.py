@@ -1,28 +1,11 @@
 #!/usr/bin/env python
-"""Merge an EP-sharded checkpoint into one ``from_pretrained``-loadable HuggingFace checkpoint.
+"""Merge an EP-sharded checkpoint (``save_sharded_ep: true``) into one ``from_pretrained``-loadable checkpoint.
 
-Required for sharded EP saves (``save_sharded_ep: true``): each rank writes its own expert slices
-under ``.shard_N`` suffixes for fast parallel I/O, a layout no loader reads (the EP loader refuses it
-with these merge instructions). The merge writes each family's ``ExpertLayout`` through the same
-``to_hub_expert_tensors`` the gathered save applies, so merged-from-sharded equals gathered.
-A gathered save (``save_sharded_ep: false``) needs no merge; it is slower to write but directly
-loadable. The merge carries the save's resume state, optimizer shards included, so the merged directory
-resumes exactly on the topology that wrote it; the per-rank files are hard-linked when the output is on
-the input's filesystem, and a later training save into either directory replaces them there rather than
-writing through the link.
-
-The merge is streamed: input shards are opened once and read group by group (one MoE layer's
-experts, or one replicated tensor, at a time), each merged group is transformed and handed straight
-to an incremental shard writer. Peak host RAM is one merged layer plus the output shard being filled
-and one per write thread rather than the whole model, so a 397B artifact merges on an ordinary host.
-
-Output is HuggingFace-style sharded safetensors (``model-0000N-of-000XX.safetensors`` +
-``model.safetensors.index.json``); ``--max_shard_size`` sets the per-file cap.
-
-Usage:
-    python scripts/after_training/merge_ep_shards.py \\
-        --input_dir /path/to/ep_checkpoint --output_dir /path/to/merged_checkpoint
-"""
+Writes each family's ``ExpertLayout`` through the ``to_hub_expert_tensors`` the gathered save applies, so
+merged-from-sharded equals gathered. Resume state carries over, so the merged directory resumes exactly on the topology
+that wrote it; per-rank files are hard-linked on one filesystem, and a later save replaces them rather than writing
+through the link. Streamed group by group: peak host RAM is one merged layer plus the output shards being filled, so a
+397B artifact merges on an ordinary host."""
 
 import argparse
 

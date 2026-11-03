@@ -1,23 +1,9 @@
 #!/usr/bin/env python
-"""
-Convergence / loss-tracking comparison: stock TRL vs Halo (EP / dense).
+"""Stock TRL vs Halo loss curves on one model, seeded data, LR and global batch, showing the optimizations preserve
+training dynamics.
 
-Trains the same model (gpt-oss-20b) on the same seeded synthetic data, same LR,
-same global batch (DP=8), for a longer run, and dumps the per-step loss curve so
-Halo's optimizations (Expert Parallelism, grouped GEMM, AdamWBF16 with stochastic
-rounding) can be shown to preserve training dynamics — not just speed/memory.
-
-  --ep 0   -> stock trl.SFTTrainer + transformers FSDP + fp32-AdamW  (baseline)
-  --ep 1   -> Halo DistributedSFTTrainer, dense FSDP2 (+ AdamWBF16, grouped GEMM)
-  --ep N>1 -> Halo with Expert Parallelism size N
-
-Loss curve is printed as parseable `CONV_LOSS step=<i> loss=<x> lr=<y>` lines
-(rank 0), plus the EfficiencyCallback headline. Same seed (42) + DistributedSampler
-=> identical data order across frameworks, so curves are directly comparable.
-
-Usage (8x B300):
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_convergence.py --ep 0 --seq 2048 --batch_size 2 --steps 200
+``--ep 0`` is stock TRL, ``--ep 1`` Halo dense FSDP2, ``--ep N>1`` Halo EP. Rank 0 prints `CONV_LOSS step=<i> loss=<x>
+lr=<y>` lines.
 """
 
 import sys
@@ -103,8 +89,7 @@ def main() -> int:
             "dataloader_num_workers": 0,
             "include_num_input_tokens_seen": True,
         }
-        # One config for both arms — the stock-TRL arm distributes nothing (args.ep == 0 => ep_size
-        # 1), the Halo arm distributes experts — because the callback needs it in both.
+        # The callback needs a config in both arms; the stock-TRL arm distributes nothing (args.ep == 0 => ep_size 1).
         parallelism_config = ParallelismConfig(ep_size=max(args.ep, 1), use_grouped_gemm=True)
         efficiency_cb = EfficiencyCallback(
             parallelism_config,

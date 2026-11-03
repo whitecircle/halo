@@ -1,8 +1,5 @@
-"""The model's EP layers and the per-run facts read off them: parameter-id sets and EP gradient checkpointing.
-
-EP layers and their parameters are identified by module membership, never by name, so shared experts
-and dense MLPs are not misclassified.
-"""
+"""The model's EP layers and the per-run facts read off them. Layers and parameters are identified by module
+membership, never by name, so shared experts and dense MLPs are not misclassified."""
 
 from __future__ import annotations
 
@@ -19,22 +16,16 @@ logger = logging.getLogger(__name__)
 
 
 def uses_reentrant_checkpointing(parallelism_config, model_config) -> bool:
-    """Whether gradient checkpointing has to run reentrant for this run.
-
-    CP's sequence all-to-alls do not survive non-reentrant recompute, and EP's DeepEP barriers desync
-    ranks under its lazy recompute. A MoE routes in its recompute too: a near-tie pick on the recomputed
-    hidden state can flip and change the routing tensors' shapes, which non-reentrant checkpointing
-    rejects. Pipeline parallelism is the exception: reentrant runs the original forward in no_grad, so
-    FSDP2 registers no pre-backward hooks there.
-    """
+    """CP's all-to-alls do not survive non-reentrant recompute, EP's DeepEP barriers desync under it, and a MoE's
+    near-tie pick can flip and change routing shapes, which it rejects. PP is the exception: reentrant runs the forward
+    in no_grad, so FSDP2 registers no pre-backward hooks."""
     if parallelism_config.is_pp_mode:
         return False
     return parallelism_config.has_ep_group or parallelism_config.is_cp_mode or has_routed_experts(model_config)
 
 
 def resolve_use_reentrant(parallelism_config, model_config, configured: bool | None) -> bool | None:
-    """``True`` where :func:`uses_reentrant_checkpointing` requires it, warning when that overrides a
-    configured ``False``; else ``configured``."""
+    """``True`` where :func:`uses_reentrant_checkpointing` requires it, warning when that overrides ``False``."""
     if not uses_reentrant_checkpointing(parallelism_config, model_config):
         return configured
     if configured is False and is_global_main_process():
@@ -49,8 +40,8 @@ def resolve_use_reentrant(parallelism_config, model_config, configured: bool | N
 
 
 def require_ep_config(ep_config):
-    """``ep_config`` itself, or a raise on a path that only runs with EP layers present: without it every
-    process group read off it would come back ``None``, turning each collective into a silent no-op."""
+    """Raise on a path that only runs with EP layers present: without ``ep_config`` every process group would come back
+    ``None``, turning each collective into a silent no-op."""
     if ep_config is None:
         raise RuntimeError(
             "EP state is required on this path but no EPConfig was captured: _configure_distributed_modes "
@@ -60,19 +51,13 @@ def require_ep_config(ep_config):
 
 
 class EPLayersMixin:
-    """The model's EP layers, their parameter-id sets and EP gradient checkpointing."""
-
     # ``id(param)`` sets by name. FSDP2 replaces the Parameter objects it manages, so a set taken before
     # the wrap names dead objects: the wrap clears them all.
     _param_id_caches: dict[str, set[int]]
 
     def _ep_layers(self) -> list[EPMoELayerBase]:
-        """Every EP-patched layer of the model, in ``named_modules`` order.
-
-        Memoized per model object, since it is read every logging step and save. Module objects survive
-        the FSDP2 wrap (``fully_shard`` swaps their class in place), so unlike the id sets it needs no
-        clearing.
-        """
+        """Memoized per model object, since it is read every logging step and save. Module objects survive the FSDP2
+        wrap (``fully_shard`` swaps their class in place), so unlike the id sets it needs no clearing."""
         model, layers = getattr(self, "_ep_layers_of", (None, None))
         if model is not self.model:
             layers = [layer for _name, layer in named_ep_layers(self.model)]
@@ -80,7 +65,6 @@ class EPLayersMixin:
         return layers
 
     def _memoized_param_ids(self, key: str, build: Callable[[], set[int]]) -> set[int]:
-        """``build()``, memoized in ``_param_id_caches`` under ``key`` until the wrap clears it."""
         if key not in self._param_id_caches:
             self._param_id_caches[key] = build()
         return self._param_id_caches[key]
@@ -92,12 +76,8 @@ class EPLayersMixin:
         )
 
     def _get_sharded_expert_param_ids(self) -> set[int]:
-        """Ids of the EP/ETP-distributed expert weights only (each layer's ``expert_named_params()``), whose
-        shard norms the grad-norm expert bucket sums; a replicated parameter would be over-counted there.
-
-        ep1 FSDP-managed experts are left out: they are DTensors normed over their FSDP shard group, and
-        the expert bucket's legs reduce nothing at ep1, so only the local shard would count.
-        """
+        """Expert-bucket membership; a replicated parameter would be over-counted there. ep1 FSDP-managed experts are
+        left out: they are normed over their FSDP shard group, and the expert legs reduce nothing at ep1."""
         return self._memoized_param_ids(
             "sharded_experts",
             lambda: {
@@ -110,8 +90,8 @@ class EPLayersMixin:
         )
 
     def _install_ep_gradient_checkpointing(self) -> None:
-        """EP-safe gradient checkpointing, enabled here rather than by HF: EP's recompute must replay the
-        checkpoint frame's dispatch/combine results rather than issue a second DeepEP cycle."""
+        """Enabled here rather than by HF: EP's recompute must replay the checkpoint frame's dispatch/combine results
+        rather than issue a second DeepEP cycle."""
         ep_layers = self._ep_layers()
         if not ep_layers:
             return
@@ -131,7 +111,6 @@ class EPLayersMixin:
             return
         reject_ep_gradient_checkpointing(ep_layers)
         gc_kwargs = self.args.gradient_checkpointing_kwargs or {}
-        # The config the constructor resolved use_reentrant from, read off the same top-level model.
         model_config = getattr(self._top_level_model(), "config", None)
         use_reentrant = resolve_use_reentrant(config, model_config, gc_kwargs.get("use_reentrant"))
         # Explicit where nothing forces reentrancy too: the PP stage's checkpoint takes the value as given.

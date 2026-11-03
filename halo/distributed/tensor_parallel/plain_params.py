@@ -1,9 +1,6 @@
-"""The two registries of plain (non-DTensor) parameters TP leaves partial on each rank, stamped on the model.
-
-Hand-sliced parameters (GptOss sinks) hold this rank's slice along a recorded dim; every consumer shipping the
-model elsewhere must all-gather them. Per-head norm parameters are replicas whose gradient covers this rank's
-heads only; the trainer SUMs them over the TP group once per optimizer step.
-"""
+"""The two registries of plain (non-DTensor) parameters TP leaves partial on each rank. Hand-sliced ones (GptOss sinks)
+hold this rank's slice, so every consumer shipping the model must all-gather them. Per-head norm ones are replicas
+whose gradient covers this rank's heads, so the trainer SUMs them over the TP group once per optimizer step."""
 
 from __future__ import annotations
 
@@ -37,7 +34,6 @@ def hand_sliced_dims(model: nn.Module) -> dict[str, int]:
 
 
 def hand_sliced_suffixes(model: nn.Module) -> tuple[str, ...]:
-    """The hand-sliced parameter suffixes, for consumers that exclude or special-case those params by name."""
     return tuple(hand_sliced_dims(model))
 
 
@@ -53,8 +49,7 @@ def iter_hand_sliced_full(model: nn.Module) -> Iterator[tuple[str, torch.Tensor]
     if tp_size <= 1:
         return
 
-    # Over the TP group rather than world: on EP+TP a world gather would concatenate other groups'
-    # head-shards.
+    # Over the TP group: on EP+TP a world gather would concatenate other groups' head-shards.
     tp_group = tp_mesh.get_group()
 
     for name, param in model.named_parameters():
@@ -85,5 +80,4 @@ def register_per_head_norm_params(model: nn.Module, modules: list[nn.Module]) ->
 
 
 def per_head_norm_param_names(model: nn.Module) -> tuple[str, ...]:
-    """The registered per-head norm parameter names, sorted."""
     return tuple(getattr(model, _PER_HEAD_NORM_PARAMS_ATTR, None) or ())

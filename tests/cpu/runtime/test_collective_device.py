@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""A hand-built collective tensor belongs on the BACKEND's device, not on this rank's compute device.
-
-``current_device()`` answers ``cuda:N`` whenever CUDA exists, which is right for model and metric
-tensors and wrong for a collective on a **gloo** group: gloo moves host memory, so a CUDA tensor is a
-staging copy at best and unsupported for the op at worst — and every CPU-test world on a GPU box is
-exactly that shape. ``collective_device()`` is the seam the collectives use instead.
-
-    python tests/cpu/runtime/test_collective_device.py
-"""
+"""A hand-built collective tensor belongs on the backend's device: gloo moves host memory, so a CUDA tensor is a
+staging copy at best."""
 
 import contextlib
 from unittest.mock import patch
@@ -24,7 +17,6 @@ _MOD = "halo.runtime.collectives"
 
 @contextlib.contextmanager
 def _world(backend: str):
-    """A live 2-rank group on ``backend``, as far as the helpers can tell."""
     with (
         patch(f"{_MOD}.dist.is_available", return_value=True),
         patch(f"{_MOD}.dist.is_initialized", return_value=True),
@@ -41,19 +33,18 @@ def test_a_gloo_group_collects_on_cpu():
 
 
 def test_an_nccl_group_collects_on_the_cuda_device_when_there_is_one():
-    """Anti-over-correction: the NCCL path must keep its device-side tensor."""
+    """The NCCL path keeps its device-side tensor."""
     with _world("nccl"):
         assert collective_device().type == ("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def test_no_group_at_all_collects_on_cpu():
-    """Nothing initialized: there is no backend to ask, and no collective to run."""
     with patch(f"{_MOD}.dist.is_initialized", return_value=False):
         assert collective_device().type == "cpu"
 
 
 def test_a_gloo_subgroup_under_an_nccl_world_collects_on_cpu():
-    """The device follows the group the collective runs on, not the default group."""
+    """The device follows the group the collective runs on."""
     gloo_subgroup = object()
     with (
         _world("nccl"),
@@ -84,7 +75,6 @@ def test_a_group_agreement_places_its_tensor_for_that_group():
 
 
 def test_the_collective_call_sites_place_their_tensors_there():
-    """The seam is worth nothing if a call site still builds its tensor on the compute device."""
     devices: list[torch.device] = []
 
     with (

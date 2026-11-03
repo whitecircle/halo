@@ -1,5 +1,5 @@
-"""The trainer spine every distributed trainer composes before its TRL/HF base: construction, the parallel-mode
-setup and the HF overrides; each concern lives in a sibling module the class composes."""
+"""The trainer spine every distributed trainer composes before its TRL/HF base; each concern lives in a sibling
+module."""
 
 import logging
 from typing import Any, ClassVar, Literal
@@ -89,17 +89,13 @@ from halo.trainers.training_args_overrides import align_save_on_each_node, disab
 
 logger = logging.getLogger(__name__)
 
-# Where TRL keeps its fused Liger loss: the preference trainers (DPO/KTO) and GRPO.
 _TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss")
 
-# Peak-allocated fraction of device memory above which the post-first-step margin warning fires: a rank this
-# close to full after the first optimizer step OOMs on a later backward.
+# Peak-allocated device fraction: a rank this close to full after the first optimizer step OOMs on a later backward.
 MEMORY_MARGIN_WARN_RATIO = 0.92
 
 
 def thin_memory_margin_message(peak_bytes: int, total_bytes: int, rank: int) -> str | None:
-    """Warning text when ``peak_bytes`` leaves less than ``1 - MEMORY_MARGIN_WARN_RATIO`` of the device free,
-    else ``None``."""
     if total_bytes <= 0 or peak_bytes < MEMORY_MARGIN_WARN_RATIO * total_bytes:
         return None
     gib = 1024**3
@@ -114,9 +110,8 @@ def thin_memory_margin_message(peak_bytes: int, total_bytes: int, rank: int) -> 
 
 
 def verify_no_meta_tensors(model: nn.Module) -> None:
-    """Raise on parameters or buffers still on the meta device at placement: no loader leaves one, so it holds
-    no values, and allocating it would train or score uninitialized memory that differs per rank (a zero
-    ``inv_freq`` degenerates RoPE to NoPE at a plausible loss)."""
+    """Raise on parameters or buffers still on meta at placement: allocating one would train or score uninitialized
+    memory that differs per rank (a zero ``inv_freq`` degenerates RoPE to NoPE at a plausible loss)."""
     meta_buffer_names = []
     meta_param_names = []
     for name, module in model.named_modules():
@@ -148,7 +143,6 @@ def verify_no_meta_tensors(model: nn.Module) -> None:
 
 
 def _parallelism_log_fields(config, ep_config, has_ep_layers: bool) -> dict[str, float]:
-    """The ``parallelism/*`` fields every log line carries after the first step."""
     fields = {"parallelism/dp_size": config.data_parallel_size}
     if config.has_ep_group and config.is_tp_mode:
         fields["parallelism/ep_tp_mode"] = 1.0
@@ -209,7 +203,6 @@ class DistributedTrainerMixin(
 
     @classmethod
     def reject_undeclared_axes(cls, *, cp_size: int, pp_size: int) -> None:
-        """Refuse a CP or PP size this trainer has not declared; the config builder runs it before any model loads."""
         if cp_size > 1 and not cls.SUPPORTS_CP:
             raise ValueError(
                 f"{cls.__name__} does not support Context Parallelism (CP). Use Expert Parallelism (EP) and/or "
@@ -229,10 +222,9 @@ class DistributedTrainerMixin(
         ctor_positions: dict[str, int] | None = None,
         **explicit,
     ) -> dict:
-        """COLLECTIVE: pop the distributed kwargs, take over the TrainingArguments fields the toolkit owns and run
-        the construction refusals before ``super().__init__()``; returns the remaining kwargs. ``**explicit``
-        carries the params a signature names (kwargs win); a ``(*args, **kwargs)`` trainer passes its positionals
-        as ``ctor_args`` with ``ctor_positions``, the slot table of the base it forwards them to."""
+        """COLLECTIVE. Pop the distributed kwargs, take over the TrainingArguments fields the toolkit owns and run the
+        construction refusals; returns the remaining kwargs. A ``(*args, **kwargs)`` trainer passes its positionals as
+        ``ctor_args`` with its base's ``ctor_positions``."""
         if explicit:
             kwargs = {**explicit, **kwargs}
         parallelism_config = kwargs.pop("parallelism_config", None)
@@ -254,7 +246,6 @@ class DistributedTrainerMixin(
         self._moe_balancing = kwargs.pop("moe_balancing", "auto")
         # Datasets pre-sharded per DP rank: re-sharding in the DataLoader drops ~(N-1)/N of each slice.
         self._dataset_presharded = kwargs.pop("dataset_presharded", False)
-        # The eval-loader cache every trainer's eval path shares, holding the prepared loader as the base Trainer does.
         self._eval_dataloaders: dict[str, Any] = {}
 
         model, ctor_training_args = get_ctor_model_and_config(ctor_args, kwargs, ctor_positions)
@@ -292,16 +283,15 @@ class DistributedTrainerMixin(
         return self._split_pipeline_stage(kwargs, training_args, ctor_args)
 
     def _snapshot_model_config_state(self, model_config) -> None:
-        """Snapshot the config fields TRL's constructor writes: the special-token ids every save restores (HF's
-        ``align_special_tokens`` also collapses a list-valued ``eos_token_id`` at train()), and the router
-        aux-loss fields restored once TRL's construction is done."""
+        """Snapshot what TRL's constructor writes: the special-token ids every save restores (HF's
+        ``align_special_tokens`` also collapses a list-valued ``eos_token_id`` at train()) and the router aux-loss
+        fields."""
         self._pristine_special_token_ids = (
             snapshot_config_fields(model_config, SPECIAL_TOKEN_ID_FIELDS) if model_config else []
         )
         self._router_aux_fields = snapshot_config_fields(model_config, ROUTER_AUX_FIELDS) if model_config else []
 
     def _apply_training_args_overrides(self, training_args, model) -> None:
-        """Take over the TrainingArguments fields the toolkit owns, before TRL's constructor reads them."""
         config = self.parallelism_config
         model_config = getattr(model, "config", None)
         if training_args is None:
@@ -320,8 +310,7 @@ class DistributedTrainerMixin(
         training_args.fsdp = ""
         if config.has_ep_group:
             training_args.ddp_find_unused_parameters = True
-        # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering and
-        # running upstream's applier alone.
+        # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering.
         if getattr(training_args, "use_liger_kernel", False):
             safe_config = dict(getattr(training_args, "liger_kernel_config", None) or {})
             safe_config.setdefault("fused_linear_cross_entropy", False)
@@ -347,7 +336,7 @@ class DistributedTrainerMixin(
                 training_args.gradient_checkpointing_kwargs = {**gc_kwargs, "use_reentrant": use_reentrant}
 
     def _configure_distributed_modes(self) -> None:
-        """COLLECTIVE: wrap the model for its parallel mode and run the post-wrap gates and installs; call after
+        """COLLECTIVE. Wrap the model for its parallel mode and run the post-wrap gates; call after
         ``super().__init__()``."""
         config = self.parallelism_config
         self._restore_trl_overrides()
@@ -403,10 +392,8 @@ class DistributedTrainerMixin(
         barrier()
 
     def _restore_trl_overrides(self) -> None:
-        """Take back what TRL's constructor changed: the router aux-loss config fields, the deferred Liger flag,
-        HF's inferred loss-kwargs scaling where the loss is its own mean and the TP width TRL's token counter
-        divides by; snapshot the config of a model passed by id, which TRL only now loaded."""
-        # Declared-only, so a trainer that has not adopted the attribute keeps whatever HF inferred.
+        """Take back what TRL's constructor changed: the router aux-loss fields, the deferred Liger flag, HF's inferred
+        loss-kwargs scaling and the TP width TRL's token counter divides by."""
         if self.LOSS_IS_OWN_MEAN:
             self.model_accepts_loss_kwargs = False
         # TRL reads the ranks sharing a batch off accelerate's parallelism config, which the toolkit's accelerator
@@ -421,9 +408,8 @@ class DistributedTrainerMixin(
             self._snapshot_model_config_state(getattr(getattr(self, "model", None), "config", None))
 
     def _disable_inert_router_logits(self) -> None:
-        """Refuse, or turn off, MoE balancing that rides an aux loss this trainer's loss never adds
-        (``ROUTER_AUX_LOSS_ADDED_BY`` is None): under ``auto`` the router logits go back off for the run; set
-        outside the balancing strategy, they stay on with a warning."""
+        """Refuse, or turn off, MoE balancing that rides an aux loss this trainer never adds. Under ``auto`` the router
+        logits go back off; set outside the balancing strategy, they stay on with a warning."""
         if self.ROUTER_AUX_LOSS_ADDED_BY is not None:
             return
         model = self._top_level_model()
@@ -455,8 +441,8 @@ class DistributedTrainerMixin(
             )
 
     def _warn_on_zeroed_lora_dropout(self) -> None:
-        """Warn when the configured ``lora_dropout`` was zeroed: TRL's ``disable_dropout`` (on by default for the
-        preference, reward and offline-GRPO trainers) runs after the adapter wrap and zeroes PEFT's dropout too."""
+        """Warn when ``lora_dropout`` was zeroed: TRL's ``disable_dropout`` runs after the adapter wrap and zeroes
+        PEFT's dropout too."""
         peft_model = find_peft_model(self.model)
         spec = self.parallelism_config.expert_lora
         configured = max(
@@ -480,7 +466,6 @@ class DistributedTrainerMixin(
             )
 
     def _install_ep_layer_hooks(self) -> None:
-        """Hook the EP capacity generation and the router DP sync onto what the training loop actually calls."""
         if self._ep_layers():
             # EP patching registers the generation hook on the model it patched, which a PEFT wrapper reaches
             # through .forward() without a pre-hook, freezing the generation at the first forward's capacity.
@@ -492,12 +477,10 @@ class DistributedTrainerMixin(
                 logger.info(f"  Re-attached EP router DP-sync hook to {attached} trainable modules_to_save params")
 
     def _configure_wrapped_model(self) -> None:
-        """Everything that must follow the wrap, in order: state keyed on the wrapped Parameter objects, the
-        adapter-disable seams, the save-shape refusals, the eval gather, the Liger guard, torch.compile."""
+        """Everything that must follow the wrap, in order."""
         config = self.parallelism_config
         # FSDP2 replaces managed Parameter objects, so an id memoized pre-wrap names a dead object.
         self._param_id_caches.clear()
-        # Only fully_shard makes a module an FSDPModule.
         self._install_grad_accum_window()
         self._install_ep_gradient_checkpointing()
         # The reference passes run under peft's disable_adapter(): it must drop the native expert adapters too,
@@ -548,32 +531,29 @@ class DistributedTrainerMixin(
         model.to(device)
 
     def _backbone_model(self) -> nn.Module:
-        """The transformer backbone (``model.model``, without ``lm_head``), for backbone-only work; anything
-        covering every trainable parameter takes :meth:`_top_level_model`, which keeps an untied ``lm_head``."""
+        """``model.model``, without ``lm_head``; work covering every trainable parameter takes
+        :meth:`_top_level_model`."""
         model = self._top_level_model()
         if hasattr(model, "model"):
             return model.model
         return model
 
     def _top_level_model(self) -> nn.Module:
-        """The full top-level model (``*ForCausalLM`` / CP wrapper) under accelerate/DDP and ``torch.compile``,
-        whose ``named_parameters()`` cover the whole trainable surface including ``lm_head``."""
+        """The full model under accelerate/DDP and ``torch.compile``; its parameters include an untied ``lm_head``."""
         return unwrap_framework_wrappers(self.model)
 
     def get_total_train_batch_size(self, args) -> int:
-        """Samples per optimizer step over the toolkit's DP width; the base Trainer's divisors read state the
-        toolkit never sets and have no PP or ETP term, so every non-DP axis would count as data parallelism."""
+        """Over the toolkit's DP width: the base Trainer's divisors read state the toolkit never sets and have no PP or
+        ETP term."""
         return self._train_batch_size * args.gradient_accumulation_steps * self.parallelism_config.data_parallel_size
 
     def _validate_reference_model(self, ref_model) -> None:
-        """Warn about an explicit reference model beside a policy sharded by EP/TP."""
         if ref_model is not None:
             warn_unparallelized_reference(self.parallelism_config, self.REFERENCE_ALTERNATIVES)
 
     def _validate_held_reference_model(self) -> None:
-        """Gate the reference the trainer holds once TRL's constructor has run: the one passed, or the one TRL
-        builds itself (DPO/KTO). A sinks mismatch biases the KL and raises; an unsharded replica only wastes memory
-        and warns. TRL nulls ``ref_model`` where it holds none (PEFT, precompute, ``beta == 0``)."""
+        """A sinks mismatch biases the KL and raises; an unsharded replica wastes memory and warns. TRL nulls
+        ``ref_model`` where it holds none."""
         ref_model = getattr(self, "ref_model", None)
         if ref_model is None:
             return
@@ -583,10 +563,9 @@ class DistributedTrainerMixin(
         warn_unparallelized_reference(self.parallelism_config, self.REFERENCE_ALTERNATIVES)
 
     def log(self, logs: dict[str, float], start_time: float | None = None):
-        """COLLECTIVE: after the first step, add the parallelism fields and the run's loss-token total to the log,
-        summed over the world with HF's input-token count and FLOPs estimate in one all-reduce
-        (:meth:`_drain_token_counts`), and log TRL's attended-token counter as ``num_attended_tokens_seen``, the name
-        beside ``num_input_tokens_seen`` (padding included) and ``num_unmasked_output_tokens_seen`` (loss tokens)."""
+        """COLLECTIVE. After the first step, add the parallelism fields and the world-summed token and FLOPs counts
+        (:meth:`_drain_token_counts`). TRL's attended-token counter logs as ``num_attended_tokens_seen``, beside
+        ``num_input_tokens_seen`` (padding included) and ``num_unmasked_output_tokens_seen`` (loss tokens)."""
         if hasattr(self, "_tp_size"):
             for mode_metrics in self._metrics.values():
                 if "num_tokens" in mode_metrics:
@@ -600,9 +579,8 @@ class DistributedTrainerMixin(
         super().log(logs, start_time)
 
     def training_step(self, model, inputs, num_items_in_batch=None):
-        """Count the batch's loss tokens and attention-score work and arm FSDP2's per-window post-backward
-        toggles before the inherited step, and complete FSDP2's post-backward after it. COLLECTIVE once an optimizer
-        step's last backward is done: the DeepEP buffers its grows retired are freed there."""
+        """Arm FSDP2's per-window toggles and complete its post-backward after the inherited step. COLLECTIVE once a
+        step's last backward is done, which frees the DeepEP buffers its grows retired."""
         self._accumulate_unmasked_output_tokens(self._extract_output_token_count(inputs))
         self._accumulate_attention_flops(inputs)
         if self._pp_runner is not None:
@@ -630,9 +608,8 @@ class DistributedTrainerMixin(
         return loss
 
     def _warn_once_on_thin_memory_margin(self):
-        """After the first optimizer step, the first point where weights, grads, optimizer state and a backward's
-        activations coexisted, warn if this rank's peak is near its device's memory; per rank, since MoE routing
-        skew loads the hot ranks."""
+        """After the first optimizer step, where weights, grads, optimizer state and a backward's activations first
+        coexist, warn per rank if the peak is near device memory; MoE routing skew loads the hot ranks."""
         if self._memory_margin_checked or self.state.global_step < 1:
             return
         self._memory_margin_checked = True
@@ -653,12 +630,9 @@ class DistributedTrainerMixin(
         return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
 
     def create_optimizer(self, model=None):  # base Trainer passes it; the mixin builds from self
-        """Build the run's optimizer (:func:`build_optimizer`, else the stock one), register the grad-sync step
-        hooks and install the non-finite step skip."""
         if self.optimizer is None:
-            # A gathered FSDP2 module registers its transient unsharded params, and an evaluate() before
-            # train() leaves it gathered (reshard_after_forward=False; the root never reshards post-forward):
-            # param groups built over those objects update orphans the next unshard discards — never the shards.
+            # An evaluate() before train() leaves FSDP2 modules gathered (reshard_after_forward=False), and param
+            # groups built over their transient unsharded params update orphans the next unshard discards.
             reshard_fsdp2_modules(self.model)
             self.optimizer = build_optimizer(
                 self.model,
@@ -680,7 +654,7 @@ class DistributedTrainerMixin(
         return self.optimizer
 
     def cleanup_ep(self):
-        """COLLECTIVE: destroy the DeepEP buffers; call when done with the trainer, before GC tears down the CUDA
+        """COLLECTIVE. Destroy the DeepEP buffers; call when done with the trainer, before GC tears down the CUDA
         context."""
         # Align first: destroy is a device-side barrier (~100 s spin), so the wait belongs under the PG timeout.
         barrier()

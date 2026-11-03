@@ -1,11 +1,5 @@
-"""The shared body of the SFT mode suites: one model under one parallel shape, trained on a synthetic
-dataset and checked on the finished run and on the shape the model took.
-
-A suite states what is its own (checkpoint, attention kernel, training arguments) as an
-:class:`SFTSuite` and its parallel shapes as a ``{key: SFTMode}`` table; :func:`run_sft_suite` runs
-the ``--mode`` a manifest row names. Each row runs one mode, since a second EP model in one process
-has to rebuild DeepEP's buffers; ``--mode all`` still runs every mode in order for a standalone sweep.
-"""
+"""The shared body of the SFT mode suites: one model under one parallel shape, trained on a synthetic dataset and
+checked. Each manifest row runs one mode, since a second EP model in one process must rebuild DeepEP's buffers."""
 
 import math
 import os
@@ -34,11 +28,9 @@ from tests.common.sft_collator import build_sft_collator
 from tests.common.training_checks import step_losses, training_run_checks
 
 SEED = 42
-# The eval split's seed offset, so it never repeats the training samples.
+# So the eval split never repeats the training samples.
 EVAL_SEED_OFFSET = 100
-# SFTConfig fields every suite shares: one sample per device, bf16 with gradient checkpointing, a loss
-# logged every step, nothing saved or reported. Liger stays off here because the loader already
-# applied its kernels.
+# Liger stays off because the loader already applied its kernels.
 BASE_SFT_ARGS: Mapping[str, Any] = {
     "per_device_train_batch_size": 1,
     "per_device_eval_batch_size": 1,
@@ -58,35 +50,25 @@ TrainerChecks = Callable[[DistributedSFTTrainer], dict[str, bool]]
 
 @dataclass(frozen=True)
 class SFTMode:
-    """One parallel shape of a suite: its ``ParallelismConfig`` kwargs and what else it changes."""
-
     parallelism: Mapping[str, Any] = field(default_factory=dict)
-    # ``None`` keeps the suite's.
+    # None keeps the suite's.
     attn_implementation: str | None = None
-    # Over the suite's SFT arguments.
     sft_args: Mapping[str, Any] = field(default_factory=dict)
-    # ``(train, eval)`` sample counts; ``None`` keeps the suite's.
+    # None keeps the suite's.
     num_samples: tuple[int, int] | None = None
     extra_checks: TrainerChecks | None = None
-    # :func:`~tests.common.adapters.load_peft_model` kwargs (``mode``, ``lora_target_modules``): the model
-    # loads through the production adapter path and the trainer wraps it.
+    # :func:`~tests.common.adapters.load_peft_model` kwargs: the model loads through the production adapter path.
     adapters: Mapping[str, Any] | None = None
-    # Run on the built trainer before training; returns the checks to run on it after.
+    # Runs on the built trainer before training; returns the checks to run after.
     before_train: Callable[[DistributedSFTTrainer], TrainerChecks] | None = None
-    # ``False`` keeps GptOss's pretrained sinks live, as on-policy RL loads them.
+    # False keeps GptOss's pretrained sinks live, as on-policy RL loads them.
     reset_sinks: bool = True
 
 
 @dataclass(frozen=True)
 class SFTSuite:
-    """What every mode of one suite shares.
-
-    ``sft_args`` sit over :data:`BASE_SFT_ARGS` and must name ``max_steps``. ``dataset`` is called as
-    ``dataset(num_samples, tokenizer, seed=...)``; an eval count of 0 builds no eval split.
-    ``evaluate`` runs an evaluation before and after training (plus the trainer's own at the last
-    step) and checks the final eval loss; ``loss_decreased`` adds the first-vs-last step-loss check and
-    ``loss_band`` the band check on the reported training loss.
-    """
+    """What every mode of one suite shares; ``sft_args`` must name ``max_steps``, and an eval count of 0 builds no eval
+    split."""
 
     model_name: str
     attn_implementation: str | None
@@ -177,10 +159,7 @@ def run_sft_mode(ctx, suite: SFTSuite, key: str, mode: SFTMode, tokenizer) -> di
 
 
 def load_suite_tokenizer(ctx, model_name: str):
-    """Register the DeepEP teardown, download ``model_name`` and return its tokenizer, padding with EOS when
-    it names no pad token."""
-    # Registry-wide rather than per trainer: a finalizer bound to a trainer would keep each mode's model
-    # alive into the next mode.
+    # Registry-wide: a finalizer bound to a trainer would keep each mode's model alive into the next.
     ctx.on_teardown(destroy_all_dispatchers)
     ensure_model_downloaded(model_name, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -190,7 +169,7 @@ def load_suite_tokenizer(ctx, model_name: str):
 
 
 def run_sft_suite(ctx, suite: SFTSuite, modes: Mapping[str, SFTMode], mode: str) -> dict:
-    """Run ``mode`` of ``modes`` (``all`` runs every mode in order) and return the harness result."""
+    """Run ``mode`` (``all`` runs every mode in order) and return the harness result."""
     selected = list(modes) if mode == "all" else [mode]
     log(f"\nSFT suite: {suite.model_name}, world {ctx.world_size}, {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"Modes: {selected}")
@@ -211,16 +190,9 @@ def sft_metric_checks(
     token_accuracy_rises: bool = False,
     eval_loss_logged: bool = False,
 ) -> dict[str, bool]:
-    """Checks on the metrics an SFT run logs, past what :func:`training_run_checks` reads.
-
-    ``initial_loss_reasonable`` (the first step loss inside ``first_loss_band``: a pretrained model on
-    the math data, not an untrained or collapsed one), ``grad_norms_reasonable`` (every logged norm
-    under ``max_grad_norm``, the ceiling a missing TP reduction blows past), ``token_accuracy_valid``
-    (every logged ``mean_token_accuracy`` in [0, 1]), with ``token_accuracy_rises``
-    ``token_accuracy_increased`` (last above first), and with ``eval_loss_logged`` ``eval_loss_finite``
-    (at least one eval loss logged, all finite: a silently skipped eval must not pass). The token
-    accuracy checks apply only when the run logs it.
-    """
+    """Checks on the metrics an SFT run logs, past what :func:`training_run_checks` reads. ``max_grad_norm`` is the
+    ceiling a missing TP reduction blows past; a skipped eval must not pass. Token-accuracy checks apply only when
+    logged."""
     history = trainer.state.log_history
     losses = step_losses(trainer)
     grad_norms = [entry["grad_norm"] for entry in history if "grad_norm" in entry]

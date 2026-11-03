@@ -1,6 +1,5 @@
-"""Reset a checkpoint's attention sinks to their dtype minimum shard by shard: only the shards holding a sink are
-rewritten, each staged and verified before it replaces its target, and the others are linked across unchanged;
-a checkpoint that carries no sinks is copied through."""
+"""Reset a checkpoint's attention sinks to their dtype minimum, rewriting only the shards holding one, each staged and
+verified before it replaces its target; a checkpoint with no sinks is copied through."""
 
 import functools
 import logging
@@ -31,10 +30,8 @@ logger = logging.getLogger(__name__)
 
 
 def _assert_sinks_at_min(tensors: dict[str, torch.Tensor], sink_keys: list[str], where: str) -> None:
-    """Every key in ``sink_keys`` must be present in the written ``tensors`` and sit at its dtype min.
-
-    Runs on a staged write before it replaces the target, so a failure ships nothing.
-    """
+    """Refuse unless every sink in ``sink_keys`` was written at dtype min, on a staged write, so failure ships
+    nothing."""
     missing = sorted(set(sink_keys) - set(tensors))
     failed = sorted(
         key for key, tensor in tensors.items() if not (tensor == neutralized_sink_value(tensor.dtype)).all()
@@ -67,12 +64,9 @@ def _non_artifact_entries(root: str, directory: str, names: list[str]) -> list[s
 
 
 def _passthrough_copy(source: Path, output_dir: Path, dry_run: bool) -> None:
-    """Materialise ``output_dir`` for a checkpoint that turned out to carry no sinks.
-
-    A no-op reset still writes the output it was asked for: returning without writing would leave the
-    next pipeline stage pointing at a missing directory, or at a stale one of the same name. It leaves
-    behind the entries a reset that rewrites shards does not carry (a vendor weight dump, the run's ``_*`` ones).
-    """
+    """Write ``output_dir`` for a checkpoint with no sinks, since returning without writing would point the next stage
+    at a missing or stale directory; it leaves out what a rewriting reset does not carry (a vendor dump, the ``_*``
+    entries)."""
     if dry_run or output_dir == source:
         return
     logger.info(f"No sinks to reset — copying the checkpoint to {output_dir} unchanged...")
@@ -97,8 +91,7 @@ def _report_sinks(sink_keys: dict[str, list[str]]) -> None:
 
 
 def _stage_reset_shard(shard: str, keys: list[str], output_dir: Path) -> Path:
-    """``shard`` with its sinks at dtype min, written to an exclusive staged sibling of its name under
-    ``output_dir`` and verified there."""
+    """``shard`` with its sinks at dtype min, written to a staged sibling under ``output_dir`` and verified there."""
     tensors = load_file(shard, device="cpu")
     for key in keys:
         tensors[key].fill_(neutralized_sink_value(tensors[key].dtype))
@@ -114,10 +107,7 @@ def _stage_reset_shard(shard: str, keys: list[str], output_dir: Path) -> Path:
 
 
 def _publish_reset_shards(sink_keys: dict[str, list[str]], output_dir: Path) -> None:
-    """Stage and verify every sink-holding shard, then rename each over its name in ``output_dir``.
-
-    Nothing is renamed until every staged shard verified, so a failed reset leaves the target as it was.
-    """
+    """Stage and verify every sink shard, then rename each over its name, only once every stage verified."""
     staged: dict[str, Path] = {}
     try:
         for shard, keys in sink_keys.items():
@@ -141,14 +131,13 @@ def _publish_reset_shards(sink_keys: dict[str, list[str]], output_dir: Path) -> 
 
 
 def _resolve_destination(checkpoint_dir: str, output_dir: str | None, *, dry_run: bool, in_place: bool) -> str:
-    """The directory the reset writes: ``checkpoint_dir`` itself only for ``--in_place`` or a dry run, else an
+    """The directory the reset writes: ``checkpoint_dir`` only for ``--in_place`` or a dry run, else an
     ``--output_dir`` that is not the input."""
     if in_place:
         if output_dir is not None:
             raise ValueError(
                 "--in_place rewrites the --model_id directory, so it cannot be combined with --output_dir."
             )
-        # The same local-or-Hub rule resolve_checkpoint_source applies.
         if not os.path.isdir(checkpoint_dir):
             raise ValueError(
                 f"--in_place cannot rewrite {checkpoint_dir!r}: it is not a local directory (a HuggingFace "
@@ -156,9 +145,7 @@ def _resolve_destination(checkpoint_dir: str, output_dir: str | None, *, dry_run
             )
         return checkpoint_dir
     if output_dir is None:
-        # A dry run only reads (every write is gated on it), so it needs no destination. The refusal
-        # guards the writing invocations, where defaulting to the input would let a mistyped command
-        # rewrite the only copy with no undo.
+        # A dry run only reads, so it needs no destination.
         if not dry_run:
             raise ValueError(
                 "--output_dir is required: this tool replaces a checkpoint's sink tensors, and defaulting "
@@ -166,8 +153,6 @@ def _resolve_destination(checkpoint_dir: str, output_dir: str | None, *, dry_run
                 "--output_dir <new dir>, or --in_place to rewrite the --model_id directory deliberately."
             )
         return checkpoint_dir
-    # Same refusal the sibling conversions make: an --output_dir aimed at the input is the in-place run
-    # the flag above exists to make explicit.
     reject_in_place_conversion(checkpoint_dir, output_dir)
     return output_dir
 
@@ -179,22 +164,10 @@ def reset_sinks(
     in_place: bool = False,
     revision: str | None = None,
 ) -> int:
-    """Reset every attention sink tensor of a checkpoint to its dtype minimum.
-
-    Args:
-        checkpoint_dir: Path to checkpoint directory or HuggingFace repo ID.
-        output_dir: Directory to save the modified checkpoint. Required unless ``in_place`` or ``dry_run``.
-        dry_run: If True, only inspect sink values without modifying.
-        in_place: Rewrite ``checkpoint_dir`` itself. Explicit because it has no undo; the sibling
-            conversion tools refuse an in-place run outright.
-        revision: Hub revision of a repo-id ``checkpoint_dir``.
-
-    Returns:
-        Number of sink tensors found (and reset, if not dry_run).
-    """
-    # The input gate runs first: a per-rank EP/TP save stores one rank's slice of each expert under its
-    # ordinary name, which a reset would ship as the whole tensor. That diagnosis is more useful than a
-    # missing-destination error, and it holds whichever destination was named.
+    """Reset every attention sink tensor to its dtype minimum; returns how many were found. ``in_place`` rewrites
+    ``checkpoint_dir`` itself and has no undo; ``dry_run`` only inspects."""
+    # Input gate first: a per-rank EP/TP save stores one rank's slice under its ordinary name, which a reset would ship
+    # as the whole tensor, whichever destination was named.
     reject_partial_checkpoint(checkpoint_dir)
     output_dir = _resolve_destination(checkpoint_dir, output_dir, dry_run=dry_run, in_place=in_place)
 
@@ -248,8 +221,7 @@ def reset_sinks(
             # A fresh mtime: the sweep below breaks an index-versus-single-file tie by it.
             shutil.copyfile(source / SAFETENSORS_INDEX_FILE, output_path / SAFETENSORS_INDEX_FILE)
         _publish_reset_shards(sink_keys, output_path)
-        # The reset defines the directory: drop the weight files it did not produce (a previous run's
-        # shard numbering or single file).
+        # The reset defines the directory: drop weight files it did not produce (an earlier run's shards or file).
         sweep_after_full_save(str(output_path))
 
     logger.info(f"All {count} sink tensors reset to dtype min, verified, and saved.")

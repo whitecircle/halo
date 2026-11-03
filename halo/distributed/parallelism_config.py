@@ -1,8 +1,5 @@
-"""ParallelismConfig: the job's axis sizes, their resolved topology and rank coordinates.
-
-EP is orthogonal to DP; PP divides the world into stages and TP/CP/expert-TP reduce
-``data_parallel_size`` within each. The refusals it applies live in :mod:`halo.distributed.parallelism_rules`.
-"""
+"""The job's axis sizes, resolved topology and rank coordinates. EP is orthogonal to DP; PP divides the world into
+stages and TP/CP/expert-TP reduce ``data_parallel_size`` within each."""
 
 import logging
 from dataclasses import dataclass, field
@@ -68,7 +65,7 @@ class ParallelismConfig:
     ep_buffer_backend: EPBufferBackend = "auto"  # "auto" == "elastic" (DeepEP V2); "legacy" = V1 CUDA-IPC
 
     # The rows one MoE forward carries per device and the max_length the dispatch-ceiling gate checks;
-    # 0 rows = no budget, max_length 0 = the model's context window.
+    # 0 rows = no budget, 0 length = context window.
     ep_rows_per_device: int = 0
     ep_declared_max_length: int = 0
 
@@ -101,11 +98,8 @@ class ParallelismConfig:
     _cp_config: Optional["CPConfig"] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        """COLLECTIVE. Resolve and validate, then raise one world-uniform ValueError on any rank's failure.
-
-        Two inputs are per-node (``gpus_per_node``, ``NVLINK_DOMAIN_SIZE``), so a local raise would
-        leave every other rank waiting in the fabric collectives below until the watchdog fires.
-        """
+        """COLLECTIVE. Resolve and validate, then raise one world-uniform ValueError on any rank's failure. The inputs
+        are per-node, so a local raise would leave other ranks in the fabric collectives until the watchdog fires."""
         try:
             self._resolve_and_validate()
         except Exception as exc:  # any type, or the raising rank would skip the gather its peers wait in
@@ -130,8 +124,7 @@ class ParallelismConfig:
             logger.info(self.summary())
 
     def _resolve_and_validate(self) -> None:
-        """Fill the computed fields and apply every rank-local rule. Must stay collective-free: it runs
-        inside the uniformity gather."""
+        """Fill the computed fields and apply every rank-local rule. Collective-free: it runs inside the gather."""
         if self.world_size == 0:
             self.world_size = get_global_world_size()
         if self.gpus_per_node == 0:
@@ -207,7 +200,7 @@ class ParallelismConfig:
                 f"if they span racks, unset it (per-node NVLink only)."
             )
         if self.nvlink_domain_size > self.world_size:
-            # Single-node only (multi-node raised above); the summary shows only the clamped value.
+            # Single-node only; the summary shows only the clamped value.
             if is_global_main_process():
                 logger.info(
                     f"nvlink_domain_size ({self.nvlink_domain_size}) exceeds this job's world_size; "
@@ -248,7 +241,7 @@ class ParallelismConfig:
             # A one-rank group spans no domain; 'global' would send the dense run through cross-node rank math.
             self.ep_scope = "node"
 
-        self.num_nodes = self.world_size // self.gpus_per_node  # gpus_per_node > 0, checked above
+        self.num_nodes = self.world_size // self.gpus_per_node
         self.num_nvlink_domains = self.stage_world_size // self.nvlink_domain_size
 
         dp_divisor = max(self.tp_size, self.cp_size, self.expert_tp_size)
@@ -273,8 +266,7 @@ class ParallelismConfig:
 
     @property
     def experts_fsdp_managed(self) -> bool:
-        """FSDP syncs the replicated experts (``ep_group_size == 1``), so the EP layer's grad hooks must
-        not; every reader takes this one verdict."""
+        """FSDP syncs the replicated experts (``ep_group_size == 1``), so the EP layer's grad hooks must not."""
         return self.fsdp_shard_ep1_experts and self.ep_group_size == 1
 
     def pp_microbatch_count(self, gradient_accumulation_steps: int) -> int:
@@ -284,17 +276,13 @@ class ParallelismConfig:
 
     @property
     def active_axes(self) -> frozenset[str]:
-        """The model-sharding axes this config turns on, derived from the sizes (never hand-listed)."""
         return frozenset(a.name for a in AXES if getattr(self, a.size_field) > 1)
 
     @property
     def is_racy_single_domain_multigroup_ep(self) -> bool:
-        """Several >2-rank DeepEP dispatch groups on one NVLink domain, whose combine barriers race
-        FSDP2's DP-wide collectives (``legacy`` deadlocks, ``elastic`` faults on peer memory).
-
-        Keyed on ``ep_group_size``, not ``ep_size``: EP+ETP filling the domain (ep4+etp2 on 8) runs
-        clean although its dispatch groups are the same width as a racy bare ep4.
-        """
+        """Several >2-rank DeepEP dispatch groups on one NVLink domain, whose combine barriers race FSDP2's DP-wide
+        collectives (``legacy`` deadlocks, ``elastic`` faults on peer memory). Keyed on ``ep_group_size``, since EP+ETP
+        filling the domain (ep4+etp2 on 8) runs clean."""
         return self.num_nvlink_domains == 1 and self.ep_size > 2 and self.nvlink_domain_size > self.ep_group_size
 
     @property
@@ -351,7 +339,6 @@ class ParallelismConfig:
         return self.pp_rank == self.pp_size - 1
 
     def pp_stage_rank_blocks(self) -> list[list[int]]:
-        """Each pipeline stage's global ranks: ``pp_size`` contiguous blocks of ``stage_world_size``."""
         return [list(range(s * self.stage_world_size, (s + 1) * self.stage_world_size)) for s in range(self.pp_size)]
 
     def pp_chain_ranks(self) -> list[int]:
@@ -375,7 +362,6 @@ class ParallelismConfig:
 
     @property
     def dp_replicate_size(self) -> int:
-        """HSDP replica groups = one per NVLink domain (1 when HSDP off)."""
         return self.num_nvlink_domains if self.is_hsdp else 1
 
     @property
@@ -390,7 +376,6 @@ class ParallelismConfig:
 
     @property
     def mode_string(self) -> str | None:
-        """Short mode string, e.g. 'ep', 'tp', 'ep-tp'."""
         parts = []
         if self.is_pp_mode:
             parts.append("pp")
@@ -417,7 +402,6 @@ class ParallelismConfig:
         return self.stage_local_rank // max(self.tp_size, self.cp_size)
 
     def ep_config(self) -> "EPConfig":
-        """Create (and cache) the EPConfig that builds the EP process groups."""
         if self._ep_config is None:
             self._ep_config = EPConfig(
                 ep_size=self.ep_size,
@@ -441,7 +425,6 @@ class ParallelismConfig:
         return self._ep_config
 
     def cp_config(self) -> "CPConfig":
-        """Create (and cache) the CPConfig that builds the CP process groups."""
         if self._cp_config is None:
             self._cp_config = CPConfig(
                 self.cp_size,

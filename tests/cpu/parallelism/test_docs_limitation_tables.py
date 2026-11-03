@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""The published support tables must agree with the code that enforces them.
-
-Each pinned table — the axis allowlist, trainer × axis, family × axis (agent and human) and the per-family EP
-restrictions — is re-derived here from the registries and class declarations the runtime reads.
-"""
+"""The published support tables agree with the registries and class declarations the runtime reads."""
 
 from __future__ import annotations
 
@@ -34,15 +30,11 @@ _TRAINER_ARCHITECTURE = REPO_ROOT / "agent-docs" / "reference" / "trainer-archit
 _MODELS_INDEX = REPO_ROOT / "agent-docs" / "models" / "README.md"
 _HUMAN_MATRIX = REPO_ROOT / "human-docs" / "supported-matrix.md"
 
-# Doc column header -> whether the class declaration admits that axis. No trainer refuses EP, ETP or TP,
-# so the matrix carries the two axes a trainer declares.
+# No trainer refuses EP, ETP or TP, so the matrix carries the two axes a trainer declares.
 _TRAINER_AXIS_SUPPORT = {"CP": lambda cls: cls.SUPPORTS_CP, "PP": lambda cls: cls.PP_REFUSAL is None}
 
-# EP capabilities a family may switch off: its spec's ``supports_*`` fields (default True) and
-# ``*_refusal`` fields (default None), and the EP layer's own ``_supports_*`` flags that default True
-# over the whole MRO (the base is composed of mixins that each declare part of the surface). DERIVED,
-# never listed: a capability restated here is a second copy of the declaration, and the one it forgets
-# is unpinnable — the restriction table can then omit that family's row and still pass.
+# Derived, since a restated capability is a second copy, and one it forgets lets the restriction table omit that
+# family's row and still pass.
 _EP_RESTRICTABLE_FLAGS = tuple(
     sorted(
         {
@@ -61,22 +53,20 @@ _EP_RESTRICTABLE_FLAGS = tuple(
     )
 )
 
-# The catch-all row of the supported-combinations table; it names no axis set on purpose.
+# Names no axis set on purpose.
 _CATCH_ALL_ROW = "anything else"
 
-# The restriction table's preamble states how many flags a family may switch off. Spelled out, so the
-# count is checked against the derivation rather than left to rot beside a table that grew.
+# Spelled out, so the count is checked against the derivation.
 _EP_FLAG_COUNT_SENTENCE = re.compile(r"declares (\w+) capabilities")
 _NUMBER_WORDS = {word: n for n, word in enumerate(("four", "five", "six", "seven", "eight", "nine"), start=4)}
 
 _FAMILY_AXES = ("EP", "ETP", "CP", "TP", "PP")
 
-# The one remote-code family: hub modeling code, so no transformers module to read its classes off.
+# Hub modeling code, so no transformers module to read its classes off.
 _REMOTE_CODE_CLASSES = {"bailing_moe": frozenset({"BailingMoeV2Attention", "BailingMoeV2Model"})}
 
 
 def _table_with_headers(path: Path, *required: str) -> list[dict[str, str]]:
-    """The one table in ``path`` whose header row contains every name in ``required``, as dicts."""
     matches = [
         [dict(zip(table.headers, row, strict=False)) for row in table.rows]
         for table in parse_tables(path.read_text(encoding="utf-8"))
@@ -89,13 +79,12 @@ def _table_with_headers(path: Path, *required: str) -> list[dict[str, str]]:
 
 
 def _plain(cell: str) -> str:
-    """Cell text without markdown emphasis, code ticks or links."""
+    """Without markdown emphasis, code ticks or links."""
     cell = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", cell)
     return re.sub(r"[*`]", "", cell).strip()
 
 
 def _axis_set_from_mode(label: str) -> frozenset[str] | None:
-    """The axis set a supported-combinations row names, or ``None`` for the catch-all row."""
     text = re.sub(r"\(.*", "", _plain(label)).strip()
     lowered = text.lower()
     if lowered.startswith(_CATCH_ALL_ROW):
@@ -113,23 +102,18 @@ def _axis_set_from_mode(label: str) -> frozenset[str] | None:
 
 
 def _ep_model_rows() -> list[dict[str, str]]:
-    """The EP supported-models table rows."""
     return _table_with_headers(_EXPERT_PARALLELISM, "Model", "HF Class", "EP Layer")
 
 
 def _ep_layer_class_name(row: dict[str, str]) -> str:
-    """The wrapper class a supported-models row names (first code span; ignores 'subclasses X')."""
+    """First code span; ignores 'subclasses X'."""
     spans = re.findall(r"`([^`]+)`", row["EP Layer"])
     assert spans, f"EP supported-models row {row['Model']!r} names no wrapper class in backticks"
     return spans[0]
 
 
 def test_supported_combinations_table_matches_the_allowlist():
-    """``agent-docs/parallelism/README.md`` must publish exactly the sets ``ParallelismConfig`` accepts.
-
-    A row the allowlist rejects sends a reader into a config-time raise; a missing row hides a shape
-    that works. Both are the failure this table exists to prevent.
-    """
+    """A row the allowlist rejects sends a reader into a config-time raise; a missing row hides a shape that works."""
     rows = _table_with_headers(_PARALLELISM_INDEX, "Mode", "Data Parallel Size", "Notes")
     documented = {}
     catch_all = 0
@@ -150,11 +134,7 @@ def test_supported_combinations_table_matches_the_allowlist():
 
 
 def test_trainer_compatibility_table_matches_the_support_flags():
-    """Every cell of the trainer × axis matrix must equal the class attribute the mixin reads.
-
-    ``DistributedTrainerMixin`` raises off ``SUPPORTS_CP`` / ``PP_REFUSAL``; a doc cell that
-    disagrees promises (or denies) a mode the trainer will refuse (or accept) at construction.
-    """
+    """A cell that disagrees promises or denies a mode the trainer will refuse or accept at construction."""
     rows = _table_with_headers(_TRAINER_ARCHITECTURE, "Trainer", *_TRAINER_AXIS_SUPPORT)
     classes = {cls.__name__: cls for cls in distributed_trainer_classes()}
 
@@ -176,11 +156,8 @@ def test_trainer_compatibility_table_matches_the_support_flags():
 
 
 def test_ep_supported_models_table_lists_every_registered_wrapper():
-    """The EP supported-models table must name exactly the wrapper classes ``MOE_LAYER_MAP`` holds.
-
-    ``MOE_LAYER_MAP`` is derived from the ``EPMoELayerBase`` subclass tree, so a family added to
-    ``layers/`` is live the moment it is imported — with no doc row telling anyone it exists.
-    """
+    """``MOE_LAYER_MAP`` is derived from the subclass tree, so a family is live the moment it is imported, with no
+    doc row."""
     documented = {_ep_layer_class_name(row) for row in _ep_model_rows()}
     registered = {cls.__name__ for cls in MOE_LAYER_MAP.values()}
     assert documented == registered, (
@@ -190,11 +167,7 @@ def test_ep_supported_models_table_lists_every_registered_wrapper():
 
 
 def test_ep_restriction_table_matches_the_layer_capability_flags():
-    """The per-family EP restriction table must be exactly the set of ``False`` capability flags.
-
-    Each capability is on by default, so a family turning one off is the whole limitation. A stale row
-    promises a restriction that no longer exists; a missing row hides one that does (Zaya under gradient checkpointing, Inkling under weight sync).
-    """
+    """Each capability is on by default, so a family turning one off is the whole limitation."""
     by_wrapper = {_ep_layer_class_name(row): _plain(row["Model"]) for row in _ep_model_rows()}
     documented = set()
     for row in _table_with_headers(_EXPERT_PARALLELISM, "Family", "Restricted capability", "Declaration"):
@@ -219,11 +192,7 @@ def test_ep_restriction_table_matches_the_layer_capability_flags():
 
 
 def test_the_restriction_preamble_counts_the_flags_it_derives_from():
-    """The prose above the table must state the number of capabilities a family can switch off.
-
-    A capability added that no family switches off yet leaves the table itself correct and the
-    sentence introducing it wrong, so nothing else here would notice.
-    """
+    """A capability no family switches off yet leaves the table correct and its intro sentence wrong."""
     match = _EP_FLAG_COUNT_SENTENCE.search(_EXPERT_PARALLELISM.read_text(encoding="utf-8"))
     assert match, (
         f"{_EXPERT_PARALLELISM.name} no longer states how many capabilities a family declares; the "
@@ -242,19 +211,13 @@ def test_the_restriction_preamble_counts_the_flags_it_derives_from():
 
 
 def test_every_capability_a_family_switches_off_is_a_restrictable_flag():
-    """Guards the test above: a restriction the derived flag set cannot express is undocumentable.
-
-    The derivation only sees flags that default ``True`` on ``EPMoELayerBase``. A family that turns
-    off anything else — a ``_supports_*`` the base never declared, or one whose base default was
-    flipped to ``False`` — states a restriction the table has no row shape for, and the comparison
-    above would pass while the docs stayed silent about it.
-    """
+    """The derivation only sees flags defaulting ``True`` on ``EPMoELayerBase``; anything else has no row shape in
+    the table."""
     assert len(_EP_RESTRICTABLE_FLAGS) >= 5, (
         f"only {len(_EP_RESTRICTABLE_FLAGS)} restrictable flags derived from EPMoELayerBase — the "
         f"attribute sweep lost its target: {_EP_RESTRICTABLE_FLAGS}"
     )
-    # Own declarations below the base only: the base's own ``False`` defaults are opt-IN capabilities
-    # (``SUPPORTS_BIAS_BALANCING``), not restrictions.
+    # Own declarations below the base only: the base's own ``False`` defaults are opt-in capabilities.
     switched_off = {
         (cls.__name__, name)
         for cls in MOE_LAYER_MAP.values()
@@ -270,14 +233,11 @@ def test_every_capability_a_family_switches_off_is_a_restrictable_flag():
 
 
 def _family_rows(path: Path, *required: str) -> dict[str, dict[str, str]]:
-    """The family table in ``path`` as ``{family label: {column: first word}}``, the catch-all row left out.
-
-    A cell's first word drops markup and footnote markers: ``**No** ¹`` reads ``No``.
-    """
+    """A cell's first word drops markup and footnote markers: ``**No** ¹`` reads ``No``."""
     rows: dict[str, dict[str, str]] = {}
     for row in _table_with_headers(path, *required):
         label = _plain(row[required[0]])
-        if label.lower().startswith("any other"):  # the catch-all row names no family on purpose
+        if label.lower().startswith("any other"):  # The catch-all row names no family on purpose.
             continue
         assert label not in rows, f"{path.name}: family row {label!r} is a duplicate"
         rows[label] = {column: (_plain(cell).split() or [""])[0] for column, cell in row.items()}
@@ -285,7 +245,6 @@ def _family_rows(path: Path, *required: str) -> dict[str, dict[str, str]]:
 
 
 def _modeling_classes(model_type: str) -> frozenset[str]:
-    """The names the modeling module of the family ``model_type`` names defines."""
     if model_type in _REMOTE_CODE_CLASSES:
         return _REMOTE_CODE_CLASSES[model_type]
     module = model_type_to_module_name(model_type)
@@ -293,8 +252,6 @@ def _modeling_classes(model_type: str) -> frozenset[str]:
 
 
 def _derived_family_verdicts(model_type: str) -> dict[str, str]:
-    """The EP/ETP/CP/TP/PP verdicts the registries give the family ``model_type`` names, read off the classes its
-    modeling module defines."""
     classes = _modeling_classes(model_type)
     is_moe = find_moe_family_spec(model_type) is not None
     # CP needs a wrapped attention class and no layer carrying state along the sequence axis.
@@ -312,11 +269,7 @@ def _derived_family_verdicts(model_type: str) -> dict[str, str]:
 
 @pytest.mark.parametrize("path, label_column", [(_MODELS_INDEX, "Model Family"), (_HUMAN_MATRIX, "Model family")])
 def test_family_table_matches_the_registries(path: Path, label_column: str):
-    """The agent compatibility matrix and its human copy must list a row per MoE family spec, each carrying the
-    verdicts the registries give the ``model_type`` the agent matrix names for it.
-
-    A cell the code contradicts sends a reader into a load-time raise, or away from a mode that works.
-    """
+    """A cell the code contradicts sends a reader into a load-time raise, or away from a mode that works."""
     agent_rows = _family_rows(_MODELS_INDEX, "Model Family", "`model_type`", *_FAMILY_AXES)
     model_types = {label: row["`model_type`"] for label, row in agent_rows.items()}
     covered = {find_moe_family_spec(model_type) for model_type in model_types.values()}
@@ -337,8 +290,7 @@ def test_family_table_matches_the_registries(path: Path, label_column: str):
 
 
 def test_the_tp_accept_list_names_only_moe_family_attention():
-    """Selective TP is the MoE path: a dense model shards off its config's own HF plan, so a dense attention class
-    in the accept-list is consulted by no load while it reads as TP support."""
+    """A dense attention class in the accept-list is consulted by no load while it reads as TP support."""
     model_types = [row["`model_type`"] for row in _family_rows(_MODELS_INDEX, "Model Family", "`model_type`").values()]
     moe_classes = frozenset().union(*(_modeling_classes(mt) for mt in model_types if find_moe_family_spec(mt)))
     stray = sorted(TP_SHARDABLE_ATTENTION_CLASSES - moe_classes)
@@ -346,8 +298,6 @@ def test_the_tp_accept_list_names_only_moe_family_attention():
 
 
 def test_human_trainer_table_matches_the_support_flags():
-    """Each training-method row of ``human-docs/supported-matrix.md`` must state the CP / PP declarations of the
-    trainers its scripts construct, and every distributed trainer must sit in some row."""
     classes = {cls.__name__: cls for cls in distributed_trainer_classes()}
     trainer_name = re.compile(r"\b(" + "|".join(classes) + r")\b")
     seen: set[str] = set()

@@ -14,26 +14,21 @@ SUBMIT_TOOL = "submit_solution"
 NO_STDIN_NOTE = "(No stdin was passed to this run; if the program reads input, pass it in the `stdin` argument.)"
 # Follows a scratchpad timeout, whose limit is the one this problem's graded tests run under.
 SCRATCHPAD_TIME_LIMIT_NOTE = "(the per-test time limit this problem is graded at)"
-# The refusals of a call past the episode's budget for the tool: the fact and what to do, never the
-# budget's size (the level the chat template states and the engine's caps control what an episode may do).
+# Refusals past the episode's budget: the fact and what to do, never the budget's size.
 SCRATCHPAD_BUDGET_SPENT_REPLY = (
     f"Not run: this task's scratchpad budget is spent. Submit your solution with {SUBMIT_TOOL}."
 )
 SUBMISSION_BUDGET_SPENT_REPLY = "Not graded: this task's submission budget is spent."
-# Appended to the task message when the payload carries no time limit (``limits``: ``5 s``, or per
-# language); the statement itself may still name one.
+# Appended when the payload carries no time limit (``limits``: ``5 s``, or per language).
 UNSTATED_TIME_LIMIT_NOTE = "\n\nEach test of this problem runs under {limits}."
-# The reply to a program whose call names a language it is evidently not written in.
 MISLABELLED_LANGUAGE_REPLY = (
     'Not {verb}: this looks like {evident} code sent with language "{language}"; send it again with language '
     '"{evident}". No {spent} was spent.'
 )
-# The reply to a submission after one that passed every hidden test.
 SUBMISSION_AFTER_ACCEPT_REPLY = (
     "Not graded: an earlier submission already passed every test, so it stands and the task ends."
 )
-# A program identical to one this episode already graded, comments aside, would draw the same verdict: refused
-# unspent, the turn flagged like any refusal.
+# Identical to a graded program, comments aside, so it would draw the same verdict: refused unspent, the turn flagged.
 IDENTICAL_RESUBMISSION_REPLY = (
     "Not graded: this program is identical to one already graded and would receive the same verdict. Change it "
     "before submitting again."
@@ -49,10 +44,8 @@ SYSTEM_PROMPT = (
     "never in your message. Your message to the user must contain no code: write only a brief summary "
     "of what you did this turn (your approach and what you tested)."
 )
-# Appended when the run lists several languages: the choice is the model's, per program.
 _LANGUAGE_CHOICE_PROMPT = " Choose each program's language with the tool's language argument ({names})."
-# Appended when the set mixes interpreted and compiled languages: the grading contract each runs under
-# (``multiplier`` is empty at scale 1, else e.g. ``"2x "``).
+# Appended when the set mixes interpreted and compiled languages (``multiplier``: empty at scale 1, else ``"2x "``).
 _TIME_LIMIT_FLOOR_PROMPT = (
     " A {interpreted} solution gets at least {floor:g} s per test; a compiled one runs at {multiplier}the "
     "problem's stated time limit, at most {cap:g} s."
@@ -226,14 +219,11 @@ AUDIT_CHECKS = (
 
 
 def _language_phrase(specs: Sequence[LanguageSpec]) -> str:
-    """The language set as prose (``python``, ``python or cpp``) — canonical names, the values the
-    tool argument takes."""
+    """Canonical names, the values the tool argument takes (``python or cpp``)."""
     return " or ".join(spec.name for spec in specs)
 
 
 def default_system_prompt(specs: Sequence[LanguageSpec], test_tool: str, grading: GradingSpec) -> str:
-    """The solver's role and task contract, with the language choice and the grading contract's terms
-    for each kind of language when the run lists several."""
     prompt = SYSTEM_PROMPT.format(language=_language_phrase(specs), test_tool=test_tool)
     if len(specs) < 2:
         return prompt
@@ -251,7 +241,6 @@ def default_system_prompt(specs: Sequence[LanguageSpec], test_tool: str, grading
 
 
 def _language_parameters(specs: Sequence[LanguageSpec]) -> list[ToolParameter]:
-    """The ``language`` tool argument when the run lets the model choose; none when it fixes one."""
     if len(specs) < 2:
         return []
     names = [spec.name for spec in specs]
@@ -265,11 +254,10 @@ def build_contest_tools(
     run_test: Callable[..., str],
     submit: Callable[..., str],
 ) -> tuple[NativeTool, NativeTool]:
-    """The scratchpad and the submission tool for the run's language set. The scratchpad runs a program through the
-    sandbox that grades ``submit_solution`` (a subprocess, not the in-process REPL, which blocks imports) on the stdin
-    the call passes, never on the graded tests; the submission is the one graded channel."""
+    """The scratchpad runs through the sandbox that grades ``submit_solution`` (a subprocess, not the in-process REPL,
+    which blocks imports), on the stdin the call passes, never on the graded tests."""
     phrase = _language_phrase(specs)
-    # What the sandbox builds or runs each language with; empty where the backend states none.
+    # Empty where the backend states none.
     toolchain = [f"{spec.name} {stated}" for spec in specs if (stated := sandbox.toolchain(spec.name))]
     toolchain_clause = f" Here {' and '.join(toolchain)}." if toolchain else ""
     verb = "Runs" if all(not spec.is_compiled for spec in specs) else "Compiles and runs"

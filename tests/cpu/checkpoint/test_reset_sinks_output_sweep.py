@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""``reset_sinks`` must hand back a directory that holds ONLY the checkpoint it just wrote, rewritten shard by shard.
-
-The tool rewrites only the shards that hold a sink and links the rest across, keeping the source's shard
-layout. When ``--output_dir`` already holds a previous run's weight files, the leftovers would outlive the
-write and ``from_pretrained`` and the toolkit's index-first readers could resolve the OLD weights — so a
-fresh output is swept after the write; an ``--in_place`` run deletes nothing that is not its own.
-
-Every rewritten shard is staged and verified at dtype min before anything replaces its target, so a torn
-write, an interrupted one or a write that kept live sinks leaves the target as it was. A sink-carrying
-family whose keys miss the sink spelling raises instead of copying through as "reset".
-
-    python tests/cpu/checkpoint/test_reset_sinks_output_sweep.py
-"""
+"""``reset_sinks`` hands back a directory holding only the checkpoint it wrote, rewritten shard by shard.
+Every rewritten shard is staged and verified at dtype min before anything replaces its target."""
 
 import json
 import logging
@@ -38,7 +27,7 @@ VOCAB_SIZE, HIDDEN_SIZE = 128, 64
 
 
 def _tiny_gptoss():
-    """A real sink-carrying model: gpt-oss is the family this tool exists for."""
+    """gpt-oss is the family this tool exists for."""
     torch.manual_seed(0)
     config = GptOssConfig(
         vocab_size=VOCAB_SIZE,
@@ -57,7 +46,6 @@ def _tiny_gptoss():
 
 
 def _build_source(source_dir, *, sharded: bool) -> dict[str, torch.Tensor]:
-    """Write a source checkpoint; return its sink tensors so the reset can be shown to have happened."""
     model = _tiny_gptoss()
     model.save_pretrained(str(source_dir), max_shard_size="64KB" if sharded else "5GB")
     assert os.path.isfile(os.path.join(source_dir, INDEX)) == sharded, "the source did not land in the shape asked for"
@@ -70,12 +58,7 @@ def _build_source(source_dir, *, sharded: bool) -> dict[str, torch.Tensor]:
 
 
 def _plant_previous_sharded_run(out_dir) -> str:
-    """A COMPLETE previous sharded save in the output directory: index plus every shard it names.
-
-    Complete on purpose. Both that layout and the single file this run writes describe a whole
-    checkpoint, so only the modification time separates them — back-dated here to say which one is
-    the leftover. Returns the directory for convenience.
-    """
+    """Complete on purpose: only the back-dated modification time says which layout is the leftover."""
     os.makedirs(out_dir, exist_ok=True)
     shards = ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
     for shard in shards:
@@ -90,7 +73,7 @@ def _plant_previous_sharded_run(out_dir) -> str:
 
 
 def _weight_files(directory) -> set[str]:
-    return set(weight_files(str(directory), include_index=True))  # the sweep owns the index too
+    return set(weight_files(str(directory), include_index=True))  # The sweep owns the index too.
 
 
 def _sinks_across_shards(directory) -> dict[str, torch.Tensor]:
@@ -123,8 +106,7 @@ def _staged_leftovers(directory) -> list[str]:
 
 
 def test_a_single_file_reset_sweeps_the_previous_runs_leftovers(tmp_path):
-    """A complete previous sharded save in the output survives a write that clears nothing, and would win
-    the index-first lookup over the file just written."""
+    """It would win the index-first lookup over the file just written."""
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=False)
     _plant_previous_sharded_run(out)
@@ -137,8 +119,6 @@ def test_a_single_file_reset_sweeps_the_previous_runs_leftovers(tmp_path):
 
 
 def test_the_rewrite_stamps_the_safetensors_format(tmp_path):
-    """The rewrite stamps the ``format`` metadata ``save_pretrained`` and the toolkit's full-checkpoint
-    writers stamp, so the reset file reads as the same kind of checkpoint it replaced."""
     source, out = tmp_path / "src", tmp_path / "out"
     _build_source(source, sharded=False)
 
@@ -149,9 +129,7 @@ def test_the_rewrite_stamps_the_safetensors_format(tmp_path):
 
 
 def test_a_sharded_reset_keeps_the_layout_and_rewrites_only_the_sink_shards(tmp_path, monkeypatch):
-    """Rewriting one small tensor per layer must not load or rewrite the whole checkpoint: the shards with
-    no sink reach the output byte for byte, the index is the source's, and only one shard is resident at a
-    time — no model class is involved at all."""
+    """Only one shard is resident at a time, and no model class is involved."""
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=True)
     before = _shard_bytes(source)
@@ -185,8 +163,7 @@ def test_a_sharded_reset_sweeps_the_previous_runs_files(tmp_path):
 
 
 def test_an_interrupted_write_leaves_the_target_and_no_stage(tmp_path, monkeypatch):
-    """A kill mid-write under ``--in_place`` must leave the only copy untouched and no partial file
-    behind: an unrecognized leftover beside the weights rides along into every later aux-file copy."""
+    """An unrecognized leftover beside the weights rides along into every later aux-file copy."""
     source = tmp_path / "src"
     _build_source(source, sharded=False)
     before = sorted(os.listdir(source))
@@ -206,8 +183,7 @@ def test_an_interrupted_write_leaves_the_target_and_no_stage(tmp_path, monkeypat
 
 
 def test_an_in_place_run_deletes_nothing_it_did_not_write(tmp_path):
-    """An ``--in_place`` reset does not prune the directory: a weight file outside the checkpoint's own
-    layout belongs to whoever put it there, and the reset still has to happen."""
+    """A weight file outside the checkpoint's own layout belongs to whoever put it there."""
     source = tmp_path / "src"
     sinks = _build_source(source, sharded=False)
     stray = source / "model-00009-of-00009.safetensors"
@@ -220,9 +196,7 @@ def test_an_in_place_run_deletes_nothing_it_did_not_write(tmp_path):
 
 
 def test_a_write_that_kept_live_sinks_never_replaces_the_source(tmp_path, monkeypatch):
-    """A torn or buggy write must not ship live sinks as a reported success, over the only copy: every
-    staged shard is verified at dtype min BEFORE any is renamed, and a failure raises with the source
-    byte-identical and no stage left behind."""
+    """A torn or buggy write must not ship live sinks as a reported success over the only copy."""
     source = tmp_path / "src"
     sinks = _build_source(source, sharded=True)
     sink_shard_count = len(_sink_shards(source, sinks))
@@ -232,7 +206,7 @@ def test_a_write_that_kept_live_sinks_never_replaces_the_source(tmp_path, monkey
     saves: list[str] = []
 
     def corrupting_save_file(state_dict, path, **kwargs):
-        # A torn writer on the last staged shard, after the others verified: it lands with live sinks.
+        # A torn writer on the last staged shard, after the others verified.
         saves.append(str(path))
         last = len(saves) == sink_shard_count
         live = {key: (torch.zeros_like(t) if ".sinks" in key and last else t) for key, t in state_dict.items()}
@@ -249,8 +223,7 @@ def test_a_write_that_kept_live_sinks_never_replaces_the_source(tmp_path, monkey
 
 
 def test_a_failed_publish_names_the_verified_shards_still_to_place(tmp_path, monkeypatch):
-    """Once one shard is renamed, the staged ones are the only reset copies of the rest; a cleanup there
-    would leave the target half-reset with nothing to recover from."""
+    """Once one shard is renamed, the staged ones are the only reset copies of the rest."""
     source = tmp_path / "src"
     sinks = _build_source(source, sharded=True)
     assert len(_sink_shards(source, sinks)) > 1, "premise: more than one shard is published"
@@ -276,8 +249,7 @@ def test_a_failed_publish_names_the_verified_shards_still_to_place(tmp_path, mon
 
 
 def test_a_dry_run_neither_writes_nor_sweeps(tmp_path):
-    """``--dry_run`` reports what would change. Sweeping there would delete files for a run that
-    writes nothing — and it must not touch the source's sinks either."""
+    """Sweeping would delete files for a run that writes nothing."""
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=False)
     _plant_previous_sharded_run(out)
@@ -293,8 +265,7 @@ def test_a_dry_run_neither_writes_nor_sweeps(tmp_path):
 
 @pytest.mark.parametrize("sharded", [False, True], ids=["single_file", "sharded"])
 def test_a_dry_run_needs_no_output_dir(tmp_path, sharded):
-    """``--dry_run`` is the documented read-only invocation, so the destination requirement — which
-    exists to stop a WRITING run from defaulting onto its own input — must not abort it first."""
+    """The destination requirement exists to stop a writing run defaulting onto its own input."""
     source = tmp_path / "src"
     sinks = _build_source(source, sharded=sharded)
 
@@ -306,7 +277,6 @@ def test_a_dry_run_needs_no_output_dir(tmp_path, sharded):
 
 
 def test_a_writing_run_still_requires_an_output_dir(tmp_path):
-    """Anti-over-widening: the refusal still guards every invocation that writes."""
     source = tmp_path / "src"
     _build_source(source, sharded=False)
 
@@ -316,8 +286,7 @@ def test_a_writing_run_still_requires_an_output_dir(tmp_path):
 
 @pytest.mark.parametrize("sharded", [False, True], ids=["single_file", "sharded"])
 def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, caplog, sharded):
-    """A sink-holding shard is resident while it is rewritten, so the shared preflight must warn before
-    that — silence means the tool stopped calling the helper — and must not abort the reset."""
+    """Silence means the tool stopped calling the helper."""
     monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=sharded)
@@ -330,8 +299,7 @@ def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, caplog, 
 
 
 def test_a_sink_family_whose_keys_miss_the_spelling_raises(tmp_path):
-    """A GptOss checkpoint with no key the sink predicate matches would otherwise copy through as a
-    "reset" checkpoint whose sinks are untouched."""
+    """Otherwise it copies through, reported as reset, with its sinks untouched."""
     source, out = tmp_path / "src", tmp_path / "out"
     _build_source(source, sharded=False)
     renamed = {key.replace(".sinks", ".sink_bias"): tensor for key, tensor in load_file(str(source / SINGLE)).items()}
@@ -344,7 +312,6 @@ def test_a_sink_family_whose_keys_miss_the_spelling_raises(tmp_path):
 
 
 def _build_sink_free_source(source_dir) -> None:
-    """A single-file checkpoint of a family that carries no sinks."""
     _build_source(source_dir, sharded=False)
     stripped = {key: tensor for key, tensor in load_file(str(source_dir / SINGLE)).items() if ".sinks" not in key}
     save_file(stripped, str(source_dir / SINGLE), metadata=SAFETENSORS_METADATA)
@@ -354,7 +321,6 @@ def _build_sink_free_source(source_dir) -> None:
 
 
 def test_a_sink_free_family_is_copied_through(tmp_path):
-    """Anti-over-widening: a family that carries no sinks is not refused; its output is written unchanged."""
     source, out = tmp_path / "src", tmp_path / "out"
     _build_sink_free_source(source)
 
@@ -364,11 +330,7 @@ def test_a_sink_free_family_is_copied_through(tmp_path):
 
 
 def test_the_copy_through_leaves_the_vendor_weight_dumps_and_the_run_internal_entries_behind(tmp_path):
-    """``original/`` and ``metal/`` are the vendor's own copies of the same weights (gpt-oss ships both), and an
-    ``output_dir`` root holding the final model also holds the run's ``_*`` entries (the checkpointing-plan record,
-    the reference scratch): a reset that rewrites shards drops them through the aux copy, and the copy-through of a
-    sink-free checkpoint must not carry them either, while a subdirectory that belongs to the checkpoint still
-    arrives."""
+    """gpt-oss ships ``original/`` and ``metal/``; an ``output_dir`` root also holds the run's ``_*`` entries."""
     source, out = tmp_path / "src", tmp_path / "out"
     _build_sink_free_source(source)
     for dump in ("original", "metal"):

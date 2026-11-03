@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""``local_optimizer_state`` observes the optimizer it reads without stepping it.
-
-The resume suites snapshot a trainer's optimizer at ``on_train_begin``, after the restore and before the first
-resumed step. A restore that loaded no state leaves the optimizer empty, and ``get_optimizer_state_dict`` fills an
-empty optimizer with a zero-LR step before reading it. That step runs the trainer's step-pre-hooks outside the
-restore's mute: the deferred EP sweep claims the current step there, and the first resumed step's clip then raises
-"ran twice" instead of the resume failing on its named checks. The snapshot must read an empty optimizer as empty,
-leave it untouched, and still read a stepped one in full.
-
-    python tests/cpu/conventions/test_local_optimizer_state.py
-"""
+"""``local_optimizer_state`` observes the optimizer it reads without stepping it. ``get_optimizer_state_dict`` fills
+an empty optimizer with a zero-LR step, which runs the step-pre-hooks outside the restore's mute and makes the
+first resumed step's clip raise."""
 
 from types import SimpleNamespace
 

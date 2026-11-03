@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""Mistral4, the text backbone of Mistral3 VLMs, is claimed by the EP, CP and TP registries.
-
-Run: python tests/cpu/parallelism/test_mistral4_registries.py
-"""
+"""Mistral4, the text backbone of Mistral3 VLMs, is claimed by the EP, CP and TP registries."""
 
 import pytest
 

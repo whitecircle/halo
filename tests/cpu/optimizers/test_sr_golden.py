@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""Bit-exact golden of the stochastic-rounding seeds and the eager AdamWBF16 step.
-
-The rounding noise is a pure function of key, step and parameter name, so any change to the seed
-mix, the noise draw or the rounding bit-step moves these bits. The Triton kernel draws its noise from Philox
-instead; ``tests/gpu/optimizers/test_adamw_bf16_fused.py`` holds its fused launch to the per-parameter one bit for bit.
-"""
+"""Bit-exact golden of the stochastic-rounding seeds and the eager AdamWBF16 step;
+``tests/gpu/optimizers/test_adamw_bf16_fused.py`` holds the fused launch to it."""
 
 import pytest
 import torch

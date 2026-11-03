@@ -1,41 +1,6 @@
-"""``gpu_test_main`` — the shared lifecycle for torchrun-native GPU tests.
-
-Covers the lifecycle every torchrun test needs: the training run's INFO root → deterministic kernel env →
-``init_distributed`` → ``PartialState`` → validate world size → ``setup_cache_dirs`` → ``try`` body →
-``finally`` (the ``ctx.on_teardown`` finalizers, ``cleanup_ep`` among them → ``cleanup_memory`` →
-``cleanup_dirs`` → ``barrier`` → ``teardown_distributed``, the last two skipped on an ``error``
-status, since a rank whose body raised abandoned a collective its peers are still inside) →
-``sys.exit``. Hand-rolled copies drift — a skipped barrier, a dir leaked on the error path, a
-missing ``cleanup_ep``. With the decorator owning it, a test body is just *load → train → assert*.
-
-    from tests.common.harness import gpu_test_main
-
-    @gpu_test_main(min_world_size=2, prefix="test_sft_qwen3_dense")
-    def run(ctx):
-        pc = ParallelismConfig(world_size=ctx.world_size, ...)
-        model, tok = load_distributed_model(..., parallelism_config=pc)
-        trainer = DistributedSFTTrainer(..., parallelism_config=pc)
-        ctx.on_teardown(trainer.cleanup_ep)        # finalizer the decorator can't reach
-        trainer.train()
-        return {
-            "checks": {"loss_finite": ..., "loss_decreased": ...},
-            "metrics": ctx.metrics(trainer),       # headline tok/s/GPU + peak mem
-        }
-
-    if __name__ == "__main__":
-        run()                                       # decorator calls sys.exit itself
-
-The body returns ``{"checks": {name: bool}, "metrics": {...}}``. The decorator
-computes ``all(checks.values())``, emits the machine-readable result line
-(:mod:`tests.common.reporting`), guarantees teardown on every exit path, and
-exits ``0`` (pass) / ``1`` (fail or body raised) / ``2`` (bad launch: wrong world
-size, emitted as a ``status="error"`` result that the GPU launcher reports as a FAIL).
-
-Why a decorator and not a bare context manager: world size is validated per
-test, ``--cp/--ep/--tp`` change the required ``nproc``, and ``cleanup_ep`` is
-trainer-scoped — none reachable from a plain ``with`` block, all handled here via
-``ctx``.
-"""
+"""``gpu_test_main``: the shared lifecycle for torchrun GPU tests, so a body is just load, train, assert. The body
+returns ``{"checks": {name: bool}, "metrics": {...}}``. Exits 0 on pass, 1 on a failure or a raise, and 2 on a bad
+launch."""
 
 import contextlib
 import functools
@@ -62,18 +27,15 @@ from tests.common.memory import cleanup_memory
 from tests.common.rank_log import log, log_all
 from tests.common.reporting import emit_result, format_table, snapshot_efficiency
 
-# Exit codes the launcher keys on.
 _EXIT_PASS = 0
 _EXIT_FAIL = 1
 _EXIT_BAD_LAUNCH = 2
-# causal_conv1d's default backward sums the conv weight gradient with atomics, so two identical steps
-# can round a weight differently and an exact replay (a resume against the uninterrupted run) diverges.
-# Set unless the caller exported its own value.
+# causal_conv1d's default backward sums conv weight gradients with atomics, so two identical steps can round apart and
+# an exact replay diverges. Set unless the caller exported its own value.
 _DETERMINISTIC_KERNEL_ENV = {"CAUSAL_CONV1D_DETERMINISTIC": "1"}
 
 
 def _efficiency_callback(trainer) -> EfficiencyCallback | None:
-    """The first ``EfficiencyCallback`` attached to ``trainer``, or None."""
     handler = getattr(trainer, "callback_handler", None)
     if handler is None:
         return None
@@ -81,8 +43,6 @@ def _efficiency_callback(trainer) -> EfficiencyCallback | None:
 
 
 class Ctx:
-    """Per-run context handed to a ``gpu_test_main`` body."""
-
     def __init__(self, rank: int, world_size: int, local_rank: int, output_dir: str, cache_dir: str):
         self.rank = rank
         self.world_size = world_size
@@ -101,11 +61,7 @@ class Ctx:
             dist.barrier()
 
     def broadcast_seed(self, seed: int = 42) -> int:
-        """Seed torch/random identically on all ranks (rank-0 value wins).
-
-        Use when every rank must generate the same data (a parallel-mode run
-        compared against a single-GPU reference). Returns the shared seed.
-        """
+        """Seed torch/random identically on all ranks (rank 0's value wins); returns the shared seed."""
         t = torch.tensor([seed], device=self.device)
         if dist.is_initialized():
             dist.broadcast(t, src=0)
@@ -116,14 +72,8 @@ class Ctx:
         return shared
 
     def broadcast_checks(self, checks: dict[str, bool]) -> dict[str, bool]:
-        """Share rank 0's verdict with every rank, without masking another rank's own failure.
-
-        Checks only rank 0 can make (a served model's response, an HTTP probe) are missing on the
-        other ranks, and the harness exits per rank — so a real server-side failure would leave
-        rank 0 exiting 1 while its peers exit 0, which the launcher reports as a teardown race.
-        Rank 0's entries are AND-ed into the local dict rather than replacing it: a check that
-        failed only on rank 1 must survive the merge.
-        """
+        """AND rank 0's checks into each rank's own, without masking another rank's failure. Rank-0-only checks would
+        otherwise leave rank 0 exiting 1 while peers exit 0, which the launcher reports as a teardown race."""
         if not dist.is_initialized() or self.world_size == 1:
             return checks
         payload = [checks if self.rank == 0 else None]
@@ -134,11 +84,7 @@ class Ctx:
         return merged
 
     def metrics(self, trainer_or_cb) -> dict:
-        """Snapshot headline metrics from a trainer (or an EfficiencyCallback).
-
-        Returns ``{}`` if no ``EfficiencyCallback`` is attached — metrics are
-        optional; correctness tests can omit them.
-        """
+        """Snapshot headline metrics from a trainer or EfficiencyCallback; ``{}`` if none is attached."""
         cb = trainer_or_cb if isinstance(trainer_or_cb, EfficiencyCallback) else _efficiency_callback(trainer_or_cb)
         return snapshot_efficiency(cb) if cb is not None else {}
 
@@ -154,17 +100,9 @@ class Ctx:
 
 
 def record_check(checks: dict[str, bool], name: str, fn: Callable[[], None]) -> None:
-    """Run ``fn`` and record its verdict under ``name`` instead of aborting the body.
-
-    For a suite that asserts many INDEPENDENT properties in one launch: a raise would end the body
-    at the first failure and the harness would report a single error, hiding every later property.
-    Recording keeps each verdict in the dict ``gpu_test_main`` reports and exits on.
-
-    Continuing past a failure is only safe while no rank is left misaligned on a later collective, so
-    every raise inside ``fn`` has to be rank-symmetric (every rank raises together, e.g. after an
-    agreed verdict) or come after ``fn``'s last collective. That is also why ``gpu_test_main`` skips its
-    own barrier for a body that raised.
-    """
+    """Run ``fn`` and record its verdict under ``name`` instead of aborting the body, so later independent properties
+    still report. Every raise inside ``fn`` must be rank-symmetric or come after its last collective, or a rank is left
+    misaligned."""
     try:
         fn()
     except Exception as e:
@@ -178,8 +116,8 @@ def record_check(checks: dict[str, bool], name: str, fn: Callable[[], None]) -> 
 
 @contextlib.contextmanager
 def cuda_syncs_are_errors() -> Iterator[None]:
-    """CUDA's sync debug mode at ``error`` over the body, so an op that synchronizes the host with the device raises
-    instead of stalling it; back to ``default`` on exit."""
+    """CUDA's sync debug mode at ``error`` over the body, so an op that synchronizes host and device raises instead of
+    stalling."""
     torch.cuda.set_sync_debug_mode("error")
     try:
         yield
@@ -188,22 +126,16 @@ def cuda_syncs_are_errors() -> Iterator[None]:
 
 
 def skip_unless_local_checkpoint(path: str, env_var: str) -> None:
-    """Decline to run, before the harness starts, when a suite's local checkpoint directory is absent.
-
-    The launcher reads an exit-0 run that printed a ``SKIP:`` line and no result line as a skip.
-    ``env_var`` is the knob that points the suite at a checkpoint that is present.
-    """
+    """Decline to run when a suite's local checkpoint is absent; the launcher reads exit 0 with a ``SKIP:`` line and no
+    result as a skip."""
     if not os.path.isdir(path):
         log(f"SKIP: local model path missing: {path} (set {env_var} to a present checkpoint)")
         sys.exit(0)
 
 
 def skip_unless_blackwell(what: str) -> None:
-    """Decline to run, before the harness starts, on a GPU older than Blackwell.
-
-    For a suite that runs FlashAttention 4, which only the Blackwell image ships. The launcher reads an
-    exit-0 run that printed a ``SKIP:`` line and no result line as a skip.
-    """
+    """Decline to run on a GPU older than Blackwell, for a suite using FA4; the launcher reads exit 0 with a ``SKIP:``
+    line as a skip."""
     if not is_blackwell_gpu():
         log(f"SKIP: {what} runs FlashAttention 4, which needs a Blackwell GPU")
         sys.exit(0)
@@ -217,18 +149,8 @@ def gpu_test_main(
     partial_state: bool = True,
     process_group: bool = True,
 ):
-    """Wrap a ``run(ctx) -> dict`` body with the full GPU-test lifecycle.
-
-    Args:
-        min_world_size: minimum GPUs the test needs; a smaller launch emits a
-            ``status="error"`` result and exits 2, which the GPU launcher reports as a FAIL.
-        exact_world_size: if set, the launch must provide exactly this many GPUs.
-        prefix: temp-dir prefix for this test's isolated output/cache dirs.
-        partial_state: construct ``accelerate.PartialState()`` (needed by the
-            Trainer-based tests; off for pure-kernel tests).
-        process_group: join the torchrun process group; off for a ``launcher="python"`` driver, one
-            process at rank 0 of a world of one that starts its own ranks.
-    """
+    """Wrap a ``run(ctx) -> dict`` body with the full GPU-test lifecycle. ``process_group`` off is for a
+    ``launcher="python"`` driver, one process that starts its own ranks."""
 
     def decorator(run: Callable[["Ctx"], dict]) -> Callable[[], int]:
         @functools.wraps(run)
@@ -241,7 +163,6 @@ def gpu_test_main(
             if partial_state:
                 PartialState()
 
-            # ── Validate the launch BEFORE allocating anything ──────────────
             bad = None
             if exact_world_size is not None and world_size != exact_world_size:
                 bad = f"requires exactly {exact_world_size} GPUs, launched with {world_size}"
@@ -269,9 +190,8 @@ def gpu_test_main(
             except Exception as e:
                 status = "error"
                 err = f"{type(e).__name__}: {e}"
-                # Every rank reports its own failure. Under rank-0-only reporting a non-zero rank's
-                # exception is invisible: the launcher shows exit code 1 with no message and no
-                # traceback, indistinguishable from a teardown race.
+                # Every rank reports its own failure; a non-zero rank's exception is otherwise invisible to the
+                # launcher.
                 log_all(f"\nFATAL: {err}")
                 traceback.print_exc()
             finally:
@@ -279,29 +199,23 @@ def gpu_test_main(
                 try:
                     cleanup_memory()
                 except Exception:
-                    # A body that faulted the device faults this too, and raising here would drop the
-                    # failed verdict, which the launcher then reads as an infra error. Only a pass must
-                    # not survive it.
+                    # A body that faulted the device faults this too, and raising here would drop the failed verdict.
+                    # Only a pass must not survive it.
                     if status == "pass":
                         raise
                     log_all("cleanup_memory raised after the body failed")
                     traceback.print_exc()
                 cleanup_dirs(output_dir, cache_dir)
-                # Clean path only. A rank whose body RAISED has abandoned a collective its peers are
-                # still inside, so both the barrier and the NCCL group teardown block until the
-                # watchdog timeout — the whole job hangs and reports an undiagnosable infra error
-                # instead of this rank's traceback. Exiting straight away is what makes the launcher
-                # reap the group, so a single-rank failure stays a FAIL.
+                # Clean path only. A rank whose body raised abandoned a collective its peers are still inside, so the
+                # barrier and group teardown would block until the watchdog timeout. Exiting straight away makes the
+                # launcher reap the group.
                 if status != "error":
                     ctx.barrier()
                     teardown_distributed()
 
             failed = [k for k, v in checks.items() if not v]
-            # A non-zero rank whose checks disagree with rank 0's exits non-zero while rank 0 prints
-            # RESULT: PASS — reporting only from rank 0 makes that look like a teardown race with no
-            # diagnosable cause. Every rank announces its own failures.
-            # Printed directly rather than via log_all: the process group is already torn down by
-            # here, so log_all cannot read the rank and would label every line "[Rank 0]".
+            # Every rank announces its own failures, else a disagreement looks like a teardown race. Printed directly:
+            # the process group is already gone, so log_all would label every line "[Rank 0]".
             if rank != 0 and failed:
                 print(f"[Rank {rank}] FAILED CHECKS: {failed} (metrics: {metrics})", flush=True)
 
@@ -314,8 +228,7 @@ def gpu_test_main(
                 log(f"\nRESULT: {status.upper()}" + (f" (failed: {failed})" if failed else ""))
                 emit_result(status, checks=checks, metrics=metrics, error=err)
 
-            # The script's `if __name__ == "__main__": run()` relies on this
-            # exiting the process with the launcher-visible code.
+            # The script's ``run()`` relies on this exiting with the launcher-visible code.
             sys.exit(_EXIT_PASS if status == "pass" else _EXIT_FAIL)
 
         return wrapper

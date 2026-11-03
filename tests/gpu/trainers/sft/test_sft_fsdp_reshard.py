@@ -1,32 +1,8 @@
 #!/usr/bin/env python
-"""
-FULL_SHARD (ZeRO-3) vs SHARD_GRAD_OP (ZeRO-2) equivalence on a dense model (pure DP and CP).
+"""FULL_SHARD and SHARD_GRAD_OP are the same math, so their loss curves match on pure DP and CP=2.
 
-``fsdp_reshard_after_forward`` selects FSDP2's resharding mode: False (default) =
-SHARD_GRAD_OP (params stay unsharded between forward and backward), True =
-FULL_SHARD (params resharded after forward, re-gathered in backward — lower peak
-memory). The two are mathematically identical; only memory/timing differ. So the
-training loss curve must match between them on every supported (EP=1) path.
-
-This runs a few SFT steps on Qwen3-0.6B in each parallelism mode with the flag OFF
-then ON and checks, per mode:
-  * both runs produce finite, decreasing loss;
-  * the FULL_SHARD loss curve matches the SHARD_GRAD_OP curve within tolerance.
-
-Modes (dense paths the config guard permits FULL_SHARD on). TP *with* DP is excluded:
-FSDP2's backward re-gather of the TP-sharded DTensor params has no registered all-gather
-strategy, so ParallelismConfig rejects TP+DP+FULL_SHARD (covered by
-test_reshard_rejects_tp_with_dp in tests/cpu/parallelism/test_parallelism_config.py). Pure TP (dp=1) has
-no DP axis to reshard, so there is nothing to equate against SHARD_GRAD_OP either.
-  * pure DP   (FSDP shards over all ranks)
-  * CP=2      (FSDP + Ulysses; the reshard all-gather interleaved with the CP all-to-all)
-
-Needs 4 GPUs so CP=2 still leaves DP=2, where resharding actually engages
-(at DP=1 FSDP is skipped and the flag is a no-op).
-
-Run with 4 GPUs:
-    torchrun --nproc_per_node=4 \
-        tests/gpu/trainers/sft/test_sft_fsdp_reshard.py
+TP+DP is excluded since FSDP2 has no all-gather strategy for TP-sharded DTensors (ParallelismConfig rejects it), and
+pure TP has no DP axis to reshard. 4 GPUs, so CP=2 leaves DP=2: at DP=1 FSDP is skipped and the flag is a no-op.
 """
 
 import math
@@ -51,17 +27,13 @@ MAX_STEPS = 8
 MAX_SEQ_LENGTH = 1024
 LEARNING_RATE = 2e-5
 SEED = 42
-# FULL_SHARD and SHARD_GRAD_OP are the same math but re-gather/reduce params in a different
-# order, so over many bf16 optimizer steps the loss curves drift apart by rounding noise even
-# though step 0 (a pure forward, no reduction yet) is bit-identical. We therefore check that the
-# curves *track* — small deviation relative to the loss scale — not that they bit-match. A real
-# sharding bug (dropped/doubled grad sync) diverges monotonically by >>this or NaNs.
-STEP0_ABS_TOL = 1e-3  # the first forward must be identical (proves identical setup bar reshard mode)
-CURVE_REL_TOL = 0.03  # mean |Δloss| / mean loss across the run
+# Different re-gather and reduce order, so bf16 curves drift by rounding though step 0 is bit-identical. A real
+# sharding bug (dropped or doubled grad sync) diverges monotonically by far more, or NaNs.
+STEP0_ABS_TOL = 1e-3  # The first forward must be identical.
+CURVE_REL_TOL = 0.03  # Mean |Δloss| / mean loss across the run.
 
 
 def run_sft(mode_name, parallelism_kwargs, reshard, tokenizer, output_dir):
-    """Train a few SFT steps and return the per-step loss list."""
     reshard_label = "FULL_SHARD" if reshard else "SHARD_GRAD_OP"
     log(f"\n--- {mode_name} / {reshard_label} (reshard_after_forward={reshard}) ---")
 
@@ -131,7 +103,7 @@ def run(ctx) -> dict:
         barrier()
 
         both_finite = all(math.isfinite(x) for x in off + on)
-        # both modes must train (decrease), not just the FULL_SHARD run
+        # Both modes must train, not just FULL_SHARD.
         both_decreased = len(on) >= 2 and on[-1] < on[0] and off[-1] < off[0]
         aligned = len(off) == len(on) and bool(off)
         step0_match = aligned and abs(off[0] - on[0]) <= STEP0_ABS_TOL

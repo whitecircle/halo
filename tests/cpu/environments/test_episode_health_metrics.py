@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the two episode-health signals a natural-termination rate hides.
-
-A turn that stops inside its reasoning arrives with no visible content and no tool call, and
-reasoning that drifts into another script reads as a normal turn; both are only visible in
-transcripts unless the environment counts them.
-
-Run: python tests/cpu/environments/test_episode_health_metrics.py  (or pytest)
-"""
+"""The two episode-health signals a natural-termination rate hides: a turn stopping inside its reasoning, and
+reasoning drifting into another script."""
 
 import pytest
 

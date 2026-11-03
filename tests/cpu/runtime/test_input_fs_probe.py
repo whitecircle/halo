@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""The input-filesystem probe: ``DIST_INPUT_SHARED_FILESYSTEM`` vs what the HF caches do.
-
-The read side's declaration picks who fills the Hub and datasets caches: global rank 0 alone when shared,
-each node's local rank 0 when per-node. Both wrong declarations are silent at 2+ nodes:
-
-* declared SHARED on node-local caches: the other nodes read a cache nobody filled, so their Hub reads
-  fail and every rank there recomputes each dataset map into its own node's cache;
-* declared PER-NODE on a shared cache: every node's local rank 0 fills the same cache files at once.
-
-``verify_input_filesystem_sharing`` writes a sentinel from global rank 0 under each cache and gathers who
-sees it, before the first Hub read. Driven here on a real 2-rank gloo group whose ranks stand for two
-nodes (``LOCAL_WORLD_SIZE=1``), each with its own or a common cache directory.
-
-    python tests/cpu/runtime/test_input_fs_probe.py
-"""
+"""The input-filesystem probe: ``DIST_INPUT_SHARED_FILESYSTEM`` vs what the HF caches do, on two gloo ranks standing
+for nodes. Both wrong declarations are silent at 2+ nodes: unfilled caches, or every node filling the same files."""
 
 import datetime
 import json
@@ -28,7 +15,7 @@ from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 PG_TIMEOUT = datetime.timedelta(seconds=60)
-# Two single-rank nodes, and a one-second poll so an unseen sentinel costs a second, not the default minute.
+# A one-second poll, so an unseen sentinel costs a second, not the default minute.
 TWO_NODE_ENV = {"LOCAL_WORLD_SIZE": "1", "LOCAL_RANK": "0", "DIST_FS_PROBE_TIMEOUT_SECONDS": "1"}
 
 
@@ -46,14 +33,14 @@ def _probe_worker(
     try:
         verify_input_filesystem_sharing(caches)
         outcome = "passed"
-    except Exception as exc:  # the verdict on every rank is the subject
+    except Exception as exc:  # The verdict on every rank is the subject.
         outcome = f"{type(exc).__name__}: {exc}"
     with open(os.path.join(root, f"outcome_{rank}.json"), "w") as fh:
         json.dump(outcome, fh)
 
 
 def _outcomes(tmp_path, *, node_local: bool | str, declared_shared: bool, unwritable_hub: bool = False) -> list[str]:
-    """Every rank's verdict, with both caches node-local (``True``), both shared (``False``), or only the one named."""
+    """``node_local``: both caches (``True``), neither (``False``), or the one named."""
     (tmp_path / "read_only_file").write_text("")
     run_gloo_ranks(
         _probe_worker,
@@ -85,9 +72,8 @@ def test_a_per_node_declaration_over_a_shared_cache_is_refused_on_every_rank(tmp
 
 @pytest.mark.parametrize("declared_shared", [True, False], ids=["declared-shared", "declared-per-node"])
 def test_caches_on_different_kinds_of_storage_are_refused_under_either_declaration(tmp_path, declared_shared):
-    """A node-local Hub cache beside a shared datasets cache (an explicit HF_DATASETS_CACHE, as the launch recipe
-    sets it, moves only that one): either declaration contradicts one of them, and the refusal moves the cache it
-    names and says the two must match, rather than sending the user to flip the flag into the other refusal."""
+    """Either declaration contradicts one cache, and the refusal says the two must match rather than flip the flag
+    into the other refusal."""
     flagged = "HF_HUB_CACHE" if declared_shared else "HF_DATASETS_CACHE"
     remedy = f"point {flagged} at the shared mount" if declared_shared else f"put {flagged} on each node's local"
     for outcome in _outcomes(tmp_path, node_local="HF_HUB_CACHE", declared_shared=declared_shared):
@@ -104,8 +90,7 @@ def test_a_matching_declaration_passes_and_leaves_no_sentinel(tmp_path, node_loc
 
 
 def test_a_cache_rank_zero_cannot_write_is_skipped_and_the_rest_still_probed(tmp_path):
-    """A read-only, pre-staged cache is filled by nobody, so its declaration is moot; the writable cache beside
-    it still refuses a contradiction."""
+    """A read-only, pre-staged cache is filled by nobody."""
     for outcome in _outcomes(tmp_path, node_local=True, declared_shared=True, unwritable_hub=True):
         assert "point HF_DATASETS_CACHE at the shared mount" in outcome, outcome
         assert "declared SHARED but" in outcome and "HF_HUB_CACHE (" not in outcome, outcome
@@ -125,8 +110,7 @@ class _RecordingParser:
 
 
 def test_a_training_script_probes_its_caches_after_the_group_starts_and_before_any_hub_read(monkeypatch):
-    """The scripts' first Hub reads (the modality probe, the config) follow ``parse_script_args``; a follower
-    reads only the cache its scope's main rank fills, so the declaration is verified ahead of them."""
+    """A follower reads only the cache its main rank fills, so the declaration is verified first."""
     events: list = []
     monkeypatch.setattr(script, "init_distributed", lambda: events.append("group"))
     monkeypatch.setattr(script, "verify_input_filesystem_sharing", lambda caches: events.append(sorted(caches)))
@@ -138,7 +122,7 @@ def test_a_training_script_probes_its_caches_after_the_group_starts_and_before_a
 
 
 def test_a_single_node_job_is_not_probed(tmp_path, monkeypatch):
-    """Within one node every rank shares the mounts by construction: no sentinel, no collective."""
+    """Every rank shares the mounts by construction."""
     monkeypatch.setattr(filesystem, "get_global_world_size", lambda: 8)
     monkeypatch.setattr(filesystem, "get_local_world_size", lambda: 8)
     verify_input_filesystem_sharing({"HF_DATASETS_CACHE": str(tmp_path / "datasets")})

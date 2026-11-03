@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Between logs a step reads its metrics back only for the efficiency callback; a log reads the world metrics once
-and the token counts once.
-
-On a host-bound step every device-to-host read drains the stream, so each one turns the GPU's queue into idle
-time. The metric path of a run keeps its counters on the device or the host between logs: the world metrics, the
-loss-token total and HF's input-token count (``include_num_input_tokens_seen: all``) are summed over the world
-at each log, the input tokens also at each save, and, for the efficiency callback, at each step it measures. Two
-gloo ranks train a tiny SFT model with the efficiency callback off and on, counting every ``item``, ``tolist``,
-``bool``, ``float``, ``int``, ``cpu`` and ``numpy`` read the toolkit or TRL makes per optimizer step, and check the
-input-token count each log, each save and the callback read against the batches the ranks actually saw.
-
-    python tests/cpu/trainers/test_metric_host_reads.py
-"""
+"""Between logs a step reads metrics back only for the efficiency callback; a log reads world metrics and tokens once.
+On a host-bound step every device-to-host read drains the stream, turning the GPU's queue into idle time."""
 
 import datetime
 import json
@@ -48,8 +37,7 @@ LOGGING_STEPS = 2
 SAVE_STEP = 5
 # The steps counted: one plain, one logged, past the first log, whose flush agrees the metric keys once.
 PLAIN_STEP, LOGGED_STEP = 3, 4
-# Where a read counts: the metric path's modules and TRL's, not torch's, accelerate's or transformers', nor a
-# per-step read with another purpose (the non-finite step guard's verdict).
+# The metric path's modules and TRL's, never a dependency's read or the non-finite step guard's per-step verdict.
 METRIC_SOURCES = (
     "halo/trainers/world_metrics.py",
     "halo/trainers/token_metrics.py",
@@ -73,8 +61,7 @@ def _source(filename: str) -> str:
 
 
 class _StepWindows(TrainerCallback):
-    """Files every host read under the optimizer step it falls in, from that step's begin to the next one's, so
-    a step's log and save count with it."""
+    """Files host reads under the optimizer step they fall in, up to the next step's begin, so a log and save count."""
 
     def __init__(self):
         self.step = None
@@ -88,9 +75,6 @@ class _StepWindows(TrainerCallback):
 
 
 class _TokenLedger(TrainerCallback):
-    """The input-token count each consumer read: every log line's, and the state the callbacks see at each step
-    end."""
-
     def __init__(self):
         self.at_step_end: dict[int, int] = {}
 
@@ -112,8 +96,7 @@ def _count_reads(windows: _StepWindows) -> None:
 
 
 def _record_batch_tokens(seen: list[int]) -> None:
-    """This rank's input tokens per micro-batch, read off the batches themselves: the reference the trainer's world
-    sums are held to."""
+    """This rank's input tokens per micro-batch, off the batches: the reference the trainer's world sums must match."""
     track = TokenMetricsMixin._track_num_input_tokens
 
     def recording(self, inputs):
@@ -203,7 +186,6 @@ def runs(request, tmp_path_factory) -> tuple[bool, list[dict]]:
 
 
 def _world_tokens_through(step: int, seen: list[list[int]]) -> int:
-    """Every rank's input tokens over the first ``step`` optimizer steps, from the batches themselves."""
     return sum(sum(rank_seen[: step * GRAD_ACCUM]) for rank_seen in seen)
 
 
@@ -219,8 +201,7 @@ _MEASURED_STEP_READS = {
 
 
 def test_a_plain_step_reads_its_metrics_back_only_for_the_efficiency_callback(runs):
-    """Off, a step between logs reads nothing back; on, the callback's step end reads the input-token sum and the
-    step's attention work, at the boundary its step clock already waits on."""
+    """The callback reads the input-token sum and attention work at the boundary its step clock already waits on."""
     efficiency, results = runs
     expected = _MEASURED_STEP_READS if efficiency else {}
     for rank, result in enumerate(results):
@@ -229,7 +210,7 @@ def test_a_plain_step_reads_its_metrics_back_only_for_the_efficiency_callback(ru
 
 
 def test_a_logged_step_reads_the_world_metrics_and_the_token_counts_once_each(runs):
-    """The loss metrics' flush and the token counters' sum: one read each, beside a measured step's own."""
+    """The loss metrics' flush and the token counters' sum, beside a measured step's own."""
     efficiency, results = runs
     logged = {("tolist", "halo/trainers/world_metrics.py"): 2}
     expected = Counter(logged) + Counter(_MEASURED_STEP_READS) if efficiency else logged
@@ -239,8 +220,6 @@ def test_a_logged_step_reads_the_world_metrics_and_the_token_counts_once_each(ru
 
 
 def test_the_input_token_count_is_exact_wherever_it_is_read(runs):
-    """Every log line, the trainer state saved off the logging cadence and the final state carry the world's
-    tokens so far; with the efficiency callback, so does the state every step end shows it."""
     efficiency, results = runs
     seen = results[0]["seen"]
     assert len({len(rank_seen) for rank_seen in seen}) == 1 and seen[0] != seen[1], "premise: unequal shards"

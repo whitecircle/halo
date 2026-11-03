@@ -1,5 +1,5 @@
-"""Distributed SFT trainer: TRL's SFTTrainer under the trainer spine, with tree packing, router aux-loss weighting,
-the CP loss and its own loss metrics, folded across the world once per log."""
+"""TRL's SFTTrainer under the trainer spine, with tree packing, router aux-loss weighting, the CP loss and its own loss
+metrics, folded across the world once per log."""
 
 import inspect
 import logging
@@ -26,17 +26,13 @@ from halo.trainers.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 
-# TRL SFTTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
 _CTOR_POSITIONS = resolve_ctor_positions(SFTTrainer, "model", "args", "data_collator")
 
 
 def _replace_chunked_nll_loss_type(training_args) -> None:
-    """Replace TRL's ``chunked_nll`` loss type with ``nll``.
-
-    TRL defaults an unset ``loss_type`` to ``chunked_nll`` whenever ``use_liger_kernel`` is off, and that type
-    replaces the model's forward with one that projects ``lm_head`` itself: it skips the family's head transform,
-    the router aux loss the forward folds in, and the logits a subclass's loss reads.
-    """
+    """TRL defaults an unset ``loss_type`` to ``chunked_nll`` when ``use_liger_kernel`` is off, whose forward projects
+    ``lm_head`` itself: it skips the family's head transform, the router aux loss and the logits a subclass's loss
+    reads."""
     if training_args is None or getattr(training_args, "loss_type", None) != "chunked_nll":
         return
     if is_global_main_process():
@@ -51,11 +47,8 @@ def _replace_chunked_nll_loss_type(training_args) -> None:
 def _record_loss_metrics(
     metrics: WorldMetrics, outputs, inputs, labels, cp_shard: tuple[int, int] | None, *, training: bool
 ) -> None:
-    """Record one micro-batch's metrics for the per-log flush, issuing no collective and no host read: next-token
-    accuracy and entropy over the supervised tokens (accuracy from the fused loss when the forward skipped the
-    logits), the batch's attended tokens and the router aux loss. ``cp_shard`` is this rank's ``(cp_rank,
-    cp_size)`` when the forward covers its chunk alone; a non-final rank's last position then predicts the next
-    chunk's first token, as in the loss."""
+    """No collective and no host read. ``cp_shard`` is ``(cp_rank, cp_size)`` when the forward covers its chunk alone;
+    a non-final rank's last position then predicts the next chunk's first token, as in the loss."""
     logits = getattr(outputs, "logits", None)
     if labels is not None and logits is not None:
         if cp_shard is not None:
@@ -84,8 +77,6 @@ def _record_loss_metrics(
 
 
 class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
-    """TRL's SFT trainer under EP, CP, TP, ETP and PP."""
-
     SUPPORTS_CP = True
     # Canonical last-stage loss; the PP-incompatible knobs are rejected in _split_pipeline_stage.
     PP_REFUSAL = None
@@ -112,13 +103,11 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
             self.model_accepts_loss_kwargs = False
         self._configure_distributed_modes()
 
-        # Per-mode loss metrics awaiting their once-per-log flush (:meth:`_drain_loss_metrics`).
         self._loss_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """The model's loss on the inputs TRL's ``SFTTrainer.compute_loss`` prepares, the router aux term weighed at
-        its coefficient; under CP, the wrapper's loss on this rank's chunk. Its metrics are recorded for the
-        once-per-log flush (:meth:`_drain_loss_metrics`) where TRL gathers and reads them per micro-batch."""
+        """Under CP, the wrapper's loss on this rank's chunk. Metrics are recorded for the once-per-log flush, where
+        TRL gathers and reads them per micro-batch."""
         self._warn_once_on_empty_labels(inputs)
         prediction_loss_only = inputs.pop("_prediction_loss_only", None)
         inputs["use_cache"] = False
@@ -146,8 +135,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         return (loss, outputs) if return_outputs else loss
 
     def _add_trl_forward_inputs(self, inputs, prediction_loss_only: bool | None) -> None:
-        """The forward inputs ``SFTTrainer.compute_loss`` adds: the router logits where TRL weighs the aux loss and,
-        under Liger, the fused loss's skip-logits verdict, its token accuracy and DFT's token scaling."""
+        """The forward inputs ``SFTTrainer.compute_loss`` adds: router logits where TRL weighs the aux loss and, under
+        Liger, the skip-logits verdict, token accuracy and DFT's token scaling."""
         if self.aux_loss_enabled:
             inputs["output_router_logits"] = True
         if self.args.use_liger_kernel:
@@ -164,8 +153,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
             inputs["use_token_scaling"] = self.args.loss_type == "dft"
 
     def _pad_to_cp_multiple(self, inputs) -> None:
-        """Pad every sequence column in place to a multiple of ``context_parallel_size``, with the tokenizer's
-        pad id (never vocabulary token 0) on ``input_ids`` and the ignore index on ``labels``."""
+        """Pad sequence columns in place to a multiple of ``cp_size``, with the tokenizer's pad id (never vocabulary
+        token 0) on ``input_ids`` and the ignore index on ``labels``."""
         cp_size = self.parallelism_config.cp_size
         labels = inputs.get("labels")
         if labels is None or labels.shape[1] % cp_size == 0:
@@ -185,14 +174,9 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
                 inputs[key] = torch.nn.functional.pad(inputs[key], (0, pad_len), value=fill)
 
     def _weigh_router_aux_loss(self, model, loss, outputs, num_items_in_batch):
-        """Weigh the router aux loss at its coefficient: ``coef x mean(aux)`` per optimizer step, ``coef x aux`` in an
-        eval batch's loss.
-
-        HF's ``num_items_in_batch`` path scales a micro-batch loss by the process count and sums the accumulation
-        window, which makes the token-summed LM term the window's mean but weighs the per-micro-batch aux mean
-        ``processes x accumulation`` times. The forward adds the term only when handed the labels, which HF
-        withholds under a label smoother or a ``compute_loss_func``; it is then added here alone.
-        """
+        """``coef x mean(aux)`` per optimizer step, ``coef x aux`` in an eval batch; HF's ``num_items_in_batch`` path
+        would weigh the aux mean ``processes x accumulation`` times. The forward adds the term only when handed labels,
+        which HF withholds under a label smoother or ``compute_loss_func``; it is then added here alone."""
         aux = outputs.get("aux_loss") if isinstance(outputs, dict) else None
         if aux is None or num_items_in_batch is None:
             return loss
@@ -216,11 +200,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         super().log(logs, start_time)
 
     def _drain_loss_metrics(self):
-        """COLLECTIVE outside PP: fold this log window's loss metrics across the world in one flush and emit them.
-        A window with no loss forward anywhere (the final log of a run, or a mode that never ran) emits nothing
-        rather than a 0.0 accuracy, a verdict every rank reads off the same flushed result. The pipeline schedule
-        computes no loss here and records nothing, so a PP run skips the flush, as does a subclass whose loss
-        records none (:attr:`RECORDS_LOSS_METRICS`)."""
+        """COLLECTIVE outside PP. A window with no loss forward anywhere emits nothing rather than a 0.0 accuracy. PP
+        records nothing here, so it skips the flush, as does a subclass with :attr:`RECORDS_LOSS_METRICS` off."""
         if self._pp_runner is not None or not self.RECORDS_LOSS_METRICS:
             return
         mode = "train" if self.model.training else "eval"
@@ -236,8 +217,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
 
     @cached_property
     def _forward_accepts_skip_logits(self) -> bool:
-        """Whether forward was patched with Liger ``lce_forward`` (exposes ``skip_logits``); read at the first eval
-        step, so both the class-level patch and TRL's instance-level re-application are visible."""
+        """Whether forward was patched with Liger ``lce_forward``; read at the first eval step, so both the class-level
+        patch and TRL's instance-level re-application are visible."""
         model = self._top_level_model()
         try:
             return "skip_logits" in inspect.signature(model.forward).parameters
@@ -245,8 +226,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
             return False
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-        """Route loss-only eval through Liger's fused CE (``skip_logits``) rather than materialize full
-        ``[B, S, vocab]`` fp32 logits; every other clause names a consumer that still needs real logits."""
+        """Route loss-only eval through Liger's fused CE rather than materialize full ``[B, S, vocab]`` fp32 logits;
+        every other clause names a consumer that still needs real logits."""
         if (
             prediction_loss_only
             and not self.LOSS_READS_LOGITS

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """Preference tokenization must not append a second turn terminator.
-
-Chat templates close the final turn with ``<terminator>\\n``, so the last token of a rendered
-completion is the NEWLINE. Testing only ``input_ids[-1]`` therefore reads an already-terminated row as
-unterminated and appends a duplicate ender the policy never emits — measured on Qwen3-4B-Instruct as
-``Four.<|im_end|>\\n<|im_end|>``. That token lands inside the mean log-prob that IS the SMPO margin,
-for chosen and rejected alike, and no shipped preference config pins a chat template that would avoid
-it. The SFT render path already walks back over template whitespace; this pins the same rule here.
-
-Run: pytest tests/cpu/trainers/test_preference_terminator.py
-"""
+Templates end a turn with a terminator and a newline; a duplicate ender would land in the SMPO margin's log-prob."""
 
 import pytest
 
@@ -22,8 +13,6 @@ ROLE_MARKER = 200  # a config-declared ender (GLM-4 style), absent from tokenize
 
 
 class _StubTokenizer:
-    """Decodes only what the whitespace walk needs: content vs template whitespace."""
-
     eos_token_id = TERMINATOR
 
     def decode(self, ids):
@@ -36,7 +25,6 @@ def tokenizer():
 
 
 def test_terminator_followed_by_template_newline_counts_as_terminated(tokenizer):
-    """The real shape: ``... <terminator> \\n``. Appending here is the bug."""
     assert ends_with_terminator([CONTENT, TERMINATOR, NEWLINE], tokenizer, {TERMINATOR})
 
 
@@ -45,7 +33,6 @@ def test_bare_terminator_counts_as_terminated(tokenizer):
 
 
 def test_content_tail_is_not_terminated(tokenizer):
-    """A genuinely unterminated completion must still receive one — the walk stops at content."""
     assert not ends_with_terminator([TERMINATOR, CONTENT], tokenizer, {TERMINATOR})
 
 

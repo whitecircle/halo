@@ -1,6 +1,5 @@
-"""VLM data collators: the runtime render-and-collate path and the preprocessed-artifact padder, both
-composing :mod:`halo.data.vlm_render` so a runtime batch and an offline bake of the same row tokenize
-identically."""
+"""VLM collators: runtime render-and-collate and the preprocessed-artifact padder, both composing
+:mod:`halo.data.vlm_render` so a runtime batch and an offline bake tokenize identically."""
 
 import logging
 from collections.abc import Callable
@@ -29,8 +28,7 @@ from halo.models.attention.prefix_lm import has_prefix_lm_attention, prefix_lm_t
 
 logger = logging.getLogger(__name__)
 
-# What the construction-time template checks render: two exchanges in the parts form the VLM render receives, so a
-# template ending each assistant turn at the next turn's role marker (GLM) closes the first one.
+# Two exchanges in the VLM render's parts form, so a template ending a turn at the next role marker (GLM) closes one.
 _PROBE_CONVERSATION = [
     {"role": role, "content": [{"type": "text", "text": text}]}
     for role, text in (("user", "q"), ("assistant", "a"), ("user", "q"), ("assistant", "a"))
@@ -50,8 +48,6 @@ def _reject_rendered_bos(processor, tokenizer) -> None:
 
 
 class VLMDataCollator:
-    """Data collator for Vision Language Models."""
-
     # Same span policy as the text runtime collators; the SDPG subclass overrides it.
     _COMPLETION_SPAN_POLICY: dict[str, bool] | None = COLLATOR_SPAN_POLICY
 
@@ -72,8 +68,7 @@ class VLMDataCollator:
         self.response_prompt_template = response_prompt_template
         self.train_on_completions_only = train_on_completions_only
         self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
-        # Construction-time, like the eos set: the union reads the tokenizer's full vocab dict, which
-        # is a per-batch cost of the vocabulary's size for a verdict that cannot change between batches.
+        # At construction: the union reads the full vocab dict, too costly per batch for a verdict that cannot change.
         self.image_token_ids = tuple(resolve_image_token_ids(tokenizer, processor))
         # The processor marks no suffix in a rendered conversation (all 0: one bidirectional prefix).
         self.prefix_lm = has_prefix_lm_attention(model_config)
@@ -94,8 +89,7 @@ class VLMDataCollator:
         return self._collate(examples, lambda example: example.get("history", []), "batch")
 
     def _collate(self, examples, history_of: Callable[[dict[str, Any]], list], subject: str):
-        """The processed ``history_of`` batch with its labels, and a prefix-LM model's ``token_type_ids``
-        (:func:`~halo.models.attention.prefix_lm.prefix_lm_token_type_ids`)."""
+        """The processed batch with its labels, and a prefix-LM model's ``token_type_ids``."""
         batch = self._process_batch(examples, history_of, subject)
         batch["labels"] = self._build_labels(batch["input_ids"], batch.get("attention_mask"))
         if self.prefix_lm:
@@ -104,9 +98,8 @@ class VLMDataCollator:
         return batch
 
     def _process_batch(self, examples, history_of: Callable[[dict[str, Any]], list], subject: str):
-        """Render each row's ``history_of`` conversation and run the processor over the batch, refusing an
-        over-length sequence: truncating would desync expanded image placeholders from the vision tensors,
-        and a runtime batch cannot drop rows without desyncing DP ranks."""
+        """Refuses an over-length sequence: truncating would desync expanded image placeholders from the vision
+        tensors, and a runtime batch cannot drop rows without desyncing DP ranks."""
         if self.prefix_lm and not all(example.get("images") for example in examples):
             # PaliGemma's processor puts <bos> after each row's last <image>: in a row without one it lands
             # six characters into the text, and a batch without any image raises inside the processor.
@@ -122,12 +115,11 @@ class VLMDataCollator:
         return batch
 
     def _render(self, history: list[dict[str, Any]], example: dict[str, Any]) -> str:
-        """Chat-template one conversation with the row's tools."""
         return render_vlm_text(self.processor, history, tools=vlm_row_tools(example))
 
     def _mask_appended_newline(self, batch) -> None:
-        """Mask the label of each row's last token where it holds the newline a prefix-LM processor appends to the
-        text (PaliGemma's prefix/suffix separator), which lands after the rendered conversation ends."""
+        """Mask the newline a prefix-LM processor appends to the text (PaliGemma's prefix/suffix separator), which
+        lands after the conversation ends."""
         attention_mask = batch["attention_mask"]
         last_positions = attention_mask.shape[1] - 1 - attention_mask.flip(-1).argmax(dim=-1)
         for row, position in enumerate(last_positions.tolist()):
@@ -149,8 +141,7 @@ class VLMDataCollator:
 
 
 def _stacked_vision_tensors(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-    """``pixel_values`` and ``image_grid_thw`` concatenated over every image-carrying row of a preprocessed
-    batch, in order (a mixed batch has text-only rows)."""
+    """Concatenated over every image-carrying row, in order (a mixed batch has text-only rows)."""
     tensors = {}
     pixel_values = [
         torch.from_numpy(

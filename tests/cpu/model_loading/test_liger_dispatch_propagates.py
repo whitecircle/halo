@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``_apply_liger_for_standard_models`` must not swallow the appliers' deliberate failures.
-
-The toolkit appliers raise on purpose: ``ValueError`` for a contradictory option pair,
-``NotImplementedError`` for an unimplemented one. A blanket ``except ImportError: return None``
-around the resolve-and-apply block turns a failure into a log line about an unrelated cause, and the
-run that asked for Liger trains UNPATCHED.
-
-Run: pytest tests/cpu/model_loading/test_liger_dispatch_propagates.py
-"""
+"""``_apply_liger_for_standard_models`` must not swallow the appliers' deliberate failures, or a run asking for
+Liger trains unpatched."""
 
 import inspect
 
@@ -17,13 +10,13 @@ from halo.model_loading.liger import dispatch
 from halo.model_loading.liger.dispatch import _apply_liger_for_standard_models
 from tests.common.repo import probe_findings
 
-# The exception types an applier can raise. Each must reach the caller.
+# Each must reach the caller.
 _APPLIER_EXCEPTIONS = (ImportError, ValueError, NotImplementedError, RuntimeError)
 
 
 @pytest.fixture
 def registry():
-    """Restore ``_TOOLKIT_LIGER_APPLIERS`` after a test registers a probe applier into it."""
+    """Restores ``_TOOLKIT_LIGER_APPLIERS``."""
     original = dict(dispatch._TOOLKIT_LIGER_APPLIERS)
     yield dispatch._TOOLKIT_LIGER_APPLIERS
     dispatch._TOOLKIT_LIGER_APPLIERS.clear()
@@ -32,8 +25,6 @@ def registry():
 
 @pytest.mark.parametrize("exc_type", _APPLIER_EXCEPTIONS)
 def test_applier_failure_reaches_the_caller(registry, exc_type):
-    """Whatever an applier raises must propagate, never become a ``None`` return."""
-
     def _raising_applier(rope=True, cross_entropy=True, rms_norm=True, swiglu=True, geglu=True):
         raise exc_type("applier refused")
 
@@ -43,12 +34,11 @@ def test_applier_failure_reaches_the_caller(registry, exc_type):
 
 
 def test_unknown_model_type_still_returns_none(registry):
-    """The legitimate no-applier case stays a soft None — only raised failures propagate."""
     assert _apply_liger_for_standard_models("no_such_model_type_at_all", {}) is None
 
 
 def test_successful_applier_returns_the_filtered_config(registry):
-    """Baseline: a working applier is called and its signature-filtered config is reported."""
+    """Reports the signature-filtered config."""
     seen = {}
 
     def _applier(rope=True, cross_entropy=True, rms_norm=True):
@@ -62,18 +52,8 @@ def test_successful_applier_returns_the_filtered_config(registry):
 
 
 def test_every_registered_model_type_applies_without_raising():
-    """Every model_type dispatch can resolve must apply cleanly under the toolkit defaults.
-
-    Once an applier's failure propagates (above), any upstream applier that cannot honour those defaults
-    takes the run down at model load. Sweeping the whole registry catches the next such applier.
-
-    Each type resolves as a checkpoint of that type does, a multimodal wrapper with its text tower as the
-    fallback: resolved bare, a wrapper upstream registers (``gemma4``) would run upstream's applier over the
-    classes the tower's toolkit spec owns, which no load does.
-
-    Run in a subprocess: applying an applier rebinds upstream HF module classes for the rest of the
-    process, which would poison every later test in the session.
-    """
+    """Resolved as a checkpoint of that type does, a wrapper with its tower as fallback.
+    Subprocess: applying an applier rebinds upstream classes for the rest of the process."""
     script = """
 import sys
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
@@ -98,13 +78,7 @@ print("FAILURES:" + "|".join(failures))
 
 @pytest.mark.parametrize("model_type", sorted(dispatch._TOOLKIT_LIGER_APPLIERS))
 def test_real_toolkit_applier_rejections_reach_the_caller(model_type):
-    """Drive the REAL registered appliers through dispatch with a contradictory option pair.
-
-    ``cross_entropy`` and ``fused_linear_cross_entropy`` are mutually exclusive (both patch the loss), so
-    an applier accepting both must raise — and the raise must arrive here rather than being converted
-    into a silently unpatched model. Enumerated over the registry and skipped by signature, so a family
-    added later is covered without this file naming it.
-    """
+    """``cross_entropy`` and ``fused_linear_cross_entropy`` both patch the loss, so accepting both must raise."""
     applier = dispatch._TOOLKIT_LIGER_APPLIERS[model_type]
     params = set(inspect.signature(applier).parameters)
     if not {"cross_entropy", "fused_linear_cross_entropy"} <= params:
@@ -116,13 +90,8 @@ def test_real_toolkit_applier_rejections_reach_the_caller(model_type):
 
 @pytest.mark.parametrize("model_type", sorted(dispatch._TOOLKIT_LIGER_APPLIERS))
 def test_rope_false_appliers_refuse_an_explicit_rope_override(model_type):
-    """An applier declaring ``rope=False`` states Liger's generic rotary cannot serve this family.
-
-    Dispatch only forces ``rope`` off when the user did NOT ask for it, so a YAML
-    ``liger_kernel_config: {rope: true}`` survives the filter and reaches the applier. Ignoring it
-    there trains a model whose rotary the user believes is fused and is not. Enumerated over the
-    registry so a family added later is covered without this file naming it.
-    """
+    """``rope=False`` means Liger's rotary cannot serve this family; dispatch only forces it off when not asked, so
+    a YAML request reaches the applier."""
     applier = dispatch._TOOLKIT_LIGER_APPLIERS[model_type]
     rope_param = inspect.signature(applier).parameters.get("rope")
     if rope_param is None or rope_param.default is not False:

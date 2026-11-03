@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The weight-sync transport preflight reads NCCL's own debug log and a checkpoint shard.
-
-The transport verdict is the whole point of the tool: a parser that misses the ``via NET/...``
-channel lines, or reads GPUDirect off the wrong field, turns a socket fallback into a passing
-preflight. The excerpts below are verbatim NCCL 2.31 output for the transports the trainer meets:
-EFA with GPUDirect, NCCL's own InfiniBand transport, the socket fallback, same-host CUDA IPC and
-shared memory. The push is pinned against a recording client, and the CLI's gate (``--expect``,
-the unchanged-server check) against a stubbed preflight result.
-
-    python tests/cpu/weight_sync/test_transport_check.py
-"""
+"""The weight-sync transport preflight reads NCCL's own debug log and a checkpoint shard. A parser that misses the
+``via NET/...`` channel lines turns a socket fallback into a pass. Excerpts are verbatim NCCL 2.31 output."""
 
 import json
 import os
@@ -75,7 +66,7 @@ _FORCED_SIMPLE = (
     "FI_OPT_EFA_WRITE_IN_ORDER_ALIGNED_128_BYTES not supported\n"
 )
 _PROVIDER_LINE = "host:1:257 [0] NCCL INFO NET/OFI Selected provider"
-# The --json keys, in order: what a launch script parsing the check's output reads.
+# The --json keys, in order, as a launch script parsing the check's output reads them.
 _JSON_KEYS = [
     "server_url",
     "backend",
@@ -117,9 +108,8 @@ def test_efa_log_reads_as_efa_with_gpudirect_and_the_plugin_identity():
 
 
 def test_a_plugin_that_forced_the_simple_protocol_is_reported():
-    """The forced protocol is invisible in a passing run and hangs a peer on a different rdma-core
-    build; a report that only names the transport would call that pair healthy. The probe answer
-    and the forcing are separate lines: the plugin skips the forcing on platforms it exempts."""
+    """The forced protocol hangs a peer on a different rdma-core build. The probe answer and the forcing are separate
+    lines, since the plugin skips the forcing on platforms it exempts."""
     probe_failed = EFA_LOG.replace(_PROVIDER_LINE, _PROBE_FAILED + _PROVIDER_LINE)
     forced = EFA_LOG.replace(_PROVIDER_LINE, _PROBE_FAILED + _FORCED_SIMPLE + _PROVIDER_LINE)
     assert (
@@ -161,8 +151,7 @@ def test_same_host_cuda_ipc_reads_as_p2p_and_shared_memory_as_shm():
 
 
 def test_a_proxied_net_channel_keeps_its_gpudirect_suffix():
-    """NCCL's PXN send form puts the proxy rank before ``/GDRDMA``; the parser must not drop the
-    suffix on it and report a GPUDirect path as host-staged."""
+    """NCCL's PXN send form puts the proxy rank before ``/GDRDMA``; losing the suffix reads as host-staged."""
     proxied = EFA_LOG.replace("[send] via NET/Libfabric/0/GDRDMA", "[send] via NET/Libfabric/0(1)/GDRDMA")
     report = wst.parse_nccl_log(proxied)
     assert "NET/Libfabric/0(1)/GDRDMA" in report.transports
@@ -175,10 +164,8 @@ def test_a_log_without_channel_lines_is_unknown_not_a_guess():
 
 @pytest.fixture
 def nccl_debug_env(monkeypatch):
-    """The NCCL debug variables, restored once the test ends."""
     for key in ("NCCL_DEBUG", "NCCL_DEBUG_SUBSYS", "NCCL_DEBUG_FILE"):
-        # Recorded whether or not the key exists, so the arming cannot leak past the test into the
-        # torchrun subprocesses the GPU tier spawns with this process's environment.
+        # Recorded whether or not the key exists, so the arming cannot leak into the GPU tier's torchrun subprocesses.
         monkeypatch.setenv(key, os.environ.get(key, ""))
 
 
@@ -199,8 +186,7 @@ def test_arming_refuses_a_process_whose_nccl_already_read_its_settings(tmp_path,
 
 
 def test_checkpoint_tensor_comes_from_the_shard_the_index_names(tmp_path):
-    """The same key in two shards with different values: only the index says which one is the
-    checkpoint's, and a loader scanning shards in name order would push the wrong tensor."""
+    """Only the index says which copy is the checkpoint's; scanning shards in name order pushes the wrong one."""
     stale = torch.zeros(3, 2, dtype=torch.bfloat16)
     embed = torch.arange(6, dtype=torch.bfloat16).reshape(3, 2)
     save_file({"model.embed_tokens.weight": stale}, str(tmp_path / "model-00001-of-00002.safetensors"))
@@ -228,8 +214,7 @@ def test_checkpoint_tensor_comes_from_the_shard_the_index_names(tmp_path):
 
 
 def test_the_default_parameter_is_the_embedding_under_any_prefix(tmp_path):
-    """Multimodal families keep the embedding under the language model; the default must find it
-    there rather than assume the dense spelling, and refuse to guess between two candidates."""
+    """Multimodal families keep the embedding under the language model. Two candidates are refused."""
     save_file(
         {
             "model.language_model.embed_tokens.weight": torch.zeros(2, 2),
@@ -251,8 +236,6 @@ def test_the_default_parameter_is_the_embedding_under_any_prefix(tmp_path):
 
 
 def test_a_hub_checkpoint_is_read_at_the_requested_revision(monkeypatch, tmp_path):
-    """``--revision`` must reach every Hub download, and a served id that is neither a directory here
-    nor a Hub repo must name ``--model_id`` rather than surface a bare validation error."""
     save_file({"model.embed_tokens.weight": torch.zeros(2, 2)}, str(tmp_path / wst.SAFETENSORS_WEIGHTS_FILE))
     downloads: list[tuple[str, str, str | None]] = []
 
@@ -279,8 +262,7 @@ def test_a_hub_checkpoint_is_read_at_the_requested_revision(monkeypatch, tmp_pat
 
 
 class _StreamedClient(VLLMWeightSyncClient):
-    """The vLLM client over a fake server's HTTP routes: forming the group only records the sync device,
-    and a :class:`Wire` stands in for the engine's update phases."""
+    """Forming the group only records the sync device, and a :class:`Wire` stands in for the engine's update phases."""
 
     def init_communicator(self, device=0):
         self._sync_device = resolve_sync_device(device)
@@ -288,9 +270,7 @@ class _StreamedClient(VLLMWeightSyncClient):
 
 @pytest.mark.usefixtures("nccl_debug_env")
 def test_each_round_is_the_trainers_streamed_push(tmp_path, monkeypatch):
-    """A round stages the checkpoint tensor on the sync device as a copy and streams it inside one update
-    it closes, as every trainer sync does. An engine handed the loaded tensor itself means the round
-    skipped that copy, so the rate it reports is not the trainer's."""
+    """An engine handed the loaded tensor itself means the round skipped the copy, so its rate is not the trainer's."""
     # The preflight's NCCL log directory is a fresh mkdtemp; this keeps it under tmp_path.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     embed = torch.arange(8, dtype=torch.bfloat16).reshape(4, 2)
@@ -358,8 +338,7 @@ def _result(**overrides) -> wst.TransportCheckResult:
 
 
 def test_the_cli_gates_on_the_expected_transport_and_an_unchanged_server(monkeypatch, capsys):
-    """The exit code is the gate a launch script reads: a transport other than ``--expect`` or a
-    push that altered the served model must be 1, and the report must name which."""
+    """The exit code is the gate a launch script reads."""
     results: list[dict] = []
     monkeypatch.setattr(preflight_cli, "run_transport_check", lambda **kwargs: results.pop(0))
 

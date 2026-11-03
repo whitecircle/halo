@@ -12,8 +12,7 @@ from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import agree_across_ranks
 from halo.runtime.ranks import get_global_world_size, get_local_world_size
 
-# Rows per split hashed into the identity the holders of one replica compare: spread over the split,
-# so a re-push that kept the row count still differs somewhere among them.
+# Spread over the split, so a re-push that kept the row count still differs somewhere among them.
 _IDENTITY_SAMPLE_ROWS = 16
 
 
@@ -56,8 +55,8 @@ def _feed_values(hasher, array: pa.Array) -> None:
 
 
 def _split_identity(split: Dataset) -> str:
-    """Row count, schema and a digest of evenly spaced rows, what the holders of one replica compare. Media
-    columns stay out, since their stored path can name a file under a node's own cache."""
+    """Row count, schema and a digest of evenly spaced rows. Media columns stay out, since their stored path can name a
+    file under a node's own cache."""
     rows = len(split)
     columns = [name for name, feature in split.features.items() if not _stores_file_path(feature)]
     picks = (
@@ -75,7 +74,7 @@ def _split_identity(split: Dataset) -> str:
 
 
 def _describe_divergence(gathered: list[tuple[int, dict[str, str]]], num_replicas: int, local_world: int) -> str:
-    """The first replica whose holders loaded different rows, as the refusal names it; ``""`` when none did."""
+    """The first replica whose holders loaded different rows; ``""`` when none did."""
     holders: dict[int, dict[str, list[int]]] = {}
     for rank, (rank_replica, rank_identity) in enumerate(gathered):
         holders.setdefault(rank_replica, {}).setdefault(repr(rank_identity), []).append(rank)
@@ -93,14 +92,10 @@ def _describe_divergence(gathered: list[tuple[int, dict[str, str]]], num_replica
 
 
 def reject_divergent_replicas(dataset: DatasetDict, path: str, *, replica: int, num_replicas: int) -> None:
-    """COLLECTIVE: fail loud when ranks that must hold the same rows loaded different ones.
-
-    A replicated load holds one copy of the rows on every rank (``num_replicas=1``), a sharded one one per
-    data-parallel replica. Every rank reads its own copy of the source (a per-node S3 cache, a pre-staged
-    directory, a cached hub revision), so one stale node trains other rows than its peers with nothing
-    raised. The identity names every split, since the split set decides how many coordinated operations
-    the consumers run. One all-reduce when every rank holds the same replica, else a rank-0 combine.
-    """
+    """COLLECTIVE: fail loud when ranks that must hold the same rows loaded different ones: every rank reads its own
+    copy of the source (a per-node S3 cache, a cached hub revision), so one stale node trains other rows with nothing
+    raised. The identity names every split, as the split set decides how many coordinated operations run. One
+    all-reduce on one replica, else a rank-0 combine."""
     world = get_global_world_size()
     if world <= 1 or num_replicas >= world:
         return

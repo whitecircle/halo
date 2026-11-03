@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""A family's fp32 pins must survive every wrapper a checkpoint writer holds the model through.
-
-``_keep_in_fp32_modules(_strict)`` is a class attribute of the family's ``PreTrainedModel``; a
-writer that reads it off the type of what it holds — a pipeline stage, the CP wrapper, a PEFT
-model — sees no pins and casts DeepSeek-V4's hyper-connection tensors and norms, GLM-5's KDA
-``A_log``/``dt_bias``/conv, Inkling's short convolutions to bf16: an export the reload's re-pin
-cannot repair. The derivation reads every class in the module tree instead.
-
-Run: ``pytest -m cpu tests/cpu/parallelism/test_fp32_pins_through_wrappers.py``
-"""
+"""A family's fp32 pins survive every wrapper a writer holds the model through. ``_keep_in_fp32_modules`` is a class
+attribute, and bf16 pinned tensors are past the reload's re-pin repairing."""
 
 from __future__ import annotations
 
@@ -45,8 +37,7 @@ def test_pins_are_read_through_a_plain_wrapper():
 
 
 def test_pipeline_stages_pin_exactly_the_unsplit_models_tensors():
-    """Union of the stages' pins (in global names) == the unsplit model's; the stage caster keeps
-    each pinned tensor at its trained dtype while an unpinned one goes to the save dtype."""
+    """In global names; an unpinned tensor goes to the save dtype."""
     pinned = fp32_pinned_names(_model())
     seen: set[str] = set()
     for pp_rank in range(PP_SIZE):
@@ -65,8 +56,7 @@ def test_pipeline_stages_pin_exactly_the_unsplit_models_tensors():
 
 
 def test_an_export_keeps_a_pinned_buffer_at_fp32():
-    """GLM-5 Next pins its router's ``e_score_correction_bias`` buffer; no loader casts a buffer, so it
-    is fp32 live, and the export must write it so rather than round the checkpoint's own values."""
+    """No loader casts a buffer, so it is fp32 live."""
     model = tiny_family_model(TINY_MOE_FAMILIES["glm5_next"])
     buffers = {name: b for name, b in model.named_buffers() if name.endswith("e_score_correction_bias")}
     assert buffers and all(b.dtype == torch.float32 for b in buffers.values()), buffers

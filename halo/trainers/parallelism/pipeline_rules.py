@@ -1,6 +1,5 @@
-"""Pipeline-parallel trainer refusals: pure functions the PP trainer integration and the PP-enabled
-trainers call at construction, before the model is split into this rank's stage, and on the trainer's
-final collator after it."""
+"""Pipeline-parallel trainer refusals, called at construction before the model is split and on the trainer's final
+collator after it."""
 
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ from halo.runtime.ranks import get_num_nodes
 
 
 def reject_unsupported_pp_training_args(training_args, *, save_sharded_ep: bool, evaluates: bool) -> None:
-    """Reject the training arguments a pipeline cannot honor; ``evaluates`` says whether any evaluation runs."""
+    """``evaluates`` says whether any evaluation runs."""
     if not getattr(training_args, "max_length", None):
         raise ValueError(
             "Pipeline parallelism requires a fixed sequence length (the P2P buffer shapes "
@@ -55,7 +54,6 @@ def reject_unsupported_pp_training_args(training_args, *, save_sharded_ep: bool,
             "stage module at setup, so a compiled wrapper installed afterwards never runs. Disable "
             "torch_compile."
         )
-    # TRL's flag, which SFTConfig and RewardConfig carry too; plain TrainingArguments do not.
     if getattr(training_args, "activation_offloading", False):
         raise ValueError(
             "activation_offloading is not supported under pipeline parallelism: TRL applies it "
@@ -65,11 +63,8 @@ def reject_unsupported_pp_training_args(training_args, *, save_sharded_ep: bool,
 
 
 def reject_pp_peft(peft_config, explicit_param_trainer: str | None = None) -> None:
-    """Reject PEFT/LoRA under PP, whose adapter checkpoint path is not stage-aware.
-
-    ``explicit_param_trainer`` names a trainer whose ``peft_config`` is an explicit ctor parameter the
-    mixin's kwargs-based rejection cannot see.
-    """
+    """``explicit_param_trainer`` names a trainer whose ``peft_config`` is a ctor parameter the mixin's kwargs-based
+    rejection cannot see."""
     if peft_config is None:
         return
     message = (
@@ -90,12 +85,8 @@ def reject_pp_peft(peft_config, explicit_param_trainer: str | None = None) -> No
 
 
 def require_pp_stage_model(kwargs: dict):
-    """The ``model`` keyword the split turns into this rank's stage, refusing a missing, config-less or
-    PEFT-wrapped one.
-
-    A positional ``peft_config`` never reaches the split: every TRL base takes ``model`` first, so filling
-    the ``peft_config`` slot by position leaves no ``model`` keyword.
-    """
+    """Refuses a missing, config-less or PEFT-wrapped model. A positional ``peft_config`` never reaches the split:
+    every TRL base takes ``model`` first, leaving no ``model`` keyword."""
     model = kwargs.get("model")
     if model is None or not hasattr(model, "config"):
         raise ValueError(
@@ -115,12 +106,8 @@ def require_pp_stage_model(kwargs: dict):
 
 
 def reject_pp_vlm(train_dataset, eval_dataset, collator) -> None:
-    """COLLECTIVE: refuse a multimodal wrapper's run that feeds it images, naming the evidence.
-
-    The split keeps the text backbone and the task head, so the vision tower and projector are in no
-    stage. Joined across ranks: the dataset probe is rank-local (a pre-sharded dataset can carry images
-    on one rank only), and a lone raise would leave the peers at the split's collectives.
-    """
+    """COLLECTIVE. The split drops the vision tower and projector. Joined across ranks because the dataset probe is
+    rank-local, and a lone raise would leave the peers at the split's collectives."""
     consumed = set(getattr(collator, "required_dataset_columns", ()) or ()) & set(VLM_IMAGE_COLUMNS)
     evidence = (
         dataset_image_evidence(train_dataset)
@@ -141,7 +128,6 @@ def reject_pp_vlm(train_dataset, eval_dataset, collator) -> None:
 
 
 def reject_positional_model_or_args(kwargs: dict) -> None:
-    """Reject positional ``model``/``args`` under PP: the pipeline seam rewrites both by key."""
     if "model" not in kwargs or "args" not in kwargs:
         raise ValueError(
             "Pipeline parallelism requires `model` and `args` passed as keywords: the mixin's "
@@ -151,8 +137,7 @@ def reject_positional_model_or_args(kwargs: dict) -> None:
 
 
 def reject_pp_ref_model(ref_model, column_hint: str) -> None:
-    """Reject a live reference model under PP. ``column_hint`` names the trainer's precomputed
-    reference column(s) to ship instead."""
+    """``column_hint`` names the trainer's precomputed reference column(s) to ship instead."""
     if ref_model is None:
         return
     raise ValueError(
@@ -165,7 +150,6 @@ def reject_pp_ref_model(ref_model, column_hint: str) -> None:
 
 
 def reject_missing_precomputed_columns(dataset, columns: tuple[str, ...], role: str = "train") -> None:
-    """Reject a ``role`` dataset that lacks the precomputed reference column(s) under PP."""
     present = getattr(dataset, "column_names", None) or []
     if all(column in present for column in columns):
         return
@@ -183,9 +167,8 @@ def reject_missing_precomputed_columns(dataset, columns: tuple[str, ...], role: 
 def reject_missing_precomputed_reference(
     trainer: str, training_args, train_dataset, eval_dataset, columns: tuple[str, ...]
 ) -> None:
-    """Reject a run off PP's precompute-only reference contract: the flag set and ``columns`` present in
-    the train and every eval split, since TRL's in-init sweep runs over those too. ``trainer`` names the
-    wrapper in the message."""
+    """Reject a run off PP's precompute-only reference contract: the flag set and ``columns`` in the train and every
+    eval split, since TRL's in-init sweep runs over those too."""
     if not training_args.precompute_ref_log_probs:
         subject = f"the {columns[0]} column" if len(columns) == 1 else f"the {'/'.join(columns)} columns"
         raise ValueError(
@@ -202,16 +185,13 @@ def reject_missing_precomputed_reference(
 
 
 def reject_pp_compute_metrics(compute_metrics, mechanism: str) -> None:
-    """Reject ``compute_metrics`` under PP for a trainer with no ``PipelineLossAdapter.predictions_fn``
-    reduction to reproduce (its non-PP ``prediction_step`` hands metrics the raw logits plane, or
-    nothing); ``mechanism`` is that trainer's reason."""
+    """For a trainer with no ``predictions_fn`` reduction to reproduce; ``mechanism`` is that trainer's reason."""
     if compute_metrics is None:
         return
     raise ValueError(f"compute_metrics is not supported under pipeline parallelism: {mechanism}")
 
 
 def reject_pp_named_optimizer(training_args, parallelism_config) -> None:
-    """Reject a toolkit-named optimizer (``NAMED_OPTIMIZER_BUILDERS``) under PP, where none is validated."""
     optim = optim_name(getattr(training_args, "optim", None))
     if parallelism_config.is_pp_mode and optim in NAMED_OPTIMIZER_BUILDERS:
         raise ValueError(
@@ -222,8 +202,8 @@ def reject_pp_named_optimizer(training_args, parallelism_config) -> None:
 
 
 def reject_uncovered_pp_ep_layers(config: ParallelismConfig, ep_layers) -> None:
-    """COLLECTIVE: refuse a PP+EP run where this rank's stage carries no EP layer, joined across ranks
-    since the verdict is rank-local (a hybrid MoE with leading dense layers can give one stage none)."""
+    """COLLECTIVE, since the verdict is rank-local: a hybrid MoE with leading dense layers can give one stage no EP
+    layer."""
     reason = None
     if config.has_ep_group and not ep_layers:
         reason = (
@@ -236,9 +216,8 @@ def reject_uncovered_pp_ep_layers(config: ParallelismConfig, ep_layers) -> None:
 
 
 def reject_pp_collator(collator, *, per_device_train_batch_size: int, n_microbatches: int, model_config) -> None:
-    """Reject a collator whose batches cannot take the pipeline's fixed shape, frozen after the first step, or
-    whose packed rows ``model_config``'s mixers cannot keep apart
-    (:func:`~halo.models.segment_markers.reject_pipeline_packed_rows`)."""
+    """Reject a collator whose batches cannot take the pipeline's fixed shape, or whose packed rows ``model_config``'s
+    mixers cannot keep apart."""
     if collator is None:
         raise ValueError("Pipeline parallelism requires a data collator; the trainer has none.")
     if isinstance(collator, DataCollatorWithFlattening):
@@ -264,7 +243,7 @@ def reject_pp_collator(collator, *, per_device_train_batch_size: int, n_microbat
 
 
 def require_pad_token_id(processing_class, why: str) -> int:
-    """The tokenizer's pad id; ``why`` opens the refusal for a processing class without one."""
+    """``why`` opens the refusal for a processing class without one."""
     pad_id = getattr(resolve_tokenizer(processing_class), "pad_token_id", None)
     if pad_id is None:
         raise ValueError(
@@ -274,8 +253,8 @@ def require_pad_token_id(processing_class, why: str) -> int:
 
 
 def require_pooling_pad_id(config, tokenizer_pad_id: int | None) -> int:
-    """The pad id sequence-classification pooling keys on, or a raise when it is unset or disagrees with the
-    tokenizer's, which pads every PP batch: no filler would count as padding, and every row would pool a pad."""
+    """The pad id sequence-classification pooling keys on; refused when it is unset or disagrees with the tokenizer's,
+    since every row would then pool a pad."""
     pad_id = config.get_text_config().pad_token_id
     if pad_id is None:
         raise ValueError(

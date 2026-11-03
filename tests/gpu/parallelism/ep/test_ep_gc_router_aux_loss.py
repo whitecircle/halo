@@ -38,8 +38,7 @@ EP_SIZE = 2
 BATCH, SEQ = 2, 64
 COEF = 0.5
 SEED = 1234
-# bf16 recompute through the replayed dispatch: the aux share must agree to well inside this, while a
-# dropped aux gradient is off by 100%.
+# bf16 recompute through the replayed dispatch, while a dropped aux gradient is off by 100%.
 AUX_REL_TOL = 5e-2
 
 _FAMILIES = {
@@ -58,7 +57,6 @@ def build_model(family: str, device):
 
 
 def router_gradient(model, batch, coef: float) -> torch.Tensor:
-    """The routers' gradient after one forward+backward with the head's aux coefficient at ``coef``."""
     model.zero_grad(set_to_none=True)
     model.router_aux_loss_coef = coef
     model(**batch).loss.backward()

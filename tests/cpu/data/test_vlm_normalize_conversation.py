@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
-"""normalize_vlm_conversation: hub-shape adaptation for the VLM SFT pipeline.
-
-Covers the two accepted conversation shapes (native role/content and the HuggingFaceM4
-paired {user, assistant} ``texts`` shape shared by FineVision / the_cauldron / Docmatix),
-top-level image injection into the first user turn (``images_field``, also through
-``build_vlm_row_processor``), and input immutability.
-
-Usage:
-    python tests/cpu/data/test_vlm_normalize_conversation.py
-"""
+"""``normalize_vlm_conversation``: the native and HuggingFaceM4 paired conversation shapes, top-level image
+injection into the first user turn, and input immutability."""
 
 import copy
 
@@ -69,9 +61,8 @@ def test_images_with_list_content_prepend():
 
 
 def test_existing_placeholders_filled_not_doubled():
-    """TRL vision convention: bare {"type": "image"} placeholders pair with the images column by
-    order — filling must not add a second placeholder (double-injection starves the processor's
-    replacement iterator, surfacing as a swallowed StopIteration = silent zero-step training)."""
+    """Bare placeholders pair with the images column by order; a second placeholder starves the processor's
+    replacement iterator, surfacing as a swallowed StopIteration and silent zero-step training."""
     img = _image()
     conv = [
         {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What digit?"}]},
@@ -126,18 +117,16 @@ def test_normalized_output_feeds_extract_conversation_images():
 
 @pytest.mark.parametrize("payload", [b"", ""], ids=["empty-bytes", "empty-path"])
 def test_a_falsy_but_present_image_payload_fails_loud(payload):
-    """A truthiness test here would drop the payload while still emitting the placeholder, handing the
-    processor a prompt with an image placeholder and no image — which surfaces later as a
-    placeholder-count mismatch, if at all. A present payload must reach ``decode_image``.
-    """
+    """A truthiness test would drop the payload while still emitting the placeholder, a later placeholder-count
+    mismatch."""
     conv = [{"role": "user", "content": [{"type": "image", "image": payload}]}]
     with pytest.raises((OSError, ValueError)):
         extract_conversation_images(conv)
 
 
 def test_an_absent_image_payload_is_still_a_bare_placeholder():
-    """The other side: an unfilled placeholder (``images_field`` pairing, or the ``image: None`` key
-    Arrow adds to every text part of a mixed dataset) carries no payload and must pass through."""
+    """An unfilled placeholder, or the ``image: None`` key Arrow adds to every text part of a mixed dataset, carries
+    no payload."""
     history, images = extract_conversation_images([{"role": "user", "content": [{"type": "image"}]}])
     assert images == []
     assert history[0]["content"] == [{"type": "image"}]

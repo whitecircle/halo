@@ -1,25 +1,6 @@
 #!/usr/bin/env python3
-"""Load-time guards in ``halo/data/sources/loading.py``.
-
-Four guards pinned here:
-
-* a **declared** render column (``conversation_field``) the dataset does not carry must not be
-  accepted silently: ``filter_empty_conversations`` no-ops on a missing column, so a typo surfaces
-  much later as a bare ``KeyError`` inside an HF ``map`` worker — after the (possibly multi-node)
-  model load and naming neither the knob nor the offending dataset. It fails loud at load, and *only*
-  where the column is consumed: the callers that declare nothing (DPO/SMPO/KTO/reward/classification)
-  and the pre-processed path (rows are already tokenized) must still load.
-* ``test_size`` is inert for sharded and pre-processed loads, whose train/test split is fixed at
-  preparation time. Exactly one warning must say so — and none when ``test_size`` is unset, which is
-  the normal case.
-* a corpus entry whose source ships no test split contributes training rows only: the placeholder
-  test split is the last resort for a corpus with no held-out data anywhere, never a per-entry filler
-  that dilutes a sibling pool's real one.
-* a source that ships ``validation`` and no ``test`` evaluates on its validation rows, not on the
-  placeholder cut from the rows it trains on.
-
-Run: pytest tests/cpu/data/test_loading_guards.py
-"""
+"""Load-time guards in ``halo/data/sources/loading.py``: a declared render column must exist, ``test_size`` warns
+where inert, a train-only corpus entry adds no held-out rows, and ``validation`` serves as the held-out split."""
 
 import json
 import logging
@@ -43,7 +24,6 @@ _CONVERSATION = [{"role": "user", "content": "hi"}]
 
 
 def _conversation_dataset(num_rows: int, *, empty_rows: int = 0, field: str = "messages") -> Dataset:
-    """A raw conversational split; ``empty_rows`` trailing rows carry an empty conversation."""
     rows = [_CONVERSATION] * (num_rows - empty_rows) + [[]] * empty_rows
     return Dataset.from_dict({field: rows, "row_id": list(range(num_rows))})
 
@@ -56,7 +36,6 @@ def _pool(num_rows: int, first_id: int) -> Dataset:
 
 
 def _save_raw_dataset(directory: str, train: Dataset, test: Dataset) -> str:
-    """Write a ``save_to_disk`` DatasetDict — the local raw (non-preprocessed) load path."""
     DatasetDict({"train": train, "test": test}).save_to_disk(directory)
     return directory
 
@@ -69,7 +48,6 @@ def _save_train_only_dataset(directory: str, train: Dataset) -> str:
 
 
 def _save_sharded_dataset(directory: str, train_rows: int = 20, test_rows: int = 6) -> str:
-    """Write a sharded (prepared) dataset carrying both splits."""
     for split, num_rows in (("train", train_rows), ("test", test_rows)):
         dataset = Dataset.from_dict(
             {
@@ -106,14 +84,9 @@ def _test_size_warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "test_size=" in r.getMessage()]
 
 
-# --------------------------------------------------------------------------------------------- #
-# Declared render column must exist
-# --------------------------------------------------------------------------------------------- #
-
-
 def test_declared_conversation_field_typo_fails_loud():
-    """A misspelled conversation_field must raise at load, naming the knob, the dataset and the
-    columns that are actually there — not KeyError inside a map worker after the model load."""
+    """A misspelled column raises at load, naming the knob, the dataset and the columns present; it would otherwise
+    be a KeyError inside a map worker after the model load."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_raw_dataset(temp_dir, _conversation_dataset(4), _conversation_dataset(2))
@@ -121,15 +94,14 @@ def test_declared_conversation_field_typo_fails_loud():
             load_datasets(temp_dir, test_size=None, dataset_ratio=1, conversation_field="mesages")
         message = str(excinfo.value)
         assert temp_dir in message, message
-        assert "messages" in message, message  # the available columns are reported
+        assert "messages" in message, message
     finally:
         shutil.rmtree(temp_dir)
 
 
 def test_the_refusal_names_the_knob_the_caller_read_the_column_from(tmp_path):
-    """RLVR and env GRPO declare ``prompt_field`` as the render column; an error telling the user to
-    set ``conversation_field`` points at a knob those scripts do not have. Both load paths (one source
-    and a list) name the knob passed."""
+    """RLVR and env GRPO declare ``prompt_field``, so telling them to set ``conversation_field`` points at a knob
+    they lack."""
     source = _save_raw_dataset(str(tmp_path / "raw"), _conversation_dataset(4), _conversation_dataset(2))
     for path in (source, [source]):
         with pytest.raises(ValueError, match=r"^prompt_field='question' .*Point prompt_field at") as excinfo:
@@ -140,8 +112,8 @@ def test_the_refusal_names_the_knob_the_caller_read_the_column_from(tmp_path):
 
 
 def test_declared_tools_field_typo_fails_loud():
-    """``tools_field`` is optional at render time, so a typo NEVER surfaces downstream — rows just
-    render without tools and the run trains tool-calling data with none. The load must refuse it."""
+    """``tools_field`` is optional at render time, so a typo never surfaces downstream: the run trains tool-calling
+    data with no tools."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_raw_dataset(temp_dir, _conversation_dataset(4), _conversation_dataset(2))
@@ -152,7 +124,6 @@ def test_declared_tools_field_typo_fails_loud():
 
 
 def test_declared_tools_field_present_loads():
-    """Anti-over-rejection: a tools column that exists loads; unset tools_field checks nothing."""
     temp_dir = tempfile.mkdtemp()
     try:
         train = _conversation_dataset(4).add_column("tools", [[]] * 4)
@@ -169,9 +140,8 @@ def test_declared_tools_field_present_loads():
 
 
 def test_tools_column_is_aliased_onto_the_spelling_the_reward_trainer_renders():
-    """TRL's RewardTrainer reads the column literally named ``tools``: a declared column under any
-    other name is renamed in every split, the canonical name passes through, and a dataset that
-    already carries ``tools`` beside the declared column is refused rather than overwritten."""
+    """TRL's RewardTrainer reads the column literally named ``tools``; a dataset already carrying ``tools`` beside
+    the declared column is refused."""
     train = _conversation_dataset(4).add_column("fn_schemas", [[]] * 4)
     test = _conversation_dataset(2).add_column("fn_schemas", [[]] * 2)
     aliased = alias_tools_column(DatasetDict({"train": train, "test": test}), "fn_schemas", "ds")
@@ -188,8 +158,7 @@ def test_tools_column_is_aliased_onto_the_spelling_the_reward_trainer_renders():
 
 
 def test_declared_conversation_field_present_loads_and_still_filters():
-    """Anti-over-rejection, plus the filter the guard sits in front of: a correct column loads, and
-    rows whose conversation is empty are still dropped."""
+    """A correct column loads, and rows whose conversation is empty are still dropped."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_raw_dataset(temp_dir, _conversation_dataset(4, empty_rows=1), _conversation_dataset(2))
@@ -201,8 +170,7 @@ def test_declared_conversation_field_present_loads_and_still_filters():
 
 
 def test_extra_split_without_the_column_is_not_rejected():
-    """Anti-over-rejection: the loader renders train and test only, so a `validation` split a source
-    happens to carry (with its own schema) is not a render contract and must not fail the load."""
+    """The loader renders train and test only, so a ``validation`` split with its own schema is no render contract."""
     temp_dir = tempfile.mkdtemp()
     try:
         DatasetDict(
@@ -230,11 +198,8 @@ def test_conversation_field_none_is_unaffected():
 
 
 def test_undeclared_conversation_field_does_not_reject_preference_data():
-    """The DPO/SMPO/KTO/reward/classification scripts declare no render column at all and their rows
-    carry none — the historical "conversation" fallback stays an opportunistic filter for them.
-
-    Holding an undeclared fallback to the existence check would reject every one of those runs.
-    """
+    """These scripts declare no render column, and the conversation fallback stays an opportunistic filter; an
+    existence check would reject every such run."""
     temp_dir = tempfile.mkdtemp()
     try:
         preference = Dataset.from_dict(
@@ -252,8 +217,7 @@ def test_undeclared_conversation_field_does_not_reject_preference_data():
 
 
 def test_dataset_list_names_the_offending_entry():
-    """With a list path the concatenation would drop the column entirely; the raise must identify
-    WHICH entry lacks it, not just report that the column went missing."""
+    """The concatenation would drop the column entirely, so the raise identifies which entry lacks it."""
     good_dir = tempfile.mkdtemp()
     bad_dir = tempfile.mkdtemp()
     try:
@@ -270,13 +234,8 @@ def test_dataset_list_names_the_offending_entry():
 
 
 def test_mixed_corpus_keeps_the_tools_column_through_the_concatenation():
-    """The mixed-corpus shape the tools warning promises: only the rows of the source WITHOUT the
-    column render toolless.
-
-    A schema intersection would drop a column missing from any entry, so the whole corpus — the
-    tool-use half included — would render without tools, and nothing downstream would say so
-    (``tools_field`` is optional at render time).
-    """
+    """A schema intersection would drop a column missing from any entry, so the tool-use half would render without
+    tools and nothing downstream would say so."""
     with_tools = tempfile.mkdtemp()
     without_tools = tempfile.mkdtemp()
     try:
@@ -307,8 +266,7 @@ def test_mixed_corpus_keeps_the_tools_column_through_the_concatenation():
 
 
 def test_tools_column_lost_to_a_type_mismatch_fails_loud():
-    """A declared column no null fill can reconcile (list-of-struct in one entry, a JSON string in
-    the other) is dropped by the intersection — and that must raise, not train toolless in silence."""
+    """A column no null fill can reconcile is dropped by the intersection, which must raise."""
     struct_tools = tempfile.mkdtemp()
     string_tools = tempfile.mkdtemp()
     try:
@@ -336,8 +294,7 @@ def test_tools_column_lost_to_a_type_mismatch_fails_loud():
 
 
 def test_preprocessed_load_ignores_the_render_column():
-    """Pre-processed rows are already tokenized — the render column is never consumed there, so a
-    declared conversation_field must NOT be required of them."""
+    """Pre-processed rows are already tokenized, so the render column is never consumed."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_preprocessed_dataset(temp_dir)
@@ -350,14 +307,8 @@ def test_preprocessed_load_ignores_the_render_column():
         shutil.rmtree(temp_dir)
 
 
-# --------------------------------------------------------------------------------------------- #
-# test_size cannot re-split an already-prepared dataset
-# --------------------------------------------------------------------------------------------- #
-
-
 def test_test_size_warns_once_for_a_sharded_load(caplog):
-    """A sharded dataset's split was fixed at preparation time, so a YAML test_size does nothing.
-    Exactly one warning must name the cause and the re-prepare fix."""
+    """The split was fixed at preparation time, so a YAML test_size does nothing."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_sharded_dataset(temp_dir)
@@ -374,8 +325,7 @@ def test_test_size_warns_once_for_a_sharded_load(caplog):
 
 
 def test_no_test_size_warning_when_unset(caplog):
-    """Anti-over-rejection: the normal run leaves test_size unset, and a warning that fires every
-    time only trains operators to ignore this module's warnings."""
+    """A warning firing every run only trains operators to ignore this module's warnings."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_sharded_dataset(temp_dir)
@@ -388,8 +338,8 @@ def test_no_test_size_warning_when_unset(caplog):
 
 
 def test_test_size_warns_once_for_a_preprocessed_load(caplog):
-    """The pre-processed branch never even receives test_size (``load_preprocessed_dataset`` takes
-    none), so the auto entry point is the only place that can report it as ignored."""
+    """``load_preprocessed_dataset`` takes no test_size, so the auto entry point is the only place to report it as
+    ignored."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_preprocessed_dataset(temp_dir)
@@ -405,7 +355,6 @@ def test_test_size_warns_once_for_a_preprocessed_load(caplog):
 
 
 def test_test_size_still_splits_a_plain_dataset(caplog):
-    """Anti-over-rejection: on the raw non-sharded path test_size is honored, so nothing warns."""
     temp_dir = tempfile.mkdtemp()
     try:
         DatasetDict({"train": _conversation_dataset(10)}).save_to_disk(temp_dir)
@@ -419,8 +368,7 @@ def test_test_size_still_splits_a_plain_dataset(caplog):
 
 
 def test_preprocessed_metadata_fixture_is_detected():
-    """Guards the two pre-processed tests above: a fixture that stopped being detected as
-    pre-processed would send them down the raw path and certify nothing."""
+    """A fixture no longer detected as pre-processed would send the two tests above down the raw path."""
     temp_dir = tempfile.mkdtemp()
     try:
         _save_preprocessed_dataset(temp_dir)
@@ -433,13 +381,7 @@ def test_preprocessed_metadata_fixture_is_detected():
 
 
 def test_train_only_list_entry_contributes_no_rows_to_the_held_out_split(caplog):
-    """A pool whose source ships no test split must contribute TRAINING rows only.
-
-    Filling its missing split with the first 100 of its own train rows — the last resort a
-    single-path load takes so eval machinery has something — silently seeds a corpus whose sibling
-    pool DOES ship a held-out split with rows the model trains on, and the concatenated split then
-    reports a size that hides the contamination.
-    """
+    """A filler of its first 100 train rows would seed a sibling's held-out split with rows the model trains on."""
     with_test = tempfile.mkdtemp()
     train_only = tempfile.mkdtemp()
     try:
@@ -460,12 +402,8 @@ def test_train_only_list_entry_contributes_no_rows_to_the_held_out_split(caplog)
 
 
 def test_corpus_with_no_test_split_anywhere_keeps_the_placeholder_fallback():
-    """With no held-out split anywhere there is nothing to protect, so the placeholder still applies
-    — once, over the concatenated train — because every consumer indexes ``ds["test"]``.
-
-    Per entry it would instead take the first 100 rows of EACH pool, so the fallback's size is what
-    separates the corpus-wide last resort from the per-entry filler.
-    """
+    """Every consumer indexes ``ds["test"]``, so the placeholder applies once over the concatenated train. Per entry
+    it would take 100 rows of each pool, so its size separates the two."""
     first = tempfile.mkdtemp()
     second = tempfile.mkdtemp()
     try:
@@ -482,8 +420,7 @@ def test_corpus_with_no_test_split_anywhere_keeps_the_placeholder_fallback():
 
 
 def test_test_size_carves_a_held_out_split_from_a_train_only_entry():
-    """The remedy the warning names: ``test_size`` splits every entry, so a train-only pool
-    contributes genuinely held-out rows rather than none."""
+    """``test_size`` splits every entry, so a train-only pool contributes held-out rows."""
     with_test = tempfile.mkdtemp()
     train_only = tempfile.mkdtemp()
     try:

@@ -8,14 +8,13 @@ import torch
 
 from halo.env import env_positive_float
 
-# The deadline for one chunk of a sync over a slow link (HALO_NCCL_SYNC_TIMEOUT_SECONDS): the update RPC that
-# declares it and the drain of its broadcasts. Read once at import so a malformed value cannot raise mid-RL-step.
+# Covers the update RPC that declares a chunk and the drain of its broadcasts. Read once at import so a malformed
+# value cannot raise mid-RL-step.
 CHUNK_SYNC_TIMEOUT_S = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", None) or 600.0
 
 
 @contextmanager
 def _aborting_on_failure(abort: Callable[[], None]) -> Iterator[None]:
-    """Run ``abort`` before a failed wait's error propagates."""
     try:
         yield
     except RuntimeError:
@@ -40,7 +39,7 @@ def bounded_event_sync(event: torch.cuda.Event, timeout_s: float, what: str, *, 
                     f"(NCCL_CUMEM_ENABLE). scripts/profiling/weight_sync_transport.py reports the "
                     f"transport the group actually formed on."
                 )
-            # 1 ms: the poll is on the per-chunk critical path and still yields the GIL.
+            # 1 ms, as the poll is on the per-chunk critical path and still yields the GIL.
             time.sleep(0.001)
 
 

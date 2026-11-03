@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``halo`` commands the docs show must run as written.
-
-A reader pastes them. Two things go stale silently: a method or tool name that no longer resolves,
-and a ``--`` separator in front of flags that never needed one (unknown flags pass through on their
-own — the separator exists only for a flag the launcher itself owns, so showing it elsewhere teaches
-a rule the CLI does not have). A script or config path that moved fails the reference checks instead.
-
-Run: pytest tests/cpu/conventions/test_documented_commands.py
-"""
+"""``halo`` commands the docs show must run as written: the method or tool resolves, and no ``--`` precedes a flag
+the launcher does not own."""
 
 import re
 import shlex
@@ -39,7 +32,6 @@ def _doc_files() -> list[Path]:
 
 
 def _joined(text: str) -> str:
-    """Fold shell line continuations so a wrapped command reads as one line."""
     return re.sub(r"\\\n\s*", " ", text)
 
 
@@ -57,7 +49,6 @@ def _halo_commands() -> list[tuple[str, str, list[str]]]:
 
 
 def _launcher_flags(verb: str) -> set[str]:
-    """Every flag the launcher parses itself, read off the CLI rather than restated here."""
     command = typer.main.get_command(app).commands[verb]
     owned = {opt for param in command.params for opt in getattr(param, "opts", ())}
     return owned | set(command.get_help_option_names(click.Context(command)))

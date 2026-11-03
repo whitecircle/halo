@@ -1,10 +1,5 @@
-"""Device-aware kernel dispatch: CPU calls must take the torch path, CUDA-shaped dispatch intact.
-
-transformers 5.20's ``use_kernel_func_from_hub_with_fallback`` captures the CUDA-only original
-package (causal_conv1d/fla) at decoration time and calls it for every input. These tests fail if
-the toolkit shim stops routing CPU tensors to the decorated torch function — the failure is a
-crash (``Expected x.is_cuda()``) in every CPU forward of a conv/linear-attention family.
-"""
+"""Device-aware kernel dispatch: transformers 5.20's fallback captures the CUDA-only package, so without the shim
+every CPU forward of a conv/linear-attention family raises ``Expected x.is_cuda()``."""
 
 import os
 import subprocess
@@ -47,7 +42,7 @@ def test_patch_is_idempotent():
 
 
 def test_tensorless_call_reaches_the_captured_implementation():
-    """No tensor argument → no device verdict; the shim must defer to the stock dispatch."""
+    """No tensor argument, no device verdict."""
     ensure_device_aware_kernel_dispatch()
 
     @hub_kernels.use_kernel_func_from_hub_with_fallback(
@@ -60,9 +55,8 @@ def test_tensorless_call_reaches_the_captured_implementation():
 
 
 def test_cpu_delta_rule_restarts_recurrent_state_per_document():
-    """The torch fallback ignores ``cu_seqlens`` and runs one recurrence over the packed row; the
-    shim must slice per document. A cumsum stands in for the recurrence: without segmentation
-    document B starts from document A's running state."""
+    """A cumsum stands in for the recurrence; the torch fallback ignores ``cu_seqlens``, so document B would start
+    from A's state."""
     ensure_device_aware_kernel_dispatch()
 
     @hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
@@ -77,9 +71,7 @@ def test_cpu_delta_rule_restarts_recurrent_state_per_document():
 
 
 def test_cpu_delta_rule_segments_by_the_host_bounds_and_consumes_them():
-    """The tree recurrence hands fla's ``cu_seqlens_cpu`` along with the device bounds. The fallback reads
-    the segments off that host copy (the device copy is on the meta device here, which a read would fault)
-    and passes it no further: the torch body takes no such argument."""
+    """The device copy is on the meta device here, which a read would fault; the torch body takes no such argument."""
     ensure_device_aware_kernel_dispatch()
 
     @hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
@@ -93,14 +85,8 @@ def test_cpu_delta_rule_segments_by_the_host_bounds_and_consumes_them():
 
 
 def test_cuda_capture_resolves_a_submodule_only_package_kernel():
-    """``fla`` exports nothing at root, so a decoration that resolved only off a bare package import
-    would silently capture the torch body — every CUDA forward then running the naive scan at ~10x
-    the step time. The decoration must capture fla's real kernel.
-
-    A fresh interpreter is required: once anything in the process has imported the submodule (any
-    ``fla.ops`` import loads it), it is an attribute of the ``fla`` root and a root-only resolve finds
-    the kernel by walking attributes, so the check would pass against the very regression it pins.
-    """
+    """``fla`` exports nothing at root, so a root-only resolve captures the torch body at ~10x step time.
+    Fresh interpreter: any earlier ``fla.ops`` import makes the root resolve pass against this regression."""
     script = """
 import sys
 
@@ -144,7 +130,7 @@ print("FINDINGS:" + "|".join(findings))
 
 
 def test_torch_capture_with_the_package_installed_warns(caplog, monkeypatch):
-    """A capture that lands on torch while the package is importable is a silent 10x — it must warn."""
+    """A capture landing on torch with the package importable is a silent 10x."""
     ensure_device_aware_kernel_dispatch()
     monkeypatch.setitem(hub_kernels._KERNELS_INTERNAL_PATH_MAPPINGS, "chunk_gated_delta_rule", "ops.no_such_submodule")
     monkeypatch.setattr(hub_kernel_dispatch, "_warned_torch_captures", set())
@@ -161,9 +147,7 @@ def test_torch_capture_with_the_package_installed_warns(caplog, monkeypatch):
 
 
 def test_a_kernel_package_that_fails_its_own_import_raises(tmp_path, monkeypatch):
-    """Only a missing module means "package absent or chain renamed". A package that is present but
-    breaks inside its kernel import (a Triton or ABI fault) must stop the load: swallowed, upstream
-    captures the torch body and every CUDA forward runs the slow scan."""
+    """Swallowed, upstream captures the torch body and every CUDA forward runs the slow scan."""
     ensure_device_aware_kernel_dispatch()
     ops = tmp_path / "halo_broken_kernel_pkg" / "ops"
     ops.mkdir(parents=True)
@@ -177,12 +161,7 @@ def test_a_kernel_package_that_fails_its_own_import_raises(tmp_path, monkeypatch
 
 
 def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
-    """The install happens on ``halo`` import, not on first use.
-
-    Every test above calls ``ensure_device_aware_kernel_dispatch()`` itself and then decorates its own
-    probe, which can only ever observe install-then-bind; this pins the install to the import. A fresh
-    interpreter is required: this process installed the shim long ago.
-    """
+    """Other tests observe install-then-bind only. Fresh interpreter: this process installed the shim long ago."""
     probe = (
         "import halo;"
         "from transformers.integrations import hub_kernels;"
@@ -204,10 +183,8 @@ def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
 
 
 def test_importing_halo_redecorates_what_a_module_imported_earlier_bound():
-    """A modeling module decorates at its own import, so one imported ahead of ``halo`` holds upstream's capture,
-    the CUDA-only package included, and every later CPU forward of that family dies with ``Expected x.is_cuda()``
-    in whatever test happens to run after the import. The premise check is the negative control: before ``halo``
-    the capture fails on CPU. A fresh interpreter is required: this process installed the shim long ago."""
+    """A module imported ahead of ``halo`` holds upstream's capture. The premise check is the negative control.
+    Fresh interpreter: this process installed the shim long ago."""
     pytest.importorskip("causal_conv1d")
     script = """
 import torch

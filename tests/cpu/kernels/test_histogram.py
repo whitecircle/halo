@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the sync-free routing histogram shared by the EP layers and the MoE metrics callback.
-
-``halo.kernels.histogram`` replaces ``torch.bincount`` on the routing hot path, where bincount's
-device→host read-back of the max index costs a full sync per MoE layer per forward. Three
-properties are load-bearing and each has a way of failing silently:
-
-* the counts must equal ``bincount``'s — a miscounting histogram feeds grouped-GEMM the wrong
-  offsets, which mis-slices experts rather than raising;
-* ``int32`` indices must be accepted — DeepEP hands back int32 local expert ids at ``ep_size > 1``,
-  and ``scatter_add_`` requires int64, so a dropped cast breaks every distributed EP run while
-  ``ep_size == 1`` (int64) stays green;
-* the counter dtype is the CALLER's choice — fp32 for the metric accumulators, int64 for the
-  grouped-GEMM offsets, where inexact adds would drift the boundaries.
-
-Run: ``python tests/cpu/kernels/test_histogram.py`` (or ``pytest -m cpu``).
-"""
+"""The sync-free routing histogram replacing ``torch.bincount``, whose read-back costs a sync per MoE layer per
+forward. Miscounts mis-slice experts silently; DeepEP hands back int32 ids."""
 
 from __future__ import annotations
 
@@ -31,7 +17,7 @@ def test_counts_match_bincount():
 
 
 def test_a_multi_dimensional_selection_is_flattened():
-    """Routing selections arrive as ``[T, top_k]``; every (token, slot) pair counts once."""
+    """Routing selections arrive as ``[T, top_k]``."""
     topk_indices = torch.tensor([[0, 1], [1, 2], [1, 1]])
     counts = sync_free_bincount(topk_indices, 4, dtype=torch.long)
     assert counts.tolist() == [1, 4, 1, 0]
@@ -57,7 +43,7 @@ def test_the_counter_dtype_is_the_callers(dtype):
 
 
 def test_size_is_the_counter_width_not_the_max_index():
-    """The whole point of the pre-sized buffer: no host read-back of ``indices.max()``."""
+    """No host read-back of ``indices.max()``."""
     assert sync_free_bincount(torch.tensor([0]), 16, dtype=torch.long).numel() == 16
 
 
@@ -72,8 +58,7 @@ def test_accumulate_creates_on_the_first_call_and_adds_afterwards():
 
 
 def test_weights_count_an_occurrence_that_many_times():
-    """A weighted count is what a token shared by several examples needs: one selection, counted once
-    per example."""
+    """What a token shared by several examples needs."""
     indices = torch.tensor([[0, 2], [2, 1]])
     weights = torch.tensor([[3, 3], [1, 1]])
     assert sync_free_bincount(indices, 4, weights=weights).tolist() == [3.0, 1.0, 4.0, 0.0]

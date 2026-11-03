@@ -1,5 +1,4 @@
-"""Multi-dataset corpora: the per-entry ratios and subsets, one schema over every entry, and the train/test
-concatenation with its last-resort held-out split."""
+"""Multi-dataset corpora: per-entry ratios and subsets, one schema over every entry, and train/test concatenation."""
 
 import numpy as np
 from datasets import Dataset, DatasetDict, concatenate_datasets
@@ -37,8 +36,7 @@ _ESSENTIAL_COLUMNS = (
 
 
 def resolve_dataset_ratios(path: str | list, dataset_ratio: float | list | None) -> float | list:
-    """``dataset_ratio`` as the loader reads it: one ratio per entry of a list ``path`` (a single float
-    applies to each), ``1`` (all of it) when unset."""
+    """One ratio per entry of a list ``path`` (a single float applies to each), ``1`` when unset."""
     if dataset_ratio is None:
         return [1] * len(path) if isinstance(path, list) else 1
     if isinstance(path, list) and isinstance(dataset_ratio, (int, float)):
@@ -58,14 +56,14 @@ def resolve_dataset_ratios(path: str | list, dataset_ratio: float | list | None)
 
 
 def placeholder_test_split(train_ds: Dataset, path: str) -> DatasetDict:
-    """``train_ds`` with its first ``_PLACEHOLDER_TEST_ROWS`` rows as the test split, for a source shipping none."""
+    """For a source shipping no test split: its first ``_PLACEHOLDER_TEST_ROWS`` rows."""
     if is_global_main_process():
         logger.warning(f"Dataset {path} has no test split, using first {_PLACEHOLDER_TEST_ROWS} samples as test")
     return DatasetDict({"train": train_ds, "test": train_ds.select(range(min(_PLACEHOLDER_TEST_ROWS, len(train_ds))))})
 
 
 def _subset_split(dataset: Dataset, dataset_ratio: float | None, seed: int) -> Dataset:
-    """Subset the dataset to dataset_ratio (0.0-1.0). Seeded for cross-rank reproducibility."""
+    """Seeded for cross-rank reproducibility."""
     if dataset_ratio is None or abs(dataset_ratio - 1) <= 0.001:
         return dataset
 
@@ -74,7 +72,7 @@ def _subset_split(dataset: Dataset, dataset_ratio: float | None, seed: int) -> D
 
 
 def subset_dataset_dict(dataset: DatasetDict, dataset_ratio: float | None, seed: int) -> DatasetDict:
-    """Subset train and, where shipped, test to ``dataset_ratio`` (test draws with ``seed + 1``)."""
+    """Test draws with ``seed + 1``."""
     dataset["train"] = _subset_split(dataset["train"], dataset_ratio, seed)
     if "test" in dataset:
         dataset["test"] = _subset_split(dataset["test"], dataset_ratio, seed + 1)
@@ -82,8 +80,7 @@ def subset_dataset_dict(dataset: DatasetDict, dataset_ratio: float | None, seed:
 
 
 def _reject_tools_field_nowhere(paths: list, datasets: list, tools_field: str) -> None:
-    """Refuse a ``tools_field`` no entry carries (a typo); warn about the entries without it, which a mixed
-    tool-use and plain-chat corpus legitimately has."""
+    """Refuse a ``tools_field`` no entry carries (a typo); warn about entries without it, as in a mixed corpus."""
     without = [
         entry_path
         for entry_path, ds_dict in zip(paths, datasets, strict=True)
@@ -105,11 +102,8 @@ def _reject_tools_field_nowhere(paths: list, datasets: list, tools_field: str) -
 
 
 def _find_common_columns(datasets):
-    """Columns every dataset carries with one feature type, in the first dataset's column order.
-
-    A list, never a set: the order becomes the concatenation's column order, which every map keying
-    on ``column_names`` reads, and a set's string order is hash-randomized per process — per rank.
-    """
+    """Columns every dataset carries with one feature type, in the first's order. A list: the order becomes the
+    concatenation's column order, which maps keying on ``column_names`` read; a set's is hash-randomized per rank."""
     common_columns = list(datasets[0].column_names)
     feature_types = {col: str(datasets[0].features[col]) for col in common_columns}
     for ds in datasets[1:]:
@@ -127,8 +121,8 @@ def _find_common_columns(datasets):
 
 
 def _pin_declared_columns(datasets: list[Dataset], declared_columns) -> list[Dataset]:
-    """Null-fill each declared render column into the entries that do not carry it, at the carrying entry's
-    feature type, so the schema intersection keeps it for the whole corpus instead of dropping it."""
+    """Null-fill declared render columns into entries lacking them, at the carrying entry's type, so the schema
+    intersection keeps them."""
     donor_features = {}
     for column in declared_columns:
         donor = next((ds for ds in datasets if column in ds.column_names), None)
@@ -145,7 +139,6 @@ def _pin_declared_columns(datasets: list[Dataset], declared_columns) -> list[Dat
 
 
 def _normalize_dataset_schema(datasets, declared_columns=()):
-    """The columns every dataset carries, the run's ``declared_columns`` pinned through the intersection."""
     if not datasets:
         return []
     datasets = _pin_declared_columns(datasets, declared_columns)
@@ -173,8 +166,7 @@ def _normalize_dataset_schema(datasets, declared_columns=()):
 
 
 def _concatenate_entries(paths: list[str], subsets: list[DatasetDict], declared_columns) -> DatasetDict:
-    """One train/test ``DatasetDict`` over every entry's normalized splits; the test split comes only from
-    the entries that ship one, and falls back to a placeholder when none does."""
+    """The test split comes only from entries shipping one, else a placeholder."""
     train_datasets = [d["train"] for d in subsets]
     test_datasets = [d["test"] for d in subsets if "test" in d]
     train_only_entries = [p for p, d in zip(paths, subsets, strict=True) if "test" not in d]
@@ -215,11 +207,8 @@ def build_corpus(
     conversation_knob: str,
     tools_field: str | None,
 ) -> DatasetDict:
-    """One train/test ``DatasetDict`` from the ``(dataset, sharded)`` entries loaded for ``paths``.
-
-    Each entry is checked and filtered on its own, so a refusal names the offending dataset; the declared
-    render columns are pinned through the concatenation, then re-checked on its result.
-    """
+    """One train/test ``DatasetDict``. Each entry is checked and filtered on its own, so a refusal names the offending
+    dataset; declared render columns are pinned through the concatenation, then re-checked."""
     # A SHARDED entry missing a split is a per-rank shard-index fault, not a source that ships only train.
     for entry_path, (entry_ds, entry_sharded) in zip(paths, loaded, strict=True):
         if entry_sharded:

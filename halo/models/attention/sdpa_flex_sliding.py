@@ -1,7 +1,5 @@
 """The ``sdpa_flex_sliding`` attention: masked causal layers on compiled FlexAttention, wide-head global layers on
-matmul attention or, on packed rows past its budget, on mem-efficient attention per document, each skipping the
-tiles the mask excludes; every other call goes to ``sdpa``. agent-docs/optimization/flash-attention.md has the
-routing and the compile contract."""
+matmul attention or, on packed rows past its budget, mem-efficient attention per document; the rest on ``sdpa``."""
 
 from __future__ import annotations
 
@@ -31,17 +29,16 @@ logger = logging.getLogger(__name__)
 
 SDPA_FLEX_SLIDING = "sdpa_flex_sliding"
 
-# Attention-function keywords FlexAttention is not given here; a call carrying any of them keeps SDPA.
+# A call carrying any of these keeps SDPA.
 _SDPA_ONLY_KWARGS = ("s_aux", "softcap", "position_bias")
 
-# Bytes matmul attention saves for backward per score: the fp32 softmax output and the 16-bit weights.
+# Saved for backward per score: the fp32 softmax output and the 16-bit weights.
 _SAVED_BYTES_PER_SCORE = 6
-# Saved scores one global layer may hold on matmul attention before mem-efficient SDPA takes over:
-# 16 heads at 4,096 tokens per row.
+# 16 heads at 4,096 tokens per row; past it a global layer moves to mem-efficient SDPA.
 MATMUL_GLOBAL_BUDGET_BYTES = 2 * 2**30
 
-# Tiles tuned on Gemma 4's head_dim-256 sliding layers on SM100+. Length-independent on purpose: a
-# length-dependent choice is a guard the compiled kernel would recompile on.
+# Tuned on Gemma 4's head_dim-256 sliding layers on SM100+. A length-dependent choice would be a guard the compiled
+# kernel recompiles on.
 _SM100_SLIDING_KERNEL_OPTIONS = {
     "BLOCK_M": 128,
     "BLOCK_N": 64,
@@ -59,13 +56,11 @@ _TILE = 128
 # The narrowest query/key or value head Inductor's FlexAttention kernel takes (``tl.dot``'s minimum); a narrower
 # one keeps SDPA, as a head wider than FLASH_MAX_HEAD_DIM does.
 FLEX_MIN_HEAD_DIM = 16
-# Query rows of a dense mask reduced to key runs per pass (see ``key_intervals``).
+# Query rows of a dense mask reduced to key runs per pass, to bound the temporaries.
 _INTERVAL_ROWS = 256
 
-# The attribute a dense mask carries its per-row block masks on (an empty list for a mask SDPA serves),
-# so every layer of a forward that gets the mask shares them and they are freed with it.
+# On the dense mask (empty for a mask SDPA serves), so every layer of a forward shares them and they are freed with it.
 _BLOCK_MASKS_ATTR = "_flex_sliding_block_masks"
-# The attribute a dense mask carries its packed documents on (``None`` for a mask that is not document-causal).
 _DOCUMENTS_ATTR = "_flex_sliding_documents"
 # ``custom_mask_type`` of the mem-efficient kernel: causal from each document's first query and key.
 _CAUSAL_FROM_TOP_LEFT = 1
@@ -85,10 +80,8 @@ def _pad_to_tile(length: int) -> int:
 
 
 def key_intervals(allowed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Per query, the first and last key of a boolean ``[Q, K]`` mask as int32 ``[Q]`` tensors (an empty
-    row gets ``first = K``, ``last = -1``), or ``None`` when some query's keys are not one contiguous run.
-    Read :data:`_INTERVAL_ROWS` query rows at a time to bound the temporaries.
-    """
+    """Per query, the first and last key of a boolean ``[Q, K]`` mask as int32 ``[Q]`` tensors (an empty row gets
+    ``first = K``, ``last = -1``), or ``None`` when some query's keys are not one contiguous run."""
     q_len, kv_len = allowed.shape
     first = torch.empty(q_len, dtype=torch.int32, device=allowed.device)
     last = torch.empty_like(first)
@@ -108,12 +101,8 @@ def key_intervals(allowed: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | 
 
 
 def interval_block_mask(first: torch.Tensor, last: torch.Tensor, kv_len: int) -> BlockMask:
-    """The ``BlockMask`` of per-query key runs ``first[q] <= kv <= last[q]``, both sides padded to whole
-    :data:`_TILE` tiles (a padded query attends nothing).
-
-    The mask function compares against the two ``[Q]`` bounds rather than indexing a ``[Q, K]`` grid,
-    whose flattened offset outgrows int32 past about 46k tokens.
-    """
+    """Both sides padded to whole tiles. The mask function compares against the two ``[Q]`` bounds, as a ``[Q, K]``
+    grid's flattened offset outgrows int32 past about 46k tokens."""
     q_len = first.shape[0]
     q_pad, kv_pad = q_len + _pad_to_tile(q_len), kv_len + _pad_to_tile(kv_len)
     first = torch.nn.functional.pad(first, (0, q_pad - q_len), value=kv_pad)
@@ -139,8 +128,7 @@ def interval_block_mask(first: torch.Tensor, last: torch.Tensor, kv_len: int) ->
 
 
 def row_block_masks(attention_mask: torch.Tensor) -> list[BlockMask] | None:
-    """One block mask per row of SDPA's boolean ``[B, 1, Q, K]`` mask, or ``None`` when a row allows some
-    query a non-contiguous set of keys (which SDPA then serves). Built once per mask tensor."""
+    """``None`` when a row allows some query a non-contiguous set of keys, left to SDPA. Built once per mask."""
     masks = getattr(attention_mask, _BLOCK_MASKS_ATTR, None)
     if masks is not None:
         return masks or None
@@ -157,10 +145,8 @@ def row_block_masks(attention_mask: torch.Tensor) -> list[BlockMask] | None:
 
 
 def causal_documents(attention_mask: torch.Tensor) -> tuple[torch.Tensor, int] | None:
-    """The packed documents of SDPA's boolean ``[B, 1, S, S]`` mask when each query attends exactly its own
-    document, from the document's first token up to itself: ``(cu_seqlens, max_len)``, the int32 boundaries of
-    every row's documents laid end to end and the longest one's length. ``None`` for any other mask (a padded
-    query, a bidirectional span, a window), which SDPA then serves. Built once per mask tensor."""
+    """``(cu_seqlens, max_len)`` when each query attends exactly its own document, from the document's first token up
+    to itself; ``None`` for any other mask, which SDPA then serves. Built once per mask tensor."""
     if hasattr(attention_mask, _DOCUMENTS_ATTR):
         return getattr(attention_mask, _DOCUMENTS_ATTR)
     batch, _, seq, _ = attention_mask.shape
@@ -193,8 +179,7 @@ def _padded_rows(tensor: torch.Tensor) -> list[torch.Tensor]:
 
 
 def _to_autocast_dtype(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """``tensors`` in the autocast dtype where autocast is on for their device, as autocast casts SDPA's
-    inputs; the kernels here run outside autocast's reach."""
+    """Autocast casts SDPA's inputs; the kernels here run outside its reach."""
     device_type = tensors[0].device.type
     if not torch.is_autocast_enabled(device_type):
         return tensors
@@ -209,7 +194,7 @@ def _block_sparse_attention(
     block_masks: list[BlockMask],
     scaling: float | None,
 ) -> torch.Tensor:
-    """FlexAttention over each batch row under its block mask. Returns ``[B, S, H, D]``."""
+    """Returns ``[B, S, H, D]``."""
     q_len = query.shape[-2]
     # fp32 rotary output beside 16-bit values would otherwise be a graph the warm-up never compiled.
     query, key, value = _to_autocast_dtype(query, key, value)
@@ -217,7 +202,6 @@ def _block_sparse_attention(
     if records_grad:
         # A frozen input joins as a detached leaf, so the graph never depends on which projections train.
         query, key, value = (t if t.requires_grad else t.detach().requires_grad_() for t in (query, key, value))
-    # The tuned tiles only where they were tuned (16-bit inputs, head_dim 256, SM100+).
     tuned = (
         query.dtype in (torch.bfloat16, torch.float16) and query.shape[-1] == _TUNED_HEAD_DIM and is_blackwell_gpu()
     )
@@ -242,10 +226,8 @@ def _block_sparse_attention(
 
 
 class _Fp32ScoreMatmul(torch.autograd.Function):
-    """``query @ key_t`` over ``[N, M, D] @ [N, D, K]``, returned in at least fp32 at 16-bit GEMM speed
-    (upcast inputs would run an fp32 GEMM, ~18x slower at Gemma 4's shapes). :func:`bmm_fp32` has no
-    derivative on that path, hence the explicit backward.
-    """
+    """In at least fp32 at 16-bit GEMM speed (upcast inputs would run an fp32 GEMM, ~18x slower at Gemma 4's shapes).
+    :func:`bmm_fp32` has no derivative on that path, hence the explicit backward."""
 
     @staticmethod
     def forward(ctx, query: torch.Tensor, key_t: torch.Tensor) -> torch.Tensor:
@@ -269,10 +251,8 @@ def _matmul_global_attention(
     scaling: float,
     is_causal: bool,
 ) -> torch.Tensor:
-    """Attention as two matmuls and a softmax over fp32 logits, as mem-efficient SDPA keeps them, masked as
-    SDPA masks the call. Each KV group's query heads stack on the sequence axis, so no KV copy is made;
-    masked scores take the dtype minimum, so no row softmaxes to NaN. Returns ``[B, S, H, D]``.
-    """
+    """Two matmuls and a softmax over fp32 logits, as mem-efficient SDPA keeps them. Each KV group's query heads stack
+    on the sequence axis, so no KV copy is made; masked scores take the dtype minimum, so no row softmaxes to NaN."""
     batch, heads, q_len, dim = query.shape
     kv_heads = key.shape[1]
     group = heads // kv_heads
@@ -306,8 +286,7 @@ def _matmul_global_attention(
 
 
 class _VarlenCausalAttention(torch.autograd.Function):
-    """Mem-efficient attention over ``[1, T, H, D]`` inputs, causal within each ``cu_seqlens`` document: the
-    kernel SDPA runs these heads on, over the documents' own tiles only."""
+    """The kernel SDPA runs these heads on, causal within each ``cu_seqlens`` document, over their own tiles."""
 
     @staticmethod
     def forward(ctx, query, key, value, cu_seqlens: torch.Tensor, max_len: int, scale: float) -> torch.Tensor:
@@ -363,8 +342,7 @@ def _varlen_causal_attention(
     documents: tuple[torch.Tensor, int],
     scaling: float,
 ) -> torch.Tensor:
-    """Causal attention within each packed document of ``documents`` (:func:`causal_documents`), the KV heads
-    repeated per query group as SDPA repeats them. Returns ``[B, S, H, D]``."""
+    """The KV heads repeat per query group as SDPA repeats them. Returns ``[B, S, H, D]``."""
     batch, heads, seq, dim = query.shape
     query, key, value = _to_autocast_dtype(query, key, value)
 
@@ -380,20 +358,14 @@ def _varlen_causal_attention(
 
 
 def _flex_widths(head_dim: int, v_head_dim: int) -> bool:
-    """Whether FlexAttention runs heads this wide: query/key and value at least FLEX_MIN_HEAD_DIM, and query/key
-    no wider than FLASH_MAX_HEAD_DIM."""
     return min(head_dim, v_head_dim) >= FLEX_MIN_HEAD_DIM and head_dim <= FLASH_MAX_HEAD_DIM
 
 
 def _flex_runs(call: AttentionCall) -> bool:
-    """Whether FlexAttention serves ``call``: heads of a width it runs (:func:`_flex_widths`), and no softcap,
-    which keeps SDPA."""
     return _flex_widths(call.head_dim, call.v_head_dim) and call.softcap is None
 
 
 def _flex_call(module: torch.nn.Module) -> AttentionCall | None:
-    """The call ``module`` makes on FlexAttention (:func:`~halo.models.attention.layout.attention_call`), or
-    ``None`` for one FlexAttention serves no call of."""
     call = attention_call(module)
     return call if call is not None and _flex_runs(call) else None
 
@@ -407,12 +379,9 @@ def _flex_serves(
     window: int | None,
     scaling: float | None,
 ) -> bool:
-    """Whether FlexAttention takes a masked call: one mask row per batch row over exactly the call's queries
-    and keys, heads of a width it runs (:func:`_flex_widths`), more queries than the window
-    and one tile (below either no tile is skipped, and a single-tile row gives the block mask size-1 dims,
-    which Dynamo specializes on), and the heads, widths and scaling of the call the warm-up compiles for the
-    module, so no call compiles mid-run. Tensor parallelism hands a call the rank's share of the heads, which
-    the module does not declare, so such a call keeps SDPA."""
+    """It needs more queries than the window and one tile (a single-tile row gives the block mask size-1 dims, which
+    Dynamo specializes on), and the call the warm-up compiles for the module, so no call compiles mid-run. TP hands a
+    call the rank's share of the heads, which the module does not declare, so such a call keeps SDPA."""
     if not (
         attention_mask is not None
         and attention_mask.shape == (query.shape[0], 1, query.shape[-2], key.shape[-2])
@@ -441,8 +410,6 @@ def _flex_serves(
 
 
 def _varlen_serves(query: torch.Tensor, key: torch.Tensor, attention_mask: torch.Tensor | None) -> bool:
-    """Whether per-document mem-efficient attention may take a masked call FlexAttention does not (a head wider
-    than FLASH_MAX_HEAD_DIM): one mask row per batch row over the call's queries as its keys."""
     return (
         attention_mask is not None
         and query.shape[-2] == key.shape[-2]
@@ -463,10 +430,8 @@ def flex_sliding_attention(
     is_causal: bool | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
-    """The registered attention function: mem-efficient-only causal global calls within the budget on matmul
-    attention, masked causal calls (sliding windows, packed documents, padding) on FlexAttention, wide-head ones
-    past the budget on packed rows on mem-efficient attention per document, the rest on ``sdpa``. An explicit
-    ``is_causal`` overrides the module's, as it does for SDPA."""
+    """Mem-efficient-only causal global calls within the budget on matmul attention, masked causal calls on
+    FlexAttention, wide-head ones past the budget on mem-efficient attention per document, the rest on ``sdpa``."""
     boolean_mask = attention_mask is None or attention_mask.dtype == torch.bool
     eligible = (
         query.is_cuda
@@ -504,7 +469,6 @@ def flex_sliding_attention(
 
 
 def register_flex_sliding_attention() -> str:
-    """Register :data:`SDPA_FLEX_SLIDING` (idempotent) and return its name for ``attn_implementation``."""
     if SDPA_FLEX_SLIDING not in ALL_ATTENTION_FUNCTIONS:
         ALL_ATTENTION_FUNCTIONS.register(SDPA_FLEX_SLIDING, flex_sliding_attention)
         ALL_MASK_ATTENTION_FUNCTIONS.register(SDPA_FLEX_SLIDING, sdpa_mask)
@@ -517,15 +481,10 @@ def register_flex_sliding_attention() -> str:
 
 
 def resolve_flex_sliding_attn_implementation(model_config, attn_implementation: str) -> str:
-    """:data:`SDPA_FLEX_SLIDING` where the run resolved to ``sdpa`` on CUDA for a model with sliding-window
-    layers (Step-3.7, Gemma 4, a Mistral on a pinned ``sdpa``) or a head wider than flash runs, else
-    ``attn_implementation``.
-
-    Plain SDPA stays for a model whose every call carries what the kernels here are not given (GptOss's
-    sinks, Gemma 2's logit softcap), for a class transformers does not declare backend-compatible (Inkling,
-    whose calls carry a dense relative bias), for remote code (unmapped, or mapped by an earlier load), whose
-    attention need not dispatch through the registry, and under ``HALO_FLEX_SLIDING=0``.
-    """
+    """Taken where the run resolved to ``sdpa`` on CUDA for a model with sliding-window layers or a head wider than
+    flash runs. Plain SDPA stays for a model whose every call carries what these kernels are not given (GptOss's sinks,
+    Gemma 2's softcap), a class transformers does not declare backend-compatible (Inkling, whose calls carry a dense
+    relative bias) and remote code, whose attention need not dispatch through the registry."""
     if (
         attn_implementation != "sdpa"
         or not torch.cuda.is_available()
@@ -546,22 +505,20 @@ def resolve_flex_sliding_attn_implementation(model_config, attn_implementation: 
 
 
 def flex_attention_calls(model: torch.nn.Module) -> set[AttentionCall]:
-    """The distinct calls ``model``'s causal attention modules make on FlexAttention (a sliding layer, or a full
-    layer, with heads of a width it runs and no softcap): the call arguments the compiled kernel's guards key on."""
+    """The call arguments the compiled kernel's guards key on."""
     return {call for call in attention_calls(model) if _flex_runs(call)}
 
 
 def warm_flex_sliding_kernels(
     model: torch.nn.Module, *, dtype: torch.dtype, device: torch.device | None = None
 ) -> None:
-    """Compile the training and forward-only FlexAttention graphs of each masked call ``model`` makes, on ``device``
-    (the current CUDA device by default), so no rank compiles one mid-run, and record the deterministic mode they
-    compiled under. Rank-local; the caller fences it."""
+    """Compile the training and forward-only graphs of each masked call, so no rank compiles one mid-run, and record
+    the deterministic mode they compiled under. Rank-local; the caller fences it."""
     global _warmed_deterministic
     if effective_attn_implementation(model.config) != SDPA_FLEX_SLIDING:
         return
     calls = flex_attention_calls(model)
-    if not calls:  # nothing to compile, so no graph for a later mode to miss
+    if not calls:  # no graph for a later mode to miss
         return
     if device is None:
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
@@ -590,9 +547,8 @@ def warm_flex_sliding_kernels(
 
 
 def reject_full_determinism_after_warmup(full_determinism: bool) -> None:
-    """Refuse ``full_determinism`` once the warm-up compiled the FlexAttention graphs without deterministic
-    mode; call before ``Trainer.__init__`` turns it on. Dynamo guards on the mode, so each rank would recompile
-    at its own first long masked call while its peers wait in the next collective."""
+    """Call before ``Trainer.__init__`` turns it on. Dynamo guards on the mode, so each rank would recompile at its own
+    first long masked call while its peers wait in the next collective."""
     if full_determinism and _warmed_deterministic is False:
         raise ValueError(
             f"full_determinism: true cannot run with the {SDPA_FLEX_SLIDING} attention this model was built with: "

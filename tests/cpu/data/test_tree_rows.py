@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: tree packing trains exactly the rows it is given.
-
-Tree packing is an optimization, so its contract is an equality: every root-to-leaf path of a
-processed tree must carry the tokens the flat pipeline tokenizes for that row, and the labels the flat
-packing collator gives it. These tests run both pipelines over the same conversations with the
-production GPT-OSS tokenizer and chat template and compare example by example. They also pin what
-decides which rows are examined together (the share key and the ordering it induces) and the
-collator's refusals — the cases where a tree row would otherwise reach the model in a shape that
-attends across branches. The last test drives the SFT script's data path both ways over one shuffled
-dataset, so the ordering, the typed map, the filter and the packing between the two are covered too.
-
-Run: python tests/cpu/data/test_tree_rows.py  (or pytest)
-"""
+"""Tree packing trains exactly the rows it is given: every root-to-leaf path carries the tokens and labels the flat
+packed pipeline gives that row, compared example by example with the production GPT-OSS tokenizer and template.
+Also pins the share key, its ordering and the collator's refusals."""
 
 import random
 import sys
@@ -264,9 +254,8 @@ def _run_sft_main(tmp_path, yaml_body: str) -> None:
     ids=["auto-fa3", "split-on-fa2"],
 )
 def test_an_unsupported_backend_is_refused_before_any_weight_loads(tmp_path, monkeypatch, backend, match):
-    """Auto-selection picks FA3 on Hopper, and the split form needs FA4: the run stops at the backend the loader
-    would resolve for the config, dtype and GPU, with the message the loaded model's install gives, before the
-    datasets or the weights load. Pinned to FA2 with the gather form, the same run gets past the check."""
+    """Auto-selection picks FA3 on Hopper and the split form needs FA4, so the run stops at the backend the loader
+    would resolve, before the datasets or weights load. Pinned to FA2 with the gather form, it passes."""
     monkeypatch.setattr(selection, "_detect_attention_impl", lambda: "flash_attention_3")
     monkeypatch.setattr(sft_script, "resolve_training_dtype", lambda config: torch.bfloat16)
     monkeypatch.setattr(sft_script, "probe_checkpoint", lambda *args, **kwargs: (Qwen3Config(), False))
@@ -295,8 +284,7 @@ def _stop_a_glm5_run_at_the_datasets(monkeypatch, config) -> None:
 
 
 def test_a_glm5_adapter_on_kv_b_proj_is_refused_before_any_weight_loads(tmp_path, monkeypatch):
-    """GLM-5 Next's tree attention folds kv_b_proj into the query, so an adapter there would never apply: the run
-    stops on its LoRA targets before the datasets or the weights load, and without kv_b_proj gets past the check."""
+    """GLM-5 Next's tree attention folds kv_b_proj into the query, so an adapter there would never apply."""
     _stop_a_glm5_run_at_the_datasets(monkeypatch, tiny_family_model(TINY_MOE_FAMILIES["glm5_next"]).config)
     adapter = "attn_implementation: sdpa\nuse_peft: true\nlora_target_modules: [q_a_proj, {}]\n"
     with pytest.raises(ValueError, match="Leave kv_b_proj out of lora_target_modules"):
@@ -317,9 +305,8 @@ def test_a_glm5_adapter_on_kv_b_proj_is_refused_before_any_weight_loads(tmp_path
 def test_a_quantized_glm5_tree_run_is_refused_before_the_load(
     tmp_path, monkeypatch, run_quantization, checkpoint_quantization
 ):
-    """GLM-5 Next's tree attention reads kv_b_proj's weight as a plain matrix, which a quantized load holds packed or
-    block-scaled: a run that quantizes the weights, or loads a checkpoint declaring its own quantization (the fp8
-    hub release), stops before the datasets or the weights load; the same run on plain weights gets past the check."""
+    """GLM-5 Next's tree attention reads kv_b_proj's weight as a plain matrix, which a quantized load holds packed
+    or block-scaled."""
     config = tiny_family_model(TINY_MOE_FAMILIES["glm5_next"]).config
     lora = "attn_implementation: sdpa\nuse_peft: true\nlora_target_modules: [q_a_proj, o_proj]\n"
     _stop_a_glm5_run_at_the_datasets(monkeypatch, config)
@@ -403,9 +390,8 @@ class _TrainerTransport:
 
 
 def test_the_recurrence_bounds_stay_on_the_host_through_the_batch_transports(tokenizer):
-    """The accelerate dataloader and the trainer move every tensor of a batch to the device; the levels' host
-    bounds, which the delta-rule kernel builds its chunk indices from without a device read, must arrive as
-    they left the collator."""
+    """Transports move every tensor of a batch to the device; the levels' host bounds, which the delta-rule kernel
+    reads with no device sync, must arrive as they left the collator."""
     trees = _process(tokenizer, _conversations()[:4])
     collator = DataCollatorWithTreePacking(tokenizer, sliding_window=None, full_form="gather", conv_kernel=4)
     batch = collator(trees)

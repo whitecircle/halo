@@ -1,21 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: both rollout drivers bind an episode's reasoning effort through ONE seam.
-
-``bind_episode_effort`` (``halo/environments/reasoning_effort.py``) resolves the episode's level once and turns the
-env's per-level CoT budget into the per-turn reasoning cap every turn runs under. The Ray actor and the
-offline eval runner must both go through it: a driver that resolves the level itself, or skips the
-budget, generates under a different contract than the one the policy was trained on. The episode
-output budget (``rollout_max_episode_tokens``) rides the same seam: ``EpisodeEffort.turn_caps`` narrows
-a turn's request to what the budget has left and hands back none once it holds no turn, which ends
-the episode truncated. So does the answer-room bound (``rollout_max_answer_tokens``): a capped turn's
-total is at most its reasoning cap plus the room, so a turn the engine force-closed cannot reason on in
-its visible output up to ``rollout_max_tokens``.
-
-Both drivers are exercised for real — the actor via the class ``@ray.remote`` wraps (no cluster), the
-eval runner with its generation call stubbed — so the tests fail if either one stops binding.
-
-    python tests/cpu/environments/test_effort_binding.py
-"""
+"""Both rollout drivers bind an episode's reasoning effort through ``bind_episode_effort``, so they generate under
+the contract the policy trained on. The output budget and the answer-room bound ride the same seam. The actor
+runs via the class ``@ray.remote`` wraps (no cluster), the eval runner with its generation call stubbed."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -53,7 +39,7 @@ class _PlainEnv(NativeToolUseEnvironment):
 
 
 class _BudgetEnv(_PlainEnv):
-    """…and one that binds a distinct CoT budget per level, like the coding envs."""
+    """Binds a distinct CoT budget per level, like the coding envs."""
 
     BUDGETS = {"low": 1000, "medium": 2000, "high": 4000}
 
@@ -79,7 +65,6 @@ def _actor_text_turn(token_ids=None, tokens=3, text="the answer"):
 
 
 def _actor_tool_turn(token_ids=None, tokens=3, name="echo"):
-    """The actor-side twin of ``_tool_turn``."""
     call = {"id": "c0", "type": "function", "function": {"name": name, "arguments": "{}"}}
     return ray_actors.TurnGeneration(
         text="", tool_calls=[call], reasoning="", tokens=tokens, finish_reason="tool_calls", token_ids=token_ids
@@ -92,7 +77,6 @@ def _ids_closing_reasoning_after(reasoning_tokens: int) -> list[int]:
 
 
 async def _drive_eval(monkeypatch, env, context, *, responses, config=None):
-    """Run the eval driver over ``responses``; return its captured requests and trajectory."""
     calls = []
 
     async def fake_chat(client, **request):
@@ -111,15 +95,9 @@ async def _drive_eval(monkeypatch, env, context, *, responses, config=None):
 
 
 async def _drive_actor(env_cls, context, config, generations=None, env_kwargs=None):
-    """Run the real ``EnvironmentActor`` episode loop off-cluster over ``generations`` (one text turn
-    when omitted), the env built with ``env_kwargs``; return its per-turn ``(config, level, budget,
-    payload)`` records and the result.
-
-    ``@ray.remote`` wraps the class and keeps the original at ``__ray_metadata__.modified_class``;
-    ``__init__`` only assigns attributes, so this exercises the genuine ``run_episode`` binding. The
-    transport is replaced below the payload builder, so each record's payload is the request the
-    actor would have sent for that turn.
-    """
+    """Run the real ``EnvironmentActor`` episode loop off-cluster over ``generations``, returning per-turn
+    ``(config, level, budget, payload)`` records and the result. ``@ray.remote`` keeps the class at
+    ``__ray_metadata__.modified_class``; the transport is replaced below the payload builder."""
     cls = ray_actors.EnvironmentActor.__ray_metadata__.modified_class
     actor = cls.__new__(cls)
     actor.__init__(actor_id=0, env_type=(env_cls, env_kwargs or {}), env_config={})
@@ -147,7 +125,6 @@ def _eval_caps(calls):
 
 
 async def test_both_drivers_bind_the_same_caps(monkeypatch):
-    """The level's budget must reach BOTH drivers' generation contract, identically."""
     context = {"reasoning_effort": "high"}
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS)
 
@@ -156,21 +133,20 @@ async def test_both_drivers_bind_the_same_caps(monkeypatch):
     (actor_cfg, actor_level, actor_budget, _) = seen[0]
     calls, eval_traj = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=[_text_turn()], config=config)
 
-    # Actor side: the env's per-level budget replaces the (unset) global CoT cap, turn cap untouched,
-    # and the template is told the same number the engine enforces.
+    # Actor side: the per-level budget replaces the unset global cap, and the template is told the number the engine
+    # enforces.
     assert (actor_level, actor_cfg.max_thinking_tokens, actor_cfg.max_tokens) == ("high", 4000, _MAX_TOKENS)
     assert actor_budget == 4000
-    # Eval side: byte-identical generation-control fields to the ones the actor's payload carries —
-    # built from the ACTOR's own per-episode config, so this compares the two drivers, not the helper
-    # with itself. The eval must not compute the CoT budget and then drop it from the request.
+    # Eval side: byte-identical control fields, built from the actor's own config, so this compares the two drivers and
+    # not the helper with itself.
     assert calls[0]["extra_body"] == generation_control_fields(actor_cfg, actor_level, actor_budget)
     assert calls[0]["extra_body"]["reasoning_effort"] == "high"
     assert calls[0]["extra_body"]["thinking_token_budget"] == 4000
-    # …and the budget also reaches the template as a variable, the one channel a prompt can state it through.
+    # The budget also reaches the template as a variable, the one channel a prompt can state it through.
     assert calls[0]["extra_body"]["chat_template_kwargs"] == {"reasoning_budget": 4000}
     assert calls[0]["max_tokens"] == actor_cfg.max_tokens
-    # …and both leave the episode carrying the budget it ran under: the trainer's re-render reads it
-    # off the trajectory, the eval records it in the trajectory file.
+    # Both leave the episode carrying the budget: the trainer's re-render reads it off the trajectory, the eval records
+    # it in the file.
     assert (eval_traj.reasoning_effort, eval_traj.reasoning_budget) == ("high", 4000)
     assert (result.trajectory.reasoning_effort, result.trajectory.reasoning_budget) == ("high", 4000)
     recorded = eval_runner.serialize_trajectory(eval_traj)
@@ -178,10 +154,8 @@ async def test_both_drivers_bind_the_same_caps(monkeypatch):
 
 
 async def test_every_turn_of_an_episode_runs_under_the_levels_whole_cap(monkeypatch):
-    """A thinking budget is per turn: three turns each reasoning 1500 tokens of the level's 4000 all
-    request the same 4000-token cap and the same turn total, state the same budget to the template,
-    and the control fields ask for no sampled ids (the eval transport captures nothing) — on both
-    drivers identically."""
+    """Three turns each reasoning 1500 of the level's 4000 all request the same cap and turn total and ask for no
+    sampled ids."""
     context = {"reasoning_effort": "high"}
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, reasoning_end_token_id=_END)
     ids = _ids_closing_reasoning_after(1500)
@@ -207,7 +181,7 @@ async def test_every_turn_of_an_episode_runs_under_the_levels_whole_cap(monkeypa
 
 
 async def test_env_without_a_level_budget_keeps_the_global_caps(monkeypatch):
-    """No per-level budget: the run's own caps stand — the level still steers the template."""
+    """No per-level budget: the run's own caps stand, and the level still steers the template."""
     context = {"reasoning_effort": "high"}
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_thinking_tokens=8192)
 
@@ -219,17 +193,13 @@ async def test_env_without_a_level_budget_keeps_the_global_caps(monkeypatch):
     assert (actor_cfg.max_thinking_tokens, actor_cfg.max_tokens) == (8192, _MAX_TOKENS)
     assert result.trajectory.reasoning_budget == 8192
     assert calls[0]["max_tokens"] == _MAX_TOKENS
-    assert eval_traj.reasoning_budget is None  # eval declares no global CoT cap
+    assert eval_traj.reasoning_budget is None
     assert eval_traj.reasoning_effort == "high"
 
 
 async def test_random_level_is_drawn_once_for_the_whole_episode(monkeypatch):
-    """A 'random' env level is one draw per EPISODE: every turn, and the recorded budget, share it.
-
-    Re-resolving per turn would steer consecutive turns at different efforts and leave a budget that
-    belongs to no turn — the trap the once-per-episode seam exists to prevent. Counted, not inferred
-    from the drawn levels: a per-turn re-draw agrees with itself one time in three.
-    """
+    """Re-resolving per turn would steer turns at different efforts. Counted, not inferred from the levels: a
+    per-turn re-draw agrees with itself one time in three."""
     env = _BudgetEnv(reasoning_effort="random")
     bindings = []
     real_bind = eval_runner.bind_episode_effort
@@ -253,9 +223,8 @@ async def test_random_level_is_drawn_once_for_the_whole_episode(monkeypatch):
 
 
 async def test_the_actor_records_each_turns_cap_and_reasoning_and_the_eval_its_cap_alone(monkeypatch):
-    """``episode/thinking_cap_turns`` reads each training turn's pair: the cap the turn's level set and
-    the reasoning it sampled through the close. The eval asks for no ids, so its record carries the cap
-    alone."""
+    """``episode/thinking_cap_turns`` reads each training turn's cap and sampled reasoning. The eval asks for no
+    ids, so its record carries the cap alone."""
     context = {"reasoning_effort": "high"}
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, reasoning_end_token_id=_END)
     ids = _ids_closing_reasoning_after(1500)
@@ -275,10 +244,8 @@ async def test_the_actor_records_each_turns_cap_and_reasoning_and_the_eval_its_c
 
 
 def test_a_level_budget_is_clamped_by_the_runs_cap_which_alone_caps_an_unbudgeted_level():
-    """The level's ``thinking_tokens`` caps every turn, never above ``rollout_max_thinking_tokens``; a
-    level without one runs under the run's cap, or uncapped; and a cap that fills the turn is refused,
-    since such a turn has no answer room and is cut mid-reasoning every time. The turn total is the
-    run's ``max_tokens`` whatever the level, and the output budget rides on every binding."""
+    """A level's cap never exceeds ``rollout_max_thinking_tokens``; a level without one runs under the run's cap or
+    uncapped; a cap filling the turn is refused, since it leaves no answer room."""
     context = {"reasoning_effort": "high"}
     clamped = reasoning_effort.bind_episode_effort(
         context, _BudgetEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=3000
@@ -302,9 +269,8 @@ def test_a_level_budget_is_clamped_by_the_runs_cap_which_alone_caps_an_unbudgete
 
 
 async def test_the_eval_refuses_a_level_cap_that_fills_the_turn_before_generating(monkeypatch):
-    """A drawable level whose cap fills the turn would fail every episode at its first turn, each recorded
-    as a zero-reward error sample: the eval gates on it before its first request, as the trainer does at
-    construction, and a run whose levels fit passes the same gate."""
+    """A drawable level whose cap fills the turn would fail every episode as a zero-reward error sample, so the eval
+    gates before its first request."""
     calls = []
 
     async def fake_chat(client, **request):
@@ -349,8 +315,6 @@ def test_context_level_wins_over_the_env_setting():
     assert (unset.level, unset.thinking_budget, unset.max_tokens) == (None, None, _MAX_TOKENS)
 
 
-# --- The episode output budget ---
-
 # What the native protocol charges an episode closed as a max_turns overflow; the output budget's
 # truncation must be priced the same.
 _OVERFLOW_PRICE = 0.3
@@ -366,8 +330,7 @@ def _effort(**overrides) -> reasoning_effort.EpisodeEffort:
 
 
 def _caps(effort, generated):
-    """``turn_caps`` as the pair of request fields it sets — exactly the two, since the drivers splat it
-    over the turn's ``RolloutConfig`` — or ``None`` once the budget holds no turn."""
+    """``turn_caps`` as the pair of request fields it sets, or ``None`` once the budget holds no turn."""
     caps = effort.turn_caps(generated)
     if caps is None:
         return None
@@ -376,9 +339,8 @@ def _caps(effort, generated):
 
 
 def test_turn_caps_narrow_to_what_the_budget_has_left_and_keep_the_answer_room():
-    """The total narrows to what is left, and the reasoning cap gives up the difference so the turn
-    keeps its 16000 of answer room whole; a turn with exactly the room left keeps one reasoning token,
-    never a cap of 0, which would close the reasoning before it opened; one token less holds no turn."""
+    """The total narrows to what is left and the reasoning cap gives up the difference, so the turn keeps its answer
+    room whole; the floor is one token, since a cap of 0 would close the reasoning before it opened."""
     effort = _effort()
     # 50000 and exactly 20000 left: the turn's own caps stand.
     for generated in (0, 30000):
@@ -395,16 +357,13 @@ def test_turn_caps_narrow_to_what_the_budget_has_left_and_keep_the_answer_room()
     uncapped = _effort(thinking_budget=None)
     assert _caps(uncapped, 30000) == (_MAX_TOKENS, None)
     assert _caps(uncapped, 30001) is None
-    # No budget: nothing narrows, however much was sampled.
     unbounded = _effort(episode_tokens=None)
     assert _caps(unbounded, 10**6) == (_MAX_TOKENS, 4000)
 
 
 async def test_an_output_budget_ends_the_episode_truncated_when_less_than_a_turn_is_left(monkeypatch):
-    """No reasoning cap: 50000 tokens for the episode over 20000-token turns. After three turns 1000
-    remain, under a turn's room, so the episode stops with a turn of max_turns still unused — closed
-    truncated, not completed, and priced like a max_turns overflow. Both drivers identically, and each
-    reports the spend as its token count."""
+    """50000 tokens over 20000-token turns: after three turns 1000 remain, under a turn's room, so the episode
+    closes truncated with max_turns unused, priced like an overflow."""
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_episode_tokens=50000)
     sampled = [19000, 11000, 19000]
     expected = [(_MAX_TOKENS, None)] * 3
@@ -438,10 +397,8 @@ async def test_an_output_budget_ends_the_episode_truncated_when_less_than_a_turn
 
 
 async def test_a_cut_on_the_last_turn_the_budget_affords_closes_the_episode_as_one_overflow(monkeypatch):
-    """After a 19000- and an 11000-token turn exactly 20000 of the 50000 remain, one 20000-token turn: the
-    third turn is the last the budget affords. Cut there, it cannot be retried, so the episode closes as
-    a max_turns overflow would — one overflow price, no cut price, and no nudge dangling after the
-    fragment — on both drivers alike."""
+    """The third turn is the last the budget affords and, cut there, cannot be retried: one overflow price, no cut
+    price, no nudge after the fragment."""
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_episode_tokens=50000)
     prices = {"turn_overflow_penalty": 0.3, "length_cutoff_penalty": 0.1}
     cut = SimpleNamespace(**{**vars(_actor_text_turn(tokens=11000)), "text": "half an ans", "finish_reason": "length"})
@@ -461,10 +418,8 @@ async def test_a_cut_on_the_last_turn_the_budget_affords_closes_the_episode_as_o
 
 
 async def test_both_drivers_run_the_turn_after_an_unproductive_one_under_the_levels_whole_cap(monkeypatch):
-    """A cut turn, a turn ended on nothing and a turn whose one call names no tool each leave the next request on
-    the level's 4000-token reasoning cap and its whole turn total, and every turn records that cap: a turn that
-    closed its reasoning at 1000 or 1500 tokens reads as under its cap, so ``episode/thinking_cap_turns`` counts
-    only the one that reasoned to 4000."""
+    """Each leaves the next request on the level's whole caps. A turn that closed its reasoning under its cap reads
+    as such, so ``episode/thinking_cap_turns`` counts only the one that reasoned to 4000."""
     context = {"reasoning_effort": "high"}
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, reasoning_end_token_id=_END)
     expected = [(_MAX_TOKENS, 4000)] * 4
@@ -496,8 +451,7 @@ async def test_both_drivers_run_the_turn_after_an_unproductive_one_under_the_lev
 
 
 async def test_the_eval_refuses_an_output_budget_under_one_turn_before_generating(monkeypatch):
-    """An explicit ``--max_tokens`` above the training contract's episode budget would let no turn start;
-    the shared binding seam refuses it before the first request, as the trainer's config does at parse."""
+    """An explicit ``--max_tokens`` above the contract's episode budget would let no turn start."""
     calls = []
 
     async def fake_chat(client, **request):
@@ -514,12 +468,8 @@ async def test_the_eval_refuses_an_output_budget_under_one_turn_before_generatin
 
 
 async def test_an_output_budget_shrinks_the_reasoning_cap_with_the_total_and_records_the_levels_cap(monkeypatch):
-    """The run's 4000-token reasoning cap under 20000-token turns (16000 of answer room), 38000 for the
-    episode: the second turn has 19000 left, so its request drops to 19000 with a 3000 reasoning cap,
-    the room kept whole; after it 1000 remain, under the room, and no third turn starts. The narrowed
-    caps reach both drivers' requests, the eval's control fields are the actor's own turn by turn, and
-    each turn records the level's 4000 — the cap ``episode/thinking_cap_turns`` reads against — not the
-    narrowed one."""
+    """4000-token cap, 20000-token turns, 38000 for the episode: the second turn drops to 19000 with a 3000 cap,
+    then no third starts. Each turn records the level's 4000, not the narrowed cap."""
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_thinking_tokens=4000, max_episode_tokens=38000)
     sampled = [19000, 18000]
     expected = [(_MAX_TOKENS, 4000), (19000, 3000)]
@@ -545,8 +495,7 @@ async def test_an_output_budget_shrinks_the_reasoning_cap_with_the_total_and_rec
 
 
 async def test_a_narrowed_turn_reads_a_cut_off_its_own_total(monkeypatch):
-    """A turn that consumed its narrowed total is a cut even when the engine labelled it complete: the
-    count is compared with the request's own cap, not the run's turn cap it no longer runs under."""
+    """The count is compared with the request's own cap, not the run's turn cap it no longer runs under."""
     config = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_thinking_tokens=4000, max_episode_tokens=50000)
     full = _tool_turn(tokens=18000)  # the whole 18000 the third request asked for, finish_reason "stop"
     responses = [_tool_turn(tokens=19000), _tool_turn(tokens=13000), full]
@@ -557,7 +506,7 @@ async def test_a_narrowed_turn_reads_a_cut_off_its_own_total(monkeypatch):
 
 
 async def test_an_episode_inside_its_budget_records_false_and_one_without_a_budget_records_nothing(monkeypatch):
-    """Anti-vacuity for the flag and the metric: both exist exactly when a budget was set."""
+    """Both the flag and the metric exist exactly when a budget was set."""
     budget = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_episode_tokens=50000)
     _, result = await _drive_actor(_PlainEnv, None, budget, generations=[_actor_text_turn(tokens=19000)])
     assert result.error is None, result.error
@@ -581,8 +530,6 @@ async def test_an_episode_inside_its_budget_records_false_and_one_without_a_budg
     )
     assert OUTPUT_BUDGET_EXHAUSTED_KEY not in free.info
 
-
-# --- The answer-room bound ---
 
 # A code-contests-like shape: 30000-token turns, per-level caps 8192 / 12288 / 16384, an 81920-token
 # episode, and 8192 tokens of answer room past each cap.
@@ -609,9 +556,8 @@ def _contest(level, *, answer=_ROOM, episode_tokens=None) -> reasoning_effort.Ep
 
 
 def test_an_answer_bound_totals_each_turn_at_its_reasoning_cap_plus_the_room():
-    """Each level's turn totals its cap plus 8192, not 30000, so a turn the engine force-closed keeps 8192
-    tokens past the close. Where the cap plus the room exceeds the turn, ``rollout_max_tokens`` still binds;
-    unset, every turn totals 30000."""
+    """Each level's turn totals its cap plus 8192, not 30000. Where the cap plus the room exceeds the turn,
+    ``rollout_max_tokens`` binds; unset, every turn totals 30000."""
     for level, total in {"low": 16384, "medium": 20480, "high": 24576}.items():
         bounded = _contest(level)
         cap = _ContestEnv.BUDGETS[level]
@@ -625,9 +571,7 @@ def test_an_answer_bound_totals_each_turn_at_its_reasoning_cap_plus_the_room():
 
 
 def test_a_bound_at_or_past_a_levels_own_room_leaves_its_turns_as_unset():
-    """A bound at the level's own room (30000 less its cap) or past it shrinks none of that level's
-    turns: their caps match the unset ones at every point of the episode budget, since
-    ``rollout_max_tokens`` binds first."""
+    """A bound at or past a level's own room shrinks none of its turns, since ``rollout_max_tokens`` binds first."""
     for level, cap in _ContestEnv.BUDGETS.items():
         unset = _contest(level, answer=None, episode_tokens=_CONTEST_EPISODE)
         for answer in (_CONTEST_TURN - cap, _CONTEST_TURN - cap + 5000):
@@ -637,10 +581,8 @@ def test_a_bound_at_or_past_a_levels_own_room_leaves_its_turns_as_unset():
 
 
 def test_an_answer_bound_narrows_with_the_output_budget_and_starts_a_turn_only_while_the_room_is_left():
-    """Near the end of an 81920-token episode the total narrows to what is left and the reasoning cap
-    gives up the difference, so every turn keeps its 8192 of room. A turn starts while 8192 remain and
-    not one token under, at every level — where unset, a low-level episode already stopped at 21808
-    left — and the trajectory's exhausted flag reads the same gate."""
+    """Near the end of the episode the total narrows and the cap gives up the difference, so every turn keeps its
+    8192; a turn starts while 8192 remain and not one token under."""
     low = _contest("low", episode_tokens=_CONTEST_EPISODE)
     assert _caps(low, 60000) == (16384, 8192), "21920 left: the turn's own caps stand"
     assert _caps(low, 70000) == (11920, 3728)
@@ -659,11 +601,8 @@ def test_an_answer_bound_narrows_with_the_output_budget_and_starts_a_turn_only_w
 
 
 async def test_both_drivers_bound_a_turn_and_the_one_after_a_cut_by_the_answer_room(monkeypatch):
-    """A low-level episode under a 40000-token budget: the first turn asks for 8192 + 8192 and is cut
-    there; the turn after it asks for the same 8192 + 8192; the third has 13616 left and asks for all of
-    it, its cap down to 5424; after it 7616 remain, under the room, so no fourth turn starts and the
-    episode closes truncated. Both drivers request the same caps and record the level's cap on every
-    turn."""
+    """A 40000-token budget: the first turn asks 8192 + 8192 and is cut, the next asks the same, the third has 13616
+    left with its cap down to 5424, then 7616 remain and the episode closes truncated."""
     context = {"reasoning_effort": "low"}
     config = ray_actors.RolloutConfig(max_tokens=_CONTEST_TURN, max_answer_tokens=_ROOM, max_episode_tokens=40000)
     sampled = [16384, 10000, 6000]
@@ -690,8 +629,7 @@ async def test_both_drivers_bound_a_turn_and_the_one_after_a_cut_by_the_answer_r
 
 
 async def test_an_answer_bound_is_refused_where_a_drawable_level_has_no_reasoning_cap(monkeypatch):
-    """The bound counts past a reasoning cap, so an episode without one has nothing to bound: the run's
-    cap gives every level one, and without it the binding and the eval's pre-generation gate refuse."""
+    """The bound counts past a reasoning cap, so an episode without one has nothing to bound."""
     context = {"reasoning_effort": "high"}
     with pytest.raises(ValueError, match=r"rollout_max_answer_tokens \(8192\) bounds .* reasoning_effort='high'"):
         reasoning_effort.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_answer_tokens=8192)
@@ -746,10 +684,8 @@ def _soft(level, *, ceiling=None, answer=_ROOM):
 
 
 def test_a_soft_budget_is_stated_while_the_engine_closes_only_where_the_answer_room_is_left():
-    """A level with ``enforce_thinking_cap: false`` keeps its budget as what the template states and the reasoning
-    terms read, while the engine closes a turn's reasoning only where ``rollout_max_answer_tokens`` is left of it:
-    the turn keeps that room past the close, and nothing closes at the budget. The trajectory records the budget
-    soft for the re-render."""
+    """A level with ``enforce_thinking_cap: false`` keeps its budget as what the template states and the terms read,
+    while the engine closes reasoning only where ``rollout_max_answer_tokens`` is left of the turn."""
     for level, budget in _ContestEnv.BUDGETS.items():
         soft = _soft(level)
         assert (soft.thinking_budget, soft.thinking_cap, soft.budget_soft) == (budget, _SOFT_CEILING, True)
@@ -773,9 +709,8 @@ def test_a_run_cap_is_a_soft_budgets_ceiling_and_without_either_bound_nothing_ca
 
 
 def test_an_uncapped_soft_turn_needs_its_whole_total_left_of_the_output_budget():
-    """With no ceiling nothing closes the reasoning below the turn total, so no part of the turn is answer room
-    a narrowed turn could keep: a turn starts only while the output budget still holds the whole total, and
-    never narrower. An enforced level under the same budget narrows instead, down to its answer room."""
+    """Nothing closes the reasoning below the total, so no part of the turn is answer room: a turn starts only while
+    the budget holds the whole total. An enforced level narrows instead."""
     bare = reasoning_effort.bind_episode_effort(
         {"reasoning_effort": "high"}, _soft_env(), max_tokens=_CONTEST_TURN, max_episode_tokens=_CONTEST_EPISODE
     )
@@ -788,8 +723,7 @@ def test_an_uncapped_soft_turn_needs_its_whole_total_left_of_the_output_budget()
 
 
 def test_a_soft_budget_at_or_past_its_ceiling_is_refused():
-    """At or past its ceiling the engine would enforce the budget, so it is no soft budget: refused whether the
-    ceiling is the run's cap, the one the answer room leaves, or the turn itself."""
+    """At or past its ceiling the engine would enforce the budget, so it is no soft budget."""
     with pytest.raises(
         ValueError, match=r"'high' level's soft thinking_tokens \(16384\) must sit below its ceiling \(12000"
     ):
@@ -808,8 +742,7 @@ def test_a_soft_budget_at_or_past_its_ceiling_is_refused():
 
 
 def test_a_soft_levels_ceiling_at_or_past_the_turn_is_refused():
-    """The engine closes a soft level's reasoning at the run's cap, so a cap at or past the turn total closes
-    nothing and leaves the turn no answer room: refused as it is for a level with no budget of its own."""
+    """A cap at or past the turn total closes nothing and leaves no answer room."""
     for cap in (_CONTEST_TURN, _CONTEST_TURN + 1):
         with pytest.raises(
             ValueError, match=rf"rollout_max_thinking_tokens \({cap}\) must sit below rollout_max_tokens"
@@ -819,8 +752,7 @@ def test_a_soft_levels_ceiling_at_or_past_the_turn_is_refused():
 
 
 async def test_both_drivers_send_the_ceiling_and_state_the_soft_budget(monkeypatch):
-    """The actor and the eval both ask the engine for the ceiling, state the level's budget flagged soft to the
-    template, and leave the episode carrying it for the trainer's re-render and the trajectory file."""
+    """Both ask the engine for the ceiling, state the budget flagged soft, and leave the episode carrying it."""
     context = {"reasoning_effort": "high"}
     config = ray_actors.RolloutConfig(max_tokens=_CONTEST_TURN, max_answer_tokens=_ROOM)
     profiles = {"high": {"thinking_tokens": 16384, "enforce_thinking_cap": False}}

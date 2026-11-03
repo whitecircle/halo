@@ -1,17 +1,6 @@
 #!/usr/bin/env python
 """The on-policy GRPO trainers hold the KL reference the toolkit loaded, never one TRL builds itself.
-
-TRL's ``GRPOTrainer`` builds a reference at ``beta != 0`` on a policy no PEFT adapter wraps, by
-``create_model_from_path`` on the policy config's name: fp32, the hub's default revision, the default
-attention, the non-persistent buffers as ``from_pretrained`` left them. The entry scripts load it with
-the frozen loader instead (:func:`load_reference_model_for_on_policy_grpo`: the run dtype, the policy's
-revision pin, attention request and sinks policy, the buffers repaired), and the trainers hand it to
-TRL's own build call, so TRL's placement and ``prepare_model`` still run on it. A run that holds no
-reference loads none; a reference TRL asks for with none passed, and a passed one it never reads, are
-refused.
-
-    python tests/cpu/grpo/test_on_policy_kl_reference.py
-"""
+TRL's own build means fp32, the hub's default revision, the default attention and buffers left unrepaired."""
 
 import ast
 import inspect
@@ -56,7 +45,6 @@ _TRL_VLLM_CLIENT = trl_vllm_generation.VLLMClient
 
 
 def _token_setup_args():
-    """The script arguments the tokenizer setup seam reads, all at their defaults."""
     return types.SimpleNamespace(
         eos_token=None,
         bos_token=None,
@@ -69,7 +57,6 @@ def _token_setup_args():
 
 
 def _load_reference(source: str, *, beta: float = BETA, peft_config=None, revision=None, reset_sinks=True):
-    """The scripts' reference load for a bf16 run, as their ``main`` calls it."""
     return load_reference_model_for_on_policy_grpo(
         _token_setup_args(),
         ModelArguments(model_name_or_path=source, model_revision=revision, trust_remote_code=False),
@@ -93,8 +80,6 @@ class _OnPolicyHost(OnPolicyGRPOInitMixin, GRPOTrainer):
 
 
 class _StubTrlVLLMClient:
-    """The ``TrlVLLMClient`` TRL's server-mode generation builds, with no server behind it."""
-
     def __init__(self, **_):
         pass
 
@@ -117,7 +102,6 @@ def _grpo_args(tmp_path, *, beta: float = BETA, **overrides) -> GRPOConfig:
 
 
 def _trainer_kwargs(tmp_path, *, beta: float = BETA, peft_config=None, **arg_overrides) -> dict:
-    """What a GRPO trainer is built from here, the model aside."""
     return {
         "reward_funcs": lambda completions, **_: [0.0] * len(completions),
         "args": _grpo_args(tmp_path, beta=beta, **arg_overrides),
@@ -135,15 +119,13 @@ def _host(tmp_path, model, *, beta: float = BETA, ref_model=None, peft_config=No
 
 @pytest.fixture
 def base_dir(tmp_path):
-    """A tiny fp32 Qwen3 checkpoint on disk, the run's configured model."""
     torch.manual_seed(0)
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(tmp_path / "base")
     return str(tmp_path / "base")
 
 
 def test_trl_holds_the_toolkit_reference_in_the_run_dtype_with_its_buffers_repaired(tmp_path, base_dir, monkeypatch):
-    """TRL's own build would hold an fp32 copy read back by ``from_pretrained`` alone; the run's reference is
-    the bf16 one the frozen loader built and repaired, placed and frozen by the hand-off."""
+    """TRL's own build would hold an fp32 copy read back by ``from_pretrained`` alone."""
     finalized = []
     repair = frozen_models.finalize_loaded_model
 
@@ -222,8 +204,7 @@ def test_a_policy_passed_by_name_is_still_built_by_trl(tmp_path, base_dir):
 
 @pytest.mark.parametrize("trainer_cls", [DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
 def test_the_replica_warning_names_the_on_policy_way_around_the_reference(trainer_cls, monkeypatch, caplog):
-    """Under EP the reference is a dense replica per rank; the warning offers what these trainers honor,
-    not DPO's precompute."""
+    """The reference is a dense replica per rank under EP; the warning must not offer DPO's precompute."""
     monkeypatch.setattr(frozen_models, "_reported_references", set())
     host = types.SimpleNamespace(
         model=None,
@@ -272,9 +253,7 @@ def test_both_trainers_run_trls_constructor_under_the_hand_off(trainer_cls):
 
 @pytest.mark.parametrize("script", ON_POLICY_GRPO_SCRIPTS)
 def test_both_scripts_load_the_reference_as_their_policy_and_pass_it(script):
-    """The reference load reads the policy's own attention request and sinks policy, and its result is the
-    ``ref_model`` the trainer gets; anything else leaves TRL's build to refuse or loads a second model nobody
-    reads."""
+    """Anything else leaves TRL's build to refuse or loads a second model nobody reads."""
     (main,) = (function for _, function in functions_in([script], top_level=True) if function.name == "main")
     calls = [node for node in ast.walk(main) if isinstance(node, ast.Call)]
     (load,) = (call for call in calls if call_name(call) == load_reference_model_for_on_policy_grpo.__name__)
@@ -292,8 +271,6 @@ def test_both_scripts_load_the_reference_as_their_policy_and_pass_it(script):
 
 
 def test_the_online_trainer_hands_trl_the_reference_under_its_client_install(tmp_path, base_dir, monkeypatch):
-    """The real online constructor at ``beta != 0``: TRL builds its server-mode generation through
-    ``TrlVLLMClient`` and holds the supplied reference, and both patches are unwound once construction succeeds."""
     monkeypatch.setattr(online, "TrlVLLMClient", _StubTrlVLLMClient)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     reference = _load_reference(base_dir)
@@ -318,9 +295,8 @@ def _trl_constructor_reached(*_, **__):
 def test_a_reference_the_run_never_reads_is_refused_before_trls_constructor(
     tmp_path, base_dir, monkeypatch, trainer_cls, unread
 ):
-    """Whether TRL holds a reference is known from the ctor arguments, so the refusal needs no TRL constructor,
-    and on online GRPO that constructor connects to the rollout server. The model goes positionally, the slot
-    TRL's signature gives it."""
+    """The refusal needs no TRL constructor, which on online GRPO connects to the rollout server. The model goes
+    positionally, the slot TRL's signature gives it."""
     monkeypatch.setattr(GRPOTrainer, "__init__", _trl_constructor_reached)
     lora = LoraConfig(target_modules=["q_proj"], task_type="CAUSAL_LM")
     model = Qwen3ForCausalLM.from_pretrained(base_dir)
@@ -339,7 +315,6 @@ def test_a_reference_the_run_never_reads_is_refused_before_trls_constructor(
 
 @pytest.mark.parametrize("script", ON_POLICY_GRPO_SCRIPTS)
 def test_both_scripts_run_the_server_preflights_before_the_reference_load(script):
-    """A misconfigured server fails at the cheap probes, not after a second model load."""
     (main,) = (function for _, function in functions_in([script], top_level=True) if function.name == "main")
     first_line = {}
     for node in ast.walk(main):

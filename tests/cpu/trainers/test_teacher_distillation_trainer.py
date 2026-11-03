@@ -1,15 +1,6 @@
 #!/usr/bin/env python
 """``DistributedTeacherDistillationTrainer``'s objective, teacher gate and PEFT wiring, on stub models.
-
-The objective is ``alpha * L_distill + (1 - alpha) * L_clm``, each term one mean over the batch's
-supervised (shifted) tokens. Every way it can go wrong keeps the loss finite: an ignored alpha or a
-dropped CLM term, labels left unshifted, the teacher's logits replaced by the student's, the
-hard-label gate skipped (or applied on top of SLIM's own weight), a per-row instead of a global
-token mean. The stub models score each token through their own random table, so each of those lands
-on a different number than the independent oracle below.
-
-Run: pytest tests/cpu/trainers/test_teacher_distillation_trainer.py
-"""
+Each stub scores tokens through its own table, so a dropped term or unshifted labels miss the independent oracle."""
 
 import contextlib
 import inspect
@@ -131,8 +122,6 @@ def _oracle(trainer, *, gate: bool = False, slim: bool = False):
 
 
 def _construct(args, *, peft_config=None, teacher_model=None):
-    """The real ``__init__`` with the model loads, the distributed setup and HF's Trainer stubbed."""
-
     def init_config(self, kwargs, **explicit):
         self.parallelism_config = explicit["parallelism_config"]
         return {**kwargs, "model": explicit["model"]}
@@ -166,9 +155,7 @@ def test_the_loss_is_the_alpha_mix_of_two_global_token_means():
 
 
 def test_an_eval_split_s_padding_rows_leave_the_loss_and_its_metrics():
-    """Row 2 pads the eval split's final round, a repeat of row 0 (``eval_split_rows`` keeps rows 0 and
-    1): the loss and both metrics are the two real rows' global token means, stored with their two
-    rows as the weight."""
+    """Row 2 pads the eval split's final round, a repeat of row 0."""
     trainer, stored = _trainer()
     trainer.model.eval()
     trainer.eval_split_rows = lambda num_rows: 2
@@ -208,8 +195,7 @@ def test_slim_takes_its_own_gold_token_weight():
     [("kl_divergence", True), ("slim", False), ("jensen_shannon", False), ("cosine_similarity", False)],
 )
 def test_backward_holds_no_fp32_vocab_plane_beyond_the_two_logits(monkeypatch, distill_loss, apply_hard_labels):
-    """Every term (divergence, gate, CLM) scores token chunks under a checkpoint, so autograd keeps the
-    student and teacher logits and no fp32 ``[tokens, V]`` plane of its own; two chunks per row here."""
+    """Every term scores token chunks under a checkpoint, so autograd keeps no fp32 ``[tokens, V]`` plane itself."""
     monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 2 * VOCAB)
     trainer, _ = _trainer(distill_loss, apply_hard_labels=apply_hard_labels)
     saved = []
@@ -236,8 +222,8 @@ def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_i
 
 
 def test_a_casted_peft_student_forwards_under_bf16_autocast():
-    """``build_peft_model`` leaves a QLoRA student's adapters bf16 over fp32 activations; every
-    sibling trainer feeds its cast flag to the autocast, so this one must too."""
+    """``build_peft_model`` leaves a QLoRA student's adapters bf16 over fp32 activations; every sibling trainer feeds
+    its cast flag to the autocast."""
     seen = []
 
     @contextmanager
@@ -252,8 +238,8 @@ def test_a_casted_peft_student_forwards_under_bf16_autocast():
 
 
 def test_the_trainer_wraps_peft_through_prepare_policy_model_and_keeps_its_cast_flag():
-    """The PEFT wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss; the
-    student keeps its dropout, since the config has no switch for it."""
+    """The wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss; the student keeps its
+    dropout, since the config has no switch for it."""
     peft_config, wrapped = LoraConfig(), nn.Linear(2, 2)
     with mock.patch.object(teacher_distillation, "prepare_policy_model", return_value=(wrapped, True)) as prepare:
         trainer = _construct(
@@ -267,8 +253,8 @@ def test_the_trainer_wraps_peft_through_prepare_policy_model_and_keeps_its_cast_
 
 @pytest.mark.parametrize("policy", [SinksPolicy.NEUTRALIZED, SinksPolicy.LIVE, None], ids=str)
 def test_a_teacher_loaded_with_neutralized_sinks_is_refused(policy):
-    """A frozen teacher never trains back from neutralized sinks, so the trainer refuses one whatever built it; a
-    teacher loaded under a live policy, or by a loader that stamps none, keeps its sinks and constructs."""
+    """A frozen teacher never trains back from neutralized sinks. One loaded under a live policy, or by a loader that
+    stamps none, constructs."""
     torch.manual_seed(0)
     teacher = tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"])
     if policy is not None:
@@ -312,7 +298,6 @@ def test_a_teacher_missing_logit_rows_for_tokenizer_ids_is_refused():
 
 
 def test_embedding_padding_alone_is_compared_over_the_tokenizer_ids():
-    """Same tokenizer, padded embeddings: both rows are sliced to the tokenizer's ids."""
     trainer = _setup(VOCAB, VOCAB + 5)
     assert trainer._vocab_width == VOCAB
     assert _setup(VOCAB, VOCAB)._vocab_width is None
@@ -376,8 +361,8 @@ def test_the_script_refuses_a_teacher_tokenizer_before_any_teacher_weight_loads(
 
 
 def test_the_text_collator_keeps_the_real_eos_label_when_pad_is_eos():
-    """A plain LM collator masks every pad-valued label, the turn-ending EOS included when pad == eos,
-    leaving the student no stop signal; both terms mask on these labels."""
+    """A plain LM collator masks every pad-valued label, the turn-ending EOS included when pad == eos, leaving the
+    student no stop signal."""
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     tokenizer.pad_token = tokenizer.eos_token
     args = types.SimpleNamespace(train_on_completions_only=False, assistant_message_template=None)

@@ -1,25 +1,8 @@
 #!/usr/bin/env python
-"""ZAYA1-8B EP checkpoint save correctness test.
+"""ZAYA1-8B EP slice-then-gather save is lossless and fused, against the on-disk base checkpoint.
 
-Guards the production gathered-save path (``save_sharded_ep: false``) for Zaya. The canonical
-``Zyphra/ZAYA1`` checkpoint — and every loader that reads it — stores experts FUSED
-(``mlp.experts.gate_up_proj`` ``[E, 2M, H]`` / ``mlp.experts.down_proj`` ``[E, H, M]``), so the base
-fused gather is the layout the save must emit; the pre-5.14 per-expert spelling
-(``experts.local_experts.{i}.linear_fc{1,2}.weight``) is read by nothing and would make the loader
-silently skip every expert.
-
-This test loads ZAYA1-8B under EP (no training), saves via
-``save_ep_gathered_checkpoint``, and on rank 0 verifies:
-  1. The saved checkpoint carries the fused expert tensors, two per MoE layer, with the FULL expert
-     count on dim 0 (the EP gather reassembled every rank's slice) and no per-expert key at all.
-  2. Those tensors are bit-identical to the original base checkpoint's — i.e. EP load (slice) → save
-     (gather) is a loss-less round-trip. A router (non-expert) tensor is checked too.
-
-The saved tensors are compared against the on-disk base checkpoint, which pins the fused layout and
-the bit-exact gather without a second load.
-
-Run (2 GPUs, EP=2):
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_zaya_ep_save_roundtrip.py
+Every loader reads fused experts (``mlp.experts.gate_up_proj`` ``[E, 2M, H]``); the pre-5.14 per-expert spelling would
+make the loader silently skip each.
 """
 
 import json
@@ -48,15 +31,13 @@ _PER_EXPERT_RE = re.compile(r"\.experts\.local_experts\.\d+\.linear_fc[12]\.weig
 
 
 class ShardedReader:
-    """Read individual tensors from a (possibly sharded) safetensors checkpoint."""
-
     def __init__(self, checkpoint_dir: str):
         index_path = os.path.join(checkpoint_dir, "model.safetensors.index.json")
         if os.path.exists(index_path):
             with open(index_path) as f:
                 self._weight_map = json.load(f)["weight_map"]
         else:
-            self._weight_map = None  # single-file checkpoint
+            self._weight_map = None  # Single-file checkpoint.
         self._dir = checkpoint_dir
 
     def keys(self) -> list[str]:
@@ -72,14 +53,11 @@ class ShardedReader:
 
 
 def _verify_saved_checkpoint(save_dir: str, n_experts: int) -> dict[str, bool]:
-    """Rank 0: the saved layout is the canonical fused one, bit-identical to the base checkpoint."""
     saved = ShardedReader(save_dir)
     saved_keys = saved.keys()
     fused = [k for k in saved_keys if _FUSED_RE.search(k)]
     per_expert = [k for k in saved_keys if _PER_EXPERT_RE.search(k)]
-    # The MoE container the wrapper replaced (``model.layers.N.mlp``), read off the saved
-    # keys rather than assumed, so a renamed container fails the count below instead of
-    # silently matching nothing.
+    # Read off the saved keys, so a renamed container fails the count below instead of silently matching nothing.
     containers = sorted(
         {k.rsplit(".experts.", 1)[0] for k in fused},
         key=lambda c: int(re.search(r"layers\.(\d+)\.", c).group(1)),
@@ -96,7 +74,6 @@ def _verify_saved_checkpoint(save_dir: str, n_experts: int) -> dict[str, bool]:
         return checks
     log(f"  ✓ {len(containers)} MoE layers × (gate_up_proj, down_proj), all fused (canonical)")
 
-    # Compare saved weights to the original base checkpoint (ground truth).
     base_dir = MODEL if os.path.isdir(MODEL) else snapshot_download(MODEL, allow_patterns=["*.safetensors*"])
     base = ShardedReader(base_dir)
     experts_gathered, experts_match, routers_match = [], [], []
@@ -104,7 +81,7 @@ def _verify_saved_checkpoint(save_dir: str, n_experts: int) -> dict[str, bool]:
         for name in ("gate_up_proj", "down_proj"):
             key = f"{container}.experts.{name}"
             tensor = saved.get(key)
-            # Every rank's slice, not just rank 0's: an ungathered save has E/world here.
+            # Every rank's slice: an ungathered save has E/world here.
             if tensor.shape[0] != n_experts:
                 log(f"  {key} holds {tensor.shape[0]} experts, expected all {n_experts}")
             experts_gathered.append(tensor.shape[0] == n_experts)
@@ -130,7 +107,6 @@ def run(ctx) -> dict:
 
     pc = ParallelismConfig(ep_size=ctx.world_size, use_grouped_gemm=True)
 
-    # ── [1/3] Load under EP ────────────────────────────────────────
     log("\n[1/3] Loading ZAYA1-8B under EP...")
     model, tok = load_distributed_model(
         model_name_or_path=MODEL,
@@ -147,7 +123,6 @@ def run(ctx) -> dict:
     n_experts = ep_layers[0].num_experts
     log(f"  ✓ {len(ep_layers)} EP layers, {n_experts} experts each")
 
-    # ── [2/3] Save (gathered, fused) ───────────────────────────────
     log("\n[2/3] Saving via save_ep_gathered_checkpoint...")
     save_ctx = save_context(model, pc, tokenizer=tok)
     save_tokenizer(save_ctx, save_dir)
@@ -156,7 +131,6 @@ def run(ctx) -> dict:
     torch.cuda.empty_cache()
     ctx.barrier()
 
-    # ── [3/3] Verify layout + weight equality on rank 0 ────────────
     checks: dict[str, bool] = {}
     if ctx.rank == 0:
         log("\n[3/3] Verifying saved checkpoint (rank 0)...")

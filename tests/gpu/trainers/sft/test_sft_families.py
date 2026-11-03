@@ -70,12 +70,8 @@ OVERFIT_MIN_PEAK_TOKEN_ACCURACY = 0.99
 
 
 def peak_token_accuracy_check(trainer) -> dict[str, bool]:
-    """The overfit mode's verdict: the peak ``mean_token_accuracy`` the training steps logged.
-
-    Read off the trainer's own per-batch metric, since a separate inference pass would need its own EP
-    coordination. The peak proves the model can memorize the set; the tail mean is logged to show
-    whether it held.
-    """
+    """The peak ``mean_token_accuracy`` the training steps logged, since a separate inference pass would need its own
+    EP coordination. The peak proves the model can memorize the set; the tail mean is logged."""
     accuracies = [
         entry["mean_token_accuracy"] for entry in trainer.state.log_history if "mean_token_accuracy" in entry
     ]
@@ -87,9 +83,8 @@ def peak_token_accuracy_check(trainer) -> dict[str, bool]:
 
 @dataclass(frozen=True)
 class FamilySuite:
-    """One ``--suite``: the shared run, its modes (``None``: one ``ep`` mode at ``ep_size`` = the world unless
-    ``HALO_TEST_EP`` sets it), the mode a bare launch runs, the world sizes it takes, and the knob of a local
-    checkpoint whose absence makes the launch a skip."""
+    """One ``--suite``: its modes (``None``: one ``ep`` mode at ``ep_size`` = the world unless ``HALO_TEST_EP`` sets
+    it), and the knob of a local checkpoint whose absence makes the launch a skip."""
 
     suite: SFTSuite
     modes: Mapping[str, SFTMode] | None
@@ -99,7 +94,6 @@ class FamilySuite:
     local_checkpoint_knob: str | None = None
 
 
-# The five-step EP smoke the large MoE suites share.
 SMOKE_ARGS = {
     "max_steps": 5,
     "gradient_accumulation_steps": 2,
@@ -108,7 +102,6 @@ SMOKE_ARGS = {
     "max_length": 4096,
     "remove_unused_columns": False,
 }
-# The three-step smoke of the suites sized to the world, on short single-turn samples.
 SHORT_SMOKE_ARGS = {**SMOKE_ARGS, "max_steps": 3, "max_length": 1024}
 VERBOSE_MATH = partial(create_single_turn_sft_dataset, templates=VERBOSE_MATH_TEMPLATES)
 
@@ -127,8 +120,8 @@ SUITES = {
             num_samples=(64, 16),
             evaluate=False,
             loss_decreased=True,
-            # Qwen3-0.6B on the math data starts near 4-5; healthy norms stay in the tens, and a TP run
-            # whose partial sums skip their reduction logged ~16,000.
+            # Starts near 4-5; healthy norms stay in the tens, and a TP run whose partial sums skip their reduction
+            # logged ~16,000.
             extra_checks=partial(
                 sft_metric_checks,
                 first_loss_band=(1.0, 8.0),
@@ -151,8 +144,8 @@ SUITES = {
             use_liger_kernel=False,
             evaluate=False,
             loss_decreased=True,
-            # One batch of the TP run spikes the pre-clip norm to 190-540 depending on the rounding
-            # stream; a missing TP reduction lands far above the ceiling.
+            # One batch of the TP run spikes the pre-clip norm to 190-540; a missing TP reduction lands far above the
+            # ceiling.
             extra_checks=partial(sft_metric_checks, first_loss_band=(0.5, 12.0), max_grad_norm=1000.0),
         ),
         {"fsdp": SFTMode(), "tp": SFTMode({"tp_size": 2})},
@@ -194,8 +187,8 @@ SUITES = {
         SFTSuite(
             model_name=env_str("HALO_TEST_GLM4_MODEL", GLM4_FLASH),
             attn_implementation="flash_attention_2",
-            # FLCE-only model: its Liger forward returns no logits, and with the flag off TRL's metric path
-            # slices the missing logits. The loader already applied the kernels, so none are reapplied.
+            # FLCE-only: its Liger forward returns no logits, and with the flag off TRL's metric path slices them. The
+            # loader already applied the kernels, so none are reapplied.
             sft_args={**SMOKE_ARGS, "use_liger_kernel": True},
             dataset=VERBOSE_MATH,
         ),
@@ -207,7 +200,7 @@ SUITES = {
     "gemma4_moe": FamilySuite(
         SFTSuite(
             model_name=env_str("HALO_TEST_GEMMA4_MODEL", GEMMA4_26B_A4B_PATCHED),
-            # The global heads use head_dim=512, past FA2's 256 limit; sdpa takes any head dim.
+            # The global heads use head_dim=512, past FA2's 256 limit.
             attn_implementation="sdpa",
             sft_args={**SHORT_SMOKE_ARGS, "gradient_checkpointing": False},
             num_samples=(16, 4),

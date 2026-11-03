@@ -1,33 +1,7 @@
 #!/usr/bin/env python
-"""
-SFT Trainer test with HSDP (Hybrid Sharded Data Parallel).
+"""SFT under HSDP over two simulated NVLink domains: the 2D FSDP mesh of a real multi-node job, replicas bit-identical.
 
-Multi-node HSDP cannot be exercised on a single node directly, so this test SIMULATES two
-NVLink domains on one box by telling ``ParallelismConfig`` that each domain is
-``world_size // 2`` GPUs (``gpus_per_node = world_size // 2``). With ``use_hsdp=True`` that yields
-a 2D ``(dp_replicate=2, dp_shard=world_size//2)`` FSDP mesh — the exact code path a real
-multi-node job takes, only with the cross-domain replicate all-reduce running over NVLink
-instead of RDMA. The math (shard placement, replica grad all-reduce, the 2D-mesh grad-norm
-reduction) is identical.
-
-Validates, on Qwen3-0.6B:
-1. HSDP engages: non-expert params are DTensors on a 2D ``(dp_replicate, dp_shard)`` mesh with
-   ``(Replicate, Shard)`` placements.
-2. Replicas stay in sync: EVERY 2D-mesh DTensor param's local shard is bit-identical across
-   the dp_replicate group after training (proves init replication + cross-domain gradient
-   all-reduce). Checked over all such params, not just the first.
-3. Training is healthy: losses and grad norms finite, the loss falling (exercises the 2D-mesh
-   grad-norm path in DistributedTrainerMixin._fsdp_shard_group).
-
-``--lora`` trains LoRA adapters on the attention projections instead, built here with each rank drawing its
-adapters from its own RNG stream (the state a draw on some ranks only, before the build, leaves the streams in),
-and checked apart across the ranks before the trainer wraps them: the replicas must start from the first
-replica's adapters and keep them, and every adapter must move. ``--cp-size 2`` adds context parallelism inside
-each simulated domain, whose wrap shards over the CP ranks too.
-
-Run with 4 GPUs (simulates 2 domains of 2):
-    torchrun --nproc_per_node=4 \
-        tests/gpu/trainers/sft/test_sft_hsdp.py [--lora] [--cp-size 2]
+``--lora`` has each rank draw adapters from its own RNG stream, so replicas must start from the first replica's.
 """
 
 import argparse
@@ -68,13 +42,11 @@ ARGS = parser.parse_args()
 
 
 def run(ctx) -> dict:
-    """Run the SFT HSDP test on a simulated 2-domain topology."""
     if ctx.world_size % 2 != 0:
-        # The SKIP: sentinel, not a bare exit 0 — the launcher counts an unmarked exit-0 as a PASS.
+        # The launcher counts an unmarked exit 0 as a PASS.
         log(f"SKIP: HSDP test needs an even world size >= 4 to simulate 2 domains; got {ctx.world_size}.")
         sys.exit(0)
 
-    # Simulate two NVLink domains on one node: each "domain" is half the GPUs.
     simulated_gpus_per_node = ctx.world_size // 2
 
     log(f"\n{'=' * 70}")
@@ -86,7 +58,6 @@ def run(ctx) -> dict:
 
     log("\n[1/4] Loading model with use_hsdp=True...")
     parallelism_config = ParallelismConfig(gpus_per_node=simulated_gpus_per_node, use_hsdp=True, cp_size=ARGS.cp_size)
-    # The whole point of the test — confirm the topology resolved to real HSDP.
     assert parallelism_config.is_hsdp, "use_hsdp=True did not resolve to HSDP (check domain simulation)"
     assert parallelism_config.dp_replicate_size == 2
     assert parallelism_config.dp_shard_size == simulated_gpus_per_node

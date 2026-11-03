@@ -1,20 +1,10 @@
 #!/usr/bin/env python
-"""Distributed sequence-classification training.
+"""Distributed sequence-classification training. Text-only: few families have a multimodal classification head
+upstream, and halo/models/seq_cls_heads.py registers Gemma 4 and MoE Qwen3.5/3.6.
 
-Modality: text-only. VLM sequence classification needs a multimodal classification head, which
-transformers ships for only a few families (Gemma3, dense Qwen3.5, T5Gemma2, ModernVBert); the
-toolkit registers two more itself in halo/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6,
-each in both spellings a checkpoint can carry (composite and text tower). Other VLM families have
-no such head, so general VLM classification is not supported upstream.
-
-Supported Parallelism Modes: EP, TP, ETP, PP. CP is not supported — the trainer pools over the
-complete sequence, which no CP shard holds. Under PP a multimodal checkpoint trains its text tower
-and score head; the untouched vision tensors ride every checkpoint under the wrapper layout.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/classification.py \\
-        examples/classification/gptoss/clf-gptoss-20b-mage-ep.yaml
-"""
+Modes: EP, TP, ETP, PP. CP is not supported, as the trainer pools over the complete sequence, which no CP shard holds.
+Under PP a multimodal checkpoint trains its text tower and score head; untouched vision tensors ride every checkpoint
+under the wrapper layout."""
 
 import logging
 
@@ -59,8 +49,8 @@ logger = logging.getLogger(__name__)
 # A "no label" row, in the stringified form labels_in_split gives every label.
 NO_LABEL_SENTINEL = "-1"
 
-# Every split whose labels join the class list: an eval split may hold a class train lacks, and a
-# split the run never reads still counts, so the head does not change shape with the eval setting.
+# An eval split may hold a class train lacks, and a split the run never reads still counts, so the head does not change
+# shape with the eval setting.
 LABEL_SPLITS = ("train", *EVAL_SPLIT_NAMES)
 
 
@@ -74,17 +64,9 @@ def tokenize_classification_row(
     text_field: str | None = None,
     tools_field: str | None = None,
 ) -> dict:
-    """Chat-template and tokenize one classification row, mapping its label to an id.
-
-    Accepts either a pre-built ``prompt`` conversation or a raw ``text_field`` column, so text/label
-    datasets (e.g. imdb) train without pre-wrapping each row as a conversation. Kept module-level
-    with every tunable in the signature so the map's state rides in ``fn_kwargs``, which the cache
-    key fingerprints, rather than in closure cells it cannot.
-
-    Rows over ``max_length`` are truncated rather than dropped as on the SFT path: a classification
-    label describes the whole document, so a shortened document keeps a valid label, while dropping
-    the row would shrink the training set and skew the class balance.
-    """
+    """Reads a pre-built ``prompt`` or a raw ``text_field``. Module-level with every tunable in the signature, so the
+    map's state rides in ``fn_kwargs``, which the cache key fingerprints. Rows over ``max_length`` are truncated,
+    unlike SFT: a label describes the whole document, and dropping rows would skew the class balance."""
     prompt = resolve_json_value(example.get("prompt"))
     if prompt is None and text_field:
         prompt = [{"role": "user", "content": example[text_field]}]
@@ -117,12 +99,7 @@ def tokenize_classification_row(
 
 
 def require_prompt_or_text_column(train_columns: list[str], text_field: str | None) -> None:
-    """Config-time check that tokenization has an input column, before the model is loaded.
-
-    ``tokenize_classification_row`` reads a pre-built ``prompt`` conversation, falling back to
-    ``text_field`` — with neither present the failure would otherwise surface as a per-row
-    ``KeyError`` deep in the dataset map, after the full (possibly multi-node) model load.
-    """
+    """Config-time check: the failure would otherwise be a per-row ``KeyError`` in the dataset map, post-load."""
     if "prompt" in train_columns or (text_field and text_field in train_columns):
         return
     text_field_state = f"text_field='{text_field}' names no existing column" if text_field else "text_field is not set"
@@ -134,16 +111,11 @@ def require_prompt_or_text_column(train_columns: list[str], text_field: str | No
 
 
 def run_splits(training_config) -> tuple[str, ...]:
-    """The splits the run reads: train, and the ``test`` eval split when the run evaluates."""
     return ("train", "test") if uses_evaluation(training_config) else ("train",)
 
 
 def labels_in_split(raw_dataset, split="train") -> list[str]:
-    """The stringified labels of ``split``, flattened for a multi-label one.
-
-    Empty for an empty split: a pre-sharded eval split can leave a rank without rows, and that rank
-    must still reach the label-set gather its peers enter.
-    """
+    """Empty for an empty split: a rowless rank on a pre-sharded eval split must still join the label gather."""
     if len(raw_dataset[split]) == 0:
         return []
     if isinstance(raw_dataset[split]["label"][0], list):
@@ -156,12 +128,8 @@ def labels_in_split(raw_dataset, split="train") -> list[str]:
 
 
 def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
-    """Each label-bearing split's stringified label set, unioned across the world on a pre-sharded load.
-
-    A pre-sharded dataset leaves each rank part of a split's labels, giving a rank-divergent
-    num_labels and so a different [num_labels, hidden] score head per rank, which breaks the
-    FSDP2/DDP all-reduce over it. Every rank needs a train row, which the label type is read from.
-    """
+    """Unioned across the world on a pre-sharded load: partial labels would give a rank-divergent ``num_labels`` and
+    score head, breaking the all-reduce over it. Every rank needs a train row, which gives the label type."""
     if dataset_presharded:
         reject_across_ranks(
             None if len(ds["train"]) else "its train shard holds no rows; shard so every rank gets one",
@@ -177,14 +145,8 @@ def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
 
 
 def reject_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_multi_label: bool) -> None:
-    """Refuse the ``-1`` "no label" sentinel in a single-label split the run reads.
-
-    A multi-hot row reads the sentinel as absence. A single-label row has no class to put it in:
-    ``-1`` would reach the cross-entropy as an out-of-range class index. A split the run never reads
-    is dropped before tokenization, so an unlabeled GLUE-style test split does not block a run that
-    does not evaluate. Runs on the world-agreed label sets, before the model load, so every rank
-    raises together.
-    """
+    """Refuse the ``-1`` sentinel in a single-label split the run reads: it would reach the cross-entropy as an
+    out-of-range class. Runs on the world-agreed label sets before the model load, so every rank raises together."""
     if is_multi_label:
         return
     for split in used_splits:
@@ -209,7 +171,7 @@ def reject_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_mul
 
 
 def build_label_list(split_labels: dict[str, set[str]]) -> list[str]:
-    """The sorted class list: every split's labels, less the ``-1`` "no label" sentinel."""
+    """Every split's labels, sorted, less the ``-1`` no-label sentinel."""
     for split, labels in split_labels.items():
         eval_only = sorted(labels - split_labels["train"] - {NO_LABEL_SENTINEL})
         if eval_only and is_global_main_process():
@@ -225,8 +187,7 @@ def main():
         ClassificationScriptArguments, ClassificationConfig, ModelArguments, ParallelismArguments
     )
 
-    # The score head is pinned to AutoModelForSequenceClassification, so the loader would only warn
-    # and build the wrapper anyway; reject the flag rather than accept one that cannot take effect.
+    # The score head is pinned to AutoModelForSequenceClassification, so the flag could not take effect.
     reject_unsupported_args("Classification", text_only_model=args.text_only_model)
 
     context = init_training_script(
@@ -261,9 +222,8 @@ def main():
 
     label_to_id = {v: i for i, v in enumerate(label_list)}
 
-    # Before the model load: a multimodal family with no score head otherwise fails inside Auto*
-    # resolution on every rank, naming no alternative. After the distributed init, so the hub read it
-    # makes is ordered main-rank-first.
+    # Before the load: a family with no score head fails inside Auto* resolution on every rank, naming no alternative.
+    # After the distributed init, so the hub read is ordered main-rank-first.
     reject_multimodal_model_without_seq_cls_head(model_config)
 
     # ClassificationTrainer's DataCollatorWithPadding right-pads every batch.
@@ -306,8 +266,7 @@ def main():
             "text_field": args.text_field,
             "tools_field": args.tools_field,
         },
-        # The baked label_to_id keys the map cache: with presharded data the ids change with world size,
-        # and a stale cache would keep the old ones.
+        # With presharded data the ids change with world size, and a stale cache would keep the old ones.
         cache_key_extras={"label_list": label_list},
     )
 

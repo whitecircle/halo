@@ -1,6 +1,3 @@
-"""The embedding-tie readers: a config ties when any level declaring the flag ties, which on every
-roster family is the text sub-config's own verdict, and the untie clears every declaring level."""
-
 import pytest
 import torch
 from transformers import Qwen3_5MoeConfig
@@ -31,7 +28,6 @@ def test_every_roster_config_ties_as_its_text_config_declares(roster_configs, na
 
 
 def test_the_roster_covers_both_verdicts_and_composite_levels(roster_configs):
-    """Anti-vacuity: the sweep above must see tied and untied families and a two-level config."""
     verdicts = {ties_word_embeddings(config) for config in roster_configs.values()}
     assert verdicts == {True, False}
     assert any(len(tie_flag_configs(config)) > 1 for config in roster_configs.values())

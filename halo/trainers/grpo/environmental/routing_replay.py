@@ -1,7 +1,6 @@
-"""MoE routing replay (arXiv:2507.18071): the recompute's or the engine's top-k selections replayed in the update,
-so near-tie flips cannot train it through other experts than the importance ratios saw. Gate weights are
-re-derived from the live router over the replayed selection: replaying weights zeroes the router gradient (RSPO,
-arXiv:2510.23027)."""
+"""MoE routing replay (arXiv:2507.18071): top-k selections replayed in the update, so near-tie flips cannot train it
+through other experts than the ratios saw. Gate weights re-derive from the live router, as replaying them zeroes its
+gradient (RSPO, arXiv:2510.23027)."""
 
 import base64
 import contextlib
@@ -36,8 +35,8 @@ ROLLOUT_COVERAGE_SHAPES = ("full", "engine_omits_last", "completion_only", "unre
 
 
 def decoder_layer_indices(names: Iterable[str]) -> list[int]:
-    """The decoder-layer index of each EP layer FQN, which both engines key their per-token rows by: a family
-    with dense first layers ships more rows than it has EP layers. An FQN outside ``layers.N`` raises."""
+    """Both engines key their per-token rows by decoder-layer index, and a family with dense first layers ships more
+    rows than it has EP layers. An FQN outside ``layers.N`` raises."""
     indices = []
     for name in names:
         index = decoder_layer_index(name)
@@ -48,9 +47,8 @@ def decoder_layer_indices(names: Iterable[str]) -> list[int]:
 
 
 def decode_rollout_routing(payload: str, num_layers: int, top_k: int) -> torch.Tensor:
-    """An engine's ``routed_experts`` payload as an int16 ``[tokens, L, K]`` tensor: vLLM's base64 ``.npy`` or
-    SGLang's base64 raw int32 rows, reshaped by the trainer's own ``(num_layers, top_k)`` so a shape
-    disagreement raises here rather than misaligning the mask."""
+    """Int16 ``[tokens, L, K]``, from vLLM's base64 ``.npy`` or SGLang's base64 raw int32 rows, reshaped by the
+    trainer's own shape so a disagreement raises here rather than misaligning the mask."""
     raw = base64.b64decode(payload)
     if raw.startswith(NPY_MAGIC_PREFIX):
         array = np.load(io.BytesIO(raw))
@@ -77,11 +75,9 @@ def assemble_rollout_masks(
     top_k: int,
     num_experts: int,
 ) -> tuple[torch.Tensor, dict[str, int]]:
-    """``(masks, stats)``: per-turn ``(mask, engine_prompt_tokens)`` routing in the padded ``[rows, P+C, L, K]``
-    batch mask, and the row count of each coverage convention (:data:`ROLLOUT_COVERAGE_SHAPES` plus
-    ``prompt_len_mismatch``). Alignment anchors on the engine's prompt token count, since a re-render can drift
-    by a token. Positions without engine routing stay ``-1`` (natural selection); a row matching no convention
-    is counted, not raised, so the caller can refuse uniformly."""
+    """``(masks, stats)``. Alignment anchors on the engine's prompt token count, since a re-render can drift by a
+    token. Positions without routing stay ``-1``; a row matching no convention is counted, so the caller can refuse
+    uniformly."""
     full, engine_omits_last, completion_only, unresolved = ROLLOUT_COVERAGE_SHAPES
     rows = len(turn_masks)
     stats = {**dict.fromkeys(ROLLOUT_COVERAGE_SHAPES, 0), "prompt_len_mismatch": 0}
@@ -121,14 +117,13 @@ def assemble_rollout_masks(
 
 
 def _require_spans_with_order(row_spans: list[tuple[int, int]] | None, row_order: torch.Tensor | None) -> None:
-    """Refuse a row order without the per-row spans: only the dense per-row path forwards rows reordered."""
     if row_order is not None and row_spans is None:
         raise RuntimeError("routing replay got a row order without row spans: only per-row forwards are reordered")
 
 
 class RoutingReplayInjector:
-    """Capture/replay state across one model's EP MoE layers, in ``named_modules`` order (the mask's layer
-    axis); ``engine_layers`` and ``layer_indices`` place those layers among the engine's per-decoder-layer rows."""
+    """Capture/replay across EP MoE layers, in ``named_modules`` order (the mask's layer axis); ``engine_layers`` and
+    ``layer_indices`` place them among the engine's per-decoder-layer rows."""
 
     def __init__(self, ep_layers: list[EPMoELayerBase], *, engine_layers: int, layer_indices: list[int]):
         if not ep_layers:
@@ -189,13 +184,9 @@ class RoutingReplayInjector:
         row_spans: list[tuple[int, int]] | None = None,
         row_order: torch.Tensor | None = None,
     ):
-        """Capture routing over a (possibly chunked) no-grad forward of ``rows`` sequences of padded width
-        ``seq_len``; the yielded list holds the ``[rows, seq, layers, top_k]`` mask on exit. ``row_spans``
-        describes span-trimmed per-row forwards (positions outside a span stay ``-1``). ``row_order[p]`` is the
-        batch row the ``p``-th forwarded row is, so the mask comes back in batch order; only the per-row path
-        reorders rows, so it comes with ``row_spans``. An error inside resets every layer and propagates
-        unchanged, so the token-count check cannot shadow an OOM or NCCL failure.
-        """
+        """The yielded list holds the ``[rows, seq, layers, top_k]`` mask on exit. ``row_spans`` describes span-trimmed
+        per-row forwards, ``row_order[p]`` the batch row the ``p``-th forward is. An error inside resets every layer
+        and propagates, so the token-count check cannot shadow an OOM."""
         _require_spans_with_order(row_spans, row_order)
         targets = list(range(rows)) if row_order is None else row_order.tolist()
         for layer in self._layers:
@@ -244,11 +235,9 @@ class RoutingReplayInjector:
         row_spans: list[tuple[int, int]] | None = None,
         row_order: torch.Tensor | None = None,
     ) -> None:
-        """Arm every EP layer with one microbatch's ``[rows, seq, layers, top_k]`` mask, consumed cursor-wise
-        across the row-chunked forwards (a GC forward saves its slice for the backward recompute); it stays armed
-        through backward. ``row_spans`` trims each forwarded row to what its per-row forward covers, and
-        ``row_order[p]`` is the mask row the ``p``-th forwarded row is (batch order when ``None``; given only with
-        ``row_spans``)."""
+        """One microbatch's mask, consumed cursor-wise across row-chunked forwards (a GC forward saves its slice for
+        the recompute) and armed through backward. ``row_spans`` trims each forwarded row and ``row_order[p]`` names
+        its mask row."""
         _require_spans_with_order(row_spans, row_order)
         if masks.dim() != 4 or masks.size(2) != len(self._layers):
             raise RuntimeError(
@@ -274,9 +263,8 @@ class RoutingReplayInjector:
         self._armed = True
 
     def disarm(self) -> None:
-        """Clear the forced masks after the microbatch's backward, raising (unless an exception is propagating)
-        when a layer's consumed total is not a positive multiple of its armed size: only non-recompute forwards
-        consume, and the cursor wraps on exact exhaustion, so a correctly tiled microbatch ends there."""
+        """Raises (unless an exception is propagating) when a layer's consumed total is not a positive multiple of its
+        armed size: only non-recompute forwards consume, and the cursor wraps on exact exhaustion."""
         if not self._armed:
             return
         bad = []
@@ -299,8 +287,8 @@ class RoutingReplayInjector:
             )
 
     def flip_rate(self) -> float | None:
-        """COLLECTIVE. The share of the world's forced (token, layer) selections whose live top-k differed from
-        the replayed mask since the last call, ``None`` when none was forced; one host sync, once per log step."""
+        """COLLECTIVE. The share of forced (token, layer) selections whose live top-k differed since the last call,
+        ``None`` when none was forced; one host sync, once per log step."""
         totals = [layer._replay_flip_counts for layer in self._layers if layer._replay_flip_counts is not None]
         for layer in self._layers:
             layer._replay_flip_counts = None
@@ -310,7 +298,6 @@ class RoutingReplayInjector:
 
 
 def build_routing_replay_injector(model: nn.Module) -> RoutingReplayInjector:
-    """An injector over ``model``'s EP MoE layers, placed on the engine's one-row-per-decoder-layer wire."""
     layers = dict(named_ep_layers(model))
     return RoutingReplayInjector(
         list(layers.values()),
@@ -320,11 +307,9 @@ def build_routing_replay_injector(model: nn.Module) -> RoutingReplayInjector:
 
 
 class RoutingReplayMixin:
-    """Builds and feeds the routing-replay injector of the environmental GRPO trainer."""
-
     def _build_routing_replay_injector(self, mode: str) -> RoutingReplayInjector | None:
-        """The routing-replay injector for ``mode`` (``None`` when off), refusing an unknown mode, a model
-        without EP layers or whose family cannot re-derive gate weights, and an unsupported mode setup."""
+        """``None`` when off; refuses an unknown mode, a model without EP layers or whose family cannot re-derive gate
+        weights, and an unsupported setup."""
         modes = get_args(AsyncRolloutConfig.__annotations__["routing_replay"])
         if mode not in modes:
             raise ValueError(f"routing_replay must be one of {list(modes)}, got {mode!r}")
@@ -345,17 +330,13 @@ class RoutingReplayMixin:
 
     @property
     def _runs_logprob_recompute(self) -> bool:
-        """Whether the no-grad log-prob recompute runs: the one gate the recompute pass and the ``recompute``
-        replay refusal both read."""
         return self.num_iterations > 1 or self._misaligned_accumulation or self._is_correction or self.beta != 0.0
 
     def _assemble_rollout_routing(
         self, rows: list[TurnRow], step: StepRows, device: torch.device, mode: str
     ) -> torch.Tensor | None:
-        """The engine-supplied routing mask under ``routing_replay='rollout'``, else ``None``; the uniform raise
-        it wraps sits behind a config and mode gate. A batch with no engine routing fails only while its loss
-        mask still has a trainable token: an all-masked step has no selection to replay and trains as a no-op.
-        """
+        """``None`` off rollout replay. A batch with no engine routing fails only while its loss mask has a trainable
+        token: an all-masked step has nothing to replay and trains as a no-op."""
         rollout_routing_masks = None
         if self._rollout_routing_replay and mode == "train":
             if any(row.turn_routing is not None for row in rows):
@@ -380,8 +361,7 @@ class RoutingReplayMixin:
     def _rollout_masks_with_coverage(
         self, rows: list[TurnRow], step: StepRows, device: torch.device
     ) -> torch.Tensor | None:
-        """The step's engine routing as the batch mask, each row's coverage recorded; a malformed or wholly
-        unresolved batch is recorded on the fence."""
+        """Each row's coverage is recorded; a malformed or wholly unresolved batch is recorded on the fence."""
         try:
             masks, coverage = assemble_rollout_masks(
                 [row.turn_routing for row in rows],
@@ -411,11 +391,9 @@ class RoutingReplayMixin:
         return masks.to(device)
 
     def _arm_loss_forward_replay(self, inputs: dict) -> None:
-        """Arm the batch's routing mask, if it carries one, over the positions its gradient forward attends; the
-        rest route naturally and stay out of the flip rate. Besides padding, that leaves out the completion of a
-        row dropped from the loss (a degenerate group, an invalid episode, a masked truncation), which this forward
-        reads as attention padding, in a context other than the one its mask was recorded in. The dense per-row
-        path trims those positions off its forwards; the padded paths forward them."""
+        """Over the positions the gradient forward attends; the rest route naturally. That excludes padding and the
+        completion of a row dropped from the loss, which this forward reads as attention padding, in a context other
+        than its mask's."""
         masks = inputs.get(ROUTING_MASKS_KEY)
         if masks is None:
             return

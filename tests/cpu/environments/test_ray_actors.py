@@ -1,14 +1,4 @@
 #!/usr/bin/env python
-"""
-Tests for Ray actors with local Ray (no GPU/vLLM required).
-
-Run with:
-    python tests/cpu/environments/test_ray_actors.py
-
-One test starts a local Ray instance; the rest drive the actors off-cluster with the engine's HTTP
-calls stubbed.
-"""
-
 import ast
 import asyncio
 import dataclasses
@@ -45,15 +35,9 @@ from halo.inference.response import FINISH_REASON_LENGTH
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
 from tests.common.repo import REPO_ROOT
 
-# Test: Environment Actor (Direct - Without Ray)
-
 
 def test_env_reset_yields_one_episode_per_prompt():
-    """The actor drives ``env.reset`` per episode, so it must return one id and one step per prompt.
-
-    A reset that collapses or reorders prompts silently misattributes every reward the manager maps
-    back positionally.
-    """
+    """A reset that collapses or reorders prompts misattributes every reward the manager maps back positionally."""
     env = build_environment("react_math", {"max_turns": 5})
     episode_ids, steps = env.reset(["2+2?", "3+3?"], [{"answer": "4"}, {"answer": "6"}])
 
@@ -63,8 +47,7 @@ def test_env_reset_yields_one_episode_per_prompt():
 
 
 async def test_env_batch_calls_refuse_contexts_that_do_not_pair():
-    """A context list shorter than the batch must raise, sync and async: truncating to the shorter
-    list drops the unpaired episodes, which the caller only finds as missing results."""
+    """Truncating to the shorter list drops the unpaired episodes."""
     env = build_environment("react_math", {"max_turns": 5})
     with pytest.raises(ValueError, match="shorter"):
         env.reset(["2+2?", "3+3?"], [{"answer": "4"}])
@@ -78,9 +61,6 @@ async def test_env_batch_calls_refuse_contexts_that_do_not_pair():
     episode_ids, _ = await async_env.reset_async(["2+2?"], [{}])
     with pytest.raises(ValueError, match="shorter"):
         await async_env.step_async(episode_ids, ["4"], [])
-
-
-# Test: ray.init temp dir
 
 
 @pytest.fixture
@@ -111,12 +91,8 @@ def test_a_short_ray_tmpdir_is_used_as_is(deep_temp_root, monkeypatch):
     assert "_temp_dir" not in ray_init_kwargs(), "Ray's own short RAY_TMPDIR must not be overridden"
 
 
-# Test: Rollout Manager (Mocked Ray)
-
-
 def test_rollout_manager_round_robins_across_servers():
-    """Multi-server rollout spreads load by cycling ``_next_url``. A selector that stopped advancing
-    would pin every episode on one engine — same total throughput on paper, one server saturated."""
+    """A selector that stopped advancing would pin every episode on one engine."""
     urls = ["http://server1:8000", "http://server2:8000", "http://server3:8000"]
     manager = RolloutManager(
         num_workers=1,
@@ -131,14 +107,13 @@ def test_rollout_manager_round_robins_across_servers():
 
 
 async def test_rollout_manager_start_shutdown():
-    """RolloutManager start and shutdown on a local Ray instance."""
     try:
         if ray.is_initialized():
             ray.shutdown()
         # ray_init_kwargs keeps the dashboard off (jobs-API CVE surface) and the tempdir short;
         # num_cpus caps Ray's core-count worker prestart on many-core hosts.
         ray.init(**ray_init_kwargs(num_cpus=4))
-    except Exception as e:  # ray[default] is a hard dependency — a failed init is a real failure
+    except Exception as e:  # ray[default] is a hard dependency, so a failed init is a real failure
         raise AssertionError(f"ray.init() failed, so the actor-lifecycle checks below never ran: {e}") from e
 
     try:
@@ -150,12 +125,10 @@ async def test_rollout_manager_start_shutdown():
             rollout_config=RolloutConfig(),
         )
 
-        # Start should create actors
         await manager.start()
         assert manager._started
         assert len(manager._actors) == 2
 
-        # Second start should be idempotent
         await manager.start()
         assert len(manager._actors) == 2
 
@@ -164,7 +137,6 @@ async def test_rollout_manager_start_shutdown():
         manager.end_engine_pause(2.5)
         assert await manager._actor_pause_clock.paused_seconds.remote() == 2.5
 
-        # Shutdown should clean up
         await manager.shutdown()
         assert not manager._started
         assert len(manager._actors) == 0
@@ -212,29 +184,19 @@ async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(
     assert spawned == [("clock", affinity), ("actor", affinity), ("actor", affinity)]
 
 
-# Test: RolloutConfig fields and picklability
-
-
 def test_rollout_config_defaults():
-    """Fields RolloutConfig must NOT carry, and picklability (the actors receive it pickled).
-
-    The default VALUES are pinned against their ``AsyncRolloutConfig`` counterparts in
-    ``tests/cpu/config/test_rollout_config_mirror.py``.
-    """
+    """The default values are pinned against ``AsyncRolloutConfig`` in
+    ``tests/cpu/config/test_rollout_config_mirror.py``."""
     config = RolloutConfig()
 
-    # Must NOT have removed fields
     assert not hasattr(config, "max_concurrent_per_actor")
 
-    # RolloutConfig should be fully picklable (no unpicklable callables)
+    # The actors receive it pickled.
     pickled = pickle.dumps(config)
     restored = pickle.loads(pickled)
     assert restored.temperature == config.temperature
     assert restored.max_retries == config.max_retries
     assert restored.model_name == config.model_name
-
-
-# Test: Bounded Concurrency and Positional Mapping (fake actor pool, no Ray)
 
 
 def _manager_over_fake_actors(actor, *, num_workers=2, max_concurrent_rollouts=None):
@@ -253,11 +215,8 @@ def _manager_over_fake_actors(actor, *, num_workers=2, max_concurrent_rollouts=N
 
 
 class _RecordingActor:
-    """Ray-handle stand-in: ``run_episode.remote(...)`` returns an awaitable episode.
-
-    Records peak in-flight episodes so the manager's own semaphore — not a locally constructed
-    one — is what the bound is asserted against.
-    """
+    """Ray-handle stand-in recording peak in-flight episodes, so the bound is asserted on the manager's own
+    semaphore."""
 
     def __init__(self, *, fail: bool = False):
         self.fail = fail
@@ -281,7 +240,6 @@ class _RecordingActor:
 
 
 async def test_collect_rollouts_bounds_in_flight_episodes_by_max_concurrent():
-    """The manager's semaphore must cap in-flight episodes — an unbounded fan-out stampedes the server."""
     actor = _RecordingActor()
     manager = _manager_over_fake_actors(actor, num_workers=3, max_concurrent_rollouts=3)
 
@@ -294,8 +252,8 @@ async def test_collect_rollouts_bounds_in_flight_episodes_by_max_concurrent():
 
 
 async def test_collect_rollouts_yields_one_result_per_prompt_when_every_episode_fails():
-    """The trainer maps rollouts back to prompts positionally, so a failing server must still yield
-    one RolloutResult per prompt, in order — dropping the failures shifts every reward by one."""
+    """The trainer maps rollouts back positionally, so a failing server still yields one result per prompt, in
+    order."""
     prompts = ["a", "b", "c"]
     manager = _manager_over_fake_actors(_RecordingActor(fail=True), num_workers=2)
 
@@ -307,9 +265,8 @@ async def test_collect_rollouts_yields_one_result_per_prompt_when_every_episode_
 
 
 async def test_collect_rollouts_refuses_contexts_that_do_not_pair_with_prompts():
-    """One context per prompt. A short list must raise before any episode is submitted: truncating
-    leaves the unpaired prompts as masked "Unknown error" rows, and a raise after the first tasks
-    started would leave those episodes running on the actors."""
+    """A short list raises before any episode is submitted; a raise after the first tasks started would leave them
+    running on the actors."""
     actor = _RecordingActor()
     manager = _manager_over_fake_actors(actor)
 
@@ -342,12 +299,8 @@ def test_a_loopback_server_url_warns_on_a_multinode_job(url, caplog):
     assert "loopback" not in caplog.text
 
 
-# Test: Tool Schema Detection
-
-
 def test_tools_schema_detection():
-    """Native tool-use environments must emit OpenAI-format tool schemas — the server rejects any
-    other shape, so the key VALUES matter, not just their presence."""
+    """The server rejects any other shape, so the key values matter."""
     native_env = build_environment("native_math", {"max_turns": 3})
     schema = native_env.get_tools_schema()
 
@@ -359,11 +312,8 @@ def test_tools_schema_detection():
 
 
 def test_tool_calls_in_step_context():
-    """Test that tool_calls in context are attached to assistant messages."""
-    # Create a native tool use environment
     env = build_environment("native_math", {"max_turns": 5})
 
-    # Reset with a prompt
     episode_ids, steps = env.reset(["What is 2+2?"], [{"answer": "4"}])
     episode_id = episode_ids[0]
 
@@ -375,24 +325,15 @@ def test_tool_calls_in_step_context():
     step_context = {"answer": "4", "tool_calls": mock_tool_calls}
     env.step([episode_id], [""], [step_context])
 
-    # The trajectory should have the assistant message with tool_calls
     traj = env._trajectories[episode_id]
     assistant_msgs = [m for m in traj.messages if m.role == "assistant"]
     assert len(assistant_msgs) >= 1
     assert assistant_msgs[-1].tool_calls == mock_tool_calls
 
 
-# Test: _build_payload (what actually gets sent to vLLM)
-
-
 def _make_actor(env_type="native_math", env_config=None):
-    """Instantiate the REAL EnvironmentActor off-cluster.
-
-    ``@ray.remote`` wraps the class; the original is kept at
-    ``__ray_metadata__.modified_class``. ``__init__`` only sets attributes (env + tools
-    schema are lazy), so this is CPU-safe and lets us exercise the genuine ``_build_payload``
-    rather than a hand-rebuilt copy of its logic.
-    """
+    """The real EnvironmentActor off-cluster: ``@ray.remote`` keeps the class at
+    ``__ray_metadata__.modified_class``, and ``__init__`` only sets attributes."""
     cls = EnvironmentActor.__ray_metadata__.modified_class
     actor = cls.__new__(cls)
     actor.__init__(actor_id=0, env_type=env_type, env_config=env_config or {"max_turns": 3})
@@ -400,7 +341,6 @@ def _make_actor(env_type="native_math", env_config=None):
 
 
 def test_build_payload_sends_only_supported_params_and_env_tools():
-    """The real _build_payload forwards the supported sampling params + OpenAI tools, nothing else."""
     actor = _make_actor("native_math")  # native_math exposes OpenAI-format tools
     payload = actor._build_payload(
         [{"role": "user", "content": "2+2?"}],
@@ -409,7 +349,6 @@ def test_build_payload_sends_only_supported_params_and_env_tools():
 
     assert payload["messages"][0]["content"] == "2+2?"
     assert payload["temperature"] == 0.9 and payload["top_p"] == 0.8 and payload["max_tokens"] == 512
-    # Env tools are attached and in OpenAI function format.
     assert payload["tools"] and payload["tools"][0]["type"] == "function" and "function" in payload["tools"][0]
     # model is omitted when model_name is unset, and no unsupported sampling knob leaks through (the
     # sampler filters each request carries are pinned in tests/cpu/weight_sync/test_rollout_backend_selection.py).
@@ -440,11 +379,8 @@ def test_build_payload_carries_the_chat_template_kwargs_only_when_set():
 
 
 def test_build_payload_sends_no_tools_for_a_react_env():
-    """ReAct parses its action out of the assistant TEXT, so the rollout must advertise no tools.
-
-    Advertising them makes a server with a tool-call parser strip the call out of ``content``: ReAct
-    then sees no ``Action:``, appends its format hint and burns the turn unpriced and uncounted.
-    """
+    """ReAct parses its action out of the text; a server's tool-call parser would strip it out of ``content`` and
+    burn the turn."""
     react_payload = _make_actor("react_math")._build_payload([{"role": "user", "content": "2+2?"}], RolloutConfig())
     native_payload = _make_actor("native_math")._build_payload([{"role": "user", "content": "2+2?"}], RolloutConfig())
 
@@ -452,8 +388,6 @@ def test_build_payload_sends_no_tools_for_a_react_env():
     # Positive control: the native protocol still advertises its schema through the same code path.
     assert native_payload["tools"]
 
-
-# Test: RolloutResult wire contract
 
 # The fields a rollout is allowed to carry home. Every one is pickled through the Ray object store and
 # again through the TP broadcast, once per episode, so an unread field ships the whole per-episode
@@ -476,11 +410,8 @@ ROLLOUT_RESULT_CONSUMERS = ("halo/environments", "halo/trainers/grpo")
 
 
 def _bare_local_attribute_reads(root):
-    """Attribute names read off a bare local (``r.error``) anywhere under ``root``.
-
-    Bare locals only, ``self`` excluded: ``self.async_config.rollout_server_url`` reads a *config*
-    field of the same name, and counting it would let a dead result field look consumed.
-    """
+    """Attribute names read off a bare local anywhere under ``root``; ``self`` is excluded, since it reads config
+    fields of the same names."""
     names = set()
     for path in root.rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
@@ -492,12 +423,7 @@ def _bare_local_attribute_reads(root):
 
 
 def test_rollout_result_carries_only_consumed_fields():
-    """RolloutResult must declare exactly the consumed set — and each field must have a real reader.
-
-    Two halves: the first fails when a field is added or removed without the contract moving with it,
-    the second fails when a field stops being read anywhere in the actor/trainer path. Neither passes
-    on a field that only ever gets written.
-    """
+    """Fails when a field changes without the contract, and when a field stops being read in the actor/trainer path."""
     declared = {f.name for f in dataclasses.fields(RolloutResult)}
     assert declared == CONSUMED_ROLLOUT_RESULT_FIELDS, (
         f"RolloutResult fields drifted from the consumed set: only in the class {declared - CONSUMED_ROLLOUT_RESULT_FIELDS}, "
@@ -537,9 +463,8 @@ class _FakeChatCompletionsSession:
 
 
 async def test_sglang_length_cutoff_survives_the_rollout_transport():
-    """SGLang spells the token-cap cut-off ``stop_reason``, and this transport reads the response body
-    as a plain dict — so a reader that knows only ``finish_reason`` clears the truncation and the env
-    grades an engine-cut fragment as a deliberate final answer."""
+    """SGLang spells the cut ``stop_reason`` and this transport reads the body as a plain dict; knowing only
+    ``finish_reason`` clears the truncation and grades a fragment."""
     actor = _make_actor("native_math")
     session = _FakeChatCompletionsSession(
         {
@@ -559,9 +484,8 @@ async def test_sglang_length_cutoff_survives_the_rollout_transport():
 
 
 async def test_a_turn_that_used_its_whole_cap_is_a_cut_even_when_vllm_says_tool_calls():
-    """vLLM labels the finish ``tool_calls`` whenever its parser extracted a call, including one it
-    salvaged from a turn max_tokens cut mid-call (the name survives, the arguments come back ``{}``).
-    The transport reads the cap off ``usage.completion_tokens`` so the env takes the cut path."""
+    """vLLM labels the finish ``tool_calls`` whenever its parser extracted a call, including one salvaged from a cut
+    turn, so the transport reads the cap off ``usage.completion_tokens``."""
     actor = _make_actor("native_math")
     salvaged = {"id": "c1", "type": "function", "function": {"name": "python_repl", "arguments": "{}"}}
     session = _FakeChatCompletionsSession(
@@ -725,13 +649,9 @@ async def test_the_actor_keeps_a_cut_call_on_its_turn_without_running_or_resendi
     assert [m.tool_calls for m in turns] == [None, None]
 
 
-# Test: stateful-env session cleanup across rollouts
-
-
 async def test_actor_releases_session_when_episode_errors():
-    """A stateful SweEnvironment episode that errors mid-way must still release its sandbox
-    session + temp dir — run_episode cleans up in a finally, so a long-lived actor doesn't leak a
-    working directory per failed rollout."""
+    """run_episode cleans up in a finally, so a long-lived actor does not leak a working directory per failed
+    rollout."""
     actor = _make_actor("swe", {"max_turns": 5})
     env = actor._env  # force construction so we can inspect its sessions
 
@@ -767,10 +687,8 @@ async def test_actor_releases_session_when_episode_errors():
 
 
 async def test_actor_drives_async_env_via_step_async():
-    """An async environment (async-only tool handlers, like MCP) must be driven through
-    reset_async/step_async by the rollout — a sync step would hit NativeTool.execute's 'no sync
-    handler' and the tool would never run. Verifies the actor detects AsyncEnvironmentBase and the
-    async tool actually executes."""
+    """Async-only tool handlers must run through reset_async/step_async; a sync step would hit NativeTool.execute's
+    no-sync-handler error."""
     ran = {"called": False}
 
     async def _async_handler(x):
@@ -783,7 +701,7 @@ async def test_actor_drives_async_env_via_step_async():
             name="aecho",
             description="async echo",
             parameters=[ToolParameter("x", "string", "value")],
-            async_handler=_async_handler,  # NOTE: no sync handler — only runs via the async path
+            async_handler=_async_handler,  # no sync handler: runs only via the async path
         )
     )
 
@@ -817,15 +735,9 @@ async def test_actor_drives_async_env_via_step_async():
     assert any("async-result-hi" in r for r in tool_results), f"async tool output missing: {tool_results}"
 
 
-# Test: per-EPISODE generation-token accounting (summed across turns)
-
-
 async def test_run_episode_generation_tokens_sum_across_turns():
-    """RolloutResult.generation_tokens must be the SUM of every turn's generated tokens for THIS
-    episode — not the last turn, the first turn, or a per-turn mean. This is the source the trainer
-    aggregates into episode/generation_tokens, so a regression to per-turn accounting would silently mis-report
-    per-episode generation length. Drives the real multi-turn loop in run_episode (native_math), mocking
-    only the vLLM call so each turn reports a distinct token count."""
+    """The source of episode/generation_tokens, so per-turn accounting would silently mis-report. Drives the real
+    multi-turn loop, mocking only the vLLM call."""
     actor = _make_actor("native_math", {"max_turns": 5})
 
     async def _fake_client():
@@ -860,10 +772,8 @@ async def test_run_episode_generation_tokens_sum_across_turns():
 
 
 async def test_each_assistant_turn_records_the_levels_cap_and_the_reasoning_it_sampled():
-    """``episode/thinking_cap_turns`` reads each turn's own pair: the cap the turn's level set — not the narrower
-    one the output budget may have put on the request — beside the reasoning the turn sampled through
-    its close. Drives the real loop in run_episode (native_math): 400-token turns with a 100-token
-    reasoning cap under a 1050-token episode budget, so the third request is narrowed to 350 and 50."""
+    """400-token turns with a 100-token cap under a 1050-token episode budget: the third request narrows to 350 and
+    50, and the turn records the level's cap."""
     end = 151668
     actor = _make_actor("native_math", {"max_turns": 5})
 
@@ -902,21 +812,11 @@ async def test_each_assistant_turn_records_the_levels_cap_and_the_reasoning_it_s
     assert result.generation_tokens == sum(sampled)
 
 
-# Test: concurrent CodeContests episodes grade against their OWN tests
-
-
 async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
-    """Two concurrent CodeContests episodes sharing ONE actor (hence one env instance and one
-    sandbox) must each be graded against their OWN hidden tests.
-
-    The submit_solution handler reads the episode it is grading from the ``_ACTIVE_TRAJECTORY``
-    ContextVar (set per step), not a shared instance attribute. If that isolation broke, one
-    in-flight episode's submission would be graded against the other's tests — silently corrupting
-    the RL reward. Episode A's code only solves A's problem and B's only solves B's, so a leak flips
-    at least one reward from full-pass to fail. This is the reward-critical Ray-actor property, so
-    it runs the genuine sync env + local subprocess grader, no mocks below the HTTP boundary."""
-    # A: double the input; B: increment it. Each problem's single hidden test is satisfied ONLY by
-    # its own program — B's incrementing code scores 0 on A's doubling test and vice versa.
+    """The submit handler reads its episode from the ``_ACTIVE_TRAJECTORY`` ContextVar set per step; if that broke,
+    one episode's submission would grade against the other's tests. Runs the genuine sync env and local
+    subprocess grader."""
+    # A: double the input; B: increment it. Each problem's hidden test is satisfied only by its own program.
     problems = {
         "DOUBLE": {"code": "print(int(input()) * 2)", "answer": {"tests": [{"input": "21", "output": "42"}]}},
         "INCREMENT": {"code": "print(int(input()) + 1)", "answer": {"tests": [{"input": "21", "output": "22"}]}},
@@ -970,15 +870,9 @@ async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
     assert "_test_cases" not in result_a.trajectory.info
 
 
-# Test: sync env.step runs OFF the actor's event loop (no episode serialization)
-
-
 async def test_slow_sync_step_does_not_block_concurrent_episodes():
-    """A sync env's blocking step (sandboxed grading runs seconds-to-minutes) must run OFF the
-    actor's event loop. Two concurrent episodes rendezvous inside step on a 2-party barrier:
-    offloaded to worker threads both are inside step simultaneously and pass; stepped inline on the
-    loop, the first step blocks the loop, the second episode's step never starts, and the barrier
-    times out — surfacing as broken-barrier episode errors."""
+    """Sandboxed grading blocks for seconds to minutes. Two episodes rendezvous inside step on a 2-party barrier:
+    offloaded both pass; stepped inline, the barrier times out."""
     barrier = threading.Barrier(2, timeout=10.0)
 
     class _BarrierStepEnv(NativeToolUseEnvironment):
@@ -1014,11 +908,8 @@ async def test_slow_sync_step_does_not_block_concurrent_episodes():
 
 
 async def test_sync_step_offload_preserves_cross_turn_contextvars():
-    """Offloading must keep the per-episode ContextVar semantics steps had when they ran inline on
-    the episode's own asyncio task: a value set during turn 1 (e.g. the simulated file tools'
-    per-episode store) stays visible on turn 2 of the SAME episode, and never leaks into a
-    concurrent episode. A naive per-call ``asyncio.to_thread`` would drop turn-1 writes (fresh
-    context copy each call); a shared context would leak markers across episodes."""
+    """A value set in turn 1 stays visible on turn 2 of the same episode and never leaks to a concurrent one.
+    Per-call ``asyncio.to_thread`` would drop writes, and a shared context would leak."""
     turn_var: ContextVar = ContextVar("test_episode_marker", default=None)
     second_turn_reads: dict[str, str | None] = {}
 
@@ -1075,33 +966,27 @@ async def test_sync_step_offload_preserves_cross_turn_contextvars():
 
 
 def test_only_a_genuine_client_error_gives_up():
-    """Only a genuine, non-transient 4xx from the rollout server abandons the batch."""
-
     def _http(status, body="boom"):
         return RolloutHTTPError(status, "vllm", body)
 
-    # 4xx errors should NOT be retried
     assert _should_giveup(_http(400, "Bad request"))
     assert _should_giveup(_http(422, "Unprocessable"))
     assert _should_giveup(_http(404, "Not found"))
 
-    # 5xx errors SHOULD be retried (giveup returns False)
     assert not _should_giveup(_http(500, "Internal error"))
     assert not _should_giveup(_http(503, "Unavailable"))
 
-    # Timeouts SHOULD be retried
     assert not _should_giveup(TimeoutError("Connection timed out"))
     assert not _should_giveup(ConnectionError("Connection refused"))
 
-    # 429 (rate limit) and 408 (request timeout) are 4xx but transient — they MUST be
-    # retried, not given up on.
+    # 429 (rate limit) and 408 (request timeout) are 4xx but transient, so they are retried.
     assert not _should_giveup(_http(429, "Too Many Requests"))
     assert not _should_giveup(_http(408, "Request Timeout"))
 
 
 def test_an_engine_serialization_fault_under_a_400_is_retried():
-    """vLLM reports a NaN log-prob it cannot serialise as a 400, though the request was valid and a fresh
-    one succeeds: giving up on it ends every episode in flight on that engine when one decode step faults."""
+    """vLLM reports a NaN log-prob it cannot serialise as a 400 though a fresh request succeeds; giving up ends
+    every in-flight episode on that engine."""
     body = (
         '{"error":{"message":"Out of range float values are not JSON compliant: nan",'
         '"type":"BadRequestError","param":null,"code":400}}'
@@ -1113,11 +998,7 @@ def test_an_engine_serialization_fault_under_a_400_is_retried():
 
 
 def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
-    """The status is read as data, never re-parsed out of the message.
-
-    The response body is server-controlled text: a 503 from a proxy that quotes the upstream
-    "status 400" it saw must not abandon the whole batch on the strength of that quote.
-    """
+    """The status is read as data: a 503 from a proxy quoting the upstream status 400 must not abandon the batch."""
     exc = RolloutHTTPError(503, "vllm", "upstream returned status 400: bad request")
 
     assert "status 400" in str(exc)
@@ -1126,12 +1007,7 @@ def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
     assert not _should_giveup(RuntimeError("vllm error (status 400): Bad request"))
 
 
-# Test: RolloutManager max_concurrent clamping
-
-
 def test_rollout_manager_max_concurrent_clamping():
-    """Test that max_concurrent is clamped to at least num_workers."""
-    # max_concurrent_rollouts < num_workers should be clamped
     manager = RolloutManager(
         num_workers=8,
         env_type="react_math",
@@ -1153,11 +1029,7 @@ def test_rollout_manager_max_concurrent_clamping():
     assert manager2.max_concurrent == 16  # 4 * 4
 
 
-# Test: AsyncRolloutConfig → RolloutConfig mapping
-
-
 def test_async_rollout_config_builds_the_rollout_config():
-    """Test that AsyncRolloutConfig.get_rollout_config() maps all fields."""
     config = AsyncRolloutConfig(
         rollout_temperature=0.9,
         rollout_top_p=0.8,

@@ -1,10 +1,5 @@
-"""The efficiency harness finds nothing between two runs of today's ``EfficiencyCallback``, each scenario reaches
-the path it names, a pipeline stage counts its own layers and its chain's batch once, each seeded change to the
-FLOPs model, a stage's attention share, the token accounting, the rounding or the setup summary shows up as a
-delta, a case one tree lacks is listed rather than compared, and the verdict fails when its negative control raises.
-
-Run: python tests/cpu/callbacks/test_efficiency_harness.py
-"""
+"""The efficiency harness finds nothing between two runs of today's ``EfficiencyCallback``, each scenario reaches its
+path, each seeded change shows up as a delta, and the verdict fails when its negative control raises."""
 
 from dataclasses import replace
 
@@ -65,7 +60,6 @@ def _messages(report: dict, level: str) -> str:
 
 @pytest.fixture(scope="module")
 def roster(tmp_path_factory):
-    """Every case, once for the module (a few seconds)."""
     return _reports(tmp_path_factory.mktemp("roster"), CASES)
 
 
@@ -113,8 +107,8 @@ def test_each_scenario_reaches_the_path_it_names(roster):
 
 
 def test_the_sharded_shapes_report_rank_local_figures(roster):
-    """A rank holding 1/ep of the experts serves ep times their tokens, so its active FLOPs equal a rank holding
-    them all while its dense FLOPs fall with the expert count; TP and FSDP2 shards count only their local part."""
+    """A rank holding 1/ep of the experts serves ep times their tokens, so its active FLOPs equal a rank holding them
+    all while its dense FLOPs fall with the expert count."""
     for family in ("qwen3_moe", "gpt_oss"):
         steps = {shape: roster[f"{family}/{shape}/default"]["steps"][-1] for shape in SHAPES}
         active = {shape: step["step_smfu_tflops_per_sec"] for shape, step in steps.items()}
@@ -129,8 +123,7 @@ def test_the_sharded_shapes_report_rank_local_figures(roster):
 
 
 def test_a_pipeline_stage_reports_the_layers_it_holds(roster):
-    """The two stages' MFU and S-MFU add up to the unsplit model's on the same expert layout (a dense model
-    reports no S-MFU on either side)."""
+    """The two stages' MFU and S-MFU add up to the unsplit model's on the same expert layout."""
     for family in REPRESENTATIVE_FAMILIES:
         pipelines = ("pp2",) if family in DENSE_FAMILIES else tuple(UNSPLIT_SHAPE)
         for pipeline in pipelines:
@@ -165,9 +158,7 @@ REPLICAS = {
 
 
 def test_every_shape_counts_each_shared_batch_once(roster):
-    """Every rank's step carries the same scripted batch, so each shape's cluster figure is its replica count times
-    one rank's, and a GPU's share is the cluster over the whole world: a pipeline chain, a TP or expert-TP pair and
-    a CP pair each count their batch once."""
+    """Each shape's cluster figure is its replica count times one rank's, and a GPU's share is that over the world."""
     assert set(REPLICAS) == set(SHAPES)
     one_replica = roster[DEFAULT.path]["snapshot"]["cluster_tokens_per_second"]
     for shape, replicas in REPLICAS.items():
@@ -179,7 +170,7 @@ def test_every_shape_counts_each_shared_batch_once(roster):
 
 
 def test_two_producer_processes_match(tmp_path):
-    """Base against base, each tree's producer in its own process as ``make verify-efficiency`` runs them."""
+    """Each tree's producer runs in its own process, as ``make verify-efficiency`` runs them."""
     outputs = [tmp_path / "first", tmp_path / "second"]
     for output in outputs:
         run_in_tree(REPO_ROOT, MODULE, "--produce", str(output), "--cases", *(case.path for case in SAMPLE))
@@ -210,8 +201,8 @@ def test_a_changed_flops_rule_is_a_delta_in_every_case(monkeypatch, tmp_path):
 
 
 def test_a_pipeline_blind_attention_share_is_a_delta_in_the_staged_config_term_only(monkeypatch, tmp_path):
-    """A stage whose layers are not reachable owns 1 / pp_size of the config's full depth; read off its own layers,
-    the share is whole, so dropping pp_size moves only the layerless stage."""
+    """A stage whose layers are not reachable owns 1 / pp_size of the config's full depth, so dropping pp_size moves
+    only the layerless stage."""
     baseline = _reports(tmp_path / "baseline", STAGED)
     term = model_flops._attention_term
     monkeypatch.setattr(
@@ -224,8 +215,6 @@ def test_a_pipeline_blind_attention_share_is_a_delta_in_the_staged_config_term_o
 
 
 def test_a_full_depth_layout_on_a_stage_is_a_delta_in_every_staged_case_only(monkeypatch, tmp_path):
-    """Costing every layer the config declares as the rank's own leaves an unsplit model's figures alone and moves
-    every stage's."""
     cases = SAMPLE + STAGED
     baseline = _reports(tmp_path / "baseline", cases)
     monkeypatch.setattr(

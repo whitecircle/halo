@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`halo.data.pipeline.map_cache_key.dataset_content_fingerprint`.
-
-HF's ``Dataset._fingerprint`` is *not* stable across Python processes, so
-using it as the dataset half of the cache key built by
-:func:`map_cache_file_name` means every fresh ``python`` recomputes it
-differently and no run hits a previous run's cache — each rerun of the same
-config leaves another full set of arrow shards behind. The dataset half
-therefore routes through
-:func:`rank_stable_dataset_id`, which keys off the dataset's on-disk Arrow
-paths (written with deterministic md5 names upstream in
-:func:`coordinated_map` / :func:`coordinated_filter`).
-
-These tests pin that contract: as long as the on-disk shards are unchanged,
-the content fingerprint is *byte-identical* across simulated processes
-(different ``_fingerprint`` values).
-
-Run::
-
-    python tests/cpu/data/test_dataset_content_fingerprint.py
-"""
+"""``dataset_content_fingerprint`` keys off on-disk Arrow paths, since HF's ``Dataset._fingerprint`` is not stable
+across processes and every fresh run would miss its cache and leave another set of shards."""
 
 from __future__ import annotations
 
@@ -31,8 +13,7 @@ from halo.data.pipeline.map_cache_key import dataset_content_fingerprint
 
 
 def _on_disk_dataset(dirpath: str, data: dict, fingerprint: str) -> Dataset:
-    """Save a Dataset to disk and reload it; force a specific ``_fingerprint`` value
-    to simulate the per-process recomputation that HF datasets exhibits in practice."""
+    """Save and reload a Dataset, forcing ``_fingerprint`` to simulate the per-process recomputation."""
     ds = Dataset.from_dict(data)
     ds.save_to_disk(dirpath)
     reloaded = Dataset.load_from_disk(dirpath)
@@ -41,8 +22,6 @@ def _on_disk_dataset(dirpath: str, data: dict, fingerprint: str) -> Dataset:
 
 
 def test_run_to_run_stability_dataset() -> None:
-    """A single Dataset whose ``_fingerprint`` differs between simulated runs
-    must still produce the same content fingerprint."""
     with tempfile.TemporaryDirectory() as tmp:
         ds_run1 = _on_disk_dataset(tmp, {"x": list(range(16))}, fingerprint="run1-fp")
         ds_run2 = _on_disk_dataset(tmp, {"x": list(range(16))}, fingerprint="run2-fp")
@@ -53,8 +32,6 @@ def test_run_to_run_stability_dataset() -> None:
 
 
 def test_run_to_run_stability_datasetdict() -> None:
-    """A DatasetDict (train + test) with per-process-unstable per-split
-    ``_fingerprint`` values must still produce the same content fingerprint."""
     with tempfile.TemporaryDirectory() as tmp_train, tempfile.TemporaryDirectory() as tmp_test:
         train1 = _on_disk_dataset(tmp_train, {"x": list(range(16))}, fingerprint="t1")
         test1 = _on_disk_dataset(tmp_test, {"x": list(range(4))}, fingerprint="e1")
@@ -68,8 +45,6 @@ def test_run_to_run_stability_datasetdict() -> None:
 
 
 def test_different_content_different_fingerprint() -> None:
-    """A change in dataset size or on-disk shards must change the fingerprint —
-    otherwise we'd risk loading a stale cache against fresh inputs."""
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
         small = _on_disk_dataset(a, {"x": list(range(16))}, fingerprint="fp")
         large = _on_disk_dataset(b, {"x": list(range(128))}, fingerprint="fp")
@@ -77,9 +52,7 @@ def test_different_content_different_fingerprint() -> None:
 
 
 def test_in_memory_fallback_uses_fingerprint() -> None:
-    """A purely in-memory Dataset (no ``cache_files``) falls back to
-    ``_fingerprint`` — without it we'd collide on identical-shape in-memory
-    datasets that actually carry different content."""
+    """Without the fallback, identical-shape in-memory datasets with different content would collide."""
     ds_a = Dataset.from_dict({"x": [1, 2, 3]})
     ds_b = Dataset.from_dict({"x": [1, 2, 3]})
     ds_a._fingerprint = "marker-a"

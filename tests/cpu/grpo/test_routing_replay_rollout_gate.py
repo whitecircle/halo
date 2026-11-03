@@ -1,18 +1,6 @@
 #!/usr/bin/env python
-"""CPU pin for the ``routing_replay='rollout'`` (R3) batch gate in
-``DistributedAsyncEnvironmentalGRPOTrainer._assemble_rollout_routing``.
-
-The gate exists because training under R3 without the engine's selection is silently wrong, which
-includes a batch whose every routed row matches no engine coverage convention. What it must NOT do is
-fail a step that trains nothing: an assistant turn with no sampled ids yields no row
-(``_tokenize_trajectory_turns``), so a batch of such turns is fully masked rows carrying no routing —
-the zero-gradient step every other mode takes as a no-op. A turn the engine cut off is not that case:
-it becomes a negative-only row that may train, so it carries its routing and counts as trainable at
-the gate. Both halves are driven end to end here: the real per-turn tokenizer builds the rows, the
-real gate judges them.
-
-    python tests/cpu/grpo/test_routing_replay_rollout_gate.py
-"""
+"""The ``routing_replay='rollout'`` (R3) batch gate. Training without the engine's selection is silently wrong, yet a
+step that trains nothing must pass, and an engine-cut turn that may train carries its routing."""
 
 import types
 from collections import defaultdict
@@ -47,8 +35,7 @@ def _rollout(
     captured: bool = True,
     routing_tokens: int = len(ENGINE_PROMPT) + len(SAMPLED),
 ) -> RolloutResult:
-    """One episode with a single assistant turn carrying the engine's ids (and optionally its routing,
-    ``routing_tokens`` rows long: the default is the full prompt + completion convention)."""
+    """One episode with a single assistant turn; ``routing_tokens`` defaults to the prompt + completion convention."""
     traj = Trajectory()
     traj.add_message(Message.user("solve it"))
     traj.add_message(
@@ -65,11 +52,7 @@ def _rollout(
 
 
 def _host():
-    """A trainer stand-in exposing the REAL per-turn tokenizer, gate and uniform raise.
-
-    Single-process, so the batch fence's ``reject`` skips its gather and raises the recorded
-    error directly — the gate's verdict is the assertion, not a mocked one.
-    """
+    """The real per-turn tokenizer, gate and raise. Single-process, so the fence's ``reject`` raises directly."""
     host = types.SimpleNamespace(
         _rollout_routing_replay=True,
         _routing_injector=RoutingReplayInjector(
@@ -112,7 +95,6 @@ def _gate(host, rows):
 
 
 def test_an_engine_cut_turn_keeps_its_routing_on_a_negative_only_row():
-    """The mechanism: a cut turn's row is built like a trainable one, routing included, and tagged."""
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=True, routing=True))
     assert len(rows) == 1 and rows[0].negative_only
@@ -137,8 +119,7 @@ def test_gate_raises_when_a_negative_only_row_carries_no_routing():
 
 
 def test_gate_skips_a_batch_that_trains_nothing():
-    """No routing plus no trainable token is an empty step, not a capture failure: cut turns the engine
-    returned no ids for yield no row at all."""
+    """Cut turns the engine returned no ids for yield no row at all, so this is an empty step, no capture failure."""
     host = _host()
     rows = [
         row
@@ -150,7 +131,6 @@ def test_gate_skips_a_batch_that_trains_nothing():
 
 
 def test_gate_raises_when_a_trainable_row_carries_no_routing():
-    """Anti-vacuity: the capture failure the gate exists for still fails, naming the serve flags."""
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=False))
     assert rows[0].completion_mask.tolist() == [1] * len(SAMPLED)
@@ -159,8 +139,7 @@ def test_gate_raises_when_a_trainable_row_carries_no_routing():
 
 
 def test_gate_raises_on_a_mixed_batch_that_still_trains_something():
-    """Masked rows do not excuse a capture-less trainable one: that row would train with no selection
-    to replay, which is the state the gate exists to refuse."""
+    """A capture-less trainable row would train with no selection to replay, the state the gate exists to refuse."""
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=True, routing=False, captured=False))
     rows += host._tokenize_trajectory_turns(_rollout(truncated=False, routing=False))
@@ -169,7 +148,6 @@ def test_gate_raises_on_a_mixed_batch_that_still_trains_something():
 
 
 def test_gate_assembles_the_engine_mask_for_a_trainable_row():
-    """The pass-through case: a captured turn replays, and its coverage is recorded as fully aligned."""
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True))
     masks = _gate(host, rows)
@@ -185,8 +163,8 @@ _UNRESOLVED_TOKENS = len(ENGINE_PROMPT) + len(SAMPLED) + 3
 
 
 def test_gate_raises_when_every_routed_row_is_unresolved():
-    """Routing that lines up with no engine convention leaves every position on natural routing, so
-    R3 would train inert with only a coverage metric to show it."""
+    """Routing matching no engine convention leaves every position on natural routing, so R3 would train inert with
+    only a coverage metric to show it."""
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True, routing_tokens=_UNRESOLVED_TOKENS))
     with pytest.raises(ValueError, match="no routed row on this rank"):
@@ -194,7 +172,7 @@ def test_gate_raises_when_every_routed_row_is_unresolved():
 
 
 def test_gate_keeps_a_partly_unresolved_batch():
-    """Anti-vacuity: one unresolved row among replayed ones is coverage drift to watch, not a failure."""
+    """One unresolved row among replayed ones is coverage drift to watch, never a failure."""
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True))
     rows += host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True, routing_tokens=_UNRESOLVED_TOKENS))

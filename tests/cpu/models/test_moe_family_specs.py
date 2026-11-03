@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""Each MoE family is one spec, held by exactly one EP layer class, and the spec index refuses a shared claim.
-
-Run: ``python tests/cpu/models/test_moe_family_specs.py`` (or ``pytest -m cpu``).
-"""
+"""Each MoE family is one spec, held by exactly one EP layer class, and the spec index refuses a shared claim."""
 
 import pytest
 
@@ -20,7 +17,7 @@ from halo.models.moe.family_specs import (
 
 
 def _family_classes() -> list[type]:
-    """Toolkit EP layer classes declaring their own spec; test doubles join the same subclass tree."""
+    """Test doubles join the same subclass tree, so this keeps the toolkit's own."""
     return [cls for cls in ep_layer_classes() if "FAMILY" in vars(cls) and cls.__module__.startswith("halo.")]
 
 
@@ -32,8 +29,7 @@ def test_every_spec_is_held_by_exactly_one_family_class():
 
 @pytest.mark.parametrize("cls", _family_classes(), ids=lambda cls: cls.__name__)
 def test_the_live_balancing_slot_names_the_spec_slot(cls):
-    """The live-tree slot a family adopts is its spec's first spelling and the rest are its hub renames; a drift
-    would adopt one tensor and save another key."""
+    """A drift would adopt one tensor and save another key."""
     slot = cls.FAMILY.balancing_slot
     if slot:
         assert set(slot.attrs) == {slot.attrs[0], cls.FAMILY.to_hub_key(slot.attrs[0])}

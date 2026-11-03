@@ -1,18 +1,5 @@
-"""A checkpoint write that fails on ONE rank must abort every rank — proven on a real group.
-
-:class:`DeferredRankFailure` exists so a save-rank ENOSPC does not strand its peers in the next
-collective. The single-process tests next door pin the local half (record, don't raise, keep the
-first cause), but they all take ``reject_across_ranks``'s ``world_size <= 1`` early return, which
-degenerates to a plain local raise. Gutting the ``all_gather_object`` and replacing it with
-``if self.reason: raise`` passes every one of them — and reinstates exactly the bug the class was
-written to prevent, because the ranks that wrote successfully never learn a peer failed.
-
-This is the test that fails for that mutation. Two ranks, real gloo, only rank 1 "fails" its write:
-rank 0 must still raise, and its message must carry rank 1's actual errno rather than a timeout.
-The process-group timeout is deliberately short so a regression FAILS instead of stalling the suite.
-
-    python tests/cpu/checkpoint/test_deferred_failure_multirank.py
-"""
+"""A checkpoint write failing on one rank aborts every rank, on real gloo. The single-process tests take the
+``world_size <= 1`` early return, so a plain local raise passes them and fails here."""
 
 import datetime
 import os
@@ -24,15 +11,13 @@ from halo.runtime.consensus import DeferredRankFailure
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
-# Far below any plausible real wait: without the gather, the non-failing rank can only end in a gloo
-# timeout, and the suite must not sit on it.
+# Without the gather the non-failing rank can only end in a gloo timeout.
 PG_TIMEOUT_SEC = 15
 
 ENOSPC = "No space left on device"
 
 
 def _worker(rank: int, tmp_dir: str, failing_rank: int) -> None:
-    """Model the streaming save: every rank stages 'layers', one rank's write fails partway."""
     guard = DeferredRankFailure("checkpoint write")
     collectives_entered = 0
 
@@ -69,12 +54,12 @@ def _results(tmp_path, failing_rank: int) -> list[tuple[int, str]]:
 
 
 def test_one_ranks_write_failure_aborts_every_rank_with_the_cause(tmp_path):
-    """The headline behavior. Rank 0's write succeeds; it must still raise, naming rank 1's errno."""
+    """Rank 0's write succeeds and it still raises, naming rank 1's errno."""
     failing_rank = 1
     results = _results(tmp_path, failing_rank=failing_rank)
 
     for rank, (collectives, outcome) in enumerate(results):
-        # The whole point of deferring: the failing rank keeps entering the collectives.
+        # The failing rank keeps entering the collectives.
         assert collectives == 3, f"rank {rank} skipped a collective ({collectives}/3) — peers would hang"
         assert outcome != "NO RAISE", f"rank {rank} sailed past a failed checkpoint write"
         assert "Timeout" not in outcome and "timed out" not in outcome, f"rank {rank} only saw a timeout: {outcome}"
@@ -84,7 +69,6 @@ def test_one_ranks_write_failure_aborts_every_rank_with_the_cause(tmp_path):
 
 
 def test_a_clean_save_raises_on_nobody(tmp_path):
-    """The gather must not be a raise-always: with no failure anywhere, every rank proceeds."""
     results = _results(tmp_path, failing_rank=-1)
     for rank, (collectives, outcome) in enumerate(results):
         assert collectives == 3

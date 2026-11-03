@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The shared synthetic generators in ``tests/common/datasets.py`` are a fixed data contract.
-
-GPU suites assert ``loss_decreased`` on real checkpoints over this data, so a generator that
-changes what it emits moves every one of those trajectories at once. Two properties are pinned:
-the single-turn generator emits exactly one user/assistant pair per row (the multi-turn variant
-lives in ``create_sft_dataset``), and a given ``(seed, templates)`` pair reproduces the same rows.
-
-Run: python tests/cpu/data/test_synthetic_dataset_generators.py
-"""
+"""The shared synthetic generators in ``tests/common/datasets.py`` are a fixed data contract: GPU suites assert
+``loss_decreased`` over this data, so a change moves every trajectory at once."""
 
 import pytest
 
@@ -47,8 +40,7 @@ def test_single_turn_generator_is_seed_reproducible():
 
 
 def test_the_multi_turn_generator_is_a_different_data_contract():
-    """``create_sft_dataset`` is not a drop-in for the single-turn one: its follow-up turns change
-    the token count, hence the loss trajectory of any suite pinned on the flat rows."""
+    """Its follow-up turns change the token count, hence the loss trajectory of any suite pinned on the flat rows."""
     multi = create_sft_dataset(64, _RoleTokenizer(), seed=42)["text"]
     assert any(text.count("user:") > 1 for text in multi), "multi_turn_ratio=0.3 must produce follow-ups"
     flat = create_single_turn_sft_dataset(64, _RoleTokenizer(), seed=42)["text"]

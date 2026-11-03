@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Test the mixin's OOM-diagnosability helpers in single-process isolation.
-
-The thin-margin warning and the rank-local OOM banner exist so a one-rank OOM inside a distributed
-step does not read as a DeepEP/cuBLAS kernel fault: the hot rank OOMs by a fraction of a GiB and its
-peers die on Xid 43 launch failures inside combine. No GPU or distributed init.
-
-Both are PER-RANK verdicts, so neither sits behind the module's ``is_global_main_process()`` guard: each is
-pinned here to log on a rank that is not the main process. Guarded, each would print only when rank 0 is
-the affected rank, which is precisely the case it was not written for.
-
-Run: python tests/cpu/trainers/test_memory_margin_diagnostics.py
-"""
+"""The mixin's OOM-diagnosability helpers, so a one-rank OOM does not read as a DeepEP/cuBLAS kernel fault.
+Both are per-rank verdicts, so each must log on a rank that is not the main process."""
 
 import types
 from unittest import mock
@@ -53,15 +43,11 @@ def test_message_survives_zero_total():
 
 
 class _OOMingTrainer:
-    """Stands in for the TRL/HF base whose step the spine wraps."""
-
     def training_step(self, model, inputs, num_items_in_batch=None):
         raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 53.56 GiB")
 
 
 class _StepHost(DistributedTrainerMixin, _OOMingTrainer):
-    """The spine's real ``training_step`` over a base that OOMs; the token accounting has nothing to count."""
-
     def _accumulate_unmasked_output_tokens(self, local_count):
         pass
 
@@ -78,7 +64,6 @@ def _oom_step():
 
 
 def _recorder(monkeypatch, main: bool) -> mock.MagicMock:
-    """The module logger replaced by a recorder, on a rank that is or is not the global main process."""
     recorder = mock.MagicMock()
     monkeypatch.setattr("halo.trainers.distributed_trainer.logger", recorder)
     monkeypatch.setattr("halo.trainers.distributed_trainer.is_global_main_process", lambda: main)
@@ -86,9 +71,7 @@ def _recorder(monkeypatch, main: bool) -> mock.MagicMock:
 
 
 def test_primary_failure_banner_logs_off_the_main_process(monkeypatch):
-    """The banner names the rank that OOMed. Guarded to the main process it would print only when rank 0
-    died — never in the case it exists for, leaving a post-mortem with peer watchdog timeouts and no
-    primary cause."""
+    """Guarded to the main process it would print only when rank 0 died, leaving peer timeouts and no primary cause."""
     recorder = _recorder(monkeypatch, main=False)
     monkeypatch.setattr("halo.trainers.distributed_trainer.get_global_rank", lambda: 3)
 
@@ -102,12 +85,8 @@ def test_primary_failure_banner_logs_off_the_main_process(monkeypatch):
 
 
 def test_thin_margin_warning_logs_off_the_main_process(monkeypatch):
-    """The thin-margin verdict is per-rank by construction (MoE routing skew concentrates dispatch buffers
-    and expert activations on hot ranks), so a main-process-only emit reports it for the one rank whose
-    margin is least likely to be the problem.
-
-    CUDA is faked rather than skipped: on the CPU tier a skip would leave the emit unpinned, which is the
-    whole behaviour under test."""
+    """MoE routing skew concentrates buffers on hot ranks, so a main-process-only emit reports the rank least at risk.
+    CUDA is faked because a skip on the CPU tier would leave the emit unpinned."""
     recorder = _recorder(monkeypatch, main=False)
     monkeypatch.setattr("halo.trainers.distributed_trainer.thin_memory_margin_message", lambda *a, **k: "thin margin")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -125,7 +104,7 @@ def test_thin_margin_warning_logs_off_the_main_process(monkeypatch):
 
 @pytest.mark.parametrize("main", [True, False])
 def test_the_released_buffers_line_logs_on_the_main_process_only(monkeypatch, main):
-    """The control for the two above: the released-buffers line is for global rank 0 only."""
+    """The control for the two above."""
     recorder = _recorder(monkeypatch, main)
     monkeypatch.setattr("halo.trainers.distributed_trainer.free_unclaimed_ep_buffers", lambda: 2)
     monkeypatch.setattr("halo.trainers.distributed_trainer.barrier", lambda: None)

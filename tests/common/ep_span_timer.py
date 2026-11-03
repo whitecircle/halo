@@ -1,5 +1,5 @@
-"""Timing of named spans on CUDA events, such as the EP layers' dispatch, expert-compute and combine phases
-(``benchmark_sft_ep.py --comm_profile`` swaps it in for their ``torch.profiler.record_function`` labels)."""
+"""Timing of named spans on CUDA events, swapped in for the EP layers' ``record_function`` labels by
+``benchmark_sft_ep.py --comm_profile``."""
 
 from __future__ import annotations
 

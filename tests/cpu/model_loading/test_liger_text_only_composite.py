@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""A text-only load of a multimodal checkpoint applies Liger to the text sub-config the built model carries.
-
-On a composite config ``AutoModelForCausalLM`` builds the text-only sibling, which holds the text sub-config and runs
-the head the fused loss (``fused_linear_cross_entropy``) patches. Liger applied to the composite config resolves the
-applier through the wrapper's text fallback, takes the wrapper's own head for the one that runs and keeps the fused
-loss off: a Qwen3.8-Flash-Next text-only run would hold the full logits plane while its recipes request the fused
-loss. The load of the composite class keeps that wrapper-head guard. Pinned through ``load_distributed_model`` on
-the tiny Flash-Next checkpoint (an eager build from the config, and the lazy EP loader's meta shell), and across
-every composite ``model_type`` transformers maps that admits a text-only load.
-
-    python tests/cpu/model_loading/test_liger_text_only_composite.py
-"""
+"""A text-only load of a multimodal checkpoint applies Liger to the text sub-config the model carries. Otherwise the
+wrapper fallback keeps the fused loss off and holds the full logits plane."""
 
 import json
 import logging
@@ -39,7 +29,7 @@ WRAPPER_WARNING = "multimodal wrapper"
 
 
 class _RecordingApplier(LigerApplier):
-    """The family's toolkit applier, recording each call's flags instead of patching the modeling classes."""
+    """Records each call's flags instead of patching the modeling classes."""
 
     def __init__(self, spec):
         super().__init__(spec)
@@ -59,7 +49,7 @@ def flash_next_applier(monkeypatch):
 
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory):
-    """The tiny Flash-Next release layout: the multimodal wrapper, saved with its vision tower."""
+    """The multimodal wrapper, saved with its vision tower."""
     directory = tmp_path_factory.mktemp("flash_next")
     torch.manual_seed(0)
     tiny_family_model(TINY_MOE_VLM_FAMILIES["qwen4_exp"]).save_pretrained(directory)
@@ -71,13 +61,12 @@ def _eager_build(source, pc, model_class, model_config, dtype, **kwargs):
 
 
 def _meta_shell_build(source, pc, model_class, model_config, dtype, **kwargs):
-    """The lazy EP loader's build: the shell ``from_pretrained`` reads on the meta device."""
+    """The shell ``from_pretrained`` reads on the meta device."""
     return instantiate_on_meta(source.local_dir, model_class, model_config, dtype, trust_remote_code=False)
 
 
 def _load(config, build, *, text_only: bool, liger_kernel_config: dict | None, local_dir: str = "org/model"):
-    """``load_distributed_model`` with Liger, the class resolution and the build real, everything a CPU process
-    cannot run (or need not, the family patches and kernel warm-ups) stubbed; returns the built model."""
+    """Liger, class resolution and the build stay real; what a CPU process cannot run is stubbed."""
     with (
         patch.object(model_loading, "configure_float32_matmul_precision"),
         patch.object(model_loading, "apply_remote_code_compat_shims"),
@@ -106,8 +95,8 @@ def _load(config, build, *, text_only: bool, liger_kernel_config: dict | None, l
 
 @pytest.mark.parametrize("build", [_eager_build, _meta_shell_build], ids=["eager", "lazy_ep_meta_shell"])
 def test_a_text_only_flash_next_load_takes_the_fused_loss_it_requests(build, checkpoint, flash_next_applier, caplog):
-    """The text tower's applier runs with the fused loss on, its stamp sits on the built model's config, where the
-    trainer's TRL flag reconciliation reads it, and no export carries it."""
+    """The stamp sits on the built model's config, where the trainer's TRL flag reconciliation reads it, and no
+    export carries it."""
     config = AutoConfig.from_pretrained(checkpoint)
     with caplog.at_level(logging.WARNING, logger=dispatch.__name__):
         model = _load(config, build, text_only=True, liger_kernel_config={FLCE: True}, local_dir=checkpoint)
@@ -128,8 +117,7 @@ def test_a_text_only_flash_next_load_takes_the_fused_loss_it_requests(build, che
 
 
 def test_the_composite_class_load_keeps_the_fused_loss_off(checkpoint, flash_next_applier, caplog):
-    """The multimodal class runs its own head, which the text tower's fused loss never patches: the request is
-    refused under the wrapper-head warning, so the spec registry is not where the text-only fix may live."""
+    """The multimodal class runs its own head, so the spec registry is not where the text-only fix may live."""
     config = AutoConfig.from_pretrained(checkpoint)
     with caplog.at_level(logging.WARNING, logger=dispatch.__name__):
         model = _load(config, _eager_build, text_only=False, liger_kernel_config={FLCE: True}, local_dir=checkpoint)
@@ -141,15 +129,13 @@ def test_the_composite_class_load_keeps_the_fused_loss_off(checkpoint, flash_nex
 
 
 def _composite_config(model_type: str):
-    """The tiny roster's config where it carries the family (a stock default config may not build), else the stock
-    default."""
+    """A stock default config may not build."""
     family = TINY_MOE_VLM_FAMILIES.get(model_type)
     return family.build({}).config if family is not None else CONFIG_MAPPING[model_type]()
 
 
 def _text_only_composite_types() -> list[str]:
-    """Every composite ``model_type`` transformers maps to an image-text-to-text class that also admits a text-only
-    load (:func:`resolve_auto_model_class` refuses the rest)."""
+    """:func:`resolve_auto_model_class` refuses the rest."""
     admitted = []
     for model_type in sorted(MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES):
         if model_type not in CONFIG_MAPPING:
@@ -173,15 +159,13 @@ def test_the_sweep_covers_the_composite_families_the_toolkit_trains():
 
 
 def _applier_resolution(config) -> tuple:
-    """The applier Liger resolves for ``config`` and whether it came through the wrapper's text fallback, which
-    keeps the fused loss off."""
+    """The fallback keeps the fused loss off."""
     resolved, applier = dispatch._resolve_applier(*dispatch._liger_model_types(config))
     return applier, applier is not None and resolved != config.model_type
 
 
 @pytest.mark.parametrize("model_type", TEXT_ONLY_COMPOSITE_TYPES)
 def test_every_text_only_composite_load_applies_liger_to_the_config_its_model_carries(model_type, monkeypatch):
-    """Whatever the family, the loader hands Liger the config the text-only build holds."""
     seen: list = []
     monkeypatch.setattr(model_loading, "apply_liger_kernel", lambda config, **kwargs: seen.append(config))
     composite = _composite_config(model_type)
@@ -198,9 +182,7 @@ def test_every_text_only_composite_load_applies_liger_to_the_config_its_model_ca
 
 
 def test_only_a_family_claimed_through_its_text_tower_alone_changes_its_applier():
-    """The text tower's applier differs from the composite spelling's only for a family Liger claims through its
-    text tower alone (Flash-Next), whose composite spelling reaches an applier only through the wrapper's text
-    fallback; for Qwen3.5 and Qwen3.5-MoE the composite spelling resolves the text tower's applier itself."""
+    """For Qwen3.5 and Qwen3.5-MoE the composite spelling resolves the tower's applier itself."""
     changed = {}
     for model_type in TEXT_ONLY_COMPOSITE_TYPES:
         composite = _composite_config(model_type)
@@ -213,8 +195,7 @@ def test_only_a_family_claimed_through_its_text_tower_alone_changes_its_applier(
 
 
 def test_a_load_that_pins_another_class_keeps_the_config_it_read():
-    """Only ``AutoModelForCausalLM`` swaps a composite config for its text sub-config; the composite class and a
-    plain config pass through."""
+    """Only ``AutoModelForCausalLM`` swaps a composite config for its text sub-config."""
     composite = CONFIG_MAPPING["qwen4_exp"]()
     assert model_loading._built_model_config(composite, AutoModelForCausalLM) is text_config(composite)
     assert model_loading._built_model_config(composite, resolve_auto_model_class(composite)) is composite

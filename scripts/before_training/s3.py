@@ -1,10 +1,5 @@
 #!/usr/bin/env python
-"""CLI over the toolkit's S3 transport: push, download, list and delete S3 folders, each through an
-:class:`~halo.data.sources.s3_client.S3Client` built for ``--bucket``, or for the bucket a full ``s3://`` URI key
-names.
-
-Usage: python scripts/before_training/s3.py <push|download|list|exists|delete> ...
-"""
+"""CLI over the toolkit's S3 transport: push, download, list, exists and delete S3 folders."""
 
 import argparse
 import logging
@@ -22,7 +17,6 @@ from halo.log import configure_cli_logging
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The CLI: one subcommand per S3 operation, each bound to its handler, over the shared bucket flags."""
     parser = argparse.ArgumentParser(
         description="S3 utilities for uploading/downloading folders",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -106,8 +100,7 @@ def main():
     args = build_parser().parse_args()
 
     configure_cli_logging(verbose=args.verbose)
-    # Undo the library modules' INFO pins so ``-v`` widens the S3 code that emits the transfer
-    # records, not only its dependencies.
+    # Undo the library modules' INFO pins so ``-v`` widens the S3 code as well as its dependencies.
     level = logging.DEBUG if args.verbose else logging.INFO
     for module_logger in (s3_client.logger, s3_dataset_store.logger, dataset_cache.logger):
         module_logger.setLevel(level)

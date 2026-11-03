@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Online GRPO's vLLM generation timeout must stay below the NCCL collective watchdog.
-
-The generation POST is single-shot and blocking, so every peer sits at the next collective for its
-whole duration. Env-GRPO validates its rollout timeouts against ``nccl_timeout()``;
-online GRPO has no such guard, so the client's default is derived from the same resolver instead of
-spelled as a literal — otherwise lowering ``DIST_NCCL_TIMEOUT_MINUTES`` leaves an HTTP timeout the
-watchdog fires long before.
-
-    python tests/cpu/grpo/test_generation_timeout_watchdog.py
-"""
+"""Online GRPO's vLLM generation timeout must stay below the NCCL collective watchdog. The POST blocks every peer at
+the next collective, so the client's default derives from the ``nccl_timeout()`` resolver instead of a literal."""
 
 import logging
 
@@ -27,11 +19,8 @@ class _NoChoices:
 
 @pytest.fixture
 def generation_timeout(monkeypatch):
-    """The deadline ``TrlVLLMClient.generate`` puts on its ``/v1/completions`` request under the given env.
-
-    Drives a real client through its constructor and one generation, with only the live-server probe
-    and the POST itself replaced — a structural read of the source would pass against a restored literal.
-    """
+    """The deadline ``TrlVLLMClient.generate`` puts on its ``/v1/completions`` request, through a real client; a
+    structural read of the source would pass against a restored literal."""
 
     def resolve(**env):
         for name, value in env.items():
@@ -65,7 +54,6 @@ def test_default_generation_timeout_clears_the_default_watchdog(monkeypatch, gen
 
 
 def test_a_lowered_watchdog_lowers_the_generation_timeout(monkeypatch, generation_timeout):
-    """The regression a literal default hides: shrinking the watchdog must shrink the HTTP bound."""
     monkeypatch.delenv("HALO_VLLM_GENERATION_TIMEOUT_SECONDS", raising=False)
 
     default_watchdog = generation_timeout(DIST_NCCL_TIMEOUT_MINUTES="30")
@@ -76,7 +64,7 @@ def test_a_lowered_watchdog_lowers_the_generation_timeout(monkeypatch, generatio
 
 
 def test_an_explicit_generation_timeout_still_wins(monkeypatch, generation_timeout):
-    """The knob is an override, not a ceiling — an operator who raised the watchdog can raise it."""
+    """An operator who raised the watchdog can raise this too."""
     assert generation_timeout(HALO_VLLM_GENERATION_TIMEOUT_SECONDS="900.5") == 900.5
 
 

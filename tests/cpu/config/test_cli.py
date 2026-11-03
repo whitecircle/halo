@@ -15,11 +15,8 @@ runner = CliRunner()
 
 
 def stub_exec(monkeypatch, envs: list[dict[str, str]] | None = None) -> tuple[list[Path], list[list[str]]]:
-    """Replace the process handover so a non-dry-run invocation is observable.
-
-    Returns ``(chdirs, argvs)`` — what the CLI would have chdir'd to, and the argv it would exec; the
-    environment it would exec with lands in ``envs`` when one is given.
-    """
+    """Replace the process handover; returns ``(chdirs, argvs)``, and the exec environment lands in ``envs`` when
+    given."""
     chdirs: list[Path] = []
     argvs: list[list[str]] = []
 
@@ -85,8 +82,7 @@ def test_nested_methods_index_without_shadowing_flat_methods(tmp_path):
 
 
 def test_singular_plural_stem_variants_get_no_alias(tmp_path):
-    """`reward` (nested) vs `rewards` (other) differ only by pluralization; a bare-stem
-    alias would silently launch the wrong trainer, so neither stem is aliased."""
+    """A bare-stem alias would silently launch the wrong trainer, so neither stem is aliased."""
     write_script(tmp_path / "scripts/training/other/rewards.py")
     write_script(tmp_path / "scripts/training/nested/reward.py")
 
@@ -112,9 +108,8 @@ def test_launch_ambiguous_stem_reports_qualified_names(tmp_path):
 
 
 def test_a_stem_whose_candidates_are_one_script_resolves(tmp_path):
-    """The singular/plural fold is what makes a stem ambiguous, and with a single script there is
-    nothing to be ambiguous about: `reward` matches `other/rewards` and its own `rewards` alias,
-    two names for one file. Reporting that as ambiguous leaves the method unreachable by its stem."""
+    """With a single script there is nothing to be ambiguous about: ``reward`` matches ``other/rewards`` and its own
+    ``rewards`` alias, two names for one file."""
     write_script(tmp_path / "scripts/training/other/rewards.py")
     write_config(tmp_path / "config.yaml")
 
@@ -125,9 +120,7 @@ def test_a_stem_whose_candidates_are_one_script_resolves(tmp_path):
 
 
 def test_underscored_method_name_resolves_to_the_hyphenated_entry(tmp_path):
-    """The index is hyphenated, but a script spells its method with underscores (`my_method.py`) —
-    that spelling must launch it, not be rejected as unknown. The listing stays hyphenated: one
-    canonical entry, no alias."""
+    """The listing stays hyphenated: one canonical entry, no alias."""
     write_script(tmp_path / "scripts/training/my_method.py")
     write_config(tmp_path / "config.yaml")
 
@@ -145,8 +138,7 @@ def test_underscored_method_name_resolves_to_the_hyphenated_entry(tmp_path):
 
 
 def test_unknown_method_still_fails_loud(tmp_path):
-    """Normalization must not swallow a typo into a near neighbour: an unindexed name raises, naming
-    the known methods and the flag that lists the rest."""
+    """An unindexed name raises, naming the known methods and the flag that lists the rest."""
     write_script(tmp_path / "scripts/training/my_method.py")
     write_config(tmp_path / "config.yaml")
 
@@ -160,8 +152,8 @@ def test_unknown_method_still_fails_loud(tmp_path):
 
 
 def test_a_root_with_no_scripts_tree_names_the_root(tmp_path):
-    """An index that came back empty is a wrong ``--root`` (or an install without the tree). Calling
-    the typed name unknown would name the wrong problem and send the user hunting for a typo."""
+    """An empty index means a wrong ``--root``; calling the typed name unknown would send the user hunting for a
+    typo."""
     write_config(tmp_path / "config.yaml")
 
     results = {
@@ -188,7 +180,6 @@ def test_tool_commands_cover_after_training_inference_and_preparation(tmp_path):
     write_script(tmp_path / "scripts/inference/reward_model/score.py")
     write_script(tmp_path / "scripts/before_training/prepare_dataset.py")
     write_script(tmp_path / "scripts/environments/inference/eval_env.py")
-    # training scripts must NOT leak into the tool index
     write_script(tmp_path / "scripts/training/sft.py")
 
     index = tool_commands(tmp_path)
@@ -213,11 +204,10 @@ def test_tool_subtrees_are_derived_from_the_scripts_tree(tmp_path):
 
     assert index["profiling/trace-report"] == tmp_path / "scripts/profiling/trace_report.py"
     assert index["after-training/merge-models"] == tmp_path / "scripts/after_training/merge_models.py"
-    # training stays owned by `halo launch`
     assert all(not name.startswith("training/") for name in index)
     assert "sft" not in index
-    # diagrams regenerates committed doc assets through generators that rely on being run as a
-    # script (`from _theory_style import *`), so advertising them as tools would only mislead.
+    # diagrams regenerates doc assets through generators that must run as a script, so advertising them as tools would
+    # mislead.
     assert all(not name.startswith("diagrams/") for name in index)
 
 
@@ -295,7 +285,6 @@ def test_command_accelerate_passes_num_processes_when_nproc_set():
         "--num_processes",
         "4",
     ]
-    # accelerate takes precedence over torchrun even when nproc > 1
     assert "torchrun" not in run
 
 
@@ -373,11 +362,8 @@ def test_run_command_passes_flags_through(tmp_path):
 
 
 def test_run_keeps_the_caller_cwd_so_relative_path_flags_mean_what_they_say(tmp_path, monkeypatch):
-    """`halo run <tool> --output_dir ./out` must write under the CALLER's cwd.
-
-    Chdir'ing to the repo root re-roots every relative path flag — a multi-GB checkpoint/dataset
-    write silently lands on the small root FS instead of the scratch volume the user is standing in.
-    """
+    """Chdir'ing to the repo root would re-root every relative path flag, and a multi-GB write would land on the
+    small root FS."""
     write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
     caller_cwd = tmp_path / "caller"
     caller_cwd.mkdir()
@@ -389,7 +375,6 @@ def test_run_keeps_the_caller_cwd_so_relative_path_flags_mean_what_they_say(tmp_
     assert result.exit_code == 0, result.output
     assert chdirs == [], "halo run must not chdir — './out' would resolve under the repo root"
     assert Path.cwd() == caller_cwd
-    # The script is addressed absolutely, so nothing depended on the chdir.
     assert argvs[0][1] == str(tmp_path / "scripts/after_training/merge_ep_shards.py")
     assert argvs[0][-2:] == ["--output_dir", "./out"]
 
@@ -454,8 +439,8 @@ def test_command_rejects_port_for_single_process():
 
 @pytest.mark.parametrize("flag", ["--nnodes=2", "--node_rank", "--master-addr=10.0.0.1", "--rdzv_endpoint=h:1"])
 def test_launch_refuses_torchrun_multinode_flags_by_name(tmp_path, flag):
-    """``halo launch`` is single-node: a torchrun rendezvous flag among the pass-through args would
-    otherwise reach the script's parser and be reported as an unknown config field."""
+    """A torchrun rendezvous flag would otherwise reach the script's parser and be reported as an unknown config
+    field."""
     write_script(tmp_path / "scripts/training/sft.py")
     write_config(tmp_path / "config.yaml")
 
@@ -481,7 +466,6 @@ def test_launch_port_option_reaches_torchrun(tmp_path):
 
 
 def _dry_run(tmp_path, verb_args: list[str]) -> list[str]:
-    """Tokens of the command a dry run prints."""
     verb, *rest = verb_args
     # Launcher flags first: whatever follows a separator in ``rest`` is the script's.
     result = runner.invoke(app, [verb, "--dry_run", "--root", str(tmp_path), *rest])
@@ -501,7 +485,6 @@ def _dry_run(tmp_path, verb_args: list[str]) -> list[str]:
     ],
 )
 def test_launch_forwards_field_overrides_without_a_separator(tmp_path, overrides):
-    """Overrides follow the config as typed: no ``--`` is needed for a flag the launcher does not own."""
     write_script(tmp_path / "scripts/training/sft.py")
     write_config(tmp_path / "config.yaml")
 
@@ -572,8 +555,8 @@ def test_positional_tool_arguments_pass_through_without_a_separator(tmp_path):
 
 
 def test_an_override_typed_before_the_config_names_the_argument_order(tmp_path):
-    """An unknown flag is pass-through, so one typed first is parsed as CONFIG itself; the error must
-    say so instead of reporting a missing file called ``--learning_rate``."""
+    """An unknown flag is pass-through, so one typed first parses as CONFIG; the error says so and does not report a
+    missing file called ``--learning_rate``."""
     write_script(tmp_path / "scripts/training/sft.py")
     write_config(tmp_path / "config.yaml")
 
@@ -599,9 +582,8 @@ def test_a_flag_in_the_tool_slot_is_refused_by_name(tmp_path):
 
 @pytest.mark.parametrize("tool_flags", [["--port", "7860"], ["-p", "7860"], ["-n", "8"], ["--nproc", "2"]])
 def test_run_is_one_process_and_hands_the_tool_its_own_port_and_count_flags(tmp_path, tool_flags):
-    """Every tool is single-process: N torchrun copies of a checkpoint tool race on one output
-    directory, and a launcher ``--port`` would swallow a Gradio app's own ``--port``. So ``halo run``
-    owns neither, and both reach the tool as typed."""
+    """N torchrun copies of a checkpoint tool race on one output directory, and a launcher ``--port`` would swallow
+    a Gradio app's own."""
     write_script(tmp_path / "scripts/inference/serve.py")
 
     tokens = _dry_run(tmp_path, ["run", "serve", *tool_flags])
@@ -613,9 +595,8 @@ def test_run_is_one_process_and_hands_the_tool_its_own_port_and_count_flags(tmp_
 
 @pytest.mark.parametrize("verb", ["launch", "run"])
 def test_the_child_imports_the_root_tree_first(tmp_path, monkeypatch, verb):
-    """A script's own directory is all ``python script.py`` puts on ``sys.path``, so a ``--root``
-    checkout would otherwise run its script over the installed tree's ``halo`` and ``scripts``; the
-    root leads ``PYTHONPATH`` and an inherited entry follows it."""
+    """``python script.py`` puts only the script's directory on ``sys.path``, so a ``--root`` checkout would
+    otherwise run over the installed tree; the root leads ``PYTHONPATH``."""
     write_script(tmp_path / "scripts/training/sft.py")
     write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
     write_config(tmp_path / "config.yaml")
@@ -640,9 +621,8 @@ def test_the_child_imports_the_root_tree_first(tmp_path, monkeypatch, verb):
     ],
 )
 def test_numa_binding_reaches_torchrun_not_the_script(tmp_path, typed):
-    """torchrun reads its own options only before the script; one after it is the script's argument,
-    which the training parser rejects as an unknown field. Parsed with torchrun's parser, the flag is
-    torchrun's and the script keeps only its config and overrides."""
+    """torchrun reads its own options only before the script; one after it is the script's argument, which the
+    training parser rejects."""
     write_script(tmp_path / "scripts/training/sft.py")
     write_config(tmp_path / "config.yaml")
 
@@ -701,8 +681,8 @@ def test_an_unknown_numa_mode_is_refused_before_launch(tmp_path):
     ids=["python", "python-n1", "accelerate", "accelerate-n8"],
 )
 def test_numa_binding_is_refused_for_a_launch_without_torchrun(tmp_path, launcher):
-    """``accelerate launch`` and ``python`` have no NUMA binding: the flag fails loud rather than being
-    dropped (an unbound run) or forwarded (an unknown field in the script's parser)."""
+    """``accelerate launch`` and ``python`` have no NUMA binding, so the flag fails loud and is neither dropped nor
+    forwarded."""
     write_script(tmp_path / "scripts/training/sft.py")
     write_config(tmp_path / "config.yaml")
     write_config(tmp_path / "accelerate.yaml")

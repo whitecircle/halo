@@ -1,26 +1,6 @@
 #!/usr/bin/env python
-"""
-VLM (Vision Language Model) SFT Training Test.
-
-Smoke test: DistributedSFTTrainer trains a VLM model (AutoModelForImageTextToText) on text-only
-synthetic conversations, exercising the VLM code path without image data. It checks only that the
-logged losses are finite; no loss is compared against a reference.
-
-Test Setup:
-- Model: Qwen/Qwen3-VL-2B-Instruct (VLM with text+vision capabilities)
-- Parallelism: the mixin's FSDP2 data parallelism (no EP/CP/TP)
-- Dataset: the shared synthetic math SFT set, text-only (no images), 30% multi-turn
-
-Test Phases:
-1. Load VLM model via AutoModelForImageTextToText + AutoProcessor
-2. Create synthetic text-only dataset with chat-templated conversations
-3. Train for 5 steps with gradient checkpointing (Liger off)
-4. Validate: training completes, loss is finite
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_vlm.py
-"""
+"""DistributedSFTTrainer smoke on Qwen3-VL-2B with text-only data. It checks only finite losses; no loss is compared
+against a reference."""
 
 from types import SimpleNamespace
 
@@ -56,7 +36,7 @@ def run(ctx):
     log(f"  Seq length: {MAX_SEQ_LENGTH}")
     log(f"{'=' * 70}")
 
-    # the loader reads dtype/liger settings off these
+    # The loader reads dtype and Liger settings off these.
     config = SFTConfig(
         output_dir=ctx.output_dir,
         max_steps=MAX_STEPS,
@@ -75,7 +55,7 @@ def run(ctx):
     )
     parallelism_config = ParallelismConfig()
 
-    # production entry point, so VLM detection and processor load are under test too
+    # The production entry point, so VLM detection and processor load are under test too.
     log("\n[1/5] Loading VLM via load_policy_model (production path)...")
     model_config = ModelArguments(
         model_name_or_path=MODEL_NAME, attn_implementation="flash_attention_2", trust_remote_code=True

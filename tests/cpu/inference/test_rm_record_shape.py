@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""The reward-model scripts write each generated turn as ``{"role", "content"}`` plus the reply's
-non-null extras, never its null optional fields.
-
-A served reply carries the SDK's optional fields (``annotations``, ``refusal``, ``audio``,
-``function_call``) and the engine's own (``reasoning``, ``reasoning_content``), nearly all null; a
-dump of the reply object writes them into every ``full_conversation``, ``chosen`` / ``rejected`` and
-``completions`` turn. A non-null ``reasoning_content`` is the chain of thought the chat template
-renders, so it stays.
-
-Run: python tests/cpu/inference/test_rm_record_shape.py
-"""
+"""The reward-model scripts write each generated turn as ``{"role", "content"}`` plus the reply's non-null extras. A
+non-null ``reasoning_content`` is the chain of thought the chat template renders, so it stays."""
 
 import asyncio
 import copy

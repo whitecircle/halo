@@ -30,7 +30,6 @@ from tests.common.offline_grpo_reference import (
 
 
 def _scratch_files(root) -> list[str]:
-    """The scratch's files, minus the lock a live launch holds beside its directory for the run."""
     return sorted(
         str(path.relative_to(root))
         for path in (root / REFERENCE_CACHE_DIR_NAME).rglob("*")
@@ -514,8 +513,7 @@ def test_transport_failure_is_not_deferred_to_a_world_failure_join(tmp_path, mon
 
 
 def test_completed_scores_stay_on_disk_for_the_launch(tmp_path):
-    """Every rank maps the merged files for the run: on NFS a reader on another node faults on a stale
-    handle once the file is unlinked and the unlinking host closes its own mappings."""
+    """On NFS a reader on another node faults on a stale handle once the unlinking host closes its own mappings."""
     first = mapped_scores(tmp_path, reference_dataset(), reference_rows())
     mapped_scores(tmp_path, reference_dataset(), reference_rows())
     launches = [path for path in (tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir() if path.is_dir()]

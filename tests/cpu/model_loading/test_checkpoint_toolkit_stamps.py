@@ -1,13 +1,5 @@
-"""A checkpoint's ``config.json`` can carry toolkit stamps (``TOOLKIT_STAMP_PREFIX`` keys: the applied Liger config,
-the CP fused-loss flag, the resolved sinks reset, the router-logits forced-off mark) that another writer serialized.
-Each load drops them before the run stamps its own, so none is read as this run's state: the policy loader's config,
-which every per-mode loader builds the model from; both configs a frozen reference or teacher holds; the model a
-trainer constructor loads from a path; and the backbone the default embedding path loads. A config the caller hands
-the load is the run's and keeps its stamps. The forced-off mark carries the stamp prefix, so the export lifts it from
-a config that holds no recorded original for it.
-
-    python tests/cpu/model_loading/test_checkpoint_toolkit_stamps.py
-"""
+"""Toolkit stamps another writer serialized into ``config.json`` are dropped at each load, so none reads as this run's
+state. A config the caller hands the load is the run's and keeps its stamps."""
 
 import copy
 import json
@@ -42,8 +34,8 @@ from tests.common.tiny_models import (
     word_level_tokenizer,
 )
 
-# Each stamp at the value that would steer a run: the fused loss armed, the FLCE warning raised, SDPA allowed on
-# live sinks, the MoE metrics callback unwired.
+# Each at the value that would steer a run: fused loss armed, FLCE warning raised, SDPA allowed on live sinks, the MoE
+# metrics callback unwired.
 CHECKPOINT_STAMPS = {
     LIGER_APPLIED_CONFIG_ATTR: {"fused_linear_cross_entropy": True},
     LIGER_CP_FUSED_LOSS_ATTR: True,
@@ -65,8 +57,6 @@ def _stamps(config) -> list[str]:
 
 
 def _stamped_checkpoint(tmp_path, family: str) -> str:
-    """``family``'s tiny checkpoint, with a tokenizer, and every stamp written on the wrapper and, for a composite,
-    the text config."""
     build_tiny_family_checkpoint(FAMILIES[family], str(tmp_path))
     word_level_tokenizer(("hello",)).save_pretrained(tmp_path)
     config_path = tmp_path / "config.json"
@@ -75,7 +65,7 @@ def _stamped_checkpoint(tmp_path, family: str) -> str:
     if isinstance(payload.get("text_config"), dict):
         payload["text_config"] |= CHECKPOINT_STAMPS
     config_path.write_text(json.dumps(payload))
-    # The condition the loaders guard: transformers reads every stamp back as a live attribute on every level.
+    # transformers reads every stamp back as a live attribute on every level.
     read_back = AutoConfig.from_pretrained(tmp_path)
     assert all(
         vars(level).get(key) == value
@@ -110,9 +100,7 @@ def test_the_policy_config_drops_every_checkpoint_stamp(stamped):
 
 
 def test_a_frozen_model_drops_every_checkpoint_stamp(stamped):
-    """The config the frozen load resolves its attention backend against carries no checkpoint stamp, and the model
-    built on it carries only the run's own: the sinks verdict this load resolved (live, against the checkpoint's
-    reset)."""
+    """The model carries only the sinks verdict this load resolved (live, against the checkpoint's reset)."""
     family, path = stamped
     resolved_against = []
     resolve = frozen_models.resolve_attn_implementation
@@ -138,7 +126,7 @@ def test_a_frozen_model_drops_every_checkpoint_stamp(stamped):
 
 
 def test_a_trainer_model_path_drops_every_checkpoint_stamp(stamped):
-    """A trainer constructor handed a path (SMPO, offline GRPO, the distillation student) loads it itself."""
+    """A trainer constructor handed a path loads it itself."""
     _, path = stamped
     model = resolve_trainer_model(path, None, parallelism_config=None)
     assert _stamps(model.config) == []
@@ -146,7 +134,7 @@ def test_a_trainer_model_path_drops_every_checkpoint_stamp(stamped):
 
 
 def test_a_config_the_caller_passes_keeps_its_stamps(stamped):
-    """The policy loader stamps the config it passes before the load; the load must not drop the run's state."""
+    """The policy loader stamps the config before the load."""
     _, path = stamped
     config = AutoConfig.from_pretrained(path)
     passed = _stamps(config)
@@ -156,7 +144,7 @@ def test_a_config_the_caller_passes_keeps_its_stamps(stamped):
 
 @pytest.mark.parametrize("family", EMBEDDING_FAMILIES)
 def test_the_embedding_backbone_drops_every_checkpoint_stamp(family, tmp_path):
-    """The default embedding path, where sentence-transformers loads the backbone itself."""
+    """sentence-transformers loads the backbone itself."""
     path = _stamped_checkpoint(tmp_path / "checkpoint", family)
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
@@ -183,8 +171,7 @@ def test_the_embedding_backbone_drops_every_checkpoint_stamp(family, tmp_path):
 
 
 def test_the_forced_off_mark_never_exports_from_a_copied_config():
-    """``from_pretrained`` hands the model a deep copy of the config it is given, which holds no recorded original
-    for a mark written before the copy; the export lifts the mark by its prefix and the run still reads it."""
+    """The deep copy holds no recorded original for a mark written before it, so the export lifts it by prefix."""
     config = AutoConfig.for_model("qwen3")
     mark_router_logits_forced_off(config)
     copied = copy.deepcopy(config)

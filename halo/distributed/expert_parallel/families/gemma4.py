@@ -10,19 +10,13 @@ from halo.models.moe.family_specs import GEMMA4
 
 
 class EPGemma4MoELayer(EPMoELayerBase):
-    """EP layer for Gemma4 routed experts (``Gemma4TextExperts``) using DeepEP.
-
-    Gemma4 inlines MoE compute in its decoder layer with no ``*MoeBlock``, so only the experts are replaced; the
-    sibling ``Gemma4TextRouter`` stays FSDP-managed and bf16 (``fp32_router`` has no effect, and upcasting it
-    would feed fp32 into DeepEP's bf16-only combine). Tokens arrive flat ``[B*S, H]`` with routing weights
-    already normalized and scaled.
-    """
+    """EP layer for ``Gemma4TextExperts``. Gemma4 inlines MoE compute in its decoder layer, so only the experts are
+    replaced; the sibling router stays FSDP-managed and bf16 (fp32 would reach DeepEP's bf16-only combine)."""
 
     HF_MODULE_NAMES = ("Gemma4TextExperts",)
     FAMILY = GEMMA4
 
-    # The router is a sibling module in the decoder layer, not a child of the wrapped experts: nothing
-    # is adopted here, and only expert grad-sync hooks register.
+    # The router is a sibling module in the decoder layer, so only expert grad-sync hooks register.
     _ROUTER_ATTR = None
 
     # Gemma4 spells its config field ``hidden_activation``, which the name-resolution chain does not
@@ -34,13 +28,11 @@ class EPGemma4MoELayer(EPMoELayerBase):
 
     @classmethod
     def _find_experts_container(cls, layer: nn.Module) -> nn.Module:
-        """The wrapped module is itself the expert container: Gemma4 inlines MoE in its decoder
-        layer, so there is no block to read one off."""
+        """The wrapped module is itself the expert container."""
         return layer
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
-        """No-op: the sibling ``Gemma4TextRouter`` passes the routing decision in already made, and
-        ``Gemma4TextExperts`` carries no routing knob."""
+        """No-op: the sibling ``Gemma4TextRouter`` passes the routing decision in already made."""
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
         return ("router=sibling-module (FSDP-managed)",)

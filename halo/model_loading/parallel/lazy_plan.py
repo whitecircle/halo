@@ -1,9 +1,5 @@
-"""Planning a lazy EP load: the expert-key vocabulary, the lazy gate, the per-key weight plan and the prologue
-the EP and PP lazy loaders share.
-
-The vocabulary is derived from the family specs; a fused-3D checkpoint is planned as
-ranged expert slices, a per-expert one as this rank's keys for :mod:`.expert_fuser` to stack.
-"""
+"""Planning a lazy EP load: the expert-key vocabulary, the lazy gate, the per-key weight plan and the prologue the EP
+and PP lazy loaders share."""
 
 from __future__ import annotations
 
@@ -32,8 +28,7 @@ from halo.runtime.ranks import get_global_rank
 
 logger = logging.getLogger(__name__)
 
-# Derived from the family specs' container attrs, never restated: a hand-written alternation that omitted
-# a family's container silently mis-planned every one of its expert keys.
+# Derived from the family specs: a hand-written alternation omitting a family's container would mis-plan its keys.
 _CONTAINER_ALT = "|".join(re.escape(a) for a in experts_container_attrs())
 # A fused 3D expert tensor, expert index on dim 0: GptOss ``[E,H,2M]``, Qwen3/GLM4/LFM2 ``[E,2M,H]``.
 FUSED_EXPERT_KEY_PATTERN = re.compile(
@@ -47,8 +42,6 @@ _NESTED_EXPERT_KEY_PATTERN = re.compile(rf"\.(?:{_CONTAINER_ALT})\.[A-Za-z_]\w*\
 
 
 class ExpertKeyLayout(Enum):
-    """How a checkpoint stores its expert weights."""
-
     FUSED = auto()  # 3D tensors with the expert dim: sliced directly
     PER_EXPERT = auto()  # one key per expert: this rank's read and fused
 
@@ -64,14 +57,9 @@ class ExpertKeyLayout(Enum):
 
 
 def is_lazy_loadable(model_path: str) -> bool:
-    """Whether the lazy loaders can materialize this checkpoint; the caller routes a refusal to
-    ``from_pretrained``.
-
-    The family spec's ``supports_lazy_loading`` decides, read off ``config.model_type``; a checkpoint-native
-    quantization is refused (its scale tensors map to nothing live, so the experts would load as garbage
-    unseen); a nested expert index is the structural backstop for a ``model_type`` no family claims.
-    Best-effort: ``True`` when neither the config nor the index can be read.
-    """
+    """Whether the lazy loaders can materialize this checkpoint; ``True`` when neither config nor index reads.
+    Checkpoint-native quantization is refused, as its scale tensors map to nothing live and the experts would load as
+    garbage unseen."""
     try:
         config = read_checkpoint_config(model_path, missing_ok=True) or {}
     except (OSError, ValueError):
@@ -115,11 +103,7 @@ class WeightPlanner:
         fanout: dict[str, tuple] | None = None,
         ignore_unexpected: Iterable[str] = (),
     ) -> list[WeightPlan]:
-        """One plan per checkpoint key that aligns to a model tensor (a fan-out key, one per target).
-
-        A key that aligns to none is warned unless it matches one of the ``ignore_unexpected`` patterns (the model's
-        ``_keys_to_ignore_on_load_unexpected``, which ``from_pretrained`` leaves out of its report too).
-        """
+        """One plan per key aligning to a model tensor; others warn unless ``ignore_unexpected`` matches."""
         plans: list[WeightPlan] = []
         claimed_by: dict[str, str] = {}
         unexpected: list[str] = []
@@ -206,11 +190,7 @@ class WeightPlanner:
         return WeightAction.REPLICATE, 0, 0, 0
 
     def _is_expected_per_expert_key(self, disk_key: str) -> bool:
-        """A per-expert key the fuser (or a per-expert live model) consumes, so not an unexpected one.
-
-        Still reported: an undeclared projection suffix, which nothing reads, and an expert index at or
-        beyond the config's expert count, which no rank owns.
-        """
+        """A per-expert key the fuser consumes; an undeclared suffix or an index past the count still reports."""
         m = PER_EXPERT_KEY_PATTERN.search(disk_key)
         if not m:
             return False
@@ -243,13 +223,8 @@ def lazy_load_prologue(
     meta_init_phase: str,
     build_meta_shell: Callable[[bool], nn.Module],
 ) -> LazyLoadPlan:
-    """COLLECTIVE-EQUIVALENT (``meta_init_phase`` is a store rendezvous): what the EP and PP lazy loaders
-    need before the first rank-local read.
-
-    The expert assignment is finalized before any plan exists (the planner slices by this rank's range),
-    and the meta shell before the keys are aligned against it. ``build_meta_shell`` receives whether the
-    index names shard files this filesystem lacks, which a caller answers with a config-only build.
-    """
+    """COLLECTIVE-EQUIVALENT (``meta_init_phase`` is a store rendezvous): what the lazy loaders need before the first
+    rank-local read. ``build_meta_shell`` receives whether the index names shard files this filesystem lacks."""
     rank = get_global_rank()
     dtype = resolve_load_dtype(dtype, config)
     if ep_config is not None and ep_config.num_experts is None:

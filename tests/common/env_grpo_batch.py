@@ -1,9 +1,5 @@
-"""The environmental trainer's real batch build over stub rows, for CPU tests of what a step trains.
-
-``_build_training_tensors`` runs for real; tokenization, the recompute forward and the reference
-forward are stubs, so a test sets the rows, the policy's log-probs and the knobs, and reads the batch,
-the world metrics and the completions record. Single process: every gather is the identity.
-"""
+"""The environmental trainer's real batch build over stub rows, for CPU tests of what a step trains; every gather is
+the identity."""
 
 import types
 from collections import defaultdict
@@ -33,8 +29,8 @@ def row(
     loss_mask: list[int] | None = None,
     negative_only: bool = False,
 ) -> TurnRow:
-    """A one-token-prompt row; ``sampling`` carries the engine's per-token log-probs, ``negative_only`` tags
-    an untrainable turn's row."""
+    """A one-token-prompt row; ``sampling`` carries the engine's per-token log-probs, ``negative_only`` tags an
+    untrainable turn's row."""
     return TurnRow(
         torch.tensor([5]),
         torch.tensor(completion),
@@ -62,9 +58,8 @@ def batch_host(
     balance_token_mass: bool = False,
     save_completions: bool = False,
 ):
-    """A trainer stand-in whose ``_build_training_tensors`` is the real one; the recompute forward returns
-    ``policy`` (``[rows, completion width]``) and the reference forward ``reference``. ``scale_rewards`` and
-    ``std_floor`` are the advantage's ``scale_rewards`` and ``scale_rewards_std_floor``."""
+    """A trainer stand-in whose ``_build_training_tensors`` is real; the recompute forward returns ``policy``, the
+    reference forward ``reference``."""
     host = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
     host.model = types.SimpleNamespace(training=training)
     host.args = types.SimpleNamespace(

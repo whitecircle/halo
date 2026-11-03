@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""SMPOTrainer at TP=2 saves a mid-training checkpoint and resumes from it on Qwen3-0.6B.
-
-The DTensor parameters are gathered for the save and re-sharded on the resume, which streams the
-checkpoint's weights into a base-loaded TP model; the checks are
-:func:`~tests.common.checkpoint_io.run_two_phase_resume`'s.
-"""
+"""SMPOTrainer at TP=2 saves a mid-training checkpoint and resumes from it, streaming weights into a base-loaded TP
+model."""
 
 import torch
 from transformers import AutoTokenizer
@@ -40,7 +36,7 @@ def run(ctx) -> dict:
             dtype=torch.bfloat16,
             trust_remote_code=True,
             use_liger_kernel=True,
-            attn_implementation="sdpa",  # padded preference: avoid FA4 varlen-bwd cold-compile (see test_smpo_tp)
+            attn_implementation="sdpa",  # Padded preference: avoids FA4's varlen-bwd cold compile (see test_smpo_tp).
         )
         return SMPOTrainer(
             model=model,

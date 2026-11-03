@@ -1,7 +1,6 @@
-"""Gradient sync for EP MoE layers: post-accumulate hooks on the FSDP-ignored router and replicated params, inert
-during gradient accumulation and in a single process. The expert grads take no hook: their divide, and the
-cross-replica sum multiple EP groups add, run once per optimizer step in the trainer's post-backward sweep
-(``EPConfig.runs_post_backward_sweep``), which every rank enters."""
+"""Gradient sync for EP MoE layers: post-accumulate hooks on the FSDP-ignored router and replicated params. Expert
+grads take no hook; their divide and cross-replica sum run once per optimizer step in the trainer's post-backward
+sweep, which every rank enters."""
 
 from __future__ import annotations
 
@@ -22,8 +21,7 @@ def should_sync_gradients() -> bool:
 
 
 def has_grad_sync_peers(ep_config: EPConfig) -> bool:
-    """Whether this process has peer ranks to sync gradients with, read live: the default process group is
-    initialized independently of the config."""
+    """Read live, since the default process group is initialized independently of the config."""
     return has_process_group() and ep_config.stage_world_size > 1
 
 
@@ -42,16 +40,14 @@ def build_router_grad_hook(ep_config: EPConfig) -> Callable[[torch.Tensor], None
 
 
 class EPGradSyncMixin:
-    """The layer's grad-sync hooks, mixed into :class:`EPMoELayerBase`, whose construction builds the state
-    annotated here. Trainers call its two public methods on layers."""
+    """The layer's grad-sync hooks, mixed into :class:`EPMoELayerBase`."""
 
     ep_config: EPConfig
     _grad_sync_hooks: list
 
     def reattach_router_grad_sync(self) -> int:
-        """Hook the trainable router/replicated params again for PEFT ``modules_to_save``, which trains a copy
-        the construction hooks never saw; returns how many. Only on the in-backward hook path.
-        """
+        """Hook the trainable router/replicated params again for PEFT ``modules_to_save``, which trains a copy the
+        construction hooks never saw; returns how many."""
         if not self.ep_config.uses_backward_grad_hooks:
             return 0
         if not has_grad_sync_peers(self.ep_config):
@@ -59,10 +55,8 @@ class EPGradSyncMixin:
         return self._hook_dp_averaged_params()
 
     def synced_trainable_param_ids(self) -> set:
-        """Ids of the trainable params this layer keeps DP/EP-consistent: all of them under the FSDP-sharded
-        or deferred sweep, else the experts and their adapters (the sweep's expert divide), the router and
-        replicated submodules (the router hook).
-        """
+        """Ids of the trainable params this layer keeps DP/EP-consistent: all under the FSDP-sharded or deferred sweep,
+        else the experts and adapters (the sweep's divide), router and replicated submodules (the router hook)."""
         trainable = {id(p) for p in self.parameters() if p.requires_grad}
         if not self.ep_config.uses_backward_grad_hooks:
             return trainable
@@ -71,8 +65,6 @@ class EPGradSyncMixin:
         return ids
 
     def _install_gradient_sync_hooks(self) -> None:
-        """Register the router hook on the router and replicated submodules, the only in-backward sync these
-        FSDP-ignored params get."""
         # FSDP reduce-scatters fully replicated experts (ep_group_size==1, not pure ETP), and the deferred
         # sweep owns every cross-replica topology and PP rank block: a hook would double-sync or race it.
         if not self.ep_config.uses_backward_grad_hooks:
@@ -81,8 +73,6 @@ class EPGradSyncMixin:
             self._hook_dp_averaged_params()
 
     def _hook_dp_averaged_params(self) -> int:
-        """Register the router hook on every trainable :meth:`_dp_averaged_named_params` param; returns how
-        many."""
         dp_hook = build_router_grad_hook(self.ep_config)
         trainable = [param for _, param in self._dp_averaged_named_params() if param.requires_grad]
         for param in trainable:
@@ -90,8 +80,7 @@ class EPGradSyncMixin:
         return len(trainable)
 
     def _dp_averaged_named_params(self) -> list:
-        """``(name, param)`` the router hook DP-averages: the live router (a PEFT ``modules_to_save`` copy
-        included) and the replicated submodules."""
+        """What the router hook DP-averages: the live router, ``modules_to_save`` copy included, and replicas."""
         router = self._live_router_module()
         router_params = list(router.named_parameters()) if router is not None else []
         return router_params + self.replicated_named_params()
