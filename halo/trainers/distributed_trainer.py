@@ -92,8 +92,6 @@ from halo.trainers.training_args_overrides import align_save_on_each_node, disab
 
 logger = logging.getLogger(__name__)
 
-_TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss")
-
 # Peak-allocated device fraction: a rank this close to full after the first optimizer step OOMs on a later backward.
 MEMORY_MARGIN_WARN_RATIO = 0.92
 
@@ -283,7 +281,7 @@ class DistributedTrainerMixin(
         # Before HF's Trainer.__init__ turns on the deterministic mode the warmed graphs were compiled without.
         reject_full_determinism_after_warmup(full_determinism)
         reject_cross_domain_determinism(parallelism_config, full_determinism)
-        return self._split_pipeline_stage(kwargs, training_args, ctor_args)
+        return self._split_pipeline_stage(kwargs, training_args)
 
     def _snapshot_model_config_state(self, model_config) -> None:
         """Snapshot what TRL's constructor writes: the special-token ids every save restores (HF's
@@ -309,10 +307,8 @@ class DistributedTrainerMixin(
         # Every entry point, the Python API included; free after an entry script's own probe.
         verify_output_filesystem_sharing(training_args.output_dir)
         align_save_on_each_node(training_args)
-        # The mixin owns the sharding, and DDP must tolerate the EP layers' externally synced params.
+        # The mixin owns the sharding.
         training_args.fsdp = ""
-        if config.has_ep_group:
-            training_args.ddp_find_unused_parameters = True
         # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering.
         if getattr(training_args, "use_liger_kernel", False):
             safe_config = dict(getattr(training_args, "liger_kernel_config", None) or {})
@@ -382,9 +378,7 @@ class DistributedTrainerMixin(
             self._install_ep_layer_hooks()
         # Every run and never gated on the model: under PP a stage may hold no EP layer and the check is
         # collective, and a model can carry EP layers its config does not declare.
-        reject_unsynced_trainable_params(
-            self.model, self._fsdp_exclusions().params, self._ep_layers(), self._ep_config
-        )
+        reject_unsynced_trainable_params(self.model, self._fsdp_excluded_params(), self._ep_layers(), self._ep_config)
         reject_unrealized_expert_lora(self._top_level_model(), config.expert_lora)
         # After the wrap and after TRL's dropout disabling, so they read what the run will actually use.
         reject_expert_lora_peft_conflicts(self._top_level_model(), config.expert_lora)
@@ -399,6 +393,8 @@ class DistributedTrainerMixin(
         loss-kwargs scaling and the TP width TRL's token counter divides by."""
         if self.LOSS_IS_OWN_MEAN:
             self.model_accepts_loss_kwargs = False
+            # A compute_loss_func, which these losses never call, would otherwise also drop the /grad_accum division.
+            self.loss_is_scaled_for_ga = False
         # TRL reads the ranks sharing a batch off accelerate's parallelism config, which the toolkit's accelerator
         # never carries, so its world-gathered attended-token counter would count a TP/ETP/CP batch once per rank.
         if hasattr(self, "_tp_size"):
@@ -502,7 +498,6 @@ class DistributedTrainerMixin(
         self._install_dp_metric_gather()
         if self.save_sharded_ep:
             reject_unmergeable_ep_sharded_save(self.model, merge_expert_lora_on_save=config.merge_expert_lora_on_save)
-        self._disable_trl_liger_loss_under_fsdp2()
         reject_sync_ref_model_on_sharded_policy(
             self.args, sharded=self._fsdp_wrapped or config.has_ep_group or config.is_tp_mode
         )
@@ -510,24 +505,6 @@ class DistributedTrainerMixin(
         if self._fsdp_wrapped:
             self._register_output_capturing_for_fsdp()
         self._apply_torch_compile()
-
-    def _disable_trl_liger_loss_under_fsdp2(self) -> None:
-        """Turn off TRL's fused Liger loss once FSDP2 has sharded the model: it matmuls ``lm_head.weight`` outside
-        FSDP2's forward hooks, where that is a sharded DTensor. A loss attribute this guard does not know fails."""
-        if not (self._fsdp_wrapped and getattr(self, "use_liger_kernel", False)):
-            return
-        if not any(getattr(self, attr, None) is not None for attr in _TRL_LIGER_LOSS_ATTRS):
-            raise RuntimeError(
-                f"use_liger_kernel is on under FSDP2 but none of TRL's known fused Liger loss "
-                f"attributes {_TRL_LIGER_LOSS_ATTRS} is set on {type(self).__name__}: the installed TRL "
-                f"builds that loss under another name, which this guard cannot disable, and it would "
-                f"matmul the FSDP2-sharded lm_head.weight. Set use_liger_kernel: false, or add the new "
-                f"attribute name to _TRL_LIGER_LOSS_ATTRS."
-            )
-        self.use_liger_kernel = False
-        self.args.use_liger_kernel = False
-        if is_global_main_process():
-            logger.info("  Disabled Liger fused loss (incompatible with FSDP2 DTensors)")
 
     def _move_model_to_device(self, model, device):
         verify_no_meta_tensors(model)

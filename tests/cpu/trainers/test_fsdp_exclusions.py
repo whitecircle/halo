@@ -38,16 +38,14 @@ def _ids(params) -> set[int]:
 def test_a_trainable_child_of_a_module_owning_a_frozen_fp32_param_stays_sharded():
     gate = _ForgetGate()
 
-    exclusions = DistributedTrainerMixin._fsdp_exclusions(_trainer(gate))
-
-    assert _ids(exclusions.params) == {id(gate.dt_bias)}
+    assert _ids(DistributedTrainerMixin._fsdp_excluded_params(_trainer(gate))) == {id(gate.dt_bias)}
 
 
 def test_a_uniform_model_excludes_nothing():
     gate = _ForgetGate()
     gate.dt_bias.data = gate.dt_bias.data.to(torch.bfloat16)
 
-    assert DistributedTrainerMixin._fsdp_exclusions(_trainer(gate)).params == []
+    assert DistributedTrainerMixin._fsdp_excluded_params(_trainer(gate)) == []
 
 
 if __name__ == "__main__":

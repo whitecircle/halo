@@ -18,7 +18,6 @@ from trl import KTOTrainer
 
 from halo.data.completion_spans import completion_labels
 from halo.kernels.logprobs import sequence_logprobs
-from halo.trainers.ctor_slots import get_ctor_arg
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, row_count_normalizer, rows_with_labels
 from halo.trainers.parallelism.pipeline_rules import (
@@ -44,15 +43,13 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         "load_distributed_model."
     )
 
-    def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
+    def _reject_unsupported_pp_options(self, kwargs: dict) -> None:
         """The PP loss reproduces ``beta`` and both desirability weights; ctor parameters are read from ``kwargs``
         only, as in DPO."""
         reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
         reject_kto_pp_loss_type(training_args)
-        reject_pp_ref_model(
-            get_ctor_arg(ctor_args, kwargs, "ref_model", self.CTOR_POSITIONS), "the ref_logps dataset column"
-        )
+        reject_pp_ref_model(kwargs.get("ref_model"), "the ref_logps dataset column")
         reject_missing_precomputed_reference(
             "KTO",
             training_args,

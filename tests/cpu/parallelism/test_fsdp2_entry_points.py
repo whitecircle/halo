@@ -207,8 +207,8 @@ class _EPTPHost(ModeSetupMixin):
         )
         self._excluded = excluded
 
-    def _fsdp_exclusions(self):
-        return SimpleNamespace(params=self._excluded)
+    def _fsdp_excluded_params(self):
+        return self._excluded
 
 
 def _ep_tp_model() -> _CausalLmLike:

@@ -21,7 +21,6 @@ from trl import DPOTrainer
 
 from halo.data.completion_spans import completion_labels
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
-from halo.trainers.ctor_slots import get_ctor_arg
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,
@@ -74,15 +73,12 @@ class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         "level by load_distributed_model."
     )
 
-    def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
+    def _reject_unsupported_pp_options(self, kwargs: dict) -> None:
         """Ctor parameters are read from ``kwargs`` only, since a positional argument would rebind TRL's ``model``
         slot."""
         reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
-        reject_pp_ref_model(
-            get_ctor_arg(ctor_args, kwargs, "ref_model", self.CTOR_POSITIONS),
-            "ref_chosen_logps/ref_rejected_logps dataset columns",
-        )
+        reject_pp_ref_model(kwargs.get("ref_model"), "ref_chosen_logps/ref_rejected_logps dataset columns")
         reject_missing_precomputed_reference(
             "DPO",
             training_args,

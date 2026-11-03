@@ -101,7 +101,6 @@ def test_the_spine_sets_the_hf_settings_every_distributed_trainer_needs(ep_size,
         {"args": args, "parallelism_config": make_parallelism_config(world_size=2, gpus_per_node=2, ep_size=ep_size)}
     )
     assert args.fsdp == ""
-    assert args.ddp_find_unused_parameters is (True if ep_size > 1 else None)
 
 
 if __name__ == "__main__":

@@ -189,9 +189,7 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         elif self.args.n_gpu > 1:
             hf_loss_scale = self.args.n_gpu
         else:
-            hf_loss_scale = self.accelerator.num_processes
-            if (pc := getattr(self.accelerator, "parallelism_config", None)) is not None:
-                hf_loss_scale //= pc.tp_size
+            hf_loss_scale = self.accelerator.num_processes // self.get_tp_size()
         return loss - forward_added * hf_loss_scale + target
 
     def log(self, logs: dict[str, float], start_time: float | None = None):

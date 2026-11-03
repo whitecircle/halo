@@ -21,9 +21,7 @@ class OfflineGRPOPipelineMixin:
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """Every denominator reads batch metadata alone, so the microbatch numerators share the runner's one per-step
-        normalizer. At ``kl_beta != 0`` the reference log-probs ship as a third side tensor. Seeds the PP-only live
-        clamp floor."""
-        self._pp_min_log_prob: float | None = self.min_log_prob
+        normalizer. At ``kl_beta != 0`` the reference log-probs ship as a third side tensor."""
         extra_target_keys = ("advantage", "group_size")
         if self.beta != 0.0:
             extra_target_keys += (REF_PER_TOKEN_LOGPS_COLUMN,)
@@ -48,7 +46,7 @@ class OfflineGRPOPipelineMixin:
         advantages = target["advantage"].float()
         ref_logps = target[REF_PER_TOKEN_LOGPS_COLUMN] if self.beta != 0.0 else None
         per_token_loss, sample_values = self._token_objective(
-            token_logps, advantages, ref_logps, self._pp_min_log_prob
+            token_logps, advantages, ref_logps, self._live_min_log_prob
         )
         self._record_sign_metrics(sample_values, advantages, mask, rows=rows_with_labels(target["labels"]))
         return offline_loss_numerator(per_token_loss, mask, target["group_size"], loss_type=self.loss_type)
@@ -73,7 +71,6 @@ class OfflineGRPOPipelineMixin:
             self.args.max_length,
             "The fixed shape is max_prompt_length + max_completion_length; raise them to fit the rows.",
         )
-        self._pp_min_log_prob = self._live_min_log_prob
         out = {**padded, "advantage": batch["advantage"], "group_size": batch["group_size"]}
         if self.beta != 0.0 and self._pp_ref_sweep is None:
             ref_logps = batch.get(REF_PER_TOKEN_LOGPS_COLUMN)
@@ -121,7 +118,6 @@ class OfflineGRPOPipelineMixin:
     def _pp_reference_sweep_pass(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         """COLLECTIVE across the chain and the stage's replicas. One forward-only pass whose last-stage loss stashes
         its per-token log-probs, which every rank receives."""
-        self._pp_ref_sweep = []
         self._pp_runner.eval_loss(
             inputs["input_ids"],
             inputs["labels"],
@@ -130,5 +126,4 @@ class OfflineGRPOPipelineMixin:
             extra_targets={key: inputs[key] for key in ("advantage", "group_size")},
         )
         stashed = torch.cat(self._pp_ref_sweep) if self.parallelism_config.is_last_pp_stage else None
-        self._pp_ref_sweep = None
         return self._pp_broadcast_output_from_last_stage(stashed)

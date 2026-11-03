@@ -5,6 +5,8 @@
 import inspect
 
 import pytest
+import torch
+from transformers import TrainingArguments
 from transformers.trainer import Trainer
 
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
@@ -12,6 +14,8 @@ from tests.common.rosters import distributed_trainer_classes
 
 _FLAG = "LOSS_IS_OWN_MEAN"
 _ASSIGNMENT = "model_accepts_loss_kwargs = False"
+_OWN_MEAN = 8.0
+_ACCUMULATION = 4
 
 
 def _computes_its_own_loss(cls: type) -> bool:
@@ -80,6 +84,7 @@ class _SpineStopped(Exception):
 class _SpineHost:
     _deferred_liger_kernel = False
     model = None
+    loss_is_scaled_for_ga = None  # HF's class default: infer it per step
 
     def __init__(self, loss_is_own_mean: bool):
         self.LOSS_IS_OWN_MEAN = loss_is_own_mean
@@ -101,6 +106,33 @@ def test_the_spine_applies_the_declared_attribute(loss_is_own_mean):
         f"_restore_trl_overrides left model_accepts_loss_kwargs={host.model_accepts_loss_kwargs!r} "
         f"for a trainer with {_FLAG}={loss_is_own_mean!r}"
     )
+    assert host.loss_is_scaled_for_ga is (False if loss_is_own_mean else None)
+
+
+class _OwnMeanLoss(Trainer):
+    """Returns its own mean and ignores ``compute_loss_func``, as every ``LOSS_IS_OWN_MEAN`` trainer does."""
+
+    LOSS_IS_OWN_MEAN = True
+    _deferred_liger_kernel = False
+    _pristine_special_token_ids = ["snapshotted"]
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        return model(inputs["x"]).sum() * 0.0 + _OWN_MEAN
+
+
+def test_a_compute_loss_func_leaves_an_own_mean_loss_divided_by_accumulation(tmp_path):
+    """HF drops the division whenever a ``compute_loss_func`` is set, on the premise that it scaled the loss."""
+    trainer = _OwnMeanLoss(
+        model=torch.nn.Linear(1, 1),
+        args=TrainingArguments(output_dir=str(tmp_path), use_cpu=True, report_to="none"),
+        compute_loss_func=lambda *args, **kwargs: pytest.fail("this trainer's loss never calls compute_loss_func"),
+    )
+    DistributedTrainerMixin._restore_trl_overrides(trainer)
+    trainer.current_gradient_accumulation_steps = _ACCUMULATION
+
+    loss = trainer.training_step(trainer.model, {"x": torch.ones(1, 1)})
+
+    assert loss.item() == _OWN_MEAN / _ACCUMULATION
 
 
 def test_the_default_leaves_hf_inference_alone():

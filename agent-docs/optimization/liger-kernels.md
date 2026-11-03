@@ -366,10 +366,7 @@ outside Halo's loaders runs those roles eager.
 DPO and KTO turn TRL's `use_liger_kernel` off at construction in every mode: TRL's chunked log-prob path
 refuses the router aux loss, and DPO's also skips the family's head transform
 ([DPO](../training-methods/preference/dpo.md)). The model-level kernels stay; single-process DPO loses that
-loss path's memory saving. Under FSDP2 the other trainers' fused TRL loss (`liger_loss_fn`,
-`liger_grpo_loss`) is disabled too: it does `input @ weight.t()` against `model.lm_head.weight` outside
-FSDP2's forward hooks, where the weight is a sharded DTensor. A trainer with TRL's `use_liger_kernel` on and
-none of those attributes set raises at construction rather than leave an unknown loss running.
+loss path's memory saving.
 
 ## GptOss
 

@@ -4,7 +4,6 @@ import logging
 import os
 import time
 from collections.abc import Iterable
-from typing import NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -31,16 +30,6 @@ logger = logging.getLogger(__name__)
 
 # Accelerate's TorchDynamoPlugin default too; reduce-overhead's CUDA graphs measure slower on EP MoE.
 DEFAULT_TORCH_COMPILE_MODE = "default"
-
-
-class FsdpExclusions(NamedTuple):
-    """``ep_modules`` sync their own gradients and are left out whole, except under ``experts_fsdp_managed``.
-    ``dtype_params`` are frozen parameters whose dtype no trainable parameter shares, taken one by one so a trainable
-    child of their module stays in its shard group."""
-
-    ep_modules: list[nn.Module]
-    dtype_params: list[nn.Parameter]
-    params: list[nn.Parameter]
 
 
 def require_tp_mesh(mesh, tp_size: int):
@@ -153,7 +142,7 @@ class ModeSetupMixin:
                 self._apply_dp_fsdp2(
                     self.model,
                     config.stage_world_size,
-                    excluded_params=self._fsdp_exclusions().params,
+                    excluded_params=self._fsdp_excluded_params(),
                     dp_replicate_size=config.dp_replicate_size,
                 )
         if mode and is_global_main_process():
@@ -219,7 +208,7 @@ class ModeSetupMixin:
             return
         self._apply_ep_aware_dp_fsdp2(
             self.model,
-            exclusions=self._fsdp_exclusions(),
+            excluded_params=self._fsdp_excluded_params(),
             fallback_dp_size=config.stage_world_size,
             dp_replicate_size=config.dp_replicate_size,
         )
@@ -234,7 +223,7 @@ class ModeSetupMixin:
             compute_dtype=resolve_training_dtype(self.args),
             fp32_reduce=config.fsdp_reduces_in_fp32,
             dp_size=config.data_parallel_size,
-            ignored_params=self._fsdp_exclusions().params,
+            ignored_params=self._fsdp_excluded_params(),
             reshard_after_forward=config.fsdp_reshard_after_forward,
         )
 
@@ -249,7 +238,7 @@ class ModeSetupMixin:
         self._apply_dp_fsdp2(
             self._top_level_model(),
             config.stage_world_size,
-            excluded_params=self._fsdp_exclusions().params,
+            excluded_params=self._fsdp_excluded_params(),
             dp_replicate_size=config.dp_replicate_size,
         )
 
@@ -305,7 +294,7 @@ class ModeSetupMixin:
         self,
         model: nn.Module,
         *,
-        exclusions: FsdpExclusions,
+        excluded_params: Iterable[nn.Parameter],
         fallback_dp_size: int,
         fallback_dp_group: dist.ProcessGroup | None = None,
         dp_replicate_size: int = 1,
@@ -325,17 +314,18 @@ class ModeSetupMixin:
                     f"{replicas} replicas."
                 )
         self._apply_dp_fsdp2(
-            model, dp_size, excluded_params=exclusions.params, dp_group=dp_group, dp_replicate_size=dp_replicate_size
+            model, dp_size, excluded_params=excluded_params, dp_group=dp_group, dp_replicate_size=dp_replicate_size
         )
 
-    def _fsdp_exclusions(self) -> FsdpExclusions:
+    def _fsdp_excluded_params(self) -> list[nn.Parameter]:
+        """EP modules sync their own gradients and are left out whole, except under ``experts_fsdp_managed``. Frozen
+        parameters whose dtype no trainable parameter shares are taken one by one, so a trainable child of their module
+        stays in its shard group."""
         ep_modules = self._ep_layers()
         if self.parallelism_config.experts_fsdp_managed:
             ep_modules = []
-        dtype_params = self._dtype_excluded_params()
         ep_params = [p for module in ep_modules for p in module.parameters()]
-        params = list({id(p): p for p in ep_params + dtype_params}.values())
-        return FsdpExclusions(ep_modules, dtype_params, params)
+        return list({id(p): p for p in ep_params + self._dtype_excluded_params()}.values())
 
     def _dtype_excluded_params(self) -> list[nn.Parameter]:
         """Frozen parameters whose dtype no trainable parameter shares (a frozen bf16 base under fp32 adapters, uint8

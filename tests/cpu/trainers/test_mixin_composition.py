@@ -43,7 +43,7 @@ _OWNERSHIP = {
         "_cast_peft_params_to_compute_dtype",
         "_dtype_excluded_params",
         "_find_cp_wrapper",
-        "_fsdp_exclusions",
+        "_fsdp_excluded_params",
         "_get_tp_rank",
         "_install_qlora_grad_sync",
         "_upcast_non_ep_params_to_fp32",

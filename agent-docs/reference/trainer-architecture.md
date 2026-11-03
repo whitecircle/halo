@@ -18,7 +18,7 @@ its concern:
 | `dataloaders.py` | `DataParallelLoaderMixin`: the parallelism-aware DP-sharded train / eval / test loaders and the pre-sharded length equalization |
 | `evaluation.py` | `EvaluationMixin`: `evaluate` / `evaluation_loop`, the unequal-batch escape hatch, the DP-scoped evaluation gather and the final round's padding cut (`eval_split_rows`) |
 | `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device accumulator) and HF's input-token count (`include_num_input_tokens_seen: all`, added up on the host), summed over the world in one all-reduce per log, the input tokens also before each save and at each step the [EfficiencyCallback](../training-methods/callbacks.md#efficiencycallback) measures; the per-document attention-work accumulator the MFU attention term reads; HF's `total_flos` estimate, with its parameter count walked once per model, summed in the log's all-reduce and on its own at a save and at the end of training (`store_flos`); `effective_loss_mask` |
-| `parallelism/mode_setup.py` | `ModeSetupMixin`: the mode ladder (`_wrap_for_parallel_mode`), every per-mode FSDP2 wrap and the QLoRA sync install, `FsdpExclusions`, the CP wrapper adoption, `reject_unsynced_trainable_params` (COLLECTIVE) |
+| `parallelism/mode_setup.py` | `ModeSetupMixin`: the mode ladder (`_wrap_for_parallel_mode`), every per-mode FSDP2 wrap and the QLoRA sync install, `_fsdp_excluded_params`, the CP wrapper adoption, `reject_unsynced_trainable_params` (COLLECTIVE) |
 | `parallelism/ep_layers.py` | `EPLayersMixin`: the model's EP layers (`_ep_layers()`), their parameter-id sets (one `_param_id_caches` store, cleared after the wrap), EP-safe gradient checkpointing; `resolve_use_reentrant` |
 | `parallelism/grad_sync.py` | `GradientSyncMixin`: the grad-accum window, the QLoRA / deferred-EP / TP-replicated grad sweeps and their step-pre-hooks |
 | `parallelism/grad_clipping.py` | `GradientClippingMixin`: the EP / TP / QLoRA `clip_grad_norm_` replacements and the EP/DTensor-aware global norm they reduce; `pp_clip_grad_norm` and the clip primitives |
@@ -232,8 +232,8 @@ before the base trainer sees them: `parallelism_config` (a `ParallelismConfig`; 
 raises `ValueError`), the checkpoint knobs `save_sharded_ep` (default `False`), `save_max_shard_size`
 and `allow_optimizer_warm_restart`, `max_consecutive_nonfinite_steps` (the [step guard](#non-finite-steps)'s
 limit), `moe_balancing`, `dataset_presharded`, and `bf16_optimizer`.
-Its `_apply_training_args_overrides` step sets `fsdp = ""` on the training args (the mixin owns sharding)
-and, under EP, `ddp_find_unused_parameters = True`, hands TRL its router aux-loss coefficient, and
+Its `_apply_training_args_overrides` step sets `fsdp = ""` on the training args (the mixin owns sharding),
+hands TRL its router aux-loss coefficient, and
 reconciles `save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested
 mode and the model ([reentrant rule](../optimization/flash-attention.md#usage)). It then runs the construction refusals
 (`reject_undeclared_axes`, `reject_pp_named_optimizer`, `reject_custom_parallelism_under_accelerate`, the determinism
@@ -507,13 +507,14 @@ row cut reaches it.
 
 When the eval dataloader yields a different number of batches per rank (or has no length),
 `evaluate()` replaces the per-step metric gather with the identity to avoid a deadlock, and warns:
-the eval loss and `compute_metrics` values it logs are then rank 0's shard, not the global value.
+the eval loss and `compute_metrics` values it logs are then rank 0's shard, not the global value. A dict of
+named splits gets this verdict split by split.
 
 ## Training loop integration
 
 HuggingFace's `_inner_training_loop` calls `accelerator.prepare(model)`, which normally wraps in
 DDP. `AcceleratorMixin` replaces `prepare()` with `no_wrap_prepare` for model/optimizer/scheduler when
-`_fsdp_wrapped or _mixin_manages_ep_layers or is_tp_mode or is_expert_tp_mode or is_pp_mode`.
+`_fsdp_wrapped or _qlora_grad_sync or _mixin_manages_ep_layers or is_tp_mode or is_expert_tp_mode or is_pp_mode`.
 `_mixin_manages_ep_layers` is `needs_ep_layers and not accelerate-managed`; `needs_ep_layers` alone
 defaults True even for dense models, so this guards against hijacking an accelerate-managed DDP/FSDP
 launch.
@@ -526,7 +527,8 @@ averaging already gives correct gradients, so without this both loss and `grad_n
 HuggingFace infers that flag from the model's forward signature alone — any `**kwargs` makes it True
 — and then drops its own `/gradient_accumulation_steps` division. A trainer whose `compute_loss`
 returns the batch's own mean therefore declares `LOSS_IS_OWN_MEAN`, which `_configure_distributed_modes`
-applies once for every trainer that declares it.
+applies once for every trainer that declares it. It also sets `loss_is_scaled_for_ga = False`, since a
+`compute_loss_func` drops the same division.
 
 ## SFT loss and metrics
 

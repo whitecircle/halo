@@ -189,8 +189,7 @@ The EP flags (`expert_parallel_size`, `ep_scope`, `nvlink_domain_size`, `use_gro
 `save_sharded_ep`:
 [checkpoint flags](../reference/configuration-reference.md#model-checkpoint-and-from-scratch-flags).
 
-Training args: `bf16=True`, `gradient_checkpointing=True` (recommended). The trainer sets
-`ddp_find_unused_parameters=True` for every run with an EP group. With GC it calls
+Training args: `bf16=True`, `gradient_checkpointing=True` (recommended). With GC the trainer calls
 `enable_scoped_gradient_checkpointing()` and sets `args.gradient_checkpointing=False` so HF Trainer does
 not re-enable it.
 
@@ -621,7 +620,6 @@ the training scripts seed it. A Python-API run that seeds ranks differently trai
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the EP layers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `halo/model_loading/liger/dispatch.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP layer severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Qwen3-Next, Qwen3.8-Flash-Next, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |
-| `ddp_find_unused_parameters` | must be `True`; the trainer sets it for every run with an EP group | `DistributedTrainerMixin._apply_training_args_overrides` |
 | `packing`, `padding_free`, `torch_compile`, `lowp_precision`, `dataset_num_proc` | not gated under EP | — |
 
 ## Troubleshooting
@@ -630,7 +628,6 @@ the training scripts seed it. A Python-API run that seeds ranks differently trai
 |---|---|
 | `No module named 'deep_ep'` | Install DeepEP ([deepep.md](../infrastructure/deepep.md)) |
 | `EP group size (N) must divide world size (M)` / `… the NVLink domain (M)` | Use a size dividing `world_size` (cross-node) or `nvlink_domain_size` (node-local) |
-| `Parameter indices which did not receive grad` | `ddp_find_unused_parameters=True` did not reach the wrap; the trainer sets it for every run with an EP group, so build the trainer through `DistributedTrainerMixin` as the entry scripts do |
 | `DeepEP NVLink barrier timeout` then `cudaErrorLaunchFailure` abort, under GC | `use_reentrant=False` reached the EP path. The trainer forces `True` — this only appears if `enable_scoped_gradient_checkpointing` was called directly. Do not pin `false` |
 | OOM | Enable GC; raise EP size (each doubling roughly halves per-GPU expert memory) |
 

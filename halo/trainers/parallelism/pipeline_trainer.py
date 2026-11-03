@@ -91,18 +91,17 @@ class PipelineTrainerMixin:
     # values-only broadcast; empty when the adapter declares no ``metrics_fn``.
     _pp_metric_keys: tuple[str, ...] = ()
 
-    def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Hook: reject this trainer's own PP-incompatible options before the split; ctor parameters are in ``kwargs``,
-        the remaining positionals in ``ctor_args``."""
+    def _reject_unsupported_pp_options(self, kwargs: dict) -> None:
+        """Hook: reject this trainer's own PP-incompatible options before the split."""
 
-    def _split_pipeline_stage(self, kwargs: dict, training_args, ctor_args: tuple = ()) -> dict:
+    def _split_pipeline_stage(self, kwargs: dict, training_args) -> dict:
         """Split the model into this rank's stage before ``super().__init__`` sees it, after the refusals that must
         precede any wrapping."""
         config: ParallelismConfig = self.parallelism_config
         if not config.is_pp_mode:
             return kwargs
 
-        self._reject_unsupported_pp_options(ctor_args, kwargs)
+        self._reject_unsupported_pp_options(kwargs)
         reject_unsupported_pp_training_args(
             training_args, save_sharded_ep=self.save_sharded_ep, evaluates=uses_evaluation(training_args)
         )
@@ -241,7 +240,7 @@ class PipelineTrainerMixin:
         if ep_layers:
             self._apply_ep_aware_dp_fsdp2(
                 stage,
-                exclusions=self._fsdp_exclusions(),
+                excluded_params=self._fsdp_excluded_params(),
                 fallback_dp_size=config.stage_world_size,
                 fallback_dp_group=self._pp_stage_group,
             )
@@ -249,7 +248,7 @@ class PipelineTrainerMixin:
             self._apply_dp_fsdp2(
                 stage,
                 config.stage_world_size,
-                excluded_params=self._fsdp_exclusions().params,
+                excluded_params=self._fsdp_excluded_params(),
                 dp_group=self._pp_stage_group,
             )
 

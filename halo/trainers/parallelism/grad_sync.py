@@ -59,6 +59,9 @@ def claim_optimizer_step(trainer, marker_attr: str) -> bool:
 
 
 class GradientSyncMixin:
+    # Set by the mode ladder over a quantized base: FSDP2 cannot shard it, so the trainer's own sweep is the sync.
+    _qlora_grad_sync: bool = False
+
     def _install_grad_accum_window(self) -> None:
         """Cache the FSDP2 modules :meth:`_set_window_end` toggles: empty unless ``fsdp_reshard_after_backward=False``
         or ``fsdp_defer_grad_sync`` is set on this trainer's wrap. Called after every wrap, which is what makes an

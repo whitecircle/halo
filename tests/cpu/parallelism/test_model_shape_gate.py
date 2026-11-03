@@ -14,7 +14,6 @@ from halo.model_loading.parallel.load_rules import _divisors_up_to, reject_unsup
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.moe.config_fields import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_width
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.parallelism.mode_setup import FsdpExclusions
 from tests.common.parallelism import make_parallelism_config
 
 _MOD = "halo.distributed.parallelism_config"
@@ -215,7 +214,7 @@ def test_the_wrap_time_seam_does_not_re_refuse_the_triple():
     """This walk does not run on every rank under PP, so a raise from it would hang the job."""
     stub = _stub(experts_fsdp_managed=True, fp32_non_ep_params=True, ep_modules=[nn.Linear(4, 4)])
 
-    assert DistributedTrainerMixin._fsdp_exclusions(stub) == FsdpExclusions([], [], [])
+    assert DistributedTrainerMixin._fsdp_excluded_params(stub) == []
 
 
 def test_fsdp_managed_ep1_experts_hand_the_experts_to_fsdp():
@@ -223,11 +222,7 @@ def test_fsdp_managed_ep1_experts_hand_the_experts_to_fsdp():
     expert = nn.Linear(4, 4)
     stub = _stub(experts_fsdp_managed=True, fp32_non_ep_params=False, ep_modules=[expert])
 
-    exclusions = DistributedTrainerMixin._fsdp_exclusions(stub)
-
-    assert exclusions.ep_modules == []
-    assert exclusions.dtype_params == []
-    assert not any(p is expert.weight for p in exclusions.params)
+    assert DistributedTrainerMixin._fsdp_excluded_params(stub) == []
 
 
 def test_experts_outside_fsdp_stay_excluded():
@@ -235,23 +230,21 @@ def test_experts_outside_fsdp_stay_excluded():
     expert = nn.Linear(4, 4)
     stub = _stub(experts_fsdp_managed=False, fp32_non_ep_params=True, ep_modules=[expert])
 
-    exclusions = DistributedTrainerMixin._fsdp_exclusions(stub)
+    excluded = DistributedTrainerMixin._fsdp_excluded_params(stub)
 
-    assert exclusions.ep_modules == [expert]
-    assert [id(p) for p in exclusions.params] == [id(p) for p in expert.parameters()]
+    assert [id(p) for p in excluded] == [id(p) for p in expert.parameters()]
 
 
 def test_a_parameter_that_is_both_ep_and_dtype_excluded_is_excluded_once():
-    """``params`` feeds FSDP's ``ignored_params``; a duplicate there is a silent hazard."""
+    """The list feeds FSDP's ``ignored_params``; a duplicate there is a silent hazard."""
     expert = nn.Linear(4, 4)
     stub = _stub(
         experts_fsdp_managed=False, fp32_non_ep_params=False, ep_modules=[expert], dtype_params=[expert.weight]
     )
 
-    exclusions = DistributedTrainerMixin._fsdp_exclusions(stub)
+    excluded = DistributedTrainerMixin._fsdp_excluded_params(stub)
 
-    assert [id(p) for p in exclusions.dtype_params] == [id(expert.weight)]
-    assert [id(p) for p in exclusions.params] == [id(p) for p in expert.parameters()]
+    assert [id(p) for p in excluded] == [id(p) for p in expert.parameters()]
 
 
 if __name__ == "__main__":

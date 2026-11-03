@@ -27,11 +27,14 @@ def _real_loader_trainer():
     trainer.data_collator = lambda rows: rows
     trainer._prepare_dataloader = lambda loader, **kwargs: loader
     trainer.args = SimpleNamespace(
+        remove_unused_columns=False,
         per_device_eval_batch_size=1,
         dataloader_num_workers=1,
         dataloader_persistent_workers=True,
         dataloader_pin_memory=False,
+        dataloader_multiprocessing_context=None,
         dataloader_prefetch_factor=1,
+        dataloader_in_order=True,
     )
     return trainer
 

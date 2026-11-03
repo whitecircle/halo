@@ -92,7 +92,6 @@ def _stub(*, beta, loss_type, pg, min_log_prob, policy, reference) -> types.Simp
         _sign_metrics={"train": WorldMetrics(), "eval": WorldMetrics()},
         _SIGN_METRIC_KEYS=OfflineGRPOTrainer._SIGN_METRIC_KEYS,
         _pp_ref_sweep=None,
-        _pp_min_log_prob=min_log_prob,
         _live_min_log_prob=min_log_prob,
         _joined_rows=OfflineGRPOTrainer._joined_rows,
     )

@@ -8,9 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from datasets import Dataset
 
 import halo.trainers.evaluation as mixin_module
+from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
 
 # Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate() returns.
 _MASKING_QUANTILE = 0.8
@@ -37,6 +41,8 @@ class _InnerTrainer:
 class _StubTrainer(DistributedTrainerMixin, _InnerTrainer):
     """Real MRO so the mixin's zero-arg ``super().evaluate()`` resolves."""
 
+    eval_dataset = None
+
     def __init__(self, *, top_entropy_quantile: float = 1.0, unequal: bool = True):
         self.args = SimpleNamespace(top_entropy_quantile=top_entropy_quantile)
         self.accelerator = _Accelerator()
@@ -47,7 +53,7 @@ class _StubTrainer(DistributedTrainerMixin, _InnerTrainer):
     def _needs_custom_accelerator(self) -> bool:
         return True
 
-    def _eval_ranks_have_unequal_batches(self, eval_args, eval_kwargs) -> bool:
+    def _eval_ranks_have_unequal_batches(self, eval_dataset) -> bool:
         return self._unequal
 
 
@@ -148,11 +154,41 @@ def _raise(exc):
 def test_only_a_length_less_loader_counts_as_unmeasurable():
     """``len()`` of an iterable loader is a ``TypeError``; anything else is a bug to surface."""
     unmeasurable = SimpleNamespace(get_eval_dataloader=lambda dataset: iter(()))
-    assert DistributedTrainerMixin._eval_ranks_have_unequal_batches(unmeasurable, (), {}) is True
+    assert DistributedTrainerMixin._eval_ranks_have_unequal_batches(unmeasurable, None) is True
 
     broken = SimpleNamespace(get_eval_dataloader=lambda dataset: _raise(AttributeError("loader bug")))
     with pytest.raises(AttributeError, match="loader bug"):
-        DistributedTrainerMixin._eval_ranks_have_unequal_batches(broken, (), {})
+        DistributedTrainerMixin._eval_ranks_have_unequal_batches(broken, None)
+
+
+class _ReachedBase:
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        return {"evaluated": eval_dataset}
+
+
+class _OfflineLoaderOrder(GroupedLoaderMixin, EvaluationMixin, DataParallelLoaderMixin, _ReachedBase):
+    """Offline GRPO's real order of these mixins, over a base recording what reached it."""
+
+    eval_dataset = None
+
+    def _needs_custom_accelerator(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("given_as", ["positional", "keyword", "constructor"])
+def test_a_dict_of_splits_reaches_the_base_unmeasured(distributed, given_as):
+    """Nothing can measure a loader over a dict: offline GRPO's loader reads the dict's ``column_names`` and raises on
+    every multi-rank run, the very call its constructor refusal points at."""
+    splits = {"first": Dataset.from_dict({"group_id": [0, 1]}), "second": Dataset.from_dict({"group_id": [2, 3]})}
+    trainer = _OfflineLoaderOrder()
+    if given_as == "positional":
+        metrics = trainer.evaluate(splits)
+    elif given_as == "keyword":
+        metrics = trainer.evaluate(eval_dataset=splits)
+    else:
+        trainer.eval_dataset = splits
+        metrics = trainer.evaluate()
+    assert metrics == {"evaluated": None if given_as == "constructor" else splits}
 
 
 if __name__ == "__main__":

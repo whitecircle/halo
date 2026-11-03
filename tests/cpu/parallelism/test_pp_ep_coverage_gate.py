@@ -55,7 +55,7 @@ def test_the_stage_wrap_builds_the_stage_group_then_gates_then_wraps(ep_layers):
     calls = mock.Mock()
     trainer = SimpleNamespace(
         parallelism_config=config,
-        _fsdp_exclusions=lambda: SimpleNamespace(params=()),
+        _fsdp_excluded_params=list,
         _apply_dp_fsdp2=calls.wrap,
         _apply_ep_aware_dp_fsdp2=calls.wrap,
     )

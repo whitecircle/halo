@@ -14,7 +14,6 @@ checkpoints them; CP owns token shards of the same rows, and PP's microbatch num
 denominators."""
 
 import logging
-from collections import defaultdict
 from collections.abc import Callable
 from typing import Any, Union
 
@@ -142,7 +141,6 @@ class OfflineGRPOTrainer(
         reject_offline_cp_options(
             parallelism_config, ref_model, self._reference_mode(model, parallelism_config, peft_config)
         )
-        self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
         self._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
 
         self._configure_objective(args, require_tokenizer(processing_class))
@@ -489,9 +487,7 @@ class OfflineGRPOTrainer(
         # replicas of the whole sample set, so they fold over the stage group (a world flush would block the other
         # stages in a collective they never enter) and the chain gets the scalars from the broadcast below.
         sign_metrics = self._sign_metrics[mode]
-        if sign_metrics:
-            sign_metrics.flush(self._metrics[mode], group=self._pp_stage_group)
-        metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}
+        metrics = sign_metrics.flush(group=self._pp_stage_group) if sign_metrics else {}
 
         current_min_log_prob = self._live_min_log_prob
         if current_min_log_prob is not None:
@@ -505,4 +501,3 @@ class OfflineGRPOTrainer(
 
         logs = {**logs, **metrics}
         super().log(logs, start_time)
-        self._metrics[mode].clear()

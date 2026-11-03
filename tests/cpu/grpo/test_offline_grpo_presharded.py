@@ -25,14 +25,17 @@ def _sampler_span(presharded: bool, dp_size: int, dp_rank: int) -> int:
             dataloader_num_workers=0,
             dataloader_pin_memory=False,
             dataloader_persistent_workers=False,
+            dataloader_multiprocessing_context=None,
             dataloader_prefetch_factor=None,
-            dataloader_drop_last=False,
+            dataloader_in_order=True,
             data_seed=None,
             seed=0,
         ),
     )
     stub.dp_shard_geometry = partial(DataParallelLoaderMixin.dp_shard_geometry, stub)
+    stub._get_collator_with_removed_columns = lambda collator, description: collator
     stub._loader_collate_fn = partial(DataParallelLoaderMixin._loader_collate_fn, stub)
+    stub._loader_params = partial(DataParallelLoaderMixin._loader_params, stub)
 
     loader = OfflineGRPOTrainer._build_grouped_dataloader(
         stub, [{"row": index} for index in GROUP_IDS], GROUP_IDS, batch_size=1, shuffle=False

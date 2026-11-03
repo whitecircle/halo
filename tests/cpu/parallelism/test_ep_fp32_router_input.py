@@ -142,10 +142,10 @@ def test_a_frozen_router_the_wrap_leaves_out_projects_in_fp32(family, single_ran
     routers = [p for layer in ep_layers for p in layer._live_router_module().requires_grad_(False).parameters()]
     trainer = SimpleNamespace(model=model, parallelism_config=config, _ep_layers=lambda: ep_layers)
     trainer._dtype_excluded_params = lambda: ModeSetupMixin._dtype_excluded_params(trainer)
-    exclusions = ModeSetupMixin._fsdp_exclusions(trainer)
-    left_out = {id(p) for p in exclusions.params}
+    excluded = ModeSetupMixin._fsdp_excluded_params(trainer)
+    left_out = {id(p) for p in excluded}
     assert all(id(p) in left_out for p in routers), "premise: the exclusions leave every frozen router param out"
-    _fsdp2_wrap(model, single_rank_mesh, exclusions.params)
+    _fsdp2_wrap(model, single_rank_mesh, excluded)
     _assert_router_projects_at(_forward_recording(model), model, FP32)
 
 

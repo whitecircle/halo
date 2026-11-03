@@ -97,7 +97,7 @@ Parameter counts derived from those fields (fused expert layout
 | Active per token (top-10 + shared + attention + head) | **17.35 B** | |
 
 **`P_r` is the trap.** `EPQwen3_5MoELayer` owns the router `gate`, the `shared_expert` and
-`shared_expert_gate`; the whole layer lands in FSDP2's ignored set (`_fsdp_exclusions`), TP
+`shared_expert_gate`; the whole layer lands in FSDP2's ignored set (`_fsdp_excluded_params`), TP
 never visits it (`apply_tp_to_attention_only`), and EP does not shard it — `replicated_named_params`
 grad-syncs it by hand. So **0.88 B stays as a full 8 B/param copy on every rank ≈ 7 GB that no axis
 shrinks.** Under `fp32_router` its 0.13 B of router weights are fp32 at 16 B/param, +1 GB.

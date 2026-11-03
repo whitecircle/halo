@@ -209,11 +209,6 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         }
 
     def _restore_reference_logps_or_none(self, dataset: Dataset, split: str, *, identity: Mapping) -> Dataset | None:
-        reject_across_ranks(
-            None if isinstance(dataset, Dataset) else f"'{split}' must be a finite datasets.Dataset",
-            "Validating offline GRPO reference dataset",
-            exc_type=ValueError,
-        )
         self._verify_reference_resume_context()
         reject_divergent_settings(
             {"split": split, **identity},
@@ -255,13 +250,8 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
             self.model.train(was_training)
 
     def _reference_sweep_loader(self, dataset, split: str, dp_size: int, dp_rank: int) -> DataLoader:
-        """COLLECTIVE. Full batches of ``(batch, real rows)``; refuses on every rank a dataset that is not finite or
-        leaves some rank no rows."""
-        reject_across_ranks(
-            None if isinstance(dataset, Dataset) else f"Reference sweep needs a finite Dataset for '{split}'",
-            f"Preparing the '{split}' reference sweep",
-            exc_type=ValueError,
-        )
+        """COLLECTIVE. Full batches of ``(batch, real rows)``; refuses on every rank a dataset that leaves some rank no
+        rows."""
         rows = len(dataset)
         batch_size = self.args.per_device_train_batch_size
         collator = self._loader_collate_fn(self.data_collator)
@@ -348,8 +338,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         )
 
     def _reference_input_digests(self, dataset: Dataset, name: str) -> dict[str, str]:
-        if not isinstance(dataset, Dataset):
-            raise TypeError(f"'{name}' must be a finite datasets.Dataset for a reference sweep")
+        del name
         for column in _TOKEN_COLUMNS:
             arrow_type = dataset.features.arrow_schema.field(column).type
             if not (pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type)) or not pa.types.is_integer(

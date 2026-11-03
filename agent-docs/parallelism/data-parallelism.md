@@ -50,7 +50,7 @@ across NVLink domains PP's stage loader reads only each stage's layers
 
 The plain-DP, CP, EP and EP+TP wraps also leave out the frozen parameters whose dtype no trainable
 parameter shares (a base under differently typed adapters), one parameter at a time, so a trainable child
-of their module stays in its shard group (`_fsdp_exclusions` in `halo/trainers/parallelism/mode_setup.py`). A
+of their module stays in its shard group (`_fsdp_excluded_params` in `halo/trainers/parallelism/mode_setup.py`). A
 trainable parameter left out of every group has no reduce-scatter, and only an EP layer can leave one out;
 unless its hooks or the deferred sweep average it, trainer construction raises on every rank rather than
 let it drift across DP ranks (`reject_unsynced_trainable_params`).

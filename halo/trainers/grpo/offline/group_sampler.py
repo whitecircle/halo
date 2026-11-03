@@ -6,7 +6,6 @@ from collections import defaultdict
 from functools import partial
 
 import datasets
-import torch
 from torch.utils.data import BatchSampler, DataLoader, Dataset, Sampler
 from transformers.trainer_utils import seed_worker
 
@@ -111,46 +110,37 @@ class GroupedLoaderMixin:
             # Not the constructor's "eval" split: keyed by its fingerprint, which an attached reference
             # column derives from the scores' digest.
             return self._cached_eval_dataloader(eval_dataset, build, key=f"eval/{eval_dataset._fingerprint}")
-        return build(eval_dataset)
+        raise ValueError(
+            f"Offline GRPO evaluates a map-style datasets.Dataset, since its sampler cuts rows by group and equalizes "
+            f"the batch counts across ranks; got {type(eval_dataset).__name__}."
+        )
 
     def _build_grouped_dataloader(self, dataset, group_ids, *, batch_size: int, shuffle: bool) -> DataLoader:
         """COLLECTIVE when the world has peers. Batch count equalized to the world minimum, else faster ranks exit and
         block the next all-reduce. The sampler already shards, so accelerate places devices only."""
         dp_size, dp_rank = self.dp_shard_geometry()
-
-        dataloader_params = {
-            "collate_fn": self._loader_collate_fn(self.data_collator),
-            "num_workers": self.args.dataloader_num_workers,
-            "pin_memory": self.args.dataloader_pin_memory,
-            "persistent_workers": self.args.dataloader_persistent_workers,
-        }
-
-        if not isinstance(dataset, torch.utils.data.IterableDataset):
-            sampler = MultiGroupSampler(
-                group_ids=group_ids,
-                rank=dp_rank,
-                world_size=dp_size,
-                shuffle=shuffle,
-                seed=resolve_data_seed(self.args) if shuffle else 0,
-            )
-            if get_global_world_size() > 1:
-                # compute_loss gathers every batch: a rank with an extra batch blocks its peers.
-                (min_batches,) = rank_min([len(sampler) // batch_size])
-                if min_batches == 0:
-                    raise ValueError(
-                        f"Batch-count equalization left 0 full batches on the smallest rank "
-                        f"(batch_size={batch_size}, world min over ranks) — the dataset split is too "
-                        f"small for this world size; eval/training would silently run on nothing."
-                    )
-                if min_batches * batch_size < len(sampler.indices_sequence):
-                    sampler.indices_sequence = sampler.indices_sequence[: min_batches * batch_size]
-            dataloader_params["batch_sampler"] = BatchSampler(sampler=sampler, batch_size=batch_size, drop_last=True)
-            if self.args.dataloader_num_workers > 0:
-                dataloader_params["worker_init_fn"] = partial(
-                    seed_worker, num_workers=self.args.dataloader_num_workers, rank=dp_rank
+        sampler = MultiGroupSampler(
+            group_ids=group_ids,
+            rank=dp_rank,
+            world_size=dp_size,
+            shuffle=shuffle,
+            seed=resolve_data_seed(self.args) if shuffle else 0,
+        )
+        if get_global_world_size() > 1:
+            # compute_loss gathers every batch: a rank with an extra batch blocks its peers.
+            (min_batches,) = rank_min([len(sampler) // batch_size])
+            if min_batches == 0:
+                raise ValueError(
+                    f"Batch-count equalization left 0 full batches on the smallest rank "
+                    f"(batch_size={batch_size}, world min over ranks) — the dataset split is too "
+                    f"small for this world size; eval/training would silently run on nothing."
                 )
-            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
-        else:
-            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            if min_batches * batch_size < len(sampler.indices_sequence):
+                sampler.indices_sequence = sampler.indices_sequence[: min_batches * batch_size]
 
-        return DataLoader(dataset, **dataloader_params)
+        dataset, params = self._loader_params(dataset, batch_size, "grouped")
+        del params["batch_size"]
+        params["batch_sampler"] = BatchSampler(sampler=sampler, batch_size=batch_size, drop_last=True)
+        if self.args.dataloader_num_workers > 0:
+            params["worker_init_fn"] = partial(seed_worker, num_workers=self.args.dataloader_num_workers, rank=dp_rank)
+        return DataLoader(dataset, **params)

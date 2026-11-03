@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 """Under QLoRA every rank's floating-point parameters start from rank 0's, on two gloo ranks across the tiny rosters.
-QLoRA skips FSDP2 and only averages gradients, so a per-rank adapter draw persists while losses stay finite."""
+QLoRA skips FSDP2 and only averages gradients, so a per-rank adapter draw persists while losses stay finite. Its own
+sweep syncs those gradients, so the training loop must not add a DDP wrap and a second reduce."""
 
 import datetime
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +13,7 @@ import torch
 import torch.distributed as dist
 
 from halo.model_loading.dtype import has_packed_quantized_params
+from halo.trainers.accelerator import AcceleratorMixin
 from tests.common.distributed import max_abs_diff_across
 from tests.common.gloo import run_gloo_ranks
 from tests.common.numerics import max_or_nan
@@ -25,6 +28,17 @@ PACKED_SHAPE = (8, 4)
 PG_TIMEOUT = datetime.timedelta(seconds=120)
 
 
+class _StockTrainingLoop:
+    """HF's loop as far as it wraps the model."""
+
+    def _inner_training_loop(self, *args):
+        return self.accelerator.prepare(self.model)
+
+
+class _TrainerLadder(ModeLadder, AcceleratorMixin, _StockTrainingLoop):
+    _fsdp_wrapped = False
+
+
 def _qlora_ladder(rank: int, family: str) -> dict:
     """Records after the trainer's mode ladder."""
     model = per_rank_lora_model(FAMILIES[family], rank)
@@ -37,8 +51,9 @@ def _qlora_ladder(rank: int, family: str) -> dict:
         dist.broadcast(tensor, src=0)
 
     config = make_parallelism_config(world_size=WORLD, gpus_per_node=WORLD, rank=rank, use_grouped_gemm=False)
-    wrapper = ModeLadder(model, config)
+    wrapper = _TrainerLadder(model, config)
     wrapper._wrap_for_parallel_mode()
+    wrapper.accelerator = SimpleNamespace(prepare=lambda module: "ddp-wrapped")
     return {
         "qlora_path": has_packed_quantized_params(model) and getattr(wrapper, "_qlora_grad_sync", False),
         "drawn": drawn,
@@ -47,6 +62,7 @@ def _qlora_ladder(rank: int, family: str) -> dict:
             ((param.data - old).abs().max().item() for param, old in zip(floating, rank0, strict=True)), default=0.0
         ),
         "packed_kept": torch.equal(packed.data, torch.full(PACKED_SHAPE, rank, dtype=torch.uint8)),
+        "left_unwrapped": wrapper._inner_training_loop() is model,
     }
 
 
@@ -79,6 +95,10 @@ def test_floating_point_parameters_start_from_rank_0(records):
 
 def test_packed_storage_is_left_to_each_rank(records):
     assert all(record["packed_kept"] for record in records), records
+
+
+def test_the_training_loop_adds_no_ddp_wrap_over_the_sweep(records):
+    assert all(record["left_unwrapped"] for record in records), records
 
 
 if __name__ == "__main__":

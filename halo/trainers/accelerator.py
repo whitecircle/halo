@@ -126,10 +126,11 @@ class AcceleratorMixin:
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
-        """Skip DDP wrapping where FSDP2, the EP layers, TP, ETP or PP sync the gradients."""
+        """Skip DDP wrapping where FSDP2, the QLoRA sweep, the EP layers, TP, ETP or PP sync the gradients."""
         config = self.parallelism_config
         if not (
             self._fsdp_wrapped
+            or self._qlora_grad_sync
             or self._mixin_manages_ep_layers
             or config.is_tp_mode
             or config.is_expert_tp_mode

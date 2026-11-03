@@ -100,11 +100,15 @@ class EvaluationMixin:
 
     def evaluate(self, *args, **kwargs):
         """COLLECTIVE. Swap the eval gather for the identity where ranks hold unequal batch counts, since the per-step
-        ``gather_for_metrics`` deadlocks there; each rank scores its own shard and the logged metrics are rank 0's."""
+        ``gather_for_metrics`` deadlocks there; each rank scores its own shard and the logged metrics are rank 0's. A
+        dict ``eval_dataset`` is measured split by split, when HF re-enters here for each."""
+        eval_dataset = kwargs.get("eval_dataset", args[0] if args else None)
+        if isinstance(self.eval_dataset if eval_dataset is None else eval_dataset, dict):
+            return super().evaluate(*args, **kwargs)
         if (
             self._needs_custom_accelerator()
             and has_process_group()
-            and self._eval_ranks_have_unequal_batches(args, kwargs)
+            and self._eval_ranks_have_unequal_batches(eval_dataset)
         ):
             if getattr(self.args, "top_entropy_quantile", 1.0) < 1.0:
                 # TRL's entropy threshold pads-and-gathers through this same accelerator; identity padding aborts.
@@ -151,8 +155,7 @@ class EvaluationMixin:
 
     @contextlib.contextmanager
     def suspended_dp_metric_gather(self):
-        """Hold whatever gather is installed across the block's evaluation loops. Restored on exit, since
-        ``Trainer.evaluate`` re-enters itself per split of a dict ``eval_dataset``."""
+        """Hold whatever gather is installed across the block's evaluation loops."""
         was_suspended = self._dp_metric_gather_suspended
         self._dp_metric_gather_suspended = True
         try:
@@ -170,10 +173,9 @@ class EvaluationMixin:
         split_rows, rows_per_rank, shard = final_round
         return min(num_rows, _rank_split_rows(split_rows, rows_per_rank, shard.process_index))
 
-    def _eval_ranks_have_unequal_batches(self, eval_args: tuple, eval_kwargs: dict) -> bool:
+    def _eval_ranks_have_unequal_batches(self, eval_dataset) -> bool:
         """COLLECTIVE. True when batch counts differ across ranks or a rank cannot measure its own (iterable dataset),
         so the gather is dropped rather than risk a deadlock."""
-        eval_dataset = eval_kwargs.get("eval_dataset", eval_args[0] if eval_args else None)
         try:
             local_batches = len(self.get_eval_dataloader(eval_dataset))
             measurable = True
