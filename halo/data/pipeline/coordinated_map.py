@@ -137,6 +137,42 @@ class _PickledOnceCallable:
         return _load_map_callable, (self._payload, self._cache_key)
 
 
+def _remove_columns_by_split(
+    dataset: DatasetDict, remove_columns: str | list[str] | None
+) -> dict[str, list[str]] | None:
+    """Each split's own list where a split lacks a column another split holds, a source's schemas not matching; None
+    where the one list fits every split. A column no split holds stays listed, for ``datasets`` to refuse the typo."""
+    if not remove_columns:
+        return None
+    listed = [remove_columns] if isinstance(remove_columns, str) else remove_columns
+    held = set().union(*(split.column_names for split in dataset.values()))
+    by_split = {
+        name: [column for column in listed if column in split.column_names or column not in held]
+        for name, split in dataset.items()
+    }
+    return None if all(len(columns) == len(listed) for columns in by_split.values()) else by_split
+
+
+def _map_with_columns_by_split(
+    dataset: DatasetDict,
+    fn: Callable,
+    *,
+    remove_columns: dict[str, list[str]],
+    cache_file_names: dict[str, str],
+    **map_kwargs,
+) -> DatasetDict:
+    """``DatasetDict.map`` per split, not ``Dataset.map``, whose ``on_mixed_types`` default turns a mixed-type column
+    into JSON where ``DatasetDict.map`` raises."""
+    return DatasetDict(
+        {
+            name: DatasetDict({name: split}).map(
+                fn, remove_columns=remove_columns[name], cache_file_names={name: cache_file_names[name]}, **map_kwargs
+            )[name]
+            for name, split in dataset.items()
+        }
+    )
+
+
 def _cached_map_or_filter(
     operation: str,
     dataset: Dataset | DatasetDict,
@@ -164,8 +200,15 @@ def _cached_map_or_filter(
     if _maps_in_workers(num_proc) and not inspect.iscoroutinefunction(fn):
         fn = _PickledOnceCallable(fn, op_kwargs.pop("fn_kwargs", None), cache_file_name)
 
+    run_operation = getattr(dataset, operation)
+    if operation == "map" and isinstance(dataset, DatasetDict):
+        by_split = _remove_columns_by_split(dataset, op_kwargs.get("remove_columns"))
+        if by_split is not None:
+            run_operation = functools.partial(_map_with_columns_by_split, dataset)
+            op_kwargs = {**op_kwargs, "remove_columns": by_split}
+
     return coordinated_dataset_operation(
-        lambda **kwargs: getattr(dataset, operation)(fn, desc=desc, **op_kwargs, **kwargs),
+        lambda **kwargs: run_operation(fn, desc=desc, **op_kwargs, **kwargs),
         dataset=dataset,
         operation_name=operation_name,
         num_proc=num_proc,

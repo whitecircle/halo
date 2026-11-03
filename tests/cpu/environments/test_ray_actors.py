@@ -541,6 +541,51 @@ async def test_a_call_cut_at_the_cap_reaches_the_env_as_a_cut_call_on_either_eng
     assert ctx[CUT_TOOL_CALLS_KEY] == [_PARTIAL_CALL] and "tool_calls" not in ctx
 
 
+def test_a_row_column_named_like_a_turn_stamp_never_reads_as_the_turns_output():
+    """A stamp is written only when the turn produced it, so a dataset column of that name would stand in for it: the
+    row's calls would run on a plain text turn and its rationale would be priced as the turn's reasoning."""
+    columns = {
+        "tool_calls": [{"id": "c", "function": {"name": "echo", "arguments": '{"text": "from the row"}'}}],
+        "reasoning": "the dataset's rationale",
+        "token_ids": [1],
+        "token_logprobs": [-0.5],
+        "prompt_token_ids": [2],
+        "routing_mask": "mask",
+        "routing_prompt_tokens": 1,
+        "thinking_cap": 8,
+        "reasoning_tokens": 3,
+        CUT_TOOL_CALLS_KEY: [{"id": "c"}],
+        "last_turn": True,
+        "finish_reason": "length",
+    }
+    row = {"answer": "4", "reasoning_effort": "high", **columns}
+    turn = TurnGeneration(text="4", tool_calls=[], reasoning="", tokens=1, finish_reason="stop")
+    assert step_context_from_generation(row, turn) == {
+        "answer": "4",
+        "reasoning_effort": "high",
+        "finish_reason": "stop",
+    }
+
+    ran = []
+    registry = NativeToolRegistry().register(
+        NativeTool(name="echo", description="d", parameters=[ToolParameter("text", "string", "t")], handler=ran.append)
+    )
+    env = NativeToolUseEnvironment(tool_registry=registry, max_turns=3)
+    ids, _ = env.reset(["q"], [row])
+    step = env.step(ids, [turn.text], [step_context_from_generation(row, turn)])[0]
+    assert step.done and not ran, "a text turn ends the episode, whatever the row's tool_calls column holds"
+    assert step.trajectory.last_assistant_message().thinking is None
+    assert step.trajectory.total_reward == 1.0, "the row's answer still grades the turn"
+
+
+def test_a_turns_own_stamp_wins_over_a_row_column_of_the_same_name():
+    row = {"reasoning": "the dataset's rationale", "tool_calls": [{"id": "row"}]}
+    call = {"id": "turn", "function": {"name": "echo", "arguments": "{}"}}
+    turn = TurnGeneration(text="", tool_calls=[call], reasoning="the turn's own", tokens=1, finish_reason="tool_calls")
+    stamped = step_context_from_generation(row, turn)
+    assert stamped["reasoning"] == "the turn's own" and stamped["tool_calls"] == [call]
+
+
 class _FakeEngineSession(_FakeChatCompletionsSession):
     """Serves the canned completion and vLLM's ``/detokenize``, recording the ids each decode asked for."""
 

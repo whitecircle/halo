@@ -62,10 +62,8 @@ def _serialized_message(message: Message) -> dict[str, Any]:
     return record
 
 
-def serialize_trajectory(traj: Trajectory | None) -> dict[str, Any] | None:
+def serialize_trajectory(traj: Trajectory) -> dict[str, Any]:
     """Every message, and ``info`` without the row payload and the private ``_``-prefixed grading stamps."""
-    if traj is None:
-        return None
     info = {k: v for k, v in traj.info.items() if not k.startswith("_") and k != CONTEXT_KEY}
     info["eval_stats"] = traj.info.get(EVAL_STATS_KEY)
     return {
@@ -220,7 +218,7 @@ async def run_episode(
     client: AsyncOpenAI,
     *,
     rollout: RolloutConfig,
-) -> Trajectory | None:
+) -> Trajectory:
     """A generation lost past the retries closes the episode on what it earned, stamped :data:`_DRIVER_FAULT_KEY`
     unless the request itself caused it."""
     context, effort = _bind_eval_effort(env, prompt, context, rollout)
@@ -235,8 +233,6 @@ async def run_episode(
         keep_lost_episode=True,
     )
     traj, lost = played.trajectory, played.lost_turn
-    if traj is None:
-        return None
     # A request the episode's own length broke (the served context, ``request_timeout`` on every client retry)
     # is graded on what it earned; any other failure is the driver's, and the sample carries no verdict.
     request_fault = isinstance(lost, APITimeoutError) or (
@@ -255,20 +251,20 @@ async def run_episode(
     return traj
 
 
-def _solved(env: EnvironmentBase, traj: Trajectory | None, reward: float, success_threshold: float) -> bool:
+def _solved(env: EnvironmentBase, traj: Trajectory, reward: float, success_threshold: float) -> bool:
     """The environment's :func:`solve_verdict` where it reports one, else the threshold, since a shaped total mixes in
     prices a solve does not depend on."""
-    verdict = solve_verdict(env.rollout_metrics(traj)) if traj is not None else None
+    verdict = solve_verdict(env.rollout_metrics(traj))
     return reward >= success_threshold if verdict is None else verdict
 
 
-def _sample_record(env: EnvironmentBase, traj: Trajectory | None, success_threshold: float) -> dict[str, Any]:
-    reward = traj.total_reward if traj and traj.done else 0.0
-    stats = (traj.info.get(EVAL_STATS_KEY) if traj else None) or {}
-    if traj is not None and _DRIVER_FAULT_KEY in traj.info:
+def _sample_record(env: EnvironmentBase, traj: Trajectory, success_threshold: float) -> dict[str, Any]:
+    reward = traj.total_reward
+    stats = traj.info.get(EVAL_STATS_KEY) or {}
+    if _DRIVER_FAULT_KEY in traj.info:
         # Stopped on the driver's fault: no verdict, so the sample leaves the scores, counted apart.
         return {"reward": None, "success": None, "stats": stats, GENERATION_ERROR_KEY: traj.info[_DRIVER_FAULT_KEY]}
-    if traj is not None and traj.episode_invalid:
+    if traj.episode_invalid:
         # A grade with no signal (a grader outage) scores zero, `error` telling it from a genuine miss.
         reason = str(traj.info.get(EPISODE_INVALID_REASON_KEY, "episode invalid"))
         return {"reward": 0.0, "success": False, "stats": stats, "error": reason}

@@ -46,8 +46,8 @@ TOOL_CALL_REFUSALS = (ToolBudgetExhausted, ToolArgumentError)
 
 
 def is_refused_unrun(outcome: object) -> bool:
-    """Whether ``outcome`` refused the call unrun, a disabled tool aside. A native-protocol turn whose every call was
-    refused or unknown is flagged ``calls_rejected``, so an episode that recovers never reinforces it."""
+    """Whether ``outcome`` refused the call unrun, a disabled tool aside. A turn whose every call was refused or unknown
+    is flagged ``calls_rejected``, so an episode that recovers never reinforces it."""
     return isinstance(outcome, TOOL_CALL_REFUSALS) and not isinstance(outcome, ToolDisabled)
 
 

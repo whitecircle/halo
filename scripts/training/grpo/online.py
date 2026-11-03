@@ -110,6 +110,19 @@ def main():
     )
     parallelism_config = context.parallelism_config
 
+    # The trainer gets dataset_presharded so it does not re-shard. The prompt column is the loader's render column: it
+    # must exist, and empty-prompt rows drop.
+    ds, dataset_presharded = load_script_datasets(
+        args,
+        parallelism_config,
+        conversation_field=args.prompt_field,
+        conversation_knob="prompt_field",
+    )
+    reject_image_columns(ds, "RLVR Online GRPO")
+    # Read with .get, so a mistyped answer_field would yield empty answers and all-zero verifiable rewards.
+    if args.answer_field:
+        reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+
     # Prompts and completions are collated into padded batches.
     requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
@@ -128,20 +141,7 @@ def main():
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
-    # The trainer gets dataset_presharded so it does not re-shard. The prompt column is the loader's render column: it
-    # must exist, and empty-prompt rows drop.
-    ds, dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        conversation_field=args.prompt_field,
-        conversation_knob="prompt_field",
-    )
-    reject_image_columns(ds, "RLVR Online GRPO")
-
     original_columns = list(ds["train"].column_names)
-    # Read with .get, so a mistyped answer_field would yield empty answers and all-zero verifiable rewards.
-    if args.answer_field:
-        reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
     columns_to_remove = [col for col in original_columns if col not in ["prompt", "conversation", "answer"]]
 
     processed_ds = coordinated_map_and_filter(

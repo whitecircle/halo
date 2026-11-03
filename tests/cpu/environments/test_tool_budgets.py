@@ -230,8 +230,30 @@ def test_react_budget_refuses_past_the_cap():
     assert observations[0] == "echo:x"
     assert observations[1] == _ECHO_SPENT
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
+    assert _flags(traj) == _untrainable(traj) == [False, True], "a refused turn is never reinforced, as under native"
     with pytest.raises(ValueError, match="tool_budgets"):
         ReActEnvironment(tool_registry=_registry(), tool_budgets={"nope": 1})
+
+
+@pytest.mark.parametrize(
+    "action", ['echo(mode="fast")', "echo", 'echo(code=["x"])'], ids=["undeclared", "missing", "list-for-a-string"]
+)
+def test_a_react_action_whose_arguments_do_not_bind_is_flagged_and_unspent(action):
+    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 1}, tool_error_penalty=0.1)
+    ids, _ = env.reset(["t"])
+    step = env.step(ids, [f"Thought: go\nAction: {action}"])[0]
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [True]
+    assert _react_observations(step.trajectory)[0].startswith("Error: echo: ")
+    assert step.reward == pytest.approx(env.thought_reward - 0.1) and step.info[TOOL_CALL_COUNTS_KEY] == {}
+
+
+def test_a_react_action_on_a_disabled_tool_is_an_error_and_not_flagged():
+    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 0}, tool_error_penalty=0.1)
+    ids, _ = env.reset(["t"])
+    step = env.step(ids, ['Thought: go\nAction: echo(code="x")'])[0]
+    assert _react_observations(step.trajectory) == [_ECHO_SPENT]
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [False]
+    assert step.reward == pytest.approx(env.thought_reward - 0.1)
 
 
 def test_base_profiles_bind_the_thinking_budget_per_level():

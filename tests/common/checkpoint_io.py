@@ -41,6 +41,8 @@ FIXED_TEXT_BATCH_MAX_TOKENS = 64
 OPTIMIZER_SHARD_FILE = "optimizer_shard_{rank:05d}.pt"
 OPTIMIZER_META_FILE = "optimizer_meta.pt"
 SHARD_ROUND_TRIP_LR = 0.05
+TWO_PHASE_SAVE_STEP = 3
+TWO_PHASE_TOTAL_STEPS = 6
 RESUME_PROBE_TEXT = (
     "User: What is 17 plus 25?\nAssistant: The answer is 42. "
     "Weights must survive a checkpoint save and resume intact across parallelism modes."
@@ -392,25 +394,23 @@ def run_two_phase_resume(
     *,
     output_dir: str,
     probe: tuple[torch.Tensor, torch.Tensor],
-    save_at_step: int = 3,
-    total_steps: int = 6,
     optimizer_state: bool = False,
 ) -> dict[str, bool]:
-    """COLLECTIVE. Train to ``save_at_step``, resume a fresh trainer to ``total_steps``, and return both phases'
-    checks, phase 2's prefixed ``resume_``. ``build_trainer(checkpoint, **schedule)`` builds a phase's trainer;
-    ``checkpoint`` is None in phase 1."""
-    checkpoint = os.path.join(output_dir, f"checkpoint-{save_at_step}")
-    log(f"\n  Phase 1: train {save_at_step} steps, checkpoint at the last")
+    """COLLECTIVE. Train to :data:`TWO_PHASE_SAVE_STEP`, resume a fresh trainer to :data:`TWO_PHASE_TOTAL_STEPS`, and
+    return both phases' checks, phase 2's prefixed ``resume_``. ``build_trainer(checkpoint, **schedule)`` builds a
+    phase's trainer; ``checkpoint`` is None in phase 1."""
+    checkpoint = os.path.join(output_dir, f"checkpoint-{TWO_PHASE_SAVE_STEP}")
+    log(f"\n  Phase 1: train {TWO_PHASE_SAVE_STEP} steps, checkpoint at the last")
     trainer = build_trainer(
         None,
         output_dir=output_dir,
-        max_steps=save_at_step,
+        max_steps=TWO_PHASE_SAVE_STEP,
         save_strategy="steps",
-        save_steps=save_at_step,
+        save_steps=TWO_PHASE_SAVE_STEP,
         save_total_limit=1,
     )
     shape_checks = parallel_shape_checks(trainer.model, trainer.parallelism_config)
-    checks = training_run_checks(trainer.train(), trainer, save_at_step)
+    checks = training_run_checks(trainer.train(), trainer, TWO_PHASE_SAVE_STEP)
     l_pre = fixed_batch_loss(trainer.model, *probe)
     # Nothing steps the optimizer after the save at the last step, so this is the state its shards hold.
     saved_optimizer = local_optimizer_state(trainer.model, trainer.optimizer) if optimizer_state else None
@@ -425,17 +425,17 @@ def run_two_phase_resume(
         log("  Phase 1 FAILED, skipping the resume")
         return shape_checks | checks
 
-    log(f"\n  Phase 2: resume from {checkpoint} to step {total_steps}")
-    trainer = build_trainer(checkpoint, output_dir=output_dir, max_steps=total_steps, save_strategy="no")
+    log(f"\n  Phase 2: resume from {checkpoint} to step {TWO_PHASE_TOTAL_STEPS}")
+    trainer = build_trainer(checkpoint, output_dir=output_dir, max_steps=TWO_PHASE_TOTAL_STEPS, save_strategy="no")
     capture = ResumeCapture(trainer, *probe, optimizer_state=optimizer_state)
     trainer.add_callback(capture)
     resumed = parallel_shape_checks(trainer.model, trainer.parallelism_config)
-    resumed |= training_run_checks(trainer.train(resume_from_checkpoint=checkpoint), trainer, total_steps)
+    resumed |= training_run_checks(trainer.train(resume_from_checkpoint=checkpoint), trainer, TWO_PHASE_TOTAL_STEPS)
     checks |= {f"resume_{name}": ok for name, ok in resumed.items()}
     checks |= resume_continuity_checks(
         capture.capture,
         l_pre,
-        save_step=save_at_step,
+        save_step=TWO_PHASE_SAVE_STEP,
         loss_tol=TOL.resume_fixed_batch_loss_abs,
         optimizer_state=saved_optimizer,
     )

@@ -94,7 +94,6 @@ def test_serialize_trajectory_drops_answer_key_and_internals():
     assert "_test_cases" not in s["info"]
     assert "context" not in s["info"]
     assert "EXPECTED_OUTPUT_42" not in json.dumps(s)
-    assert serialize_trajectory(None) is None
 
 
 def test_write_trajectories_jsonl_meta_then_episodes(tmp_path):

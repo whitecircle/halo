@@ -358,7 +358,7 @@ def patch_call(call: ast.Call, owners: dict[str, str], constants: dict[str, str]
         target, string = ".".join(part for part in (owners[root], chain, rest[0].value) if part), None
     else:
         return None
-    if target.partition(".")[0] not in FIRST_PARTY:
+    if not _first_party(target):
         return None
     absent = _may_be_absent(call)
     edits_in_place = is_method and callee == "dict"
@@ -412,7 +412,7 @@ class RepoIndex:
         for node in tree.body:
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
                 loaded = loaded_module(node.value, constants)
-                if loaded and loaded.name.partition(".")[0] in FIRST_PARTY:
+                if loaded and _first_party(loaded.name):
                     owners.update((target.id, loaded.name) for target in node.targets if isinstance(target, ast.Name))
         return owners
 

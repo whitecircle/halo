@@ -61,6 +61,14 @@ def main():
     )
     parallelism_config = context.parallelism_config
 
+    ds, dataset_presharded = load_script_datasets(args, parallelism_config)
+    # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while the vision map reads the aliased
+    # column, so the alias keeps the two verdicts identical and a mistyped name detectable.
+    ds = alias_images_column(ds, args.images_field, str(args.dataset))
+    # TRL's RewardTrainer renders the column literally named ``tools`` into the chat template and no
+    # other, so a declared tools column is aliased onto that spelling rather than rendered toolless.
+    ds = alias_tools_column(ds, args.tools_field, str(args.dataset))
+
     # Before the load: a family with no score head fails inside Auto* resolution on every rank, naming no alternative.
     # After the distributed init, so the hub read is ordered main-rank-first.
     reject_multimodal_model_without_seq_cls_head(model_config)
@@ -80,15 +88,7 @@ def main():
 
     log_model_info(model, tokenizer)
 
-    ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while the vision map reads the aliased
-    # column, so the alias keeps the two verdicts identical and a mistyped name detectable.
-    ds = alias_images_column(ds, args.images_field, str(args.dataset))
-    # TRL's RewardTrainer renders the column literally named ``tools`` into the chat template and no
-    # other, so a declared tools column is aliased onto that spelling rather than rendered toolless.
-    ds = alias_tools_column(ds, args.tools_field, str(args.dataset))
-
-    # Decided now the dataset is known: a multimodal checkpoint on text-only pairs is a text run, class unchanged.
+    # Off the loaded config: a multimodal checkpoint on text-only pairs is a text run, class unchanged.
     is_vlm = is_vlm_run_across_ranks(args, model_config.model_name_or_path, ds, config=model.config)
     if is_vlm:
         # The VLM pair render (halo/data/pipeline/preferences.py) templates the prompt without

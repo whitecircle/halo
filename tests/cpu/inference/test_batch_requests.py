@@ -14,7 +14,6 @@ from halo.inference.batch_requests import (
     append_resume_records,
     load_resume_records,
     parallel_openai_requests,
-    resolve_request_tools,
     resume_store_path,
 )
 from halo.inference.response import OpenAIResponse
@@ -22,15 +21,15 @@ from tests.common.fake_chat_client import FakeChatClient, RecordingChatClient, f
 
 _TOOL = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
 # A store in the on-disk line format, written in two flushes, rows in completion order: a tool-call turn
-# with a null answer, a turn with reasoning and sampled ids, and a non-ASCII turn cut at its token cap.
+# with a null answer, a turn with reasoning, and a non-ASCII turn cut at its token cap.
 _STORE_LINES = (
     '{"index": 2, "result": {"answer": null, "reasoning": null, "finish_reason": "tool_calls", "tool_calls": '
     '[{"id": "call_0", "function": {"arguments": "{\\"q\\": \\"Zürich\\"}", "name": "lookup"}, "type": "function"}], '
-    '"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25, "token_ids": null}}\n'
+    '"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}}\n'
     '{"index": 0, "result": {"answer": "Paris", "reasoning": "The capital of France.", "finish_reason": "stop", '
-    '"tool_calls": null, "prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15, "token_ids": [9, 8, 7]}}\n'
+    '"tool_calls": null, "prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}}\n'
     '{"index": 1, "result": {"answer": "Déjà — cut", "reasoning": null, "finish_reason": "length", "tool_calls": '
-    'null, "prompt_tokens": 0, "completion_tokens": 64, "total_tokens": 0, "token_ids": null}}\n'
+    'null, "prompt_tokens": 0, "completion_tokens": 64, "total_tokens": 0}}\n'
 )
 # The batch without its store; the flush interval paces only the store, so its value is unused.
 _WITHOUT_STORE = {"resume": False, "flush_interval": 1}
@@ -47,7 +46,6 @@ def _stored_rows() -> list[OpenAIResponse]:
             prompt_tokens=12,
             completion_tokens=3,
             total_tokens=15,
-            token_ids=[9, 8, 7],
         ),
         OpenAIResponse(
             answer="Déjà — cut", reasoning=None, finish_reason="length", tool_calls=None, completion_tokens=64
@@ -102,7 +100,7 @@ def _store_path_for(messages, tools=None):
         messages=messages,
         temperature=0.0,
         max_tokens=32,
-        request_tools=resolve_request_tools(tools, message_count=len(messages)),
+        tools=tools,
     )
 
 
@@ -163,17 +161,6 @@ def test_the_store_is_appended_every_flush_interval_completions_and_once_at_the_
         pytest.param(
             {
                 "model": "gen-model",
-                "messages": [[{"role": "user", "content": "q0"}], [{"role": "user", "content": "q1"}]],
-                "temperature": None,
-                "max_tokens": 64,
-            },
-            [_TOOL],
-            "openai_requests_1d6bf86a2fd2faae4a979390dc182a10.jsonl",
-            id="common-tools",
-        ),
-        pytest.param(
-            {
-                "model": "gen-model",
                 "messages": [
                     [{"role": "system", "content": "S"}, {"role": "user", "content": "q0"}],
                     [{"role": "user", "content": "q1"}],
@@ -189,8 +176,7 @@ def test_the_store_is_appended_every_flush_interval_completions_and_once_at_the_
 )
 def test_the_store_name_is_pinned_per_request_identity(request_fields, tools, name):
     """A renamed store is one a re-run would miss after an interrupted run wrote it."""
-    request_tools = resolve_request_tools(tools, len(request_fields["messages"]))
-    assert Path(resume_store_path(**request_fields, request_tools=request_tools)).name == name
+    assert Path(resume_store_path(**request_fields, tools=tools)).name == name
 
 
 def test_a_store_in_the_line_format_replays_its_rows_and_is_written_line_for_line(tmp_path):
@@ -211,13 +197,19 @@ def test_a_store_in_the_line_format_replays_its_rows_and_is_written_line_for_lin
     assert "Déjà — cut" in text, "non-ASCII text is written as itself, not escaped"
 
 
-def test_store_round_trip_restores_the_sampled_token_ids(tmp_path):
-    """A caller that asked for ids (``return_token_ids``) reads ``None`` as the engine returning none."""
-    store = str(tmp_path / "requests.jsonl")
-    response = OpenAIResponse(answer="a", reasoning=None, finish_reason="stop", tool_calls=None, token_ids=[5, 6, 7])
-    append_resume_records(store, [(0, response)])
+@pytest.mark.parametrize("token_ids", ["null", "[5, 6, 7]"])
+def test_a_store_line_carrying_a_token_ids_key_still_replays(tmp_path, token_ids):
+    """Stores on disk may carry the key; a record is read by name."""
+    store = tmp_path / "requests.jsonl"
+    store.write_text(
+        f'{{"index": 0, "result": {{"answer": "a", "finish_reason": "stop", "token_ids": {token_ids}}}}}\n',
+        encoding="utf-8",
+    )
 
-    assert load_resume_records(store, result_count=1).results[0] == response
+    loaded = load_resume_records(str(store), result_count=1)
+
+    assert loaded.skipped_records == 0
+    assert loaded.results[0] == OpenAIResponse(answer="a", reasoning=None, finish_reason="stop", tool_calls=None)
 
 
 def test_store_loader_retries_a_record_whose_answer_is_not_text(tmp_path):
@@ -270,40 +262,17 @@ def test_append_empty_records_is_noop(tmp_path):
     assert not store.exists()
 
 
-def test_request_tools_distinguishes_common_and_per_message_shapes():
-    common_tools = [{"type": "function", "function": {"name": "search"}}]
-    common = resolve_request_tools(common_tools, message_count=2)
-    assert common.per_message is False
-    assert common.for_message(0) == common_tools
-
-    per_message_tools = [common_tools, None]
-    per_message = resolve_request_tools(per_message_tools, message_count=2)
-    assert per_message.per_message is True
-    assert per_message.for_message(0) == common_tools
-    assert per_message.for_message(1) is None
-
-
-def test_request_tools_rejects_per_message_length_mismatch():
-    with pytest.raises(ValueError, match="same length"):
-        resolve_request_tools([[{"type": "function"}]], message_count=2)
-
-
-def test_request_tools_none_or_empty_is_not_per_message():
-    none = resolve_request_tools(None, message_count=3)
-    assert none.per_message is False
-    assert none.for_message(0) is None
-    assert resolve_request_tools([], message_count=0).per_message is False
+@pytest.mark.parametrize("tools", [[[_TOOL]], [[_TOOL], None, None], []], ids=["short", "long", "empty"])
+def test_parallel_requests_refuses_tools_that_do_not_pair_with_the_messages(tools):
+    """Indexing past a short list would fail row by row, each read as a retryable request failure."""
+    client = RecordingChatClient()
+    with pytest.raises(ValueError, match="one entry per message: got"):
+        asyncio.run(parallel_openai_requests("m", ["a", "b"], client=client, tools=tools, **_WITHOUT_STORE))
+    assert client.calls == []
 
 
 def test_store_path_differs_for_a_different_request():
-    request_tools = resolve_request_tools(None, message_count=1)
-    base_kwargs = {
-        "model": "model",
-        "messages": ["hello"],
-        "temperature": 0.0,
-        "max_tokens": 32,
-        "request_tools": request_tools,
-    }
+    base_kwargs = {"model": "model", "messages": ["hello"], "temperature": 0.0, "max_tokens": 32, "tools": None}
     baseline = resume_store_path(**base_kwargs)
     assert resume_store_path(**{**base_kwargs, "model": "other"}) != baseline
     assert resume_store_path(**{**base_kwargs, "temperature": 0.7}) != baseline
@@ -339,9 +308,9 @@ def test_store_path_covers_every_row_of_the_tools():
     assert _store_path_for(prompts, base) != _store_path_for(prompts, edited)
 
 
-def test_store_path_covers_a_common_tool_schema_to_its_full_length():
+def test_store_path_covers_a_tool_schema_to_its_full_length():
     def tools(tail):
-        return [{"type": "function", "function": {"name": "search", "description": "d" * 600 + tail}}]
+        return [[{"type": "function", "function": {"name": "search", "description": "d" * 600 + tail}}]]
 
     assert _store_path_for(["q"], tools("")) != _store_path_for(["q"], tools("!"))
 
@@ -355,18 +324,16 @@ def test_parallel_requests_keeps_at_most_max_workers_in_flight(max_workers):
     assert client.peak == max_workers
 
 
-def test_parallel_requests_forwards_common_tools_to_every_row_and_per_message_tools_to_theirs():
-    def tools_sent(client):
-        return {call["messages"][-1]["content"]: call.get("tools") for call in client.calls}
-
-    common = RecordingChatClient()
-    asyncio.run(parallel_openai_requests("m", ["a", "b"], client=common, tools=[_TOOL], **_WITHOUT_STORE))
-    assert tools_sent(common) == {"a": [_TOOL], "b": [_TOOL]}
-
+def test_parallel_requests_forwards_each_rows_own_tools():
     per_message = RecordingChatClient()
     asyncio.run(parallel_openai_requests("m", ["a", "b"], client=per_message, tools=[[_TOOL], None], **_WITHOUT_STORE))
-    assert tools_sent(per_message) == {"a": [_TOOL], "b": None}
-    assert all("tools" not in call for call in per_message.calls if call["messages"][-1]["content"] == "b")
+    sent = {call["messages"][-1]["content"]: call for call in per_message.calls}
+    assert sent["a"]["tools"] == [_TOOL]
+    assert "tools" not in sent["b"]
+
+    no_tools = RecordingChatClient()
+    asyncio.run(parallel_openai_requests("m", ["a", "b"], client=no_tools, tools=None, **_WITHOUT_STORE))
+    assert all("tools" not in call for call in no_tools.calls)
 
 
 if __name__ == "__main__":

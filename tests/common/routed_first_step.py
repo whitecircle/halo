@@ -244,10 +244,6 @@ def routed_first_step_checks(
     reference_grads: dict[str, torch.Tensor],
     *,
     device,
-    output_rtol: float = TOL.routed_output_rel_l2,
-    grad_cos_min: float = TOL.routed_grad_cosine_min,
-    grad_ratio_band: tuple[float, float] = TOL.routed_grad_norm_ratio_band,
-    regret_max: float = TOL.router_near_tie_logit_abs,
 ) -> tuple[dict[str, bool], dict[str, float]]:
     """Routed checks on a recorded step against its pinned reference. Forward, output and pick verdicts are world-wide
     (COLLECTIVE). An expert zero on one side only fails, and no token may name one expert twice. Every
@@ -271,15 +267,17 @@ def routed_first_step_checks(
 
     pairs, covered, zero_both, zero_one = _grad_pairs(routed, pinned, reference_grads)
     routing_params = {name for name in reference_grads if ROUTING_DEPENDENT_PARAM.search(name)}
-    grads_match, grad_metrics = _score_pairs(pairs, cos_min=grad_cos_min, ratio_band=grad_ratio_band)
+    grads_match, grad_metrics = _score_pairs(
+        pairs, cos_min=TOL.routed_grad_cosine_min, ratio_band=TOL.routed_grad_norm_ratio_band
+    )
     cosines = [value for key, value in grad_metrics.items() if key.endswith("_cos")]
     ratios = [value for key, value in grad_metrics.items() if key.endswith("_norm_ratio")]
 
     checks = {
         "routed_forwards_all_pinned": world_all(all_pinned, device),
-        "routed_picks_are_reference_near_ties": world_all(regret <= regret_max, device),
+        "routed_picks_are_reference_near_ties": world_all(regret <= TOL.router_near_tie_logit_abs, device),
         "routed_picks_are_distinct_experts": world_all(duplicated == 0, device),
-        "routed_outputs_match_reference": world_all(output_error <= output_rtol, device),
+        "routed_outputs_match_reference": world_all(output_error <= TOL.routed_output_rel_l2, device),
         "routed_grads_cover_every_routing_param": bool(routing_params) and covered == routing_params,
         "routed_grads_match_reference": grads_match and not zero_one,
     }
@@ -294,13 +292,13 @@ def routed_first_step_checks(
     }
     log_all(
         f"  routed outputs over {len(forwards)} layers x {min(forwards.values(), default=0)} forwards: worst rel L2 "
-        f"{output_error:.3e} at {worst_layer} (tol {output_rtol}); worst pick shortfall "
-        f"{regret:.3e} (tol {regret_max}); {duplicated} tokens naming one expert twice"
+        f"{output_error:.3e} at {worst_layer} (tol {TOL.routed_output_rel_l2}); worst pick shortfall "
+        f"{regret:.3e} (tol {TOL.router_near_tie_logit_abs}); {duplicated} tokens naming one expert twice"
     )
     log(
         f"  routed grads over {len(pairs)} router/expert slices: cos >= {metrics['routed_grad_min_cos']:.6f} "
-        f"(min {grad_cos_min}), norm ratio {metrics['routed_grad_min_norm_ratio']:.5f}.."
-        f"{metrics['routed_grad_max_norm_ratio']:.5f} (band {grad_ratio_band}); {len(zero_both)} experts zero on "
+        f"(min {TOL.routed_grad_cosine_min}), norm ratio {metrics['routed_grad_min_norm_ratio']:.5f}.."
+        f"{metrics['routed_grad_max_norm_ratio']:.5f} (band {TOL.routed_grad_norm_ratio_band}); {len(zero_both)} experts zero on "
         f"both sides, {len(zero_one)} on one {zero_one[:4]}; uncovered routing params "
         f"{sorted(routing_params - covered)[:4]}"
     )

@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from halo.config_validation import present, require_callable, require_finite
-from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY
 from halo.environments.episode_scoring import EpisodeGrade
 from halo.environments.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
@@ -119,7 +119,7 @@ Tips:
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
         """A row with no grader raises, since running a command proves nothing. A reward without an ``environment``
         term takes no grade, which could only void the episode for a verdict no term reads."""
-        if self.objective_term is None or not trajectory.info.get("completed"):
+        if self.objective_term is None or not trajectory.info.get(COMPLETED_KEY):
             return EpisodeGrade(0.0)
 
         if self.test_function:
@@ -129,7 +129,7 @@ Tips:
                 logger.warning("SWE test_function raised; scoring the episode invalid", exc_info=True)
                 return self._invalid_grade(trajectory, f"test_function raised {type(exc).__name__}: {exc}")
 
-        ctx = context or trajectory.info.get("context") or {}
+        ctx = context or trajectory.info.get(CONTEXT_KEY) or {}
         # Key presence, not value: the protocol marks a null ``answer`` cell invalid instead of paying it.
         if callable(ctx.get("validator")) or ANSWER_KEY in ctx:
             return super()._grade_episode(trajectory, context)

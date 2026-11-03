@@ -3,7 +3,6 @@ step and a host-read probe. Entry points rebind process-global state, so each ru
 reports through one ``FINDINGS:`` line."""
 
 import torch
-from torch.utils.checkpoint import CheckpointError
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from trl.trainer.sft_trainer import DataCollatorForLanguageModeling as TRLDataCollatorForLanguageModeling
 
@@ -23,9 +22,13 @@ from tests.common.packed_flash_varlen import (
     SWEEP_ATTN_IMPLEMENTATION,
     VARLEN_KEYS,
     AttentionHostReads,
+    checkpointed_then_plain,
     install_reference_flash,
     padding_tokenizer,
+    recording_step,
+    tensors_equal,
     use_flash,
+    with_varlen_boundaries,
 )
 from tests.common.tiny_models import tiny_family_model
 
@@ -53,15 +56,7 @@ def without_set(batch: dict) -> dict:
 def wrong_boundary(batch: dict) -> dict:
     """A varlen set splitting the row in two: a forward that reads the set trains another loss."""
     width = batch["input_ids"].shape[1]
-    cu_seq_lens = torch.tensor([0, width // 2, width], dtype=torch.int32)
-    longest = width - width // 2
-    return {
-        **batch,
-        "cu_seq_lens_q": cu_seq_lens,
-        "cu_seq_lens_k": cu_seq_lens,
-        "max_length_q": longest,
-        "max_length_k": longest,
-    }
+    return with_varlen_boundaries(batch, torch.tensor([0, width // 2, width], dtype=torch.int32))
 
 
 def _flash_label(name: str) -> str:
@@ -135,32 +130,13 @@ def step_findings(name: str, gc_mode: str) -> list[str]:
     if reentrant is not None:
         enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": reentrant})
 
-    def step(inputs):
-        model.zero_grad(set_to_none=True)
-        _kernels, counts = install_reference_flash(attn_implementation=_flash_label(name))
-        loss = model(**inputs, use_cache=False).loss
-        forward = dict(counts)
-        loss.backward()
-        trained = {"loss": loss.detach()} | {
-            param_name: param.grad.clone() for param_name, param in model.named_parameters() if param.grad is not None
-        }
-        return trained, forward, {key: counts[key] - forward[key] for key in counts}
-
+    step = recording_step(model, _flash_label(name))
     handed, handed_forward, handed_backward = step(batch)
     bare, bare_forward, bare_backward = step(without_set(batch))
-    wrong_error = None
-    try:
-        wrong = step(wrong_boundary(batch))[0]
-    except CheckpointError as error:
-        wrong, wrong_error = None, str(error).partition("\n")[0]
-    model.gradient_checkpointing_disable()
-    wrong_plain = step(wrong_boundary(batch))[0]
-
-    def same(a, b):
-        return a is not None and a.keys() == b.keys() and all(torch.equal(a[key], b[key]) for key in a)
+    wrong, wrong_error, wrong_plain = checkpointed_then_plain(model, step, wrong_boundary(batch))
 
     findings = []
-    if not same(handed, bare):
+    if not tensors_equal(handed, bare):
         findings.append("the varlen set changed the loss or a gradient")
     tests_forward, tests_backward = bare_forward["_is_packed_sequence"], bare_backward["_is_packed_sequence"]
     if not tests_forward or tests_backward != (tests_forward if reentrant is not None else 0):
@@ -170,12 +146,12 @@ def step_findings(name: str, gc_mode: str) -> list[str]:
         )
     if handed_forward["_is_packed_sequence"] or handed_backward["_is_packed_sequence"]:
         findings.append(f"a layer tested the row despite the set: {handed_forward} / {handed_backward}")
-    if wrong_error is not None or not same(wrong, wrong_plain):
+    if wrong_error is not None or not tensors_equal(wrong, wrong_plain):
         findings.append(
             "the recompute attended over other boundaries than the set the forward was handed"
             + (f" ({wrong_error})" if wrong_error else "")
         )
-    if same(wrong_plain, handed):
+    if tensors_equal(wrong_plain, handed):
         findings.append("a wrong boundary trained the same step, so the set is not what attention reads")
     return findings
 

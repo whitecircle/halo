@@ -30,15 +30,15 @@ class StubEPLayerBase(EPMoELayerBase):
         raise NotImplementedError(f"{type(self).__name__} is a state/export stub — its forward is never exercised")
 
 
-def bare_ep_layer(cls: type[EPMoELayerBase], *, ep_size: int = 1, expert_tp_size: int = 1, **expert_params):
+def bare_ep_layer(cls: type[EPMoELayerBase], **expert_params):
     """``cls`` without its constructor, holding what the export reads on one process and ``expert_params``; its real
     gather runs at world size 1."""
     layer = object.__new__(cls)
     nn.Module.__init__(layer)
     layer._expert_lora_attrs = frozenset()
-    layer.expert_tp_size = expert_tp_size
+    layer.expert_tp_size = 1
     layer.expert_tp_group = "expert-tp-group"
-    layer.ep_config = SimpleNamespace(ep_size=ep_size, dispatch_ep_group="dispatch-ep-group")
+    layer.ep_config = SimpleNamespace(ep_size=1, dispatch_ep_group="dispatch-ep-group")
     for name, tensor in expert_params.items():
         setattr(layer, name, nn.Parameter(torch.as_tensor(tensor)))
     return layer

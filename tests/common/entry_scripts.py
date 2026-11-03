@@ -17,6 +17,7 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoModel, AutoModelForCausalLM, AutoModelForSequenceClassification
 
 from halo.cli import TRAINING_ROOT, training_methods
+from tests.common.checkpoint_io import loading_problems
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
@@ -305,13 +306,11 @@ def export_checks(export: type, checkpoint: Path, base: str, *, learned: bool) -
         decoder = {name for name in base_state if name.startswith("model.")}
         # The pipeline builds its backbone whatever the files hold; the files must hold every key of it.
         _, info = AutoModel.from_pretrained(checkpoint, output_loading_info=True)
-        complete = set(trained) == decoder and not (
-            info["missing_keys"] or info["unexpected_keys"] or info["mismatched_keys"]
-        )
+        complete = set(trained) == decoder and not loading_problems(info)
     else:
         model, info = export.from_pretrained(checkpoint, output_loading_info=True)
         trained = model.state_dict()
-        complete = not (info["missing_keys"] or info["unexpected_keys"] or info["mismatched_keys"])
+        complete = not loading_problems(info)
     checks = {"export_loads_every_weight": complete}
     if learned:
         shared = [

@@ -74,12 +74,8 @@ async def generate_openai_response(
     max_tokens: int = 512,
     tools: list[dict] | None = None,
     request_timeout: float = REQUEST_TIMEOUT_SECONDS,
-    extra_body: dict[str, Any] | None = None,
-    top_p: float | None = None,
 ) -> OpenAIResponse:
-    """``temperature`` ``None`` keeps the served default, which reasoning models require. ``extra_body`` rides the
-    request body verbatim, for fields outside the OpenAI chat schema; the rollout engines' come from
-    :func:`~halo.environments.engine_wire.generation_control_fields`."""
+    """``temperature`` ``None`` keeps the served default, which reasoning models require."""
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
 
@@ -91,25 +87,19 @@ async def generate_openai_response(
     }
     if temperature is not None:
         request["temperature"] = temperature
-    if top_p is not None:
-        request["top_p"] = top_p
     if tools is not None:
         request["tools"] = tools
-    if extra_body:
-        request["extra_body"] = extra_body
 
     completion = await chat_completion(client, **request)
     choice = completion.choices[0]
     message = choice.message
-    # Outside the OpenAI schema, so the SDK keeps it as an extra attribute of the choice.
-    token_ids = getattr(choice, "token_ids", None)
+    completion_tokens = _usage_field(completion, "completion_tokens")
     return OpenAIResponse(
         answer=message.content,
         reasoning=get_reasoning_text(message),
-        finish_reason=get_finish_reason(choice) or "",
+        finish_reason=get_finish_reason(choice, completion_tokens=completion_tokens, max_tokens=max_tokens) or "",
         tool_calls=message.tool_calls,
         prompt_tokens=_usage_field(completion, "prompt_tokens"),
-        completion_tokens=_usage_field(completion, "completion_tokens"),
+        completion_tokens=completion_tokens,
         total_tokens=_usage_field(completion, "total_tokens"),
-        token_ids=token_ids if isinstance(token_ids, list) else None,
     )

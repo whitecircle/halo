@@ -60,9 +60,11 @@ def _run_kto(
     yaml_body: str = "",
     vlm_checkpoint: bool = True,
     logged: dict | None = None,
+    model_load: Exception | None = None,
 ) -> None:
     """Run ``preference/kto.py:main()`` up to the trainer hand-off. ``log_dataset_examples`` is the last call that
-    sees the splits as the trainer will, so it records them into ``logged`` and stops the run."""
+    sees the splits as the trainer will, so it records them into ``logged`` and stops the run. ``model_load`` is
+    raised by the model load in its place."""
     module = _script_module()
     model_id = _VLM_MODEL_ID if vlm_checkpoint else _TEXT_MODEL_ID
     config = tmp_path / "config.yaml"
@@ -96,7 +98,7 @@ def _run_kto(
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_preference_models", side_effect=load_models),
+        mock.patch.object(module, "load_preference_models", side_effect=model_load or load_models),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "log_script_dataset_examples", side_effect=capture_and_stop),
         mock.patch("halo.entrypoints.script.install_log_tee"),
@@ -180,6 +182,18 @@ def test_images_field_naming_a_missing_column_raises(tmp_path):
     """A mistyped column would otherwise leave the run on the text path with no images at all."""
     with pytest.raises(ValueError, match="images_field='pictures' names a column the dataset"):
         _run_kto(tmp_path, _dataset(), yaml_body="images_field: pictures\n")
+
+
+@pytest.mark.parametrize(
+    ("knob", "message"),
+    [("completion_field", "completion_field='response'"), ("label_field", "label_field='response'")],
+)
+def test_a_mistyped_render_column_is_refused_before_the_model_load(tmp_path, knob, message):
+    """The typo would otherwise surface only after the policy and reference load."""
+    with pytest.raises(ValueError, match=message):
+        _run_kto(
+            tmp_path, _dataset(), yaml_body=f"{knob}: response\n", model_load=AssertionError("the model was loaded")
+        )
 
 
 def test_an_empty_eval_split_is_still_the_eval_split(tmp_path):

@@ -324,6 +324,27 @@ def reject_lora_before_the_load(context: ScriptContext, model_config: ModelArgum
     )
 
 
+def reject_knobs_injected_lora_cannot_honor(model_config: ModelArguments, args: EmbeddingScriptArguments) -> None:
+    """Injection freezes every non-adapter parameter, which these two would need trained."""
+    if not model_config.use_peft:
+        return
+    # The freeze re-freezes trainable copies and the wrapper renames the base tensor, so the saved ST module lacks the
+    # plain <mod>.weight.
+    if model_config.lora_modules_to_save:
+        raise ValueError(
+            f"lora_modules_to_save={list(model_config.lora_modules_to_save)} is not supported for "
+            "embedding training: the SentenceTransformer path injects adapters in place, which "
+            "leaves the modules_to_save copies frozen and rewrites the base module's keys so the "
+            "saved model no longer reloads. Train those modules with a full fine-tune instead."
+        )
+    if args.train_sinks:
+        raise ValueError(
+            "train_sinks: true needs full fine-tuning: embedding LoRA freezes every non-adapter "
+            "parameter after injection, so the sinks would train nowhere. Keep the sinks live and "
+            "frozen instead (reset_sinks: false without train_sinks), or drop the adapters."
+        )
+
+
 def reject_fp32_masters_without_ep_layers(
     context: ScriptContext, model_config: ModelArguments, dist_args: ParallelismArguments
 ) -> None:
@@ -370,22 +391,6 @@ def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: 
     peft_config = build_peft_config(backbone, model_config)
     if peft_config is None:
         return
-    # The freeze below re-freezes trainable copies and the wrapper renames the base tensor, so the saved ST module
-    # lacks the plain <mod>.weight.
-    if model_config.lora_modules_to_save:
-        raise ValueError(
-            f"lora_modules_to_save={list(model_config.lora_modules_to_save)} is not supported for "
-            "embedding training: the SentenceTransformer path injects adapters in place, which "
-            "leaves the modules_to_save copies frozen and rewrites the base module's keys so the "
-            "saved model no longer reloads. Train those modules with a full fine-tune instead."
-        )
-    # The freeze below re-freezes everything that is not an adapter, trainable sinks included.
-    if args.train_sinks:
-        raise ValueError(
-            "train_sinks: true needs full fine-tuning: embedding LoRA freezes every non-adapter "
-            "parameter after injection, so the sinks would train nowhere. Keep the sinks live and "
-            "frozen instead (reset_sinks: false without train_sinks), or drop the adapters."
-        )
     inject_adapter_in_model(peft_config, backbone)
     adapters = tuner_adapter_param_ids(backbone)
     for param in model.parameters():
@@ -445,6 +450,7 @@ def main():
     reject_uneven_sentence_transformers_batches(
         embedding_config, train_dataset, toolkit_loader=uses_dp_sharded_loader(parallelism_config, dataset_presharded)
     )
+    reject_knobs_injected_lora_cannot_honor(model_config, args)
     reject_lora_before_the_load(context, model_config)
     reject_fp32_masters_without_ep_layers(context, model_config, dist_args)
 

@@ -105,17 +105,25 @@ def test_an_empty_presharded_train_shard_is_refused_before_its_label_type_is_rea
     assert classification.split_label_sets(ds, dataset_presharded=False) == {"train": set()}
 
 
+def _labeled_split(labels: list | None, rows: int = 2) -> Dataset:
+    """No ``label`` column for ``None``."""
+    return Dataset.from_dict(
+        {"prompt": [_TURNS] * rows} if labels is None else {"prompt": [_TURNS] * len(labels), "label": labels}
+    )
+
+
 def _run_to_tokenization(
-    classification, tmp_path, eval_strategy: str, test_labels: list, extra: str = ""
+    classification, tmp_path, eval_strategy: str, test_labels: list | None, extra: str = "", train_labels=(0, 1)
 ) -> list[str]:
-    """Run ``main()`` over a single-label dataset to its tokenization map; returns the splits it maps."""
+    """Run ``main()`` over a single-label dataset to its tokenization map; returns the splits it maps. ``None`` labels
+    leave the split without a ``label`` column."""
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: stub/qwen3-4b\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
         f"bf16: false\nuse_cpu: true\nmax_length: 512\neval_strategy: {eval_strategy}\n{extra}"
     )
-    train = Dataset.from_dict({"prompt": [_TURNS, _TURNS], "label": [0, 1]})
-    test = Dataset.from_dict({"prompt": [_TURNS] * len(test_labels), "label": test_labels})
+    train = _labeled_split(train_labels and list(train_labels))
+    test = _labeled_split(test_labels)
     runtime = types.SimpleNamespace(parallelism_config=types.SimpleNamespace(), model_source="stub/qwen3-4b")
     model = types.SimpleNamespace(config=types.SimpleNamespace())
 
@@ -168,6 +176,34 @@ def test_an_unlabeled_test_split_is_refused_when_the_run_evaluates(classificatio
 
 def test_a_labeled_test_split_is_tokenized_when_the_run_evaluates(classification, tmp_path):
     assert _run_to_tokenization(classification, tmp_path, "steps", test_labels=[0, 1]) == ["test", "train"]
+
+
+def test_a_test_split_with_no_label_column_trains_when_the_run_does_not_evaluate(classification, tmp_path):
+    assert _run_to_tokenization(classification, tmp_path, "no", test_labels=None) == ["train"]
+
+
+def test_a_test_split_with_no_label_column_is_refused_by_name_when_the_run_evaluates(classification, tmp_path):
+    with pytest.raises(ValueError, match=r"The 'test' split .*no 'label' column.*eval_strategy: no"):
+        _run_to_tokenization(classification, tmp_path, "steps", test_labels=None)
+
+
+def test_a_train_split_with_no_label_column_is_refused_by_name(classification, tmp_path):
+    with pytest.raises(ValueError, match=r"The 'train' split .*no 'label' column.*Add a 'label' column"):
+        _run_to_tokenization(classification, tmp_path, "no", test_labels=[0, 1], train_labels=None)
+
+
+def test_a_rowless_read_split_with_no_label_column_is_not_refused(classification):
+    """A pre-sharded rank without rows has no schema to answer for: its peers' verdict decides."""
+    ds = DatasetDict({"train": _labeled_split([0, 1]), "test": _labeled_split(None, rows=0)})
+    classification.reject_read_splits_without_labels(ds, ("train", "test"))
+
+
+@pytest.mark.parametrize("dataset_presharded", [False, True], ids=["whole", "presharded"])
+def test_an_unread_split_with_no_label_column_adds_no_class(classification, dataset_presharded):
+    ds = DatasetDict({"train": _labeled_split([0, 1]), "validation": _labeled_split(None)})
+    labels = classification.split_label_sets(ds, dataset_presharded=dataset_presharded)
+    assert labels == {"train": {"0", "1"}, "validation": set()}
+    assert classification.build_label_list(labels) == ["0", "1"]
 
 
 if __name__ == "__main__":

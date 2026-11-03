@@ -20,7 +20,7 @@ from halo.callbacks.factory import build_run_callbacks
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.checkpoint_io import save_schedule
+from tests.common.checkpoint_io import OPTIMIZER_SHARD_FILE, save_schedule
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.optimizer_state import local_optimizer_state
 from tests.common.pp_equivalence import causal_lm_loss, count_checkpoint_calls, dp_slice_batch
@@ -219,7 +219,7 @@ def restored_moments_match_shard(stage, optimizer, checkpoint: str, rank: int, f
     """Whether every moment in this rank's shard under ``fqn_prefixes`` equals the live optimizer's, bitwise, and how
     many params it covers (none fails)."""
     shard = torch.load(
-        os.path.join(checkpoint, f"optimizer_shard_{rank:05d}.pt"), map_location="cpu", weights_only=False
+        os.path.join(checkpoint, OPTIMIZER_SHARD_FILE.format(rank=rank)), map_location="cpu", weights_only=False
     )
     live = local_optimizer_state(stage, optimizer)["state"]
     fqns = [fqn for fqn in shard["state"] if fqn.startswith(fqn_prefixes)]

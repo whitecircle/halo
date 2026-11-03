@@ -566,9 +566,6 @@ def fault_passes_bf16_noise_scoring(
     fault: Callable[[int, str, torch.Tensor], torch.Tensor],
     *,
     cos_min: float,
-    ratio_band: tuple[float, float] = TOL.ep_grad_norm_ratio_band,
-    noise_factor: float = TOL.bf16_noise_excuse_factor,
-    excusable_fraction: float = TOL.bf16_noise_excusable_layer_fraction,
 ) -> bool:
     """Negative control, which must return False: whether ``kind``'s pairs with ``fault`` applied still pass the bf16
     noise scoring. The other pairs stay in, as their layers' largest gradients set the kind's excusable fractions."""
@@ -581,13 +578,7 @@ def fault_passes_bf16_noise_scoring(
     ]
     scored = [
         {name: score for name, score in scores.items() if parameter_kind(name) == kind}
-        for scores in score_against_bf16_noise(
-            faulty,
-            cos_min=cos_min,
-            ratio_band=ratio_band,
-            noise_factor=noise_factor,
-            excusable_fraction=excusable_fraction,
-        )
+        for scores in score_against_bf16_noise(faulty, cos_min=cos_min)
     ]
     return all(score.matches for scores in scored for score in scores.values()) and not parameters_outside_the_bars(
         scored
@@ -708,12 +699,11 @@ def dense_reference(
     device: str,
     *,
     attn_implementation: str,
-    dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[float, torch.Tensor]:
     """Plain undistributed forward+backward; returns (loss, router grad). A mis-scaled reduction shows only in the
     gradient."""
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=dtype, trust_remote_code=True, attn_implementation=attn_implementation
+        model_name, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation=attn_implementation
     ).to(device)
     model.train()
     outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, use_cache=False)
@@ -738,8 +728,8 @@ def broadcast_reference(loss: float, grad: torch.Tensor | None, device: str, ran
     return float(loss_t.item()), grad
 
 
-def roll_expert_banks(model, shift: int = 1) -> int:
-    """Negative control: rotate every EP layer's local expert bank by ``shift``, which is what a wrong-expert routing
+def roll_expert_banks(model) -> int:
+    """Negative control: rotate every EP layer's local expert bank by one, which is what a wrong-expert routing
     bug does. Same rotation on every rank, so the reduced loss stays well defined. Returns the tensors rotated; 0 must
     fail the test."""
     rotated = 0
@@ -748,6 +738,6 @@ def roll_expert_banks(model, shift: int = 1) -> int:
             for _, param in layer.expert_named_params():
                 if param.shape[0] < 2:
                     continue
-                param.data.copy_(torch.roll(param.data, shifts=shift, dims=0))
+                param.data.copy_(torch.roll(param.data, shifts=1, dims=0))
                 rotated += 1
     return rotated

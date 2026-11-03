@@ -23,12 +23,6 @@ def parse_args():
 
     add_s3_dataset_args(parser)
     parser.add_argument(
-        "--follow_up_prompt_field",
-        type=str,
-        default="follow_up_prompt",
-        help="Row field with follow-up turns sent after the first answer (default: %(default)s).",
-    )
-    parser.add_argument(
         "--tools_field", type=str, default="tools", help="Field with tool definitions in OpenAI format"
     )
 

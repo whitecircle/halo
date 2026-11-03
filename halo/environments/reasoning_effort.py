@@ -152,11 +152,9 @@ class EpisodeEffort:
             thinking = max(thinking - (level_total - total), 1)
         return {"max_tokens": total, "max_thinking_tokens": thinking}
 
-    def stamp(self, trajectory: Trajectory | None, generated: int) -> None:
+    def stamp(self, trajectory: Trajectory, generated: int) -> None:
         """Re-tokenization has to render the level and budget the model generated under, and the reasoning terms price
         the episode by its level."""
-        if trajectory is None:
-            return
         trajectory.reasoning_effort = self.level
         trajectory.reasoning_budget = self.thinking_budget
         trajectory.reasoning_budget_soft = self.budget_soft

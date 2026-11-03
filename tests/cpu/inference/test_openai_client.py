@@ -18,34 +18,6 @@ from halo.inference.openai_client import (
 from tests.common.fake_chat_client import FakeChatClient, RecordingChatClient, fake_completion
 
 
-def test_generate_forwards_extra_body_verbatim():
-    """The rollout engines' spellings are owned by ``engine_wire.generation_control_fields``; a second owner would
-    let the training and eval paths send different ones."""
-    client = RecordingChatClient()
-    fields = {"reasoning_effort": "high", "thinking_token_budget": 4096}
-    resp = asyncio.run(generate_openai_response("m", "hi", client=client, extra_body=fields))
-    assert client.captured["extra_body"] == fields
-    assert resp.answer == "ok"
-
-
-def test_generate_omits_extra_body_when_there_is_nothing_to_add():
-    client = RecordingChatClient()
-    asyncio.run(generate_openai_response("m", "hi", client=client))
-    assert "extra_body" not in client.captured
-    asyncio.run(generate_openai_response("m", "hi", client=client, extra_body={}))
-    assert "extra_body" not in client.captured
-
-
-def test_generate_keeps_the_sampled_ids_an_engine_attaches_to_the_choice():
-    """vLLM's ``return_token_ids`` puts the sampled ids on the choice outside the OpenAI schema; anything but a list
-    reads as absent."""
-    with_ids = RecordingChatClient(completion=fake_completion(token_ids=[1, 2, 3]))
-    assert asyncio.run(generate_openai_response("m", "hi", client=with_ids)).token_ids == [1, 2, 3]
-    not_a_list = RecordingChatClient(completion=fake_completion(token_ids="1,2,3"))
-    assert asyncio.run(generate_openai_response("m", "hi", client=not_a_list)).token_ids is None
-    assert asyncio.run(generate_openai_response("m", "hi", client=RecordingChatClient())).token_ids is None
-
-
 def test_generate_requires_an_explicit_keyword_only_client():
     """Omitting the client is a TypeError naming it, never a mid-run 401 from an endpoint the caller did not choose."""
     parameter = inspect.signature(generate_openai_response).parameters["client"]
@@ -65,15 +37,13 @@ def test_generate_sends_the_default_temperature_and_omits_a_none():
     assert "temperature" not in client.captured
 
 
-@pytest.mark.parametrize(
-    ("field", "value"), [("top_p", 0.9), ("tools", [{"type": "function", "function": {"name": "search"}}])]
-)
-def test_generate_sends_an_optional_request_field_only_when_given(field, value):
+def test_generate_sends_tools_only_when_given():
+    tools = [{"type": "function", "function": {"name": "search"}}]
     client = RecordingChatClient()
     asyncio.run(generate_openai_response("m", "hi", client=client))
-    assert field not in client.captured
-    asyncio.run(generate_openai_response("m", "hi", client=client, **{field: value}))
-    assert client.captured[field] == value
+    assert "tools" not in client.captured
+    asyncio.run(generate_openai_response("m", "hi", client=client, tools=tools))
+    assert client.captured["tools"] == tools
 
 
 def _empty_completion(error=None):

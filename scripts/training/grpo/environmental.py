@@ -154,6 +154,25 @@ def rollout_start_log(env_settings: dict, async_config: AsyncRolloutConfig) -> l
     ]
 
 
+def reject_missing_carried_columns(args: EnvironmentalGRPOScriptArguments, ds) -> None:
+    """A renamed answer_field resolving to no column is a typo, yielding a full RL run with no ground truth. The default
+    spelling is not checked: the trainer gates on the environment's requires_answer. prompt_field is the loader's
+    conversation_field, already guarded."""
+    if args.answer_field:
+        if args.answer_field != DEFAULT_ANSWER_FIELD:
+            reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+        elif missing_render_column_splits(ds, args.answer_field) and is_global_main_process():
+            logger.warning(
+                f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
+                f"environment that grades against one refuses this dataset at trainer construction; "
+                f"one that grades against an answer only where a row has one pays every episode for "
+                f"completing the task instead."
+            )
+    for column in args.context_fields or []:
+        if column:
+            reject_missing_render_column(ds, str(args.dataset), "context_fields", column)
+
+
 def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
     def carried_columns(row):
         """Typed values, on rejected rows too, keeping every writer batch's Arrow schema identical."""
@@ -180,22 +199,6 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
         return {"prompt": messages, **carried_columns(row)}
 
     original_columns = list(ds["train"].column_names)
-    # A renamed answer_field resolving to no column is a typo, yielding a full RL run with no ground truth. The default
-    # spelling is not checked: the trainer gates on the environment's requires_answer. prompt_field is the loader's
-    # conversation_field, already guarded.
-    if args.answer_field:
-        if args.answer_field != DEFAULT_ANSWER_FIELD:
-            reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
-        elif missing_render_column_splits(ds, args.answer_field) and is_global_main_process():
-            logger.warning(
-                f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
-                f"environment that grades against one refuses this dataset at trainer construction; "
-                f"one that grades against an answer only where a row has one pays every episode for "
-                f"completing the task instead."
-            )
-    for column in args.context_fields or []:
-        if column:
-            reject_missing_render_column(ds, str(args.dataset), "context_fields", column)
     keep_columns = {"prompt", ANSWER_KEY} | set(args.context_fields or [])
     columns_to_remove = [col for col in original_columns if col not in keep_columns]
 
@@ -258,6 +261,17 @@ def main():
     )
     parallelism_config = context.parallelism_config
 
+    # The trainer gets dataset_presharded so it does not re-shard a per-rank load.
+    ds, dataset_presharded = load_script_datasets(
+        args,
+        parallelism_config,
+        conversation_field=args.prompt_field,
+        conversation_knob="prompt_field",
+    )
+    # process_dataset prunes to prompt/answer/context_fields, so an image column would vanish and train on text alone.
+    reject_image_columns(ds, "Environmental GRPO")
+    reject_missing_carried_columns(args, ds)
+
     # Trajectories are collated into padded batches.
     requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
@@ -272,15 +286,6 @@ def main():
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
-    # The trainer gets dataset_presharded so it does not re-shard a per-rank load.
-    ds, dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        conversation_field=args.prompt_field,
-        conversation_knob="prompt_field",
-    )
-    # process_dataset prunes to prompt/answer/context_fields, so an image column would vanish and train on text alone.
-    reject_image_columns(ds, "Environmental GRPO")
     processed_ds = process_dataset(args, tokenizer, ds)
     train_dataset = processed_ds["train"]
     eval_dataset = processed_ds.get("test")

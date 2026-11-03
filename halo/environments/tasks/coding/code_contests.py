@@ -10,6 +10,7 @@ from typing import Any
 from halo.config_validation import require_finite, require_int
 from halo.environments.episode_keys import (
     ANSWER_KEY,
+    COMPLETED_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     EPISODE_SLICES_KEY,
@@ -217,13 +218,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             compiled_time_limit_scale=compiled_time_limit_scale,
             max_grading_seconds=max_grading_seconds,
         )
-        chooses = self.chooses_language
-        test_tool, submit_tool = build_contest_tools(
-            specs,
-            self.sandbox,
-            run_test=self._run_test_in if chooses else self._run_test,
-            submit=self._submit_in if chooses else self._submit,
-        )
+        test_tool, submit_tool = build_contest_tools(specs, self.sandbox, run_test=self._run_test, submit=self._submit)
         self.test_tool_name = test_tool.name
         # What a veto judge listing ``checks: environment`` audits with.
         self.JUDGE_CHECKS = tuple(
@@ -348,10 +343,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         info[TURN_RUN_PROGRAMS_KEY] = len(info.get(RUN_PROGRAMS_KEY, []))
         return super()._execute_tool_calls(tool_calls, trajectory)
 
-    def _run_test_in(self, code: str, language: str, stdin: str = "") -> str:
-        """``language`` is required here, so a call without it fails to bind and is refused unspent."""
-        return self._run_test(code, language, stdin)
-
     def _run_test(self, code: str, language: str | None = None, stdin: str = "") -> str:
         """Run a scratchpad test under the per-test limit the episode's problem is graded at; outside an episode it
         runs uncapped at the grading default."""
@@ -417,10 +408,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             marker = len(TRUNCATION_MARKER.format(dropped=len(output)))
             output = self._truncate_observation(output, max(1, cap - len(tail) - marker))
         return output + tail
-
-    def _submit_in(self, code: str, language: str) -> str:
-        """``language`` required, as in :meth:`_run_test_in`."""
-        return self._submit(code, language)
 
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade against the episode's tests. The protocol keeps the ``max_submissions`` count and increments it
@@ -497,7 +484,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # A turn that also booked a sandbox fault ends on it, uncompleted, whatever it submitted.
         spent = self._exhausted_tool_cap(outcome.trajectory, SUBMIT_TOOL) is not None
         if not outcome.done and (spent or is_accepted(info)) and SANDBOX_FAULT_KEY not in info:
-            info["completed"] = True
+            info[COMPLETED_KEY] = True
             return outcome._replace(done=True)
         return outcome
 

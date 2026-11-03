@@ -70,9 +70,8 @@ A turn is unproductive when it is:
 
 - **cut**: the engine stopped it at its token cap;
 - **empty**: the model ended it with neither a tool call nor visible content;
-- **rejected**: every tool call named a nonexistent tool. Under the native tool-call protocol a call refused unrun
-  also counts ([Untrainable turns](environments/protocols/native-tool-use.md#untrainable-turns)); ReAct flags unknown
-  tools only.
+- **rejected**: every tool call named a nonexistent tool or was refused unrun
+  ([Untrainable turns](environments/protocols/native-tool-use.md#untrainable-turns)).
 
 What follows:
 

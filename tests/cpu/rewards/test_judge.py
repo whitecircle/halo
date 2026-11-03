@@ -397,6 +397,32 @@ def test_verdict_embedded_in_prose_and_numeric_strings_parse():
     assert parse_verdict(content, _term()) == Verdict({"correctness": 9.0, "clarity": 7.5}, {}, "fine")
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        'The set {1, 2} is covered. {"scores": {"correctness": 9, "clarity": 7}, "rationale": "fine"}',
+        '{"scores": {"correctness": 9, "clarity": 7}, "rationale": "fine"} Note: see {x}.',
+    ],
+    ids=["brace-before", "brace-after"],
+)
+def test_a_stray_brace_in_the_prose_around_a_verdict_does_not_hide_it(content):
+    """A parser miss reads as a scorer outage: it voids the episode, or neutralizes a veto."""
+    assert parse_verdict(content, _term()) == Verdict({"correctness": 9.0, "clarity": 7.0}, {}, "fine")
+
+
+def test_a_reply_holding_two_verdicts_reads_the_first():
+    draft, final = ({"scores": {"correctness": n, "clarity": n}, "rationale": str(n)} for n in (1, 9))
+    assert parse_verdict(f"{json.dumps(draft)}\n{json.dumps(final)}", _term()) == Verdict(
+        {"correctness": 1.0, "clarity": 1.0}, {}, "1"
+    )
+
+
+def test_a_cut_verdict_stays_unparseable_though_an_inner_object_decodes():
+    assert parse_verdict('{"scores": {"correctness": 9, "clarity": 7}, "rationale": "cut he', _term()) is None
+    veto_reply = '{"checks": {"cheat": {"fired": true, "evidence": []}, "sloppy": {"fired": false'
+    assert parse_verdict(veto_reply, _veto_term()) is None
+
+
 def test_a_reply_is_read_whole_before_the_object_it_embeds():
     """An array holding a verdict is not a verdict object."""
     verdict = {"scores": {"correctness": 9, "clarity": 7}, "rationale": "fine"}

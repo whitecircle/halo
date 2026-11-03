@@ -21,12 +21,6 @@ def build_reward_model_parser(description: str, *, temperature_default: float) -
     )
     add_prompt_field_args(parser)
     parser.add_argument(
-        "--follow_up_prompt_field",
-        type=str,
-        default="follow_up_prompt",
-        help="Row field with follow-up turns sent after the first answer (default: %(default)s).",
-    )
-    parser.add_argument(
         "--correct_answer_field",
         type=str,
         default="correct_answer",

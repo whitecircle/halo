@@ -19,39 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
-class _RequestTools:
-    raw: list[dict[str, object]] | list[list[dict[str, object]] | None] | None
-    per_message: bool
-
-    def for_message(self, index: int) -> list[dict[str, object]] | None:
-        if self.raw is None:
-            return None
-        if self.per_message:
-            return self.raw[index]
-        return self.raw
-
-
-@dataclass(slots=True)
 class _ResumeLoad:
     results: list[OpenAIResponse | None]
     processed_indices: set[int]
     skipped_records: int = 0
-
-
-def _is_per_message_tools(
-    tools: list[dict[str, object]] | list[list[dict[str, object]] | None] | None,
-) -> bool:
-    if not tools:
-        return False
-
-    first = tools[0]
-    if first is None or isinstance(first, list):
-        return True
-
-    if isinstance(first, dict) and "type" not in first:
-        return not any(isinstance(tool, dict) and "type" in tool for tool in tools)
-
-    return False
 
 
 def _sequence_digest(items: list) -> str:
@@ -75,10 +46,6 @@ def _response_from_record(result: dict[str, object]) -> OpenAIResponse:
     if answer is None and not result.get("tool_calls"):
         raise ValueError("resume record is missing answer")
 
-    token_ids = result.get("token_ids")
-    if token_ids is not None and not (isinstance(token_ids, list) and all(type(t) is int for t in token_ids)):
-        raise TypeError("resume record token_ids must be a list of integers")
-
     finish_reason = result.get("finish_reason")
     reasoning = result.get("reasoning")
     return OpenAIResponse(
@@ -89,7 +56,6 @@ def _response_from_record(result: dict[str, object]) -> OpenAIResponse:
         prompt_tokens=_optional_int(result.get("prompt_tokens")),
         completion_tokens=_optional_int(result.get("completion_tokens")),
         total_tokens=_optional_int(result.get("total_tokens")),
-        token_ids=token_ids,
     )
 
 
@@ -111,34 +77,21 @@ def _parse_resume_line(line: str) -> tuple[int, OpenAIResponse]:
     return index, _response_from_record(result)
 
 
-def resolve_request_tools(
-    tools: list[dict[str, object]] | list[list[dict[str, object]] | None] | None,
-    message_count: int,
-) -> _RequestTools:
-    per_message = _is_per_message_tools(tools)
-    if per_message and tools is not None and len(tools) != message_count:
-        raise ValueError(
-            "If tools is per-message, it must have the same length as messages. "
-            f"Got {len(tools)} tools and {message_count} messages."
-        )
-    return _RequestTools(raw=tools, per_message=per_message)
-
-
 def resume_store_path(
     *,
     model: str,
     messages: list[str] | list[list[dict]],
     temperature: float | None,
     max_tokens: int,
-    request_tools: _RequestTools,
+    tools: list[list[dict] | None] | None,
 ) -> str:
     """Under ``$HALO_DATA_ROOT``: a re-run must find it after the process and container that wrote it are gone."""
     hash_content = {
         "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "tools": None if request_tools.raw is None else _sequence_digest(request_tools.raw),
-        "per_message_tools": request_tools.per_message,
+        "tools": None if tools is None else _sequence_digest(tools),
+        "per_message_tools": tools is not None,
         "messages_sample": _sequence_digest(messages),
     }
     task_hash = hashlib.md5(json.dumps(hash_content, sort_keys=True).encode()).hexdigest()
@@ -206,12 +159,13 @@ async def parallel_openai_requests(
     max_tokens: int = 512,
     max_workers: int = 8,
     resume: bool = True,
-    tools: list[dict] | list[list[dict] | None] | None = None,
+    tools: list[list[dict] | None] | None = None,
 ) -> list[OpenAIResponse | None]:
     """One request per entry, ``max_workers`` in flight. With ``resume``, results are appended to the store every
     ``flush_interval`` completions; a failed request is left ``None`` and unstored, so it retries on the next run.
-    ``tools`` is a single list applied to every message, or one list per message."""
-    request_tools = resolve_request_tools(tools, len(messages))
+    ``tools`` holds one list, or ``None``, per message."""
+    if tools is not None and len(tools) != len(messages):
+        raise ValueError(f"tools must hold one entry per message: got {len(tools)} for {len(messages)} messages.")
 
     results: list[OpenAIResponse | None] = [None] * len(messages)
     semaphore = asyncio.Semaphore(max_workers)
@@ -225,7 +179,7 @@ async def parallel_openai_requests(
                     client=client,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    tools=request_tools.for_message(index),
+                    tools=tools[index] if tools else None,
                 )
                 return index, response
         except Exception:
@@ -242,7 +196,7 @@ async def parallel_openai_requests(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            request_tools=request_tools,
+            tools=tools,
         )
         logger.info("Checkpoint file path: %s", store_path)
         stored = load_resume_records(store_path, result_count=len(results))

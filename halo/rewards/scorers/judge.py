@@ -50,7 +50,6 @@ _EVIDENCE_SLIP_SHARE = 0.2
 _EVIDENCE_MIN_SLIP_WORDS = 4
 
 _WHITESPACE = re.compile(r"\s+")
-_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -90,21 +89,11 @@ def _object_of(properties: dict[str, Any]) -> dict[str, Any]:
 
 def response_schema(term: JudgeTerm) -> dict[str, Any]:
     if term.is_veto:
-        check = {
-            "type": "object",
-            "properties": {"fired": {"type": "boolean"}, "evidence": {"type": "array", "items": {"type": "string"}}},
-            "required": ["fired", "evidence"],
-            "additionalProperties": False,
-        }
+        check = _object_of({"fired": {"type": "boolean"}, "evidence": {"type": "array", "items": {"type": "string"}}})
         verdicts = {"checks": _object_of({check_.name: check for check_ in term.checks})}
     else:
         verdicts = {"scores": _object_of({requirement.name: {"type": "integer"} for requirement in term.requirements})}
-    return {
-        "type": "object",
-        "properties": {**verdicts, "rationale": {"type": "string"}},
-        "required": [*verdicts, "rationale"],
-        "additionalProperties": False,
-    }
+    return _object_of({**verdicts, "rationale": {"type": "string"}})
 
 
 def _tagged(tag: str, text: str) -> str:
@@ -149,19 +138,17 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
             f"one to {MAX_EVIDENCE_QUOTES} lines of that text, each copied character for character — not paraphrased, "
             "shortened or described — or an empty list when it does not fire.\n" + rubric
         )
-    else:
-        rubric = "\n".join(f"{i}. {r.name}: {r.description}" for i, r in enumerate(term.requirements, 1))
-        parts.append(
-            f"# Requirements\nScore the episode in <{view}> on each requirement from 0 (not met) to {term.scale} "
-            f"(fully met).\n{rubric}"
-        )
-    if term.is_veto:
         keys = ", ".join(
             f'"{check.name}": {{"fired": <true|false>, "evidence": ["<a line copied exactly>", ...]}}'
             for check in term.checks
         )
         parts.append(f'Reply with one JSON object: {{"checks": {{{keys}}}, "rationale": "<one or two sentences>"}}')
     else:
+        rubric = "\n".join(f"{i}. {r.name}: {r.description}" for i, r in enumerate(term.requirements, 1))
+        parts.append(
+            f"# Requirements\nScore the episode in <{view}> on each requirement from 0 (not met) to {term.scale} "
+            f"(fully met).\n{rubric}"
+        )
         keys = ", ".join(f'"{requirement.name}": <integer>' for requirement in term.requirements)
         parts.append(f'Reply with one JSON object: {{"scores": {{{keys}}}, "rationale": "<one or two sentences>"}}')
     return "\n\n".join(parts)
@@ -175,14 +162,17 @@ def action_text(term: JudgeTerm, sample: ScoringSample) -> str:
 
 def _parse_json_object(content: str) -> Any | None:
     """The JSON value ``content`` is, or the first object it embeds in prose; ``None`` when neither parses."""
-    match = _JSON_OBJECT.search(content)
-    for candidate in (content, match.group(0) if match else None):
-        if candidate is None:
-            continue
+    try:
+        return json.loads(content)
+    except ValueError:
+        pass
+    decoder = json.JSONDecoder()
+    start = content.find("{")
+    while start != -1:
         try:
-            return json.loads(candidate)
+            return decoder.raw_decode(content, start)[0]
         except ValueError:
-            continue
+            start = content.find("{", start + 1)
     return None
 
 

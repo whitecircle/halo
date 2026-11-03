@@ -11,6 +11,8 @@ from trl import GRPOTrainer
 
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
+MAX_COMPLETION_LENGTH = 64
+
 
 def single_process_accelerator() -> types.SimpleNamespace:
     """The accelerator surface the scoring path and TRL's loss read, for one process."""
@@ -80,7 +82,7 @@ def stacked(batch: dict) -> tuple[torch.Tensor, torch.Tensor, int]:
     return ids, mask, batch["completion_ids"].size(1)
 
 
-def scoring_host(model, ref_model, *, chunks: int, accelerator, beta: float = 0.0):
+def scoring_host(model, ref_model, *, chunks: int, accelerator):
     """The trainer's real scoring path, the chunked dense sweep at batch 1, the deal on."""
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.model, host.ref_model = model, ref_model
@@ -93,7 +95,7 @@ def scoring_host(model, ref_model, *, chunks: int, accelerator, beta: float = 0.
     )
     host.accelerator = accelerator
     host.temperature = 1.0
-    host.beta = beta
+    host.beta = 0.0
     host.num_iterations = 1
     host._use_chunked_grpo_logprobs = True
     host._is_correction = True
@@ -104,9 +106,9 @@ def scoring_host(model, ref_model, *, chunks: int, accelerator, beta: float = 0.
     return host
 
 
-def loss_host(model, *, chunks: int, accelerator, loss_type: str = "dapo", max_completion_length: int = 64):
+def loss_host(model, *, chunks: int, accelerator, loss_type: str = "dapo"):
     """:func:`scoring_host` with TRL's buffer and ``loss_type`` state, IS on; ``luspo`` at sequence-level IS,
-    ``dr_grpo`` by ``max_completion_length``."""
+    ``dr_grpo`` by :data:`MAX_COMPLETION_LENGTH`."""
     host = scoring_host(model, None, chunks=chunks, accelerator=accelerator)
     host.args.sapo_temperature_pos, host.args.sapo_temperature_neg = 1.0, 1.05
     host._step = 0
@@ -118,7 +120,7 @@ def loss_host(model, *, chunks: int, accelerator, loss_type: str = "dapo", max_c
     host.off_policy_mask_threshold = None
     host.importance_sampling_level = "sequence" if loss_type == "luspo" else "token"
     host.loss_type = loss_type
-    host.max_completion_length = max_completion_length
+    host.max_completion_length = MAX_COMPLETION_LENGTH
     host.epsilon_low, host.epsilon_high = 0.2, 0.28
     host.use_vllm = host.vllm_importance_sampling_correction = True
     host._entropy_bonus_enabled = False

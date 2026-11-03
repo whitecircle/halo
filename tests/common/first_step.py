@@ -205,25 +205,19 @@ def _gradient_agreement(got: dict[str, torch.Tensor], want: dict[str, torch.Tens
     return dot / math.sqrt(got_sq * want_sq), math.sqrt(got_sq / want_sq)
 
 
-def first_step_gradient_checks(
-    record: FirstStep,
-    reference: FirstStep,
-    *,
-    cosine_min: float = TOL.cp_grad_cosine_min,
-    norm_rtol: float = TOL.cp_grad_norm_rtol,
-) -> tuple[dict[str, bool], dict[str, float]]:
+def first_step_gradient_checks(record: FirstStep, reference: FirstStep) -> tuple[dict[str, bool], dict[str, float]]:
     """Gradient checks as one vector: a mis-scaled reduction keeps the direction, a mis-routed one keeps the norm. Per
     parameter, bf16 noise on small norm-weight gradients is too large to gate on."""
     cosine, norm_ratio = _gradient_agreement(record.grads, reference.grads)
     checks = {
         "step1_grads_cover_the_reference_params": bool(reference.grads)
         and record.grads.keys() == reference.grads.keys(),
-        "step1_grad_direction_matches_reference": cosine >= cosine_min,
-        "step1_grad_norm_matches_reference": abs(norm_ratio - 1.0) <= norm_rtol,
+        "step1_grad_direction_matches_reference": cosine >= TOL.cp_grad_cosine_min,
+        "step1_grad_norm_matches_reference": abs(norm_ratio - 1.0) <= TOL.cp_grad_norm_rtol,
     }
     log(
-        f"  step 1 gradient over {len(reference.grads)} params: cosine {cosine:.6f} (min {cosine_min}), "
-        f"norm ratio {norm_ratio:.5f} (tol {norm_rtol})"
+        f"  step 1 gradient over {len(reference.grads)} params: cosine {cosine:.6f} (min {TOL.cp_grad_cosine_min}), "
+        f"norm ratio {norm_ratio:.5f} (tol {TOL.cp_grad_norm_rtol})"
     )
     return checks, {"step1_grad_cosine": cosine, "step1_grad_norm_ratio": norm_ratio}
 
@@ -243,11 +237,7 @@ def dense_gradient_checks(record: FirstStep, reference: FirstStep) -> tuple[dict
 
 
 def parameter_gradient_checks(
-    got: dict[str, torch.Tensor],
-    want: dict[str, torch.Tensor],
-    *,
-    cosine_min: float = TOL.cp_grad_cosine_min,
-    norm_rtol: float = TOL.cp_grad_norm_rtol,
+    got: dict[str, torch.Tensor], want: dict[str, torch.Tensor]
 ) -> tuple[bool, dict[str, float]]:
     """Whether ``got`` matches ``want`` parameter by parameter, and the metrics behind the verdict. Whole direction and
     norm, the routing-dependent group as one vector, then each parameter's own bar. An expert zero on either side is
@@ -260,7 +250,7 @@ def parameter_gradient_checks(
     routed_cosine = (
         _gradient_agreement({n: got[n] for n in routed}, {n: want[n] for n in routed})[0] if routed else 1.0
     )
-    other_floor = TOL.cp_routed_grad_cosine_min if routed else cosine_min
+    other_floor = TOL.cp_routed_grad_cosine_min if routed else TOL.cp_grad_cosine_min
     each_holds, min_cosine, worst, worst_floor = finite, 1.0, "", other_floor
     for name in shared if finite else ():
         a, b = got[name], want[name]
@@ -281,9 +271,9 @@ def parameter_gradient_checks(
     )
     matches = (
         each_holds
-        and whole_cosine >= cosine_min
-        and routed_cosine >= cosine_min
-        and abs(norm_ratio - 1.0) <= norm_rtol
+        and whole_cosine >= TOL.cp_grad_cosine_min
+        and routed_cosine >= TOL.cp_grad_cosine_min
+        and abs(norm_ratio - 1.0) <= TOL.cp_grad_norm_rtol
     )
     metrics = {
         "grad_whole_cosine": whole_cosine,

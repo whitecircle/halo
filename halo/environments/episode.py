@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 
 # What an engine's client error says, lowercased, when the conversation outgrew the context (vLLM, SGLang, OpenAI).
 _CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
+# What a turn stamps on its step context, and only when it produced it: a row column so named must not read as its own.
+_TURN_STAMPS = (
+    "tool_calls",
+    "reasoning",
+    "token_ids",
+    "token_logprobs",
+    "prompt_token_ids",
+    "routing_mask",
+    "routing_prompt_tokens",
+    "thinking_cap",
+    "reasoning_tokens",
+    CUT_TOOL_CALLS_KEY,
+    LAST_TURN_KEY,
+)
 
 
 @dataclass
@@ -172,7 +186,7 @@ def step_context_from_generation(
 ) -> dict[str, Any]:
     """The context an ``env.step`` receives, stamped from one turn's generation; ``last_turn`` when the output budget
     affords no further turn."""
-    step_ctx = dict(context) if context else {}
+    step_ctx = {key: value for key, value in (context or {}).items() if key not in _TURN_STAMPS}
     step_ctx["finish_reason"] = gen.finish_reason
     if last_turn:
         step_ctx[LAST_TURN_KEY] = True
@@ -252,7 +266,7 @@ class EpisodeDispatcher:
 class _PlayedEpisode:
     """``lost_turn`` is the generation failure that ended it early, where one did."""
 
-    trajectory: Trajectory | None
+    trajectory: Trajectory
     turns: list[TurnGeneration]
     generated: int
     lost_turn: Exception | None = None
@@ -301,8 +315,8 @@ async def play_episode(
                 last_turn=effort.turn_caps(generated) is None,
             )
             step = (await episode.step([eid], [gen.text], [step_ctx]))[0]
-        trajectory = env.get_trajectories([eid])[0]
-        if trajectory is not None and not trajectory.done:
+        trajectory = step.trajectory
+        if not trajectory.done:
             # Truncated explicitly: a synthetic empty turn would mark it ``completed`` and pay completion-graded envs.
             if lost is not None:
                 trajectory.info[EPISODE_ERROR_KEY] = describe_exception(lost)

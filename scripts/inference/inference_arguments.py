@@ -79,10 +79,16 @@ def add_s3_dataset_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
 
 
 def add_prompt_field_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """The row id, the prompt, and the per-row and global system prompts."""
+    """The row id, the prompt, its follow-up turns, and the per-row and global system prompts."""
     parser.add_argument("--id_field", type=str, default="id", help="Field holding the row's unique id")
     parser.add_argument(
         "--prompt_field", type=str, default="prompt", help="Field with the prompt as a list of message dicts"
+    )
+    parser.add_argument(
+        "--follow_up_prompt_field",
+        type=str,
+        default="follow_up_prompt",
+        help="Row field with follow-up turns sent after the first answer (default: %(default)s).",
     )
     parser.add_argument(
         "--local_system_prompt_field", type=str, default="system_prompt", help="Per-row system prompt field"

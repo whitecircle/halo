@@ -121,12 +121,10 @@ def pp_topology_kwargs(pp_size: int, world_size: int) -> dict:
     return {"gpus_per_node": stage_world, "nvlink_domain_size": stage_world}
 
 
-def resolve_benchmark_attn(
-    model_name: str,
-    attn_implementation: str | None,
-    dtype: torch.dtype = torch.bfloat16,
-) -> str:
+def resolve_benchmark_attn(model_name: str, attn_implementation: str | None) -> str:
     """Concrete attention backend for a benchmark calling ``from_pretrained`` directly, whose own default ``sdpa`` is a
     different kernel than production."""
     model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    return resolve_attn_implementation(model_config, attn_implementation, dtype, sinks_policy=SinksPolicy.NEUTRALIZED)
+    return resolve_attn_implementation(
+        model_config, attn_implementation, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+    )

@@ -270,7 +270,7 @@ class EnvironmentActor:
         request = partial(self._generate_turn, self._http_client, server_url, sync_expiries)
         played = await play_episode(env, prompt, context, effort, request, config, log_prefix=f"Actor {self.actor_id}")
         traj = played.trajectory
-        episode_metrics = env.rollout_metrics(traj) if traj else {}
+        episode_metrics = env.rollout_metrics(traj)
         sampled = [turn.token_logprobs for turn in played.turns if turn.token_logprobs]
         if sampled:
             episode_metrics["logps/sampling_mean"] = sum(sum(lps) for lps in sampled) / sum(
@@ -280,10 +280,10 @@ class EnvironmentActor:
             prompt=prompt,
             trajectory=traj,
             episode_length=len(played.turns),
-            total_reward=traj.total_reward if traj else 0.0,
+            total_reward=traj.total_reward,
             metrics=episode_metrics,
             # Natural terminal state, not a max_turns truncation; both set done=True.
-            terminated_naturally=bool(traj and traj.done and not traj.truncated),
+            terminated_naturally=not traj.truncated,
             latency=time.time() - start,
             generation_tokens=played.generated,
             requests_expired_in_sync=sync_expiries.count,

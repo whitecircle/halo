@@ -52,7 +52,7 @@ Per-turn shaping, logged as `reward/turn_shaping`: `+thought_reward` or `-no_tho
 ### Refused and unproductive turns
 
 - An `Action:` naming an unregistered tool is a tool error whose observation lists the real tools; the turn trains only on a negative advantage ([Untrainable turns](../../objective.md#untrainable-turns)).
-- An `Action:` whose arguments do not bind is refused unrun ([Argument binding](native-tool-use.md#argument-binding)): `tool_error_penalty`, no `tool_budgets` spent.
+- An `Action:` whose arguments do not bind ([Argument binding](native-tool-use.md#argument-binding)) or past its `tool_budgets` cap is refused unrun: `tool_error_penalty`, no budget spent, and the turn trains only on a negative advantage. A cap of `0` disables the tool, and its turn stays trainable.
 - A call that ends on a sandbox fault is booked by its class and ends the episode ([Sandbox faults](../sandbox.md#sandbox-faults)).
 - A cut or empty turn is neither executed nor graded. It is nudged and retried ([Unproductive turns](../../episodes.md#unproductive-turns)) and trains only on a negative advantage.
 - Text with neither an Action nor a Final Answer gets the format hint and stays trainable.

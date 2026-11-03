@@ -343,11 +343,9 @@ def family_findings(name: str) -> list[str]:
     return [*findings, f"{REACH_PREFIX}{kwargs_branch}"]
 
 
-def _shift_first_boundary(batch: dict) -> dict:
-    """``batch`` with the set's first boundary one token later; ``position_ids`` keep the true one, so only a reader of
-    the handed set sees it."""
-    cu_seq_lens = batch["cu_seq_lens_q"].clone()
-    cu_seq_lens[1] += 1
+def with_varlen_boundaries(batch: dict, cu_seq_lens: torch.Tensor) -> dict:
+    """``batch`` handing ``cu_seq_lens`` as its varlen set; ``position_ids`` keep the true boundaries, so only a reader
+    of the handed set sees these."""
     longest = int(cu_seq_lens.diff().max())
     return {
         **batch,
@@ -358,8 +356,46 @@ def _shift_first_boundary(batch: dict) -> dict:
     }
 
 
-def _same(a: dict[str, torch.Tensor], b: dict[str, torch.Tensor]) -> bool:
+def _shift_first_boundary(batch: dict) -> dict:
+    """``batch`` with the set's first boundary one token later."""
+    cu_seq_lens = batch["cu_seq_lens_q"].clone()
+    cu_seq_lens[1] += 1
+    return with_varlen_boundaries(batch, cu_seq_lens)
+
+
+def tensors_equal(a: dict[str, torch.Tensor], b: dict[str, torch.Tensor]) -> bool:
     return a.keys() == b.keys() and all(torch.equal(a[key], b[key]) for key in a)
+
+
+def recording_step(model, attn_implementation: str) -> Callable[[dict], tuple[dict, dict, dict]]:
+    """One training step on ``model`` over the reference kernels: the loss and every gradient, and the derivation calls
+    of its forward and of its backward."""
+
+    def step(inputs):
+        model.zero_grad(set_to_none=True)
+        _kernels, counts = install_reference_flash(attn_implementation=attn_implementation)
+        loss = model(**inputs, use_cache=False).loss
+        forward = dict(counts)
+        loss.backward()
+        trained = {"loss": loss.detach()} | {
+            param_name: param.grad.clone() for param_name, param in model.named_parameters() if param.grad is not None
+        }
+        return trained, forward, {key: counts[key] - forward[key] for key in counts}
+
+    return step
+
+
+def checkpointed_then_plain(model, step: Callable, batch: dict) -> tuple[dict | None, str | None, dict]:
+    """What ``step`` trains on ``batch`` under ``model``'s checkpointing, or ``None`` and why the recompute was refused,
+    then what it trains with the checkpointing off."""
+    refused = None
+    try:
+        checkpointed = step(batch)[0]
+    except CheckpointError as error:
+        # Non-reentrant checkpointing refuses a recompute whose saved tensors differ from the forward's.
+        checkpointed, refused = None, str(error).partition("\n")[0]
+    model.gradient_checkpointing_disable()
+    return checkpointed, refused, step(batch)[0]
 
 
 def recompute_findings(name: str, gc_mode: str) -> list[str]:
@@ -374,34 +410,15 @@ def recompute_findings(name: str, gc_mode: str) -> list[str]:
     if reentrant is not None:
         enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": reentrant})
 
-    def step(inputs):
-        """The loss, every gradient, and the derivation calls of one step's forward and backward."""
-        model.zero_grad(set_to_none=True)
-        _kernels, counts = install_reference_flash(attn_implementation=attn_implementation)
-        loss = model(**inputs, use_cache=False).loss
-        forward = dict(counts)
-        loss.backward()
-        trained = {"loss": loss.detach()} | {
-            param_name: param.grad.clone() for param_name, param in model.named_parameters() if param.grad is not None
-        }
-        return trained, forward, {key: counts[key] - forward[key] for key in counts}
-
+    step = recording_step(model, attn_implementation)
     with_set, _, set_backward = step(batch)
     derived, derived_forward, derived_backward = step(
         {key: value for key, value in batch.items() if key not in VARLEN_KEYS}
     )
-    shifted_batch = _shift_first_boundary(batch)
-    recompute_error = None
-    try:
-        shifted = step(shifted_batch)[0]
-    except CheckpointError as error:
-        # Non-reentrant checkpointing refuses a recompute whose saved tensors differ from the forward's.
-        shifted, recompute_error = None, str(error).partition("\n")[0]
-    model.gradient_checkpointing_disable()
-    shifted_plain = step(shifted_batch)[0]
+    shifted, recompute_error, shifted_plain = checkpointed_then_plain(model, step, _shift_first_boundary(batch))
 
     findings = []
-    if not _same(with_set, derived):
+    if not tensors_equal(with_set, derived):
         findings.append("the varlen set changed the loss or a gradient")
     # Without the set, a recompute re-derives it in every layer whose forward did.
     derivations = derived_forward["_prepare_from_posids"]
@@ -413,12 +430,12 @@ def recompute_findings(name: str, gc_mode: str) -> list[str]:
         )
     if set_backward["_is_packed_sequence"] or set_backward["_prepare_from_posids"]:
         findings.append(f"the recompute re-derived the varlen set from position_ids: {set_backward}")
-    if recompute_error is not None or not _same(shifted, shifted_plain):
+    if recompute_error is not None or not tensors_equal(shifted, shifted_plain):
         findings.append(
             "the recompute attended over other boundaries than the set the forward was handed"
             + (f" ({recompute_error})" if recompute_error else "")
         )
-    if _same(shifted_plain, with_set):
+    if tensors_equal(shifted_plain, with_set):
         findings.append("a shifted boundary trained the same step, so the recompute check cannot see a re-derivation")
     return findings
 
@@ -464,7 +481,7 @@ def mask_probe_findings(name: str) -> list[str]:
         findings.append(
             f"mask construction still read the device {skipped_reads} times ({probed_reads} with the probe)"
         )
-    if not _same(skipped, probed):
+    if not tensors_equal(skipped, probed):
         findings.append("skipping the probe changed the loss, the logits or a gradient")
     if getattr(model, "_supports_sdpa", False):
         set_attn_implementation(model.config, "sdpa")

@@ -54,6 +54,12 @@ NO_LABEL_SENTINEL = "-1"
 # shape with the eval setting.
 LABEL_SPLITS = ("train", *EVAL_SPLIT_NAMES)
 
+_EVAL_ON_LABELED_ROWS_REMEDY = (
+    "Evaluate on labeled rows instead: point dataset at the train split alone (e.g. "
+    "dataset: <hub id>@train) and cut the eval split from it with test_size, or set "
+    "eval_strategy: no."
+)
+
 
 def tokenize_classification_row(
     example: dict,
@@ -115,9 +121,31 @@ def run_splits(training_config) -> tuple[str, ...]:
     return ("train", "test") if uses_evaluation(training_config) else ("train",)
 
 
+def _label_column_problem(ds, used_splits) -> str | None:
+    """The first split the run reads that holds rows but no ``label`` column, said with its remedy."""
+    for split in used_splits:
+        if split in ds and len(ds[split]) and "label" not in ds[split].column_names:
+            remedy = (
+                "Add a 'label' column holding each row's class, or a list of classes per row for a multi-label run."
+                if split == "train"
+                else _EVAL_ON_LABELED_ROWS_REMEDY
+            )
+            return (
+                f"The '{split}' split of this classification dataset has no 'label' column (columns: "
+                f"{sorted(ds[split].column_names)}), and the run reads that split. {remedy}"
+            )
+    return None
+
+
+def reject_read_splits_without_labels(ds, used_splits) -> None:
+    """COLLECTIVE: a split the run never reads may hold no labels; one it reads is refused by name, on every rank."""
+    reject_across_ranks(_label_column_problem(ds, used_splits), "Checking the label column", ValueError)
+
+
 def labels_in_split(raw_dataset, split="train") -> list[str]:
-    """Empty for an empty split: a rowless rank on a pre-sharded eval split must still join the label gather."""
-    if len(raw_dataset[split]) == 0:
+    """Empty for an empty split, since a rowless rank on a pre-sharded eval split must still join the label gather, and
+    for a split with no label column, which only one the run does not read gets this far with."""
+    if len(raw_dataset[split]) == 0 or "label" not in raw_dataset[split].column_names:
         return []
     if isinstance(raw_dataset[split]["label"][0], list):
         label_list = [label for sample in raw_dataset[split]["label"] for label in sample]
@@ -158,11 +186,7 @@ def reject_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_mul
                 f"Filter those rows out, e.g. dataset.filter(lambda row: str(row['label']) != {NO_LABEL_SENTINEL!r})."
             )
         else:
-            remedy = (
-                "Evaluate on labeled rows instead: point dataset at the train split alone (e.g. "
-                "dataset: <hub id>@train) and cut the eval split from it with test_size, or set "
-                "eval_strategy: no."
-            )
+            remedy = _EVAL_ON_LABELED_ROWS_REMEDY
         raise ValueError(
             f"The '{split}' split of this single-label dataset carries the {NO_LABEL_SENTINEL!r} 'no "
             f"label' sentinel (unlabeled rows, as in GLUE-style test splits), and the run reads that "
@@ -214,6 +238,8 @@ def main():
     reject_image_columns(ds, "Classification")
 
     require_prompt_or_text_column(ds["train"].column_names, args.text_field)
+    used_splits = run_splits(classification_config)
+    reject_read_splits_without_labels(ds, used_splits)
     split_labels = split_label_sets(ds, dataset_presharded)
 
     is_multi_label = False
@@ -223,7 +249,6 @@ def main():
             logger.info("Label type is list, doing multi-label classification")
 
     reject_unread_metric_knobs(classification_config, is_multi_label)
-    used_splits = run_splits(classification_config)
     reject_unlabeled_rows(split_labels, used_splits, is_multi_label)
     label_list = build_label_list(split_labels)
     num_labels = len(label_list)

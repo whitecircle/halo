@@ -41,11 +41,11 @@ def build_context(expected_answer: str) -> dict[str, Any]:
     return context
 
 
-def render_transcript(trajectory: Trajectory | None) -> list[dict[str, str]]:
+def render_transcript(trajectory: Trajectory) -> list[dict[str, str]]:
     """Gradio renders only ``user``/``assistant``; a tool or system turn is shown as a labelled user turn, since the
     observation is what the next turn conditions on."""
     rendered: list[dict[str, str]] = []
-    for message in trajectory.messages if trajectory else []:
+    for message in trajectory.messages:
         content = message.content or ""
         if message.role == "assistant":
             if message.tool_calls:
@@ -60,11 +60,8 @@ def render_transcript(trajectory: Trajectory | None) -> list[dict[str, str]]:
     return rendered
 
 
-def render_summary(env_type: str, trajectory: Trajectory | None, elapsed: float, max_turns: int) -> str:
+def render_summary(env_type: str, trajectory: Trajectory, elapsed: float, max_turns: int) -> str:
     """Episode verdict for the summary panel, read off the driver's own stats (:data:`EVAL_STATS_KEY`)."""
-    if trajectory is None:
-        return f"**Environment:** {env_type}\n\n**No episode** — the environment produced no trajectory."
-
     stats = trajectory.info.get(EVAL_STATS_KEY, {})
     parts = [
         f"**Environment:** {env_type}",

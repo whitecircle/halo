@@ -121,10 +121,10 @@ def build_unmasked_batch(vocab_size: int, rows: int, seq_len: int = 32, device=N
     return input_ids, input_ids.clone()
 
 
-def build_ragged_batch(global_batch: int, seq_len: int = SEQ_LEN, seed: int = 7) -> tuple[torch.Tensor, torch.Tensor]:
+def build_ragged_batch(global_batch: int, seed: int = 7) -> tuple[torch.Tensor, torch.Tensor]:
     """Rows with ragged ignore prefixes, so replicas hold unequal loss-token counts."""
     g = torch.Generator().manual_seed(seed)
-    rows = torch.randint(4, RAGGED_BATCH_VOCAB_SIZE, (global_batch, seq_len), generator=g)
+    rows = torch.randint(4, RAGGED_BATCH_VOCAB_SIZE, (global_batch, SEQ_LEN), generator=g)
     labels = rows.clone()
     for i in range(global_batch):
         labels[i, : 4 + 3 * i] = -100
@@ -415,7 +415,6 @@ def build_pp_sft_trainer(
     per_device_batch: int,
     n_microbatches: int,
     max_steps: int = 2,
-    seq_len: int = SEQ_LEN,
     gradient_checkpointing: bool = False,
     moe_balancing: str = "auto",
     bf16: bool = True,
@@ -426,7 +425,7 @@ def build_pp_sft_trainer(
         max_steps=max_steps,
         per_device_train_batch_size=per_device_batch,
         gradient_accumulation_steps=n_microbatches,  # PP consumes accumulation as the microbatch count
-        max_length=seq_len,
+        max_length=SEQ_LEN,
         save_strategy="no",
         report_to=[],
         logging_nan_inf_filter=False,
@@ -528,7 +527,6 @@ def check_router_grads(
     band: tuple[float, float] = ROUTER_NORM_RATIO_BAND,
     cos_min: float = ROUTER_COSINE_MIN,
     twin_router_grads: dict[str, torch.Tensor] | None = None,
-    twin_tol: float = ROUTER_TWIN_REL_TOL,
 ) -> tuple[dict, dict]:
     """Router grads: bit-identical across the stage's ranks, plus a gate vs the references. With ``twin_router_grads``
     direction moves to the tight twin gate and fp32 keeps only the norm band (see :data:`ROUTER_TWIN_REL_TOL`)."""
@@ -554,7 +552,7 @@ def check_router_grads(
             router_ok &= band[0] < ratio < band[1]
             twin_err = rel_err(grads, twin_router_grads[global_name])
             worst_twin_err = max(worst_twin_err, twin_err) if math.isfinite(twin_err) else math.inf
-            twin_ok &= twin_err < twin_tol
+            twin_ok &= twin_err < ROUTER_TWIN_REL_TOL
     checks = {
         "router_grads_bitwise_identical_across_stage": router_identical,
         "router_grads_match_reference": router_ok,

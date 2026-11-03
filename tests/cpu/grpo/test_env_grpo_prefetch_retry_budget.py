@@ -6,6 +6,7 @@ import dataclasses
 from types import SimpleNamespace
 
 import pytest
+from datasets import Dataset, DatasetDict
 from trl import GRPOConfig
 
 import scripts.training.grpo.environmental as env_script
@@ -160,6 +161,8 @@ def test_the_script_refuses_before_the_model_load(monkeypatch, overrides, refuse
 
     monkeypatch.setattr(env_script, "parse_script_args", lambda *_: parsed)
     monkeypatch.setattr(env_script, "init_training_script", lambda *a, **k: SimpleNamespace(parallelism_config=None))
+    rows = DatasetDict(train=Dataset.from_dict({"prompt": ["q"], "answer": ["a"]}))
+    monkeypatch.setattr(env_script, "load_script_datasets", lambda *a, **k: (rows, False))
     monkeypatch.setattr(env_script, "load_model_and_tokenizer", model_load)
     expected = (
         pytest.raises(ValueError, match="a prefetched round stays in flight across up to 2 syncs")

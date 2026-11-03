@@ -228,10 +228,10 @@ def test_the_default_answer_field_does_not_demand_the_column(env_grpo_module, _i
     assert processed["train"][0]["prompt"] == [{"role": "user", "content": "solve it"}]
 
 
-def test_a_renamed_answer_field_must_still_name_a_real_column(env_grpo_module, _isolated_datasets_cache):
+def test_a_renamed_answer_field_must_still_name_a_real_column(env_grpo_module):
     """Resolving to no column is a typo, and the run would train with no ground truth."""
     with pytest.raises(ValueError, match="answer_field='solution'"):
-        env_grpo_module.process_dataset(_script_args(answer_field="solution"), _ChatTokenizer(), _raw())
+        env_grpo_module.reject_missing_carried_columns(_script_args(answer_field="solution"), _raw())
 
 
 def test_a_renamed_answer_field_is_carried_into_the_answer_column(env_grpo_module, _isolated_datasets_cache):

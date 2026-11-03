@@ -23,6 +23,7 @@ from halo.environments.tool_accounting import (
 from halo.environments.tools.definitions import (
     MALFORMED_LITERAL_ERRORS,
     NativeToolRegistry,
+    is_refused_unrun,
     parse_python_expression,
 )
 from halo.environments.tools.toolsets import build_math_tools, build_python_tools, build_search_tools
@@ -292,6 +293,8 @@ Always think before acting, and provide a Final Answer when you're done."""
             observation, success, fault = tool_call_outcome(step.action, outcome)
             if not success:
                 info["tool_error"] = str(outcome)
+            if is_refused_unrun(outcome):
+                trajectory.last_assistant_message().calls_rejected = True
 
         reward = self._book_tool_call(trajectory, step.action, success, fault)
         trajectory.add_message(Message.user(f"Observation: {self._truncate_observation(observation)}"))

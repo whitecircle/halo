@@ -6,11 +6,10 @@ import types
 from typing import Any
 
 
-def fake_completion(content: str = "ok", **choice_extras):
-    """Minimal chat-completion response; ``choice_extras`` are attributes outside the OpenAI schema an engine attaches
-    to the choice."""
+def fake_completion(content: str | None = "ok"):
+    """Minimal chat-completion response."""
     message = types.SimpleNamespace(content=content, tool_calls=None, reasoning=None, reasoning_content=None)
-    choice = types.SimpleNamespace(message=message, finish_reason="stop", stop_reason=None, **choice_extras)
+    choice = types.SimpleNamespace(message=message, finish_reason="stop", stop_reason=None)
     usage = types.SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
     return types.SimpleNamespace(choices=[choice], usage=usage)
 

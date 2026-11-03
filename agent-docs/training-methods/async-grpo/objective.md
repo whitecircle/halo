@@ -16,7 +16,7 @@ Three kinds of turn are tagged untrainable ([Untrainable turns](#untrainable-tur
 
 - `truncated`: the engine cut the turn.
 - `empty`: neither a tool call nor visible content.
-- `calls_rejected`: every tool call named a nonexistent tool (under native tool calls, also every call refused unrun).
+- `calls_rejected`: every tool call named a nonexistent tool or was refused unrun.
 
 A tagged turn stays in the next turn's prompt.
 

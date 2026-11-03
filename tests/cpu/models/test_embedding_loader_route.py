@@ -114,29 +114,46 @@ def test_train_sinks_on_a_sinkless_backbone_is_refused_before_sentence_transform
         )
 
 
+def _run_main_to_the_build(monkeypatch, tmp_path, checkpoint: str, config_body: str) -> None:
+    """``main()`` with a stand-in model load that fails the test as "past the gate"."""
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"model_name_or_path: {checkpoint}\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
+        f"bf16: false\nuse_cpu: true\nmax_length: 64\n{config_body}"
+    )
+    rows = DatasetDict({"train": Dataset.from_dict({"text": ["a", "b"]})})
+    monkeypatch.setattr(embedding_script, "init_training_script", lambda *a, **k: _context(checkpoint))
+    monkeypatch.setattr(embedding_script, "load_script_datasets", lambda *a, **k: (rows, False))
+    monkeypatch.setattr(embedding_script, "build_sentence_transformer", lambda *a: pytest.fail("past the gate"))
+    monkeypatch.setattr(sys, "argv", ["prog", str(config)])
+    embedding_script.main()
+
+
 @pytest.mark.parametrize("knob", ["fp32_router", "fp32_experts"])
 def test_main_refuses_an_fp32_ep_master_on_a_sentence_transformers_load(monkeypatch, tmp_path, checkpoints, knob):
     """Past this gate the dense backbone would load and train at the run dtype whatever the knob says."""
-
-    def run(checkpoint: str, **parallelism) -> None:
-        config = tmp_path / "config.yaml"
-        config.write_text(
-            f"model_name_or_path: {checkpoint}\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
-            f"bf16: false\nuse_cpu: true\nmax_length: 64\n{knob}: true\n"
-        )
-        rows = DatasetDict({"train": Dataset.from_dict({"text": ["a", "b"]})})
-        monkeypatch.setattr(
-            embedding_script, "init_training_script", lambda *a, **k: _context(checkpoint, **parallelism)
-        )
-        monkeypatch.setattr(embedding_script, "load_script_datasets", lambda *a, **k: (rows, False))
-        monkeypatch.setattr(embedding_script, "build_sentence_transformer", lambda *a: pytest.fail("past the gate"))
-        monkeypatch.setattr(sys, "argv", ["prog", str(config)])
-        embedding_script.main()
-
     with pytest.raises(ValueError, match=rf"builds no EP layers does not support.*{knob}"):
-        run(checkpoints["qwen3"])
+        _run_main_to_the_build(monkeypatch, tmp_path, checkpoints["qwen3"], f"{knob}: true\n")
     with pytest.raises(pytest.fail.Exception, match="past the gate"):
-        run(checkpoints["gpt_oss"])
+        _run_main_to_the_build(monkeypatch, tmp_path, checkpoints["gpt_oss"], f"{knob}: true\n")
+
+
+@pytest.mark.parametrize(
+    ("knob_body", "message"),
+    [
+        ("lora_modules_to_save:\n- score\n", r"lora_modules_to_save=\['score'\] is not supported for embedding"),
+        ("reset_sinks: false\ntrain_sinks: true\n", "train_sinks: true needs full fine-tuning"),
+    ],
+    ids=["lora_modules_to_save", "train_sinks"],
+)
+def test_main_refuses_a_knob_injected_lora_cannot_honor_before_the_load(
+    monkeypatch, tmp_path, checkpoints, knob_body, message
+):
+    """Read off the config alone, so no multi-hundred-GB load comes first. A full fine-tune trains these."""
+    with pytest.raises(ValueError, match=message):
+        _run_main_to_the_build(monkeypatch, tmp_path, checkpoints["qwen3"], f"use_peft: true\n{knob_body}")
+    with pytest.raises(pytest.fail.Exception, match="past the gate"):
+        _run_main_to_the_build(monkeypatch, tmp_path, checkpoints["qwen3"], knob_body)
 
 
 def test_lora_under_ep_is_refused_before_the_load(checkpoints):

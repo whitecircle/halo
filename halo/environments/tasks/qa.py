@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from halo.config_validation import require_bool
-from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY
 from halo.environments.episode_scoring import EpisodeGrade
 from halo.environments.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
@@ -219,7 +219,7 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         if expected is None:
             return super()._grade_episode(trajectory, context)
 
-        if not trajectory.info.get("completed"):
+        if not trajectory.info.get(COMPLETED_KEY):
             return EpisodeGrade(0.0)
 
         final_response = trajectory.info.get("final_response", "")

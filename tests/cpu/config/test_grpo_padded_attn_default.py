@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from datasets import DatasetDict
+from datasets import Dataset, DatasetDict
 from transformers import Gemma2Config, GemmaConfig, PretrainedConfig, Qwen3Config
 
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -94,6 +94,11 @@ def _requested_attn(
         # Offline GRPO refuses splits its run-start reference cannot read before the model load.
         elif rel_path == "grpo/offline.py":
             splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))
+            stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(splits, False)))
+        # The on-policy scripts refuse a dataset's columns before the model load.
+        elif rel_path in ("grpo/online.py", "grpo/environmental.py"):
+            rows = Dataset.from_dict({"prompt": ["q"], "answer": ["a"]})
+            splits = DatasetDict(train=rows, test=rows)
             stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(splits, False)))
         if checkpoint_config is not None:
             stack.enter_context(_blackwell(checkpoint_config))

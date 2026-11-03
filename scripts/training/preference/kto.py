@@ -97,6 +97,7 @@ def main():
     # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while TRL's vision probe reads the column
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
+    _require_kto_columns(ds, args)
     # Vision routing keys on the dataset: a natively-multimodal model trains text-only data through TRL's text path.
     # Before the load, which needs the checkpoint's processor for a vision run.
     is_vlm_data = resolve_preference_vlm_run(
@@ -106,7 +107,6 @@ def main():
 
     models = load_preference_models(context, kto_config, model_config, args, vlm_run=is_vlm_data, method="KTO")
 
-    _require_kto_columns(ds, args)
     train_dataset = _rename_kto_columns(ds["train"], args)
     eval_dataset = _rename_kto_columns(ds["test"], args) if "test" in ds else None
 

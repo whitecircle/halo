@@ -144,32 +144,30 @@ def ensure_model_downloaded(model_name: str, rank: int, revision: str | None = N
     barrier()
 
 
+def _world_reduced(value: float, op: dist.ReduceOp, device) -> torch.Tensor:
+    local = torch.tensor(float(value), device=device or torch.device("cuda", torch.cuda.current_device()))
+    dist.all_reduce(local, op=op)
+    return local
+
+
 def world_mean(value: float, device=None) -> float:
     """DP-average a per-rank scalar, matching what HF logs for a loss. Collective."""
-    local = torch.tensor(float(value), device=device or torch.device("cuda", torch.cuda.current_device()))
-    dist.all_reduce(local, op=dist.ReduceOp.AVG)
-    return float(local)
+    return float(_world_reduced(value, dist.ReduceOp.AVG, device))
 
 
 def world_any(flag: bool, device=None) -> bool:
     """True if ``flag`` holds on any rank, for a precondition on a quantity compared world-wide. Collective."""
-    local = torch.tensor(float(bool(flag)), device=device or torch.device("cuda", torch.cuda.current_device()))
-    dist.all_reduce(local, op=dist.ReduceOp.MAX)
-    return bool(local.item())
+    return bool(_world_reduced(bool(flag), dist.ReduceOp.MAX, device).item())
 
 
 def world_all(flag: bool, device=None) -> bool:
     """True if ``flag`` holds on every rank, for a property each rank checks on its own shard. Collective."""
-    local = torch.tensor(float(bool(flag)), device=device or torch.device("cuda", torch.cuda.current_device()))
-    dist.all_reduce(local, op=dist.ReduceOp.MIN)
-    return bool(local.item())
+    return bool(_world_reduced(bool(flag), dist.ReduceOp.MIN, device).item())
 
 
 def world_min(value: float, device=None) -> float:
     """The smallest ``value`` across all ranks, for a precondition that must hold on every shard. Collective."""
-    local = torch.tensor(float(value), device=device or torch.device("cuda", torch.cuda.current_device()))
-    dist.all_reduce(local, op=dist.ReduceOp.MIN)
-    return float(local)
+    return float(_world_reduced(value, dist.ReduceOp.MIN, device))
 
 
 def world_spread(value: float, device=None) -> float:

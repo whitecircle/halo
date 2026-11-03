@@ -22,7 +22,6 @@ from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, Token
 from halo.models.module_tree import backbone_with_layers
 from halo.models.segment_markers import segment_markers_for
 from tests.common.packed_flash_varlen import (
-    FINDINGS_MARKER,
     PACKING_FAMILIES,
     PAD_ID,
     REACH_PREFIX,
@@ -32,6 +31,7 @@ from tests.common.packed_flash_varlen import (
     install_loaded_flash,
     install_reference_flash,
     padding_tokenizer,
+    report,
     use_flash,
 )
 from tests.common.pp_equivalence import build_runner_stage, gather_stage_grads
@@ -197,7 +197,7 @@ def family_findings(name: str) -> list[str]:
 
 
 def main(name: str) -> None:
-    print(FINDINGS_MARKER + "|".join(family_findings(name)))
+    report(family_findings(name))
 
 
 @dataclass(frozen=True)
