@@ -127,7 +127,12 @@ def _full_weights(model):
 def _build_trainer(ctx, source, tokenizer, batch, checkpointing, cp_size, attention):
     parallelism = ParallelismConfig(cp_size=cp_size, fp32_non_ep_params=True)
     model, _ = load_distributed_model(
-        source, parallelism, dtype=torch.bfloat16, attn_implementation=attention, model_class=Qwen3_5ForCausalLM
+        source,
+        parallelism,
+        dtype=torch.bfloat16,
+        trust_remote_code=False,
+        attn_implementation=attention,
+        model_class=Qwen3_5ForCausalLM,
     )
     if checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
