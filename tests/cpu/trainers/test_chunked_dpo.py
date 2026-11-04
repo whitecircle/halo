@@ -1,5 +1,7 @@
 """Actual DPO entrypoints over tiny local models; CPU runs the native head tiles eagerly."""
 
+import ast
+import inspect
 from collections import defaultdict
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -26,6 +28,7 @@ from trl.trainer.dpo_trainer import DataCollatorForPreference
 
 import halo.trainers.preference.chunked_dpo as chunked_dpo
 import tests.common.dpo_scoring as dpo_scoring
+import tests.common.preference_precompute_e2e as precompute_e2e
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
@@ -621,8 +624,10 @@ def test_sgd_proof_rejects_one_omitted_parameter_update(omitted):
 def test_gpu_numerical_row_passes_real_preallocation_model_and_precision_guards(family, monkeypatch):
     config = Qwen3Config() if family == "dense" else Qwen3MoeConfig(num_experts=4, num_experts_per_tok=2)
     observed = []
+    loader_signature = inspect.signature(dpo_scoring.load_distributed_model)
 
     def preflight(**kwargs):
+        loader_signature.bind(**kwargs)
         pc = kwargs["parallelism_config"]
         reject_unsupported_run(pc, kwargs["dtype"])
         reject_unsupported_model(pc, config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=family == "qwen3_moe")
@@ -641,6 +646,61 @@ def test_gpu_numerical_row_passes_real_preallocation_model_and_precision_guards(
         )
     assert len(observed) == 1 and observed[0].fp32_non_ep_params
     assert observed[0].ep_fp32_experts == (family == "qwen3_moe")
+
+
+@pytest.mark.parametrize("module", [dpo_scoring, precompute_e2e], ids=["equivalence", "lifecycle"])
+def test_gpu_fixture_loader_calls_bind_actual_release_signatures(module):
+    calls = [
+        node
+        for node in ast.walk(ast.parse(inspect.getsource(module)))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("load_distributed_model", "load_peft_model")
+    ]
+    assert calls, "the contract no longer sees the GPU fixture loaders"
+    for call in calls:
+        assert all(not isinstance(arg, ast.Starred) for arg in call.args)
+        assert all(keyword.arg is not None for keyword in call.keywords)
+        signature = inspect.signature(getattr(module, call.func.id))
+        signature.bind(*[object() for _ in call.args], **{keyword.arg: object() for keyword in call.keywords})
+    required = inspect.signature(dpo_scoring.load_distributed_model)
+    with pytest.raises(TypeError, match="trust_remote_code"):
+        required.bind(model_name_or_path="/unread/local/fixture", parallelism_config=object())
+
+
+@pytest.mark.parametrize("bounded", [True, False], ids=["bounded", "full-oracle"])
+def test_gpu_numerical_builder_reaches_real_cpu_trainer_constructor(tmp_path, monkeypatch, bounded):
+    loader_signature = inspect.signature(dpo_scoring.load_distributed_model)
+    config_constructor = dpo_scoring.DPOConfig
+    observed, teardown = [], []
+
+    def load_cpu_fixture(**kwargs):
+        loader_signature.bind(**kwargs)
+        observed.append(kwargs)
+        return _model(), _tokenizer()
+
+    def cpu_config(**kwargs):
+        inspect.signature(config_constructor).bind(**kwargs)
+        return config_constructor(**kwargs, use_cpu=True)
+
+    monkeypatch.setattr(dpo_scoring, "load_distributed_model", load_cpu_fixture)
+    monkeypatch.setattr(dpo_scoring, "DPOConfig", cpu_config)
+    try:
+        trainer, hidden_dtypes = dpo_scoring._build_trainer(
+            SimpleNamespace(output_dir=str(tmp_path), on_teardown=teardown.append),
+            "/unread/local/fixture",
+            family="dense",
+            dtype=torch.float32,
+            bounded=bounded,
+        )
+        assert isinstance(trainer, DistributedDPOTrainer) and trainer.optimizer is not None
+        assert trainer.use_chunked_dpo_logprobs is bounded
+        assert len(observed) == 1 and observed[0]["trust_remote_code"] is False
+        assert hidden_dtypes and set(hidden_dtypes) == {torch.float32}
+        assert trainer.train_dataset.features["ref_chosen_logps"].dtype == "float32"
+    finally:
+        for callback in reversed(teardown):
+            callback()
 
 
 if __name__ == "__main__":

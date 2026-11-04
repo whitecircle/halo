@@ -158,6 +158,7 @@ def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bou
         model_name_or_path=checkpoint,
         parallelism_config=pc,
         dtype=dtype,
+        trust_remote_code=False,
         attn_implementation="sdpa",
         use_liger_kernel=False,
     )
