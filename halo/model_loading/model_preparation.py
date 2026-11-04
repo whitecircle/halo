@@ -27,6 +27,7 @@ from halo.models.attention.backend_setup import (
     patch_transformers_packed_sequence_probe,
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from halo.models.attention.masked_matmul import dsa_matmul_enabled, install_glm5_next_masked_matmul
 from halo.models.attention.prefix_lm import apply_prefix_lm_causal_decoder
 from halo.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
 from halo.models.attention.selection import (
@@ -36,6 +37,7 @@ from halo.models.attention.selection import (
     verify_live_sinks_carried,
 )
 from halo.models.config_access import drop_toolkit_stamps, model_type_matches, text_config
+from halo.models.hyper_connections import apply_hyper_connection_patches
 from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
 from halo.models.model_classes import auto_map_references, mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec
@@ -181,6 +183,12 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # sparse layer reads a [T, T] mask, and packed documents leak through the per-layer embedding.
     if model_type_matches(model_config, "qwen4_exp"):
         apply_qwen4_exp_patches(model_config)
+    # Else the DSA layers run mem-efficient SDPA over their [T, T] mask, whose backward grows to most of a long step.
+    if attn_implementation == "sdpa" and model_type_matches(model_config, "glm5_next") and dsa_matmul_enabled():
+        install_glm5_next_masked_matmul()
+    # Else each hyper-connection and its mix launch some 450 kernels a forward and backward, most of them on a Sinkhorn
+    # matrix of 64 bytes a token, and copy the residual streams into fp32 several times over.
+    apply_hyper_connection_patches(model_config)
     # Else transformers' 0-dim max_seqlen tensor runs FA4's head_dim-256 varlen kernels on a variant the warm-up does
     # not compile, and a softcapped batch that unpads reaches its varlen kernels.
     if attn_implementation == "flash_attention_4":

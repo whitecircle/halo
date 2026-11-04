@@ -9,30 +9,16 @@ from halo.kernels.fp32_matmul import bmm_fp32, mm_fp32
 from halo.models.attention import tree_sparse
 from halo.models.attention.sdpa_flex_sliding import _Fp32ScoreMatmul
 from halo.models.attention.tree_sparse import _SparseLatentAttention
-from tests.common.fake_cuda import CudaLike
+from tests.common.fake_cuda import CudaBmm, CudaLike
 
 HALF = (torch.bfloat16, torch.float16)
 
 
-class _CudaBmm:
-    """A patch, since a function mode does not see the backward of an autograd function."""
-
-    def __init__(self, bmm):
-        self._bmm = bmm
-        self.calls: list[tuple[torch.dtype, torch.dtype, torch.dtype | None]] = []
-
-    def __call__(self, a, b, *, out_dtype=None):
-        self.calls.append((a.dtype, b.dtype, out_dtype))
-        if out_dtype is None:
-            return self._bmm(a, b)
-        plain = [t.as_subclass(torch.Tensor).to(out_dtype) for t in (a, b)]
-        return self._bmm(*plain).as_subclass(CudaLike)
-
-
 @pytest.fixture
 def bmm(monkeypatch):
-    recorder = _CudaBmm(torch.bmm)
+    recorder = CudaBmm(torch.bmm)
     monkeypatch.setattr(torch, "bmm", recorder)
+    monkeypatch.setattr(torch, "baddbmm", recorder.baddbmm)
     return recorder
 
 
@@ -57,6 +43,25 @@ def test_half_cuda_inputs_keep_their_dtype_with_an_fp32_result(bmm, dtype):
     got = bmm_fp32(a, b)
     assert bmm.calls == [(dtype, dtype, torch.float32)], "half CUDA operands must reach the GEMM unconverted"
     assert got.dtype == torch.float32
+
+
+@pytest.mark.parametrize("dtype", HALF)
+def test_half_cuda_inputs_accumulate_in_place_in_the_gemm(bmm, dtype):
+    a, b = (t.as_subclass(CudaLike) for t in _operands(dtype))
+    accumulator = torch.ones(3, 17, 9)
+    want = accumulator + bmm._bmm(a.as_subclass(torch.Tensor).float(), b.as_subclass(torch.Tensor).float())
+    assert bmm_fp32(a, b, out=accumulator) is accumulator
+    assert bmm.calls == [(dtype, dtype, torch.float32)]
+    assert torch.equal(accumulator, want)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_cpu_inputs_accumulate_in_fp32(bmm, dtype):
+    a, b = _operands(dtype)
+    accumulator = torch.ones(3, 17, 9)
+    want = accumulator + bmm._bmm(a.float(), b.float())
+    assert bmm_fp32(a, b, out=accumulator) is accumulator
+    assert torch.equal(accumulator, want)
 
 
 def test_fp32_cuda_inputs_take_the_plain_gemm(bmm):

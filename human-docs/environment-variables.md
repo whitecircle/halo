@@ -72,7 +72,8 @@ the default.
 - **Dataset map and packing workers:** `HALO_DATASET_NUM_PROC` overrides the default (three
   quarters of the CPUs the process may use, at most 64; all but two in
   `prepare_dataset.py`), for example on a memory-tight host.
-- **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels) or
+- **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels),
+  `HALO_HC_KERNELS=0` (the hyper-connections of GLM-5 Next and DeepSeek-V4) or
   `HALO_FLEX_SLIDING=0` on every rank (FlexAttention on SDPA runs of Gemma 4 and Step-3.7,
   also needed for `full_determinism` on more than one GPU).
 - **A weight sync that raises naming `HALO_WEIGHT_SYNC_CHUNK_MB`:** set it above the

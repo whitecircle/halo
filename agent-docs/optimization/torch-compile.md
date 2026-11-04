@@ -68,6 +68,7 @@ Compile fuses the spans between graph breaks (norms, projections), not across th
 
 - **DeepEP dispatch/combine** — splits the graph at every MoE layer.
 - **Flash Attention** — opaque; the compiler cannot fuse across FA boundaries. FA4's `autograd.Function` and its cute-DSL launcher do not trace, so each FA4 call also breaks the graph.
+- **Hyper-connection kernels** — `torch.compiler.disable`, on GLM-5 Next and DeepSeek-V4: already fused, and traced, the token count would become a graph input.
 - **Gradient checkpointing** — EP, CP and every MoE force `use_reentrant=True`, which adds graph breaks; on a dense model outside EP/CP the config's `use_reentrant` stands.
 - **TP** — no break: the TP linears run on their local shards, and they and their collectives trace without a graph break; with the replicated-grad hooks Halo retargets after transformers' `tp_plan` load, the rest of a dense decoder layer's DTensor dispatch compiles into aten ops plus functional collectives. transformers' own module-level backward hooks would break it.
 - **CP (Ulysses)** — no break of its own: each exchange is one `all_to_all_single` inside an autograd function. The reentrant checkpointing CP forces (above) still breaks the graph.

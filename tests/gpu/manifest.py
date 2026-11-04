@@ -487,6 +487,9 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_tree_sparse_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "glm5"), timeout=900
     ),
+    "kernels/test_masked_matmul_attention.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "glm5"), timeout=900
+    ),
     "kernels/test_sdpa_flex_sliding.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_reward_scorer_flex_sliding.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "gemma4"), timeout=900
@@ -506,6 +509,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
+    "kernels/test_hyper_connection_kernels.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "deepseek_v4", "glm5"), timeout=900
+    ),
     "kernels/test_family_kernel_stack_numerics.py": TestSpec(
         nproc=1,
         markers=("gpu", "full", "1gpu", "moe", *_family_markers(_TINY_MOE_FAMILIES)),
@@ -2669,6 +2675,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
     "profiling/benchmark_head_logprobs.py",
+    "profiling/benchmark_hyper_connection.py",
     "profiling/benchmark_lowp_kernels.py",
     "profiling/benchmark_moe_block.py",
     "profiling/benchmark_roofline.py",

@@ -12,7 +12,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from halo.env import env_flag
 from halo.hardware import is_blackwell_gpu
-from halo.kernels.fp32_matmul import bmm_fp32
+from halo.kernels.fp32_matmul import bmm_fp32, to_autocast_dtype
 from halo.log import warn_once
 from halo.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
 from halo.models.attention.layout import AttentionCall, attention_call, attention_calls, has_sliding_window_layers
@@ -177,15 +177,6 @@ def _padded_rows(tensor: torch.Tensor) -> list[torch.Tensor]:
     ]
 
 
-def _to_autocast_dtype(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """Autocast casts SDPA's inputs; the kernels here run outside its reach."""
-    device_type = tensors[0].device.type
-    if not torch.is_autocast_enabled(device_type):
-        return tensors
-    dtype = torch.get_autocast_dtype(device_type)
-    return tuple(t.to(dtype) for t in tensors)
-
-
 def _block_sparse_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -196,7 +187,7 @@ def _block_sparse_attention(
     """Returns ``[B, S, H, D]``."""
     q_len = query.shape[-2]
     # fp32 rotary output beside 16-bit values would otherwise be a graph the warm-up never compiled.
-    query, key, value = _to_autocast_dtype(query, key, value)
+    query, key, value = to_autocast_dtype(query, key, value)
     records_grad = torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value))
     if records_grad:
         # A frozen input joins as a detached leaf, so the graph never depends on which projections train.
@@ -261,7 +252,7 @@ def _matmul_global_attention(
     kv_len = key.shape[-2]
     q = query.reshape(batch * kv_heads, group * q_len, dim)
     k = key.reshape(batch * kv_heads, kv_len, dim)
-    q, k = _to_autocast_dtype(q, k)  # bmm's out_dtype form falls through autocast
+    q, k = to_autocast_dtype(q, k)  # bmm's out_dtype form falls through autocast
     scores = _Fp32ScoreMatmul.apply(q, k.transpose(1, 2))
     if scaling != 1.0:
         scores.mul_(scaling)
@@ -343,7 +334,7 @@ def _varlen_causal_attention(
 ) -> torch.Tensor:
     """The KV heads repeat per query group as SDPA repeats them. Returns ``[B, S, H, D]``."""
     batch, heads, seq, dim = query.shape
-    query, key, value = _to_autocast_dtype(query, key, value)
+    query, key, value = to_autocast_dtype(query, key, value)
 
     def tokens(tensor: torch.Tensor) -> torch.Tensor:
         tokens_first, group = tensor.transpose(1, 2), heads // tensor.shape[1]

@@ -10,7 +10,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
     No text layer applies a position encoding: the config refuses a non-zero `qk_rope_head_dim`, and the top-2048 `Glm5NextTextIndexer` applies no rotary either, so position reaches a DSA layer only through the indexer's pool boundaries. `layer_types` spells `"linear_attention"`, which is what the CP gate reads.
 
-- **Hyper-connections** (`hc_mult: 4`, `hc_sinkhorn_iters: 20`, `hc_eps: 1e-6`) — per-layer `hc_attn_*` / `hc_ffn_*` tensors route a 4×-widened residual state across layers; the mHC mapping (Sinkhorn-projected combine matrix) computes in fp32 by upcasting its inputs and `fn` inside the forward, and the model declares `_is_stateful = True`.
+- **Hyper-connections** (`hc_mult: 4`, `hc_sinkhorn_iters: 20`, `hc_eps: 1e-6`) — per-layer `hc_attn_*` / `hc_ffn_*` tensors route a 4×-widened residual state across layers; the mHC mapping (Sinkhorn-projected combine matrix) computes in fp32 by upcasting its inputs and `fn` inside the forward, and the model declares `_is_stateful = True`. On CUDA the mapping and the mix run on the [hyper-connection kernels](../optimization/hyper-connection-kernels.md).
 - **MoE** — 288 routed experts, sigmoid top-8 `noaux_tc` (`n_group` 1 → plain top-k), `norm_topk_prob: true`, `routed_scaling_factor: 2.5`, 1 shared expert, `moe_intermediate_size` 2048; the first 3 layers are dense.
 
     `swiglu_limit: 10.0` clamps the GLU; the EP layer runs its own fused Triton clamped SwiGLU (`GluCombine.clamped_silu`, bound as a runtime kernel argument), latched into the generic fused-GLU seam the same way DeepSeek-V4 does ([GLM-4 → Fused SwiGLU](glm4.md#fused-swiglu)).
@@ -62,6 +62,10 @@ The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's ex
 ## Attention
 
 Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice, and their autotune picks can move a run's logits across fresh caches ([Docker](../infrastructure/docker.md#baked-in-environment-variables)); they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel the toolkit keeps on `num_warps=2` ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
+
+The 11 DSA layers keep `config._attn_implementation == "sdpa"` and its boolean `[B, 1, S, S]` mask, but on CUDA the `sdpa` slot of `modeling_glm5_next` holds `masked_matmul_attention` (`halo/models/attention/masked_matmul.py`, [how it works](../optimization/flash-attention.md#masked-matmul-attention)). Any call it does not serve goes to the library's SDPA, and `HALO_DSA_MATMUL=0` keeps stock SDPA throughout. A [tree](#tree-packing) forward carrying a plan attends in its own forward and never reaches this slot.
+
+Measured against stock mem-efficient SDPA: MEASUREMENT PENDING (`scripts/profiling/benchmark_dsa_attention.py`).
 
 ## Limitations
 

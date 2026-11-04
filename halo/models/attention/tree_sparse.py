@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
 
-from halo.kernels.fp32_matmul import bmm_fp32
+from halo.kernels.fp32_matmul import GEMM_ALIGNMENT, bmm_fp32, wide_dtype
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.models.config_access import text_config
 
@@ -111,10 +111,6 @@ def tree_key_selection(indexer, hidden_states: torch.Tensor, q_resid: torch.Tens
     return torch.cat(rows)[None].to(torch.int32)
 
 
-def _wide(dtype: torch.dtype) -> torch.dtype:
-    return torch.promote_types(dtype, torch.float32)
-
-
 def _query_chunks(keys: torch.Tensor):
     step = max(1, ATTENTION_KEYS_PER_CALL // keys.shape[1])
     for start in range(0, keys.shape[0], step):
@@ -137,7 +133,7 @@ class _SparseLatentAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, query, latent, keys, scale):
         out = torch.empty_like(query)
-        lse = torch.empty(query.shape[:2], dtype=_wide(query.dtype), device=query.device)
+        lse = torch.empty(query.shape[:2], dtype=wide_dtype(query.dtype), device=query.device)
         for chunk in _query_chunks(keys):
             gathered, scores = _chunk_scores(query[chunk], latent, keys[chunk], scale)
             lse[chunk] = torch.logsumexp(scores, dim=-1).nan_to_num(neginf=0.0)
@@ -151,7 +147,7 @@ class _SparseLatentAttention(torch.autograd.Function):
     def backward(ctx, grad):
         query, latent, keys, out, lse = ctx.saved_tensors
         d_query = torch.empty_like(query)
-        d_latent = torch.zeros(latent.shape, dtype=_wide(latent.dtype), device=latent.device)
+        d_latent = torch.zeros(latent.shape, dtype=wide_dtype(latent.dtype), device=latent.device)
         for chunk in _query_chunks(keys):
             rows = keys[chunk]
             gathered, scores = _chunk_scores(query[chunk], latent, rows, ctx.scale)
@@ -239,8 +235,10 @@ def tree_sparse_forward(forward):
         folded = torch.einsum("thd,hdr->thr", query, key_weight)
         # Under autocast the fold comes out of its matmul in the autocast dtype and the latent out of its norm in the
         # parameters' dtype: the attention reads both in the former and keeps its own precision outside autocast.
+        # Masked pad slots keep the key width, which five of the seven products' second operands carry, GEMM-aligned.
+        keys = F.pad(selected[0].long(), (0, -selected.shape[-1] % GEMM_ALIGNMENT), value=-1)
         with torch.autocast(latent.device.type, enabled=False):
-            out = _SparseLatentAttention.apply(folded, latent.to(folded.dtype), selected[0].long(), self.scaling)
+            out = _SparseLatentAttention.apply(folded, latent.to(folded.dtype), keys, self.scaling)
         out = torch.einsum("thr,hvr->thv", out, value_weight).reshape(1, tokens, heads * self.v_head_dim)
         return self.o_proj(out), None, selected if self.next_skip_topk else None
 

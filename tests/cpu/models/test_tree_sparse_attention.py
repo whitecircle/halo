@@ -12,6 +12,7 @@ from torch.overrides import TorchFunctionMode
 
 from halo.configs.script_arguments import ModelArguments
 from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN, build_trie, serialize_tree
+from halo.kernels.fp32_matmul import GEMM_ALIGNMENT
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.parallel.peft_setup import build_peft_config
 from halo.models import segment_markers
@@ -152,6 +153,21 @@ def _assert_tree_is_every_example_alone(model, paths, labels, columns, alone, pl
         (p.grad - tree_grads[name]).abs().max().item() for name, p in model.named_parameters() if p.grad is not None
     )
     assert drift < 1e-5 * scale
+
+
+def test_the_attention_reads_a_gemm_aligned_key_width(model, tree, monkeypatch):
+    """A selection's width is ``index_topk`` plus an odd tail, off the multiple the bf16 GEMMs run at. The row's
+    agreement with every example alone, below, holds with these pad slots in place."""
+    _install(model, monkeypatch)
+    widths = []
+    apply = _SparseLatentAttention.apply
+    monkeypatch.setattr(
+        _SparseLatentAttention, "apply", lambda *args: widths.append(args[2].shape[-1]) or apply(*args)
+    )
+    with torch.no_grad():
+        _forward(model, tree[2], _plan(model, tree[2]))
+    assert widths and all(width % GEMM_ALIGNMENT == 0 for width in widths)
+    assert model.config.get_text_config().index_topk % GEMM_ALIGNMENT == 0, "premise: the tail is what moves it off"
 
 
 def test_a_tree_row_reproduces_every_example_alone(model, tree, alone, monkeypatch):
