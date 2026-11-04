@@ -94,7 +94,10 @@ rlrr_correctness_threshold: 0.5  # the only correctness signal; no gold labels
 
 `vllm_importance_sampling_correction` (TRL default on) weights the loss by `exp(logπ_recompute − logπ_sampling)`. The default `sequence_mask` mode masks a sequence whose ratio exceeds `vllm_importance_sampling_clip_max` (`3.0`) or falls below `vllm_importance_sampling_clip_min` (unset); the `*_truncate` modes clamp instead. With the correction off (and aligned accumulation), the 5-nat k3 KL tail clamp and `kl_clamp_frac` cannot engage, so `beta > 0` warns.
 
-A rank-0 startup probe refuses a server whose logprobs the correction cannot use:
+A server restarted between syncs is not recovered here: the push raises on every rank, where async GRPO reconnects and re-sends ([Rollout Servers](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
+
+Rank 0 waits for the server at startup, up to `vllm_server_timeout`, and raises past it. Its probe then refuses a
+server whose logprobs the correction cannot use:
 
 - raw pre-temperature logprobs at `temperature != 1.0`; serve vLLM with `--logprobs-mode processed_logprobs`;
 - logprobs renormalized over a sampling cut (`top_p < 1`, a `top_k` or a `min_p`) while the correction sums the per-token log-ratios over each sequence, which stalls the run silently. Keep all three off. A `sequence_*` mode sums them, and so does `loss_type: vespo` in either token mode TRL lets it run.

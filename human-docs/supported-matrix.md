@@ -115,8 +115,9 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
 | Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE | No | No (no online RL at all) | No | |
 
-Offline GRPO needs no server, so these refusals do not apply to it.
-`rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only. SGLang must
+A MoE with no family in this table has no validated expert layout on either
+engine and is refused too. Offline GRPO needs no server, so these refusals do
+not apply to it. `rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only. SGLang must
 be served from this repo's image. Setup, ports, weight sync and
 `routing_replay`: [Rollout Servers](rollout-servers.md).
 

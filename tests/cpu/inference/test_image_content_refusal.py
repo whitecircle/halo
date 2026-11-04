@@ -4,11 +4,14 @@ template expands an image into placeholder tokens with no pixels behind them. Th
 ``_PastTheGuard``, which a clean text conversation must reach."""
 
 import asyncio
+import json
 import types
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from halo.data.chat_render import render_generation_prompt
+from halo.data.conversation import conversation_carries_images, reject_image_content
 from halo.entrypoints import rejection_sampling, reward_scoring
 
 _TEXT_TURNS = [{"role": "user", "content": "2+2?"}, {"role": "assistant", "content": "4"}]
@@ -57,6 +60,74 @@ def test_score_refuses_an_image_conversation(score, correct_answer):
 def test_a_text_conversation_still_reaches_the_reward_model(score):
     with pytest.raises(_PastTheGuard):
         score(_rm_tokenizer(), None, "cpu", [_TEXT_TURNS], "4", 8)
+
+
+_NON_TEXT_PARTS = [
+    {"type": "image_url", "image_url": {"url": "x"}},
+    {"type": "input_image", "image_url": "x"},
+    {"type": "video", "video": "x"},
+    {"type": "audio", "audio": "x"},
+    {"type": "input_audio", "input_audio": {"data": "x"}},
+    {"type": "input_text", "text": "x"},
+]
+
+
+def _ids(part):
+    return part["type"]
+
+
+class _RendersAnything:
+    """A template that takes any part: what it does with one is exactly what the refusal must not leave to chance."""
+
+    chat_template = "stub"
+
+    def apply_chat_template(self, messages, **kwargs):
+        return "rendered"
+
+    def __call__(self, text, **kwargs):
+        return {"input_ids": [1]}
+
+
+@pytest.mark.parametrize("part", _NON_TEXT_PARTS, ids=_ids)
+def test_the_generation_prompt_refuses_every_media_part(part):
+    """Online GRPO's only gate on its rows: Qwen3.6 renders a placeholder for these and Gemma 4's recipe template drops
+    them, so a run would train blind to them with no error."""
+    messages = [{"role": "user", "content": [part, {"type": "text", "text": "what is this?"}]}]
+    with pytest.raises(ValueError, match=part["type"]):
+        render_generation_prompt(_RendersAnything(), messages)
+
+
+@pytest.mark.parametrize("part", _NON_TEXT_PARTS, ids=_ids)
+def test_a_json_string_conversation_is_refused_too(part):
+    conversation = json.dumps([{"role": "user", "content": [part]}])
+    with pytest.raises(ValueError, match=part["type"]):
+        reject_image_content(conversation, "field")
+
+
+def test_text_parts_plain_strings_and_a_part_with_no_type_pass():
+    reject_image_content([{"role": "user", "content": [{"type": "text", "text": "x"}, {"text": "y"}]}], "field")
+    reject_image_content([{"role": "user", "content": "x"}], "field")
+    reject_image_content(json.dumps([{"role": "user", "content": [{"type": "text", "text": "x"}]}]), "field")
+    reject_image_content("not json", "field")
+
+
+def test_a_thinking_part_stays_on_the_text_path():
+    """Mistral Small 4's and Command A+'s templates write it as their reasoning block, so a refusal would turn away their
+    native assistant turn."""
+    turn = {"role": "assistant", "content": [{"type": "thinking", "thinking": "2+2"}, {"type": "text", "text": "4"}]}
+    reject_image_content([_TEXT_TURNS[0], turn], "field")
+
+
+def test_an_image_part_keeps_its_vlm_remedy():
+    with pytest.raises(ValueError, match="carries an image content part"):
+        reject_image_content(_IMAGE_TURNS, "field")
+
+
+def test_run_routing_still_reads_image_parts_alone():
+    """The VLM path extracts ``image`` parts only, so another kind must not route there and lose its data."""
+    assert conversation_carries_images(_IMAGE_TURNS)
+    for part in _NON_TEXT_PARTS:
+        assert not conversation_carries_images([{"role": "user", "content": [part]}])
 
 
 def test_rejection_sampling_scores_through_the_guarded_seam():

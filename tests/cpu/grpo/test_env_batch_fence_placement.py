@@ -69,6 +69,20 @@ def _round(events: list[str], *, row_error: bool = False, wedged_prefetch: bool 
 _TASKS = [{"prompt": "task"}, {"prompt": "task"}]
 
 
+def test_the_tool_call_watch_reads_each_round_while_armed_before_it_is_built():
+    """Past the leader's broadcast, so every group rank reads one round, and before the forward a wrong parser wastes."""
+    events = []
+    host = _round(events)
+    host._tool_call_watch = SimpleNamespace(armed=True, observe=lambda results: events.append("watch"))
+    host._collect_and_score_rollouts(_TASKS)
+    assert events.index("rollout") < events.index("watch") < events.index("tokenize")
+
+    events.clear()
+    host._tool_call_watch.armed = False
+    host._collect_and_score_rollouts(_TASKS)
+    assert "watch" not in events
+
+
 def test_a_round_joins_the_fence_at_each_phase_boundary():
     events = []
     _round(events)._collect_and_score_rollouts(_TASKS)

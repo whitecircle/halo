@@ -67,20 +67,25 @@ from halo.entrypoints.script import (
     with_distributed_teardown,
 )
 from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.reasoning_effort import bind_episode_effort
+from halo.environments.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_budget
 from halo.environments.registry import build_environment
+from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.context_window import resolve_model_context_window
+from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import reject_prefetch_past_retry_budget
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from halo.trainers.grpo.rollout.engine_preflight import (
+    ServerRequirements,
     verify_context_window,
     verify_engine_prompt_logprobs,
     verify_sampler_logprob_reference,
+    verify_server_chat_template,
+    verify_server_flags,
 )
 from halo.weight_sync.registry import resolve_weight_sync_client
 
@@ -123,6 +128,66 @@ def probe_template_kwargs(async_config: AsyncRolloutConfig, environment) -> dict
     )
     return rollout_template_kwargs(
         async_config.rollout_chat_template_kwargs, effort.level, effort.thinking_budget, effort.budget_soft
+    )
+
+
+def server_requirements(async_config: AsyncRolloutConfig, environment, model) -> ServerRequirements:
+    """What this run reads off its servers' launch flags."""
+    efforts = efforts_by_level(
+        environment,
+        max_tokens=async_config.rollout_max_tokens,
+        max_thinking_tokens=async_config.rollout_max_thinking_tokens,
+        max_answer_tokens=async_config.rollout_max_answer_tokens,
+        max_episode_tokens=async_config.rollout_max_episode_tokens,
+    )
+    budgeted = async_config.rollout_backend == VLLM_BACKEND and has_thinking_budget(efforts)
+    consumers = (
+        ("reasoning_price", async_config.reasoning_price is not None),
+        ("reasoning_floor", async_config.reasoning_floor > 0),
+        ("carry_reasoning", environment.carry_reasoning),
+        ("a thinking budget", budgeted),
+    )
+    return ServerRequirements(
+        is_moe=has_routed_experts(model.config),
+        sends_tools=bool(environment.get_tools_schema()) or environment.TOOLS_ARRIVE_ON_RESET,
+        captures_routing=async_config.routing_replay == "rollout",
+        reasoning_consumers=tuple(name for name, on in consumers if on),
+        sampled_token_ids=async_config.train_on_sampled_tokens,
+    )
+
+
+def verify_served_template(async_config: AsyncRolloutConfig, environment, tokenizer) -> None:
+    """COLLECTIVE. Reads the two contracts a run can tell apart: two drawn levels, or a fixed level against none."""
+    levels = list(
+        efforts_by_level(
+            environment,
+            max_tokens=async_config.rollout_max_tokens,
+            max_thinking_tokens=async_config.rollout_max_thinking_tokens,
+            max_answer_tokens=async_config.rollout_max_answer_tokens,
+            max_episode_tokens=async_config.rollout_max_episode_tokens,
+        ).values()
+    )[:2]
+    efforts = levels if len(levels) == 2 or levels[0].level is None else [levels[0], None]
+    system = [{"role": "system", "content": environment.system_prompt}] if environment.system_prompt else []
+    messages = [*system, {"role": "user", "content": "Probe."}]
+
+    def trainer_prompt_ids(effort) -> list[int]:
+        kwargs = rollout_template_kwargs(
+            async_config.rollout_chat_template_kwargs,
+            effort.level if effort else None,
+            effort.thinking_budget if effort else None,
+            effort.budget_soft if effort else False,
+        )
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **kwargs)
+        return tokenizer(text, add_special_tokens=False)["input_ids"]
+
+    verify_server_chat_template(
+        async_config.get_server_urls(),
+        trainer_prompt_ids,
+        messages,
+        efforts,
+        async_config.get_rollout_config(),
+        connection_timeout=async_config.rollout_connection_timeout,
     )
 
 
@@ -307,7 +372,15 @@ def main():
         single_turn_tokens=prompt_budget + async_config.rollout_max_tokens,
         full_trajectory_tokens=full_trajectory_tokens,
         backend=async_config.rollout_backend,
+        connection_timeout=async_config.rollout_connection_timeout,
     )
+    verify_server_flags(
+        async_config.get_server_urls(),
+        server_requirements(async_config, probe_env, model),
+        backend=async_config.rollout_backend,
+        connection_timeout=async_config.rollout_connection_timeout,
+    )
+    verify_served_template(async_config, probe_env, tokenizer)
     # The IS ratio divides by the engine's logprobs: they must be the sampling distribution's.
     verify_sampler_logprob_reference(
         async_config.get_server_urls(),
@@ -318,10 +391,16 @@ def main():
         repetition_penalty=async_config.rollout_repetition_penalty,
         sequence_ratio_active=async_config.build_isr_mask_config().sums_sequence_logratio,
         backend=async_config.rollout_backend,
+        connection_timeout=async_config.rollout_connection_timeout,
     )
     # The engine re-score reads each train row off the prompt log-probs: they must not depend on the batch.
     if async_config.isr_engine_reference:
-        verify_engine_prompt_logprobs(async_config.get_server_urls(), tokenizer, backend=async_config.rollout_backend)
+        verify_engine_prompt_logprobs(
+            async_config.get_server_urls(),
+            tokenizer,
+            backend=async_config.rollout_backend,
+            connection_timeout=async_config.rollout_connection_timeout,
+        )
 
     # A bad judge URL/key/model would mark every episode invalid and train on zero advantage.
     verify_backend_on_rank0(

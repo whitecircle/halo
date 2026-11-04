@@ -138,18 +138,18 @@ def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined]
 
 
 def all_gather_cat(tensor: torch.Tensor, dim: int, group, world_size: int) -> torch.Tensor:
-    """COLLECTIVE over ``group``: every rank's equal-shaped ``tensor`` concatenated along ``dim`` in rank order.
-    ``dim == 0`` receives into one preallocated output, since shards plus a ``cat`` would hold twice an expert-axis
-    gather, which carries most of a fine-grained MoE's parameters."""
+    """COLLECTIVE over ``group``: every rank's equal-shaped ``tensor`` concatenated along ``dim`` in rank order. Its one
+    allocation comes before the collective, so a raise out of it means this rank never entered, and a caller can free
+    memory and call again in step with its peers. ``dim == 0`` receives in place, since shards plus a ``cat`` would hold
+    twice an expert-axis gather, which carries most of a fine-grained MoE's parameters."""
     if world_size <= 1:
         return tensor
     tensor = tensor.contiguous()
+    shape = list(tensor.shape)
+    shape[dim] *= world_size
+    gathered = torch.empty(shape, dtype=tensor.dtype, device=tensor.device)
     if dim == 0:
-        gathered = torch.empty(
-            (tensor.shape[0] * world_size, *tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device
-        )
         dist.all_gather_into_tensor(gathered, tensor, group=group)
-        return gathered
-    shards = [torch.empty_like(tensor) for _ in range(world_size)]
-    dist.all_gather(shards, tensor, group=group)
-    return torch.cat(shards, dim=dim)
+    else:
+        dist.all_gather(list(gathered.split(tensor.shape[dim], dim=dim)), tensor, group=group)
+    return gathered

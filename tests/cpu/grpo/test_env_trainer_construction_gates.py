@@ -25,9 +25,11 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_inert_isr_stages,
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
+    reject_open_ended_tool_turns,
     reject_straddling_train_groups,
     reject_unneutralized_forced_closes,
     reject_unread_grpo_knobs,
+    reject_unresolved_forced_closes,
     reject_unsupported_routing_replay,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
@@ -55,6 +57,8 @@ _INIT_GATES = (
     "_resolve_reasoning_end_ids",
     "_resolve_forced_close_ids",
     "reject_unneutralized_forced_closes",
+    "reject_unresolved_forced_closes",
+    "reject_open_ended_tool_turns",
     "reject_inert_isr_stages",
     "reject_off_policy_mask_threshold",
     "reject_vespo_loss",
@@ -391,16 +395,81 @@ def test_a_vllm_budget_on_a_mistral_common_served_model_is_refused():
     assert _forced_close_ids(_close_host({"high": 16384}, model_config=CONFIG_MAPPING["mistral3"]())) == (_CLOSE_ID,)
 
 
-def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_closes(caplog):
-    """Nothing else reads the marker, so a family whose reasoning ends otherwise still runs, told that
-    its forced closes stay in the loss."""
-    host = _close_host({"high": 16384}, knows_close=False)
-    with caplog.at_level(logging.WARNING, logger="halo.trainers.grpo.environmental.reasoning"):
-        assert _forced_close_ids(host) is None
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        "stay in the policy loss" in w and AsyncRolloutConfig.rollout_reasoning_end_token in w for w in warnings
-    ), warnings
+_CALL_ID = 200012
+_TOOL_ENV = types.SimpleNamespace(get_tools_schema=lambda: [{"name": "run_code"}], TOOLS_ARRIVE_ON_RESET=False)
+
+
+def _serving_model(model_type: str, eos: int | list[int]) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        config=types.SimpleNamespace(model_type=model_type, get_text_config=lambda decoder=None: None),
+        generation_config=types.SimpleNamespace(eos_token_id=eos),
+    )
+
+
+_CALL_TOKENIZER = types.SimpleNamespace(convert_tokens_to_ids={"<|call|>": _CALL_ID}.__getitem__)
+
+
+def test_gpt_oss_on_a_tool_environment_needs_its_call_terminator_stopped():
+    """<|call|> is no eos of unsloth/gpt-oss-20b-BF16, so a turn runs past its call into a tool result the model
+    writes itself, and no call ever executes."""
+    model = _serving_model("gpt_oss", [200002, 199999])
+    with pytest.raises(ValueError, match=r'rollout_stop_tokens: \["<\|call\|>"\]'):
+        reject_open_ended_tool_turns(_TOOL_ENV, model, _CALL_TOKENIZER, None)
+    reject_open_ended_tool_turns(_TOOL_ENV, model, _CALL_TOKENIZER, [_CALL_ID])
+
+
+def test_a_checkpoint_stopping_on_the_terminator_passes():
+    reject_open_ended_tool_turns(_TOOL_ENV, _serving_model("gpt_oss", [200002, _CALL_ID]), _CALL_TOKENIZER, None)
+    reject_open_ended_tool_turns(_TOOL_ENV, _serving_model("gpt_oss", _CALL_ID), _CALL_TOKENIZER, None)
+
+
+def test_an_environment_with_no_tools_stops_on_no_call():
+    env = types.SimpleNamespace(get_tools_schema=lambda: None, TOOLS_ARRIVE_ON_RESET=False)
+    reject_open_ended_tool_turns(env, _serving_model("gpt_oss", [200002]), _CALL_TOKENIZER, None)
+
+
+@pytest.mark.parametrize("model_type", ["glm4_moe_lite", "qwen3_moe", "gemma4", "lfm2_moe", "bailing_moe", "qwen3"])
+def test_a_family_whose_turn_ends_elsewhere_declares_no_terminator(model_type):
+    """GLM-4.7's render ends in </tool_call>, no eos, while its turn ends on the next message's <|observation|>, so a
+    rule read off the render would refuse it."""
+    no_tokenizer = types.SimpleNamespace()
+    reject_open_ended_tool_turns(_TOOL_ENV, _serving_model(model_type, [1]), no_tokenizer, None)
+
+
+def test_a_cap_whose_close_the_tokenizer_does_not_write_is_refused():
+    """The default ``</think>`` on Gemma 4 or gpt-oss: the forced closes cannot be found, so they would train with the
+    episode's advantage and teach the model to stop closing its reasoning."""
+    marker = AsyncRolloutConfig.rollout_reasoning_end_token
+    with pytest.raises(ValueError, match="stay in the policy loss") as refused:
+        reject_unresolved_forced_closes(True, None, VLLM_BACKEND, marker)
+    assert marker in str(refused.value) and "<channel|>" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("capped", "end_ids", "backend"),
+    [
+        (True, (_CLOSE_ID,), VLLM_BACKEND),
+        (False, None, VLLM_BACKEND),
+        # A profile's cap reaches no request field on SGLang, which forces nothing.
+        (True, None, SGLANG_BACKEND),
+    ],
+    ids=["the-close-resolves", "soft-budgets-force-nothing", "sglang"],
+)
+def test_the_refusal_holds_only_where_an_unfindable_close_can_be_forced(capped, end_ids, backend):
+    reject_unresolved_forced_closes(capped, end_ids, backend, AsyncRolloutConfig.rollout_reasoning_end_token)
+
+
+@pytest.mark.parametrize(
+    ("budgets", "soft", "config", "capped"),
+    [
+        ({"high": 16384}, (), {}, True),
+        ({}, (), {"rollout_max_thinking_tokens": 8192}, True),
+        ({"high": 16384}, ("high",), {}, False),
+    ],
+    ids=["a-levels-budget", "the-runs-ceiling", "a-soft-budget-with-no-ceiling"],
+)
+def test_the_refusal_reads_whether_a_cap_can_bind(budgets, soft, config, capped):
+    assert _close_host(budgets, knows_close=False, soft=soft, **config)._any_episode_capped is capped
 
 
 def test_the_marker_warning_is_logged_once_by_the_main_process_under_the_trainers_name(caplog, monkeypatch):

@@ -145,6 +145,7 @@ def test_an_image_part_nothing_filled_has_no_pixels_and_is_refused(part):
         {"type": "video", "path": "/data/a.mp4"},
         {"type": "audio", "audio": "/data/a.wav"},
         {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+        {"type": "input_image", "image_url": "https://x/y.png"},
         {"type": "video_url", "video_url": {"url": "https://x/y.mp4"}},
         {"type": "audio_url", "audio_url": {"url": "https://x/y.wav"}},
         {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},

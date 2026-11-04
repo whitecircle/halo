@@ -428,6 +428,7 @@ class _Round:
     """Records what each consumer was handed. ``leader`` stands in for the TP/ETP group leader's broadcast rollouts."""
 
     _collect_and_score_rollouts = DistributedAsyncEnvironmentalGRPOTrainer._collect_and_score_rollouts
+    _tool_call_watch = None
     _extract_prompts_and_contexts = DistributedAsyncEnvironmentalGRPOTrainer._extract_prompts_and_contexts
     eval_split_rows = DistributedAsyncEnvironmentalGRPOTrainer.eval_split_rows
 

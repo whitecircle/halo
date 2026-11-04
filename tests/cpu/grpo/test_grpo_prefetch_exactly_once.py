@@ -40,6 +40,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
     two-server run at ``depth``."""
 
     _collect_and_score_rollouts = _T._collect_and_score_rollouts
+    _tool_call_watch = None
     _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _T._extract_prompts_and_contexts
     eval_split_rows = _T.eval_split_rows
@@ -191,7 +192,7 @@ class _StubManager:
     async def start(self):
         return None
 
-    def warn_if_servers_unreachable_from_actors(self, multinode: bool):
+    def reject_loopback_servers(self, num_nodes: int):
         return None
 
 
@@ -203,11 +204,13 @@ class _LifecycleHost:
     _weight_sync_group_formed = False
     _start_rank_rollout_components = _T._start_rank_rollout_components
     _reject_eval_round_over_cap = _T._reject_eval_round_over_cap
+    _rollout_node_count = _T._rollout_node_count
     _start_rollout_generation = _T._start_rollout_generation
 
     def __init__(self, weight: torch.Tensor):
         self.weight = weight
         self.accelerator = types.SimpleNamespace(is_main_process=True, num_processes=1)
+        self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: 0)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
             num_rollout_workers=2,
@@ -759,14 +762,6 @@ def test_the_single_server_hint_is_said_once_and_only_when_unset(
     with caplog.at_level(logging.INFO, logger=async_mod.logger.name):
         _async_state(_SERVERS[servers], enable_prefetch)
     assert ("enable_prefetch: true" in caplog.text) is (hinted and main_process)
-
-
-def test_the_client_shape_follows_the_list_not_the_server_count():
-    # The manager (not the single-client branch) owns any configs list, one entry included: only it
-    # reads the per-entry url/group_port that list carries.
-    assert _async_state(_SERVERS["two-servers"])._multi_server_mode is True
-    assert _async_state(_SERVERS["one-entry-list"])._multi_server_mode is True
-    assert _async_state(_SERVERS["url"], enable_prefetch=True)._multi_server_mode is False
 
 
 class _SubmitLog(queue.Queue):

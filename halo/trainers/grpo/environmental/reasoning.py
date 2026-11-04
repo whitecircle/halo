@@ -99,16 +99,8 @@ class ReasoningBudgetMixin:
             config_model_types(model_config),
             resolve_weight_sync_client(cfg.rollout_backend).UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES,
         )
-        also_lost = (
-            ", and the closes the engine forces at a thinking cap stay in the policy loss"
-            if self._any_episode_capped
-            else ""
-        )
         return find_reasoning_end_ids(
-            self._tokenizer,
-            cfg.rollout_reasoning_end_token,
-            also_lost=also_lost,
-            logger=logger if is_global_main_process() else None,
+            self._tokenizer, cfg.rollout_reasoning_end_token, logger=logger if is_global_main_process() else None
         )
 
     @property

@@ -1,6 +1,6 @@
 # Environmental GRPO — Qwen3.6-35B-A3B full fine-tune, code-contests curriculum stage 2 of 3: the HardTests `hard`
 # band (rating 2000-2599), no EP, ZeRO-3, KL-free (IS bands as the trust region).
-# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --chat-template jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below) --moe-backend triton --enable-prefix-caching,
+# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --chat-template /jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below) --moe-backend triton --enable-prefix-caching,
 #   on the image's pinned Model Runner V2 (leave VLLM_USE_V2_MODEL_RUNNER unset), which enforces the thinking_token_budget this config sends.
 # Launch: start 2 vLLM servers, TP=1 each, on GPUs 6 and 7 with --weight-transfer-config '{"backend":"nccl"}', then CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=120 torchrun --nproc_per_node=6 scripts/training/grpo/environmental.py <this config>
 

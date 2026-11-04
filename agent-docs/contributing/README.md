@@ -93,8 +93,8 @@ default, `hermes`, reads JSON `<tool_call>` calls only. The gpt-oss pass serves 
 plugins instead (the Makefile's `VLLM_GPTOSS_PARSERS`, which the health guard prints into its gpt-oss
 compose line), and they replace the `qwen3` reasoning parser. A per-family pass
 (`HALO_TEST_ENV_GRPO_MODEL`) takes its family's row of that table. Under a wrong parser every call stays
-text and every episode scores 0, so each env-GRPO row on the draw task (all but the one-process
-`react_math` rows, which send no tool schema) fails `step_1_rewards_spread_within_a_group`.
+text, so each env-GRPO row on the draw task (all but the one-process `react_math` rows, which send no tool schema)
+raises by its second round.
 SGLang's default parser (`auto`) reads it off the chat template where it can and disables it elsewhere: the
 Qwen3-30B pass needs `SGLANG_TOOL_PARSER=qwen25`
 ([Tool parsers on SGLang](../infrastructure/rollout-servers.md#tool-parsers-on-sglang)).

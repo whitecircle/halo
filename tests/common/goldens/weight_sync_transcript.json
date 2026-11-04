@@ -15,6 +15,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -88,6 +89,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -159,6 +161,7 @@
         "outcome": "HTTPError",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -191,6 +194,7 @@
         "outcome": "HTTPError",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -226,6 +230,7 @@
         "outcome": "RuntimeError",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -258,6 +263,7 @@
         "outcome": "RuntimeError",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -290,6 +296,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -316,8 +323,7 @@
           "POST /start_weight_update timeout=60 single-shot retry(total=0,read=False)",
           "POST /update_weights {\"update_info\":{\"dtype_names\":[\"bfloat16\"],\"names\":[\"model.norm.weight\"],\"shapes\":[[64]]}} timeout=600 single-shot retry(total=0,read=False)",
           "POST /finish_weight_update timeout=600 single-shot retry(total=0,read=False)",
-          "POST /finish_weight_update timeout=30 single-shot retry(total=0,read=False)",
-          "POST /resume timeout=30 single-shot retry(total=0,read=False)"
+          "POST /finish_weight_update timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "send bfloat16[64]"
@@ -349,6 +355,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -375,8 +382,7 @@
           "POST /start_weight_update timeout=60 single-shot retry(total=0,read=False)",
           "POST /update_weights {\"update_info\":{\"dtype_names\":[\"bfloat16\"],\"names\":[\"model.norm.weight\"],\"shapes\":[[64]]}} timeout=600 single-shot retry(total=0,read=False)",
           "POST /finish_weight_update timeout=600 single-shot retry(total=0,read=False)",
-          "POST /finish_weight_update timeout=30 single-shot retry(total=0,read=False)",
-          "POST /resume timeout=30 single-shot retry(total=0,read=False)"
+          "POST /finish_weight_update timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "send bfloat16[64]"
@@ -408,6 +414,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -473,6 +480,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -540,6 +548,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -600,6 +609,7 @@
         "outcome": "ok",
         "requests": [
           "GET /version timeout=10 single-shot retry(total=0,read=False)",
+          "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
           "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
@@ -660,7 +670,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [
@@ -709,7 +722,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "GET /health timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -732,7 +746,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [
@@ -779,7 +796,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "GET /health timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -802,7 +820,10 @@
         "outcome": "HTTPError",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
@@ -832,9 +853,13 @@
         "outcome": "HTTPError",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)",
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "GET /health timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "form group",
@@ -865,7 +890,10 @@
         "outcome": "RuntimeError",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
@@ -895,7 +923,10 @@
         "outcome": "RuntimeError",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
@@ -925,7 +956,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [
@@ -948,8 +982,7 @@
           "POST /begin_weight_update {} timeout=60 single-shot retry(total=0,read=False)",
           "POST /update_weights_from_distributed {\"dtypes\":[\"bfloat16\"],\"flush_cache\":true,\"group_name\":\"weight_update_group_<server>\",\"names\":[\"model.norm.weight\"],\"shapes\":[[64]]} timeout=600 single-shot retry(total=0,read=False)",
           "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
-          "POST /end_weight_update {} timeout=30 single-shot retry(total=0,read=False)",
-          "POST /continue_generation {} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /end_weight_update {} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "send bfloat16[64]"
@@ -960,7 +993,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "GET /health timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -983,7 +1017,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [
@@ -1006,8 +1043,7 @@
           "POST /begin_weight_update {} timeout=60 single-shot retry(total=0,read=False)",
           "POST /update_weights_from_distributed {\"dtypes\":[\"bfloat16\"],\"flush_cache\":true,\"group_name\":\"weight_update_group_<server>\",\"names\":[\"model.norm.weight\"],\"shapes\":[[64]]} timeout=600 single-shot retry(total=0,read=False)",
           "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
-          "POST /end_weight_update {} timeout=30 single-shot retry(total=0,read=False)",
-          "POST /continue_generation {} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /end_weight_update {} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "send bfloat16[64]"
@@ -1018,7 +1054,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "GET /health timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -1041,7 +1078,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [
@@ -1083,7 +1123,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "GET /health timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -1106,7 +1147,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [
@@ -1149,7 +1193,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "GET /health timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -1172,7 +1217,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [
@@ -1231,7 +1279,10 @@
         "outcome": "ok",
         "requests": [
           "GET /server_info timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
+          "POST /v1/completions {\"max_tokens\":1,\"model\":\"fake-model\",\"prompt\":\"ping\",\"temperature\":0.0} timeout=60 single-shot retry(total=0,read=False)",
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
+          "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)"
         ],
         "transport": [

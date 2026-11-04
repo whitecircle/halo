@@ -281,11 +281,11 @@ async def play_episode(
     rollout: RolloutConfig,
     *,
     log_prefix: str,
-    keep_lost_episode: bool = False,
+    keep_lost: Callable[[Exception], bool],
 ) -> _PlayedEpisode:
     """The loop every driver shares: reset, request and step each turn under ``effort``'s caps, close it truncated
-    where still open, stamp the effort, and release it on every path. A lost turn raises, unless ``keep_lost_episode``:
-    then the episode closes on what it earned, stamped :data:`EPISODE_ERROR_KEY`, the failure returned."""
+    where still open, stamp the effort, and release it on every path. A lost turn raises, unless ``keep_lost`` takes the
+    failure: then the episode closes on what it earned, stamped :data:`EPISODE_ERROR_KEY`, the failure returned."""
     episode = EpisodeDispatcher(env)
     episode_ids, steps = await episode.reset([prompt], [context])
     eid, step = episode_ids[0], steps[0]
@@ -301,7 +301,7 @@ async def play_episode(
             try:
                 gen = await request_turn(step.observation, replace(rollout, **caps), effort)
             except Exception as exc:
-                if not keep_lost_episode:
+                if not keep_lost(exc):
                     raise
                 lost = exc
                 break

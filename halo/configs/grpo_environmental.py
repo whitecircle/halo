@@ -369,6 +369,24 @@ class AsyncRolloutConfig(
             "= off."
         },
     )
+    zero_gradient_round_limit: int | None = field(
+        default=50,
+        metadata={
+            "help": "Raise after this many train rounds in a row in which no token anywhere carries a policy gradient, "
+            "while no earlier round of this launch has: every group tied or dropped, or every token masked, trains on "
+            "nothing while logging loss 0. Past the first round that trained, a streak this long only warns. Logged as "
+            "sampling/zero_gradient_round. Positive; null = off."
+        },
+    )
+    tool_parser_watch_rounds: int | None = field(
+        default=2,
+        metadata={
+            "help": "On a tool environment, raise after this many rounds hold the template's rendered tool-call opening "
+            "in an assistant turn's text while the run has parsed no call anywhere: the server's tool parser does not "
+            "read this model's format. A turn the engine cut is no evidence. Positive; null = off, for a model that "
+            "writes the opening in prose or only malformed calls."
+        },
+    )
     # On by default here: on a sparse verifiable env reward the all-equal groups dominate the batch.
     drop_degenerate_groups: bool = field(
         default=True,
@@ -382,8 +400,9 @@ class AsyncRolloutConfig(
         default_factory=list,
         metadata={
             "help": "Special-token strings that end a turn, sent as the engine's stop_token_ids; list the model's "
-            "tool-call terminator when it is no eos (gpt-oss <|call|> under harmony-disabled serving). Empty = only "
-            "eos stops a turn. See agent-docs/training-methods/async-grpo/episodes.md#tool-calls."
+            "tool-call terminator when it is no eos (gpt-oss <|call|> under harmony-disabled serving, refused without "
+            "it on a tool environment). Empty = only eos stops a turn. "
+            "See agent-docs/training-methods/async-grpo/episodes.md#tool-calls."
         },
     )
     rollout_chat_template_kwargs: dict[str, Any] = field(
@@ -498,6 +517,8 @@ class AsyncRolloutConfig(
         require_finite(owner, ge=0, retry_base_wait=self.retry_base_wait)
         # A rate is never above 1, so a threshold at 1 would never fire.
         require_finite(owner, ge=0, lt=1, **present(truncation_alarm_rate=self.truncation_alarm_rate))
+        require_int(owner, ge=1, **present(zero_gradient_round_limit=self.zero_gradient_round_limit))
+        require_int(owner, ge=1, **present(tool_parser_watch_rounds=self.tool_parser_watch_rounds))
         # The breaker is the only writer of the skip flag: without it the condition could never fire.
         if self.early_stop_on_skipped_updates and self.skip_update_masked_frac is None:
             raise ValueError(

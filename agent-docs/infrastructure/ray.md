@@ -168,8 +168,8 @@ jobs API on 8265 that the section above says is never opened.
 The toolkit configures no other Ray ports; upstream defaults apply. What must hold across nodes:
 
 - **Rollout-server URLs must resolve from every actor node**: actors call the servers directly over
-  HTTP. The trainer warns when a loopback URL meets a multi-node run (a scattered actor would hit a
-  node with no server and return masked rows).
+  HTTP. The trainer refuses a loopback URL in a run spanning several nodes, launch or Ray cluster: a scattered actor
+  would reach another engine or none, and an engine on each node takes no push but the forwarding rank's.
 
 - **Actor nodes need the environment's runtime**, not GPUs — per env: a sandbox plus a large
   `TMPDIR` for the coding envs and `swe` (an SWE session's whole working tree lives in `TMPDIR` for

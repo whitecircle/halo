@@ -7,7 +7,8 @@ two ranks do not own.
 
 vLLM (all GPUs visible, masked by CUDA_VISIBLE_DEVICES; ``--trust-remote-code`` for Ling-mini-2.0 and Step-3.7, plus
 ``--max-model-len 1024`` for Step-3.7's tiny checkpoint):
-    docker run -d --gpus all -e CUDA_VISIBLE_DEVICES=7 -e VLLM_SERVER_DEV_MODE=1 --network host --ipc host \\
+    docker run -d --gpus all -e CUDA_VISIBLE_DEVICES=7 -e VLLM_SERVER_DEV_MODE=1 -e VLLM_ENFORCE_STRICT_TOOL_CALLING=0 \\
+        --network host --ipc host \\
         -v $HF_HOME:/root/.cache/huggingface:ro -e HF_HUB_OFFLINE=1 -e HF_MODULES_CACHE=/root/hf_modules \\
         -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_P2P_LEVEL=NVL \\
         halo:vllm-0.32.0 $MODEL --port 8000 --dtype auto --weight-transfer-config '{"backend": "nccl"}' \\
@@ -21,6 +22,9 @@ Then, for one family (``-k`` narrows ``pytest -m 'gpu and vllm_server' tests/gpu
     HALO_TEST_PUSH_EXACT_FRESH=1 VLLM_SERVER_URL=http://localhost:8000 VLLM_GROUP_HOST=127.0.0.1 NCCL_IB_DISABLE=1 \\
         NCCL_NET=Socket CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 \\
         tests/gpu/trainers/grpo/test_weight_push_exact.py --family bailing_moe --backend vllm --ep-size 2
+
+``--reach`` adds one push per forwarded name, on Laguna and Gemma 4 especially, whose real-step bar is gross;
+``--reach-leave-out model.layers.N.mlp.gate.weight`` is its negative control and must fail.
 
 A server launched from a local path takes ``--served-model-name`` (or SGLang's ``SGLANG_MODEL``) equal to
 ``HALO_TEST_PUSH_EXACT_MODEL``, the same path for the trainer.

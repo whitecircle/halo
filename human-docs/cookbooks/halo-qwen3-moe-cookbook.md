@@ -120,7 +120,7 @@ Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs.
   checkpoints serve without the bias.
 - **Tool parser.** Qwen3 tool calls parse with vLLM's default `hermes` parser. On SGLang, set
   `SGLANG_TOOL_PARSER=qwen25`: the default `auto` cannot read the 2507 chat template and turns the parser off
-  with one log line, so calls stay text and every episode scores 0
+  with one log line, which the trainer refuses at startup on a tool-using environment
   ([Tool parsers on SGLang](../../agent-docs/infrastructure/rollout-servers.md#tool-parsers-on-sglang) ↗).
 
 ## Limits

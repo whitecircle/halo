@@ -69,12 +69,10 @@ class AsyncRolloutMixin:
 
     def _init_async_state(self):
         self._rollout_manager = None
-        self._weight_sync_client = None  # one engine client, or a WeightSyncPool over several
+        self._weight_sync_client: WeightSyncPool | None = None
         # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference).
         self._engine_rescore_clients: list[WeightSyncClientBase] | None = None
         self._loop = None
-        # Which client shape to build, not how many engines serve (a one-entry list is one server).
-        self._multi_server_mode = bool(self.async_config.rollout_server_configs)
 
         self._prefetch_enabled = self.async_config.prefetch_active()
         if self.async_config.enable_prefetch is None and not self._prefetch_enabled and is_global_main_process():
@@ -100,6 +98,8 @@ class AsyncRolloutMixin:
         self._prefetch_input_skips = 0
         # The step the sync path was last entered at, not the step the engines hold.
         self._last_sync_attempt_step = -1
+        # The step whose weights the engines hold.
+        self._last_pushed_step = -1
         self._rollout_start_callback = None
         self._rollout_generation_started = False
 
@@ -135,10 +135,9 @@ class AsyncRolloutMixin:
             ),
             max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
             pool_replicas=self.accelerator.num_processes if self.async_config.ray_address is not None else 1,
+            first_server=self.parallelism_config.get_data_parallel_rank(),
         )
-        if self.accelerator.is_main_process:
-            multinode = self.async_config.ray_address is not None or get_num_nodes() > 1
-            self._rollout_manager.warn_if_servers_unreachable_from_actors(multinode)
+        self._rollout_manager.reject_loopback_servers(self._rollout_node_count())
 
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -146,6 +145,14 @@ class AsyncRolloutMixin:
         self._loop.run_until_complete(self._rollout_manager.start())
         if self.async_config.isr_engine_reference:
             self._engine_rescore_clients = self._build_engine_rescore_clients()
+
+    def _rollout_node_count(self) -> int:
+        """Actors follow the launch across its nodes and spill over a shared Ray cluster's, which a head on this host
+        alone does not have."""
+        nodes = get_num_nodes()
+        if self.async_config.ray_address is not None:
+            nodes = max(nodes, sum(node["Alive"] for node in ray.nodes()))
+        return nodes
 
     def _reject_eval_round_over_cap(self, max_concurrent: int) -> None:
         """An eval round above the in-flight cap runs in serial waves that hold the peers at the post-round collective
@@ -182,32 +189,15 @@ class AsyncRolloutMixin:
         if not self.accelerator.is_main_process:
             return
 
-        device = self.accelerator.device
-        client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
-
-        if self._multi_server_mode:
-            self._weight_sync_client = WeightSyncPool(
-                server_configs=self.async_config.rollout_server_configs,
-                connection_timeout=self.async_config.rollout_connection_timeout,
-                client_cls=client_cls,
-                base_group_port=self.async_config.rollout_group_port,
-            )
-            self._weight_sync_client.init_communicator(device=device)
-        else:
-            logger.info(f"Initializing {client_cls.BACKEND_NAME} weight-sync client on device: {device}")
-
-            self._weight_sync_client = client_cls(
-                base_url=self.async_config.rollout_server_url,
-                group_port=self.async_config.rollout_group_port,
-                connection_timeout=self.async_config.rollout_connection_timeout,
-            )
-
-            self._weight_sync_client.init_communicator(device=device)
-
-            logger.info(
-                f"{client_cls.BACKEND_NAME} weight-sync client initialized: {self.async_config.rollout_server_url}, "
-                f"device={self._weight_sync_client.sync_device}, group_port={self.async_config.rollout_group_port}"
-            )
+        # A pool at any server count, so a server restarted between syncs is recovered on one URL too.
+        config = self.async_config
+        self._weight_sync_client = WeightSyncPool(
+            server_configs=config.rollout_server_configs or [{"url": config.rollout_server_url}],
+            connection_timeout=config.rollout_connection_timeout,
+            client_cls=resolve_weight_sync_client(config.rollout_backend),
+            base_group_port=config.rollout_group_port,
+        )
+        self._weight_sync_client.init_communicator(device=self.accelerator.device)
 
     def _start_rollout_generation(self):
         """COLLECTIVE. Push the trainer's weights to the engines, then start the prefetch thread; idempotent."""
@@ -252,7 +242,17 @@ class AsyncRolloutMixin:
         self._form_weight_sync_group()
         with profiling_context(self, "weight_sync"):
             sync_trainer_weights(self, self._weight_sync_client)
+        self._last_pushed_step = self.state.global_step
         return True
+
+    def evaluate(self, *args, **kwargs):
+        """COLLECTIVE. An eval generates on what the engines hold, which trails the weights being evaluated and saved:
+        by this step's update at any cadence, and by up to ``sync_weights_every_n_steps - 1`` steps more. Stamped, so the
+        next step's first microbatch does not push the same weights again."""
+        if self._rollout_generation_started and self._last_pushed_step != self.state.global_step:
+            self._last_sync_attempt_step = self.state.global_step
+            self._sync_weights_to_engine_fenced(force=True)
+        return super().evaluate(*args, **kwargs)
 
     def _start_prefetch_thread(self):
         """A stop event of its own: a previous worker still in its round past the stop's bounded join keeps its set
@@ -515,6 +515,7 @@ class AsyncRolloutMixin:
         # engines, at whatever step it starts from.
         self._rollout_generation_started = False
         self._last_sync_attempt_step = -1
+        self._last_pushed_step = -1
 
     def _stop_prefetch_thread(self):
         """It sees its stop event within a poll slice and cancels the rounds still collecting, so a later start begins

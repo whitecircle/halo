@@ -4,6 +4,7 @@ so a sequence-level IS mode or VESPO, which sum the log-ratios, drive the ratio 
 
 import ast
 import re
+import threading
 import types
 
 import pytest
@@ -118,6 +119,7 @@ def test_the_collective_form_takes_the_consumer_flag(nucleus_server):
             repetition_penalty=1.0,
             sequence_ratio_active=True,
             backend=VLLMWeightSyncClient.BACKEND_KEY,
+            connection_timeout=5.0,
         )
 
 
@@ -126,7 +128,7 @@ def test_the_collective_form_takes_the_consumer_flag(nucleus_server):
     [(KeyError("url"), r"^KeyError: 'url'$"), (ValueError("refused"), r"^refused$")],
     ids=["other-failure", "refusal"],
 )
-def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error, message):
+def test_a_preflight_failure_reaches_every_rank_with_its_type(nucleus_server, monkeypatch, error, message):
     """A failure other than the preflight's refusal keeps its type in the text; ``KeyError('url')`` reads ``'url'``."""
 
     def fail(*args):
@@ -135,7 +137,7 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
     monkeypatch.setattr(engine_preflight, "_verify_sampler_logprob_reference_on_rank0", fail)
     with pytest.raises(ValueError, match=message) as raised:
         verify_sampler_logprob_reference(
-            ["http://unused"],
+            [nucleus_server.url],
             temperature=1.0,
             top_p=1.0,
             top_k=-1,
@@ -143,8 +145,64 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
             repetition_penalty=1.0,
             sequence_ratio_active=True,
             backend=VLLMWeightSyncClient.BACKEND_KEY,
+            connection_timeout=5.0,
         )
     assert raised.value.__cause__ is error
+
+
+def _late_server(*routes: str) -> FakeVLLMServer:
+    """Starts answering once the timer fires, as a server still loading its model answers 503 until it is up."""
+    server = FakeVLLMServer()
+    server.logprobs_mode = "raw_logprobs"
+    server.refuse.update(routes)
+    timer = threading.Timer(2.5, server.refuse.clear)
+    timer.start()
+    return server
+
+
+def _collective_raw_check(url: str, connection_timeout: float) -> None:
+    verify_sampler_logprob_reference(
+        [url],
+        temperature=0.7,
+        top_p=1.0,
+        top_k=-1,
+        min_p=0.0,
+        repetition_penalty=1.0,
+        sequence_ratio_active=False,
+        backend=VLLMWeightSyncClient.BACKEND_KEY,
+        connection_timeout=connection_timeout,
+    )
+
+
+def test_a_server_still_loading_is_waited_for_and_then_refused():
+    """A trainer started with its server failed every probe open: a raw-logprob server at temperature 0.7 went
+    unread and the run trained on tilted weights."""
+    server = _late_server("/health", "/v1/models", "/v1/completions")
+    try:
+        with pytest.raises(ValueError, match="RAW"):
+            _collective_raw_check(server.url, connection_timeout=30.0)
+    finally:
+        server.close()
+
+
+def test_a_server_that_never_comes_up_fails_the_preflight():
+    """The formation that follows would refuse it too, after the second model load."""
+    server = FakeVLLMServer()
+    server.refuse.add("/health")
+    try:
+        with pytest.raises(ValueError, match="unreachable"):
+            _collective_raw_check(server.url, connection_timeout=1.0)
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    ("script", "expected"),
+    [(ENV_SCRIPT, "async_config.rollout_connection_timeout"), (RLVR_SCRIPT, "grpo_config.vllm_server_timeout")],
+    ids=["environmental", "online"],
+)
+def test_each_script_waits_as_long_as_its_group_formation_does(script, expected):
+    assert _preflight_argument(script, "connection_timeout") == expected
 
 
 def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():

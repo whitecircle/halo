@@ -349,6 +349,11 @@ def test_custom_chat_template_example_hands_it_to_the_server(config):
         "this config forces its own chat template on the trainer but its launch instructions never "
         "pass the same file to the server, which then serves the checkpoint's built-in template"
     )
+    # The container's working directory holds no templates, so a relative path raises at start and compose loops it.
+    assert not re.search(r"(CHAT_TEMPLATE=|--chat-template[ =])jinja-templates/", comments), (
+        "the launch header names a path relative to the repo, which the server's container cannot see: use "
+        "/jinja-templates/..., which both compose files mount"
+    )
 
 
 @pytest.mark.parametrize("config", _WEIGHT_SYNC_EXAMPLES, **_ID)

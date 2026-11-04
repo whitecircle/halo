@@ -43,9 +43,9 @@ COPY docker/sglang/verify_image.py /tmp/verify_image.py
 RUN python3 /tmp/verify_image.py && rm /tmp/verify_image.py
 
 # The Gemma 4 router caches a derived form of its scale and keeps serving it after an online update
-# rewrites the parameter, the GLM-4 gates must keep reading theirs live, and the prefill result loop
-# hands a skipped request's input log-probs to the requests after it (docker/sglang/patches/
-# patch_sglang.py names each). Its pre- and post-image assertions fail the build on an upstream change,
+# rewrites the parameter, the GLM-4 gates must keep reading theirs live, the prefill result loop
+# hands a skipped request's input log-probs to the requests after it, and the glm47 parser samples under
+# a grammar the trainer never sees (docker/sglang/patches/patch_sglang.py names each). Its pre- and post-image assertions fail the build on an upstream change,
 # and it stays in the image for `--verify`.
 COPY docker/engine_source_patch.py docker/sglang/patches/patch_sglang.py /opt/halo/
 RUN python3 /opt/halo/patch_sglang.py
@@ -54,6 +54,11 @@ RUN python3 /opt/halo/patch_sglang.py
 # request ahead of a live one and fails the build unless the live one reads its own log-probs.
 COPY docker/sglang/patches/verify_prefill_logprob_cursor.py /tmp/verify_prefill_logprob_cursor.py
 RUN python3 /tmp/verify_prefill_logprob_cursor.py && rm /tmp/verify_prefill_logprob_cursor.py
+
+# A tool-bearing request at tool_choice auto must sample unconstrained on every parser a family resolves to, and the
+# glm47 parser must still read a rendered call: asserted on the real parser, since the edit above only removes a line.
+COPY docker/sglang/patches/verify_glm47_unconstrained.py /tmp/verify_glm47_unconstrained.py
+RUN python3 /tmp/verify_glm47_unconstrained.py && rm /tmp/verify_glm47_unconstrained.py
 
 # Per-build labels, set last: an ARG in scope reaches every later RUN as environment, so a new date or
 # commit above the build steps would re-key their cache. make build-sglang passes all three, and

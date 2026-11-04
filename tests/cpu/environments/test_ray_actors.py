@@ -3,7 +3,6 @@ import ast
 import asyncio
 import dataclasses
 import json
-import logging
 import os
 import pickle
 import tempfile
@@ -104,6 +103,45 @@ def test_rollout_manager_round_robins_across_servers():
 
     picked = [manager._next_url() for _ in range(len(urls) * 2)]
     assert picked == urls * 2, f"expected round-robin over {urls}, got {picked}"
+
+
+def _round_load(*, ranks: list[int], servers: int, rows: int) -> list[list[int]]:
+    """Episodes per server in each of two rounds, one real selector per training rank at ``first_server`` = its DP rank
+    (partners under TP or ETP share theirs)."""
+    urls = [f"http://server{i}:8000" for i in range(servers)]
+    managers = [
+        RolloutManager(
+            num_workers=1,
+            env_type="react_math",
+            env_config={},
+            server_urls=urls,
+            rollout_config=RolloutConfig(),
+            first_server=rank,
+        )
+        for rank in ranks
+    ]
+    load = []
+    for _ in range(2):
+        picked = [manager._next_url() for manager in managers for _ in range(rows)]
+        load.append([picked.count(url) for url in urls])
+    return load
+
+
+@pytest.mark.parametrize(
+    ("ranks", "servers", "rows"),
+    [
+        (list(range(8)), 4, 2),
+        (list(range(4)), 2, 3),
+        ([0, 0, 1, 1, 2, 2, 3, 3], 2, 3),
+        ([0, 0, 1, 1], 4, 1),
+    ],
+    ids=["8-ranks-4-servers", "odd-rows", "tp2-partners-2-servers", "tp2-partners-4-servers"],
+)
+def test_ranks_spread_a_narrow_round_over_the_servers(ranks, servers, rows):
+    """Every rank starting at server 0 put all 16 episodes of 8 ranks × 2 rows on two of four servers each round."""
+    for round_load in _round_load(ranks=ranks, servers=servers, rows=rows):
+        assert max(round_load) - min(round_load) <= 2 * max(1, len(ranks) // len(set(ranks))) - 1, round_load
+        assert sum(round_load) == len(ranks) * rows
 
 
 async def test_rollout_manager_start_shutdown():
@@ -277,9 +315,9 @@ async def test_collect_rollouts_refuses_contexts_that_do_not_pair_with_prompts()
 
 
 @pytest.mark.parametrize("url", ["http://localhost:8000", "127.0.1.1:8000", "http://[::1]:8000"])
-def test_a_loopback_server_url_warns_on_a_multinode_job(url, caplog):
-    """Every loopback spelling the weight-sync client treats as loopback, ``127.x`` included, reaches
-    no engine from an actor placed on another node."""
+def test_a_loopback_server_url_is_refused_on_several_nodes(url):
+    """Every loopback spelling the weight-sync client treats as loopback, ``127.x`` included, reaches another engine or
+    none from an actor on another node, and that node's engine takes no push."""
 
     def manager(*urls):
         return ray_actors.RolloutManager(
@@ -290,13 +328,11 @@ def test_a_loopback_server_url_warns_on_a_multinode_job(url, caplog):
             rollout_config=ray_actors.RolloutConfig(),
         )
 
-    with caplog.at_level(logging.WARNING, logger=ray_actors.__name__):
-        manager("http://10.0.0.2:8000", url).warn_if_servers_unreachable_from_actors(multinode=True)
-        assert "loopback" in caplog.text
-        caplog.clear()
-        manager("http://10.0.0.2:8000", url).warn_if_servers_unreachable_from_actors(multinode=False)
-        manager("http://10.0.0.2:8000").warn_if_servers_unreachable_from_actors(multinode=True)
-    assert "loopback" not in caplog.text
+    with pytest.raises(ValueError, match="loopback"):
+        manager("http://10.0.0.2:8000", url).reject_loopback_servers(num_nodes=2)
+    # One node reaches its own engine, which the forwarding rank's client pushes to.
+    manager("http://10.0.0.2:8000", url).reject_loopback_servers(num_nodes=1)
+    manager("http://10.0.0.2:8000").reject_loopback_servers(num_nodes=2)
 
 
 def test_tools_schema_detection():

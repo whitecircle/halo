@@ -7,7 +7,7 @@ import socket
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 import requests
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 # Per attempt; the calls that block on the engine have their own deadlines.
 POST_TIMEOUT_S = 60
 HTTP_PROBE_TIMEOUT_S = 10
+# A merely busy scheduler still answers a 1-token probe in time; a wedged one is reported, not waited out.
+GENERATION_PROBE_TIMEOUT_S = 60.0
 GROUP_FORMATION_TIMEOUT_S = 120
 # The close waits for the engine to finish applying the last chunk.
 SESSION_CLOSE_TIMEOUT_S = 600
@@ -37,6 +39,7 @@ SESSION_CLOSE_TIMEOUT_S = 600
 CLEANUP_TIMEOUT_S = 30
 # One prefill of a training row, up to 250k tokens on a server that is also generating.
 RESCORE_TIMEOUT_S = 600.0
+_RESUME_RETRY_BACKOFF_S = (1.0, 2.0, 4.0)
 # Lets an in-flight server call record its error once the local side failed.
 _SERVER_ERROR_GRACE_S = 5.0
 _DEFAULT_RETRY = Retry(
@@ -48,6 +51,20 @@ _DEFAULT_RETRY = Retry(
     backoff_factor=2,
     allowed_methods=["POST", "GET"],
 )
+
+
+class ServerFlags(NamedTuple):
+    """What a server reports on ``/server_info``; ``None`` where the reply carries no such field, so a renamed one reads
+    as unread, not as wrong."""
+
+    toolkit_image: bool
+    moe_backend: str | None = None
+    # Empty when the server runs without one.
+    reasoning_parser: str | None = None
+    tool_call_parser: str | None = None
+    strict_tool_calling: bool | None = None
+    captures_routing: bool | None = None
+    torch_compile: bool | None = None
 
 
 def unservable_bailing_model_types(release: str) -> dict[str, str]:
@@ -95,6 +112,12 @@ class WeightSyncClientBase(ABC):
     SUPPORTS_ENGINE_RESCORE = True
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal.
     INTERRUPTED_UPDATE_STATE = "a model that is part old weights and part new"
+    # The launch flags a preflight refusal names as the remedy.
+    IMAGE_REMEDY: str
+    MOE_BACKEND_FLAG: str
+    REASONING_PARSER_FLAG: str
+    TOOL_PARSER_FLAG: str
+    CHAT_TEMPLATE_FLAG: str
     # Format fields: init log ``engine_ws, master, port, bind``; failure hint ``master, port, url, env``.
     _INIT_LOG: str
     _READY_LOG: str
@@ -201,7 +224,11 @@ class WeightSyncClientBase(ABC):
         else:
             resp = requests.request(method, url, timeout=timeout, **kwargs)
         if check:
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # The route's own reason, which the bare status drops: "Bad Request" names no stale session.
+                raise requests.exceptions.HTTPError(f"{e}: {resp.text[:500]}", response=resp) from e
         return resp
 
     def check_server(self, total_timeout: float = 0.0):
@@ -225,7 +252,8 @@ class WeightSyncClientBase(ABC):
             if time.time() - start >= total_timeout:
                 raise ConnectionError(
                     f"{self.BACKEND_NAME} server unreachable at {self.base_url} after {total_timeout}s "
-                    f"(last /health result: {last_result})"
+                    f"(last /health result: {last_result}). A server still loading needs a longer wait: "
+                    f"rollout_connection_timeout, or vllm_server_timeout on online GRPO."
                 ) from last_error
             time.sleep(2.0)
 
@@ -236,6 +264,69 @@ class WeightSyncClientBase(ABC):
                 raise RuntimeError(f"{self.base_url}/v1/models lists no model")
             self._served_model_id = str(cards[0]["id"])
         return self._served_model_id
+
+    @abstractmethod
+    def read_server_flags(self) -> ServerFlags:
+        """The flags this server reports; raises on a transport or decode error."""
+
+    def reports_sampled_token_ids(self) -> bool | None:
+        """Whether a turn carries the ids it sampled, ``None`` where the request itself asks for them."""
+        return None
+
+    def _read_paused(self) -> bool:
+        """Whether the engine reports a pause; one with no such route reads as not paused and queues the probe."""
+        return False
+
+    def probe_generation(self) -> None:
+        """Fail fast when ``/health`` is up but generation is held, a trainer's SIGKILL mid-sync having skipped the exit
+        hook's resume. A paused engine would queue every request, so the pause is asked first where it can be."""
+        restart = (
+            "unless that sync had already streamed part of the model, in which case the server holds a partly written "
+            "model and has to be RESTARTED instead (its log names the last update)"
+        )
+        if self._read_paused():
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} server {self.base_url} is PAUSED for a weight update: generation requests would "
+                f"queue instead of running. A trainer died mid weight sync without lifting it. Lift it (POST "
+                f"{self.base_url}{self.RESUME_ENDPOINT}) before reconnecting, {restart}."
+            )
+        try:
+            model_id = self.served_model_id()
+        except Exception as e:
+            logger.warning(f"Generation probe: could not resolve served model ({e}); skipping probe")
+            return
+        try:
+            self.request(
+                "POST",
+                "/v1/completions",
+                retry=False,
+                timeout=GENERATION_PROBE_TIMEOUT_S,
+                check=False,
+                json={"model": model_id, "prompt": "ping", "max_tokens": 1, "temperature": 0.0},
+            )
+        except requests.exceptions.Timeout as e:
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} server {self.base_url} answers /health but GENERATION is paused or wedged (no "
+                f"response in {GENERATION_PROBE_TIMEOUT_S:.0f}s to a 1-token probe). A previous trainer most likely "
+                f"died mid-run while attached to the weight-sync routes (SIGKILL skips cleanup). Lift a pause (POST "
+                f"{self.base_url}{self.RESUME_ENDPOINT}) before reconnecting, {restart}."
+            ) from e
+        except requests.exceptions.RequestException as e:
+            # For example raw /v1/completions disabled.
+            logger.warning(f"Generation probe: server responded with an error (not wedged): {e}")
+
+    def accepts_tool_requests(self) -> bool | None:
+        """Whether a request carrying tools is served, ``None`` where the server reports its parser instead."""
+        return None
+
+    def _require_toolkit_image(self, flags: ServerFlags) -> None:
+        """Refuse a server off the toolkit's image: its routes answer, and its update lands wrong behind a ``200``."""
+        if not flags.toolkit_image:
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} server {self.base_url} does not report the toolkit's image on /server_info. "
+                f"Upstream {self.ENGINE_RELEASE} takes the same routes without the patches a weight sync needs, so "
+                f"updates would land wrong with no error. {self.IMAGE_REMEDY}"
+            )
 
     @abstractmethod
     def score_completion_logprobs(
@@ -529,11 +620,34 @@ class WeightSyncClientBase(ABC):
                 self._mark_unusable()
         try:
             self._finish_engine_update(tail)
+        except BaseException:
+            # A close that failed after chunks landed leaves the reload unfinished: the pause stays, as for a failed
+            # chunk, and is marked before the finally would lift it.
+            if self._chunks_sent:
+                self._mark_unusable()
+            raise
         finally:
             self._update_open = False
             self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
         if snapshot_error is not None:
             raise snapshot_error
+        self._require_resumed()
+
+    def _require_resumed(self) -> None:
+        """A good push still counts for nothing if the pause stays: every rollout would wait out its request timeouts and
+        the run would die on a timeout that never names the pause. After the close only, as a raise from its finally
+        would mask the failure it unwinds."""
+        for backoff in _RESUME_RETRY_BACKOFF_S:
+            if not self._paused:
+                return
+            time.sleep(backoff)
+            self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
+        if self._paused:
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} server {self.base_url} stayed paused after a good weight push: POST "
+                f"{self.RESUME_ENDPOINT} failed {1 + len(_RESUME_RETRY_BACKOFF_S)} times, so every rollout would queue. "
+                f"Check the server, lift the pause (POST {self.base_url}{self.RESUME_ENDPOINT}), or restart it."
+            )
 
     def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
         """Send ``tail`` and close the update; the resume follows."""

@@ -4,7 +4,7 @@ A run evaluates in two ways: eval rounds inside training, and offline CLIs that 
 
 ## During training
 
-Eval metrics carry the `eval_` prefix. Eval rounds run without prefetch, and a round waits for its slowest episode.
+Eval metrics carry the `eval_` prefix. Eval rounds run without prefetch, and a round waits for its slowest episode. An eval pushes first, whatever `sync_weights_every_n_steps` says, so `outcome/success@N` and best-model selection read the weights being evaluated and saved; the next step's push is then skipped as redundant.
 
 `num_generations_eval` sets the eval group size (`1` gives a fast pass@1 eval) and `eval_rollout_batch_size` the rows, not prompts, per rank in one eval round; types and defaults are in [GRPOConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
 

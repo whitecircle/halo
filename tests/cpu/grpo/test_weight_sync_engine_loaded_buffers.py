@@ -88,6 +88,42 @@ def _per_layer_spelling(names) -> set[str]:
     return {re.sub(r"\.\d+(?=\.)", ".N", name) for name in names}
 
 
+def _laguna_with_bias(value: float):
+    model = _ep_model("laguna")
+    for _, layer in named_ep_layers(model):
+        layer.get_submodule("gate").e_score_correction_bias.data.fill_(value)
+    return model
+
+
+def _bias_warnings(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if "nonzero router bias" in record.getMessage()]
+
+
+def test_a_trained_laguna_bias_warns_that_the_engine_routes_without_it(caplog):
+    """The cookbook's SFT with bias balancing ships the bias, its GRPO step starts from that checkpoint, and vLLM's
+    loader drops the key: routing then differs on every prompt, which no sync test would see."""
+    model = _laguna_with_bias(0.25)
+    with caplog.at_level("WARNING"):
+        reject_unsyncable_model(model, "vllm")
+    (warning,) = _bias_warnings(caplog)
+    assert "routing_replay: rollout" in warning and str(len(named_ep_layers(model))) in warning
+
+
+def test_a_laguna_at_its_zero_release_bias_is_silent(caplog):
+    with caplog.at_level("WARNING"):
+        reject_unsyncable_model(_laguna_with_bias(0.0), "vllm")
+    assert not _bias_warnings(caplog)
+
+
+def test_a_family_whose_engine_loads_its_bias_is_silent(caplog):
+    model = _ep_model("glm4_moe_lite")
+    for _, layer in named_ep_layers(model):
+        layer.get_submodule("gate").e_score_correction_bias.data.fill_(0.25)
+    with caplog.at_level("WARNING"):
+        reject_unsyncable_model(model, "vllm")
+    assert not _bias_warnings(caplog)
+
+
 def test_a_ling_push_carries_each_gate_bias_at_the_value_the_trainer_routes_with():
     model = _ep_model("bailing_moe")
     biases = _distinct_biases(model)

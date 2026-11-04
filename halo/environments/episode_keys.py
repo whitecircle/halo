@@ -13,6 +13,8 @@ EPISODE_INVALID_KEY = "episode_invalid"
 EPISODE_INVALID_REASON_KEY = "episode_invalid_reason"
 # The cause on an episode its driver lost, stamped before the close so the turn-overflow price stays off it.
 EPISODE_ERROR_KEY = "error"
+# The served window refused the episode's next turn: it closed on what it earned, past which its whole render may run.
+CONTEXT_OVERFLOW_KEY = "context_overflow"
 # Whether an episode output budget no longer held a turn's answer room when the episode ended.
 OUTPUT_BUDGET_EXHAUSTED_KEY = "output_budget_exhausted"
 # Step-context flag on the last turn the output budget affords: an unproductive turn there cannot be retried.

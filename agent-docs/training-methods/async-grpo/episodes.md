@@ -40,6 +40,12 @@ startup check warns when the worst-case episode overflows the served window
 environment's system prompt and tool schema as the chat template renders them, and a template that cannot render
 that preamble fails the run at startup.
 
+An episode that grows past the served window closes on what it earned, as in an [eval](evaluation.md), so the longest
+failures keep their row and reward; `episode/context_overflow` counts them. SGLang refuses any request whose prompt plus
+`max_tokens` passes the window where vLLM clamps `max_tokens`, so there such an episode ends up to `rollout_max_tokens`
+earlier. Under `train_on_sampled_tokens: false` its whole render can pass the window, ending on a tool result no engine
+served, and the episode then leaves the batch instead of raising.
+
 `max_completion_length` is no knob here: the script pins it to `rollout_max_tokens` (TRL reads it only as the
 `dr_grpo` normalizer) and raises on another explicit value.
 
@@ -114,7 +120,14 @@ Two safe setups:
 - **Built-in** (default): no `chat_template:` on the trainer and no `--chat-template` on the server, so both load the
   checkpoint's.
 - **Custom**: `chat_template: <file>.jinja` plus `force_chat_template: true` on the trainer and
-  `--chat-template <same file>` on the server, the file visible inside its container.
+  `--chat-template <same file>` on the server, the file visible inside its container (`/jinja-templates/…` under
+  either compose file). A relative path raises at server start, which `restart: unless-stopped` then loops.
+
+Rows train on the engine's prompt ids, so a mismatch shows in no loss. The startup probe asks each server for its render
+of a no-tool prompt under two of the run's contracts: a server whose prompt does not move with the level, where the
+trainer's does, is refused, as the reasoning terms would charge for a contract the model never read. Any other
+difference warns with the first differing token, since an engine also derives a thinking toggle the trainer's render
+lacks.
 
 A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
 it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths

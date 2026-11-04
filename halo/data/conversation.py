@@ -10,7 +10,12 @@ IMAGE_PART_TYPE = "image"
 IMAGE_PART_PAYLOAD_KEY = "image"
 IMAGE_PART_SOURCE_KEYS = ("path", "base64", "url")
 # No collator hands these to a processor, while chat templates render their placeholders.
-UNSUPPORTED_MEDIA_PART_TYPES = frozenset({"video", "audio", "image_url", "video_url", "audio_url", "input_audio"})
+UNSUPPORTED_MEDIA_PART_TYPES = frozenset(
+    {"video", "audio", "image_url", "input_image", "video_url", "audio_url", "input_audio"}
+)
+# What a template can write as text. ``thinking`` is a real part of the assistant turn on Mistral Small 4 and Command A+,
+# whose templates render it as their reasoning block; ``None`` is a part with no type.
+_TEXT_PART_TYPES = (None, "text", "thinking")
 
 
 def resolve_json_value(value):
@@ -67,17 +72,28 @@ def reject_unsupported_media_parts(conversation: Any, source: str) -> None:
 
 
 def reject_image_content(conversation: Any, source: str) -> None:
-    """Refuse image parts on a text renderer, which would train placeholder tokens with no pixels: the per-row backstop
-    for what the run-intent dispatch cannot see."""
+    """Refuse media parts on a text renderer, which would train placeholder tokens with no data behind them or drop the
+    part with no error: the per-row backstop for what the run-intent dispatch cannot see. Run routing keeps reading
+    :func:`conversation_carries_images`, as the VLM path extracts only ``image`` parts."""
     reject_unsupported_media_parts(conversation, source)
-    if not conversation_carries_images(conversation):
-        return
-    raise ValueError(
-        f"{source} carries an image content part, but this row is on the TEXT pipeline, which "
-        f"renders images as placeholder tokens with no pixels behind them. Train it on the VLM "
-        f"path: a multimodal checkpoint plus image data (an 'images'/'image' column, or "
-        f"images_field naming one) routes there, and offline VLM preprocessing takes --is_vlm."
+    if conversation_carries_images(conversation):
+        raise ValueError(
+            f"{source} carries an image content part, but this row is on the TEXT pipeline, which "
+            f"renders images as placeholder tokens with no pixels behind them. Train it on the VLM "
+            f"path: a multimodal checkpoint plus image data (an 'images'/'image' column, or "
+            f"images_field naming one) routes there, and offline VLM preprocessing takes --is_vlm."
+        )
+    # Each kind once; one with no type is the template's to refuse.
+    other = sorted(
+        {str(part["type"]) for part in _content_parts(conversation) if part.get("type") not in _TEXT_PART_TYPES}
     )
+    if other:
+        raise ValueError(
+            f"{source} carries {other} content parts, but this row is on the TEXT pipeline: by template they render as "
+            f"placeholder tokens with no data behind them or vanish with no error, so the run would train blind to "
+            f"them. Write text parts or plain strings, or for images use {{'type': 'image'}} parts or an images column "
+            f"on the VLM path."
+        )
 
 
 def chat_template_kwargs(row: dict[str, Any], interleaved_thinking: bool, tools_field: str | None) -> dict:

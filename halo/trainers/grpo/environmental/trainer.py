@@ -13,16 +13,19 @@ from halo.environments.messages import task_prompt
 from halo.environments.reasoning_effort import has_thinking_budget, resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, resolve_rollout_stop_token_ids
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
+    reject_open_ended_tool_turns,
     reject_prefetch_past_retry_budget,
     reject_straddling_eval_groups,
     reject_straddling_train_groups,
     reject_unread_grpo_knobs,
+    reject_unresolved_forced_closes,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
 )
@@ -32,6 +35,7 @@ from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
 from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
+from halo.trainers.grpo.environmental.tool_call_watch import ToolCallParserWatch, build_tool_call_watch
 from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
 from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
 from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
@@ -91,6 +95,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     _rollout_backend: str | None = None
     _rollout_routing_replay = False
     _replay_row_spans = False
+    _tool_call_watch: ToolCallParserWatch | None = None
 
     def __init__(self, *args, **kwargs):
         self.async_config = kwargs.pop("async_config", None) or AsyncRolloutConfig()
@@ -148,8 +153,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         cfg = self.async_config
         self._rollout_backend = cfg.rollout_backend
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
+        reject_open_ended_tool_turns(
+            self._rollout_env, unwrap_framework_wrappers(self.model), self._tokenizer, self._rollout_stop_token_ids
+        )
         self._reasoning_end_ids = self._resolve_reasoning_end_ids()
         self._forced_close_ids = self._resolve_forced_close_ids(self._reasoning_end_ids)
+        reject_unresolved_forced_closes(
+            self._any_episode_capped, self._reasoning_end_ids, cfg.rollout_backend, cfg.rollout_reasoning_end_token
+        )
         self._rows_over_cap = 0
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
@@ -163,6 +174,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._arm_update_breaker()
         self._warned_once: set[str] = set()
         self._isr_mask_config = cfg.build_isr_mask_config()
+        self._tool_call_watch = build_tool_call_watch(
+            self._rollout_env, self._tokenizer, cfg.rollout_chat_template_kwargs or {}, cfg.tool_parser_watch_rounds
+        )
 
     def train(self, *args, **kwargs):
         try:
@@ -224,6 +238,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         # Every TP/ETP group rank tokenizes the leader's rollouts, or the in-forward collectives deadlock.
         rollout_results = self._broadcast_object_from_tp_leader(rollout_results)
+        if self._tool_call_watch is not None and self._tool_call_watch.armed:
+            self._tool_call_watch.observe(rollout_results)
         # Counted once: the reasoning terms price these and the rollout metrics slice them.
         reasoning_tokens = [reasoning_token_counts(self._tokenizer, r.trajectory) for r in rollout_results]
 

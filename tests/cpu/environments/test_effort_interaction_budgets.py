@@ -401,8 +401,8 @@ def test_a_reasoning_count_ends_only_at_a_one_token_close_this_tokenizer_writes(
     final_channel = find_reasoning_end_ids(_VOCAB, "<|start|>assistant<|channel|>final<|message|>")
     assert final_channel is not None and resolve_reasoning_end_token_id(final_channel) is None
     with caplog.at_level(logging.WARNING, logger="halo.environments.rollout_config"):
-        assert find_reasoning_end_ids(_VOCAB, "<|end_reasoning|>", also_lost=", and more") is None
-    assert "A turn's reasoning goes uncounted, and more." in caplog.text
+        assert find_reasoning_end_ids(_VOCAB, "<|end_reasoning|>") is None
+    assert "A turn's reasoning goes uncounted." in caplog.text
 
 
 def test_stamp_records_output_budget_exhaustion_only_under_an_output_budget():

@@ -51,7 +51,7 @@ A reasoning close the engine forced at a turn's reasoning cap ([Reasoning budget
 
 - **Detection.** A forced close is a run of `rollout_reasoning_end_token` ids, each at sampling log-prob exactly 0: one token for Qwen3.x `</think>` and Gemma 4 `<channel|>`, six for gpt-oss's `<|end|><|start|>assistant<|channel|>final<|message|>`. `sampling/forced_close_frac` is their share of the tokens carrying sampling log-probs.
 - **Required correction.** A run whose vLLM reasoning cap can bind (a drawable level's `thinking_tokens`, a soft one only through its ceiling, or `rollout_max_thinking_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
-- **Unresolved marker.** A marker the tokenizer does not write (`</think>` on Gemma 4 or gpt-oss) leaves forced closes in the loss, with a warning.
+- **Unresolved marker.** A marker the tokenizer does not write (`</think>` on Gemma 4 or gpt-oss) is refused at construction where a cap can bind, since the forced closes could not leave the loss; a soft-only run only warns.
 
 ## Trust region masks
 
@@ -138,7 +138,7 @@ A non-finite mass raises on every rank, knob on or off. The balance raises unles
 - `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass and replays it in the update. Both passes are the trainer's, so it leaves the trainer-versus-engine gap where it was. It needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation.
 - `rollout` (R3, experimental) replays the engine's own selection through the no-grad pass and the update, so it can narrow that gap. It needs `train_on_sampled_tokens` and a capture-capable server. Positions the engine did not cover (prefix-cache hits) keep natural routing, so check the capture coverage on your serving shape before a long run.
 
-Both need MoE EP layers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of selections the live top-k would have flipped.
+Both need MoE EP layers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of (token, layer) pairs on which the live top-k would have flipped a selection.
 
 To run R3, set `routing_replay: rollout` and serve with `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` ([R3 flags](../../infrastructure/rollout-servers.md)). Capture and replay pass in two-step rows on GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, LFM-2 and Ling 2.0 on both engines and on Laguna on vLLM ([Coverage](../../infrastructure/rollout-servers.md#coverage)). Only the gpt-oss `-ep1` recipes ship it: no long run compares it with `none`.
 
@@ -149,6 +149,8 @@ Under `rollout`, the step fails on every rank when a trainable batch carries no 
 ### Trainer and engine noise
 
 Trainer and engine disagree on identical weights. bf16 round-off flips near-tie MoE top-k selections, and each flip compounds through the later layers. This is numerics, not a sync error: an unchanged push leaves the served log-probs bit-identical ([Coverage](../../infrastructure/rollout-servers.md#coverage)).
+
+How much of it routing carries varies by family. Measured with no engine, on CPU kernels and fixed text, forcing the top-k takes Laguna-XS from 0.679 nats to 0.058 and LFM-2 from 0.375 to 0.050, but GLM-4.7, whose logits reach 140, only from 0.0955 to 0.0933 and Gemma 4 from 0.683 to 0.623. On those two most of the gap stays with attention and head rounding.
 
 On gpt-oss-20b, on six untemplated rows of 32 to 1,024 tokens (2,010 positions, mean log-prob −7.5), stock transformers' bf16 forward sits 0.400 nats (mean absolute) from its fp32 forward, and 0.079 with the fp32 forward's top-k forced. 11.8% of its token-layer selections differ, from 2.7% at the first layer to 23.5% at the last. The served model sits at 0.319 and Halo's FA4 forward at 0.392 on the same rows.
 
@@ -161,6 +163,7 @@ Sampled tokens carry far less. Mean absolute log-ratio over the tokens the IS co
 | vLLM, Qwen3.6-35B-A3B | 0.0806 | 0.0800 | 0.0403 | 0.150 | 1,052–1,140 |
 
 - R2 changes nothing here, as its two trainer passes predict. R3 takes a third to a half off the mean.
+- `routing/replay_flip_rate` counts flips per token and layer with upstream layers already forced, so it understates free-running disagreement.
 - `sampling/logratio_mean`, the signed mean, moves little under R3 on vLLM: −0.0325 to −0.0291 on gpt-oss-20b, −0.0288 to −0.0221 on Qwen3.6.
 - The engines do not compare. vLLM reports log-probs after the top-p cut, so it marks more tokens certain (65% of gpt-oss-20b's completion tokens, against 31% on SGLang, which reports before the cut), and its ratio carries that renormalization, which no replay touches.
 - Other families have no comparable number; the rows of Qwen3-30B, LFM-2 and Laguna scored no tokens at step 1.

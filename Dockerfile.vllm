@@ -61,13 +61,15 @@ RUN mkdir -p /opt/nccl_compat/halo/weight_sync/transport \
 # patch destroys the NCCL communicator the engine would otherwise leak per trainer that reconnects
 # without a clean shutdown; the two thinking-budget patches let the gpt-oss parser force its whole
 # move into the final channel when an analysis channel overruns its budget; and the split top-p guard
-# keeps a budget-forced token from being masked with the rest of its row. `sitecustomize` applies
-# them in the API server and every engine-core worker.
+# keeps a budget-forced token from being masked with the rest of its row. The identity patch names them on
+# /server_info, where the trainer refuses a server without them. `sitecustomize` applies them in the API
+# server and every engine-core worker.
 COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
      docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
      docker/vllm/patches/vllm_reasoning_forced_end_patch.py \
      docker/vllm/patches/vllm_thinking_budget_completion_patch.py \
      docker/vllm/patches/vllm_topp_split_guard_patch.py \
+     docker/vllm/patches/vllm_image_identity_patch.py \
      docker/vllm/patches/sitecustomize.py /opt/vllm_patches/
 # No `:${PYTHONPATH:-}` tail: it is unset in the base image, so the suffix would render an empty
 # sys.path entry (the server's CWD) that a stray module could import-shadow.
@@ -75,6 +77,9 @@ ENV PYTHONPATH="/opt/vllm_patches:/opt/nccl_compat"
 # Model Runner V2, pinned: it enforces thinking budgets incrementally and is the only runner R3 capture
 # runs on, and pinned it fails at startup on a feature it lacks instead of falling back to the V1 runner.
 ENV VLLM_USE_V2_MODEL_RUNNER=1
+# Off for RL on a hand-run server too, not only under compose: the GLM parsers' default strict level would put a
+# structural-tag grammar over every tool-bearing request, so the served distribution is no longer the policy's.
+ENV VLLM_ENFORCE_STRICT_TOOL_CALLING=0
 
 # Again after the EFA userspace install, which rewrites the loader path.
 RUN python3 /tmp/nccl_pin.py /tmp/uv.lock --verify && rm /tmp/uv.lock /tmp/nccl_pin.py

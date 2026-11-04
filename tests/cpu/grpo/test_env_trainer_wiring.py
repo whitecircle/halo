@@ -46,6 +46,8 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
         reasoning_effort=None,
         thinking_budget_for_effort=lambda level: None,
         thinking_budget_enforced=lambda level: True,
+        get_tools_schema=lambda: None,
+        TOOLS_ARRIVE_ON_RESET=False,
     )
     trainer._tokenizer = word_level_tokenizer([_STOP])
     trainer.model = torch.nn.Module()

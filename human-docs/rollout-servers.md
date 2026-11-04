@@ -81,8 +81,8 @@ The variables mirror vLLM's (`SGLANG_MODEL`, `SGLANG_PORT`, `SGLANG_CUDA_DEVICES
 `SGLANG_TP`, `SGLANG_GPU_MEM`), except that `SGLANG_TOOL_PARSER` reads the parser
 off the chat template by default, and `SGLANG_MODEL_DIR` is required: the host
 directory holding a local `SGLANG_MODEL`, any existing one for a hub id. On a template it cannot read
-(the Qwen3 2507 releases, Ling-mini-2.0) that default turns the parser off with one log line, tool calls
-stay text and every episode scores 0, so set the parser yourself: `SGLANG_TOOL_PARSER=qwen25` for Qwen3, `hermes` for Ling
+(the Qwen3 2507 releases, Ling-mini-2.0) that default turns the parser off with one log line, which the trainer
+refuses at startup on a tool-using environment, so set the parser yourself: `SGLANG_TOOL_PARSER=qwen25` for Qwen3, `hermes` for Ling
 ([Tool parsers on SGLang](../agent-docs/infrastructure/rollout-servers.md#tool-parsers-on-sglang) ↗).
 The compose file also sets
 `NCCL_CUMEM_ENABLE=1`; a container you start by hand needs it too
@@ -176,7 +176,9 @@ engine-versus-policy log-ratio drifts negative.
 | Sign | Cause and fix |
 | --- | --- |
 | 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER`, or drop the run's reasoning cap, and leave `VLLM_USE_V2_MODEL_RUNNER` unset. |
-| The run finishes with a flat zero reward | Wrong tool-call parser on a tool-using environment; the calls came back as text. On vLLM a missing parser returns 400 instead; on SGLang it looks the same. |
+| `… the server parsed no call` by the second round | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser is refused at startup. If the parser is right and the model only writes malformed calls so far, raise `tool_parser_watch_rounds` or set it to `null`. |
+| `No token carried a policy gradient …` | Every group tied or dropped: read the shares in the message. A launch that has not trained yet stops at `zero_gradient_round_limit` rounds in a row, so raise it for a very sparse reward; past its first trained round a streak only warns. |
+| `… does not report the toolkit's image`, or another `cannot serve this run` at startup | A hand-run or upstream server. Serve from this repo's image and restate the flags the message names. |
 | `Could not bind the weight-transfer group port` | Another process holds the port, two servers share one, or an outbound connection took it. Give each server its own `group_port`, reserve it or pick one outside `32768–60999`, and remove stale containers. |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had started. |
 

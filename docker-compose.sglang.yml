@@ -42,9 +42,12 @@ services:
       # The host directory holding SGLANG_MODEL when that is a local path. No fallback; with a hub id
       # any existing directory serves.
       - ${SGLANG_MODEL_DIR:?set SGLANG_MODEL_DIR to the host directory holding a local SGLANG_MODEL (any existing directory for a hub id)}:${SGLANG_MODEL_DIR}:ro
-    # Two flags are required and silent when wrong: --tool-call-parser (tool-using environments need
-    # the calls parsed; `auto` reads the parser off the chat template and disables it on one it cannot
-    # detect) and --moe-runner-backend triton (auto-selection picks a fused runner for most MoE shapes:
+      # The chat templates the recipes pin, at the path their headers name for SGLANG_CHAT_TEMPLATE.
+      - ./jinja-templates:/jinja-templates:ro
+    # Two flags are required, and the trainer's startup preflight refuses a server without them:
+    # --tool-call-parser (tool-using environments need the calls parsed; `auto` reads the parser off the chat
+    # template and disables it on one it cannot detect) and --moe-runner-backend triton (auto-selection picks a
+    # fused runner for most MoE shapes:
     # triton_kernel and flashinfer skip R3 capture, and flashinfer_trtllm repacks the expert weights an
     # update writes).
     # --attention-backend is a per-family need, --trust-remote-code a per-checkpoint one, and SGLANG_EXTRA_ARGS is appended

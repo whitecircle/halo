@@ -45,6 +45,9 @@ def resolve_router_topk(cfg) -> int:
 
 
 def resolve_expert_count(cfg) -> int:
+    # Doge's dense checkpoints keep a default num_experts behind is_moe: false.
+    if get_config_field(cfg, "is_moe") is False:
+        return 0
     return int(_first_router_field(cfg, _ROUTER_EXPERT_COUNT_FIELDS, 0))
 
 

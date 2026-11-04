@@ -29,6 +29,8 @@ def _failing_server_call(built: threading.Event):
     """The engine's group-init POST, failing only once the local half has succeeded."""
 
     def request(method, path, **kwargs):
+        if path == SGLangWeightSyncClient.SESSION_CLOSE_ENDPOINT:
+            return None  # the stale-session clear ahead of the join
         assert built.wait(timeout=30), "the local half never completed — test would not exercise the leak window"
         raise RuntimeError(_SERVER_REFUSED)
 
@@ -48,6 +50,7 @@ def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatc
 
     monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
     monkeypatch.setattr(client, "request", _failing_server_call(built))
     monkeypatch.setattr(sglang_module, "build_weight_update_group", fake_create)
     monkeypatch.setattr(sglang_module, "release_weight_update_group", _recording_destroy(destroyed))

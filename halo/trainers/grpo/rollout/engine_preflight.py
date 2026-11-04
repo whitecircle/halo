@@ -1,19 +1,22 @@
-"""COLLECTIVE preflights of each rollout server: its context window, and whether its log-probs are the reference the IS
-ratio divides by. Rank 0 probes and its refusal raises everywhere; a server that cannot answer only warns."""
+"""COLLECTIVE preflights of each rollout server: its context window, its launch flags, and whether its log-probs are the
+reference the IS ratio divides by. Rank 0 waits for every server, as group formation would, so a loading one cannot pass unread; its
+refusal raises everywhere, while a server that answers /health and then cannot answer a probe only warns."""
 
 import logging
 import math
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from functools import partial
-from typing import Any
+from typing import Any, NamedTuple
 
 import requests
 from urllib3.util.retry import Retry
 
-from halo.environments.rollout_config import SAMPLER_FILTERS_OFF
+from halo.environments.engine_wire import build_payload, capture_generation_tokens
+from halo.environments.rollout_config import SAMPLER_FILTERS_OFF, RolloutConfig
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.runtime.consensus import refusal_text, run_on_rank0_raising_everywhere
-from halo.weight_sync.clients.base import WeightSyncClientBase
+from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
@@ -44,6 +47,145 @@ _PER_TOKEN_RATIO_REMEDY = (
     "vespo; on the environmental arm, whose correction is per token already, drop isr_geo_band_min/max and "
     "isr_opsm_delta"
 )
+
+
+class ServerRequirements(NamedTuple):
+    """What a run needs of its servers' launch flags. ``reasoning_consumers`` names the knobs reading a reasoning
+    parser."""
+
+    is_moe: bool
+    sends_tools: bool = False
+    captures_routing: bool = False
+    reasoning_consumers: tuple[str, ...] = ()
+    sampled_token_ids: bool = False
+
+
+def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
+    return (
+        f"it serves no tool parser and the environment sends tools, so calls stay text, each turn reads as a final "
+        f"answer and every episode scores alike with no error. Serve with {client_cls.TOOL_PARSER_FLAG}."
+    )
+
+
+def _server_flag_refusals(
+    client_cls: type[WeightSyncClientBase], flags: ServerFlags, needs: ServerRequirements
+) -> list[str]:
+    """Each flag a run needs and a server reports wrong; a field the reply does not carry reads as unread."""
+    refusals = []
+    if not flags.toolkit_image:
+        refusals.append(
+            f"it does not report the toolkit's image, so updates would land wrong with no error. "
+            f"{client_cls.IMAGE_REMEDY}"
+        )
+    if needs.is_moe and flags.moe_backend not in (None, "triton"):
+        refusals.append(
+            f"its MoE backend is {flags.moe_backend!r}, which repacks expert weights, so every push would corrupt "
+            f"them behind a 200. Serve with {client_cls.MOE_BACKEND_FLAG}."
+        )
+    if needs.sends_tools and flags.tool_call_parser == "":
+        refusals.append(_no_tool_parser(client_cls))
+    if needs.sends_tools and flags.strict_tool_calling:
+        refusals.append(
+            "VLLM_ENFORCE_STRICT_TOOL_CALLING is on, so a parser with a default strict level samples tool-bearing "
+            "requests under a grammar the trainer's log-probs never see. Set it to 0, as the image does."
+        )
+    if needs.captures_routing and flags.captures_routing is False:
+        refusals.append(
+            "routing_replay: rollout needs the routed experts, which it does not capture. Serve with "
+            "--enable-return-routed-experts."
+        )
+    if needs.captures_routing and flags.torch_compile:
+        refusals.append("routing_replay: rollout under --enable-torch-compile returns corrupt rows. Turn it off.")
+    if needs.reasoning_consumers and flags.reasoning_parser == "":
+        refusals.append(
+            f"it has no reasoning parser and the run reads reasoning ({', '.join(needs.reasoning_consumers)}): a "
+            f"thinking budget would answer 400 on every rollout, the price charge nothing and the floor score every "
+            f"episode as maximal under-use. Serve with {client_cls.REASONING_PARSER_FLAG}, or turn them off."
+        )
+    return refusals
+
+
+def _engine_prompt_ids(
+    client: WeightSyncClientBase, rollout: RolloutConfig, messages: list[dict], efforts: list
+) -> list[list[int] | None]:
+    """The prompt ids the server renders for ``messages`` under each effort's level and budget, one 1-token turn each."""
+    prompts = []
+    for effort in efforts:
+        payload = build_payload(
+            messages,
+            rollout,
+            effort.level if effort else None,
+            reasoning_budget=effort.thinking_budget if effort else None,
+            budget_soft=effort.budget_soft if effort else False,
+        )
+        reply = client.request(
+            "POST", "/v1/chat/completions", retry=True, timeout=_PROBE_TIMEOUT_S, json=payload
+        ).json()
+        prompts.append(capture_generation_tokens(reply["choices"][0], reply, rollout.backend)[2])
+    return prompts
+
+
+def _verify_server_chat_template_on_rank0(
+    client_cls: type[WeightSyncClientBase],
+    urls: list[str],
+    trainer_prompt_ids: Callable[[Any], list[int]],
+    messages: list[dict],
+    efforts: list,
+    rollout: RolloutConfig,
+) -> None:
+    try:
+        trainer = [trainer_prompt_ids(effort) for effort in efforts]
+    except Exception as e:  # a template's own raise, here on a contract the run may never draw
+        logger.warning(f"Could not render the trainer's prompt for the chat-template probe, so it is skipped: {e}")
+        return
+    probe = partial(_engine_prompt_ids, rollout=rollout, messages=messages, efforts=efforts)
+    for url in urls:
+        engine = _probe_server(client_cls, url, probe, None, "read the prompt ids of")
+        if engine is None or None in engine:
+            continue
+        if trainer[0] != trainer[-1] and engine[0] == engine[-1]:
+            raise ValueError(
+                f"Rollout server {url} renders the same prompt whatever the episode's reasoning effort and budget, and "
+                f"the trainer's chat template does not: the server's template ignores the level, so the reasoning "
+                f"terms would charge for a contract the model never read. Serve the file chat_template: pins "
+                f"({client_cls.CHAT_TEMPLATE_FLAG})."
+            )
+        if engine[0] != trainer[0]:
+            shared = min(len(engine[0]), len(trainer[0]))
+            at = next((i for i in range(shared) if engine[0][i] != trainer[0][i]), shared)
+            logger.warning(
+                f"Rollout server {url} renders this prompt differently from the trainer, first at token {at} of "
+                f"{len(engine[0])}/{len(trainer[0])}. Rows train on the engine's ids, so this is harmless where the "
+                f"engine only derives a thinking toggle, and a re-rendered path scores a prompt never generated "
+                f"where the templates differ: check {client_cls.CHAT_TEMPLATE_FLAG} against chat_template:."
+            )
+
+
+def _verify_server_flags_on_rank0(
+    client_cls: type[WeightSyncClientBase], urls: list[str], needs: ServerRequirements
+) -> None:
+    for url in urls:
+        flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
+        refusals = [] if flags is None else _server_flag_refusals(client_cls, flags, needs)
+        if needs.sends_tools:
+            accepted = _probe_server(
+                client_cls, url, client_cls.accepts_tool_requests, None, "probe a tool-bearing request on"
+            )
+            if accepted is False:
+                refusals.append(_no_tool_parser(client_cls))
+        if needs.sampled_token_ids:
+            sampled = _probe_server(
+                client_cls, url, client_cls.reports_sampled_token_ids, None, "probe the sampled-token ids of"
+            )
+            if sampled is False:
+                refusals.append(
+                    "train_on_sampled_tokens needs the ids a turn sampled, and its logprobs carry no token_id: "
+                    "entries, so every turn would train on a re-tokenized render. Serve with "
+                    "--return-tokens-as-token-ids, or set train_on_sampled_tokens: false."
+                )
+        if refusals:
+            raise ValueError(f"Rollout server {url} cannot serve this run: " + " ".join(refusals))
+        logger.info(f"Rollout server {url}: launch flags {flags}")
 
 
 def _probe_top_logprobs(
@@ -269,19 +411,81 @@ def _verify_engine_prompt_logprobs_on_rank0(
         )
 
 
-def _on_rank0(check: Callable[..., None], backend: str, *args) -> None:
+def _wait_then_check(
+    check: Callable[..., None],
+    client_cls: type[WeightSyncClientBase],
+    urls: list[str],
+    connection_timeout: float,
+    *args,
+) -> None:
+    for url in urls:
+        # Building the client polls /health, raising ConnectionError past the deadline. A server held by a dead
+        # trainer's pause answers /health, and each probe would wait out its timeout and pass unread.
+        client = client_cls(base_url=url, connection_timeout=connection_timeout, retry_policy=_PROBE_RETRY)
+        try:
+            client.probe_generation()
+        finally:
+            client.close_http_session()
+    check(client_cls, urls, *args)
+
+
+def _on_rank0(check: Callable[..., None], backend: str, urls: list[str], connection_timeout: float, *args) -> None:
     """COLLECTIVE. The backend is resolved on every rank, since a rank-0-only raise there would strand the peers in the
     verdict broadcast."""
     client_cls = resolve_weight_sync_client(backend)
-    run_on_rank0_raising_everywhere(partial(check, client_cls, *args), refusal_text, ValueError)
+    step = partial(_wait_then_check, check, client_cls, urls, connection_timeout, *args)
+    run_on_rank0_raising_everywhere(step, refusal_text, ValueError)
 
 
 def verify_context_window(
-    urls: list[str], single_turn_tokens: int, full_trajectory_tokens: int | None = None, *, backend: str
+    urls: list[str],
+    single_turn_tokens: int,
+    full_trajectory_tokens: int | None = None,
+    *,
+    backend: str,
+    connection_timeout: float,
 ) -> None:
     """COLLECTIVE. Refuses a window that cannot hold ``single_turn_tokens``; a ``full_trajectory_tokens`` worst case
     past it only warns."""
-    _on_rank0(_verify_context_window_on_rank0, backend, urls, single_turn_tokens, full_trajectory_tokens)
+    _on_rank0(
+        _verify_context_window_on_rank0, backend, urls, connection_timeout, single_turn_tokens, full_trajectory_tokens
+    )
+
+
+def verify_server_flags(
+    urls: list[str], needs: ServerRequirements, *, backend: str, connection_timeout: float
+) -> None:
+    """COLLECTIVE. Refuses a server off the toolkit's image or launched with a flag the run's sync or log-probs need,
+    each silently wrong otherwise."""
+    _on_rank0(_verify_server_flags_on_rank0, backend, urls, connection_timeout, needs)
+
+
+def verify_server_chat_template(
+    urls: list[str],
+    trainer_prompt_ids: Callable[[Any], list[int]],
+    messages: list[dict],
+    efforts: list,
+    rollout: RolloutConfig,
+    *,
+    connection_timeout: float,
+) -> None:
+    """COLLECTIVE. Refuses a server whose chat template ignores the level the run draws, which rows on the engine's
+    prompt ids would never show, and warns where a render differs at all. ``messages`` carry no tools, as a client-side
+    schema render drifts on correct setups, and only the refusal is certain: an engine derives toggles the trainer's
+    lack. ``efforts`` are the two contracts compared, ``None`` for no level."""
+    probe_config = replace(
+        rollout, capture_token_ids=True, capture_routed_experts=False, max_tokens=1, max_thinking_tokens=None
+    )
+    _on_rank0(
+        _verify_server_chat_template_on_rank0,
+        rollout.backend,
+        urls,
+        connection_timeout,
+        trainer_prompt_ids,
+        messages,
+        efforts,
+        probe_config,
+    )
 
 
 def verify_sampler_logprob_reference(
@@ -294,6 +498,7 @@ def verify_sampler_logprob_reference(
     repetition_penalty: float,
     sequence_ratio_active: bool,
     backend: str,
+    connection_timeout: float,
 ) -> None:
     """COLLECTIVE. Raw logprobs tilt every weight to π^T / π^1 while the ratio reads ≈ 1. A reference renormalized over
     a sampler cut lifts every uncertain position, which a sequence-summing consumer reads as drift; so does a
@@ -302,6 +507,7 @@ def verify_sampler_logprob_reference(
         _verify_sampler_logprob_reference_on_rank0,
         backend,
         urls,
+        connection_timeout,
         temperature,
         top_p,
         top_k,
@@ -311,7 +517,7 @@ def verify_sampler_logprob_reference(
     )
 
 
-def verify_engine_prompt_logprobs(urls: list[str], tokenizer, *, backend: str) -> None:
+def verify_engine_prompt_logprobs(urls: list[str], tokenizer, *, backend: str, connection_timeout: float) -> None:
     """COLLECTIVE. Scores a counting sequence that prefills eagerly, then prefixes at captured-graph lengths, and
     compares the shared positions the whole scores confidently."""
-    _on_rank0(_verify_engine_prompt_logprobs_on_rank0, backend, urls, tokenizer)
+    _on_rank0(_verify_engine_prompt_logprobs_on_rank0, backend, urls, connection_timeout, tokenizer)

@@ -82,6 +82,8 @@ class _InlineCall:
 
 
 class _Response:
+    status_code = 200
+
     def __init__(self, payload: dict):
         self._payload = payload
 
@@ -113,6 +115,10 @@ def _recording_engine(engine_requests: list[_JoinRequest], server_calls: list[st
             return _Response({"version": FakeVLLMServer.VERSION})
         if path == "/get_world_size":
             return _Response({"world_size": 0})
+        if path == "/server_info":
+            return _Response({"vllm_env": {"VLLM_HALO_PATCHES": "vllm_layerwise_reload_patch"}})
+        if path in ("/health", "/end_weight_update"):
+            return _Response({})
         server_calls.append(path)
         body = kwargs["json"]
         group = body.get("init_info", body)  # vLLM nests the group fields, SGLang does not
@@ -153,7 +159,7 @@ def client(request, monkeypatch, engine_requests, server_calls, opened_listeners
     if request.param == "vllm":
         monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
         client = offline_client(VLLMWeightSyncClient, "http://127.0.0.1:8000")
-        monkeypatch.setattr(client, "_probe_generation", lambda: None)
+        monkeypatch.setattr(client, "probe_generation", lambda: None)
         monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _StoreHoldingCommunicator)
     else:
         monkeypatch.delenv("SGLANG_GROUP_HOST", raising=False)

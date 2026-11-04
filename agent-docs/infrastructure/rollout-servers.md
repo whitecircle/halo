@@ -48,9 +48,11 @@ Both engines receive the **full model** every sync: merged LoRA touches ~95% of 
 delta path (~42 GB at 20B). Re-assembling the sharded weights is a collective every rank joins.
 
 One rank owns the clients and sends: the **forwarding rank** (global main; TP rank 0 under TP). A
-failure there (an engine 500, a refused tensor, a host OOM on the snapshot) is recorded rather than
-raised, so the rank stays in every remaining collective and the whole world raises together at the
-end of the sync, naming the failing rank and its cause.
+failure there (an engine 500, a refused tensor, a host OOM on the snapshot, a failed receive while it holds earlier
+experts, which it then drops) is recorded rather than raised, so the rank stays in every remaining collective and the
+whole world raises together at the end of the sync, naming the failing rank and its cause. A receive that fails with
+nothing to drop is the peers' own footprint: it raises on that rank and the peers wait for the NCCL watchdog, as under
+any collective a rank never enters.
 
 The gather **reshards the FSDP2 modules first**: a forward leaves transient unsharded params
 registered while the optimizer steps the shards, so reading them would ship a policy one step behind.
@@ -90,15 +92,17 @@ The push is **streamed**: an update is a sequence of declared chunks inside one 
 layerwise-reload phase); N × `/update_weights_from_distributed` inside a `/begin_weight_update` …
 `/end_weight_update` session between `/pause_generation` and `/continue_generation` on SGLang. The
 forwarding rank stages one chunk on its sync GPU, not the model (~800 GB at 400B): packed, double-
-buffered 1 GiB buffers on vLLM, typed 1 GiB chunks on SGLang. A chunk is cut before
+buffered buffers on vLLM, typed chunks on SGLang, each the size of its chunk. A chunk is cut before
 `HALO_WEIGHT_SYNC_CHUNK_MB` (1 GiB) is exceeded, and a larger tensor rides alone. A chunk staged in
 pinned host memory instead crosses PCIe twice before the NIC sees it: 19–24 GB/s against 53–80 GB/s
 staged on the device (8× B300 nodes over EFA; the vLLM rate measured on vLLM 0.26.0, the SGLang rate
 measured on SGLang 0.5.17).
 
 The forwarding rank's peak during a sync is the assembled EP layer being sent (~28 GB for one 397B
-layer), the staged chunk, the snapshot of the largest tensor and the engine path's buffers: SGLang's
-arena (grown to the largest chunk) or vLLM's two fixed 1 GiB packed buffers.
+layer), plus the snapshot of the chunk being sent and the engine path's send buffer, each the size of that chunk:
+SGLang's arena, grown to the largest chunk, or vLLM's packed buffer, so 28 + 18.6 + 18.6 GB on vLLM at 397B (calculated
+from the fused bank's 18.6 GB). A family whose hub split is a reverse converter (Step-3.7) also holds the split copies
+beside the layer.
 
 With several servers (`rollout_server_configs`) one snapshot per parameter is shared, each chunk goes
 to every server on concurrent threads, and it is released once all have it. The threads share the
@@ -125,14 +129,18 @@ its in-flight episodes' `episode_timeout` and, through the Ray actors' clock, to
 `request_timeout`; `async/requests_expired_in_sync` counts the ones that overran anyway.
 
 A chunk cannot be replayed. A server that fails before any chunk went out (an engine restarted between
-syncs) is recovered by a reconnect and re-flush; one that fails **after** its first chunk holds neither
-the old policy nor the new, and vLLM's layerwise reload materializes any layer straddling the boundary
-from *uninitialized* storage. The abort therefore leaves that engine **paused**, refuses every later
-sync on that client and logs `RESTART the … server`: restart the container.
+syncs) is recovered by a reconnect and re-flush; one that fails **after** its first chunk, the close of the update
+included, holds neither the old policy nor the new, and vLLM's layerwise reload materializes any layer straddling the
+boundary from *uninitialized* storage. The abort therefore leaves that engine **paused**, refuses every later
+sync on that client and logs `RESTART the … server`: restart the container. A resume that fails after a good push is
+retried three times, then raises naming the server, since every rollout would otherwise queue until its request
+timeout.
 
 Each chunk runs under one 600 s deadline on both engines (`HALO_NCCL_SYNC_TIMEOUT_SECONDS`): the
 update request that declares it and the drain of its sends. A failed chunk drains the stream under a
-30 s deadline, and on expiry the group is aborted instead of parking the trainer.
+30 s deadline, and on expiry the group is aborted instead of parking the trainer. Closing an SGLang group is bounded
+the same way: a server that does not answer `/health` is aborted outright, and a destroy still blocked after 30 s, as
+under a wedged engine that never enters its half, is aborted too, so the failure that brought the close raises.
 
 Both clients send from their own CUDA streams and allocate their buffers on the caller's stream,
 recorded for the send stream, so a reconnect strands no allocator pool; `HALO_WEIGHT_SYNC_MEM_LOG=1`
@@ -156,7 +164,7 @@ un-fuse rules: [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang
 
 ### vLLM server patches
 
-The image applies five runtime patches through `sitecustomize` in the API server and every engine-core
+The image applies six runtime patches through `sitecustomize` in the API server and every engine-core
 worker (`docker/vllm/patches/`), and every one is asserted at build:
 
 - **Layerwise reload** (`vllm_layerwise_reload_patch.py`). vLLM's reload moves each layer to the meta
@@ -184,6 +192,10 @@ worker (`docker/vllm/patches/`), and every one is asserted at build:
   no-mask check to the split top-p pipeline vLLM runs for the top-k-off rows of a batch of at most 64.
   Without it a budget cut (the forced token's logit is 1e9) at `rollout_top_p < 1` masks the whole row,
   and the engine samples token 0 and reports a NaN log-prob.
+
+- **Image identity** (`vllm_image_identity_patch.py`) lists these patches as `VLLM_HALO_PATCHES` on `/server_info`,
+  where the trainer refuses a server without it ([Startup preflight](#startup-preflight)). It lands only where
+  `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
 
 **Build-time source edits** (`docker/vllm/patches/patch_vllm_source.py`, through
 `docker/engine_source_patch.py`, the patcher the SGLang image shares) turn vLLM's harmony pipeline off
@@ -246,7 +258,9 @@ within twice the trainer-versus-served gap measured before the step (at least 0.
 weights ([noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise)). On its fixed rows that gap
 reads 0.02–0.06 nats on Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite and Ling 2.0, 0.16 on LFM-2, 0.31–0.47 on Gemma 4,
 0.38–0.40 on GPT-OSS and 0.60–0.65 on Laguna. At the top of that range the bar is too loose to catch a small sync
-error, so there the bit-identical rows and the CPU test hold the sync.
+error, so there the bit-identical rows, the CPU test and `--reach` hold the sync: `--reach` scales each forwarded name
+in turn and requires the served log-probs to move, since an engine that drops a name still answers `200`, and only a
+change that fails to reach the model shows it.
 
 ### Construction gates
 
@@ -259,10 +273,15 @@ sync for (`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`
   the gathered fused pair), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
   SGLang caches a hyper-connection weight copy on SM100-family GPUs that an update leaves stale,
   [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)) and Cohere2 MoE carry on both engines.
-- **A MoE without a live EP layer** (`use_grouped_gemm: false` at `ep_size: 1`), for every family: the
-  experts ship in the layout the EP layer's gather emits, and the stock module tree's fused tensors
-  under module names are dropped by the engine's loader with no error. `use_grouped_gemm: true` (the
-  torchrun default) installs the EP layers.
+- **A stock module tree no engine layout covers**, in three cases. A family with an EP layer but no live
+  one (`use_grouped_gemm: false` at `ep_size: 1`): the experts ship in the layout the EP layer's gather
+  emits, and the stock tree's fused tensors under module names are dropped by the engine's loader with no
+  error; `use_grouped_gemm: true` (the torchrun default) installs the EP layers. A dense checkpoint under a
+  spelling a MoE family claims (`lfm2_vl` over `lfm2`, `mistral3` over `mistral`, `gemma4` with
+  `enable_moe_block: false`): no `use_grouped_gemm` remedy applies, so train it offline. Any MoE with no
+  family spec, read off the config's routed-expert count: SGLang's loaders drop its fused experts with a
+  `200`, vLLM's take them only where the checkpoint spells `gate_proj`/`up_proj` and drop `w1`/`w3` names,
+  and no sync into one has run. Train it offline, or [add the family](../models/adding-a-model.md).
 - **A bnb-quantized (QLoRA) base**, and PEFT LoRA on a weight the dense push does not send (EP expert
   weights take native expert LoRA instead).
 - **GptOss without live sinks.** `reset_sinks: true` under `flash_attention_2` removes the sinks, and
@@ -276,13 +295,31 @@ sync for (`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`
 
 Offline GRPO needs no server and passes none of these gates.
 
+### Startup preflight
+
+Before the second model load rank 0 waits for each server, then reads `/server_info` and refuses, on every rank, what
+it reports wrong (`verify_server_flags`, `halo/trainers/grpo/rollout/engine_preflight.py`). A field the reply does not
+carry reads as unread, so a renamed upstream field cannot refuse a good server.
+
+| Refused | Because |
+|---|---|
+| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
+| `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
+| No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
+| `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |
+| No reasoning parser, with `reasoning_price`, `reasoning_floor`, `carry_reasoning` or a vLLM thinking budget | A budget answers `400` on every rollout, the price charges nothing, the floor scores maximal under-use |
+| `train_on_sampled_tokens` and a vLLM server whose logprobs carry no `token_id:` entries | Every turn trains on a re-tokenized render |
+| A server whose prompt does not move with the reasoning level, where the trainer's does (`verify_server_chat_template`) | Its template ignores the level, and the reasoning terms charge for a contract the model never read ([Chat template](../training-methods/async-grpo/episodes.md#chat-template)) |
+
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry: a
 family's `export_key_renames`, then transformers' own save-side revert of what the load converted
 (`export_conversions` in `halo/checkpoint/hub_layout.py`, the list the gathered save inverts), so
 Step-3.7's per-layer `moe.*` stacks and a SigLIP tower's `vision_model` level reach the engine under
 their hub keys. One-to-one renames stream tensor by tensor; a tensor a reverse converter claims (a
 fused `gate_up_proj` the hub stores split, a vision tower's fused q/k/v) is held until its sources are
-complete, since the engine loads one tensor at a time.
+complete, since the engine loads one tensor at a time. Held dense tensors are bounded at
+`HALO_WEIGHT_SYNC_CHUNK_MB`, and experts are not: the gather keeps them alive until each layer's flush anyway.
 
 ### Which families each engine serves
 
@@ -303,9 +340,10 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
 Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE are refused on both engines by their
-family spec ([construction gates](#construction-gates)). Every other family not in the table syncs on both,
-expert distribution included: dense families, GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4,
-Ling 2.0, LFM-2 MoE. Per-family server flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
+family spec ([construction gates](#construction-gates)). These sync on both, expert distribution included:
+dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE,
+GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE. A MoE with no family spec is refused on both. Per-family server
+flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank
 narrows its slice, and under `--ep-size` the loader keeps its local experts. An expert name that
@@ -402,13 +440,15 @@ docker run --gpus all --network=host --ipc=host \
 | `VLLM_ATTENTION_BACKEND` | *(unset = auto)* | `--attention-backend`; GLM-4 MoE Lite (MLA) on Blackwell needs `CUTLASS_MLA` ([MLA backend](../reference/checkpoints.md#serving-on-vllm--sglang)) |
 | `VLLM_SPECULATIVE_CONFIG` | *(unset)* | `--speculative-config` JSON for a checkpoint with an MTP head ([Throughput](#throughput)) |
 | `VLLM_PREFIX_CACHING_FLAG` | `--enable-prefix-caching` | `--no-enable-prefix-caching` turns the cache off |
-| `VLLM_ENFORCE_STRICT_TOOL_CALLING` | `0` | Env var the server reads; grammar-constrained tool calling stays off so the served distribution is the policy's |
+| `VLLM_ENFORCE_STRICT_TOOL_CALLING` | `0` | Env var the server reads, also the image's ENV; grammar-constrained tool calling stays off so the served distribution is the policy's |
 | `VLLM_TUNED_CONFIG_FOLDER` | *(unset)* | Env var the server reads: tuned Triton MoE tile configs, visible inside the container |
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
 | `VLLM_TOOL_CALLING_FLAGS` | `--enable-auto-tool-choice --tool-call-parser $VLLM_TOOL_PARSER` | Set empty (`VLLM_TOOL_CALLING_FLAGS=`) to serve with no tool parser, as the ReAct recipes do |
 | `VLLM_TOOL_PARSER_PLUGIN` / `VLLM_REASONING_PARSER_PLUGIN` | *(unset)* | Parser plugin paths (gpt-oss: the baked `/opt/gpt_oss_text_tool_parser.py`, `/opt/gpt_oss_reasoning_parser.py`) |
 | `VLLM_REASONING_PARSER` | *(unset)* | Required whenever a turn can carry a thinking cap: without one vLLM answers every request carrying `thinking_token_budget` with a 400 |
-| `VLLM_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer's `chat_template:` uses, visible inside the container |
+| `VLLM_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer's `chat_template:` uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
+| `VLLM_TRUST_REMOTE_CODE` | *(unset)* | Any value adds `--trust-remote-code`, which the Bailing (Ling 2.0) and Step-3.7 repos need |
+| `VLLM_EXTRA_ARGS` | *(unset)* | Further flags, appended last, such as `--served-model-name` when the server's path differs from the trainer's model id |
 | `TRAIN_IMAGE` | `halo:blackwell` | The image of the compose file's optional trainer service |
 
 The flag-valued variables are `${VAR:+--flag ${VAR}}` slots, so an unset one omits its flag; vLLM never
@@ -416,9 +456,9 @@ reads them as env vars. Load-bearing flags the compose file sets:
 
 - `--weight-transfer-config '{"backend": "nccl"}'` enables the transfer engine.
 - `--return-tokens-as-token-ids`: `train_on_sampled_tokens` (default on) recovers the sampled ids from
-  the logprobs, which vLLM spells out only under this flag. Without it every turn falls back to
-  re-tokenizing a chat-template re-render: one warning, then a run training on tokens the engine never
-  sampled.
+  the logprobs, which vLLM spells out only under this flag. The [preflight](#startup-preflight) refuses a
+  server without it, as every turn would fall back to re-tokenizing a chat-template re-render and train on
+  tokens the engine never sampled; `train_on_sampled_tokens: false` takes that path on purpose.
 - `--logprobs-mode processed_logprobs`: the reported logprobs are the sampling distribution's
   (temperature and top-p applied). The trainer scores at the sampling temperature and divides by them;
   the default `raw_logprobs` are pre-temperature, so every IS weight would be π^T / π^1 while
@@ -440,9 +480,14 @@ its patches; vLLM reads it with `int()`, so `false` or an empty value (an empty 
 kills the server with a bare `ValueError`.
 
 **Tool parsers are per family.** For native-tool environments (`code_contests`, `swe`, `mcp`,
-`qa_search`, open-book `exam_qa`) a missing or wrong parser is silent and fatal: calls stay text, no
-`tool_calls`, every episode reward 0, a flat zero gradient. ReAct environments send no `tools` schema
-and parse actions from the text, so their recipes serve without a parser.
+`qa_search`, open-book `exam_qa`) a missing or wrong parser leaves calls as text with no `tool_calls`, so every
+episode ties. The [preflight](#startup-preflight) refuses a server with no parser. A wrong one shows only in the
+replies, so the trainer reads the opening its chat template renders for a call and raises when two rounds hold it in
+their text with no call parsed anywhere (`halo/trainers/grpo/environmental/tool_call_watch.py`); one parsed call stands
+the watch down for the run, so a later malformed call never trips it, and a turn the engine cut is no evidence, as any
+parser leaves a partial call as text. `tool_parser_watch_rounds` sets the round count, and `null` turns the watch off for
+a model that writes the opening in prose. ReAct environments send no `tools` schema and parse actions from the text, so
+their recipes serve without a parser.
 
 | Family | `--tool-call-parser` |
 |---|---|
@@ -476,7 +521,8 @@ routes, request schemas, rendezvous convention and expert loader layouts the cli
 (`docker/sglang/verify_image.py`) and drives the patched loop on a retracted request.
 
 The server keeps SGLang's own transformers (5.19.0) and torch. Serving-only use can run upstream
-(`SGLANG_IMAGE=lmsysorg/sglang:v0.5.22`); weight sync needs this image. No newer release is validated.
+(`SGLANG_IMAGE=lmsysorg/sglang:v0.5.22`); weight sync needs this image, which names itself on `/server_info`
+([Startup preflight](#startup-preflight)). No newer release is validated.
 DeepEP v2 (`--moe-a2a-backend deepep_v2`) forces `--moe-runner-backend deep_gemm` and leaves gpt-oss
 off its model allowlist; no online update into that runner is validated.
 
@@ -497,7 +543,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | Keep `triton` for MoE RL and R3 |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any value adds `--enable-return-routed-experts` |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) |
-| `SGLANG_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer uses, visible inside the container |
+| `SGLANG_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `SGLANG_ATTENTION_BACKEND` | *(unset)* | `triton` for GLM-4 MoE Lite on Blackwell: its MLA head size has no kernel in the default backend (`Unsupported head dimensions`) |
 | `SGLANG_TRUST_REMOTE_CODE` | *(unset)* | Any value adds `--trust-remote-code`, which the Bailing (Ling 2.0) repos need |
 | `SGLANG_EXTRA_ARGS` | *(unset)* | Further flags, appended last. `--enable-deterministic-inference` for GLM-4 MoE Lite: under triton attention its greedy logits differ between a prefill and a prefix-cache hit, which the tier's zero-noise probe refuses |
@@ -533,12 +579,18 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 `--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5 and
 Qwen3.6 (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
 template no rule matches it logs one warning (`could not detect tool-call parser from chat template. Disabling
-tool-call parser.`) and serves with no parser, the failure [above](#running-it): calls stay text and every
-episode of a native-tool environment scores 0, with no error anywhere. Qwen3-30B-A3B-Instruct-2507 and
+tool-call parser.`) and serves with no parser, which `/server_info` reports and the
+[preflight](#startup-preflight) refuses on a native-tool environment. Qwen3-30B-A3B-Instruct-2507 and
 Ling-mini-2.0 land there, since their templates carry no `enable_thinking` toggle for the `qwen` rule to read.
 
 Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25`, which ran on Qwen3-30B-A3B-Instruct-2507 (0.5.22 logs it
 as the old spelling of `qwen`), and Ling-mini-2.0 with `SGLANG_TOOL_PARSER=hermes`, the parser its rows ran on.
+
+Sampling stays off any grammar. Upstream, `glm47`, the parser `auto` resolves on GLM-4.7, builds a full-assistant
+grammar for every tool-bearing request: the sampler masks tokens under it, the reported log-probs carry the mask, and
+the trainer scores the unmasked distribution. `docker/sglang/patches/patch_sglang.py` removes that flag and the build
+asserts, on the real parser, that `tool_choice: auto` carries no constraint on any parser a family resolves to, so a
+malformed call stays text the environment scores, as on vLLM.
 
 ### NCCL transport (SGLang)
 
@@ -648,7 +700,8 @@ same step time; re-measure short single-turn
 environments before consolidating. Per-server request load is
 `max_concurrent_rollouts × world_size / num_servers` per round in flight (`prefetch_depth` of them under
 prefetch): every rank builds its own actor pool, under TP
-too ([Ray → Pool sizing](ray.md#pool-sizing)), and dispatch is round-robin regardless of load.
+too ([Ray → Pool sizing](ray.md#pool-sizing)), and dispatch is round-robin regardless of load, each rank starting at
+the server its data-parallel rank names, so a round narrower than the server count still spreads.
 
 **Prefix caching** stays on: a multi-turn episode re-sends its whole context every turn, and the
 `mode=keep` pause that brackets every update clears the cache, so no cached prefix serves stale
@@ -666,9 +719,11 @@ use `ngram` on linear-attention families (an unguarded output-corruption bug); `
 startup on Model Runner V2. The prompt-log-prob probe passes under MTP on Model Runner V2 (Qwen3.6-35B-A3B,
 one speculative token).
 
-**Strict tool calling off** (`VLLM_ENFORCE_STRICT_TOOL_CALLING=0`): the structural-tag grammar would
-mask tokens the trainer's log-probabilities never see masked and add CPU work per step; a malformed
-call becomes text the environment scores.
+**Strict tool calling off** (`VLLM_ENFORCE_STRICT_TOOL_CALLING=0`, the image's ENV, so a hand-run server has it too):
+at the default strict level the GLM parsers (`glm45`, `glm47`) take a structural-tag grammar at `tool_choice: auto`,
+which would mask tokens the trainer's log-probabilities never see masked and add CPU work per step; a
+`--tool-strict-level` above `auto` or a strict tool would add other parsers. With it off a malformed call becomes
+text the environment scores.
 
 **Triton MoE tile configs.** `--moe-backend triton` reads a per-shape tuned config
 (`E=<experts>,N=<intermediate>,device_name=<GPU>.json`) from `VLLM_TUNED_CONFIG_FOLDER`, then vLLM's
@@ -681,6 +736,8 @@ and the prefill chunk).
 (`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens` caps a
 turn; on vLLM the turn's reasoning cap caps CoT engine-side, while a soft budget, and every budget on
 SGLang, is held only by the reasoning terms.
+
+**fp32 heads.** Both engines serve bf16 logits by default, while the trainer's chunked scoring is fp32. Each has a switch: `--enable-fp32-lm-head` on SGLang and `--hf-overrides '{"head_dtype":"float32"}'` on vLLM, both through `*_EXTRA_ARGS` under compose, with vLLM's single quotes kept in the value. The served weight stays bf16, so the sync is unaffected. Use them only with `use_chunked_grpo_logprobs: true`, as the full path scores bf16 and would then mismatch the other way ([size of the gap](../training-methods/async-grpo/performance.md#chunked-log-probs)).
 
 **Memory.** Raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 on dedicated server GPUs,
 but serve at ≤ 0.80, or with a smaller `--max-num-batched-tokens`, under `isr_engine_reference`, whose
@@ -756,11 +813,11 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 
 | Symptom | Cause → fix |
 |---|---|
-| `/health` is 200 but every completion hangs after a trainer died mid-sync | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it |
+| `/health` is 200 but every completion hangs after a trainer died mid-sync | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused. The next trainer refuses it at startup (`is PAUSED`, or `paused or wedged` after a 60 s probe on SGLang, which has no pause route) → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it if that sync had already streamed part of the model |
 | Group formation times out, "1/2 clients joined" | A bridge network hides the rendezvous port → `network_mode: host` on both containers |
 | First sync takes minutes, `/health` unanswered | One-time NCCL group init per server; the engine pauses mid-update → wait |
 | 400 on every rollout (vLLM) | A thinking budget without a reasoning parser → set `VLLM_REASONING_PARSER`; otherwise rollouts return zero tokens and the run trains on all-masked batches |
-| Run completes with a flat zero gradient | Missing or wrong tool parser on a native-tool environment ([parsers](#running-it)) |
+| `… hold '<marker>' … and the server parsed no call` at the second round | Wrong tool parser, or vLLM `--tool-call-parser` without `--enable-auto-tool-choice` ([parsers](#running-it)) |
 | Log-ratio drifts on SGLang while the server log stays clean | The MoE loaders skip unmapped expert names without a warning → a clean log proves nothing; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild (`make build-vllm`) |
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → a stranded communicator per connection; rebuild and recreate the container |

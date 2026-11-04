@@ -26,11 +26,14 @@ from halo.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
     iter_balancing_routers,
+    resolve_balancing_slot,
 )
+from halo.models.moe.config_fields import has_routed_experts
 from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from halo.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import materialize_dtensor
+from halo.runtime.ranks import is_global_main_process
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES
 from halo.weight_sync.registry import resolve_weight_sync_client
 
@@ -121,9 +124,40 @@ def _engine_loaded_buffer(layer: EPMoELayerBase, attr: str) -> torch.Tensor:
     return buffer
 
 
+def _reject_stock_tree(config, family_layers: list[str], client_cls) -> None:
+    """A model with no live EP layer forwards its stock module tree, whose expert names no validated sync reads. Only a
+    dense model with no MoE family's spelling passes."""
+    model_types = sorted(config_model_types(config))
+    routed = has_routed_experts(config)
+    if family_layers and routed:
+        raise ValueError(
+            f"{', '.join(family_layers)} resolves for model_type {model_types}, but the model carries no live EP "
+            f"layer (expert_parallel_size 1 with use_grouped_gemm: false): weight sync ships experts in the layout "
+            f"the family's gather_expert_state_dict emits, and without an EP layer it would forward the stock "
+            f"module tree's fused expert tensors under module names, which {client_cls.ENGINE_RELEASE}'s loader drops "
+            f"with no error, so attention, norms and routers would sync while the experts keep serving launch "
+            f"weights. Set use_grouped_gemm: true (the torchrun default), which installs the EP layers at "
+            f"expert_parallel_size 1 too."
+        )
+    if family_layers:
+        raise ValueError(
+            f"model_type {model_types} is a spelling of the MoE family {', '.join(family_layers)}, but this checkpoint "
+            f"has no routed experts: it is a dense tower under a composite the weight sync has no validated layout "
+            f"for. Train it offline, or sync its dense text checkpoint."
+        )
+    if routed:
+        raise ValueError(
+            f"model_type {model_types} is a MoE with no Halo EP family, so no expert layout has been validated against "
+            f"{client_cls.ENGINE_RELEASE}: SGLang's loaders drop the stock tree's fused experts with no error, vLLM takes "
+            f"them only where the checkpoint spells gate_proj/up_proj and drops w1/w3 names, and no sync into such a "
+            f"family has run, so experts could keep serving launch weights while the rest syncs. Train it offline "
+            f"(offline GRPO needs no server), or add the family (agent-docs/models/adding-a-model.md)."
+        )
+
+
 def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
-    """Refuses an unservable family, one with a ``weight_sync_refusal``, an EP family without the live EP layer whose
-    gather emits the layout the engine loads, and one missing a buffer the push must carry."""
+    """Refuses an unservable family, one with a ``weight_sync_refusal``, a stock tree whose experts or spelling no engine
+    layout covers (:func:`_reject_stock_tree`), and one missing a buffer the push must carry."""
     client_cls = resolve_weight_sync_client(backend)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     unservable = sorted(client_cls.UNSERVABLE_MODEL_TYPES.keys() & config_model_types(config))
@@ -150,17 +184,8 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
                 f"{cls.FAMILY.weight_sync_refusal}. Online/environmental GRPO with weight sync "
                 f"is unsupported for this model — see {cls.__name__}.FAMILY.weight_sync_refusal."
             )
-    if families and not ep_layers:
-        raise ValueError(
-            f"{', '.join(sorted({cls.__name__ for _where, cls in families}))} resolves for model_type "
-            f"{sorted(config_model_types(config))}, but the model carries no live EP layer "
-            f"(expert_parallel_size 1 with use_grouped_gemm: false): weight sync ships experts in the layout "
-            f"the family's gather_expert_state_dict emits, and without an EP layer it would forward the stock "
-            f"module tree's fused expert tensors under module names, which the engine's loader drops with no "
-            f"error — attention, norms and routers would sync while the experts keep serving launch weights. "
-            f"Set use_grouped_gemm: true (the torchrun default), which installs the EP layers at "
-            f"expert_parallel_size 1 too."
-        )
+    if not ep_layers:
+        _reject_stock_tree(config, sorted({cls.__name__ for _where, cls in families}), client_cls)
     for where, layer in ep_layers.items():
         for attr in _engine_loaded_buffer_attrs(layer, config):
             try:
@@ -172,6 +197,26 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
                     f"would keep a value the trainer does not route with. Update {layer.FAMILY.model_types[0]}'s "
                     f"engine_loaded_buffers."
                 ) from missing
+    _warn_on_a_bias_the_engine_drops(ep_layers, client_cls, config)
+
+
+def _warn_on_a_bias_the_engine_drops(ep_layers: dict[str, EPMoELayerBase], client_cls, config) -> None:
+    """COLLECTIVE for a sharded slot. A checkpoint trained with bias balancing routes on its bias here while this engine
+    never loads it, a systematic difference on every prompt. A warning, since ``routing_replay: rollout`` closes it."""
+    if not client_cls.DROPPED_BALANCING_BIAS_MODEL_TYPES & set(config_model_types(config)):
+        return
+    carrying = 0
+    for layer in ep_layers.values():
+        slots = (resolve_balancing_slot(layer, attr) for attr in layer.FAMILY.balancing_slot.attrs)
+        slot = next((slot for slot in slots if slot is not None), None)
+        carrying += slot is not None and bool(materialize_dtensor(getattr(*slot)).any())
+    if carrying and is_global_main_process():
+        logger.warning(
+            f"{carrying} MoE layers of this checkpoint hold a nonzero router bias, and {client_cls.ENGINE_RELEASE}'s "
+            f"loader drops it: the trainer routes on the bias and the engine does not, a systematic gap on every "
+            f"prompt rather than rounding noise. Set routing_replay: rollout, so the update trains through the "
+            f"engine's selection."
+        )
 
 
 def _reject_balancing_state(model: torch.nn.Module) -> None:
@@ -226,13 +271,14 @@ class _HubForwarder:
         self._conversions = export_conversions(self._model)
         self._renamings, self._converters = reversed_export_transforms(self._conversions)
 
-    def send(self, name: str, tensor: torch.Tensor) -> None:
-        self._guard.run(partial(self._forward, name, tensor))
+    def send(self, name: str, tensor: torch.Tensor, *, bounded: bool = True) -> None:
+        """``bounded=False`` for a tensor the caller keeps alive and flushes itself, whose hold adds no bytes."""
+        self._guard.run(partial(self._forward, name, tensor, bounded))
 
     def flush(self) -> None:
         self._guard.run(self._revert_held)
 
-    def _forward(self, name: str, tensor: torch.Tensor) -> None:
+    def _forward(self, name: str, tensor: torch.Tensor, bounded: bool) -> None:
         for layer_name, layer in self._ep_layers.items():
             prefix = f"{layer_name}."
             if name.startswith(prefix):
@@ -250,6 +296,8 @@ class _HubForwarder:
             self._client.update_named_param(renamed, tensor)
             return
         self._held[name] = tensor
+        if not bounded:
+            return
         self._held_bytes += tensor.nbytes
         if self._held_bytes > WEIGHT_SYNC_CHUNK_BYTES:
             raise RuntimeError(
@@ -257,8 +305,8 @@ class _HubForwarder:
                 f"{len(self._held)} tensors up to {name!r} are claimed by a reverse WeightConverter of "
                 f"{type(self._model).__name__} and cannot be sent until their sources are complete. The "
                 f"held set lives on that one rank's GPU beside the gather, so it is bounded at "
-                f"{WEIGHT_SYNC_CHUNK_BYTES / 2**30:.2f} GiB — a converter claiming per-decoder-layer "
-                f"tensors needs a flush per layer, not one per gather phase."
+                f"{WEIGHT_SYNC_CHUNK_BYTES / 2**30:.2f} GiB (HALO_WEIGHT_SYNC_CHUNK_MB) — a converter claiming "
+                f"per-decoder-layer tensors needs a flush per layer, not one per gather phase."
             )
 
     def _revert_held(self) -> None:
@@ -275,7 +323,8 @@ def _send_ep_expert_weights(
     guard: DeferredRankFailure,
 ) -> None:
     """COLLECTIVE. The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and
-    retaining stops after a failure."""
+    retaining stops after a failure. The gather stays in step through a failed retained receive
+    (:meth:`~halo.distributed.expert_parallel.moe_layer.gather.EPGatherMixin.gather_expert_tensors`)."""
     for layer_name, module in ep_layers.items():
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
@@ -285,7 +334,9 @@ def _send_ep_expert_weights(
         gathered = guard.run(gather) if retain else gather()
         if forwarder is not None and gathered:
             for param_name, param_data in gathered.items():
-                forwarder.send(f"{layer_name}.{param_name}", param_data)
+                # Alive in ``gathered`` until the flush below, so a hub split's hold costs nothing here; Step-3.7's
+                # fused bank alone is 5.6 GiB per layer at its release shape.
+                forwarder.send(f"{layer_name}.{param_name}", param_data, bounded=False)
             # Per layer, so a hub split of these experts never outlives the next gather.
             forwarder.flush()
             del param_data  # the loop's last binding would hold one tensor through the next gather

@@ -116,7 +116,7 @@ class _EngineClient(RecordingSender):
     BUILT: list["_EngineClient"] = []
     FAIL = False
 
-    def __init__(self, base_url: str, group_port: int, connection_timeout: float):
+    def __init__(self, base_url: str, group_port: int, connection_timeout: float, group_host: str | None):
         if self.FAIL:
             raise ConnectionError("the NCCL group to the engine did not form")
         super().__init__()
@@ -125,6 +125,8 @@ class _EngineClient(RecordingSender):
 
     def init_communicator(self, device) -> None:
         self.sync_device = device
+
+    buffer_param = RecordingSender.update_named_param
 
     def finish_weight_update(self) -> None:
         self.flushes += 1
@@ -160,9 +162,9 @@ def _trainer_outside_train(rank: int):
         sync_weights_every_n_steps=1,
         rollout_backend="vllm",
         rollout_server_url="http://engine:8000",
+        rollout_server_configs=None,
         rollout_connection_timeout=1.0,
     )
-    trainer._multi_server_mode = False
     trainer._weight_sync_client = trainer._rollout_manager = trainer._loop = None
     trainer._prefetch_thread = trainer._engine_rescore_clients = None
     return trainer

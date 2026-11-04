@@ -26,9 +26,11 @@ from halo.environments.episode import (
     TurnGeneration,
     describe_exception,
     generate_turn,
+    is_context_overflow,
     is_terminal_client_status,
     play_episode,
 )
+from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY
 from halo.environments.reasoning_effort import EpisodeEffort, bind_episode_effort
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
@@ -75,6 +77,12 @@ def _should_giveup(exc: BaseException) -> bool:
     return (
         isinstance(exc, RolloutHTTPError) and is_terminal_client_status(exc.status, exc.body)
     ) or _is_shutdown_error(exc)
+
+
+def _outgrew_the_served_window(exc: Exception) -> bool:
+    """The one lost turn an episode keeps its row and reward through: a long failure has to carry its signal, and the
+    eval path grades the same episode."""
+    return isinstance(exc, RolloutHTTPError) and is_context_overflow(exc.status, exc.body)
 
 
 def _http_url(url: str) -> str:
@@ -268,9 +276,21 @@ class EnvironmentActor:
             max_answer_tokens=config.max_answer_tokens,
         )
         request = partial(self._generate_turn, self._http_client, server_url, sync_expiries)
-        played = await play_episode(env, prompt, context, effort, request, config, log_prefix=f"Actor {self.actor_id}")
+        played = await play_episode(
+            env,
+            prompt,
+            context,
+            effort,
+            request,
+            config,
+            log_prefix=f"Actor {self.actor_id}",
+            keep_lost=_outgrew_the_served_window,
+        )
         traj = played.trajectory
         episode_metrics = env.rollout_metrics(traj)
+        episode_metrics["episode/context_overflow"] = float(played.lost_turn is not None)
+        if played.lost_turn is not None:
+            traj.info[CONTEXT_OVERFLOW_KEY] = True
         sampled = [turn.token_logprobs for turn in played.turns if turn.token_logprobs]
         if sampled:
             episode_metrics["logps/sampling_mean"] = sum(sum(lps) for lps in sampled) / sum(
@@ -389,9 +409,12 @@ class RolloutManager:
         rollout_config: RolloutConfig,
         max_concurrent_rollouts: int | None = None,
         pool_replicas: int = 1,
+        first_server: int = 0,
     ):
         """``num_workers`` is the actor budget for the whole Ray cluster, divided among the ``pool_replicas`` peers
-        building a pool against it (the DP size on a shared cluster, else 1)."""
+        building a pool against it (the DP size on a shared cluster, else 1). ``first_server`` offsets this manager's
+        round-robin, as peers all starting at server 0 pile a round narrower than the server count onto the first
+        ones."""
         self.num_workers = max(1, num_workers // max(1, pool_replicas))
         self.env_type = env_type
         self.env_config = env_config
@@ -410,7 +433,7 @@ class RolloutManager:
         self._actors: list = []
         self._started = False
         self._actor_idx = 0
-        self._url_idx = 0
+        self._url_idx = first_server
         # Credited back to in-flight deadlines. Actors in their own processes read a Ray copy fed alongside.
         self._pause_clock = EnginePauseClock()
         self._actor_pause_clock = None
@@ -437,22 +460,17 @@ class RolloutManager:
     def paused_seconds(self) -> float:
         return self._pause_clock.paused_seconds()
 
-    def warn_if_servers_unreachable_from_actors(self, multinode: bool) -> None:
-        """Warn on a loopback URL in a multi-node job: placement only prefers this node, so an actor elsewhere reaches
-        no engine unless one runs on every node."""
-        urls = self.server_urls
-        hosts = [urlparse(_http_url(u)).hostname or "" for u in urls]
-        if not multinode or not any(is_loopback(host) for host in hosts):
+    def reject_loopback_servers(self, num_nodes: int) -> None:
+        """A loopback URL on several nodes reaches a different engine, or none, per node. An actor where none listens
+        errors its episodes out of the batch, and an engine on every node takes no push, as the forwarding rank's client
+        reaches its own node's alone, so that node's rows train on launch weights for the whole run."""
+        hosts = [urlparse(_http_url(url)).hostname or "" for url in self.server_urls]
+        if num_nodes <= 1 or not any(is_loopback(host) for host in hosts):
             return
-        backend = self.rollout_config.backend
-        logger.warning(
-            "Multi-node async GRPO but a %s URL is loopback (%s). Ray actors may be scheduled on nodes where "
-            "no %s server listens on localhost; their connection-refused rollouts become error rows masked out "
-            "of the loss and the group baseline, shrinking the effective batch. Use resolvable host IPs/DNS in "
-            "rollout_server_url / rollout_server_configs.",
-            backend,
-            urls,
-            backend,
+        raise ValueError(
+            f"A {self.rollout_config.backend} URL is loopback ({self.server_urls}) in a run spanning {num_nodes} nodes: "
+            f"only the forwarding rank's node would take weight pushes, and actors elsewhere reach another engine or "
+            f"none. Name each server by an address every node resolves in rollout_server_url or rollout_server_configs."
         )
 
     async def start(self):

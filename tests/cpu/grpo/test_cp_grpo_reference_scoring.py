@@ -66,7 +66,9 @@ def _reassembly_worker(rank, cp_size):
 
     def reverse_shards(shards, local, **kwargs):
         gather(shards, local, **kwargs)
-        shards.reverse()
+        # In place, as the shards may be views of the one receive buffer.
+        for shard, value in zip(shards, [shard.clone() for shard in reversed(shards)], strict=True):
+            shard.copy_(value)
 
     with patch("torch.distributed.all_gather", side_effect=reverse_shards):
         broken = trainer._cp_score_reference_batch(batch)

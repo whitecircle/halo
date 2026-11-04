@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from functools import partial
 from urllib.parse import urlparse
 
+import requests
 import torch
 import torch.distributed as dist
 
@@ -18,6 +19,8 @@ from halo.weight_sync.clients.base import (
     HTTP_PROBE_TIMEOUT_S,
     POST_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
+    SESSION_CLOSE_TIMEOUT_S,
+    ServerFlags,
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
@@ -77,6 +80,11 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     SESSION_OPEN_ENDPOINT = "/begin_weight_update"
     SESSION_CLOSE_ENDPOINT = "/end_weight_update"
     SESSION_REQUEST = {"json": {}}
+    IMAGE_REMEDY = "Serve from the toolkit's SGLang image (make build-sglang), or its docker-compose.sglang.yml."
+    MOE_BACKEND_FLAG = "--moe-runner-backend triton (SGLANG_MOE_RUNNER_BACKEND)"
+    REASONING_PARSER_FLAG = "--reasoning-parser (SGLANG_REASONING_PARSER)"
+    TOOL_PARSER_FLAG = "--tool-call-parser (SGLANG_TOOL_PARSER, the family's name where auto cannot read the template)"
+    CHAT_TEMPLATE_FLAG = "--chat-template (SGLANG_CHAT_TEMPLATE)"
     _INIT_LOG = "SGLang NCCL init: engine_ws={engine_ws}, master={master}:{port}, listening on {bind}"
     _READY_LOG = "SGLang NCCL weight transfer initialized"
     _FORMATION_STEP = "weight-update group formation"
@@ -90,9 +98,29 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # c10d registers group names process-globally, and keying on group_port 0 would collide auto-port clients.
         self.group_name = group_name or f"weight_update_group_{urlparse(self.base_url).netloc}"
 
+    def read_server_flags(self) -> ServerFlags:
+        return self._flags_in(self._server_info())
+
+    @staticmethod
+    def _flags_in(info: dict) -> ServerFlags:
+        return ServerFlags(
+            toolkit_image=bool(info.get("halo_patches")),
+            moe_backend=info.get("moe_runner_backend"),
+            # A server with no parser reports null; a reply without the key says nothing.
+            reasoning_parser=(info["reasoning_parser"] or "") if "reasoning_parser" in info else None,
+            tool_call_parser=(info["tool_call_parser"] or "") if "tool_call_parser" in info else None,
+            captures_routing=info.get("enable_return_routed_experts"),
+            torch_compile=info.get("enable_torch_compile"),
+        )
+
+    def _server_info(self) -> dict:
+        return self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
+
     def _fetch_engine_world_size(self) -> int:
         """Workers join as ``rank_offset + tp_rank``; under ``--enable-dp-attention`` ``tp_rank`` spans every GPU."""
-        info = self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
+        info = self._server_info()
+        self._require_toolkit_image(self._flags_in(info))
+        self.probe_generation()
         try:
             tp_size = int(info["tp_size"])
             dp_size = int(info.get("dp_size", 1) or 1)
@@ -111,8 +139,17 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         return tp_size
 
     def _request_engine_join(self, master_address: str, port: int, world_size: int) -> AsyncCall:
-        # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first.
+        # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first, and a
+        # second begin under its open session. Unchecked, as with no session open the close answers 400.
         self._destroy_remote_group()
+        self.request(
+            "POST",
+            self.SESSION_CLOSE_ENDPOINT,
+            retry=False,
+            timeout=SESSION_CLOSE_TIMEOUT_S,
+            check=False,
+            **self.SESSION_REQUEST,
+        )
         return self._start_collective_rpc(
             "/init_weights_update_group",
             timeout=GROUP_FORMATION_TIMEOUT_S,
@@ -145,7 +182,16 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         remote = AsyncCall(self._destroy_remote_group)
         group = None if self._transport is None else self._transport[0]
         # Interpreter exit skips the local NCCL destroy, and an aborted group is already gone from torch.
-        release_weight_update_group(group, destroy=not at_exit and not self._aborted)
+        destroy = not at_exit and not self._aborted
+        if destroy and group is not None and not self._engine_answers():
+            logger.warning(f"SGLang server {self.base_url} does not answer, so its weight-update group is aborted.")
+            self._abort_group()
+            destroy = False
+        # An engine that never enters its half parks the destroy, with the failure that brought us here unraised.
+        local = AsyncCall(partial(release_weight_update_group, group, destroy=destroy), name="weight-update destroy")
+        if local.join(CLEANUP_TIMEOUT_S).is_alive():
+            logger.error(f"Destroying the weight-update group of {self.base_url} is still blocked; aborting it.")
+            self._abort_group()
         remote.join(CLEANUP_TIMEOUT_S)
         self._arena = None
         self._inflight.clear()
@@ -277,6 +323,13 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 )
             values.append(float(entry[0]))
         return values
+
+    def _engine_answers(self) -> bool:
+        try:
+            response = self.request("GET", "/health", retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False)
+        except requests.exceptions.RequestException:
+            return False
+        return response.status_code == 200
 
     def _destroy_remote_group(self):
         """Best-effort; never masks the caller's failure."""

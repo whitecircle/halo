@@ -68,7 +68,11 @@ def test_every_shipped_env_grpo_recipe_passes_as_shipped(config):
         (_GPTOSS_SGLANG, ["--steps_per_generation=48"], 2),
         (_GPTOSS_SGLANG, ["--max_retries=0"], 1),
         # A span that is no whole number of sync periods rounds up.
-        (_GPTOSS_SGLANG, ["--prefetch_depth=2", "--sync_weights_every_n_steps=5", "--max_retries=0"], 1),
+        (
+            _GPTOSS_SGLANG,
+            ["--prefetch_depth=2", "--sync_weights_every_n_steps=5", "--max_retries=0", "--eval_strategy=no"],
+            1,
+        ),
         (_GPTOSS_SGLANG, ["--steps_per_generation=40"], 2),
     ],
     ids=[
@@ -91,7 +95,7 @@ def test_an_sglang_round_spanning_more_syncs_than_its_retry_budget_is_refused(co
     ("config", "overrides"),
     [
         *((config, ["--prefetch_depth=2", "--rollout_backend=vllm"]) for config in _SGLANG_EXAMPLES),
-        (_GPTOSS_SGLANG, ["--prefetch_depth=2", "--sync_weights_every_n_steps=2"]),
+        (_GPTOSS_SGLANG, ["--prefetch_depth=2", "--sync_weights_every_n_steps=2", "--eval_strategy=no"]),
         (_GPTOSS_SGLANG, ["--prefetch_depth=2", "--max_retries=2"]),
         (_GPTOSS_SGLANG, ["--prefetch_depth=2", "--steps_per_generation=8"]),
     ],

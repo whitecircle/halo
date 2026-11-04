@@ -20,6 +20,7 @@ from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages, valid_group_stats
 from halo.trainers.grpo.objective.logratio import (
     KL_CLAMP_FRAC_KEY,
+    UPDATE_SKIPPED_KEY,
     clamp_ref_logps,
     kl_clamp_counts,
 )
@@ -31,6 +32,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     record_token_mass,
 )
 from halo.trainers.token_metrics import effective_loss_mask
+from halo.trainers.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ ROUTING_MASKS_KEY = "routing_masks"
 # Consecutive steps with no valid episode anywhere that halt the run: one can be a grader blip, a second
 # means the rollout path is down.
 EMPTY_ROLLOUT_STEP_LIMIT = 2
+ZERO_GRADIENT_ROUND_KEY = "sampling/zero_gradient_round"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -128,6 +131,9 @@ def batch_reward_std(rewards: torch.Tensor) -> float:
 
 
 class StepBatchMixin:
+    _zero_gradient_rounds = 0
+    _policy_gradient_seen = False
+
     def _build_training_tensors(
         self,
         rollout_results: list[RolloutResult],
@@ -542,7 +548,63 @@ class StepBatchMixin:
         self._populate_completion_logs(rollout_results, rewards[:num_episodes], traj_advantages[:num_episodes], mode)
         # Every rank arrives here once per step: the one collective over the step's rank-local counts.
         self._world_metrics.flush(self._metrics[mode])
+        if mode == "train":
+            self._track_zero_gradient_round(local_advantages, scores.ratio, loss_mask, rollout_results)
         return local_advantages
+
+    def _track_zero_gradient_round(
+        self,
+        advantages: torch.Tensor,
+        ratio: torch.Tensor | None,
+        loss_mask: torch.Tensor,
+        rollout_results: list[RolloutResult],
+    ) -> None:
+        """COLLECTIVE. A launch whose rounds have carried no policy gradient so far raises once
+        ``zero_gradient_round_limit`` come in a row, as the empty-step halt reads validity only, so a run whose valid
+        episodes all tie (a tool parser that leaves calls as text, an answerless environment) would log loss 0 forever.
+        A round the breaker zeroed counts, and its own early stop acts first. Past the first round that trained, a streak
+        only warns: a policy that nearly always solves, or nearly never does, ties for long stretches and still trains."""
+        trained = loss_mask.bool() & (advantages != 0).unsqueeze(1)
+        if ratio is not None:
+            trained = trained & (ratio > 0)
+        (tokens,) = world_sums([trained.sum()])
+        self._metrics["train"][ZERO_GRADIENT_ROUND_KEY].append(float(tokens == 0))
+        if tokens:
+            self._zero_gradient_rounds = 0
+            self._policy_gradient_seen = True
+            return
+        self._zero_gradient_rounds += 1
+        limit = self.async_config.zero_gradient_round_limit
+        at_limit = limit is not None and self._zero_gradient_rounds >= limit
+        first_of_a_dead_start = self._zero_gradient_rounds == 1 and not self._policy_gradient_seen
+        if not at_limit and not first_of_a_dead_start:
+            return
+        logged = self._metrics["train"]
+        shares = ", ".join(
+            f"{key}={logged[key][-1]:.2f}"
+            for key in (
+                DEGENERATE_GROUP_FRAC_KEY,
+                "sampling/invalid_episode_frac",
+                "sampling/truncated_masked_frac",
+                "sampling/is_masked_frac",
+                UPDATE_SKIPPED_KEY,
+            )
+            if logged.get(key)
+        )
+        tool_calls = sum(r.metrics.get("episode/tool_calls", 0) for r in rollout_results)
+        detail = (
+            f"No token carried a policy gradient in {self._zero_gradient_rounds} train round(s) in a row: {shares}; "
+            f"this rank's episodes made {tool_calls:g} tool calls. Tied rewards with no tool calls usually mean the "
+            f"server's parser leaves them as text; tied rewards with calls mean the environment scores every attempt "
+            f"alike (agent-docs/training-methods/async-grpo/monitoring.md)."
+        )
+        if at_limit and not self._policy_gradient_seen:
+            raise RuntimeError(
+                f"{detail} Stopping at zero_gradient_round_limit={limit}, as this launch has trained nothing yet. Raise "
+                f"it for a reward this sparse, or set it to null."
+            )
+        if is_global_main_process() and (first_of_a_dead_start or self._zero_gradient_rounds == limit):
+            logger.warning(detail)
 
     def _log_headline_rewards(
         self, gathered_rewards: torch.Tensor, gathered_valid: torch.Tensor, num_generations: int, mode: str

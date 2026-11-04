@@ -36,12 +36,18 @@ from halo.environments.reasoning_effort import resolve_reasoning_effort
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.moe.config_fields import has_routed_experts
 from halo.rewards.graders.verifiable import RLVR_GRADERS
 from halo.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
 from halo.runtime.collectives import barrier
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.grpo.rollout.engine_preflight import verify_context_window, verify_sampler_logprob_reference
+from halo.trainers.grpo.rollout.engine_preflight import (
+    ServerRequirements,
+    verify_context_window,
+    verify_sampler_logprob_reference,
+    verify_server_flags,
+)
 
 
 def build_rlvr_row_fn(args: OnlineGRPOScriptArguments, tokenizer):
@@ -190,6 +196,13 @@ def main():
         [vllm_base_url],
         single_turn_tokens=(args.max_prompt_length or 0) + grpo_config.max_completion_length,
         backend=VLLM_BACKEND,
+        connection_timeout=grpo_config.vllm_server_timeout,
+    )
+    verify_server_flags(
+        [vllm_base_url],
+        ServerRequirements(is_moe=has_routed_experts(model.config)),
+        backend=VLLM_BACKEND,
+        connection_timeout=grpo_config.vllm_server_timeout,
     )
     # TRL's IS correction divides by the engine's logprobs too: they must carry the sampling temperature,
     # and a sequence-level IS mode sums the per-token log-ratios, which a reference renormalized over the
@@ -203,6 +216,7 @@ def main():
         repetition_penalty=grpo_config.repetition_penalty,
         sequence_ratio_active=DistributedOnlineGRPOTrainer.sums_sequence_logratio(grpo_config),
         backend=VLLM_BACKEND,
+        connection_timeout=grpo_config.vllm_server_timeout,
     )
     # The KL reference TRL would otherwise build; None where the run holds none. After the server preflights, so a
     # misconfigured server fails before a second model load.

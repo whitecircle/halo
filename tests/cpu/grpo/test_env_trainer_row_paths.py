@@ -12,6 +12,7 @@ from trl.trainer.utils import pad
 
 from halo.environments.engine_wire import capture_generation_tokens
 from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
+from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY
 from halo.environments.messages import Message, Trajectory
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, TrajectoryRowMap, rollout_valid_mask
@@ -116,6 +117,41 @@ def test_a_whole_trajectory_overflow_is_recorded_and_the_steps_first_failure_kep
     trainer._tokenize_step_rows([first, second])
     error = trainer._batch_errors.reason
     assert error is not None and error.startswith(f"Trajectory of {_trajectory_tokens(first)} tokens"), error
+
+
+def _overflowed(*turns: Message) -> RolloutResult:
+    result = _result(*turns)
+    result.trajectory.info[CONTEXT_OVERFLOW_KEY] = True
+    return result
+
+
+def test_a_whole_render_past_the_window_after_an_overflow_leaves_the_batch_instead_of_raising():
+    """The render ends on the tool result the window refused, a length no engine served, so it names no wrong config."""
+    result = _overflowed(Message.assistant("aaaa"))
+    trainer = _trainer(per_turn=False, context_limit=2)
+    prompt, _completion, mask = trainer._tokenize_trajectory(result)
+    assert trainer._batch_errors.reason is None, trainer._batch_errors.reason
+    assert result.trajectory.info[EPISODE_INVALID_KEY] is True and not mask.any()
+    assert len(prompt) == 1
+
+
+def test_an_overflowed_episode_that_still_fits_trains_whole():
+    """A SGLang episode closes before its context does."""
+    result = _overflowed(Message.assistant("aaaa"))
+    tokens = _trajectory_tokens(result)
+    trainer = _trainer(per_turn=False, context_limit=tokens)
+    _prompt, _completion, mask = trainer._tokenize_trajectory(result)
+    assert mask.any() and EPISODE_INVALID_KEY not in result.trajectory.info
+
+
+def test_per_turn_rows_of_an_overflowed_episode_all_train():
+    """Each row is a request the engine served, whatever the tool result after the last one did."""
+    trainer = _trainer(context_limit=8)
+    result = _overflowed(
+        _turn([1, 2, 3], prompt_len=2), _turn([4, 5, 6], prompt_len=5), Message.tool("past the window", "c0", "echo")
+    )
+    rows = trainer._tokenize_trajectory_turns(result)
+    assert trainer._batch_errors.reason is None and [row.loss_mask.tolist() for row in rows] == [[1, 1, 1]] * 2
 
 
 def test_a_malformed_routed_experts_payload_is_recorded_and_the_turn_trains_unrouted():

@@ -48,6 +48,14 @@ class FakeEngineServer:
 
     def __init__(self):
         self.paused = False
+        # What /server_info reports; each engine spells these its own way.
+        self.toolkit_image = True
+        self.moe_backend = "triton"
+        self.reasoning_parser = ""
+        self.tool_call_parser = "family"
+        # The prompt ids a chat completion's reply carries.
+        self.render_prompt = lambda body: [1, 2, 3]
+        self.captures_routing = False
         # Declared on the model card only when set, as a server without one reports no context window.
         self.max_model_len: int | None = None
         self.logprobs_mode = self.LOGPROBS_MODE
@@ -186,6 +194,8 @@ class FakeVLLMServer(FakeEngineServer):
         self.version = self.VERSION
         self.update_open = False
         self.world_size = 1
+        self.strict_tool_calling = False
+        self.returns_token_ids = True
         # Held so the workers' store connections live until close(), as an engine's workers stay joined.
         self.joined_stores: list[TCPStore] = []
 
@@ -194,6 +204,22 @@ class FakeVLLMServer(FakeEngineServer):
             return 200, {"is_paused": self.paused}
         if (method, path) == ("GET", "/get_world_size"):
             return 200, {"world_size": self.world_size}
+        if (method, path) == ("GET", "/server_info"):
+            env = {"VLLM_ENFORCE_STRICT_TOOL_CALLING": self.strict_tool_calling}
+            if self.toolkit_image:
+                env["VLLM_HALO_PATCHES"] = "vllm_layerwise_reload_patch"
+            config = {
+                "kernel_config": {"moe_backend": self.moe_backend},
+                "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
+                "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
+            }
+            return 200, {"vllm_env": env, "vllm_config": config}
+        if (method, path) == ("POST", "/v1/chat/completions"):
+            if body.get("tools") and not self.tool_call_parser:
+                return 400, {"error": '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser'}
+            token = "token_id:7" if self.returns_token_ids else "ok"
+            choice = {"logprobs": {"content": [{"token": token, "logprob": -0.1}]}}
+            return 200, {"choices": [choice], "prompt_token_ids": self.render_prompt(body)}
         if (method, path) == ("GET", "/version"):
             return 200, {} if self.version is None else {"version": self.version}
         if method == "POST" and path == "/v1/completions" and "prompt_logprobs" in (body or {}):
@@ -256,12 +282,25 @@ class FakeSGLangServer(FakeEngineServer):
     def __init__(self):
         super().__init__()
         self.tp_size = 1
+        self.torch_compile = False
         self.groups: set[str] = set()
         self.session_open = False
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
         if (method, path) == ("GET", "/server_info"):
-            return 200, {"tp_size": self.tp_size, "dp_size": 1}
+            info = {
+                "tp_size": self.tp_size,
+                "dp_size": 1,
+                "moe_runner_backend": self.moe_backend,
+                # SGLang reports a parser it has none of as null.
+                "reasoning_parser": self.reasoning_parser or None,
+                "tool_call_parser": self.tool_call_parser or None,
+                "enable_return_routed_experts": self.captures_routing,
+                "enable_torch_compile": self.torch_compile,
+            }
+            if self.toolkit_image:
+                info["halo_patches"] = True
+            return 200, info
         if method != "POST":
             return super().answer(method, path, body)
         if path in self._REQUEST_OBJECT_ROUTES and body is None:
@@ -288,6 +327,8 @@ class FakeSGLangServer(FakeEngineServer):
             return 200, {}
         if path == "/flush_cache":
             return 200, {}
+        if path == "/v1/chat/completions":
+            return 200, {"choices": [{"prompt_token_ids": self.render_prompt(body)}]}
         if path == "/generate" and body.get("return_logprob"):
             # [logprob, token_id, text] per input token from logprob_start_len; the window's first entry is its anchor
             # and carries None.

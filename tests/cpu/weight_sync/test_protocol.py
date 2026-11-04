@@ -8,6 +8,7 @@ import contextlib
 import logging
 import socket
 import threading
+from collections import deque
 
 import pytest
 import requests
@@ -19,6 +20,7 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     _verify_context_window_on_rank0,
     _verify_sampler_logprob_reference_on_rank0,
     probe_sampler_logprob_semantics,
+    verify_context_window,
 )
 from halo.weight_sync.clients import base as client_base
 from halo.weight_sync.clients import vllm as wsc
@@ -282,6 +284,76 @@ def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(s
     assert server.paused is True, "close_communicator resumed a server that has to be restarted"
 
 
+def test_a_close_that_fails_after_chunks_landed_leaves_the_engine_paused(server, client, monkeypatch):
+    """A reload left unfinished holds the same mixed model as a failed chunk, and a resume serves it."""
+    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    server.status["/finish_weight_update"] = 500
+    with pytest.raises(requests.exceptions.HTTPError, match="500"):
+        push(client, [("a", torch.zeros(4, dtype=torch.bfloat16))])
+
+    assert server.count("POST /resume") == 0 and server.paused is True
+    with pytest.raises(RuntimeError, match="RESTART"):
+        push(client, [("b", torch.zeros(4, dtype=torch.bfloat16))])
+
+
+def _sglang_with_a_group() -> tuple[FakeSGLangServer, SGLangWeightSyncClient]:
+    server = FakeSGLangServer()
+    client = SGLangWeightSyncClient(base_url=server.url)
+    client._transport = (object(), None)
+    return server, client
+
+
+def test_a_flush_that_fails_at_the_close_leaves_sglang_paused(monkeypatch):
+    """With no tail chunk to carry the flush it goes by its own route, through the same close."""
+    server, client = _sglang_with_a_group()
+    try:
+        monkeypatch.setattr(client, "_start_engine_update", client._quiesce)
+        server.status["/flush_cache"] = 500
+        client._open_update()
+        client._chunks_sent = 1
+        monkeypatch.setattr(client, "request", _single_shot_request(client.request))
+        with pytest.raises(requests.exceptions.HTTPError, match="500"):
+            client._close_update([])
+        assert server.count("POST /continue_generation") == 0 and server.paused is True
+        assert client._unusable_reason is not None
+    finally:
+        server.close()
+
+
+def _single_shot_request(request):
+    """The session's status retries would back off ~80 s on a scripted 500."""
+
+    def single_shot(method, path, **kwargs):
+        kwargs["retry"] = False
+        return request(method, path, **kwargs)
+
+    return single_shot
+
+
+def test_a_lost_resume_is_retried_after_a_good_push(server, client, monkeypatch):
+    """One failed POST left the engine paused with the push counted as done: the next rollouts queued to their timeout."""
+    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(client_base, "_RESUME_RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
+    server.replies["/resume"] = deque([500, 500])
+
+    push(client, [("a", torch.zeros(4, dtype=torch.bfloat16))])
+
+    assert server.paused is False and server.count("POST /resume") == 3
+
+
+def test_a_resume_that_never_lands_raises_naming_the_server(server, client, monkeypatch):
+    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(client_base, "_RESUME_RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
+    server.status["/resume"] = 500
+
+    with pytest.raises(RuntimeError, match="stayed paused after a good weight push") as refused:
+        client.update_named_param("a", torch.zeros(4, dtype=torch.bfloat16))
+        client.finish_weight_update()
+
+    assert server.url in str(refused.value) and server.count("POST /resume") == 4
+    assert client._unusable_reason is None, "a good push holds the new policy: lifting the pause by hand serves it"
+
+
 def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client, monkeypatch):
     """The close resumes the engine in a ``finally``, so the verdict has to be taken where the chunk fails."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
@@ -405,16 +477,16 @@ def test_probe_generation_reports_a_paused_server(server, client):
     requests.post(f"{server.url}/pause")
     assert server.paused is True
 
-    outcome = _run_bounded(client._probe_generation)
+    outcome = _run_bounded(client.probe_generation)
 
-    assert outcome, "_probe_generation blocked instead of reading /is_paused"
+    assert outcome, "probe_generation blocked instead of reading /is_paused"
     assert isinstance(outcome[0], RuntimeError), f"a paused server was not reported: {outcome[0]!r}"
     assert "PAUSED" in str(outcome[0])
     assert "wedged" not in str(outcome[0]), "a paused server must not be reported as a wedged scheduler"
 
 
 def test_probe_generation_passes_on_a_serving_server(server, client):
-    assert _run_bounded(client._probe_generation) == [None]
+    assert _run_bounded(client.probe_generation) == [None]
 
 
 def _record_session_gets(client, monkeypatch) -> list[str]:
@@ -448,11 +520,67 @@ def test_a_card_without_a_context_window_reports_none(server, client):
 def test_probe_generation_resolves_the_served_model_over_the_session(server, client, monkeypatch):
     session_gets = _record_session_gets(client, monkeypatch)
 
-    client._probe_generation()
+    client.probe_generation()
 
     assert [url for url in session_gets if url.endswith("/v1/models")], (
-        "_probe_generation resolved the served model outside the client's session"
+        "probe_generation resolved the served model outside the client's session"
     )
+
+
+def test_a_paused_sglang_server_is_refused_with_the_route_that_lifts_it(monkeypatch):
+    """SGLang has no pause read and a paused engine queues requests, so each startup probe waited out 60 s, passed
+    unread, and the first push died on a bare Bad Request."""
+    monkeypatch.setattr(client_base, "GENERATION_PROBE_TIMEOUT_S", 0.5)
+    server = FakeSGLangServer()
+    server.hold.add("/v1/completions")
+    try:
+        client = SGLangWeightSyncClient(base_url=server.url)
+        with pytest.raises(RuntimeError, match="paused or wedged") as refused:
+            client._fetch_engine_world_size()
+    finally:
+        server.close()
+    assert "/continue_generation" in str(refused.value) and "RESTARTED" in str(refused.value)
+
+
+def test_a_paused_server_is_refused_by_the_preflight_on_every_engine(monkeypatch):
+    monkeypatch.setattr(client_base, "GENERATION_PROBE_TIMEOUT_S", 0.5)
+    for client_cls in (VLLMWeightSyncClient, SGLangWeightSyncClient):
+        server = fake_server_class(client_cls)()
+        server.paused = True
+        server.hold.add("/v1/completions")
+        try:
+            with pytest.raises(ValueError, match="PAUSED|paused or wedged"):
+                verify_context_window([server.url], 16, backend=client_cls.BACKEND_KEY, connection_timeout=5.0)
+        finally:
+            server.close()
+
+
+def test_a_join_clears_a_dead_trainers_open_session_on_sglang(monkeypatch):
+    """A second begin answers 400 until the session closes, and the close answers 400 with none open, which must not
+    fail the join."""
+    server = FakeSGLangServer()
+    try:
+        client = SGLangWeightSyncClient(base_url=server.url)
+        server.session_open = True
+        call = client._request_engine_join("127.0.0.1", 1, 2)
+        call.join(5.0)
+        assert server.session_open is False
+        call = client._request_engine_join("127.0.0.1", 1, 2)
+        call.join(5.0)
+        assert server.count("POST /end_weight_update") == 2
+    finally:
+        server.close()
+
+
+def test_a_control_routes_refusal_carries_its_reason():
+    """``raise_for_status`` keeps the status alone, and 'Bad Request' names no stale session."""
+    server = FakeSGLangServer()
+    try:
+        client = SGLangWeightSyncClient(base_url=server.url)
+        with pytest.raises(requests.exceptions.HTTPError, match="must alternate"):
+            client.request("POST", "/end_weight_update", retry=False, timeout=5, json={})
+    finally:
+        server.close()
 
 
 def test_context_window_preflight_raises_on_a_server_that_cannot_hold_one_turn(server):

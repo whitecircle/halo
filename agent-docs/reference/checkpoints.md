@@ -95,7 +95,7 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 | File | `save_only_model=false` | `save_only_model=true` | Purpose |
 |------|:-:|:-:|---------|
 | `model.safetensors` (or sharded + index) | Yes | Yes | Weights |
-| `config.json`, `tokenizer.*` (full processor for VLMs) | Yes | Yes | Architecture config + `processing_class` |
+| `config.json`, `tokenizer.*` (full processor for VLMs and for RL runs on a multimodal checkpoint, whose `processing_class` stays the tokenizer) | Yes | Yes | Architecture config + `processing_class` |
 | `generation_config.json` | Yes | Yes | Sampling defaults, stop strings and the custom `eos_token_id` set — written for a generative model only, and paired with `config.json` by `save_model_config`. `PretrainedConfig` does not carry it, so a save that writes only `config.json` serves with defaults. |
 | `trainer_state.json` | Yes | Yes | Step count, epoch, loss history — published last ([Interrupted saves](#interrupted-saves)) |
 | `optimizer_shard_XXXXX.pt` | Yes | No | Per-rank optimizer shard — every torchrun sharded mode. Under multi-group EP only the replica group's lowest rank carries the replicated (FSDP-ignored) expert state; its peers read it from that shard |
@@ -255,6 +255,10 @@ subfolder only.
 
 A gathered checkpoint is a standard HF checkpoint — stock `from_pretrained` loads it as-is. (Live RL
 weight sync is narrower: [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).)
+
+A multimodal checkpoint's export carries its processor, since both engines build the composite's processor at startup
+and raise on tokenizer files alone. The RL trainers keep a tokenizer as `processing_class`, as TRL's would take a
+processor for an image run, so their saves write the checkpoint's processor beside it (`load_export_processor`).
 
 Every writer saves the names transformers' own `save_pretrained` writes: the reverse of what the load
 converted. transformers reads several hubs through renames its module tree drops — a SigLIP tower's

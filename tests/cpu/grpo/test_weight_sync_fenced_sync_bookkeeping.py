@@ -72,7 +72,6 @@ def test_cleanup_closes_the_score_only_clients_sessions():
     trainer._weight_sync_client = None
     trainer._loop = None
     trainer._prefetch_thread = None
-    trainer._multi_server_mode = False
     clients = [Mock(), Mock()]
     trainer._engine_rescore_clients = list(clients)
 

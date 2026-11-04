@@ -9,7 +9,7 @@ from typing import NamedTuple
 import torch
 
 from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
+from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
 from halo.environments.messages import engine_view
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import (
@@ -252,6 +252,12 @@ class TrajectoryTokenizeMixin:
 
         prompt_token_ids = spans.full_ids[: spans.prompt_len]
         completion_ids = spans.full_ids[spans.prompt_len :]
+        if result.trajectory.info.get(CONTEXT_OVERFLOW_KEY) and len(spans.full_ids) > self._context_limit():
+            # Its render ends on the tool result the window refused, a length no engine served, so no config is wrong.
+            self._invalidate_unrenderable_episode(
+                result, f"it outgrew the served window, and its {len(spans.full_ids)}-token render cannot train whole"
+            )
+            return self._masked_trajectory_tensors()
         loss_mask = [0] * len(completion_ids)
         for turn, (start, end) in turn_spans:
             if not turn.untrainable:

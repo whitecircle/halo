@@ -3,7 +3,9 @@ were. Scored on the prompt log-probs of fixed token rows through the clients' ow
 measures: twice the server's run-to-run noise, with a floor for a server that repeats itself exactly. A second push
 with one tensor scaled must clear that bar, or the bar proves nothing; text rows never reach a vision tensor, so the
 scaled one sits in a text tower. After one real optimizer step, a push must leave the server computing what the trainer
-computes, within the gap the two already had before the step."""
+computes, within the gap the two already had before the step. On a family whose bf16 routing noise makes that gap large
+(Laguna, Gemma 4) the bar is gross, so ``--reach`` scales each forwarded name in turn: an engine that drops a name
+answers 200 and an unchanged push reads exact, and only a change that fails to reach the served model shows it."""
 
 import argparse
 import math
@@ -12,14 +14,16 @@ import sys
 
 import requests
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_flag, env_str
+from halo.models.config_access import config_model_types
+from halo.models.moe.balancing import is_balancing_state_key
 from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.runtime.collectives import broadcast_from_rank0
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model, sync_weights_to_client
 from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.harness import Ctx
@@ -76,7 +80,8 @@ _BAR_FLOOR = 1e-5
 _CONTROL_SCALE = 1.01
 # A text attention weight past the first layer, whichever layer type the family starts with.
 _CONTROL_TENSOR = re.compile(r"layers\.\d*[1-9]\.(self_attn|attention)\.")
-_NO_TEXT_ROW_REACHES = re.compile(r"vision|visual|audio")
+_NO_TEXT_ROW_REACHES = re.compile(r"vision|visual|audio|mtp")
+_LAYER_INDEX = re.compile(r"\.\d+(?=\.)")
 # What a push without a family's declared buffers does: vLLM's reload rebuilds the module they sit on from
 # uninitialized storage, while SGLang's loader copies name by name.
 _LEAVING_THEM_OUT_MOVES_THE_SERVER = {"vllm": True, "sglang": False}
@@ -86,6 +91,8 @@ _REAL_STEP_ROW = 3  # 256 tokens, inside every server window
 _REAL_STEP_STRIDE = 4
 _TRAINER_GAP_MARGIN = 2
 _TRAINER_GAP_FLOOR = 0.01
+# Where a sampled token sits: the positions an IS ratio mostly reads, reported beside the mean over rare ones.
+_CONFIDENT_LOGPROB = math.log(0.1)
 
 
 def parse_row(argv: list[str] | None = None) -> argparse.Namespace:
@@ -94,6 +101,10 @@ def parse_row(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backend", choices=rollout_backends(), required=True)
     parser.add_argument("--ep-size", type=int, default=1)
     parser.add_argument("--tp-size", type=int, default=1)
+    parser.add_argument("--reach", action="store_true", help="scale each forwarded name in turn, one push each")
+    parser.add_argument(
+        "--reach-leave-out", default=None, help="negative control: this name pattern's reach round must fail"
+    )
     return parser.parse_args(argv)
 
 
@@ -120,6 +131,11 @@ def skip_unless_a_fresh_server_holds_the_row(row: argparse.Namespace) -> None:
     if served != checkpoint:
         log(f"SKIP: {url} serves {served}, not this row's {checkpoint} (--served-model-name spells it)")
         sys.exit(0)
+
+
+def _name_pattern(name: str) -> str:
+    """A forwarded name with its layer indices collapsed, so one round covers a tensor of every layer."""
+    return _LAYER_INDEX.sub(".N", name)
 
 
 def _token_rows(checkpoint: str, limit: int | None) -> list[list[int]]:
@@ -171,20 +187,34 @@ def _take_one_real_step(model, stepped: list[tuple[str, torch.nn.Parameter]], ro
 
 class _RoundSender:
     """What one round's gather sends through: the real client, less the names ``leave_out`` ends, with the first control
-    tensor scaled when ``scale`` is set."""
+    tensor scaled when ``scale`` is set, or every tensor of ``scale_pattern``. ``patterns`` records what was forwarded,
+    and whether any of each pattern holds a nonzero value, as scaling zeros moves nothing."""
 
-    def __init__(self, client, *, scale: bool = False, leave_out: tuple[str, ...] = ()):
+    def __init__(
+        self,
+        client,
+        *,
+        scale: bool = False,
+        leave_out: tuple[str, ...] = (),
+        scale_pattern: str | None = None,
+        leave_out_patterns: tuple[str, ...] = (),
+    ):
         self._client = client
         self._leave_out = leave_out
+        self._leave_out_patterns = leave_out_patterns
         self._scale = scale
+        self._scale_pattern = scale_pattern
         self.scaled: str | None = None
         self.forwarded = 0
+        self.patterns: dict[str, bool] = {}
 
     def scope_co_load_groups(self, module_names) -> None:
         self._client.scope_co_load_groups(module_names)
 
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         if self._leave_out and name.endswith(self._leave_out):
+            return
+        if _name_pattern(name) in self._leave_out_patterns:
             return
         self.forwarded += 1
         if (
@@ -196,6 +226,10 @@ class _RoundSender:
         ):
             self.scaled = name
             weights = weights * _CONTROL_SCALE
+        pattern = _name_pattern(name)
+        self.patterns[pattern] = self.patterns.get(pattern, False) or bool(weights.any())
+        if pattern == self._scale_pattern:
+            weights = weights * _CONTROL_SCALE
         self._client.update_named_param(name, weights)
 
     def finish_weight_update(self) -> None:
@@ -203,6 +237,17 @@ class _RoundSender:
 
     def abort_weight_update(self) -> None:
         self._client.abort_weight_update()
+
+
+def _reach_patterns(forwarded: dict[str, bool], client, model_types: set[str]) -> list[str]:
+    """The names a change must move the served log-probs through: those holding a value, off a tower no text row reaches,
+    less a balancing bias this engine's loader declares it drops."""
+    dropped = bool(client.DROPPED_BALANCING_BIAS_MODEL_TYPES & model_types)
+    return sorted(
+        pattern
+        for pattern, nonzero in forwarded.items()
+        if nonzero and not _NO_TEXT_ROW_REACHES.search(pattern) and not (dropped and is_balancing_state_key(pattern))
+    )
 
 
 def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
@@ -236,9 +281,8 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
             base_url=_server_url(row.backend), group_port=group_port, connection_timeout=600
         )
         client.init_communicator(device=ctx.device)
-    window = [client.served_max_model_len() if ctx.rank == 0 else None]
-    dist.broadcast_object_list(window, src=0)
-    rows = _token_rows(checkpoint, window[0])
+    window = broadcast_from_rank0(client.served_max_model_len() if ctx.rank == 0 else None)
+    rows = _token_rows(checkpoint, window)
     if ctx.rank == 0:
         baseline, *repeats = [_score(client, rows) for _ in range(_BASELINE_RUNS)]
         noise = max(_difference(baseline, repeat)["max"] for repeat in repeats)
@@ -264,9 +308,10 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
         return moved["max"] <= bar
 
     try:
-        moved, _ = pushed("unchanged")
+        moved, sender = pushed("unchanged")
         if ctx.rank == 0:
             checks["unchanged_push_leaves_the_served_log_probs"] = stays(moved)
+            forwarded_patterns = sender.patterns
 
         moved, sender = pushed("scaled", scale=True)
         if ctx.rank == 0:
@@ -288,6 +333,26 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
             if ctx.rank == 0:
                 checks["unchanged_push_restores_the_buffers"] = stays(moved)
 
+        if row.reach:
+            model_types = set(config_model_types(getattr(model, "config", None)))
+            patterns = broadcast_from_rank0(
+                _reach_patterns(forwarded_patterns, client, model_types) if ctx.rank == 0 else None
+            )
+            unreached = []
+            for pattern in patterns:
+                leave_out = (pattern,) if pattern == row.reach_leave_out else ()
+                moved, _ = pushed(f"reach/{pattern}", scale_pattern=pattern, leave_out_patterns=leave_out)
+                if ctx.rank == 0 and stays(moved):
+                    unreached.append(pattern)
+            moved, _ = pushed("restored_after_reach")
+            if ctx.rank == 0:
+                log(
+                    f"  reach: {len(patterns) - len(unreached)} of {len(patterns)} names moved the server: {unreached}"
+                )
+                metrics["reach/patterns"] = len(patterns)
+                checks["every_forwarded_name_reaches_the_served_model"] = not unreached
+                checks["unchanged_push_restores_the_reach_rounds"] = stays(moved)
+
         # TP's replicated parameters take the trainer's gradient sweep, which this one step does not run.
         if row.tp_size == 1:
             model.eval()
@@ -301,9 +366,18 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
             if ctx.rank == 0:
                 floor = _difference(before_step, baseline)
                 stale = _difference(after_step, baseline)
-                served = _difference(after_step, _score(client, rows))
+                served_scores = _score(client, rows)
+                served = _difference(after_step, served_scores)
+                confident = [index for index, score in enumerate(served_scores) if score > _CONFIDENT_LOGPROB]
                 metrics |= {"trainer_gap/floor": floor["mean"], "trainer_gap/stale": stale["mean"]}
                 metrics["trainer_gap/after_push"] = served["mean"]
+                metrics["trainer_gap/after_push_confident"] = (
+                    _difference(
+                        [after_step[index] for index in confident], [served_scores[index] for index in confident]
+                    )["mean"]
+                    if confident
+                    else 0.0
+                )
                 log(f"  trainer against served: floor {floor}, stale {stale}, after the push {served}")
                 checks["a_real_step_moved_the_trainer_past_the_floor"] = (
                     stale["mean"] > _TRAINER_GAP_MARGIN * floor["mean"]

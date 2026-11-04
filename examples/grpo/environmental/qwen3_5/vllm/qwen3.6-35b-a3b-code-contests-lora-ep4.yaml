@@ -1,6 +1,6 @@
 # Environmental GRPO — Qwen3.6-35B-A3B on Codeforces, LoRA (r=64, attention projections), EP=4, ZeRO-2, KL-free (IS bands as the trust region).
 # Attention adapters land on the language model, whose attention spells the target names; the vision tower spells `qkv`/`proj` and matches none of them; the -full- sibling trains the whole model.
-# Serve with: --tool-call-parser qwen3_xml (hermes does not parse Qwen3.5/3.6 XML tool calls) --reasoning-parser qwen3 --chat-template jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below)
+# Serve with: --tool-call-parser qwen3_xml (hermes does not parse Qwen3.5/3.6 XML tool calls) --reasoning-parser qwen3 --chat-template /jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below)
 #   --moe-backend triton --enable-prefix-caching, on the image's pinned Model Runner V2 (leave VLLM_USE_V2_MODEL_RUNNER unset), which enforces the thinking_token_budget this config sends.
 # Launch: start 2 vLLM servers on GPUs 4-7 with --weight-transfer-config '{"backend":"nccl"}', then CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=4 scripts/training/grpo/environmental.py <this config>
 

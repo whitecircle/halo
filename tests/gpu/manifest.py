@@ -234,6 +234,15 @@ _PUSH_EXACT_MOE_ROWS = tuple(
     if backend == "vllm" or family not in _PUSH_EXACT_VLLM_ONLY
     for ep_size in (1, 2)
 )
+# One push per forwarded name, on the families whose real-step bar is too gross to catch a name the engine drops.
+_PUSH_EXACT_REACH_ROWS = tuple(
+    Row(
+        f"--family {family} --backend {backend} --ep-size 2 --reach",
+        markers=("gpu", "full", "2gpu", "ep", "moe", _PUSH_EXACT_MOE_FAMILY_MARKERS[family], f"{backend}_server"),
+        timeout=3600,
+    )
+    for family, backend in (("laguna", "vllm"), ("gemma4_text", "vllm"), ("gemma4_text", "sglang"))
+)
 _PUSH_EXACT_DENSE_ROWS = tuple(
     Row(
         f"--family qwen3 --backend {backend}{layout}",
@@ -1252,7 +1261,7 @@ MANIFEST: dict[str, TestSpec] = {
             "vllm_server",
             "sglang_server",
         ),
-        args_matrix=(*_PUSH_EXACT_MOE_ROWS, *_PUSH_EXACT_DENSE_ROWS),
+        args_matrix=(*_PUSH_EXACT_MOE_ROWS, *_PUSH_EXACT_REACH_ROWS, *_PUSH_EXACT_DENSE_ROWS),
         timeout=1800,
     ),
     # Every row asserts the served policy changed, so the server must run the row's checkpoint: on vLLM Qwen3-30B on

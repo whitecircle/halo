@@ -215,7 +215,9 @@ def _hold_init(engine: Engine, server: FakeEngineServer) -> None:
 
 
 def _fail_finish_once(engine: Engine, server: FakeEngineServer) -> None:
-    server.replies[engine.finish_route] = deque([500])
+    # SGLang's join clears a dead trainer's session on this route first, which with none open answers 400.
+    join_clear = [400] if engine.finish_route == SGLangWeightSyncClient.SESSION_CLOSE_ENDPOINT else []
+    server.replies[engine.finish_route] = deque([*join_clear, 500])
 
 
 def _fail_finish(engine: Engine, server: FakeEngineServer) -> None:

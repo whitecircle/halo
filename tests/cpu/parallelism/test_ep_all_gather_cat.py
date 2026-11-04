@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""``all_gather_cat`` receives into one preallocated output on the expert axis. A shard list plus ``cat`` holds the
-tensor twice, tens of GB per layer at 397B/ep64; expert-TP has no single-buffer form."""
+"""``all_gather_cat`` allocates once, ahead of the collective, on every axis. On the expert axis a shard list plus ``cat``
+holds the tensor twice, tens of GB per layer at 397B/ep64."""
 
 import pytest
 import torch
@@ -87,8 +87,9 @@ def test_expert_axis_gather_allocates_one_full_buffer(collectives):
     assert collectives["widest_alloc"] == local.numel() * WORLD
 
 
-def test_intermediate_axis_gather_keeps_the_concat_path(collectives):
-    """A single receive buffer would interleave the peers' columns."""
+def test_intermediate_axis_gather_allocates_once_before_the_collective(collectives):
+    """A later allocation would fail with the collective behind it, and a caller retrying would pair with the wrong
+    tensor; the peers' columns are written through views of one buffer, as one receive would interleave them."""
     local = torch.randn(2, 3, 5)
     gathered = all_gather_cat(local, 2, GROUP, WORLD)
     during = dict(collectives)  # The reference below concatenates too, through the same counters.
@@ -96,7 +97,8 @@ def test_intermediate_axis_gather_keeps_the_concat_path(collectives):
     torch.testing.assert_close(gathered, _expected(local, 2))
     assert during["into_tensor"] == 0
     assert during["list"] == 1
-    assert during["cat"] == 1
+    assert during["empty"] == 1 and during["empty_like"] == 0
+    assert during["cat"] == 0
 
 
 @pytest.mark.parametrize("dim", (0, 2))

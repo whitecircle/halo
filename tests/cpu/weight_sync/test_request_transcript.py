@@ -88,7 +88,6 @@ def test_an_exit_hook_that_destroys_the_local_group_breaks_the_transcript(monkey
     monkeypatch.setattr(SGLangWeightSyncClient, "close_communicator", lambda self, **kwargs: close(self))
     record = scenario_record("sglang", SCENARIO["at exit after a sync"])
     golden = GOLDEN["sglang"]["at exit after a sync"]
-    assert _routes(record) == _routes(golden), "premise: the mutant sends the same routes"
     assert record[-1]["transport"] == ["destroy group"] and golden[-1]["transport"] == ["forget group"]
 
 

@@ -30,6 +30,8 @@ class _Engine:
     """Holds a tensor per name and takes a push as the named engine's loader does: vLLM rebuilds a gate that received
     its weight alone, SGLang copies what it is sent. Its score moves with every tensor it holds."""
 
+    DROPPED_BALANCING_BIAS_MODEL_TYPES: frozenset[str] = frozenset()
+
     def __init__(self, held: dict[str, torch.Tensor], backend: str, drop_from_push: str | None = None):
         self.held = {name: tensor.clone() for name, tensor in held.items()}
         self._backend = backend
@@ -109,13 +111,16 @@ def run_row(monkeypatch):
     monkeypatch.setattr(weight_push_exact, "load_policy", lambda *args, **kwargs: (model, None))
     monkeypatch.setattr(weight_push_exact, "_token_rows", lambda checkpoint, limit: _ROWS)
     monkeypatch.setattr(weight_push_exact, "weight_transfer_port", lambda knob: 0)
-    monkeypatch.setattr(weight_push_exact, "dist", SimpleNamespace(broadcast_object_list=lambda objects, src: None))
     monkeypatch.setattr(weight_push_exact, "_trainer_scores", _engine_scores_of_the_trainer)
 
-    def run(backend: str, drop_from_push: str | None = None) -> dict[str, bool]:
+    def run(
+        backend: str, drop_from_push: str | None = None, reach: bool = False, reach_leave_out: str | None = None
+    ) -> dict[str, bool]:
         engine = _Engine(as_served, backend, drop_from_push)
         monkeypatch.setattr(weight_push_exact, "resolve_weight_sync_client", lambda name: engine)
-        row = argparse.Namespace(family="bailing_moe", backend=backend, ep_size=1, tp_size=1)
+        row = argparse.Namespace(
+            family="bailing_moe", backend=backend, ep_size=1, tp_size=1, reach=reach, reach_leave_out=reach_leave_out
+        )
         return weight_push_exact.run_push_exactness(ctx, row)["checks"]
 
     return run
@@ -202,6 +207,49 @@ def test_a_family_with_nothing_declared_runs_no_leave_out_round(run_row, monkeyp
 
     assert "unchanged_push_leaves_the_served_log_probs" in checks
     assert not any("declared_buffers" in name for name in checks)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_every_name_a_healthy_engine_holds_reaches_it(run_row, backend):
+    checks = run_row(backend, reach=True)
+
+    assert checks["every_forwarded_name_reaches_the_served_model"]
+    assert checks["unchanged_push_restores_the_reach_rounds"]
+
+
+def test_a_name_the_engine_drops_passes_the_exact_push_and_fails_the_reach_round(run_row):
+    """The failure no other round can see: the engine answers 200 on a name it never maps, so the served log-probs never
+    move, on an unchanged push or on a real one whose bar a large floor swallows."""
+    checks = run_row("sglang", drop_from_push="lm_head.weight", reach=True)
+
+    assert checks["unchanged_push_leaves_the_served_log_probs"]
+    assert checks["control_moved_past_the_bar"]
+    assert not checks["every_forwarded_name_reaches_the_served_model"]
+
+
+def test_leaving_a_pattern_out_of_its_own_round_fails_it(run_row):
+    """The row's negative control: it must read red on a healthy engine."""
+    checks = run_row("sglang", reach=True, reach_leave_out="lm_head.weight")
+
+    assert checks["unchanged_push_leaves_the_served_log_probs"]
+    assert not checks["every_forwarded_name_reaches_the_served_model"]
+
+
+def test_a_zero_tensor_and_a_declared_drop_are_no_reach_rounds():
+    """Scaling zeros moves nothing, as on a release Laguna's bias, and an engine that declares the drop owes no move."""
+    client = SimpleNamespace(DROPPED_BALANCING_BIAS_MODEL_TYPES=frozenset({"laguna"}))
+    forwarded = {
+        "model.layers.N.self_attn.q_proj.weight": True,
+        "model.layers.N.mlp.gate.weight": False,
+        "model.layers.N.mlp.experts.e_score_correction_bias": True,
+        "model.vision_tower.layers.N.attn.weight": True,
+    }
+    assert weight_push_exact._reach_patterns(forwarded, client, {"laguna"}) == [
+        "model.layers.N.self_attn.q_proj.weight"
+    ]
+    assert "model.layers.N.mlp.experts.e_score_correction_bias" in weight_push_exact._reach_patterns(
+        forwarded, client, {"bailing_moe"}
+    )
 
 
 def test_the_control_never_lands_in_a_tower_no_text_row_reaches():

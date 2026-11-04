@@ -310,7 +310,8 @@ def _scored_lengths(server: FakeEngineServer) -> list[int]:
     return [
         len(body["prompt"] if path == "/v1/completions" else body["input_ids"])
         for path, body in server.posted
-        if path in ("/v1/completions", "/generate")
+        # The generation probe ahead of the checks sends a string.
+        if path in ("/v1/completions", "/generate") and not isinstance(body.get("prompt"), str)
     ]
 
 
@@ -332,7 +333,9 @@ def test_prompt_logprob_probe_refuses_an_engine_whose_graph_prefills_are_garbage
     prefill_server.graph_prefill_shift = shift
     prefill_server.graph_capture_tokens = capture_tokens
     with pytest.raises(ValueError, match="speculative decoding") as raised:
-        verify_engine_prompt_logprobs([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
+        verify_engine_prompt_logprobs(
+            [prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY, connection_timeout=5.0
+        )
     assert "Dockerfile.vllm" in str(raised.value) and "isr_engine_reference: false" in str(raised.value)
 
 
@@ -341,7 +344,9 @@ def test_prompt_logprob_probe_accepts_batch_shape_noise(prefill_server, client_c
     """The whole sequence prefills eagerly and each prefix replays a graph, so the gap is the shift alone; each prefix
     position is compared with the same position of the whole."""
     prefill_server.graph_prefill_shift = -0.5
-    verify_engine_prompt_logprobs([prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY)
+    verify_engine_prompt_logprobs(
+        [prefill_server.url], _word_tokenizer, backend=client_cls.BACKEND_KEY, connection_timeout=5.0
+    )
     whole, *prefixes = _scored_lengths(prefill_server)
     assert whole > GRAPH_CAPTURE_TOKENS, "the reference must prefill outside the graph capture range"
     assert prefixes and all(length <= GRAPH_CAPTURE_TOKENS for length in prefixes), prefixes

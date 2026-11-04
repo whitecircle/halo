@@ -12,6 +12,8 @@ from engine_source_patch import Edit, main
 _GLM_GATE_FILES = ("srt/models/glm4_moe.py", "srt/models/glm4_moe_lite.py")
 _GEMMA4_ROUTER_FILE = "srt/models/gemma4_causal.py"
 _PREFILL_RESULT_FILE = "srt/managers/scheduler_components/batch_result_processor.py"
+_FUNCTION_CALL_PARSER_FILE = "srt/function_call/function_call_parser.py"
+_SERVER_INFO_FILE = "srt/utils/common.py"
 
 _GLM_WEIGHT_AFTER = """        self.weight = nn.Parameter(
             torch.empty(
@@ -57,6 +59,15 @@ _PREFILL_SKIP_AFTER = """                if (
                     continue
 """
 
+_GLM47_FULL_ASSISTANT_BEFORE = """        if isinstance(detector, Glm47MoeDetector):
+            detector.use_full_assistant_constraint = not any(
+                tool.function.strict for tool in tools
+            )
+"""
+
+_SERVER_INFO_BEFORE = """    result["launch_command"] = server_args.launch_command
+"""
+
 EDITS = (
     # /update_weights_from_distributed ends in model.load_weights, but the Gemma 4 router folds
     # ``scale`` into its norm weight once, behind a latch: a pushed ``scale`` would never reach routing.
@@ -82,6 +93,19 @@ EDITS = (
     # offset; upstream skips a retracted or mixed-batch-finished request without stepping over its
     # block, so every later request reads a shifted slice (a port of sgl-project/sglang#36939).
     Edit(_PREFILL_RESULT_FILE, _PREFILL_SKIP_BEFORE, _PREFILL_SKIP_AFTER, "prefill result skip"),
+    # The glm47 parser, the one that reads GLM-4.7's calls, puts a grammar over every tool-bearing request at
+    # tool_choice auto. The sampler masks under it and reports the masked log-probs while the trainer scores the
+    # unmasked distribution, so RL is off-policy and a malformed call can never be sampled. Off the detector's
+    # flag, which every parser build re-reads, a tool_choice other than auto keeps its structural tag.
+    Edit(_FUNCTION_CALL_PARSER_FILE, _GLM47_FULL_ASSISTANT_BEFORE, "", "glm47 full-assistant grammar"),
+    # Names this image on /server_info: upstream 0.5.22 takes the same routes, and the trainer refuses it, since it
+    # has none of the edits above.
+    Edit(
+        _SERVER_INFO_FILE,
+        _SERVER_INFO_BEFORE,
+        _SERVER_INFO_BEFORE + '    result["halo_patches"] = True\n',
+        "server_info image identity",
+    ),
 )
 
 

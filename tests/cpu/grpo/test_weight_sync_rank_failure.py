@@ -6,15 +6,21 @@ from __future__ import annotations
 
 import datetime
 import os
+import types
+from typing import ClassVar
 
 import pytest
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
+from halo.distributed.expert_parallel.moe_layer import gather as gather_module
+from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
+from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
+from halo.models.moe.family_specs import MoEFamilySpec
 from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.grpo.rollout.weight_push import _send_ep_expert_weights, sync_weights_to_client
-from tests.common.gloo import run_gloo_ranks
+from tests.common.gloo import new_groups, run_gloo_ranks
 
 WORLD_SIZE = 2
 NUM_PARAMS, ROWS, COLS = 5, 8, 4
@@ -156,7 +162,7 @@ class _CountingForwarder:
     def __init__(self):
         self.sent: list[str] = []
 
-    def send(self, name: str, tensor: torch.Tensor) -> None:
+    def send(self, name: str, tensor: torch.Tensor, *, bounded: bool = True) -> None:
         self.sent.append(name)
 
     def flush(self) -> None:
@@ -199,6 +205,134 @@ def test_a_clean_sync_still_pushes_every_param(tmp_path):
     assert results == {0: "NO RAISE", 1: "NO RAISE"}, f"a clean sync raised: {results}"
     assert counters[0] == (NUM_PARAMS, 1, 0), f"the forwarding rank did not push and flush every param: {counters[0]}"
     assert counters[1] == (0, 0, 0), "a non-forwarding rank talked to the engine"
+
+
+# The real gather: the injected failure is rank 0's Nth receive, the rank holding earlier attributes through it.
+_SEPARATE = MoEFamilySpec(
+    model_types=("rank_failure_separate",),
+    expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, per_expert_keys=("gate_proj", "up_proj", "down_proj")),
+)
+_FUSED = MoEFamilySpec(model_types=("rank_failure_fused",), expert_layout=ExpertLayout(ExpertLayoutKind.FUSED))
+_LAYOUTS = {"separate": _SEPARATE, "fused": _FUSED}
+
+
+class _GatherLayer(EPGatherMixin, nn.Module):
+    has_expert_lora = False
+
+    def __init__(self, spec, ep_group, ep_size, etp_group, etp_size, fill):
+        nn.Module.__init__(self)
+        self.FAMILY = spec
+        self.ep_config = types.SimpleNamespace(dispatch_ep_group=ep_group, ep_size=ep_size)
+        self.expert_tp_group, self.expert_tp_size = etp_group, etp_size
+        self.expert_lora_scaling, self._expert_lora_attrs = 1.0, frozenset()
+        self.gate_proj = nn.Parameter(torch.full((2, 6, 8), float(fill)))
+        self.up_proj = nn.Parameter(torch.full((2, 6, 8), float(fill)))
+        self.down_proj = nn.Parameter(torch.full((2, 8, 6), float(fill)))
+
+    def _base_expert_named_params(self):
+        return [("gate_proj", self.gate_proj), ("up_proj", self.up_proj), ("down_proj", self.down_proj)]
+
+    expert_named_params = _base_expert_named_params
+
+
+def _gather_worker(rank: int, out: str, ep_size: int, etp_size: int, fail_at: int | None, layout: str) -> None:
+    real_gather, real_hub = gather_module.all_gather_cat, gather_module.to_hub_expert_tensors
+    receives = {"count": 0}
+
+    def failing_gather(tensor, dim, group, world_size):
+        if world_size > 1 and rank == 0:
+            receives["count"] += 1
+            if receives["count"] == fail_at:
+                raise torch.cuda.OutOfMemoryError(f"CUDA out of memory: injected at receive {fail_at}")
+        return real_gather(tensor, dim, group, world_size)
+
+    gather_module.all_gather_cat = failing_gather
+    # The sync's destination device; this host has none.
+    gather_module.to_hub_expert_tensors = lambda spec, tensors, *, device: real_hub(spec, tensors, device="cpu")
+    world = ep_size * etp_size
+    etp_ranks = [[r for r in range(world) if r // etp_size == i] for i in range(ep_size)]
+    ep_ranks = [[r for r in range(world) if r % etp_size == i] for i in range(etp_size)]
+    etp_group = new_groups(rank, etp_ranks, PG_TIMEOUT) if etp_size > 1 else None
+    ep_group = new_groups(rank, ep_ranks, PG_TIMEOUT)
+    layers = {
+        f"layers.{i}": _GatherLayer(_LAYOUTS[layout], ep_group, ep_size, etp_group, etp_size, rank + 1)
+        for i in range(3)
+    }
+    guard = DeferredRankFailure("weight-sync push to the rollout engine")
+    try:
+        _send_ep_expert_weights(layers, _CountingForwarder() if rank == 0 else None, guard)
+        guard.reject()
+        result = "NO RAISE"
+    except Exception as exc:
+        result = f"{type(exc).__name__}: {exc}"
+    with open(os.path.join(out, f"result_{rank}.txt"), "w") as fh:
+        fh.write(result)
+
+
+@pytest.mark.parametrize(
+    ("ep_size", "etp_size", "layout", "fail_at"),
+    [
+        (2, 1, "fused", 2),
+        (2, 1, "separate", 2),
+        (2, 1, "separate", 3),
+        (2, 2, "separate", 3),
+        (2, 2, "separate", 4),
+        (2, 2, "fused", 3),
+    ],
+    ids=["ep2-fused", "ep2-separate-up", "ep2-separate-down", "ep2-etp2-etp-stage", "ep2-etp2-ep-stage", "etp2-fused"],
+)
+def test_a_failed_retained_receive_raises_on_every_rank_naming_the_cause(tmp_path, ep_size, etp_size, layout, fail_at):
+    """The forwarding rank alone holds earlier attributes through a receive, so it is the rank that runs out. Moving on
+    one collective short pairs the peers with the wrong tensor, silently where sizes match, until a group timeout with
+    no cause on any peer."""
+    run_gloo_ranks(
+        _gather_worker, ep_size * etp_size, str(tmp_path), ep_size, etp_size, fail_at, layout, pg_timeout=PG_TIMEOUT
+    )
+    for rank in range(ep_size * etp_size):
+        result = (tmp_path / f"result_{rank}.txt").read_text()
+        assert "CUDA out of memory" in result, f"rank {rank}: {result}"
+        assert "rank 0" in result, f"rank {rank} was not told which rank failed: {result}"
+
+
+def test_a_clean_gather_over_the_real_groups_raises_nowhere(tmp_path):
+    run_gloo_ranks(_gather_worker, 4, str(tmp_path), 2, 2, None, "separate", pg_timeout=PG_TIMEOUT)
+    assert {(tmp_path / f"result_{rank}.txt").read_text() for rank in range(4)} == {"NO RAISE"}
+
+
+class _ScriptedGather(EPGatherMixin):
+    EXPERT_TP_SHARD_DIMS: ClassVar[dict[str, int]] = {}
+    expert_tp_group, expert_tp_size = None, 1
+    ep_config = types.SimpleNamespace(dispatch_ep_group=None, ep_size=2)
+
+
+def test_a_failed_receive_drops_what_it_held_and_still_joins_every_collective(monkeypatch):
+    calls = []
+
+    def gather(tensor, dim, group, world_size):
+        calls.append(tensor.shape[0])
+        if len(calls) == 2:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return tensor
+
+    monkeypatch.setattr(gather_module, "all_gather_cat", gather)
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        _ScriptedGather().gather_expert_tensors({"a": torch.zeros(1), "b": torch.zeros(2), "c": torch.zeros(3)})
+    # The failed attempt and its retry for "b", then "c": the group saw each attribute once.
+    assert calls == [1, 2, 2, 3]
+
+
+def test_a_receive_with_nothing_to_drop_raises_at_once(monkeypatch):
+    """That is the footprint every peer has too, so no retry could differ."""
+    calls = []
+
+    def gather(tensor, dim, group, world_size):
+        calls.append(tensor)
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr(gather_module, "all_gather_cat", gather)
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        _ScriptedGather().gather_expert_tensors({"a": torch.zeros(1), "b": torch.zeros(2)})
+    assert len(calls) == 1
 
 
 if __name__ == "__main__":

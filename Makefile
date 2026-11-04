@@ -150,7 +150,7 @@ TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 # The vLLM compose default parses tool calls with hermes, which reads JSON <tool_call> calls only: the
 # gpt-oss pass serves with VLLM_GPTOSS_PARSERS below, and a per-family pass (HALO_TEST_ENV_GRPO_MODEL) with
 # its family's parser from agent-docs/infrastructure/rollout-servers.md. Under a wrong one every tool call
-# stays text, every draw episode scores 0 and the env-GRPO rows fail step_1_rewards_spread_within_a_group.
+# stays text and the env-GRPO rows raise by their second round.
 # SGLang's default parser (auto) reads it off the chat template where it can and otherwise disables it with a log line:
 # gpt-oss, Qwen3.6 and Gemma 4 resolve, the Qwen3 2507 releases serve with SGLANG_TOOL_PARSER=qwen25.
 SERVER_TIER ?= not moe

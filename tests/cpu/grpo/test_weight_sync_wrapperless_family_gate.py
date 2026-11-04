@@ -69,6 +69,35 @@ def test_servable_moe_without_a_live_wrapper_is_refused_with_the_remedy(backend,
     reject_unsyncable_model(_wrapped(StockModel(model_type), layer_cls), backend)
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("model_type", ["qwen2_moe", "mixtral", "glm4_moe", "deepseek_v3", "minimax_m2"])
+def test_a_moe_with_no_family_is_refused(backend, model_type):
+    """Its stock tree forwards experts no engine layout was validated for, and SGLang drops them with a 200."""
+    with pytest.raises(ValueError, match="MoE with no Halo EP family") as refused:
+        reject_unsyncable_model(StockModel(model_type), backend)
+    assert "use_grouped_gemm" not in str(refused.value)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("model_type", ["lfm2_vl", "mistral3"])
+def test_a_dense_tower_under_a_family_spelling_is_refused_without_the_grouped_gemm_remedy(backend, model_type):
+    """``use_grouped_gemm`` installs nothing on a tower with no routed experts."""
+    with pytest.raises(ValueError, match="no routed experts") as refused:
+        reject_unsyncable_model(StockModel(model_type), backend)
+    assert "use_grouped_gemm" not in str(refused.value)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_a_dense_model_with_a_leftover_expert_count_passes(backend):
+    """Doge's dense configs carry a default ``num_experts`` behind ``is_moe: false``."""
+    model = StockModel("doge")
+    assert model.config.is_moe is False and model.config.num_experts > 0
+    reject_unsyncable_model(model, backend)
+    model.config.is_moe = True
+    with pytest.raises(ValueError, match="MoE with no Halo EP family"):
+        reject_unsyncable_model(model, backend)
+
+
 def test_wrapperless_refusal_yields_to_the_sharper_family_and_engine_facts():
     """The loader fact names the remedy (another engine, or none); the wrapper hint would not."""
     with pytest.raises(ValueError, match="does not support weight sync"):

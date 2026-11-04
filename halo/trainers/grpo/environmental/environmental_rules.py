@@ -5,7 +5,14 @@ import logging
 import math
 
 from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.rollout_config import IDENTITY_SAMPLER, SGLANG_BACKEND, VALID_REASONING_EFFORTS
+from halo.environments.rollout_config import (
+    IDENTITY_SAMPLER,
+    REASONING_END_TOKEN_EXAMPLES,
+    SGLANG_BACKEND,
+    VALID_REASONING_EFFORTS,
+    VLLM_BACKEND,
+)
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.training_args_overrides import uses_evaluation
 
@@ -172,6 +179,40 @@ def reject_unneutralized_forced_closes(forced_close_ids: tuple[int, ...] | None,
         )
 
 
+def reject_unresolved_forced_closes(
+    capped: bool, reasoning_end_ids: tuple[int, ...] | None, backend: str, marker: str
+) -> None:
+    """vLLM forces its parser's end string at a thinking cap. A marker that resolves no ids cannot find those closes, so
+    they would train with the episode's advantage, with one warning at startup."""
+    if capped and reasoning_end_ids is None and backend == VLLM_BACKEND:
+        raise ValueError(
+            f"rollout_reasoning_end_token {marker!r} is not a marker this tokenizer writes, and a vLLM thinking cap can "
+            f"bind: the closes the engine forces would stay in the policy loss and teach the model to stop closing "
+            f"its reasoning. Name the end string the server's reasoning parser forces ({REASONING_END_TOKEN_EXAMPLES}), "
+            f"or run with no cap: unset rollout_max_thinking_tokens and rollout_max_answer_tokens, and every level's "
+            f"enforced thinking_tokens."
+        )
+
+
+def reject_open_ended_tool_turns(env, model, tokenizer, stop_token_ids: list[int] | None) -> None:
+    """A family whose tool-call terminator is no eos runs a turn past its call unless a request stops on it: the model
+    writes the tool's result itself and plays the whole episode in one turn, with no call ever executed."""
+    if not env.get_tools_schema() and not env.TOOLS_ARRIVE_ON_RESET:
+        return
+    spec = find_moe_family_spec_for_config(getattr(model, "config", None))
+    terminator = spec.tool_call_terminator if spec is not None else None
+    if terminator is None:
+        return
+    eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    eos = [eos] if isinstance(eos, int) else list(eos or ())
+    if tokenizer.convert_tokens_to_ids(terminator) not in {*eos, *(stop_token_ids or ())}:
+        raise ValueError(
+            f"{spec.model_types[0]} ends a tool call on {terminator!r}, which is no eos of this checkpoint and not in "
+            f"rollout_stop_tokens, so a turn would not stop at its call: the model writes the tool's result itself and "
+            f'plays the episode in one turn. Set rollout_stop_tokens: ["{terminator}"].'
+        )
+
+
 def reject_inert_isr_stages(isr_mask_config, is_correction: bool, skip_update_masked_frac: float | None) -> None:
     if isr_mask_config.any_stage_active and not is_correction:
         raise ValueError(
@@ -222,12 +263,16 @@ def reject_prefetch_past_retry_budget(client_cls, async_config, args) -> None:
     depth, every = async_config.prefetch_depth, async_config.sync_weights_every_n_steps
     round_micro_batches = args.steps_per_generation * args.num_iterations
     syncs = math.ceil(depth * round_micro_batches / (args.gradient_accumulation_steps * every))
+    # An eval pushes off the cadence; at every step's push it takes that step's place and adds none.
+    if every > 1 and args.eval_strategy not in ("no", None):
+        syncs += 1
     if syncs > async_config.max_retries:
         raise ValueError(
             f"Every {client_cls.BACKEND_NAME} weight sync aborts the turns in flight, and at prefetch_depth={depth} a "
             f"prefetched round stays in flight across up to {syncs} syncs (rounds of steps_per_generation × "
             f"num_iterations = {round_micro_batches} micro-batches, gradient_accumulation_steps="
-            f"{args.gradient_accumulation_steps}, sync_weights_every_n_steps={every}): a long turn aborted at each of "
+            f"{args.gradient_accumulation_steps}, sync_weights_every_n_steps={every}, and one for an eval between "
+            f"cadence pushes): a long turn aborted at each of "
             f"them outruns its max_retries={async_config.max_retries} re-issues and fails its episode. Shorten the "
             "span (it grows with prefetch_depth, steps_per_generation and num_iterations, falls as "
             "sync_weights_every_n_steps rises, and is never below 1), raise max_retries to "

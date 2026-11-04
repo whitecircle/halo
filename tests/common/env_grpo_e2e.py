@@ -641,7 +641,7 @@ def run_env_grpo_e2e(
         checks["server_usable_after_sync"] = bool(probe_top_logprobs(server_url, model_name))
         if pool_urls:
             clients = len(getattr(trainer._weight_sync_client, "_clients", ()))
-            checks["pool_drove_one_client_per_server"] = trainer._multi_server_mode and clients == len(pool_urls)
+            checks["pool_drove_one_client_per_server"] = clients == len(pool_urls)
     ctx.barrier()
 
     expert_round(

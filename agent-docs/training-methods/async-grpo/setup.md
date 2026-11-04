@@ -21,12 +21,15 @@ the rendezvous after 120 s on SGLang, 300 s on vLLM.
   ([Sampling](episodes.md#sampling)). `temperature` is force-set to `rollout_temperature`, so log-probs are scored at
   the sampling temperature.
 
-Rank 0 probes each server at startup:
+Rank 0 waits for each server at startup, up to `rollout_connection_timeout`, and raises past it, so a server still
+loading is read rather than passed. Then it probes each one:
 
 - It **raises** when one turn cannot fit the served window: `max_prompt_length` + the environment's measured prompt
   overhead + `rollout_max_tokens`.
 - It warns when the multi-turn worst case does not fit: that prompt budget plus the smaller of
   `max_turns × rollout_max_tokens` and `rollout_max_episode_tokens`.
+- It **raises** on a server off the toolkit's image or launched with a flag the run needs
+  ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)).
 - `verify_backend()` fails the launch on an unreachable external judge.
 
 ## Starting a server
@@ -160,8 +163,9 @@ Point `ray_address` at the cluster head ([Ray Cluster](../../infrastructure/ray.
 inference node its own `rollout_server_configs` entry and `group_port`, plus `group_host` where the trainer's routable
 address differs per server.
 
-- Use resolvable host names. A loopback URL reaches actor nodes with no engine; those episodes error into masked rows,
-  and two consecutive rounds where none survives halt training ([Batch construction](objective.md#batch-construction)).
+- Use resolvable host names. A loopback URL in a run spanning several nodes is refused at startup: it reaches a
+  different engine, or none, per node, and only the forwarding rank's node takes weight pushes. A launch on one node
+  with a `ray_address` head on it keeps its loopback URL.
 - `num_rollout_workers` actors are created per training rank, soft-pinned to its node; on a shared cluster the budget
   divides by world size ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - The trainer's NCCL address must be routable from the serving nodes: it defaults to the trainer's address on the route

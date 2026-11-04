@@ -93,6 +93,27 @@ def test_vllm_compose_turns_strict_tool_calling_off_by_default():
     assert env.get("VLLM_ENFORCE_STRICT_TOOL_CALLING") == "${VLLM_ENFORCE_STRICT_TOOL_CALLING:-0}", env
 
 
+def test_the_vllm_image_turns_strict_tool_calling_off_for_a_hand_run_server():
+    """vLLM defaults it on, and the documented ``docker run`` recipe passes no env: the GLM parsers would then sample
+    under a grammar the trainer's log-probs never see."""
+    dockerfile = (REPO_ROOT / "Dockerfile.vllm").read_text(encoding="utf-8")
+    assert re.search(r"^ENV VLLM_ENFORCE_STRICT_TOOL_CALLING=0$", dockerfile, re.MULTILINE)
+    assert "check_tool_calling_grammar_off" in (REPO_ROOT / "docker/vllm/verify_image.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("compose_path", "service", "prefix"),
+    [(VLLM_COMPOSE, "vllm-server", "VLLM"), (SGLANG_COMPOSE, "sglang-server", "SGLANG")],
+    ids=["vllm", "sglang"],
+)
+def test_each_compose_takes_remote_code_and_further_flags(compose_path, service, prefix):
+    """Ling 2.0 and Step-3.7 need the first and a server path differing from the trainer's id ``--served-model-name``.
+    With no slot compose cannot serve them, and a hand-run server restates every load-bearing flag or loses it."""
+    command = _server_command(compose_path, service)
+    assert f"${{{prefix}_TRUST_REMOTE_CODE:+--trust-remote-code}}" in command
+    assert command.rstrip().endswith(f"${{{prefix}_EXTRA_ARGS:-}}"), "extra flags must come last, to win a repeat"
+
+
 def test_vllm_compose_passes_the_model_runner_through_bare():
     """An empty value kills the server at startup (int() parse), and a default of 0 would force the V1
     runner, which R3 refuses and on which thinking budgets misfire; bare, the image's pin holds."""
@@ -170,6 +191,17 @@ def test_a_host_path_the_compose_file_mounts_has_no_fallback(compose_path, varia
         f"{compose_path.name} defaults {variable}: {operators}"
     )
     assert any(op.startswith(":?") for op in operators), f"{compose_path.name} never requires {variable}"
+
+
+@pytest.mark.parametrize(
+    ("compose_path", "service"),
+    [(VLLM_COMPOSE, "vllm-server"), (SGLANG_COMPOSE, "sglang-server")],
+    ids=["vllm", "sglang"],
+)
+def test_each_server_sees_the_chat_templates_the_recipes_pin(compose_path, service):
+    """The recipe headers name /jinja-templates/..., and neither image holds a template of its own."""
+    assert "./jinja-templates:/jinja-templates:ro" in _services(compose_path)[service]["volumes"]
+    assert (REPO_ROOT / "jinja-templates").is_dir()
 
 
 def test_the_compose_command_carries_no_yaml_comment_lines():

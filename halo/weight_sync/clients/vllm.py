@@ -11,9 +11,11 @@ import torch
 
 from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
+    GENERATION_PROBE_TIMEOUT_S,
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
+    ServerFlags,
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
@@ -29,10 +31,15 @@ from halo.weight_sync.transport.rendezvous import RendezvousListener
 
 logger = logging.getLogger(__name__)
 
-# A merely busy scheduler still answers a 1-token probe in time; a wedged one is reported, not waited out.
-_GENERATION_PROBE_TIMEOUT_S = 60.0
 # The oldest wire this client speaks; the packed geometry rides /init_weight_transfer_engine, never an update.
 _MIN_SERVER_VERSION = (0, 32, 0)
+# The route's first call collects the host's environment, once.
+_SERVER_INFO_TIMEOUT_S = 60.0
+# docker/vllm/patches/vllm_image_identity_patch.py declares it; a test pins the two together.
+_IDENTITY_KEY = "VLLM_HALO_PATCHES"
+# Listed on /server_info as the server reads it; this client never reads its own environment for it.
+_STRICT_TOOL_CALLING_KEY = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
+_TOKEN_ID_PREFIX = "token_id:"
 
 
 class VLLMWeightSyncClient(WeightSyncClientBase):
@@ -48,6 +55,13 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     RESUME_ENDPOINT = "/resume"
     SESSION_OPEN_ENDPOINT = "/start_weight_update"
     SESSION_CLOSE_ENDPOINT = "/finish_weight_update"
+    IMAGE_REMEDY = (
+        "Serve from the toolkit's vLLM image (make build-vllm), and keep its PYTHONPATH, which loads the patches."
+    )
+    MOE_BACKEND_FLAG = "--moe-backend triton (VLLM_MOE_BACKEND)"
+    REASONING_PARSER_FLAG = "--reasoning-parser (VLLM_REASONING_PARSER)"
+    TOOL_PARSER_FLAG = "--enable-auto-tool-choice --tool-call-parser (VLLM_TOOL_PARSER)"
+    CHAT_TEMPLATE_FLAG = "--chat-template (VLLM_CHAT_TEMPLATE)"
     UNSERVABLE_MODEL_TYPES = {
         "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (
@@ -81,10 +95,74 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         "NCCL_SOCKET_IFNAME for the data plane on multi-homed hosts)."
     )
 
+    def read_server_flags(self) -> ServerFlags:
+        info = self.request(
+            "GET", "/server_info", retry=False, timeout=_SERVER_INFO_TIMEOUT_S, params={"config_format": "json"}
+        ).json()
+        env, config = info.get("vllm_env", {}), info.get("vllm_config")
+        config = config if isinstance(config, dict) else {}
+        return ServerFlags(
+            toolkit_image=bool(env.get(_IDENTITY_KEY)),
+            moe_backend=config.get("kernel_config", {}).get("moe_backend"),
+            reasoning_parser=config.get("structured_outputs_config", {}).get("reasoning_parser"),
+            strict_tool_calling=env.get(_STRICT_TOOL_CALLING_KEY),
+            captures_routing=config.get("aux_output_config", {}).get("enable_return_routed_experts"),
+        )
+
+    def reports_sampled_token_ids(self) -> bool | None:
+        """``--return-tokens-as-token-ids`` shows on no reply field but the logprobs themselves."""
+        reply = self.request(
+            "POST",
+            "/v1/chat/completions",
+            retry=True,
+            timeout=GENERATION_PROBE_TIMEOUT_S,
+            json={
+                "model": self.served_model_id(),
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "logprobs": True,
+            },
+        ).json()
+        return reply["choices"][0]["logprobs"]["content"][0]["token"].startswith(_TOKEN_ID_PREFIX)
+
+    def accepts_tool_requests(self) -> bool | None:
+        """Without a parser the renderer answers a tool-bearing request with a 400 naming it; ``tools`` needs no
+        ``tool_choice``, which defaults to ``auto`` as on every rollout. Any other 400 is another fault's."""
+        reply = self.request(
+            "POST",
+            "/v1/chat/completions",
+            retry=True,
+            timeout=GENERATION_PROBE_TIMEOUT_S,
+            check=False,
+            json={
+                "model": self.served_model_id(),
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "probe",
+                            "description": "Probe.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            },
+        )
+        return not (reply.status_code == 400 and "--tool-call-parser" in reply.text)
+
     def _fetch_engine_world_size(self) -> int:
-        # An engine off this wire, paused or generation-wedged is reported before the group forms.
+        # An engine off this wire, off this image, paused or generation-wedged is reported before the group forms.
         self._check_server_version()
-        self._probe_generation()
+        try:
+            flags = self.read_server_flags()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            # As in the preflights, a report that cannot be read refuses nothing.
+            logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
+        else:
+            self._require_toolkit_image(flags)
+        self.probe_generation()
         return self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()["world_size"]
 
     def _request_engine_join(self, master_address: str, port: int, world_size: int) -> AsyncCall:
@@ -203,47 +281,13 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                 f"/init_weight_transfer_engine. Serve from the toolkit's vLLM image (make build-vllm)."
             )
 
-    def _probe_generation(self):
-        """Fail fast when ``/health`` is up but generation is wedged. A paused engine would queue the 1-token probe,
-        so the pause is asked first."""
+    def _read_paused(self) -> bool:
         try:
             resp = self.request("GET", "/is_paused", retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False)
-            paused = resp.status_code == 200 and bool(resp.json()["is_paused"])
+            return resp.status_code == 200 and bool(resp.json()["is_paused"])
         except (requests.exceptions.RequestException, ValueError, KeyError) as e:
             logger.debug(f"Could not read pause state from {self.base_url}: {e}")
-            paused = False
-        if paused:
-            raise RuntimeError(
-                f"vLLM server {self.base_url} is PAUSED for a weight update (GET /is_paused) — generation "
-                f"requests would queue instead of running. A trainer died mid weight sync without lifting "
-                f"its /pause. Lift it (POST {self.base_url}{self.RESUME_ENDPOINT}) before reconnecting — unless that "
-                f"sync had already streamed part of the model, in which case the server holds a partly "
-                f"written model and has to be RESTARTED instead (its log names the last update)."
-            )
-        try:
-            model_id = self.served_model_id()
-        except Exception as e:
-            logger.warning(f"Generation probe: could not resolve served model ({e}); skipping probe")
-            return
-        try:
-            self.request(
-                "POST",
-                "/v1/completions",
-                retry=False,
-                timeout=_GENERATION_PROBE_TIMEOUT_S,
-                check=False,
-                json={"model": model_id, "prompt": "ping", "max_tokens": 1, "temperature": 0.0},
-            )
-        except requests.exceptions.Timeout as e:
-            raise RuntimeError(
-                f"vLLM server {self.base_url} answers /health but GENERATION is wedged (no response "
-                f"in {_GENERATION_PROBE_TIMEOUT_S:.0f}s to a 1-token probe). A previous trainer most "
-                f"likely died mid-run while attached to the weight-transfer engine (SIGKILL skips cleanup), leaving the "
-                f"server's scheduler stuck. RESTART the vLLM server container to recover."
-            ) from e
-        except requests.exceptions.RequestException as e:
-            # For example raw /v1/completions disabled.
-            logger.warning(f"Generation probe: server responded with an error (not wedged): {e}")
+            return False
 
     def _require_communicator(self) -> PyNcclCommunicator:
         if self._transport is None:

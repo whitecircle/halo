@@ -230,7 +230,7 @@ async def run_episode(
         partial(_request_turn, client, env),
         rollout,
         log_prefix="eval episode",
-        keep_lost_episode=True,
+        keep_lost=lambda exc: True,
     )
     traj, lost = played.trajectory, played.lost_turn
     # A request the episode's own length broke (the served context, ``request_timeout`` on every client retry)

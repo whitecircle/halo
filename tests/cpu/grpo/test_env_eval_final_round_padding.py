@@ -97,6 +97,7 @@ class _EvalRound:
     """The real round entry; records the rows rolled out and what the batch build and rollout metrics were handed."""
 
     _collect_and_score_rollouts = _Trainer._collect_and_score_rollouts
+    _tool_call_watch = None
     _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _Trainer._extract_prompts_and_contexts
 

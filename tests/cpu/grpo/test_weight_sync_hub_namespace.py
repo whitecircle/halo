@@ -4,20 +4,26 @@ silently drops every name it does not map. The oracle is transformers' own ``sav
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import torch
 import torch.nn as nn
+from accelerate import init_empty_weights
 from peft import LoraConfig, get_peft_model
 from transformers.core_model_loading import revert_weight_conversion
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.models.param_roles import persistent_buffers
+from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.grpo.rollout import weight_push
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
+from tests.common.repo import REPO_ROOT
 
 _SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
 _NUM_EXPERTS = TINY_STEP3P7_CONFIG["n_routed_experts"]
@@ -124,13 +130,56 @@ def test_peft_sync_forwards_base_names_in_the_hub_namespace(on_disk):
     _assert_sync_equals_checkpoint(sent, on_disk, model.get_base_model())
 
 
-def test_the_held_converter_tensors_are_bounded_on_the_forwarding_rank(monkeypatch):
-    """A tensor a many-to-one reverse converter claims is held until its sources are complete, on the forwarding rank's
-    GPU. A converter claiming a per-decoder-layer tensor would hold a whole stack there, unseen until the host OOMs."""
+def test_the_dense_tensors_a_converter_holds_are_bounded_on_the_forwarding_rank(monkeypatch):
+    """A dense tensor a many-to-one reverse converter claims is held until its sources are complete, on the forwarding
+    rank's GPU, as a copy nothing else keeps. A converter claiming a per-decoder-layer tensor would hold a whole stack
+    there, unseen until the host OOMs."""
     monkeypatch.setattr(weight_push, "WEIGHT_SYNC_CHUNK_BYTES", 512)
 
-    with pytest.raises(RuntimeError, match="reverse WeightConverter"):
+    with pytest.raises(RuntimeError, match="reverse WeightConverter") as refused:
         _sync(_ep_wrapped(_tiny_step3p7()))
+    assert "vision" in str(refused.value), "the bound fired on something other than the vision q/k/v it guards"
+
+
+def test_the_expert_stacks_stay_outside_the_held_bound(monkeypatch):
+    """The gather already holds them and each layer flushes, so a bound at any size must reach the expert stacks whole.
+    Only the vision q/k/v that follow may raise, which shows the bound is still armed."""
+    monkeypatch.setattr(weight_push, "WEIGHT_SYNC_CHUNK_BYTES", 1)
+    sender = _RecordingSender()
+    with pytest.raises(RuntimeError, match="vision"):
+        gather_and_send_weights(_ep_wrapped(_tiny_step3p7()), sender)
+    for i in _SPARSE_LAYERS:
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            assert f"model.layers.{i}.moe.{proj}.weight" in sender.sent
+
+
+def test_the_release_shape_goes_through_the_expert_path():
+    """288 experts × 1280 × 4096 is a 5.6 GiB fused bank per layer: the first push of the real checkpoint raised on the
+    first expert layer on every rank, past the 198B load. Meta tensors of the real shapes, the real forwarder."""
+    raw = json.loads((REPO_ROOT / "docker/vllm/parity/fixtures/step3p7/config.json").read_text())
+    config = Step3p7Config(**{k: v for k, v in raw.items() if k not in ("architectures", "auto_map", "model_type")})
+    with init_empty_weights():
+        model = Step3p7ForConditionalGeneration(config).to(torch.bfloat16)
+    text = config.text_config
+    sparse = [i for i, kind in enumerate(text.mlp_layer_types) if kind == "sparse"]
+    for i in sparse:
+        layer = model.model.language_model.layers[i]
+        layer.mlp = _ep_stub(layer.mlp)
+    ep_layers = dict(named_ep_layers(model))
+    guard = DeferredRankFailure("release-shape push")
+    sender = _RecordingSender()
+    forwarder = weight_push._HubForwarder(sender, model, ep_layers, None, guard)
+    weight_push._send_ep_expert_weights(ep_layers, forwarder, guard)
+
+    assert guard.reason is None, guard.reason
+    assert next(iter(ep_layers.values())).gate_up_proj.nbytes > weight_push.WEIGHT_SYNC_CHUNK_BYTES
+    for i in sparse:
+        for proj, shape in (
+            ("gate_proj", (text.moe_num_experts, text.moe_intermediate_size, text.hidden_size)),
+            ("up_proj", (text.moe_num_experts, text.moe_intermediate_size, text.hidden_size)),
+            ("down_proj", (text.moe_num_experts, text.hidden_size, text.moe_intermediate_size)),
+        ):
+            assert sender.sent[f"model.layers.{i}.moe.{proj}.weight"].shape == shape
 
 
 def test_hub_layouts_not_module_layouts():

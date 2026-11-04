@@ -219,6 +219,12 @@ def test_every_engine_runs_the_push_exactness_rows_of_every_family_it_takes():
         (parse_push_exact_row(shlex.split(args)), spec.markers) for args, spec in MANIFEST[PUSH_EXACT_SUITE].launches()
     ]
     assert {row.family for row, _ in rows} == set(PUSH_EXACT_CHECKPOINTS)
+    # A real step's bar is gross on these two, so the name-by-name rounds are what catch a dropped name.
+    assert {(row.family, row.backend) for row, _ in rows if row.reach} == {
+        ("laguna", "vllm"),
+        ("gemma4_text", "vllm"),
+        ("gemma4_text", "sglang"),
+    }
     registry = ep_layer_class_by_model_type()
     for backend in rollout_backends():
         refused = resolve_weight_sync_client(backend).UNSERVABLE_MODEL_TYPES

@@ -75,6 +75,9 @@ class MoEFamilySpec:
     supports_fp32_non_ep_params: bool = True
     supports_routing_replay: bool = True
     supports_gradient_checkpointing: bool = True
+    # The special token that ends a rendered tool call, declared where it is no eos of the family's own
+    # ``generation_config``, so a served turn runs past the call unless a request stops on it.
+    tool_call_terminator: str | None = None
     # Why no online weight sync into the family's served model is validated.
     weight_sync_refusal: str | None = None
     # vLLM's reload rebuilds a module that received part of its tensors from uninitialized storage
@@ -165,6 +168,7 @@ GLM5_NEXT = MoEFamilySpec(
 )
 GPT_OSS = MoEFamilySpec(
     model_types=("gpt_oss",),
+    tool_call_terminator="<|call|>",
     dense_packing_leaks=True,
     expert_layout=ExpertLayout(ExpertLayoutKind.INTERLEAVED_GLU),
     # The router's own logit-space bias, which vLLM and SGLang both load and route with.

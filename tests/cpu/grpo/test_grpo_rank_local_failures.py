@@ -26,16 +26,18 @@ class _Manager:
 
     max_concurrent = 4
 
-    def __init__(self, fail_start: bool):
+    def __init__(self, fail_start: bool, fail_loopback: bool = False):
         self._fail_start = fail_start
+        self._fail_loopback = fail_loopback
         self.credited: list[float] = []
 
     async def start(self):
         if self._fail_start:
             raise RuntimeError("no node can place the rollout actors")
 
-    def warn_if_servers_unreachable_from_actors(self, multinode: bool) -> None:
-        pass
+    def reject_loopback_servers(self, num_nodes: int) -> None:
+        if self._fail_loopback:
+            raise ValueError("a loopback URL in a run spanning several nodes")
 
     def begin_engine_pause(self) -> None:
         pass
@@ -64,6 +66,7 @@ class _Host(AsyncRolloutMixin):
     def __init__(self, rank: int, fail_client: bool = False):
         self._fail_client = fail_client
         self.accelerator = types.SimpleNamespace(is_main_process=rank == 0, num_processes=WORLD_SIZE)
+        self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: rank)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
             num_rollout_workers=1,
@@ -110,7 +113,9 @@ def _record(tmp_dir: str, rank: int, step) -> None:
 def _start_worker(rank: int, tmp_dir: str, failure: str, failing_rank: int) -> None:
     failing = rank == failing_rank
     async_mod.ray = types.SimpleNamespace(is_initialized=lambda: True)
-    async_mod.RolloutManager = lambda **kwargs: _Manager(fail_start=failing and failure == "actors")
+    async_mod.RolloutManager = lambda **kwargs: _Manager(
+        fail_start=failing and failure == "actors", fail_loopback=failing and failure == "loopback"
+    )
     async_mod.resolve_weight_sync_client = lambda backend: _scorer_cls(failing and failure == "rescore_client")
     _record(tmp_dir, rank, _Host(rank, fail_client=failing and failure == "sync_client")._init_async_components)
 
@@ -181,6 +186,7 @@ def _assert_raised_everywhere(results: dict[int, str], cause: str, failing_rank:
     [
         ("rescore_client", "unreachable from this node", FAILING_RANK),
         ("actors", "no node can place the rollout actors", FAILING_RANK),
+        ("loopback", "a loopback URL in a run spanning several nodes", FAILING_RANK),
         ("sync_client", "the NCCL group to the engine did not form", 0),
     ],
 )

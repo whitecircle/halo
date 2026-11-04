@@ -16,6 +16,8 @@ from importlib.metadata import requires, version
 from unittest.mock import AsyncMock, MagicMock
 
 import vllm
+import vllm.envs as envs
+import vllm_image_identity_patch as identity_patch
 import vllm_layerwise_reload_patch as layerwise_patch
 import vllm_reasoning_forced_end_patch as forced_end_patch
 import vllm_thinking_budget_completion_patch as completion_patch
@@ -32,11 +34,13 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.rl.online.api_router import pause_generation, router
+from vllm.entrypoints.serve.dev.server_info.api_router import _get_vllm_env_vars
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.model_loader.reload import layerwise
 from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS, SKIP_TENSORS
 from vllm.model_executor.models.gemma4 import Gemma4Router
 from vllm.model_executor.models.gpt_oss import OAIAttention
+from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
@@ -173,6 +177,25 @@ def check_serve_flags() -> None:
     print("serve flags: OK")
 
 
+def check_image_identity() -> None:
+    """``/server_info`` names the patches, on the route the trainer reads, or it refuses this image as upstream."""
+    listed = _get_vllm_env_vars().get(identity_patch.IDENTITY_KEY, "")
+    assert "vllm_layerwise_reload_patch" in listed.split(","), f"/server_info lists {listed!r} as the image's patches"
+    print(f"image identity on /server_info: OK ({listed})")
+
+
+def check_tool_calling_grammar_off() -> None:
+    """Under the image's env no parser takes a grammar at tool_choice auto, however a server is launched: the glm47
+    parser, whose default strict level would, reads the same flag."""
+    assert envs.VLLM_ENFORCE_STRICT_TOOL_CALLING is False, "the image no longer turns strict tool calling off"
+    glm47 = ToolParserManager.get_tool_parser("glm47")
+    assert glm47.default_tool_strict_level is not None, "glm47 lost the default strict level this flag guards"
+    assert "VLLM_ENFORCE_STRICT_TOOL_CALLING" in inspect.getsource(ToolParser), (
+        "the tool parser base no longer reads VLLM_ENFORCE_STRICT_TOOL_CALLING"
+    )
+    print("strict tool calling off: OK")
+
+
 def check_pause_keep_clears_cache() -> None:
     """The client pauses with ``mode=keep`` (in-flight requests survive the sync) and leaves
     ``clear_cache`` at its default, so the pause resets the prefix cache and recomputes every in-flight
@@ -230,6 +253,8 @@ CHECKS = (
     check_weight_transfer_wire_contract,
     check_thinking_budget_patches,
     check_serve_flags,
+    check_image_identity,
+    check_tool_calling_grammar_off,
     check_pause_keep_clears_cache,
 )
 

@@ -112,6 +112,25 @@ PREFILL_LOOP = """                if (
                     req.time_stats.set_prefill_finished_time()
 """
 
+# sglang 0.5.22 srt/function_call/function_call_parser.py, the tail of FunctionCallParser.__init__.
+FUNCTION_CALL_PARSER_INIT = """            detector = detector_class(**kwargs)
+        else:
+            raise ValueError(f"Unsupported tool_call_parser: {tool_call_parser}")
+
+        if isinstance(detector, Glm47MoeDetector):
+            detector.use_full_assistant_constraint = not any(
+                tool.function.strict for tool in tools
+            )
+        if isinstance(tool_choice, dict):
+            tool_choice = ToolChoice(function={"name": tool_choice["name"]})
+"""
+
+# sglang 0.5.22 srt/utils/common.py, build_server_info.
+BUILD_SERVER_INFO = """    result = server_args.resolved_dict()
+    result["launch_command"] = server_args.launch_command
+    result.update(scheduler_info)
+"""
+
 
 def _patched(text, path):
     for edit in patches.EDITS:
@@ -149,6 +168,23 @@ def test_the_prefill_skip_steps_over_the_skipped_requests_log_probs():
     _verify(patched, patches._PREFILL_RESULT_FILE)
 
 
+def test_the_glm47_parser_builds_no_full_assistant_grammar():
+    """The grammar masks the sampler the trainer's log-probs never see; off the flag, the detector's default holds."""
+    patched = _patched(FUNCTION_CALL_PARSER_INIT, patches._FUNCTION_CALL_PARSER_FILE)
+    assert "use_full_assistant_constraint" not in patched
+    assert "raise ValueError" in patched and "if isinstance(tool_choice, dict):" in patched
+    _verify(patched, patches._FUNCTION_CALL_PARSER_FILE)
+
+
+def test_server_info_names_the_image_for_the_trainer_to_read():
+    """The client refuses a server without this key, as upstream takes the same routes with none of these edits."""
+    patched = _patched(BUILD_SERVER_INFO, patches._SERVER_INFO_FILE)
+    assert 'result["halo_patches"] = True' in patched
+    _verify(patched, patches._SERVER_INFO_FILE)
+    with pytest.raises(SystemExit, match="server_info image identity: the post-image is not in place"):
+        _verify(BUILD_SERVER_INFO, patches._SERVER_INFO_FILE)
+
+
 def test_verify_refuses_a_gate_whose_weight_is_in_the_default_dtype():
     """A gate reading its weight live but not holding it in fp32: ``F.linear`` would mix dtypes."""
     default_dtype = GLM_GATE.replace(patches._GLM_WEIGHT_AFTER, _GLM_WEIGHT_DEFAULT_DTYPE)
@@ -175,6 +211,8 @@ def test_verify_refuses_the_unpatched_files():
         _verify(GEMMA4_ROUTER, patches._GEMMA4_ROUTER_FILE)
     with pytest.raises(SystemExit, match="prefill result skip: the post-image is not in place"):
         _verify(PREFILL_LOOP, patches._PREFILL_RESULT_FILE)
+    with pytest.raises(SystemExit, match="glm47 full-assistant grammar: the post-image is not in place"):
+        _verify(FUNCTION_CALL_PARSER_INIT, patches._FUNCTION_CALL_PARSER_FILE)
 
 
 if __name__ == "__main__":

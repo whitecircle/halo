@@ -21,6 +21,7 @@ def _teardown_probe(client, monkeypatch) -> list[tuple[str, object]]:
         lambda group, *, destroy: calls.append(("destroy" if destroy else "drop", group)),
     )
     monkeypatch.setattr(client, "_destroy_remote_group", lambda: calls.append(("remote", None)))
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
     return calls
 
 
@@ -57,6 +58,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
     """The local destroy blocks until the engine drops its half, so the engine must already have been asked by then."""
     client = offline_client(SGLangWeightSyncClient)
     client._transport = (object(), None)
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
     remote_started = threading.Event()
     monkeypatch.setattr(client, "_destroy_remote_group", remote_started.set)
     seen_during_destroy: list[bool] = []
@@ -72,6 +74,67 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
         "the engine-side /destroy_weights_update_group did not start while the local destroy ran — "
         "under cuMem transports that order parks destroy_process_group forever"
     )
+
+
+def _aborts(monkeypatch) -> list[object]:
+    aborted: list[object] = []
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", aborted.append)
+    return aborted
+
+
+def test_a_dead_engine_is_aborted_not_destroyed(monkeypatch):
+    """A destroy waits for an engine that will never enter its half, so the failure already recorded never raises and
+    the job sits until something external kills it."""
+    client = offline_client(SGLangWeightSyncClient)
+    group = object()
+    client._transport = (group, None)
+    calls = _teardown_probe(client, monkeypatch)
+    aborted = _aborts(monkeypatch)
+    monkeypatch.setattr(client, "_engine_answers", lambda: False)
+
+    client.close_communicator()
+
+    assert aborted == [group]
+    assert all(kind != "destroy" for kind, _ in calls), "close entered the destroy with no engine to answer it"
+    assert ("drop", group) in calls
+
+
+def test_a_destroy_blocked_past_its_deadline_is_aborted(monkeypatch):
+    """A wedged engine answers its health route and never enters the destroy."""
+    client = offline_client(SGLangWeightSyncClient)
+    group = object()
+    client._transport = (group, None)
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
+    monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    aborted = _aborts(monkeypatch)
+    released = threading.Event()
+    monkeypatch.setattr(sglang_module, "release_weight_update_group", lambda group, *, destroy: released.wait(20))
+
+    finished = threading.Event()
+    thread = threading.Thread(target=lambda: (client.close_communicator(), finished.set()), daemon=True)
+    thread.start()
+    try:
+        assert finished.wait(10), "the close stayed parked with the destroy"
+    finally:
+        released.set()
+    assert aborted == [group]
+
+
+def test_a_destroy_that_returns_is_not_aborted(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    _teardown_probe(client, monkeypatch)
+    aborted = _aborts(monkeypatch)
+
+    client.close_communicator()
+
+    assert aborted == []
+
+
+def test_an_unreachable_engine_reads_as_not_answering(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:9")
+    assert client._engine_answers() is False
 
 
 def test_an_aborted_group_is_dropped_not_destroyed(monkeypatch):

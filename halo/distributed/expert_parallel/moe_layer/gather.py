@@ -41,16 +41,34 @@ class EPGatherMixin:
 
     def gather_expert_tensors(self, local: Mapping[str, torch.Tensor], *, retain: bool = True) -> dict:
         """COLLECTIVE over the expert-TP and dispatch-EP groups. ``local`` (this rank's tensors by runtime attribute,
-        matmul convention) with every expert and expert-TP shard, in ``local``'s order; ``{}`` without ``retain``."""
+        matmul convention) with every expert and expert-TP shard, in ``local``'s order; ``{}`` without ``retain``.
+
+        Only a retaining rank holds earlier attributes through a later receive, so it is the rank that runs out. It
+        drops them and joins the collective anyway, raising past the last one, so its peers never pair with the wrong
+        tensor. With nothing to drop the failure is the peers' own footprint and raises at once, which they wait out
+        until the NCCL watchdog fires, as for any rank that fails to allocate its receive."""
         gathered = {}
+        failure: torch.cuda.OutOfMemoryError | None = None
+
+        def in_step(tensor: torch.Tensor, dim: int, group, world_size: int) -> torch.Tensor:
+            nonlocal failure
+            try:
+                return all_gather_cat(tensor, dim, group, world_size)
+            except torch.cuda.OutOfMemoryError as oom:
+                if not gathered:
+                    raise
+                failure = failure or oom
+                gathered.clear()
+                return all_gather_cat(tensor, dim, group, world_size)
+
         for attr, tensor in local.items():
             if attr in self.EXPERT_TP_SHARD_DIMS:
-                tensor = all_gather_cat(
-                    tensor, self.EXPERT_TP_SHARD_DIMS[attr], self.expert_tp_group, self.expert_tp_size
-                )
-            tensor = all_gather_cat(tensor, 0, self.ep_config.dispatch_ep_group, self.ep_config.ep_size)
-            if retain:
+                tensor = in_step(tensor, self.EXPERT_TP_SHARD_DIMS[attr], self.expert_tp_group, self.expert_tp_size)
+            tensor = in_step(tensor, 0, self.ep_config.dispatch_ep_group, self.ep_config.ep_size)
+            if retain and failure is None:
                 gathered[attr] = tensor
+        if failure is not None:
+            raise failure
         return gathered
 
     def gather_expert_state_dict(
