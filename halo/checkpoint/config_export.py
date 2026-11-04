@@ -10,6 +10,7 @@ import tempfile
 from collections.abc import Iterator
 
 from transformers.dynamic_module_utils import custom_object_save, get_relative_imports
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from transformers.tokenization_utils_base import TOKENIZER_CONFIG_FILE
 from transformers.utils import CONFIG_NAME, cached_file
 
@@ -60,8 +61,16 @@ def restore_model_type(config, output_dir: str) -> None:
     write_config_json(output_dir, payload)
 
 
-def _source_config_payload(source: str) -> dict | None:
-    """The source's ``config.json`` if servable, else None with a warning (unreadable, or no ``auto_map``)."""
+def _read_without_remote_code(config, payload: dict) -> bool:
+    """Whether a source naming no modules still has a schema to hand on: one of transformers' own causal classes, which
+    stock ``from_pretrained`` and vLLM read through that class and SGLang through its own. A composite reaches the
+    engines only through the modules it names."""
+    return payload.get("model_type") == config.model_type and config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+
+
+def _source_config_payload(source: str, config) -> dict | None:
+    """The source's ``config.json`` if servable, else None with a warning (unreadable, or an ``auto_map`` its class
+    needs and lacks)."""
     try:
         config_file = cached_file(source, CONFIG_NAME)
         with open(str(config_file), encoding="utf-8") as handle:
@@ -73,7 +82,7 @@ def _source_config_payload(source: str) -> dict | None:
             f"which the pinned rollout servers cannot parse for this family."
         )
         return None
-    if not payload.get("auto_map"):
+    if not payload.get("auto_map") and not _read_without_remote_code(config, payload):
         logger.warning(
             f"export_source_config_schema: source {source!r} declares no auto_map, so it carries no "
             f"servable schema to hand on — the export keeps transformers' native one, which the "
@@ -197,7 +206,7 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
             "cannot parse for this family. Export from a checkpoint loaded off the release."
         )
         return
-    payload = _source_config_payload(source)
+    payload = _source_config_payload(source, config)
     if payload is None:
         return
     source_type = payload.get("model_type")
@@ -222,7 +231,7 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
             f"source checkpoint's own config.json and re-export."
         )
     write_config_json(output_dir, payload)
-    _copy_auto_map_modules(source, payload["auto_map"], output_dir)
+    _copy_auto_map_modules(source, payload.get("auto_map", {}), output_dir)
 
 
 def drop_unshipped_auto_map(output_dir: str) -> None:

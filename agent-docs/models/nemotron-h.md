@@ -2,6 +2,8 @@
 
 `model_type` `nemotron_h_omni` (`NemotronH_Omni_Reasoning_V3`, the release `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) wrapping the text tower `nemotron_h` (`NemotronHForCausalLM`), both native in transformers 5.20. The text tower holds 120.7B parameters, 112.7B of them routed experts, beside a 0.84B vision tower and connector and a 2.9B multi-token head (`mtp.*`) no class builds. It has 88 layers: 40 Mamba-2, 40 MoE and 8 attention. A MoE layer routes 512 gateless experts at top-22 beside one shared expert, on a 1024-wide latent it projects into from hidden 4096 and back. The vision tower is C-RADIO: 32 layers, 16 heads at head_dim 80.
 
+Nemotron 3.5 Lightning (`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`) is that text class alone, with no composite around it and no latent ([Lightning](#lightning)). Everywhere else on this page, "the release" means Super VL.
+
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
 ## Status
@@ -20,6 +22,29 @@ What these rows leave:
 - **Length of run:** 5 to 20 steps each. No run has trained the release to a quality metric, so a step's loss is all they say about training.
 - **Serving:** both engines have served an export, an untrained reattached one: vLLM on one image prompt and one text prompt, SGLang on one image prompt ([Checkpoints and serving](#checkpoints-and-serving)).
 - **Other axes:** mixed image and text rows, pipeline parallelism, pure ETP and EP+ETP have run on tiny models only.
+
+## Lightning
+
+The release is `NemotronHForCausalLM` itself: `model_type` `nemotron_h`, no vision tower and no `auto_map`, stored plain bf16 with its router bias in fp32. The tower holds 31.6B parameters, 29.4B of them routed experts, beside a 1.3B multi-token head (`mtp.*`) no class builds. It has 52 layers: 23 Mamba-2, 23 MoE and 6 attention. A MoE layer routes 128 gateless experts at top-6 beside one shared expert with no latent, so the experts and the wire run at hidden 2688, which DeepEP pads to 2816. `ep8` holds 16 experts per rank.
+
+The family's layers, balancing and refused modes below apply, and these differ:
+
+- **Load:** natively, with its keys at the root and no `text_only_model` to set. Upstream's ignore list drops the 270 `mtp.*` keys. On a tiny copy of the layout, each rank's lazy load holds what `from_pretrained` does.
+- **Rows:** text only, as the release has no vision tower.
+- **Size:** 63 GB gathered and about 40 GB static per GPU for a full fine-tune at `ep8`, by arithmetic, and a dispatch tops out at about 127,000 tokens per rank (the 32-bit wire index). So FSDP2 alone is not held back by size as it is on Super VL, though it has not run on these weights, and the figures under [EP layer](#ep-layer), [Memory](#memory) and HSDP below are Super VL's.
+- **Time-step limit:** the config declares none, so the class default (0, inf) applies, which both engines apply too. A stock reload keeps upstream's floor ([Mamba layers](#mamba-layers)).
+- **Recipe:** `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`.
+- **Export:** the release's own `config.json` with this run's changes, its `auto_map` absent, so there are no modules to copy ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)). `layers_block_type` keeps `mamba` and `attention`, the spellings SGLang's config class requires, and no `time_step_limit` reaches the file, so it holds no JSON float tag. vLLM's and SGLang's config readers parse the file; SGLang's refuses transformers' `linear_attention` and `full_attention`. Stock `from_pretrained` reloads a tiny copy's export to the release's tensors and logits. A depth cut writes its layer list in transformers' spelling, which SGLang refuses, so serve a full-depth export.
+- **Head:** an export carries no `mtp.*`, and no tool restores one: `reattach_vision_tower.py` needs a composite base and refuses this one.
+
+On the real weights:
+
+- **Load and rows at a cut:** lazy at `ep8`, peak host RSS 4.1 GiB, every MoE layer EP-wrapped, FA4. At 9 layers `ep8` differs from one rank by 2.9e-3 in loss, less than bf16 differs from fp32 on one rank (5.2e-3), and a packed document stays within 3.9e-6 of itself alone (1.01 without `seq_idx`).
+- **Exports:** the full 52-layer export holds 6,243 keys, the release's 6,513 minus `mtp.*`, each byte-identical to the release, with an identical `config.json`. NLL gap 0.0042, 59 GiB on disk.
+- **Resume:** exact at a 9-layer cut: loss difference 0.0, final weights rel L2 0.0.
+- **Throughput per block kind:** forward and backward at 8,192 tokens run 10,694 tok/s per rank at `ep8`: Mamba 58.0%, MoE 36.2%, attention 3.2%, head 2.6%.
+- **Recipe, memory and tok/s:** 5 steps at `ep8` and `max_length` 8,192 run 9,986 tok/s per rank with the optimizer and reduce, at 47.7–48.1 GiB peak allocated and 55–60 GB reserved.
+- **Serving:** vLLM and SGLang each start an untrained export with the cookbook's flags and answered one text prompt. SGLang refuses transformers' native `config.json` at start. Online weight sync stays refused, as for the family.
 
 ## Methods
 
@@ -126,7 +151,7 @@ The release is plain bf16 with no conversion step. Load it natively, `trust_remo
 - **Text-only export:** `backbone.*` and `lm_head.weight` under transformers' `nemotron_h` schema. It reloads in stock transformers through `AutoModelForCausalLM`, whose forward keeps upstream's time-step floor ([above](#mamba-layers)), so a stock reload smoke-tests the export but does not compute what the run trained.
 - **Composite export:** the hub's spellings, per expert, under the release's own `config.json` and modules (`exports_source_config_schema`). It carries no `mtp.*`, and no tool restores one onto it. Stock transformers reads it whole with `trust_remote_code=True`; its native class, without this toolkit's conversion entries, leaves the vision norm at identity.
 - **`reattach_vision_tower.py`:** turns a text-only export into the composite, streaming the vision tower, connector and 5.48 GiB `mtp.*` head back from the base byte for byte, and warns with the head's tensor count. The head stays at the release's weights. Its acceptance on a trained tower is unmeasured.
-- **Refused:** `save_sharded_ep` and `merge_ep_shards.py`, since the merge cannot respell `backbone.*` and the vision norm, and `unfuse_moe_experts.py`, as the layout stores per expert already. Gathered saves stream one 5.25 GiB layer at a time.
+- **Refused:** `save_sharded_ep` and `merge_ep_shards.py`, since the merge cannot respell `backbone.*` and the vision norm. `unfuse_moe_experts.py` copies a checkpoint through, as the layout stores per expert already. Gathered saves stream one 5.25 GiB layer at a time.
 
 Serve a composite with the release's flags. Both engines boot an untrained reattached export and answer an image prompt, vLLM a text prompt too. `reattach_vision_tower.py` carries the modules its processor and tokenizer configs' `auto_map` names, which SGLang's boot and `AutoProcessor` with `trust_remote_code=True` read.
 

@@ -25,7 +25,7 @@ from halo.model_loading.parallel.fp32_masters import restore_fp32_master_paramet
 from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, is_lazy_loadable
 from halo.models.nemotron_h import apply_nemotron_h_patches
 from tests.common.models import TINY_NEMOTRON_H_CONFIG, TINY_RADIO_VISION_CONFIG
-from tests.common.nemotron_h import BIAS_SLOT, write_tiny_hub_checkpoint
+from tests.common.nemotron_h import BIAS_SLOT, write_tiny_hub_checkpoint, write_tiny_lightning_checkpoint
 from tests.common.numerics import tensors_equal_at_narrower_dtype
 from tests.common.parallelism import single_process_ep_config, stubbed_rank_ep_config
 from tests.common.tiny_processors import tiny_image_batch, tiny_processor
@@ -121,6 +121,38 @@ def test_each_rank_loads_what_from_pretrained_does_with_its_own_experts(
         if not tensors_equal_at_narrower_dtype(lazy[key], tensor[local] if key in banks else tensor)
     ]
     assert not stale, f"{len(stale)} tensors differ from from_pretrained: {stale[:5]}"
+
+
+@pytest.mark.parametrize(("ep_size", "rank"), [(1, 0), (2, 0), (2, 1)], ids=["ep1", "ep2_rank0", "ep2_rank1"])
+def test_each_rank_of_a_text_only_release_loads_what_from_pretrained_does(tmp_path, monkeypatch, ep_size, rank):
+    """Lightning's layout: its tower at the root, no latent, and a multi-token head on disk the class does not build."""
+    stored = write_tiny_lightning_checkpoint(tmp_path)
+    path = str(tmp_path)
+    assert is_lazy_loadable(path) is True
+    assert ExpertKeyLayout.detect(dict.fromkeys(stored, "model.safetensors")) is ExpertKeyLayout.PER_EXPERT
+    _no_ep_layers(monkeypatch)
+    reference = AutoModelForCausalLM.from_pretrained(path, dtype=RUN_DTYPE).state_dict()
+    lazy = load_ep_model_lazy(
+        path,
+        stubbed_rank_ep_config(ep_size, ep_size, rank, E),
+        AutoConfig.from_pretrained(path),
+        dtype=RUN_DTYPE,
+        trust_remote_code=False,
+        model_class=AutoModelForCausalLM,
+    ).state_dict()
+
+    assert lazy.keys() == reference.keys()
+    assert not any("mtp" in key for key in lazy)
+    local = slice(rank * E // ep_size, (rank + 1) * E // ep_size)
+    banks = {key for key in reference if key.endswith(_BANKS)}
+    assert len(banks) == 2 * TINY_NEMOTRON_H_CONFIG["layers_block_type"].count("moe")
+    stale = [
+        key
+        for key, tensor in reference.items()
+        if not tensors_equal_at_narrower_dtype(lazy[key], tensor[local] if key in banks else tensor)
+    ]
+    assert not stale, f"{len(stale)} tensors differ from from_pretrained: {stale[:5]}"
+    assert all(value.dtype == torch.float32 for key, value in lazy.items() if key.endswith(BIAS_SLOT))
 
 
 @pytest.mark.parametrize("route", sorted(_ROUTES))

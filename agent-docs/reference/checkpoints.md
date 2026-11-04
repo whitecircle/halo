@@ -194,15 +194,17 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
 - **The `model_type` restore** (`restore_model_type`): puts the live `model_type` back when a vendor
   config class (Bailing/Ling) leaves it undeclared; without it every model-type-keyed reader (the shard
   merge, the hub renames) sees no family.
-- **The source checkpoint's own schema** for a family whose engines have no config class and read it
-  only through its `auto_map` modules (`exports_source_config_schema`, Step-3.7 Flash and Nemotron-H):
+- **The source checkpoint's own schema** for a family an engine reads only in the source's spellings, not transformers'
+  serialization (`exports_source_config_schema`, Step-3.7 Flash and Nemotron-H):
   `export_source_config_schema` writes the run's changed values back under the source's spellings and
   copies the `auto_map` modules in transitively. The source is the checkpoint the model was loaded from,
   so a resume or a `patch_vocab.py` output carries the schema on. A change lands under the spelling the source
   already uses: the key itself, its `attribute_map` alias or its `_legacy_field_names` alias. The rewritten config
-  is re-parsed against the live one, so a change the source schema swallows raises; a source with no `auto_map` warns
-  and keeps transformers' own, and a source of another `model_type` (a text-only load of a composite) keeps it with
-  no warning.
+  is re-parsed against the live one, so a change the source schema swallows raises. A source of the same `model_type`
+  in transformers' causal mapping needs no `auto_map` (Nemotron 3.5 Lightning), as stock `from_pretrained` and vLLM
+  read it through transformers' class and SGLang through its own: it carries with no modules to copy. Any other
+  source with no `auto_map` warns and keeps transformers' own schema, and a source of another `model_type` (a
+  text-only load of a composite) keeps it with no warning.
 - **The `auto_map` trim**: an entry naming a module the directory does not carry is dropped (an
   in-library load serializes the hub's `auto_map` without copying the code — Laguna without
   `trust_remote_code`); a cross-repo `repo--module.Class` reference stays.

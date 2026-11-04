@@ -613,10 +613,11 @@ class WeightSyncClientBase(ABC):
         copy of what landed to repair it. Idempotent."""
         if self._unusable_reason is not None:
             return
+        state = self.INTERRUPTED_UPDATE_STATE if self._chunks_sent else "no model, as the update's open unloaded it"
         self._unusable_reason = (
             f"{self.BACKEND_NAME} server {self.base_url} was left mid-update by an interrupted weight "
             f"sync, after {self._chunks_sent} chunk(s) had already been broadcast: it holds "
-            f"{self.INTERRUPTED_UPDATE_STATE}. It is left PAUSED instead of resumed so it cannot serve "
+            f"{state}. It is left PAUSED instead of resumed so it cannot serve "
             f"that model, and this client refuses further syncs. RESTART the {self.BACKEND_NAME} server "
             f"before using it again — the trainer cannot repair it."
         )

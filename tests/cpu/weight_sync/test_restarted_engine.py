@@ -89,6 +89,8 @@ def test_vllm_keeps_the_pause_when_no_close_can_end_the_session(monkeypatch):
 
     assert VLLMWeightSyncClient.RESUME_ENDPOINT not in posts, "resuming here kills the engine at its next request"
     assert client._unusable_reason is not None
+    assert "no model" in client._unusable_reason, "nothing landed, so it holds neither old nor new weights"
+    assert "part old" not in client._unusable_reason
     with pytest.raises(RuntimeError, match="RESTART"):
         client._open_update()
 
@@ -137,3 +139,7 @@ def test_sglang_keeps_its_model_through_a_session_that_cannot_close(monkeypatch)
 
     assert SGLangWeightSyncClient.RESUME_ENDPOINT in posts
     assert client._unusable_reason is None
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

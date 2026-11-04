@@ -2,8 +2,9 @@
 """A tiny ``TINY_MOE_FAMILIES`` model under EP=2 against the stock model it was copied from: loss and every MoE block
 gradient.
 
-``--expert-tp-size 2`` also splits each expert FFN two ways. A ``PINNED_ROUTING_FAMILIES`` member runs its stock model
-on the EP model's top-k picks, which must be the stock router's own up to bf16 near-ties.
+``--expert-tp-size 2`` also splits each expert FFN two ways. ``--no-latent`` runs Nemotron-H's experts on the hidden state,
+as its Lightning release does. A ``PINNED_ROUTING_FAMILIES`` member runs its stock model on the EP model's top-k picks,
+which must be the stock router's own up to bf16 near-ties.
 """
 
 import argparse
@@ -39,6 +40,7 @@ from tests.common.models import (
     TINY_NEMOTRON_H_CONFIG,
     TINY_STEP3P7_CONFIG,
 )
+from tests.common.nemotron_h import wire_width_checks
 from tests.common.numerics import cos_sim
 from tests.common.rank_log import log
 from tests.common.rosters import ep_layer_class_by_model_type
@@ -214,13 +216,11 @@ def _step3p7_checks(model, layers, input_ids) -> dict[str, bool]:
 
 def _nemotron_h_checks(model, layers, input_ids) -> dict[str, bool]:
     """Each mechanism its row exists for: the grouped path, whose kernel refuses the fp32 an autocast relu2 returns;
-    the latent on the wire; the bias at the release's scale, finer than bf16 can hold."""
+    the expert width on the wire; the bias at the release's scale, finer than bf16 can hold."""
     biases = [layer.gate.e_score_correction_bias for layer in layers]
-    return {
+    latent = None if ARGS.no_latent else TINY_NEMOTRON_H_CONFIG["moe_latent_size"]
+    return wire_width_checks(layers, hidden_size=model.config.hidden_size, latent=latent) | {
         "grouped_path_ran": all(layer._use_grouped_mm and layer._expert_kernels_warmed for layer in layers),
-        "latent_on_the_wire": all(
-            layer.dispatcher.hidden_dim == TINY_NEMOTRON_H_CONFIG["moe_latent_size"] for layer in layers
-        ),
         "bias_at_release_scale": all(
             bias.dtype == torch.float32 and bias.min() > 40.0 and not torch.equal(bias, bias.bfloat16().float())
             for bias in biases
@@ -244,14 +244,16 @@ FAMILY_CHECKS = {
 PINNED_ROUTING_FAMILIES = frozenset({"gpt_oss"})
 # A router bias the release stores in fp32, which the row's bf16 cast would round past its spread.
 FP32_BIAS_FAMILIES = frozenset({"nemotron_h"})
+# The one tiny model that spells a latent; its Lightning release has none.
+NO_LATENT_FAMILY = "nemotron_h"
 
 
-def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dict:
+def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1, *, overrides: dict | None = None) -> dict:
     """COLLECTIVE. ``cos_min`` floors every gradient's direction."""
     pc = ParallelismConfig(ep_size=ctx.world_size // expert_tp_size, expert_tp_size=expert_tp_size)
-    log(f"{family}: {pc.mode_string}")
+    log(f"{family}: {pc.mode_string} {overrides or ''}")
     torch.manual_seed(SEED)
-    reference = tiny_family_model(TINY_MOE_FAMILIES[family]).to(ctx.device, torch.bfloat16)
+    reference = tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides).to(ctx.device, torch.bfloat16)
     if family in FP32_BIAS_FAMILIES:
         fill_release_scale_bias(reference)
         reference.to(ctx.device)
@@ -308,7 +310,10 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
 parser = argparse.ArgumentParser()
 parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
 parser.add_argument("--expert-tp-size", type=int, choices=(1, 2), default=1)
+parser.add_argument("--no-latent", action="store_true", help=f"{NO_LATENT_FAMILY} with moe_latent_size unset")
 ARGS = parser.parse_args()
+if ARGS.no_latent and ARGS.family != NO_LATENT_FAMILY:
+    parser.error(f"--no-latent takes --family {NO_LATENT_FAMILY}")
 
 
 @gpu_test_main(
@@ -317,7 +322,8 @@ ARGS = parser.parse_args()
 def run(ctx):
     default = TOL.ep_grad_cosine_min
     cos_min = GRAD_COS_MIN.get(ARGS.family, default) if ARGS.expert_tp_size == 1 else default
-    return run_family(ctx, ARGS.family, cos_min, expert_tp_size=ARGS.expert_tp_size)
+    overrides = {"moe_latent_size": None} if ARGS.no_latent else None
+    return run_family(ctx, ARGS.family, cos_min, expert_tp_size=ARGS.expert_tp_size, overrides=overrides)
 
 
 if __name__ == "__main__":

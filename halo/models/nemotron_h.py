@@ -207,7 +207,7 @@ def _patch_mamba_mixer() -> None:
     @functools.wraps(original_init)
     def __init__(self, config, *args, **kwargs):
         original_init(self, config, *args, **kwargs)
-        # Upstream clamps at ``time_step_min``; the config's limit is what the release declares and both engines apply.
+        # Upstream clamps at ``time_step_min``; both engines apply (0, inf) whether a release declares it or not.
         self.time_step_limit = tuple(config.time_step_limit)
 
     @functools.wraps(original_forward)

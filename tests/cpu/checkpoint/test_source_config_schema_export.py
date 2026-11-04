@@ -6,14 +6,24 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
 from huggingface_hub.errors import StrictDataclassFieldValidationError
-from transformers import AutoConfig, AutoModelForCausalLM, NemotronH_Omni_Reasoning_V3, PretrainedConfig
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    NemotronH_Omni_Reasoning_V3,
+    NemotronHForCausalLM,
+    PretrainedConfig,
+)
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
@@ -25,6 +35,7 @@ from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.model_loading.model_preparation import auto_load_model
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS
 from tests.common.models import (
     NEMOTRON_H_RELEASE_TEXT_CONFIG,
     NEMOTRON_H_RELEASE_VISION_CONFIG,
@@ -33,7 +44,13 @@ from tests.common.models import (
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
-from tests.common.nemotron_h import nemotron_h_release_config, write_tiny_hub_checkpoint
+from tests.common.nemotron_h import (
+    nemotron_h_lightning_config,
+    nemotron_h_release_config,
+    tiny_lightning_config,
+    write_tiny_hub_checkpoint,
+    write_tiny_lightning_checkpoint,
+)
 from tests.common.rosters import ep_layer_class_by_model_type
 
 # The release's key spellings at the roster's geometry; ``test_the_source_config_parses_to_the_roster_geometry`` pins
@@ -475,6 +492,205 @@ def test_a_text_only_load_of_the_composite_saves_the_text_class(tmp_path, caplog
     assert not [name for name in _NEMOTRON_MODULES if (export / name).exists()]
     assert not caplog.records, "a text-only export is the intended outcome, not a degraded one"
     assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
+
+
+@pytest.fixture
+def lightning_source(tmp_path) -> str:
+    return _write_source(tmp_path / "source", nemotron_h_lightning_config(), {})
+
+
+def _exporter_warnings(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == config_export.logger.name and record.levelno >= logging.WARNING
+    ]
+
+
+def _saved_shell(source: str, export: str, mutate: Callable[[PretrainedConfig], None] | None = None) -> dict:
+    """A save on the release's geometry, with no weights to allocate."""
+    with torch.device("meta"):
+        model = NemotronHForCausalLM(AutoConfig.from_pretrained(source))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, source)
+    if mutate is not None:
+        mutate(model.config)
+    save_model_config(model, export)
+    with open(os.path.join(export, "config.json")) as handle:
+        return json.load(handle)
+
+
+def test_a_text_class_release_exports_its_own_config_with_no_warning(tmp_path, lightning_source, caplog):
+    """No ``auto_map`` here is the release itself, so re-deriving from it, as the composite's warning advises, leads back
+    to the same export."""
+    with caplog.at_level("WARNING"):
+        payload = _saved_shell(lightning_source, str(tmp_path / "export"))
+    assert payload == nemotron_h_lightning_config()
+    assert not _exporter_warnings(caplog)
+
+
+def test_a_text_class_export_keeps_the_spellings_sglang_reads(tmp_path, lightning_source):
+    """SGLang's own config class raises on transformers' ``linear_attention`` and ``full_attention``. The release
+    declares no time-step limit, so the export writes no JSON float tag for a reader to decode."""
+    export = str(tmp_path / "export")
+    payload = _saved_shell(lightning_source, export)
+    assert set(payload["layers_block_type"]) == {"mamba", "attention", "moe"}
+    with open(os.path.join(export, "config.json")) as handle:
+        assert "Infinity" not in handle.read()
+    assert AutoConfig.from_pretrained(export).time_step_limit == (0.0, float("inf"))
+
+
+def test_a_run_change_lands_on_the_text_class_release_schema(tmp_path, lightning_source):
+    def change(config):
+        config.use_cache = False
+        config.vocab_size = 131200
+
+    export = str(tmp_path / "export")
+    payload = _saved_shell(lightning_source, export, change)
+    assert payload == nemotron_h_lightning_config() | {"use_cache": False, "vocab_size": 131200}
+    reloaded = AutoConfig.from_pretrained(export)
+    assert reloaded.use_cache is False and reloaded.vocab_size == 131200
+
+
+def test_a_change_of_the_layer_list_reaches_the_carried_config(tmp_path, lightning_source):
+    """Parsed back, a cut model's layers are the ones it trained, whatever the carried count says."""
+
+    def cut(config):
+        config.layers_block_type = config.layers_block_type[:9]
+
+    export = str(tmp_path / "export")
+    _saved_shell(lightning_source, export, cut)
+    assert AutoConfig.from_pretrained(export).num_hidden_layers == 9
+
+
+def test_an_export_of_an_export_is_the_same_config(tmp_path, lightning_source, caplog):
+    """A resume or a next stage reads the last export as its source."""
+    first, second = str(tmp_path / "first"), str(tmp_path / "second")
+    written = _saved_shell(lightning_source, first)
+    with caplog.at_level("WARNING"):
+        assert _saved_shell(first, second) == written
+    assert not _exporter_warnings(caplog)
+
+
+def test_an_export_off_a_composites_text_export_stays_in_transformers_schema(tmp_path, nemotron_source, caplog):
+    """That source already speaks the text class's serialization, the float tag included, and the reattach is what
+    serves it."""
+    text_export = str(tmp_path / "text")
+    with torch.device("meta"):
+        model = NemotronHForCausalLM(AutoConfig.from_pretrained(nemotron_source).text_config)
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, nemotron_source)
+    save_model_config(model, text_export)
+    with open(os.path.join(text_export, "config.json")) as handle:
+        written = json.load(handle)
+    assert "linear_attention" in written["layers_block_type"]
+
+    with caplog.at_level("WARNING"):
+        payload = _saved_shell(text_export, str(tmp_path / "next"))
+    assert payload == written
+    assert payload["time_step_limit"] == [0.0, {"__float__": "Infinity"}]
+    assert not _exporter_warnings(caplog)
+
+
+def test_the_no_auto_map_rule_reaches_the_text_class_alone():
+    """Each other type a family declares reaches the engines through the modules it names, which the refusal above pins.
+    A new family lands here, so its author says what its engines read."""
+    reached = {
+        model_type
+        for spec in MOE_FAMILY_SPECS
+        if spec.exports_source_config_schema
+        for model_type in spec.model_types
+        if config_export._read_without_remote_code(SimpleNamespace(model_type=model_type), {"model_type": model_type})
+    }
+    assert reached == {"nemotron_h"}
+
+
+def test_no_auto_map_does_not_hand_on_a_source_of_another_type():
+    assert not config_export._read_without_remote_code(SimpleNamespace(model_type="nemotron_h"), {})
+    assert not config_export._read_without_remote_code(
+        SimpleNamespace(model_type="nemotron_h"), {"model_type": "nemotron_h_omni"}
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        "qwen3",  # A dense family has no spec at all.
+        *sorted(
+            model_type
+            for spec in MOE_FAMILY_SPECS
+            if not spec.exports_source_config_schema
+            for model_type in spec.model_types
+        ),
+    ],
+)
+def test_a_family_declaring_no_source_schema_keeps_transformers_serialization(model_type, tmp_path, caplog):
+    """Its engines read what transformers writes, so a release's own spellings never reach its export."""
+    source = _write_source(tmp_path / "source", {"model_type": model_type, "vendor_spelling": 1}, {})
+    export = tmp_path / "export"
+    export.mkdir()
+    written = json.dumps({"model_type": model_type})
+    (export / "config.json").write_text(written)
+    with caplog.at_level("WARNING"):
+        export_source_config_schema(SimpleNamespace(model_type=model_type), str(export), source=source)
+    assert (export / "config.json").read_text() == written
+    assert not _exporter_warnings(caplog)
+
+
+# Run without the toolkit: it reads the export as anyone downstream does, with no conversion entry or patch of ours. The
+# image's causal_conv1d runs on CUDA only, and without it upstream takes its torch path.
+_STOCK_RELOAD = """
+import json, sys
+sys.modules["causal_conv1d"] = None
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM
+export, release = sys.argv[1:]
+ids = torch.arange(1, 33).unsqueeze(0)
+loaded = {}
+for path in (export, release):
+    model, info = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32, output_loading_info=True)
+    with torch.no_grad():
+        logits = model.eval()(input_ids=ids, use_cache=False).logits
+    loaded[path] = (model, info, logits)
+model, info, logits = loaded[export]
+print(json.dumps({
+    "toolkit_imported": any(name == "halo" or name.startswith("halo.") for name in sys.modules),
+    "class": type(model).__name__,
+    "problems": {kind: list(info[kind]) for kind in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")},
+    "tensors_equal": all(
+        torch.equal(tensor, loaded[release][0].state_dict()[key]) for key, tensor in model.state_dict().items()
+    ),
+    "logits_equal": torch.equal(logits, loaded[release][2]),
+    "layer_types": AutoConfig.from_pretrained(export).layer_types,
+}))
+"""
+
+
+def test_stock_transformers_reloads_the_text_class_export_as_the_release(tmp_path):
+    """A process that never imports the toolkit, on the toolkit's own writer. An unread weight would stay random, and
+    only the comparison against the release would say so."""
+    release, export = tmp_path / "release", tmp_path / "export"
+    stored = write_tiny_lightning_checkpoint(release)
+    assert any(key.startswith("mtp.") for key in stored), "premise: the release stores a head the export drops"
+    model = auto_load_model(str(release), dtype=torch.bfloat16)
+    save_full_checkpoint(model, str(export), source_dir=str(release))
+    written = json.loads((export / "config.json").read_text())
+    assert written == tiny_lightning_config()
+
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    completed = subprocess.run(
+        [sys.executable, "-c", _STOCK_RELOAD, str(export), str(release)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    report = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert report["toolkit_imported"] is False
+    assert report["class"] == "NemotronHForCausalLM"
+    assert not any(report["problems"].values()), report["problems"]
+    assert report["tensors_equal"] and report["logits_equal"]
+    assert set(report["layer_types"]) == {"linear_attention", "moe", "full_attention"}
 
 
 if __name__ == "__main__":

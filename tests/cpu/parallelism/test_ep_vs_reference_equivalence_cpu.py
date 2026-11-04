@@ -253,14 +253,14 @@ def _step3p7() -> Step3p7SparseMoeBlock:
     )
 
 
-def _nemotron_h() -> NemotronHMoE:
+def _nemotron_h(latent: int | None = H // 2) -> NemotronHMoE:
     """A latent narrower than the hidden state, so a wrapper running its experts on the hidden state cannot build."""
     config = {key: value for key, value in _COMMON.items() if key != "hidden_act"}
     return NemotronHMoE(
         NemotronHConfig(
             n_routed_experts=E,
             num_experts_per_tok=K,
-            moe_latent_size=H // 2,
+            moe_latent_size=latent,
             moe_shared_expert_intermediate_size=M,
             n_group=1,
             topk_group=1,
@@ -271,6 +271,11 @@ def _nemotron_h() -> NemotronHMoE:
         ),
         layer_idx=0,
     )
+
+
+def _nemotron_h_no_latent() -> NemotronHMoE:
+    """The Lightning release's shape: no projection around the dispatch, so the experts run on the hidden state."""
+    return _nemotron_h(latent=None)
 
 
 def _block_inputs(dtype: torch.dtype) -> tuple[torch.Tensor, ...]:
@@ -291,6 +296,7 @@ FAMILIES = [
     ("lfm2_moe", EPLfm2MoELayer, _lfm2_moe, _block_inputs),
     ("mistral4", EPMistral4MoELayer, _mistral4, _block_inputs),
     ("nemotron_h", EPNemotronHMoELayer, _nemotron_h, _block_inputs),
+    ("nemotron_h_no_latent", EPNemotronHMoELayer, _nemotron_h_no_latent, _block_inputs),
     ("gemma4", EPGemma4MoELayer, _gemma4_experts, _experts_inputs),
     ("qwen3_moe", EPQwen3MoELayer, _qwen3_moe, _block_inputs),
     ("qwen3_5_moe", EPQwen3_5MoELayer, _qwen3_5_moe, _block_inputs),

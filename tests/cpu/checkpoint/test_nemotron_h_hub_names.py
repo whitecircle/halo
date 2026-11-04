@@ -26,6 +26,8 @@ from halo.models.conversion_overrides import CONVERSION_OVERRIDES
 from halo.models.param_roles import fp32_pinned_names
 from tests.common.conversion_mapping import restored_conversion_mapping
 from tests.common.models import (
+    NEMOTRON_3_5_LIGHTNING,
+    NEMOTRON_3_5_SUPER_VL,
     NEMOTRON_H_RELEASE_LAYOUT,
     NEMOTRON_H_RELEASE_TEXT_CONFIG,
     NEMOTRON_H_RELEASE_VISION_CONFIG,
@@ -34,7 +36,11 @@ from tests.common.nemotron_h import (
     HUB_VISION_NORM,
     NEMOTRON_H_COMPOSITE,
     VISION_NORM,
+    expected_hub_keys,
+    hub_text_prefix,
+    release_model_id,
     write_tiny_hub_checkpoint,
+    write_tiny_lightning_checkpoint,
 )
 from tests.common.nemotron_h_hub_keys import (
     NEMOTRON_H_HUB_INDEX_SHA256,
@@ -116,6 +122,49 @@ def test_the_fixture_is_the_release_index():
     keys = nemotron_h_hub_keys()
     assert len(keys) == len(set(keys)) == NEMOTRON_H_HUB_KEY_COUNT
     assert hub_keys_digest(keys) == NEMOTRON_H_HUB_INDEX_SHA256
+
+
+def test_the_release_row_expects_of_a_composite_what_each_route_stores():
+    released = set(nemotron_h_hub_keys())
+    assert hub_text_prefix(released) == "language_model."
+    assert expected_hub_keys(released, None, text_only=False) == {
+        key for key in released if not _COMPOSITE_DROPS.search(key)
+    }
+    assert expected_hub_keys(released, None, text_only=True) == {
+        key for key in released if key.startswith("language_model.") and not _COMPOSITE_DROPS.search(key)
+    }
+    assert {
+        int(re.search(r"\.layers\.(\d+)\.", key)[1]) for key in expected_hub_keys(released, 2, True) if "layers" in key
+    } == {
+        0,
+        1,
+    }
+
+
+def test_the_release_row_expects_of_a_text_only_release_its_root_keys_but_the_head(tmp_path):
+    """The prefix follows the source, so a Super-only spelling would expect nothing and pass on an empty export."""
+    stored = set(write_tiny_lightning_checkpoint(tmp_path))
+    assert hub_text_prefix(stored) == ""
+    expected = expected_hub_keys(stored, None, text_only=True)
+    assert expected == {key for key in stored if not key.startswith("mtp.")}
+    assert expected and all(key.startswith(("backbone.", "lm_head.")) for key in expected)
+
+
+def test_a_release_rows_knob_leaves_the_other_releases_rows_alone(monkeypatch):
+    """A suite exports one checkpoint for its Super VL rows and runs Lightning's beside them, which would pass on it."""
+    for knob in ("HALO_TEST_NEMOTRON_MODEL", "HALO_TEST_NEMOTRON_LIGHTNING_MODEL"):
+        monkeypatch.delenv(knob, raising=False)
+    assert release_model_id("super") == NEMOTRON_3_5_SUPER_VL
+    assert release_model_id("lightning") == NEMOTRON_3_5_LIGHTNING
+
+    monkeypatch.setenv("HALO_TEST_NEMOTRON_MODEL", "/super")
+    assert release_model_id("super") == "/super"
+    assert release_model_id("lightning") == NEMOTRON_3_5_LIGHTNING
+
+    monkeypatch.delenv("HALO_TEST_NEMOTRON_MODEL")
+    monkeypatch.setenv("HALO_TEST_NEMOTRON_LIGHTNING_MODEL", "/lightning")
+    assert release_model_id("super") == NEMOTRON_3_5_SUPER_VL
+    assert release_model_id("lightning") == "/lightning"
 
 
 def test_every_release_key_reaches_the_composite_or_a_named_drop():

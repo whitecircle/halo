@@ -19,6 +19,7 @@ QWEN3_5_MOE_35B = "Qwen/Qwen3.5-35B-A3B"
 QWEN3_NEXT_80B_A3B = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 QWEN3_8_FLASH_NEXT = "Qwen/Qwen3.8-Flash-Next"
 NEMOTRON_3_5_SUPER_VL = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+NEMOTRON_3_5_LIGHTNING = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
 QWEN3_5_MOE_122B = "Qwen/Qwen3.5-122B-A10B"
 QWEN3_6_MOE_35B = "Qwen/Qwen3.6-35B-A3B"
 BAILING_MOE_RING_MINI = "inclusionAI/Ring-mini-linear-2.0"
@@ -932,6 +933,12 @@ MODEL_CONFIGS = {
         "full_params": 30e9,
         "num_experts": 128,
         "top_k": 8,
+    },
+    "nemotron-3.5-lightning": {
+        "hf_name": NEMOTRON_3_5_LIGHTNING,
+        "full_params": 31.58e9,
+        "num_experts": 128,
+        "top_k": 6,
     },
     "glm4-flash": {
         "hf_name": GLM4_FLASH,

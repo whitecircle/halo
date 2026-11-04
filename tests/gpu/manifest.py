@@ -535,7 +535,7 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--mode layers", "--mode export", "--mode resume"),
         timeout=5400,
     ),
-    # The cut's weights, or 241 GB per export at --layers 88, where rank 0's CPU reload outlasts the NCCL watchdog.
+    # The cut's weights, or 241 GB per export at --layers 88 (Super), where rank 0's CPU reload outlasts the NCCL watchdog.
     "models/test_nemotron_h_real_checkpoint.py": TestSpec(
         nproc=8,
         markers=("gpu", "full", "8gpu", "ep", "moe", "nemotron"),
@@ -545,6 +545,10 @@ MANIFEST: dict[str, TestSpec] = {
             "--mode export --route composite",
             "--mode resume",
             "--mode profile --seq 8192",
+            "--release lightning --mode layers",
+            "--release lightning --mode export",
+            "--release lightning --mode resume",
+            "--release lightning --mode profile --seq 8192",
         ),
         timeout=5400,
     ),
@@ -875,6 +879,14 @@ MANIFEST: dict[str, TestSpec] = {
                     timeout=900,
                 )
                 for family in ("gpt_oss", "inkling_text", "nemotron_h", "qwen4_exp_text")
+            ),
+            # No latent, the shape of Nemotron-H's Lightning release, on the wire and through the expert split.
+            Row("--family nemotron_h --no-latent", markers=("gpu", "core", "2gpu", "ep", "moe", "nemotron")),
+            Row(
+                "--family nemotron_h --no-latent --expert-tp-size 2",
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "nemotron"),
+                timeout=900,
             ),
         ),
         timeout=1500,

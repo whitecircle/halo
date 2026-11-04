@@ -5,6 +5,7 @@ router scoring in fp32 from bf16 weights, and a selection bias at the release's 
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -38,6 +39,7 @@ from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.ep_reference import stores_expert_tp_split_experts, zero_filled_expert_banks
 from tests.common.ep_stubs import stubbed_rank_ep_layer
 from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG, TINY_NEMOTRON_H_CONFIG
+from tests.common.nemotron_h import wire_width_checks
 from tests.common.parallelism import single_process_ep_config
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import (
@@ -417,6 +419,29 @@ def test_the_unfuse_tool_has_no_layout_to_write():
     """The gathered save is already per expert, and a triple would name a gate this family does not have."""
     assert NEMOTRON_H.expert_layout.per_expert_keys is None
     assert not set(NEMOTRON_H.model_types) & set(per_expert_hub_model_types())
+
+
+def _layer_on_the_wire(width: int, fc1: nn.Module, fc2: nn.Module) -> SimpleNamespace:
+    return SimpleNamespace(dispatcher=SimpleNamespace(hidden_dim=width), fc1_latent_proj=fc1, fc2_latent_proj=fc2)
+
+
+def test_the_wire_check_reads_the_rows_width_not_the_models():
+    """A no-latent row whose override stopped reaching the model must fail, and the latent row on a model that lost its
+    latent, where each would otherwise hold the width to itself."""
+    latent_wire = [_layer_on_the_wire(L, nn.Linear(H, L), nn.Linear(L, H))]
+    hidden_wire = [_layer_on_the_wire(H, nn.Identity(), nn.Identity())]
+    assert wire_width_checks(hidden_wire, hidden_size=H, latent=None) == {"hidden_state_on_the_wire": True}
+    assert wire_width_checks(latent_wire, hidden_size=H, latent=L) == {"latent_on_the_wire": True}
+
+    assert wire_width_checks(latent_wire, hidden_size=H, latent=None) == {"hidden_state_on_the_wire": False}
+    assert wire_width_checks(hidden_wire, hidden_size=H, latent=L) == {"latent_on_the_wire": False}
+
+
+@pytest.mark.parametrize("stray", ["fc1", "fc2"])
+def test_the_no_latent_wire_check_refuses_a_projection_left_around_the_dispatch(stray):
+    projection = {"fc1": nn.Identity(), "fc2": nn.Identity(), stray: nn.Linear(H, H)}
+    layers = [_layer_on_the_wire(H, projection["fc1"], projection["fc2"])]
+    assert wire_width_checks(layers, hidden_size=H, latent=None) == {"hidden_state_on_the_wire": False}
 
 
 def test_expert_tp_splits_the_intermediate_and_its_partial_outputs_sum_to_the_whole():

@@ -1,0 +1,61 @@
+# NVIDIA Nemotron 3.5 Lightning (nemotron_h, 31.6B parameters, 29.4B of them routed experts, text only) — EP=8 full
+# fine-tuning SFT on UltraChat 200K, one 8-GPU node. The hub release is plain bf16, no conversion step.
+# Gradient checkpointing is on by default. See agent-docs/models/nemotron-h.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+# The router's own e_score_correction_bias, which the release stores in fp32; auto resolves here too. The forward has
+# no aux-loss route.
+moe_balancing: bias_update
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 128 routed experts -> 16/rank; one dispatch group on 8 GPUs
+fp32_grad_reduce: true                # fp32 grad reduction for the replicated non-expert parameters
+
+# --- Attention & sequence ---
+# Packed rows keep their documents apart: the Mamba scan and conv read seq_idx, attention cu_seq_lens.
+packing: true
+max_length: 8192                      # a starting point; raise after reading reserved memory on the node
+
+# --- Training ---
+per_device_train_batch_size: 1        # batch>1 flattens into one wider row; scale with GA
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
+num_train_epochs: 1.0
+
+# --- Optimizer & LR schedule ---
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Checkpointing & evaluation ---
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/nemotron-3.5-lightning-ep8-full
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# The tokenizer pads with its eos, <|im_end|>; <unk> is the pad id the release's config records, so an export keeps it.
+pad_token: <unk>
+# The hub template renders every assistant turn with no reasoning as <think></think> plus its text, and the empty block
+# trains as part of the completion.
+assistant_message_template: "<|im_start|>assistant\n"

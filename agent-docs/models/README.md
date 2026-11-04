@@ -26,7 +26,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [LFM-2 MoE](lfm2.md) | `lfm2_moe` | Yes | Yes | No | Yes | No | `examples/sft/lfm2/*` |
 | [Mistral4 MoE](mistral4.md) | `mistral4` | Yes | Yes | Yes ⁸ | Yes | No | `examples/sft/mistral4/*` |
 | [DeepSeek-V4](deepseek-v4.md) | `deepseek_v4` | Yes | Yes ⁶ | No | No | Yes | `examples/sft/deepseek_v4/*` |
-| [Nemotron-H (Nemotron 3.5 Super VL)](nemotron-h.md) | `nemotron_h` | Yes ¹⁵ | Yes ¹⁵ | No | No | Yes ¹⁰ ¹³ | `examples/sft/nemotron_h/*` |
+| [Nemotron-H (Nemotron 3.5 Super VL, Lightning)](nemotron-h.md) | `nemotron_h` | Yes ¹⁵ | Yes ¹⁵ | No | No | Yes ¹⁰ ¹³ | `examples/sft/nemotron_h/*` |
 | [Zaya (ZAYA1)](zaya.md) | `zaya` | Yes ⁹ | Yes ⁹ | No | No | No | `examples/sft/zaya/*` |
 | [Command A+ (Cohere2 MoE)](cohere2-moe.md) | `cohere2_moe` | Yes | Yes ⁶ | Yes ⁶ | Yes ⁶ | No | `examples/sft/cohere2_moe/*` |
 | [GLM-5 Next (GLM-5.3-Flash)](glm5-next.md) | `glm5_next` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/glm5_next/*` |
@@ -63,7 +63,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹⁴ Full fine-tuning with `moe_balancing: none`: PP refuses adapters, the split severs `aux_loss`, and the router has no bias slot ([Qwen3.8-Flash-Next](qwen4_exp.md#pipeline-parallelism)).
 
-¹⁵ `ep8` recipes, images included, ran 5–20 steps on the release on 8× B300, with an exact resume at a 9-layer cut. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
+¹⁵ `ep8` recipes, images included, ran 5–20 steps on Super VL on 8× B300, with an exact resume at a 9-layer cut. Lightning ran 5 steps at `ep8`, with an exact resume at a 9-layer cut and a byte-identical full export. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
 
 ## MoE knobs
 
@@ -134,7 +134,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 - [LFM-2 MoE](lfm2.md) — sigmoid routing with optional expert-bias buffer.
 - [Mistral4 MoE](mistral4.md) — Mistral3 VLM text backbone, MLA attention.
 - [DeepSeek-V4](deepseek-v4.md) — hash-routing bootstrap + top-k MoE, compressed sparse attention, eager-only.
-- [Nemotron-H](nemotron-h.md) — NVIDIA Nemotron 3.5 Super VL: Mamba-2, MoE and attention layers, gateless experts on a latent, a composite VLM with a text-only route.
+- [Nemotron-H](nemotron-h.md) — NVIDIA Nemotron 3.5 Super VL: Mamba-2, MoE and attention layers, gateless experts on a latent, a composite VLM with a text-only route. Nemotron 3.5 Lightning is the text class alone, with no latent.
 - [Zaya](zaya.md) — CCA-augmented MoE with cross-layer router state.
 - [Cohere2 MoE](cohere2-moe.md) — Command A+ VLM text backbone; interleaved sliding/NoPE attention, averaged shared expert.
 - [GLM-5 Next](glm5-next.md) — GLM-5.3-Flash composite VLM; KDA + DeepSeek sparse attention, hyper-connections, 288 routed experts.

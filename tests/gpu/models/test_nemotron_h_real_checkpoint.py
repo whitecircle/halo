@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""Nemotron 3.5 Super VL's release under EP on 8 GPUs: what tiny models can't show.
+"""A Nemotron-H release under EP on 8 GPUs: what tiny models can't show. ``--release`` picks Super VL, a composite, or
+Lightning, whose tower sits at the checkpoint's root and carries no latent.
 
 ``--mode layers`` cuts it to its first layers: the lazy route, the fp32 bias as stored, EP against one rank, and packed
 documents against themselves alone. ``--mode export`` writes it on either route and holds every tensor to the release,
@@ -11,7 +12,6 @@ import argparse
 import json
 import math
 import os
-import re
 import statistics
 import sys
 import time
@@ -30,7 +30,6 @@ from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.env import env_str
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.selection import effective_attn_implementation
@@ -44,19 +43,14 @@ from tests.common.datasets import create_sft_dataset, repository_text_rows
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.memory import cleanup_memory, host_peak_rss_gib, reset_host_peak_rss
-from tests.common.models import NEMOTRON_3_5_SUPER_VL
+from tests.common.nemotron_h import NEMOTRON_RELEASES, expected_hub_keys, hub_text_prefix, release_model_id
 from tests.common.rank_log import log
 from tests.common.resume_export import ResumeExportRoute, run_resume_export
 
-MODEL = env_str("HALO_TEST_NEMOTRON_MODEL", NEMOTRON_3_5_SUPER_VL)
 SEED = 0
-TEXT_PREFIX = "language_model."
 BIAS_SLOT = "e_score_correction_bias"
-# No class builds the multi-token head or the conditioner the processor applies; each composite layer scale is one the
-# release does not store.
-_UNBUILT_HUB_KEYS = re.compile(r"^language_model\.mtp\.|\.input_conditioner\.")
+# Each composite layer scale is one the release does not store.
 _LAYER_SCALE = "lambda1"
-_LAYER_INDEX = re.compile(r"\.layers\.(\d+)\.")
 # Peak host RSS of one rank's lazy EP load of the cut model: its experts' slices, not the release's 249 GB.
 LOAD_RSS_GIB = 40.0
 # Whole nats apart under a lost expert slice; rounding and the routing it flips part them by far less.
@@ -80,11 +74,11 @@ TRAINED_TEXT_LOSS_MAX = 4.0
 UNMARKED_OVER_MARKED_MIN = 3.0
 
 
-def _release_directory() -> str | None:
-    if os.path.isdir(MODEL):
-        return MODEL
+def _release_directory(model: str) -> str | None:
+    if os.path.isdir(model):
+        return model
     try:
-        return snapshot_download(MODEL, local_files_only=True)
+        return snapshot_download(model, local_files_only=True)
     except LocalEntryNotFoundError:
         return None
 
@@ -141,8 +135,9 @@ def _bias_checks(model, source: str) -> dict[str, bool]:
     """The tensor routing selects on is the release's, at the precision it stores, or the bf16 cast rounds it past its
     spread."""
     biases = {path: getattr(layer.gate, BIAS_SLOT) for path, layer in named_ep_layers(model)}
+    prefix = hub_text_prefix(resolve_checkpoint_weights(source).weight_map)
     stored = {
-        path: _stored_tensor(source, f"{TEXT_PREFIX}backbone.{path.removeprefix('model.')}.gate.{BIAS_SLOT}")
+        path: _stored_tensor(source, f"{prefix}backbone.{path.removeprefix('model.')}.gate.{BIAS_SLOT}")
         for path in biases
     }
     return {
@@ -234,27 +229,12 @@ def run_layers(ctx, source: str, args) -> dict:
     return {"checks": checks | packing, "metrics": metrics | packing_metrics}
 
 
-def _exported_hub_key(key: str, text_only: bool) -> str:
-    return f"{TEXT_PREFIX}{key}" if text_only else key
-
-
-def _expected_hub_keys(released: set[str], layers: int | None, text_only: bool) -> set[str]:
-    """What an export of this route and depth stores of the release."""
-    kept = set()
-    for key in released:
-        if _UNBUILT_HUB_KEYS.search(key) or (text_only and not key.startswith(TEXT_PREFIX)):
-            continue
-        layer = _LAYER_INDEX.search(key)
-        if layers is None or layer is None or int(layer.group(1)) < layers:
-            kept.add(key)
-    return kept
-
-
 def _identity_checks(export: str, source: str, layers: int | None, text_only: bool) -> dict[str, bool]:
     """Rank 0, streaming one tensor at a time. Every tensor is the release's under its own name and dtype."""
     exported, released = (resolve_checkpoint_weights(path).weight_map for path in (export, source))
-    hub_names = {_exported_hub_key(key, text_only): key for key in exported if _LAYER_SCALE not in key}
-    missing = _expected_hub_keys(set(released), layers, text_only) - hub_names.keys()
+    level = hub_text_prefix(released) if text_only else ""
+    hub_names = {f"{level}{key}": key for key in exported if _LAYER_SCALE not in key}
+    missing = expected_hub_keys(set(released), layers, text_only) - hub_names.keys()
     unknown = hub_names.keys() - released.keys()
     differing = []
     for hub_key in hub_names.keys() - unknown:
@@ -275,23 +255,30 @@ def _identity_checks(export: str, source: str, layers: int | None, text_only: bo
 
 
 def _config_checks(export: str, source: str, layers: int | None, text_only: bool) -> dict[str, bool]:
-    """A composite's full-depth export carries the release's config; the trainer's ``use_cache`` write is every
-    export's. A text-only one keeps transformers' schema for the text class."""
+    """A full-depth export carries the release's config; the trainer's ``use_cache`` write is every export's. A text-only
+    export of a composite keeps transformers' schema for the text class, while a text-only release's own schema, which
+    SGLang needs, carries through a cut too, but for the cut's layer list."""
     with open(os.path.join(export, "config.json")) as handle:
         written = json.load(handle)
-    if text_only:
+    with open(os.path.join(source, "config.json")) as handle:
+        release = json.load(handle)
+    composite = bool(hub_text_prefix(resolve_checkpoint_weights(source).weight_map))
+    if composite and text_only:
         return {
             "text_export_is_the_text_class": written["model_type"] == "nemotron_h" and "auto_map" not in written,
         }
-    with open(os.path.join(source, "config.json")) as handle:
-        release = json.load(handle)
-    checks = {"composite_export_carries_the_remote_modules": "auto_map" in written}
-    if layers is None:
-        for payload in (written, release):
-            payload.pop("use_cache", None)
-            payload.pop("transformers_version", None)
-        checks["composite_config_is_the_release_s"] = written == release
-    return checks
+    for payload in (written, release):
+        payload.pop("use_cache", None)
+        payload.pop("transformers_version", None)
+    if composite:
+        checks = {"composite_export_carries_the_remote_modules": "auto_map" in written}
+        if layers is None:
+            checks["composite_config_is_the_release_s"] = written == release
+        return checks
+    if layers is not None:
+        written.pop("layers_block_type")
+        release.pop("layers_block_type")
+    return {"text_release_export_is_the_release_config": written == release}
 
 
 def _token_scores(model, rows: torch.Tensor) -> torch.Tensor:
@@ -508,7 +495,13 @@ MODES = {"layers": run_layers, "export": run_export, "resume": run_resume, "prof
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
-    parser.add_argument("--layers", type=int, default=9, help="layers --mode layers/export/resume keep; 88 is all")
+    parser.add_argument("--release", choices=sorted(NEMOTRON_RELEASES), default="super")
+    parser.add_argument(
+        "--layers",
+        type=int,
+        default=9,
+        help="layers --mode layers/export/resume keep; 88 is all of Super, 52 Lightning",
+    )
     parser.add_argument("--seq", type=int, default=4096, help="packed row width of layers, tokens per rank of profile")
     parser.add_argument("--route", choices=("text", "composite"), default="text", help="the class --mode export loads")
     parser.add_argument("--export-dir", default=None, help="where --mode export writes and keeps its save")
@@ -520,16 +513,23 @@ def _arguments() -> argparse.Namespace:
 @gpu_test_main(exact_world_size=8, prefix="nemotron_h_real_checkpoint")
 def run(ctx) -> dict:
     args = _arguments()
-    source = _release_directory()
+    model = release_model_id(args.release)
+    source = _release_directory(model)
+    if args.route == "composite" and not hub_text_prefix(resolve_checkpoint_weights(source).weight_map):
+        raise ValueError(f"{model} is a text-only release, so it has no composite route")
     if args.layers >= text_config(AutoConfig.from_pretrained(source)).num_hidden_layers:
         args.layers = None
-    log(f"=== {MODEL} at {source}, --mode {args.mode}, --layers {args.layers}")
+    log(f"=== {model} at {source}, --mode {args.mode}, --layers {args.layers}")
     return MODES[args.mode](ctx, source, args)
 
 
 if __name__ == "__main__":
     skip_unless_blackwell("Nemotron-H's release row")
-    if _release_directory() is None:
-        log(f"SKIP: {MODEL} is not in the local Hub cache (set HALO_TEST_NEMOTRON_MODEL to a present checkpoint)")
+    _release = _arguments().release
+    _model = release_model_id(_release)
+    if _release_directory(_model) is None:
+        log(
+            f"SKIP: {_model} is not in the local Hub cache (set {NEMOTRON_RELEASES[_release][1]} to a present checkpoint)"
+        )
         sys.exit(0)
     run()
