@@ -16,7 +16,7 @@ At `ep_size: 1` the layer is installed whenever `use_grouped_gemm` is on (the to
 
 The hub checkpoints store the experts one tensor per expert (`mlp.experts.{i}.{gate,up,down}_proj.weight`), which transformers fuses on load. The spec declares that layout (`FUSED_SPLIT_PER_EXPERT` over the GLU projection names), and every writer applies it: the gathered EP save and `merge_ep_shards.py` both emit the hub's per-expert keys, the names `from_pretrained` and both pinned engines' loaders read. The lazy EP loader reads the per-expert keys and fuses each rank's expert slice directly.
 
-`from_pretrained` drops the hub's `mtp.*` multi-token-prediction head, so exports carry none.
+`from_pretrained` drops the hub's `mtp.*` multi-token-prediction head, so exports carry none unless the run [trains it](#mtp-head).
 
 ## Attention and packing
 
@@ -41,6 +41,10 @@ Online and async GRPO are refused at construction by the spec's `weight_sync_ref
 ## Liger
 
 The family's Liger spec keeps upstream's RMSNorm and FLCE, serves the GatedDeltaNet gated norm with `fla`, and takes over `swiglu` for `Qwen3NextMLP`, the dense MLP and the shared expert the EP layer adopts unchanged ([Liger Kernels](../optimization/liger-kernels.md#upstream-covered-families-the-toolkit-extends)).
+
+## MTP head
+
+`mtp_loss_weight` trains the release's `mtp.*` head ([MTP heads](../optimization/mtp-heads.md)). The config declares no tail count, which reads as one layer, as both engines read it.
 
 ## Configs
 

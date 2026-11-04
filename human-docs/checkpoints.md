@@ -8,7 +8,10 @@ adapters.
 
 Every save uses the tensor names of the checkpoint the run loaded, vision towers
 included, and an EP save writes the family's own expert layout
-([details](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
+([details](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗). A save holds an MTP head only if the
+run [trained one](../agent-docs/optimization/mtp-heads.md#checkpoints) ↗, under the release's keys, or the family's
+remote class builds its tail (Ling-3.0-flash). Drafting with `method=mtp` needs one: vLLM refuses a checkpoint without
+it.
 
 | Training mode | Output | Load directly? |
 | --- | --- | --- |
@@ -86,7 +89,7 @@ flags.
 | `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights; serving engines do not load its manifest as-is |
 | `unfuse-moe-experts` | rewrite fused expert weights to the family's per-expert layout, for a serving loader that reads only that layout |
 | `reset-sinks` | disable the attention sinks in a GPT-OSS checkpoint |
-| `reattach-vision-tower` | restore the vision tower, MTP head and processor files to a `text_only_model` export; SGLang needs it for a Qwen3.8-Flash-Next export |
+| `reattach-vision-tower` | restore the vision tower, the base's untrained MTP head (or keep the one the export trained) and processor files to a `text_only_model` export; SGLang needs it for a Qwen3.8-Flash-Next export |
 
 The tools write to a new directory (only `reset-sinks` takes `--in_place`) and
 reject a sharded EP save until `merge-ep-shards` has run. Only `merge-ep-shards`

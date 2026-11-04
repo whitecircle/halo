@@ -115,6 +115,10 @@ freeze_layers_patterns:
   - "*.mlp.gate.weight"
 ```
 
+## MTP tail
+
+Ling-3.0-flash's remote class builds its tail (`model.layers.42.*`) as live decoder layers. At the release's `mtp_loss_scaling_factor: 0` each forward runs it (one more MLA + MoE layer and a second `[T, V]` fp32 logits plane), no gradient reaches it, and every save re-exports it untrained; the load warns with its parameter count. `model_init_kwargs: {num_nextn_predict_layers: 0}` builds none and leaves the main logits unchanged. `model_init_kwargs: {mtp_loss_scaling_factor: <weight>}` trains it, with `unfreeze_layers_patterns` for a frozen trunk; SFT only, at `per_device_train_batch_size: 1`, since the head flattens rows before its shift, so the trainer refuses a larger batch, Context Parallelism and a trainer with no labelled forward. Pipeline parallelism refuses a live tail. A checkpoint carries the tail under its release keys and a resume keeps it and its weight. A bias balancing mode moves the tail's `expert_bias` even at weight 0, as it walks every gate. Verified on tiny configs.
+
 ## Serving and weight sync
 
 Only **Ling 2.0** (`bailing_moe`) is servable and syncable on both pinned engines: vLLM 0.32.0 registers `BailingMoeV2ForCausalLM`, SGLang 0.5.22 the same spelling, and gathered saves land in their per-expert expert loaders.

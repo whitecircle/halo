@@ -8,6 +8,7 @@
 | Model not in transformers yet | [Vendoring a model](#vendoring-a-model) |
 | Family the auto-detected attention backend cannot run | [Attention backend](#attention-backend) |
 | Forward scales, caps or cuts the logits around `lm_head` | [Declare the head transform](#declare-the-head-transform) |
+| Release stores a multi-token-prediction tail, or the class ignores one at load | [Declare the MTP head](#declare-the-mtp-head) |
 | Family built from `qwen4_exp`'s blocks (hyper-connections, QSA, the PLE n-gram table) | [Qwen4-lineage checklist](qwen4_exp.md#qwen4-lineage-checklist) |
 | transformers' conversion mapping misplaces or misses the hub's keys | [Correct the conversion mapping](#correct-the-conversion-mapping) |
 | Multimodal composite whose CausalLM transformers does not map, or whose tower stores keys elsewhere | [Text-only load of a composite](#text-only-load-of-a-composite) |
@@ -56,6 +57,20 @@ The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) compute logits from the
 Declare it with a `HeadTransformSpec` subclass in `halo/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
 
 The declaration is verified, never trusted: `verify_head_transform` runs the family's own forward on a meta-device shell whose backbone emits a fixed hidden state and whose output embedding is a small stand-in, and raises when the declaration does not reproduce the logits. `tests/cpu/models/test_head_transform.py` runs that check over every roster class, the MoE ones derived from the EP layer registry, and compares the chunked sweep's log-probs and gradients with each listed tiny model's forward; add the family's tiny model there, and a dense family to the dense roster.
+
+## Declare the MTP head
+
+A family whose release stores an MTP tail takes one entry in `halo/models/mtp/spec.py`: `MTP_HEAD_SPECS` where the tail is the family's own decoder layer plus a projection and norms, `MTP_REFUSALS` with the reason otherwise. `tests/cpu/models/test_mtp_head_spec.py` fails a class naming a tail in `_keys_to_ignore_on_load_unexpected` with neither.
+
+A spec declares only what a release spells its own way: placement (`root` for `mtp.*`, `list` for the decoder list's entry at `num_hidden_layers`), the projection and norm paths, trunk copies the release stores, and a drafter that zeroes the first embedding. Layer class, index and norm class are read off the trunk.
+
+For a spec:
+
+- [ ] Add the release's config and tail keys to `tests/common/mtp_release_tails.json`, read from its safetensors header, so a save's keys are held to them.
+- [ ] Add the tiny family to `MTP_TINY_FAMILIES` (`tests/common/mtp_heads.py`). A new placement or a family with its own head chain takes a `--mode ep` row in `test_sft_mtp_head.py` and in `test_sft_mtp_head_checkpoint.py`; a new layer class reuses the rows of its placement at `--arms soft`.
+- [ ] Confirm the head trains inside the forward: `tests/cpu/models/test_mtp_head.py` holds causality and the soft identity per tiny family, and fails a head reading its own target.
+- [ ] Serve a `head_only` export on each engine that takes the family: `test_sft_mtp_head_serving.py`. If either loader checks completeness, the export must write what it reads, as GLM-4's trunk copies do.
+- [ ] Add the family to the table in [MTP heads](../optimization/mtp-heads.md#families) and its model page.
 
 ## Add EP support
 

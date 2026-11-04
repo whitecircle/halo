@@ -15,7 +15,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
     Layers 43–44 clamp the routed SwiGLU at 7 (`swiglu_limits`, applied **after** the activation) and the shared expert at 16 (`swiglu_limits_shared`); every other layer runs unclamped.
 
-- **MTP** — the checkpoint ships 3 MTP tail layers (indices 45–47); transformers never builds them (their keys are ignored on load), so every export ships without them. The config field `num_nextn_predict_layers: 3` survives as metadata.
+- **MTP** — the checkpoint ships 3 MTP tail layers (indices 45–47); transformers never builds them (their keys are ignored on load), so every export ships without them. The config field `num_nextn_predict_layers: 3` survives as metadata, so vLLM and `generate(use_mtp=True)` refuse an export, and each draft layer owns its head with attention widths that differ from the trunk's layers, so `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md).
 
 ## Checkpoint
 

@@ -35,6 +35,7 @@ from halo.model_loading.parallel.load_rules import (
 )
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
+from halo.model_loading.parallel.mtp_head import attach_mtp_head
 from halo.model_loading.parallel.pp import load_pp_stage_model
 from halo.model_loading.parallel.tp import (
     load_ep_tp_model,
@@ -54,6 +55,7 @@ from halo.models.attention.selection import (
 )
 from halo.models.config_access import apply_config_overrides, text_config
 from halo.models.moe import family_specs
+from halo.models.mtp.spec import MtpHeadRequest
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_local_rank, is_global_main_process
 
@@ -352,11 +354,13 @@ def load_distributed_model(
     text_only_model: bool = False,
     preserve_checkpoint_precision: bool = False,
     check_tokenizer: Callable[[PreTrainedTokenizer], None] | None = None,
+    mtp_head: MtpHeadRequest | None = None,
     **model_kwargs,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     """COLLECTIVE: load the policy and its tokenizer under ``parallelism_config``. ``text_only_model`` picks a
     multimodal checkpoint's text-only class; ``preserve_checkpoint_precision`` marks a full-finetune resume and
-    requires complete fp32-master coverage; ``check_tokenizer`` refuses the tokenizer before any weight is read."""
+    requires complete fp32-master coverage; ``check_tokenizer`` refuses the tokenizer before any weight is read;
+    ``mtp_head`` attaches the family's released MTP head to the loaded trunk."""
     # Latched: free after the entry script's own pre-load call, a backstop for a caller without it.
     agree_rank_uniform_env()
     reject_unsupported_run(parallelism_config, dtype)
@@ -433,6 +437,18 @@ def load_distributed_model(
         init_from_scratch=init_from_scratch,
         model_kwargs=model_kwargs,
     )
+    if mtp_head is not None:
+        # Before the run policies and the kernel warm-up, which walk the modules it adds.
+        attach_mtp_head(
+            model,
+            mtp_head,
+            pc=parallelism_config,
+            source=source,
+            dtype=dtype,
+            wraps_experts=wraps_experts,
+            init_from_scratch=init_from_scratch,
+            preserve_checkpoint_precision=preserve_checkpoint_precision,
+        )
 
     # The weights' source, None for a random init, where ``_name_or_path`` survives; the resume's skip keys on this.
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, None if init_from_scratch else model_name_or_path)

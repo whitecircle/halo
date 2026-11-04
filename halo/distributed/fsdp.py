@@ -4,6 +4,7 @@ multi-layer unit's hooks and :func:`complete_fsdp2_post_backward` drive FSDP2 in
 import contextlib
 import functools
 import logging
+from collections.abc import Sequence
 
 import torch
 import torch.distributed as dist
@@ -31,6 +32,7 @@ from halo.models.module_tree import (
     decoder_layers,
     input_embedding_backbone,
 )
+from halo.models.mtp.head import find_mtp_head
 from halo.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR, fp32_pinned_names
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.collectives import nccl_safe_broadcast
@@ -188,7 +190,7 @@ def _unshard_with_layer(layer: nn.Module, split: list[nn.Module]) -> None:
 
 
 def _layer_units(
-    layers: nn.ModuleList,
+    layers: Sequence[nn.Module],
     splits: list[list[nn.Module]],
     left_out: list["IdentityParamSet"],
     layers_per_unit: int,
@@ -324,7 +326,9 @@ def apply_fsdp2_per_layer(
     layers_per_unit: int | None = None,
 ) -> int:
     """Apply FSDP2 per unit of consecutive decoder layers, then to the backbone and the root; returns the group count.
-    A layer mixing trainable dtypes first gets nested groups."""
+    A layer mixing trainable dtypes first gets nested groups. An MTP head is a unit of its own on either placement: it
+    runs past every trunk layer from the backbone's forward hook, and in a shared group a reshard frees the weights its
+    backward reads before the gradient reaches the hidden state that would re-gather them."""
     _warn_fp32_pins_cast_by_policy(model, mp_policy)
     underlying_model = backbone_with_layers(model) or model
 
@@ -358,10 +362,16 @@ def apply_fsdp2_per_layer(
     sharded = 0
     split_off: list[str] = []
     if layers is not None:
+        head = find_mtp_head(model)
+        trunk = [layer for layer in layers if layer is not head]
+        layers = trunk if head is None else [*trunk, head]
         left_out = [_left_out((layer,), root_reserved) for layer in layers]
         splits = [_uniform_dtype_split(layer, scoped) for layer, scoped in zip(layers, left_out, strict=True)]
         per_unit = layers_per_shard_group(reshard_after_forward) if layers_per_unit is None else layers_per_unit
-        for unit in _layer_units(layers, splits, left_out, per_unit):
+        units = _layer_units(trunk, splits, left_out, per_unit)
+        if head is not None:
+            units.append([len(trunk)])
+        for unit in units:
             unit_layers = [layers[index] for index in unit]
             for index in unit:
                 split_off += [type(module).__name__ for module in splits[index]]

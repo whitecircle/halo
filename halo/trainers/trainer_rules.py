@@ -9,9 +9,11 @@ from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from halo.models.attention.selection import effective_attn_implementation
+from halo.models.config_access import get_config_field
 from halo.models.external_tables import named_external_tables
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
+from halo.models.mtp.head import find_mtp_head
 from halo.models.unwrapping import find_peft_model
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, STOCK_ADAMW_OPTIMIZERS, optim_name
 
@@ -23,6 +25,51 @@ INERT_AUX_LOSS_DETAIL = (
     "loss is never added: expert load is left unbalanced and the run still materializes a [B*S, num_experts] "
     "router-logit tensor per MoE layer per forward."
 )
+
+
+def reject_unreachable_mtp_term(
+    model,
+    *,
+    trainer: str,
+    labelled_forward: bool,
+    is_cp_mode: bool,
+    pops_labels: bool,
+    rows_per_forward: int,
+) -> None:
+    """A head's term needs the model's forward to see the labels; elsewhere the head runs and pays for its layer and
+    nothing trains it. A remote-code head (Ling-3.0's ``mtp_loss_scaling_factor``) also flattens rows before its shift,
+    so past one row per forward each row's last position trains on the next row's token."""
+    factor = get_config_field(getattr(model, "config", None), "mtp_loss_scaling_factor") or 0
+    head = find_mtp_head(model)
+    if head is None and factor <= 0:
+        return
+    named = f"{type(head).__name__}" if head is not None else f"mtp_loss_scaling_factor={factor}"
+    if head is not None and not any(param.requires_grad for param in head.parameters()):
+        raise ValueError(
+            f"freeze_layers_patterns or unfreeze_layers_patterns froze every parameter of {named}, so its term trains "
+            "no head. Leave the head out of the patterns, or remove mtp_loss_weight."
+        )
+    if not labelled_forward:
+        raise ValueError(
+            f"{trainer} computes its loss from the model's outputs with no labels forward, so the MTP term of "
+            f"{named} is never added. Train the head with the SFT script, or remove it from the model."
+        )
+    if is_cp_mode:
+        raise ValueError(
+            f"Context parallelism calls the model with labels=None, so the MTP term of {named} is never added. Train "
+            "the head without context_parallel_size, or remove it from the model."
+        )
+    if pops_labels:
+        raise ValueError(
+            f"A label smoother or compute_loss_func takes the labels before the model call, so the MTP term of {named} "
+            "is never added. Remove it, or train without the head."
+        )
+    if head is None and rows_per_forward > 1:
+        raise ValueError(
+            f"mtp_loss_scaling_factor={factor} with per_device_train_batch_size={rows_per_forward}: the release's "
+            "remote head flattens rows before it shifts, so the last position of each row trains on the next row's "
+            "token. Set per_device_train_batch_size: 1."
+        )
 
 
 def reject_cp_trainer_args(

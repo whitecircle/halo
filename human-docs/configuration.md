@@ -37,6 +37,7 @@ router-balancing mode exports.
 | Precision and optimizer | `bf16`, `optim`, `bf16_optimizer`, `fp32_grad_reduce`, `fp32_non_ep_params` |
 | Parallelism | `expert_parallel_size`, `context_parallel_size`, `tensor_parallel_size`, `expert_tensor_parallel_size`, `pipeline_parallel_size`, `pipeline_microbatches`, `ep_scope` |
 | PEFT | `use_peft`, `lora_r`, `lora_alpha`, `lora_target_modules` |
+| MTP head (SFT, [MTP heads](../agent-docs/optimization/mtp-heads.md) ↗) | `mtp_loss_weight`, `mtp_loss_type`, `mtp_train_scope`, `mtp_head_source`, `mtp_min_acceptance_gain` |
 | Checkpoint and eval | `output_dir`, `save_strategy`, `save_steps`, `save_only_model`, `eval_strategy`, `eval_steps` |
 | Logging | `report_to`, `project_name`, `run_name`, `logging_steps` |
 | Online RL (both trainers) | `num_generations`, `rewards` |

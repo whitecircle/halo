@@ -25,6 +25,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 ## Throughput
 
 - **[Padding-free collator](padding-free-collator.md)** — Concatenates sequences into Flash-Attention blocks instead of padding, with boundary masking against cross-sample leakage.
+- **[MTP heads](mtp-heads.md)** — Train the multi-token-prediction head a family's release ships, jointly, detached or over a frozen trunk, with a hard or a soft target. Set `mtp_loss_weight`, `mtp_train_scope` and `mtp_loss_type`.
 - **[Tree packing](tree-packing.md)** — Rows that share a prefix store it once and branch after it; each example trains as it does packed flat, at fewer tokens.
 - **[Flash attention](flash-attention.md)** — Auto-detected per architecture — FA4 on Blackwell (B200/B300), FA3 on Hopper (H100/H200), FA2 where neither imports.
 - **[Grouped GEMM](grouped-gemm.md)** — Batched MoE expert matmul via `torch.nn.functional.grouped_mm`, default on SM90+. Home to the atomic-free permute and MoE throughput playbook.

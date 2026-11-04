@@ -2123,6 +2123,165 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "gptoss"),
         timeout=1000,
     ),
+    # Every scope on one family per placement, joint soft on the rest, over each shard layout. A row at `--attn auto`
+    # takes the backend the family's production load selects.
+    "trainers/sft/test_sft_mtp_head.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "1gpu", "2gpu", "4gpu", "ep", "etp", "moe", "qwen3", "glm4"),
+        args_matrix=(
+            *_rows(
+                tuple(
+                    f"--family {family} --mode single{arms}"
+                    for family, arms in (
+                        ("qwen3_5_moe_text", ""),
+                        ("glm4_moe_lite", ""),
+                        ("qwen3_5", " --arms soft"),
+                        ("qwen3_5_moe", " --arms soft"),
+                        ("qwen3_next", " --arms soft"),
+                    )
+                )
+                + ("--family qwen3_5_moe_text --mode single --bf16",),
+                nproc=1,
+                markers=("gpu", "full", "1gpu", "moe", "qwen3", "glm4"),
+            ),
+            *_rows(
+                tuple(
+                    f"--family {family} --mode {mode}{gc}"
+                    for family in ("qwen3_5_moe_text", "glm4_moe_lite")
+                    for mode in ("fsdp", "fsdp_zero3", "ep", "ep1", "ep1_ignored")
+                    for gc in ("", " --gc")
+                )
+                + (
+                    "--family qwen3_5_moe_text --mode ep1_fp32_router --bf16 --gc",
+                    "--family glm4_moe_lite --mode ep1_fp32_router --bf16",
+                    "--family qwen3_5 --mode fsdp_zero3 --arms soft --gc",
+                    "--family qwen3_next --mode ep --arms soft --gc",
+                    "--family qwen3_5_moe --mode ep --arms soft --gc",
+                    "--family qwen3_5_moe_text --mode ep --kernel chunked --gc",
+                    "--family glm4_moe_lite --mode ep --kernel chunked",
+                    "--family qwen3_5_moe_text --mode ep --starve",
+                    "--family glm4_moe_lite --mode ep --starve --gc",
+                    "--family qwen3_5_moe_text --mode ep_fp32_masters --arms trunk_trains --gc",
+                    "--family glm4_moe_lite --mode ep_fp32_masters --arms trunk_trains",
+                    "--family qwen3_5_moe_text --mode ep --attn auto --gc",
+                    "--family glm4_moe_lite --mode ep --attn auto",
+                    "--family qwen3_5_moe_text --mode ep --attn flash_attention_2 --packed",
+                    "--family qwen3_5_moe_text --mode ep --attn flash_attention_4 --packed --gc",
+                    "--family glm4_moe_lite --mode ep --attn flash_attention_2 --packed --gc",
+                    "--family qwen3_5_moe_text --mode etp --gc",
+                    "--family glm4_moe_lite --mode etp",
+                    "--family qwen3_5_moe_text --mode ep --arms soft --accumulation 2 --gc",
+                    "--family glm4_moe_lite --mode ep1 --arms trunk_trains --accumulation 2",
+                    # The joint recipe's own shape.
+                    "--family qwen3_5_moe_text --mode ep_fp32_masters --arms trunk_trains --attn flash_attention_2 "
+                    "--packed --accumulation 2 --gc",
+                ),
+                markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3", "glm4"),
+            ),
+            *_rows(
+                (
+                    "--family qwen3_5_moe_text --mode ep_etp --gc",
+                    "--family qwen3_5_moe_text --mode ep_etp",
+                    "--family glm4_moe_lite --mode ep_etp --gc",
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "qwen3", "glm4"),
+            ),
+        ),
+        timeout=900,
+    ),
+    # An exact resume, its export, the shard merge, the scope flip and the gate. The `multi_node` rows hold two EP groups
+    # as replicas over two NVLink domains simulated on one machine; the script's docstring has the launch on two.
+    "trainers/sft/test_sft_mtp_head_checkpoint.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "1gpu", "2gpu", "4gpu", "ep", "etp", "moe", "qwen3", "glm4"),
+        args_matrix=(
+            *_rows(
+                ("--family qwen3_5_moe_text --mode single", "--family glm4_moe_lite --mode single"),
+                nproc=1,
+                markers=("gpu", "full", "1gpu", "moe", "qwen3", "glm4"),
+            ),
+            *_rows(
+                (
+                    "--family qwen3_5_moe_text --mode ep --flip --gate --fused_gate",
+                    "--family glm4_moe_lite --mode ep --flip --gate",
+                    "--family qwen3_5_moe_text --mode ep --gc",
+                    "--family glm4_moe_lite --mode ep --gc",
+                    "--family qwen3_5_moe_text --mode ep --sharded",
+                    "--family qwen3_next --mode ep --sharded",
+                    "--family qwen3_5_moe --mode ep",
+                    "--family qwen3_5_moe_text --mode ep_fp32_masters --gc",
+                    "--family qwen3_5_moe_text --mode etp",
+                    "--family glm4_moe_lite --mode ep1",
+                    "--family qwen3_5_moe_text --mode ep1_ignored",
+                    "--family qwen3_5 --mode fsdp --flip --gate",
+                    "--family qwen3_5_moe_text --mode fsdp --flip",
+                    "--family qwen3_5 --mode fsdp_zero3 --gc",
+                ),
+                markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3", "glm4"),
+            ),
+            *_rows(
+                (
+                    "--family qwen3_5_moe_text --mode ep_etp",
+                    "--family glm4_moe_lite --mode ep_etp --gc",
+                    "--family qwen3_5_moe_text --mode multi_node --ep_size 2 --simulated_domain 2",
+                    "--family glm4_moe_lite --mode multi_node --ep_size 2 --simulated_domain 2 --gc",
+                    "--family qwen3_5_moe_text --mode multi_node --simulated_domain 2",
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "qwen3", "glm4"),
+            ),
+        ),
+        timeout=1200,
+    ),
+    # A few minutes a row on Qwen3.6-35B. Each records its acceptance curve; a bar holds at the default weights only.
+    "trainers/sft/test_sft_mtp_head_real.py": TestSpec(
+        nproc=8,
+        markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"),
+        args_matrix=(
+            "--row stale_soft",
+            "--row stale_hard",
+            "--row own_soft",
+            "--row own_hard",
+            "--row stale_soft_fused",
+            "--row stale_soft_fa4",
+            "--row own_samples_soft",
+            "--row oversized_lr",
+            "--row off_by_one",
+            "--row detached",
+        ),
+        timeout=3600,
+    ),
+    # Eight arms of about 15 minutes in one launch; `--text_only` takes the fused kernel a composite forces off.
+    "trainers/sft/test_sft_mtp_head_cost.py": TestSpec(
+        nproc=8,
+        markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"),
+        args_matrix=("", "--text_only"),
+        timeout=10800,
+    ),
+    # Skips on a server not drafting, so a tier's server with no speculative config passes over it. The script's docstring
+    # has the launch.
+    "trainers/sft/test_sft_mtp_head_serving.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"),
+        args_matrix=(
+            Row("--engine vllm --at_least 0.7"),
+            Row("--engine sglang --at_least 0.7", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+        ),
+        timeout=3600,
+    ),
+    "trainers/sft/test_sft_ling_mtp_tail.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "4gpu", "ep", "etp", "moe", "bailing"),
+        args_matrix=(
+            *_rows(
+                ("--mode ep", "--mode ep1", "--mode ep1_ignored"),
+                markers=("gpu", "full", "2gpu", "ep", "moe", "bailing"),
+            ),
+            *_rows(("--mode ep_etp",), nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "bailing")),
+        ),
+        timeout=900,
+    ),
     "trainers/sft/test_sft_eval_flce.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "glm4", "moe"), timeout=600
     ),

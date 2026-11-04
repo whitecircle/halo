@@ -96,6 +96,7 @@ changes.
 | `halo/models/forward_capture.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/training-methods/embedding.md` |
 | `halo/model_loading/parallel/frozen_models.py` | `agent-docs/training-methods/distillation/teacher-distillation.md`, `agent-docs/training-methods/preference/dpo.md` |
 | `halo/model_loading/parallel/fp32_masters.py` | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md` |
+| `halo/models/mtp/`, `halo/model_loading/parallel/mtp_head.py`, `halo/callbacks/mtp.py` | `agent-docs/optimization/mtp-heads.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/models/README.md`, `agent-docs/training-methods/callbacks.md` |
 | `halo/model_loading/parallel/model_source.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/troubleshooting.md` |
 | `halo/entrypoints/model_setup.py` | `agent-docs/training-methods/sft.md`, `agent-docs/models/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/distributed/fsdp.py` | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/checkpoints.md` |

@@ -39,6 +39,7 @@ from halo.models.moe.balancing import BIAS_UPDATE_MODES
 from halo.models.moe.config_fields import has_routed_experts, resolve_dispatch_width, resolve_router_topk
 from halo.models.moe.family_specs import wraps_experts
 from halo.trainers.dataloaders import uses_dp_sharded_loader
+from halo.trainers.sft_rules import reject_unsupported_mtp_options
 from tests.common.hub_seed import is_hub_repo
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
@@ -82,6 +83,9 @@ _EXPANDABLE_SEGMENTS_SCRIPTS = frozenset({"sft.py", "preference/dpo.py", "prefer
 
 # Parametrization ids: the example's path under examples/, so a failure names the file to open.
 _ID = {"ids": lambda config: config.relative_to(EXAMPLES_ROOT).as_posix()}
+_MTP_EXAMPLES = [
+    config for config in _EXAMPLES if "mtp_loss_weight" in (yaml.safe_load(config.read_text(encoding="utf-8")) or {})
+]
 
 
 @pytest.fixture(autouse=True)
@@ -619,6 +623,28 @@ def test_weight_sync_example_keeps_a_pushable_sink_parameter(config):
         "false with a sink-carrying implementation (flash_attention_4 on Blackwell; eager or "
         "flex_attention on Hopper)."
     )
+
+
+def test_each_mtp_scope_a_recipe_ships_is_on_a_family_with_a_head():
+    scopes = {raw_config(config).get("mtp_train_scope", "joint") for config in _MTP_EXAMPLES}
+    assert scopes == {"joint", "head_only"}
+
+
+@pytest.mark.parametrize("config", _MTP_EXAMPLES, **_ID)
+def test_mtp_example_meets_what_a_head_requires(config):
+    """Through the entry script's own gate, on the checkpoint's config."""
+    args, sft_config, model_config, dist_args = parser_for(script_for(config)).parse_yaml_file(str(config))
+    checkpoint = load_cached_config(model_config.model_name_or_path)
+    reject_unsupported_mtp_options(args, sft_config, model_config, dist_args, checkpoint)
+    assert args.gates_mtp_acceptance == (args.mtp_train_scope == "head_only")
+
+
+def test_the_gate_on_mtp_examples_is_live():
+    config = next(config for config in _MTP_EXAMPLES if raw_config(config).get("mtp_train_scope") == "head_only")
+    args, sft_config, model_config, dist_args = parser_for(script_for(config)).parse_yaml_file(str(config))
+    sft_config.gradient_checkpointing = True
+    with pytest.raises(ValueError, match="gradient_checkpointing off"):
+        reject_unsupported_mtp_options(args, sft_config, model_config, dist_args, None)
 
 
 def test_a_batch_rebalance_example_exists():

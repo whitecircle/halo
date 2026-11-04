@@ -9,6 +9,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from halo.checkpoint.reading import reject_partial_checkpoint
 from halo.checkpoint.tools.offline_export import (
+    carried_mtp_tail,
     preflight_model_load_resources,
     reject_in_place_conversion,
     save_full_checkpoint,
@@ -180,13 +181,15 @@ def patch_vocabulary(
     logger.info("SAVING MODEL AND TOKENIZER")
     logger.info(f"Saving to: {output_dir}")
 
-    # A new base: a resume sidecar of a source training checkpoint would restore that run over it.
+    # A new base: a resume sidecar of a source training checkpoint would restore that run over it. Past the patch, whose
+    # grown embeddings the head's trunk copies read.
     save_full_checkpoint(
         model,
         output_dir,
         processing_class=processing_class,
         source_dir=model_id,
         include_resume_sidecars=False,
+        carried_tensors=carried_mtp_tail(model, model_id, output_dir, tool="patch_vocab", dtype=DTYPE_BY_NAME[dtype]),
         max_shard_size=max_shard_size,
     )
 

@@ -24,6 +24,7 @@ from halo.checkpoint.parallel.writing import (
 from halo.checkpoint.writing import normalize_gathered_state_dict
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from halo.models.external_tables import named_external_tables
+from halo.models.mtp.head import mtp_trunk_copy_keys
 from halo.models.unwrapping import find_peft_model, unwrap_toolkit_wrappers
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.filesystem import fs_aware_makedirs
@@ -76,9 +77,12 @@ def select_checkpoint_saver(ctx: CheckpointContext) -> CheckpointSaver | None:
         return save_tp_checkpoint
     if ctx.toolkit_fsdp2:
         return save_fsdp2_checkpoint
-    # transformers' save_pretrained writes the state dict alone, which holds no external table; accelerate-managed
-    # FSDP's flat parameters stay with it, and the trainer refuses that shape at construction.
-    if not ctx.accelerate_manages_fsdp and next(named_external_tables(ctx.model), None) is not None:
+    # transformers' save_pretrained writes the state dict alone, which holds no external table and no MTP head's copy of
+    # a trunk embedding; accelerate-managed FSDP's flat parameters stay with it, and the trainer refuses that shape at
+    # construction.
+    if not ctx.accelerate_manages_fsdp and (
+        next(named_external_tables(ctx.model), None) is not None or mtp_trunk_copy_keys(ctx.model)
+    ):
         return save_unsharded_checkpoint
     return None
 

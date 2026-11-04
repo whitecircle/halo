@@ -1,9 +1,17 @@
-"""SFT script arguments, the conversation-rendering fields both distillation scripts share, and tree packing."""
+"""SFT script arguments, the conversation-rendering fields both distillation scripts share, tree packing and MTP head
+training."""
 
 from dataclasses import dataclass, field, fields
-from typing import ClassVar
+from typing import ClassVar, get_args
 
-from halo.config_validation import ValidatedConfig, require_text
+from halo.config_validation import (
+    ValidatedConfig,
+    differs_from_default,
+    present,
+    reject_non_default_args,
+    require_finite,
+    require_text,
+)
 from halo.configs.script_arguments import (
     CommonScriptArguments,
     CrossDocumentLinearAttentionArguments,
@@ -11,6 +19,7 @@ from halo.configs.script_arguments import (
     VisionTrainingArguments,
 )
 from halo.models.attention.tree_plan import FullAttentionForm
+from halo.models.mtp.spec import MtpHeadRequest, MtpLossType, MtpObjective, MtpScope
 
 
 @dataclass
@@ -111,7 +120,94 @@ TREE_PACKING_FIELDS = tuple(f.name for f in fields(_TreePackingArguments))
 
 
 @dataclass
+class MtpArguments(ValidatedConfig):
+    """Train the family's released MTP head (``agent-docs/optimization/mtp-heads.md``)."""
+
+    mtp_loss_weight: float = field(
+        default=0.0,
+        metadata={
+            "help": "Weight of the MTP head's cross-entropy beside the next-token loss. Above 0 builds the family's "
+            "released head and trains it; 0 builds nothing and adds no hook."
+        },
+    )
+    mtp_loss_type: MtpLossType = field(
+        default="hard",
+        metadata={
+            "help": "hard: the head fits the gold token two ahead. soft: the same loss value, with the head's gradient "
+            "routed to the trunk's own next-token distribution."
+        },
+    )
+    mtp_train_scope: MtpScope = field(
+        default="joint",
+        metadata={
+            "help": "joint: the head's term reaches the head, trunk, embedding and output embedding. detached: the "
+            "head alone, while the trunk trains on the next-token loss. head_only: detached over a frozen trunk."
+        },
+    )
+    mtp_head_source: str | None = field(
+        default=None,
+        metadata={
+            "help": "Checkpoint to read the head from when the model's own is stale or absent; a hub id or a local "
+            "directory. A resume from a checkpoint keeps its trained head and ignores it."
+        },
+    )
+    mtp_min_acceptance_gain: float | None = field(
+        default=0.0,
+        metadata={
+            "help": "head_only: the least gain over the first held-out acceptance a finished fit must show, or the "
+            "run exits non-zero, naming the checkpoint that holds the rejected head. null turns the gate off."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        owner = type(self).__name__
+        require_finite(owner, ge=0, mtp_loss_weight=self.mtp_loss_weight)
+        require_finite(owner, **present(mtp_min_acceptance_gain=self.mtp_min_acceptance_gain))
+        if self.mtp_loss_type not in get_args(MtpLossType):
+            raise ValueError(
+                f"{owner}: mtp_loss_type must be one of {get_args(MtpLossType)}, got {self.mtp_loss_type!r}."
+            )
+        if self.mtp_train_scope not in get_args(MtpScope):
+            raise ValueError(
+                f"{owner}: mtp_train_scope must be one of {get_args(MtpScope)}, got {self.mtp_train_scope!r}."
+            )
+        if self.mtp_loss_weight == 0:
+            # Every one of them would be silently inert with no head built.
+            reject_non_default_args(
+                "Halo SFT with mtp_loss_weight: 0", self, *(name for name in MTP_FIELDS if name != "mtp_loss_weight")
+            )
+        elif self.mtp_train_scope != "head_only" and differs_from_default(self, "mtp_min_acceptance_gain"):
+            raise ValueError(
+                f"{owner}: mtp_min_acceptance_gain gates a head_only fit, and mtp_train_scope is "
+                f"{self.mtp_train_scope!r}, where the trunk moves under the head. Remove it, or set "
+                "mtp_train_scope: head_only."
+            )
+
+    @property
+    def mtp_head_request(self) -> MtpHeadRequest | None:
+        """``None`` at weight 0, which leaves the load exactly as a run with no head takes it."""
+        if self.mtp_loss_weight == 0:
+            return None
+        objective = MtpObjective(self.mtp_loss_weight, self.mtp_loss_type, self.mtp_train_scope)
+        return MtpHeadRequest(objective, self.mtp_head_source)
+
+    @property
+    def gates_mtp_acceptance(self) -> bool:
+        return (
+            self.mtp_loss_weight > 0
+            and self.mtp_train_scope == "head_only"
+            and self.mtp_min_acceptance_gain is not None
+        )
+
+
+# What a run with no head must find at its default: set there, these options do nothing.
+MTP_FIELDS = tuple(f.name for f in fields(MtpArguments))
+
+
+@dataclass
 class SFTScriptArguments(
+    MtpArguments,
     _TreePackingArguments,
     CrossDocumentLinearAttentionArguments,
     VisionTrainingArguments,

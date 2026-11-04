@@ -94,7 +94,7 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 
 | File | `save_only_model=false` | `save_only_model=true` | Purpose |
 |------|:-:|:-:|---------|
-| `model.safetensors` (or sharded + index) | Yes | Yes | Weights |
+| `model.safetensors` (or sharded + index) | Yes | Yes | Weights, a trained [MTP head](../optimization/mtp-heads.md#checkpoints) under its release keys included |
 | `config.json`, `tokenizer.*` (full processor for VLMs and for RL runs on a multimodal checkpoint, whose `processing_class` stays the tokenizer) | Yes | Yes | Architecture config + `processing_class` |
 | `generation_config.json` | Yes | Yes | Sampling defaults, stop strings and the custom `eos_token_id` set — written for a generative model only, and paired with `config.json` by `save_model_config`. `PretrainedConfig` does not carry it, so a save that writes only `config.json` serves with defaults. |
 | `trainer_state.json` | Yes | Yes | Step count, epoch, loss history — published last ([Interrupted saves](#interrupted-saves)) |
@@ -546,6 +546,8 @@ path, and a policy built from the checkpoint keeps the base as its config's `_na
 run's `config.json` and model card name the same `base_model` as an uninterrupted run's. `trainer.train()`
 then reads `global_step` / `epoch` from `trainer_state.json`, skips the consumed batches, and restores the
 optimizer and LR scheduler. WandB does **not** continue the same run on its own ([Multi-node](#multi-node)).
+
+A run with an MTP head replays through the same paths, its head read from the checkpoint ([MTP heads](../optimization/mtp-heads.md#checkpoints)).
 
 ### Resume by parallelism mode
 

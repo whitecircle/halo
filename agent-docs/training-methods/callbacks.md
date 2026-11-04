@@ -16,6 +16,7 @@ Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`halo/e
 | `TorchProfilerCallback` | Per-rank traces, memory timeline | `enable_torch_profiler: true` ([Debugging](../reference/debugging.md)) |
 | `GradientCheckpointingPlanCallback` | Relaxes gradient checkpointing to what the memory budget needs | `gradient_checkpointing_plan: auto` |
 | `VariableSchedulerCallback` | Schedules a model attribute | Added by SMPO (`use_margin_schedule`) and offline GRPO (`initial_min_log_prob`) |
+| `MtpAcceptanceGate` | Fails a head fit whose held-out acceptance fell | `mtp_train_scope: head_only` ([MTP heads](../optimization/mtp-heads.md#acceptance)) |
 
 ### ParameterStatsCallback
 

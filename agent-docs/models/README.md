@@ -113,6 +113,10 @@ loads at the checkpoint's dtype; and the dense TP loader, which loads straight i
 family pins a parameter). The reward-scoring tool casts the whole model, buffers included, to its
 `--rm_dtype`.
 
+## MTP heads
+
+Qwen3.5/3.6, Qwen3.8-27B, Qwen3-Next and GLM-4 MoE Lite train the head their release ships under `mtp_loss_weight` ([MTP heads](../optimization/mtp-heads.md)); other tail-bearing families refuse by name. Without it, every family drops its tail at load and exports carry none, so `method=mtp` refuses them, except Ling-3.0-flash, whose remote class builds and re-exports its tail ([Bailing](bailing.md#mtp-tail)). `convert_to_bf16` and `patch_vocab` write a stored head of these families back; any other family's tail drops, with a warning naming the config field its output keeps. `reattach_vision_tower.py` carries the base's head at its weights, or keeps the one a text-only export trained.
+
 ## Per-family pages
 
 Each family page covers its model-specific caveats (attention quirks, checkpoint variants, balancing) and why it drops an axis.

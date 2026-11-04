@@ -11,11 +11,11 @@ import pytest
 import torch
 
 from halo.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
-from halo.distributed.expert_parallel.deepep.backends import DeepEPBackend
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
 from halo.models.moe.family_specs import find_moe_family_spec
+from tests.common.ep_stubs import LoopbackBackend
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
@@ -24,39 +24,6 @@ CHECKPOINT_MODES = {"reentrant": True, "non_reentrant": False}
 CHECKPOINTED_FAMILIES = tuple(
     name for name in TINY_MOE_FAMILIES if find_moe_family_spec(name).supports_gradient_checkpointing
 )
-
-
-class LoopbackBackend(DeepEPBackend):
-    """Every token returns to the rank that sent it, so each op is the identity; each is logged as ``(op,
-    dispatcher, handle)``."""
-
-    def __init__(self, dispatcher: ep_dispatcher.DeepEPDispatcher, log: list):
-        super().__init__(dispatcher)
-        self._log = log
-        self.counts: list[tuple[int, ...]] = []
-
-    def ensure(self, num_tokens: int, num_topk: int, *, deterministic: bool) -> None:
-        pass
-
-    def dispatch_forward(self, x, topk_idx, topk_weights):
-        handle = f"handle{len(self._log)}"
-        self._log.append(("dispatch_forward", self._d, handle))
-        counts = tuple(torch.bincount(topk_idx[topk_idx >= 0], minlength=self._d.num_experts).tolist())
-        self.counts.append(counts)
-        return x.clone(), topk_idx.clone(), topk_weights.clone(), handle, counts
-
-    def dispatch_backward(self, grad_recv_x, grad_recv_topk_weights, handle):
-        self._log.append(("dispatch_backward", self._d, handle))
-        grad_topk_weights = None if grad_recv_topk_weights is None else grad_recv_topk_weights.clone()
-        return grad_recv_x.clone(), grad_topk_weights
-
-    def combine_forward(self, x, topk_weights, handle):
-        self._log.append(("combine_forward", self._d, handle))
-        return x.clone()
-
-    def combine_backward(self, grad_combined_x, handle):
-        self._log.append(("combine_backward", self._d, handle))
-        return grad_combined_x.clone()
 
 
 @pytest.fixture(autouse=True)

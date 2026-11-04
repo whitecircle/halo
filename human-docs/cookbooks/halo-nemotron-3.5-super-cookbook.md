@@ -14,8 +14,9 @@ Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model
 - **GPUs:** EP8 on eight B300s, 64 experts per GPU.
 - **What ran.** All four recipes and the image recipe ran on the release on eight B300s, 5 to 20 steps each, with
   the figures given below, plus an exact resume at a 9-layer cut and exports byte for byte at full depth. Each
-  `max_length` is a starting point, so watch the first steps' peak. No run has trained to a quality metric, and only
-  vLLM has served an export, on one image prompt and one text prompt.
+  `max_length` is a starting point, so watch the first steps' peak. No run has trained to a quality metric. Both
+  engines have served an untrained reattached export: vLLM on one image prompt and one text prompt, SGLang on one
+  image prompt.
 
 ## Recipes
 
@@ -120,9 +121,9 @@ halo run reattach-vision-tower --input_dir /data/checkpoints/nemotron-sft \
   --output_dir /data/checkpoints/nemotron-sft-vl
 ```
 
-Serve from the [host](README.md#serve-from-the-host). vLLM has answered image and text prompts on an untrained
-reattached export. It needs `--trust-remote-code` and `--mamba-ssm-cache-dtype float32`, which
-`docker-compose.vllm.yml` does not pass, so start the image directly:
+Serve from the [host](README.md#serve-from-the-host). Both engines have answered an image prompt on an untrained
+reattached export, and vLLM a text prompt too. vLLM needs `--trust-remote-code` and
+`--mamba-ssm-cache-dtype float32`, which `docker-compose.vllm.yml` does not pass, so start the image directly:
 
 ```bash
 docker run -d --rm --name nemotron-vllm --gpus '"device=0,1"' --ipc=host --network host \
@@ -132,8 +133,7 @@ docker run -d --rm --name nemotron-vllm --gpus '"device=0,1"' --ipc=host --netwo
   --reasoning-parser nemotron_v3
 ```
 
-SGLang does not boot a reattached export yet: the rebuild leaves out the processor modules the export's `auto_map`
-names, and `AutoProcessor` with `trust_remote_code=True` raises on them too. Its compose file on port 30000 takes:
+SGLang's compose file on port 30000 takes:
 
 ```bash
 SGLANG_MODEL="$HALO_SCRATCH/checkpoints/nemotron-sft-vl" SGLANG_CUDA_DEVICES=0,1 SGLANG_TP=2 \

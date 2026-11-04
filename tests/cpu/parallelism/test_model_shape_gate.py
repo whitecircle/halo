@@ -202,6 +202,8 @@ def test_the_dtype_gate_is_inert_without_the_knob():
 
 def _stub(*, experts_fsdp_managed: bool, fp32_non_ep_params: bool, ep_modules, dtype_params=()):
     return SimpleNamespace(
+        # What the frozen-trunk half of the exclusions reads: no head here, so no trunk leaves the wrap.
+        model=nn.Identity(),
         parallelism_config=SimpleNamespace(
             experts_fsdp_managed=experts_fsdp_managed, fp32_non_ep_params=fp32_non_ep_params
         ),

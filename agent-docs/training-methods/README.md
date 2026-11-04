@@ -6,7 +6,7 @@ Every method is YAML-driven, runs through the same distributed parallelism syste
 
 | Method | Trainer | Dataset columns | When to use |
 |---|---|---|---|
-| [SFT](sft.md) | `DistributedSFTTrainer` | `prompt` (message list) | Instruction tuning, text or vision-language; also [pre-training](pretraining.md), same trainer and script |
+| [SFT](sft.md) | `DistributedSFTTrainer` | `prompt` (message list) | Instruction tuning, text or vision-language; also [pre-training](pretraining.md), same trainer and script, and a release's [MTP head](../optimization/mtp-heads.md) (`mtp_loss_weight`) |
 | [DPO](preference/dpo.md) | `DistributedDPOTrainer` | `prompt`, `chosen`, `rejected` | Paired preference data, against a reference model; 15 TRL `loss_type` values, combinable |
 | [KTO](preference/kto.md) | `DistributedKTOTrainer` | `prompt`, `completion`, `label` | Unpaired binary feedback — one completion, thumbs up or down |
 | [SMPO](preference/smpo.md) | `SMPOTrainer` | `prompt`, `chosen`, `rejected` | Preference tuning with no reference model to hold in memory |

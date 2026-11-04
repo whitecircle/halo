@@ -1,9 +1,10 @@
 """Re-attach a multimodal base's vision tower to a text-only export, restoring the wrapper layout.
 
 Trained text weights are re-prefixed to ``model.language_model.*``, or the family's declared ``text_only_layout``, the
-vision tower and any MTP tail stream back in from the base, and the composite config is regrafted. The input must be a
-text-only export and the base the multimodal checkpoint the run trained from; anything else is refused. Both pinned
-engines also load the export as-is."""
+vision tower and any MTP tail stream back in from the base (its head untrained against this trunk, which warns; a head
+the export trained supersedes it), and the composite config is regrafted. The input must be a text-only export and the
+base the multimodal checkpoint the run trained from; anything else is refused. Both pinned engines also load the export
+as-is."""
 
 import argparse
 

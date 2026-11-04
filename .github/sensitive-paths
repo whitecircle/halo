@@ -24,6 +24,7 @@ halo/kernels/head_logprobs.py
 halo/kernels/fp32_matmul.py
 halo/models/gradient_checkpointing.py
 halo/models/moe/**
+halo/models/mtp/**
 halo/model_loading/parallel/**
 halo/model_loading/lazy_safetensors/conversion_selection.py
 halo/entrypoints/model_setup.py

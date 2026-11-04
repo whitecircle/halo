@@ -540,7 +540,7 @@ attended tokens and the router aux loss into a per-mode `WorldMetrics` window (`
 flushes once per log. Under CP, `UlyssesModel.forward()` owns the boundary handling and the globally-normalized
 sum loss ([the two corrections](../parallelism/context-parallelism.md)), and the recorder mirrors the boundary
 handling on the rank's chunk; under its [fused head loss](../parallelism/context-parallelism.md#fused-head-loss) it
-weighs the chunk's `token_accuracy` by the chunk's own supervised targets. Every rank records its whole batch's attended tokens, and the flush divides the
+weighs the chunk's `token_accuracy` by the chunk's own supervised targets. A run with an [MTP head](../optimization/mtp-heads.md#objective) also records `ntp_ce` and `mtp_ce`, and at an evaluation [its acceptance](../optimization/mtp-heads.md#acceptance). Every rank records its whole batch's attended tokens, and the flush divides the
 world sum by the ranks sharing a batch (`non_dp_replication_factor`). A subclass whose own loss records none of
 these declares `RECORDS_LOSS_METRICS = False` and skips the flush (self-distillation, which stores its terms through
 `StoredMetricsMixin`).

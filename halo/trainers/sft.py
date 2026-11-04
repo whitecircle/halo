@@ -17,6 +17,7 @@ from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.models.moe.balancing import expert_load_token_weights
 from halo.models.moe.config_fields import require_router_aux_loss_coef
+from halo.models.mtp.acceptance import MTP_ACCEPTANCE_GREEDY, MTP_ACCEPTANCE_TV, MTP_SCORED_POSITIONS, MTP_TOP1
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
@@ -74,6 +75,18 @@ def _record_loss_metrics(
     if aux_loss is not None:
         # mean(): a family whose aux loss arrives per layer must still record one value.
         metrics.fraction("aux_loss", aux_loss.detach().mean(), 1)
+
+    mtp_split = getattr(outputs, "mtp_loss_split", None)
+    if mtp_split is not None:
+        metrics.fraction("ntp_ce", mtp_split.next_token_sum, mtp_split.next_token_targets)
+        metrics.fraction("mtp_ce", mtp_split.head_sum, mtp_split.head_targets)
+
+    acceptance = getattr(outputs, "mtp_acceptance", None)
+    if acceptance is not None:
+        metrics.fraction(MTP_ACCEPTANCE_TV, acceptance.overlap_sum, acceptance.positions)
+        metrics.fraction(MTP_ACCEPTANCE_GREEDY, acceptance.greedy_sum, acceptance.positions)
+        metrics.fraction(MTP_TOP1, acceptance.top1_sum, acceptance.positions)
+        metrics.sum(MTP_SCORED_POSITIONS, acceptance.positions)
 
 
 class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):

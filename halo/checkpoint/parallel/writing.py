@@ -23,6 +23,7 @@ from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from halo.models.config_access import ties_word_embeddings
 from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
+from halo.models.mtp.head import mtp_trunk_copy_keys
 from halo.models.param_roles import persistent_buffers
 from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.dtensor import gather_full_tensors
@@ -108,6 +109,7 @@ def stream_gathered_checkpoint(
         # Held only where the reconcile below can act on them; these are two of the largest tensors in the checkpoint.
         keep_tied = getattr(model, "config", None) is not None and ties_word_embeddings(model.config)
         tied: dict[str, torch.Tensor] = {}
+        trunk_copies = mtp_trunk_copy_keys(model)
         written = 0
 
         def stage(chunk: dict[str, torch.Tensor]) -> None:
@@ -117,6 +119,10 @@ def stream_gathered_checkpoint(
                     tied[key] = tensor
                 writer.add(key, tensor)
                 written += 1
+                for copy_key in trunk_copies.get(key, ()):
+                    # A clone, as a part cannot store two keys over one storage.
+                    writer.add(copy_key, tensor.clone())
+                    written += 1
 
         for chunk in chunks:
             # Driven on every rank, as its gathers are collective; only the writer has a chunk to normalize.

@@ -121,6 +121,10 @@ Under CP a batch whose length is not a multiple of `cp_size` is right-padded in 
 
 See [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility) and [Supported Models](../models/README.md#compatibility-matrix).
 
+## MTP heads
+
+`mtp_loss_weight` trains the multi-token-prediction head a family's release ships, beside the next-token loss or over a frozen trunk ([MTP heads](../optimization/mtp-heads.md)). It runs under FSDP2, EP and ETP; every other axis refuses it before the load.
+
 ## Pre-processed datasets
 
 `scripts/before_training/prepare_dataset.py` tokenizes, packs and shards offline:

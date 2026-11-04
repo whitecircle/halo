@@ -717,7 +717,9 @@ tensors) drafts with it through `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_s
 It is sound for RL: rejection sampling keeps the target distribution, `processed_logprobs` come from the
 target logits, the thinking budget is enforced on the target, and the drafter's embeddings and
 `lm_head` are the target's modules, so the sync updates them (the MTP layer keeps launch weights, which
-only moves acceptance). Under speculation a request with `min_p > 0` or a `logit_bias` raises; never
+only moves acceptance), except Step-3.5/3.7, which keep one head per draft layer. The server base must store
+the head, and exports of a run that did not [train it](../optimization/mtp-heads.md) do not, so vLLM
+refuses them at startup; `patch_vocab` and `convert_to_bf16` write a stored Qwen3.5/3.6, Qwen3-Next or GLM-4 Lite head back, and drop any other family's. SGLang has no such check on Qwen3.5/3.6, so its export must carry the tail. Under speculation a request with `min_p > 0` or a `logit_bias` raises; never
 use `ngram` on linear-attention families (an unguarded output-corruption bug); `suffix` fails at
 startup on Model Runner V2. The prompt-log-prob probe passes under MTP on Model Runner V2 (Qwen3.6-35B-A3B,
 one speculative token).

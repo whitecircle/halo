@@ -3,6 +3,8 @@ abstract method on the real base surfaces here, and each test's export contract 
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,10 +12,44 @@ import torch
 from torch import nn
 
 from halo.distributed.expert_parallel import config as ep_config_module
+from halo.distributed.expert_parallel.deepep.backends import DeepEPBackend
 from halo.distributed.expert_parallel.moe_layer import layer as layer_module
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
 from tests.common.parallelism import stubbed_rank_ep_config
+
+
+class LoopbackBackend(DeepEPBackend):
+    """Every token returns to the rank that sent it, so each op is the identity; each is logged as ``(op,
+    dispatcher, handle)``."""
+
+    def __init__(self, dispatcher, log: list):
+        super().__init__(dispatcher)
+        self._log = log
+        self.counts: list[tuple[int, ...]] = []
+
+    def ensure(self, num_tokens: int, num_topk: int, *, deterministic: bool) -> None:
+        pass
+
+    def dispatch_forward(self, x, topk_idx, topk_weights):
+        handle = f"handle{len(self._log)}"
+        self._log.append(("dispatch_forward", self._d, handle))
+        counts = tuple(torch.bincount(topk_idx[topk_idx >= 0], minlength=self._d.num_experts).tolist())
+        self.counts.append(counts)
+        return x.clone(), topk_idx.clone(), topk_weights.clone(), handle, counts
+
+    def dispatch_backward(self, grad_recv_x, grad_recv_topk_weights, handle):
+        self._log.append(("dispatch_backward", self._d, handle))
+        grad_topk_weights = None if grad_recv_topk_weights is None else grad_recv_topk_weights.clone()
+        return grad_recv_x.clone(), grad_topk_weights
+
+    def combine_forward(self, x, topk_weights, handle):
+        self._log.append(("combine_forward", self._d, handle))
+        return x.clone()
+
+    def combine_backward(self, grad_combined_x, handle):
+        self._log.append(("combine_backward", self._d, handle))
+        return grad_combined_x.clone()
 
 
 class StubEPLayerBase(EPMoELayerBase):
@@ -49,6 +85,13 @@ class _NoDispatcher:
 
     def __init__(self, *args, **kwargs):
         pass
+
+
+@contextmanager
+def no_ep_dispatcher() -> Iterator[None]:
+    """EP layers built inside take no DeepEP transport, so a rank's slice is checkable with no live group."""
+    with patch.object(layer_module, "DeepEPDispatcher", _NoDispatcher):
+        yield
 
 
 def stubbed_rank_ep_layer(

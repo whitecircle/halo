@@ -1,6 +1,6 @@
 # Halo
 
-Halo is an LLM training toolkit built on HuggingFace TRL, Transformers, and Accelerate. It adds Expert, Context, Tensor, Expert-Tensor, and Pipeline parallelism (EP / CP / TP / ETP / PP) for MoE and dense models, plus pre-training and post-training methods: SFT, preference optimization (SMPO, DPO, KTO), the GRPO family (offline, online/RLVR, async with environments), distillation (teacher, self, online SDPG), reward modeling, classification, and embedding.
+Halo is an LLM training toolkit built on HuggingFace TRL, Transformers, and Accelerate. It adds Expert, Context, Tensor, Expert-Tensor, and Pipeline parallelism (EP / CP / TP / ETP / PP) for MoE and dense models, plus pre-training and post-training methods: SFT, preference optimization (SMPO, DPO, KTO), the GRPO family (offline, online/RLVR, async with environments), distillation (teacher, self, online SDPG), reward modeling, classification, and embedding. SFT also trains the multi-token-prediction head a release ships ([MTP heads](optimization/mtp-heads.md), `mtp_loss_weight`).
 
 Trainers subclass TRL/Transformers trainers, so any Hub model trains with the same `TrainingArguments`, Accelerate FSDP configs, and PEFT/LoRA — no checkpoint conversion, except a one-time BF16 dequantize of the FP8 releases (DeepSeek-V4, GLM-5 Next, Mistral 4; [Models](models/README.md)).
 

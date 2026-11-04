@@ -6,6 +6,7 @@ import logging
 from trl import SFTConfig
 
 from halo.callbacks.generate_examples import GenerateExamplesCallback
+from halo.callbacks.mtp import MtpAcceptanceGate
 from halo.config_validation import reject_non_default_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
@@ -73,9 +74,11 @@ from halo.runtime.consensus import agree_probe_across_ranks
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.sft import DistributedSFTTrainer
 from halo.trainers.sft_rules import (
+    reject_unsupported_mtp_options,
     reject_unsupported_sft_data_options,
     reject_unsupported_tree_packing,
     reject_unsupported_vlm_sft_options,
+    settle_mtp_balancing,
 )
 
 logger = logging.getLogger(__name__)
@@ -259,6 +262,8 @@ def main():
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
+    reject_unsupported_mtp_options(args, sft_config, model_config, dist_args, checkpoint_config)
+    settle_mtp_balancing(args)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks)
     rows_plan = {
         "sinks_policy": sinks_policy,
@@ -355,6 +360,7 @@ def main():
         vlm_run=is_vlm,
         attn_default=attn_default,
         init_from_scratch=dist_args.init_from_scratch,
+        mtp_head=args.mtp_head_request,
     )
     model = policy.model
     tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
@@ -406,6 +412,10 @@ def main():
         packed_rows=_packs_rows(sft_config, metadata),
         multimodal_rows=is_vlm,
     )
+    if args.gates_mtp_acceptance:
+        # The baseline: a resume scores the head it restored too, and the gate reads the log's first reading.
+        sft_config.eval_on_start = True
+        callbacks.append(MtpAcceptanceGate(args.mtp_min_acceptance_gain))
 
     disable_trl_dataset_prep(sft_config)
 

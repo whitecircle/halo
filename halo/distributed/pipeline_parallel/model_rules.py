@@ -12,9 +12,7 @@ from halo.models.module_tree import backbone_with_layers, decoder_layers, embedd
 from halo.models.moe.balancing import accepts_native_balancing_bias, resolve_balancing_mode
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import find_moe_family_spec
-
-# Every family spelling of the multi-token-prediction tail-layer count.
-MTP_LAYER_COUNT_FIELDS: tuple[str, ...] = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "num_mtp_layers")
+from halo.models.mtp.spec import MTP_LAYER_COUNT_FIELDS
 
 
 def require_backbone(model: nn.Module) -> nn.Module:

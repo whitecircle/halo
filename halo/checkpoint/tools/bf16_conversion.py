@@ -23,6 +23,7 @@ from halo.checkpoint.tools.adapter_merge import (
 from halo.checkpoint.tools.offline_export import (
     ADAPTER_TASKS,
     TASK_MODEL_CLASSES,
+    carried_mtp_tail,
     cast_norms_to_fp32,
     copy_checkpoint_aux_files,
     load_task_model,
@@ -214,7 +215,7 @@ def _convert_adapter_to_bf16(adapter_dir, output_path) -> None:
 def _convert_checkpoint_to_bf16(
     model_path, output_path, task, load_kwargs, *, device_map, max_shard_size, trust_remote_code
 ) -> None:
-    """Reload a full checkpoint at bf16, cast norms back to fp32, and write it out."""
+    """Reload a full checkpoint at bf16, cast norms back to fp32, and write it out with the MTP head its class drops."""
     # Before the load, since a per-rank EP/TP save loads its .shard_N keys as missing and random-initialized, which
     # --verify's dtype count cannot catch.
     reject_partial_checkpoint(model_path)
@@ -225,6 +226,7 @@ def _convert_checkpoint_to_bf16(
     preflight_model_load_resources(model_path, output_path, tool="convert_to_bf16", device_map=device_map)
 
     model = load_model(model_path, task, **load_kwargs)
+    mtp_tail = carried_mtp_tail(model, model_path, output_path, tool="convert_to_bf16", dtype=torch.bfloat16)
     for action in apply_training_sidecars(model, model_path):
         logger.info(action)
     cast_norms_to_fp32(model)
@@ -236,6 +238,7 @@ def _convert_checkpoint_to_bf16(
         output_path,
         processing_class=processing_class,
         source_dir=model_path,
+        carried_tensors=mtp_tail,
         max_shard_size=max_shard_size,
     )
 

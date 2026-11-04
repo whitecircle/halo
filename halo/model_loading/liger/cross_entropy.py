@@ -15,7 +15,7 @@ from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss, unp
 from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutputWithPast
 from transformers.loss import loss_utils
 
-from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, chunked_token_sum, cross_entropy_sum, logit_chunk_rows
 from halo.models.config_access import get_config_field
 from halo.models.head_transform import HeadTransform, resolve_head_transform, resolve_head_transform_spec
 from halo.models.unwrapping import base_transformers_model
@@ -232,13 +232,21 @@ class FusedHeadLossUnavailable(ValueError):
 
 
 def fused_head_ce_sum(
-    head: nn.Linear, transform: HeadTransform, hidden: torch.Tensor, targets: torch.Tensor
+    head: nn.Linear,
+    transform: HeadTransform,
+    hidden: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    frozen_head: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The fp32 cross-entropy summed over the rows of ``hidden`` under ``transform.project(head, hidden)``, and each
     supervised row's argmax (``-1`` when ignored), through Liger's fused kernel. No ``[N, V]`` logits plane exists: the
     kernel projects a chunk at a time and writes gradients in the forward. A logit scale needs a bias-free head; the
-    softcap runs in the kernel."""
+    softcap runs in the kernel. ``frozen_head`` leaves the head out of the graph, as the kernel keys its gradient on the
+    weight's ``requires_grad``."""
     weight, bias = transform.kept_rows(head.weight, head.bias)
+    if frozen_head:
+        weight, bias = weight.detach(), None if bias is None else bias.detach()
     fused_hidden = transform.scale_hidden(hidden)
     if transform.logit_scale is not None:
         fused_hidden = fused_hidden * transform.logit_scale
@@ -278,3 +286,28 @@ def fused_head_loss(model: nn.Module) -> Callable[[torch.Tensor, torch.Tensor], 
             f"{type(base).__name__}'s logit scale multiplies a biased head, so it cannot fold onto the hidden states"
         )
     return functools.partial(fused_head_ce_sum, head, transform)
+
+
+def head_token_ce_sum(model: nn.Module, *, fused: bool) -> Callable[..., torch.Tensor]:
+    """``(hidden [N, H], targets [N], *, frozen_head) -> fp32 CE sum`` under ``model``'s head path, for hidden states
+    the forward's own loss does not score: Liger's fused kernel where ``fused`` and the rows sit on a GPU, else chunked
+    fp32 logits, the fallback CP and PP use. An empty plane skips the kernel, whose chunking divides by its length."""
+    base = base_transformers_model(model)
+    head = base.get_output_embeddings()
+    transform = resolve_head_transform(base)
+    chunk_rows = logit_chunk_rows(head.out_features)
+    fused_loss = fused_head_loss(base) if fused else None
+
+    def chunk_ce(frozen_head: bool, hidden: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        project = head
+        if frozen_head:
+            weight, bias = head.weight.detach(), None if head.bias is None else head.bias.detach()
+            project = functools.partial(F.linear, weight=weight, bias=bias)
+        return cross_entropy_sum(transform.project(project, hidden), targets)
+
+    def score(hidden: torch.Tensor, targets: torch.Tensor, *, frozen_head: bool = False) -> torch.Tensor:
+        if fused_loss is not None and hidden.is_cuda and targets.numel() > 0:
+            return fused_loss(hidden, targets, frozen_head=frozen_head)[0]
+        return chunked_token_sum(functools.partial(chunk_ce, frozen_head), hidden, targets, chunk_rows)
+
+    return score

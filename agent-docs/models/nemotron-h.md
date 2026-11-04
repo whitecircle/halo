@@ -18,7 +18,7 @@ The release has trained through the toolkit at `ep8` on 8× B300, with real weig
 What these rows leave:
 
 - **Length of run:** 5 to 20 steps each. No run has trained the release to a quality metric, so a step's loss is all they say about training.
-- **Serving:** only vLLM has served an export, an untrained reattached one, on one image prompt and one text prompt. SGLang does not boot a reattached export yet ([Checkpoints and serving](#checkpoints-and-serving)).
+- **Serving:** both engines have served an export, an untrained reattached one: vLLM on one image prompt and one text prompt, SGLang on one image prompt ([Checkpoints and serving](#checkpoints-and-serving)).
 - **Other axes:** mixed image and text rows, pipeline parallelism, pure ETP and EP+ETP have run on tiny models only.
 
 ## Methods
@@ -125,10 +125,10 @@ The release is plain bf16 with no conversion step. Load it natively, `trust_remo
 
 - **Text-only export:** `backbone.*` and `lm_head.weight` under transformers' `nemotron_h` schema. It reloads in stock transformers through `AutoModelForCausalLM`, whose forward keeps upstream's time-step floor ([above](#mamba-layers)), so a stock reload smoke-tests the export but does not compute what the run trained.
 - **Composite export:** the hub's spellings, per expert, under the release's own `config.json` and modules (`exports_source_config_schema`). It carries no `mtp.*`, and no tool restores one onto it. Stock transformers reads it whole with `trust_remote_code=True`; its native class, without this toolkit's conversion entries, leaves the vision norm at identity.
-- **`reattach_vision_tower.py`:** turns a text-only export into the composite, streaming the vision tower, connector and 5.48 GiB `mtp.*` head back from the base byte for byte. The head stays at the release's weights. Its acceptance on a trained tower is unmeasured.
+- **`reattach_vision_tower.py`:** turns a text-only export into the composite, streaming the vision tower, connector and 5.48 GiB `mtp.*` head back from the base byte for byte, and warns with the head's tensor count. The head stays at the release's weights. Its acceptance on a trained tower is unmeasured.
 - **Refused:** `save_sharded_ep` and `merge_ep_shards.py`, since the merge cannot respell `backbone.*` and the vision norm, and `unfuse_moe_experts.py`, as the layout stores per expert already. Gathered saves stream one 5.25 GiB layer at a time.
 
-Serve a composite with the release's flags. vLLM boots an untrained reattached export and answers image and text prompts. SGLang does not boot one yet, and `AutoProcessor` with `trust_remote_code=True` raises on it, as `reattach_vision_tower.py` leaves out the processor modules the export's `auto_map` names.
+Serve a composite with the release's flags. Both engines boot an untrained reattached export and answer an image prompt, vLLM a text prompt too. `reattach_vision_tower.py` carries the modules its processor and tokenizer configs' `auto_map` names, which SGLang's boot and `AutoProcessor` with `trust_remote_code=True` read.
 
 - **vLLM 0.32.0:** `--trust-remote-code` (without it the boot fails on `vit_hidden_size`), `--mamba-ssm-cache-dtype float32`, `--tensor-parallel-size 2`, `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`. `docker-compose.vllm.yml` passes neither of the first two, so start the image directly.
 - **SGLang 0.5.22:** `SGLANG_TRUST_REMOTE_CODE=1`, `SGLANG_TP=2`, `SGLANG_TOOL_PARSER=qwen3_coder`, `SGLANG_REASONING_PARSER=nemotron_3` on the compose file. The model card's `--mamba-ssm-dtype` flags are for its dedicated image and raise on this one.
@@ -146,4 +146,4 @@ Online and async GRPO are refused at construction on both engines by the spec's 
 - **CP:** the scan is a recurrence along the sequence axis.
 - **TP:** `NemotronHAttention` is not in `TP_SHARDABLE_ATTENTION_CLASSES`. Attention is 0.24% of the parameters, and two KV heads would cap it at 2.
 - **HSDP:** refused with EP, and pure DP cannot hold the model.
-- **MTP training:** both classes drop the head at load.
+- **MTP training:** `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md). The config declares `mtp_layers_block_type: [attention, moe]`, a draft chain of two blocks of different kinds, which one decoder layer does not build, and both classes drop the head at load.

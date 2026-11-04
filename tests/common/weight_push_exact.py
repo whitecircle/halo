@@ -112,6 +112,10 @@ def _server_url(backend: str) -> str:
     return SGLANG_SERVER_URL if backend == "sglang" else env_str("VLLM_SERVER_URL") or "http://localhost:8000"
 
 
+def _server_answers(backend: str) -> bool:
+    return requests.get(f"{_server_url(backend)}/health", timeout=60).ok
+
+
 def _row_checkpoint(family: str) -> str | None:
     return env_str("HALO_TEST_PUSH_EXACT_MODEL") or CHECKPOINTS[family]
 
@@ -397,5 +401,5 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
             client.close_communicator()
     if ctx.rank == 0:
         # A close that leaves the engine wedged passes every round above and fails the next trainer at launch.
-        checks["server_answers_after_the_close"] = requests.get(f"{_server_url(row.backend)}/health", timeout=60).ok
+        checks["server_answers_after_the_close"] = _server_answers(row.backend)
     return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}

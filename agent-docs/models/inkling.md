@@ -26,6 +26,8 @@ One contract fails closed: the spec's `weight_sync_refusal` refuses online/async
 
 ## Loading
 
+The release's MTP tail (`model.mtp.*`, eight layers) drops at load and exports carry none, so `method=mtp` refuses them; `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md).
+
 The hub config spells the expert width `intermediate_size: 2048` beside `dense_intermediate_size: 16384`. transformers 5.20 reads those as `moe_intermediate_size` 2048 and `intermediate_size` 16384, so a run needs no override: the built expert tensors match the hub's shard shapes.
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).

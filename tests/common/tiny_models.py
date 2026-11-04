@@ -708,6 +708,8 @@ def build_tiny_family_checkpoint(
     for name, tensor in model.state_dict(keep_vars=True).items():
         if name in stored:
             tensor.data = stored[name]
+    # Past transformers' gate to global rank 0: a multi-node launch's save rank on each machine builds its own copy.
+    model.should_save_on_this_rank = lambda is_main_process: is_main_process
     model.save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
     # As a real export does, or a vendor config leaving the class attribute unset reloads family-less.
     restore_model_type(model.config, target_dir)

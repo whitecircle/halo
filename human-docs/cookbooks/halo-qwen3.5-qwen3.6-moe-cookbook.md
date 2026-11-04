@@ -53,6 +53,24 @@ halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/qwen3.6-35b-a3b-lora
 ```
 
+### MTP head
+
+Train the `mtp.*` head the release ships, so a server can draft with it. Fit it over a frozen trunk, on rows like
+the ones you will serve, or inside a fine-tune with `qwen3.6-35b-a3b-mtp-joint.yaml`. A 150-step fit served at 0.834
+acceptance on vLLM against the release head's 0.831, inside the 0.006 that head moves between launches, so expect no
+served gain from the recipe's rows. What the `joint` recipe does over a fine-tune is not measured.
+
+```bash
+halo launch sft examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-head-only.yaml -n 8 \
+  --output_dir=/data/checkpoints/qwen3.6-35b-a3b-mtp-head
+```
+
+The fit scores held-out rows before its first step and at its last, and exits non-zero if acceptance fell. Its last
+checkpoint then holds the rejected head, so serve the one the fit started from. `mtp_train_scope: detached` keeps a
+head current during a fine-tune without changing the trunk's objective. Serve with
+`VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`
+([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
+
 ### GRPO
 
 The shipped recipes train Qwen3.6, most of them on code contests. Read
@@ -137,8 +155,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 - TP stops at 2 because the checkpoints have two KV heads. TP shards only the 10 full-attention layers,
   so per-GPU memory drops much less than `1/tp_size`.
 - Online RL refuses `text_only_model: true`.
-- Saves drop the hub checkpoint's `mtp.*` multi-token-prediction head. `reattach-vision-tower` restores
-  it for a text-only export; no tool restores it on a multimodal save.
+- Saves drop the hub checkpoint's `mtp.*` multi-token-prediction head unless the run
+  [trains it](../../agent-docs/optimization/mtp-heads.md). `reattach-vision-tower` restores the base's untrained head for a
+  text-only export.
 
 ## Export and serve
 

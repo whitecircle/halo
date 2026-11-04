@@ -48,6 +48,8 @@ The update lands in the gate's own exported `e_score_correction_bias`, so the tr
 
 ## Checkpoint conversion
 
+The release's MTP tail drops at load and the BF16 converter drops it too, so exports carry none and `method=mtp` refuses them; `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md).
+
 The hub checkpoints (`deepseek-ai/DeepSeek-V4-Flash[-Base]`) ship fine-grained FP8 dense weights (e4m3, 128×128 blocks, ue8m0 scales) with FP4-packed experts (`config.expert_dtype="fp4"`, two e2m1 nibbles per int8 byte, [1, 32] scale grid). EP requires plain BF16 experts, so convert once:
 
 ```bash

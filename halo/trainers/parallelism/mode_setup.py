@@ -15,6 +15,7 @@ from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_for_dp, apply_fs
 from halo.distributed.mesh import tp_local_rank
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
+from halo.models.mtp.head import frozen_trunk_params
 from halo.models.unwrapping import find_peft_model
 from halo.runtime.collectives import nccl_safe_broadcast
 from halo.runtime.consensus import reject_across_ranks
@@ -320,12 +321,14 @@ class ModeSetupMixin:
     def _fsdp_excluded_params(self) -> list[nn.Parameter]:
         """EP modules sync their own gradients and are left out whole, except under ``experts_fsdp_managed``. Frozen
         parameters whose dtype no trainable parameter shares are taken one by one, so a trainable child of their module
-        stays in its shard group."""
+        stays in its shard group. A ``head_only`` run's frozen trunk joins them: it takes no gradient to reduce and would
+        otherwise re-gather every step."""
         ep_modules = self._ep_layers()
         if self.parallelism_config.experts_fsdp_managed:
             ep_modules = []
         ep_params = [p for module in ep_modules for p in module.parameters()]
-        return list({id(p): p for p in ep_params + self._dtype_excluded_params()}.values())
+        params = ep_params + self._dtype_excluded_params() + frozen_trunk_params(self.model)
+        return list({id(p): p for p in params}.values())
 
     def _dtype_excluded_params(self) -> list[nn.Parameter]:
         """Frozen parameters whose dtype no trainable parameter shares (a frozen bf16 base under fp32 adapters, uint8

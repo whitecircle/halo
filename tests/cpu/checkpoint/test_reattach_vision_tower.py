@@ -2,6 +2,7 @@
 composite."""
 
 import json
+import logging
 import os
 
 import pytest
@@ -172,6 +173,82 @@ def test_an_output_aimed_at_the_base_is_refused(artifacts):
     assert sorted(os.listdir(base_dir)) == before, "a refused re-attachment touched the base directory"
 
 
+_BASE_TAIL = {"mtp.fc.weight": 1.5, "mtp.layers.0.mlp.gate.weight": 1.5, "mtp.norm.weight": 1.5}
+
+
+def _with_tail(source: str, target, tail: dict[str, float]) -> str:
+    """``source``'s tensors and config beside an MTP tail filled with each key's value."""
+    target.mkdir()
+    tensors = load_file(os.path.join(source, "model.safetensors"))
+    tensors.update({key: torch.full((2, 2), value) for key, value in tail.items()})
+    save_file(tensors, str(target / "model.safetensors"), metadata={"format": "pt"})
+    AutoConfig.from_pretrained(source).save_pretrained(target)
+    return str(target)
+
+
+def _head_warnings(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if "MTP head" in record.getMessage()]
+
+
+def test_a_base_head_carried_beside_a_trained_trunk_warns_with_its_count_and_stays_byte_equal(
+    artifacts, tmp_path, caplog
+):
+    base_dir, export_dir = artifacts
+    base = _with_tail(base_dir, tmp_path / "base_tail", _BASE_TAIL)
+    out = str(tmp_path / "out")
+    with caplog.at_level(logging.WARNING, logger=vision_reattach.__name__):
+        reattach_vision_tower(export_dir, base, out, trust_remote_code=False)
+    written = load_file(os.path.join(out, "model.safetensors"))
+    for key, value in _BASE_TAIL.items():
+        assert torch.equal(written[key], torch.full((2, 2), value)), key
+    warned = _head_warnings(caplog)
+    assert len(warned) == 1 and f"{len(_BASE_TAIL)} tensor(s)" in warned[0], warned
+    assert "mtp_train_scope: head_only" in warned[0], warned
+
+
+def test_a_base_with_no_tail_reattaches_silently(artifacts, tmp_path, caplog):
+    base_dir, export_dir = artifacts
+    with caplog.at_level(logging.WARNING, logger=vision_reattach.__name__):
+        reattach_vision_tower(export_dir, base_dir, str(tmp_path / "out"), trust_remote_code=False)
+    assert not _head_warnings(caplog)
+
+
+def test_a_head_the_export_trained_supersedes_the_bases_whole(artifacts, tmp_path, caplog):
+    """The export's own head is the one to serve; a base-only tail key beside it would reload as a mixed head."""
+    base_dir, export_dir = artifacts
+    base = _with_tail(base_dir, tmp_path / "base_tail", {**_BASE_TAIL, "mtp.layers.0.mlp.shared_expert.weight": 1.5})
+    trained = _with_tail(export_dir, tmp_path / "trained", {key: 2.5 for key in _BASE_TAIL})
+    out = str(tmp_path / "out")
+    with caplog.at_level(logging.WARNING, logger=vision_reattach.__name__):
+        reattach_vision_tower(trained, base, out, trust_remote_code=False)
+    written = load_file(os.path.join(out, "model.safetensors"))
+    assert {key for key in written if key.startswith("mtp.")} == set(_BASE_TAIL)
+    for key in _BASE_TAIL:
+        assert torch.equal(written[key], torch.full((2, 2), 2.5)), key
+    assert any(key.startswith("model.visual.") for key in written), "the vision tower still comes from the base"
+    assert not _head_warnings(caplog), "a head the export trained is not stale"
+
+
+def test_a_trained_head_of_another_width_than_the_bases_is_refused(artifacts, tmp_path):
+    """A trained tail passes the key check and still meets the shape check."""
+    base_dir, export_dir = artifacts
+    base = _with_tail(base_dir, tmp_path / "base_tail", _BASE_TAIL)
+    trained = _with_tail(export_dir, tmp_path / "trained", {key: 2.5 for key in _BASE_TAIL})
+    tensors = load_file(os.path.join(trained, "model.safetensors"))
+    tensors["mtp.fc.weight"] = torch.zeros(3, 3)
+    save_file(tensors, os.path.join(trained, "model.safetensors"), metadata={"format": "pt"})
+    with pytest.raises(ValueError, match="another model of this family"):
+        reattach_vision_tower(trained, base, str(tmp_path / "out"), trust_remote_code=False)
+
+
+def test_a_stray_key_beside_a_trained_head_is_still_refused(artifacts, tmp_path):
+    """Only what the wrapper class names as a tail joins the text layout."""
+    base_dir, export_dir = artifacts
+    trained = _with_tail(export_dir, tmp_path / "trained", {"mtp.fc.weight": 2.5, "draft.fc.weight": 2.5})
+    with pytest.raises(ValueError, match="address no module of the base's text tower"):
+        reattach_vision_tower(trained, base_dir, str(tmp_path / "out"), trust_remote_code=False)
+
+
 def test_a_base_of_another_family_is_refused(artifacts, tmp_path):
     """The graft is a plain attribute assignment, so a mismatched tower loads and serves garbage."""
     _, export_dir = artifacts
@@ -231,6 +308,16 @@ def test_a_declared_layout_restores_the_hub_spelling(declared_composite, tmp_pat
     assert "language_model.mtp.layers.0.norm.weight" in written, "a tail no text tower owns is carried from the base"
     reloaded = AutoConfig.from_pretrained(out)
     assert reloaded.model_type == name and reloaded.vision_config is not None
+
+
+def test_a_carried_head_of_a_family_with_no_spec_warns_without_offering_a_fit(declared_composite, tmp_path, caplog):
+    """``mtp_loss_weight`` refuses these families, so the warning cannot send a reader to it."""
+    _name, _composite, _base_tensors, base_dir, export_dir = declared_composite
+    with caplog.at_level(logging.WARNING, logger=vision_reattach.__name__):
+        reattach_vision_tower(export_dir, base_dir, str(tmp_path / "out"), trust_remote_code=False)
+    warned = _head_warnings(caplog)
+    assert len(warned) == 1 and "1 tensor(s)" in warned[0], warned
+    assert "mtp_train_scope" not in warned[0], warned
 
 
 def test_a_declared_layout_reloads_as_the_composite_with_the_trained_head(declared_composite, tmp_path):

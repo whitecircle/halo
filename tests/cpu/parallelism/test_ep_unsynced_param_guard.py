@@ -104,7 +104,9 @@ class _ModeHost(DistributedTrainerMixin):
 
     def __init__(self, config, layers):
         self.parallelism_config = config
-        self.args = SimpleNamespace(load_best_model_at_end=False, optim="adamw_torch")
+        self.args = SimpleNamespace(load_best_model_at_end=False, optim="adamw_torch", per_device_train_batch_size=1)
+        self.label_smoother = None
+        self.compute_loss_func = None
         self._bf16_optimizer = False
         self.model = nn.ModuleList(layers)
         self.model._device_mesh = object()  # What the TP loaders attach; the EP+TP wrap requires it.

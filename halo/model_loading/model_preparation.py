@@ -37,6 +37,7 @@ from halo.models.attention.selection import (
 )
 from halo.models.config_access import drop_toolkit_stamps, model_type_matches, text_config
 from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
+from halo.models.model_classes import mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec
 from halo.models.nemotron_h import apply_nemotron_h_patches
 from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
@@ -123,6 +124,14 @@ def resolve_build_config(
     config = AutoConfig.from_pretrained(model_name_or_path, revision=revision, trust_remote_code=trust_remote_code)
     drop_toolkit_stamps(config)
     return config
+
+
+def declared_load_ignores(config) -> tuple[str, ...]:
+    """What the class ``config`` loads through drops at load (``_keys_to_ignore_on_load_unexpected``); none for a
+    remote-code class no mapping names, which builds what it stores."""
+    auto_class = resolve_auto_model_class(config)
+    model_class = mapped_model_class(config, auto_class) or auto_class
+    return tuple(getattr(model_class, "_keys_to_ignore_on_load_unexpected", None) or ())
 
 
 def auto_load_model(

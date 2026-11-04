@@ -38,6 +38,10 @@ Three settings decide most runs:
 - **The learning rate.** `2.5e-6`–`5e-6` for a full fine-tune of a large model, 5–10× that for LoRA. Too
   high a rate erases pretrained capability without showing in the loss.
 
+A family whose release ships a multi-token-prediction head can train it for speculative decoding:
+`mtp_loss_weight` adds it to a fine-tune, `mtp_train_scope: head_only` fits it over a frozen trunk, and
+`mtp_loss_type` picks a hard or a soft target ([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
+
 Continued pre-training tokenizes the corpus once (`halo run prepare-dataset --mode text ...`) and
 trains with `train_on_completions_only: false`; `init_from_scratch: true` starts from random weights,
 on data parallelism only ([Pre-training](../../agent-docs/training-methods/pretraining.md) ↗).

@@ -39,7 +39,7 @@ On 8× B300, Halo 1.1.0 trained gpt-oss-20b at up to 3.5× the throughput of sto
 
 - **The distributed stack is built on PyTorch.** FSDP2, DTensor, and DeviceMesh provide the underlying primitives, while DeepEP handles the all-to-all communication for Expert Parallelism. EP, CP, TP, ETP, and PP each have their own setting; EP combines with CP, TP, or ETP across GPUs and nodes, PP splits a model's layers across nodes with EP or ETP inside each stage, and other pairings are rejected at config time.
 
-- **Training methods share the same infrastructure.** Pre-training, SFT, preference optimization, distillation, and RL use the same parallelism and checkpointing code, so new methods don't need their own distributed implementation.
+- **Training methods share the same infrastructure.** Pre-training, SFT, preference optimization, distillation, and RL use the same parallelism and checkpointing code, so new methods don't need their own distributed implementation. SFT also trains the multi-token-prediction head a release ships for speculative decoding, beside a fine-tune or over a frozen trunk (`mtp_loss_weight`, `mtp_train_scope`, `mtp_loss_type`; [MTP heads](agent-docs/optimization/mtp-heads.md)).
 
 - **Performance optimizations are integrated.** Halo includes DeepEP V2, FlashAttention 4, Liger, Grouped GEMM, padding-free packing, and AdamWBF16, with implementations and fallbacks for Blackwell, Hopper, and older GPUs.
 
@@ -55,8 +55,9 @@ On 8× B300, Halo 1.1.0 trained gpt-oss-20b at up to 3.5× the throughput of sto
   stack: pipeline parallelism for SFT, preference, offline GRPO, reward and classification training,
   alone or with EP or ETP inside each stage, with two recipes run across two machines; 1.11–2.07× the
   throughput of 1.1.0 on twelve benchmarked shapes (TP2 1.82×, EP4+ETP2 2.07×); SFT tree packing, which
-  stores a prefix several rows share once; the Qwen3-Next, experimental Qwen3.8-Flash-Next and NVIDIA
-  Nemotron 3.5 Super VL families; a step guard that skips an optimizer step whose gradient norm is not
+  stores a prefix several rows share once; SFT training of the multi-token-prediction head a release
+  ships, under FSDP2, EP and ETP ([MTP heads](agent-docs/optimization/mtp-heads.md)); the Qwen3-Next,
+  experimental Qwen3.8-Flash-Next and NVIDIA Nemotron 3.5 Super VL families; a step guard that skips an optimizer step whose gradient norm is not
   finite; a causal mask for PaliGemma SFT and distillation, which 1.1.0 trained non-causally;
   transformers 5.20 and TRL 1.14, with rollouts on vLLM 0.32 or SGLang 0.5.22; and the import package
   renamed to `halo`.

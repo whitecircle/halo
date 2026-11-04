@@ -15,7 +15,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
     `swiglu_limit: 10.0` clamps the GLU; the EP layer runs its own fused Triton clamped SwiGLU (`GluCombine.clamped_silu`, bound as a runtime kernel argument), latched into the generic fused-GLU seam the same way DeepSeek-V4 does ([GLM-4 → Fused SwiGLU](glm4.md#fused-swiglu)).
 
-- **MTP** — the checkpoint ships one MTP layer (index 45); transformers drops it on load (`_keys_to_ignore_on_load_unexpected`), so every export ships without it.
+- **MTP** — the checkpoint ships one MTP layer (index 45); transformers drops it on load (`_keys_to_ignore_on_load_unexpected`), so every export ships without it. `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md): its decoder class builds `attn_hc` and `ffn_hc` layers the release's tail lacks, and the release stores the tail in fp8.
 
 ## Checkpoint conversion
 

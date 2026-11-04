@@ -42,6 +42,18 @@ halo launch sft examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/glm-4.7-flash-lora
 ```
 
+### MTP head
+
+Fit the tail the release ships over a frozen trunk, so a server can draft with it. At the recipe's learning rate on
+first-turn rows the acceptance gate stopped the fit (0.7685 to 0.7649), and that export served at 0.7317 on vLLM against
+the release head's 0.7450, so expect no gain. Its export carries the head's trunk copies, which vLLM's loader requires
+([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
+
+```bash
+halo launch sft examples/sft/glm4/glm-4.7-flash-mtp-head-only.yaml -n 8 \
+  --output_dir=/data/checkpoints/glm-4.7-flash-mtp-head
+```
+
 ### GRPO
 
 Read [Before a GRPO run](README.md#before-a-grpo-run) first. This setup serves the SFT checkpoint from

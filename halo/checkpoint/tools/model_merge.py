@@ -25,9 +25,8 @@ from halo.checkpoint.tools.offline_export import (
 )
 from halo.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
 from halo.model_loading.dtype import DTYPE_BY_NAME
-from halo.model_loading.model_preparation import resolve_auto_model_class
+from halo.model_loading.model_preparation import declared_load_ignores
 from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
-from halo.models.model_classes import mapped_model_class
 from halo.models.moe.balancing import is_balancing_state_key
 
 logger = logging.getLogger(__name__)
@@ -120,9 +119,7 @@ def _excused_base_keys(
     if not base_only:
         return set()
     config = AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code)
-    auto_class = resolve_auto_model_class(config)
-    model_class = mapped_model_class(config, auto_class) or auto_class
-    patterns = getattr(model_class, "_keys_to_ignore_on_load_unexpected", None) or ()
+    patterns = declared_load_ignores(config)
     # Matched as transformers matches them: searched anywhere in the key.
     load_ignored = {key for key in base_only if any(re.search(pattern, key) for pattern in patterns)}
     return load_ignored | _tied_head_key(reference, base_only, readers, config)

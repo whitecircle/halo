@@ -13,7 +13,7 @@ from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from halo.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
+from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
 from halo.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
     layer_types_period,
@@ -32,6 +32,7 @@ from halo.models.modality import config_declares_multimodality, is_vlm_model
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from halo.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
+from halo.models.mtp.spec import MTP_LAYER_COUNT_FIELDS
 from tests.common.distributed import fake_process_group_mesh
 
 # The real checkpoint's shape at divisibility floors: head counts 4 full / 6 sliding mirror the hub's 64/96.

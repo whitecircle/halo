@@ -1,11 +1,12 @@
 """The standalone tools' model-directory contract: source resolver, input gates, size preflight, non-weight copy, a
-shard merge's resume state, the gated load per ``--task``, the fp32 norm cast and the one full-model write."""
+shard merge's resume state, the gated load per ``--task``, the fp32 norm cast, the MTP tail a class drops and the one
+full-model write."""
 
 import contextlib
 import logging
 import os
 import shutil
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 
 import torch
 from accelerate.utils import is_peft_model
@@ -34,12 +35,20 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.hub_layout import save_pretrained_layout
 from halo.checkpoint.model_card import tag_exported_model_card
-from halo.checkpoint.reading import checkpoint_shard_files
+from halo.checkpoint.reading import (
+    checkpoint_shard_files,
+    iter_checkpoint_tensors,
+    read_checkpoint_config,
+    resolve_checkpoint_weights,
+)
 from halo.checkpoint.weights_source import config_schema_source
 from halo.checkpoint.writing import sweep_after_full_save
 from halo.hardware import available_host_ram_bytes
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
+from halo.models.config_access import text_config
+from halo.models.mtp.head import mtp_head_path
+from halo.models.mtp.spec import MTP_LAYER_COUNT_FIELDS, find_mtp_head_spec, stored_tail_keys, tail_load_patterns
 from halo.models.param_roles import is_normalization_module
 
 logger = logging.getLogger(__name__)
@@ -196,11 +205,13 @@ def save_full_checkpoint(
     source_dir=None,
     *,
     include_resume_sidecars: bool = True,
+    carried_tensors: Mapping[str, torch.Tensor] | None = None,
     **save_kwargs,
 ) -> None:
     """``save_pretrained`` plus a tool output's non-weight files, for full models only. The order is the contract:
     ``source_dir``'s files copy before the save so the live config and tokenizer overwrite them, stale weights are
-    swept after it, and carried legacy tokenizer files the fresh processing class did not rewrite are dropped."""
+    swept after it, and carried legacy tokenizer files the fresh processing class did not rewrite are dropped.
+    ``carried_tensors`` are written beside the model's own."""
     if is_peft_model(model):
         raise ValueError(
             "save_full_checkpoint writes full model directories; an unmerged PEFT adapter save must "
@@ -210,6 +221,8 @@ def save_full_checkpoint(
     if source_dir is not None and os.path.isdir(source_dir):
         copy_checkpoint_aux_files(source_dir, output_dir, include_resume_sidecars=include_resume_sidecars)
     sanitize_generation_config(model)
+    if carried_tensors:
+        save_kwargs["state_dict"] = {**model.state_dict(), **carried_tensors}
     with save_pretrained_layout(model):
         model.save_pretrained(output_dir, **save_kwargs)
     if not model.can_generate():
@@ -239,6 +252,58 @@ def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str
         local_files_only=is_offline_mode(),
         ignore_patterns=list(WEIGHT_DUMP_IGNORE_PATTERNS),
     )
+
+
+def _warn_on_dropped_mtp_tail(model, model_id: str, output_dir: str, weight_map, *, tool: str) -> None:
+    load_ignores = getattr(type(model), "_keys_to_ignore_on_load_unexpected", None) or ()
+    tail = stored_tail_keys(weight_map, load_ignores)
+    if not tail:
+        return
+    text = text_config(model.config)
+    declared = {field: value for field in MTP_LAYER_COUNT_FIELDS if (value := getattr(text, field, None))}
+    logger.warning(
+        f"{tool}: {model_id} stores {len(tail)} MTP head tensor(s) (e.g. {tail[0]!r}) that {type(model).__name__} drops "
+        f"at load, so {output_dir} carries no head while its config keeps {declared or 'its tail fields'}, and vLLM "
+        f"refuses method=mtp on it."
+    )
+
+
+def carried_mtp_tail(
+    model, model_id: str, output_dir: str, *, tool: str, dtype: torch.dtype
+) -> dict[str, torch.Tensor]:
+    """The MTP head ``model``'s class dropped at load, for the save to write back at ``dtype``, so a conversion keeps a
+    head the source trained. The trunk copies a release stores come off the live embeddings, which a vocabulary patch
+    grows. A tail with no spec stays dropped, as nothing says which of its tensors follow the vocabulary, and warns with
+    the config field its output keeps; so does a class with no output embedding for a head to share, and a quantized
+    source, whose tail holds no float tensors to cast. Header-only until a head is carried; a family with no spec whose
+    class names no tail never looks at the source, as a Hub id's snapshot fetches files its load did not need."""
+    spec = find_mtp_head_spec(model.config)
+    if spec is None and not tail_load_patterns(getattr(type(model), "_keys_to_ignore_on_load_unexpected", None) or ()):
+        return {}
+    source = resolve_checkpoint_source(model_id)
+    weight_map = resolve_checkpoint_weights(source).weight_map
+    quantized = (read_checkpoint_config(source, missing_ok=True) or {}).get("quantization_config")
+    if spec is None or quantized or model.get_output_embeddings() is None:
+        _warn_on_dropped_mtp_tail(model, model_id, output_dir, weight_map, tool=tool)
+        return {}
+    path = mtp_head_path(model, spec)
+    if not any(key.startswith(f"{path}.") for key in weight_map):
+        return {}
+    embeddings = {"input": model.get_input_embeddings(), "output": model.get_output_embeddings()}
+    copies = {
+        f"{path}.{key}": embeddings[copied].weight.detach().to("cpu", dtype).clone()
+        for key, copied in spec.trunk_copies
+    }
+    tail = {
+        key: tensor.to(dtype) if tensor.is_floating_point() else tensor
+        for key, tensor in iter_checkpoint_tensors(
+            source, predicate=lambda key: key.startswith(f"{path}.") and key not in copies
+        )
+    }
+    logger.info(
+        f"{tool}: carried the {len(tail)} MTP head tensor(s) {model_id} stores under {path}.* to {output_dir}."
+    )
+    return {**tail, **copies}
 
 
 def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:

@@ -1,0 +1,63 @@
+# Qwen3.6 35B-A3B — EP=8 fit of the released MTP head over a frozen trunk. See agent-docs/optimization/mtp-heads.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+#
+# Measured: 150 steps read acceptance 0.838 to 0.849 on these rows, and the checkpoint served at 0.834 on vLLM against
+# the release head's 0.831. That head moves by 0.006 between launches, so this fit shows no served gain. A step costs
+# 0.37x a no-head step. These rows are ultrachat replies after an empty think block; a server drafts on its own samples
+# after an open one. The learning rate and warmup are the ones the acceptance gate does not warn about. mtp_loss_type:
+# hard is the other objective, and what it does depends on the learning rate.
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.6-35B-A3B
+
+# --- MTP head ---
+mtp_loss_weight: 1.0
+mtp_loss_type: soft
+mtp_train_scope: head_only
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.001                      # the gate scores held-out rows at step 0 and every eval_steps
+
+# --- Parallelism ---
+expert_parallel_size: 8               # 256 routed experts → 32/rank
+gradient_checkpointing: false         # the frozen trunk holds no graph
+
+# --- Attention & kernels ---
+max_length: 4096
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+max_steps: 150
+
+# --- Optimizer & LR schedule ---
+learning_rate: 1.0e-05
+lr_scheduler_type: constant_with_warmup
+warmup_steps: 20
+
+# --- Checkpointing & evaluation ---
+save_steps: 150
+eval_strategy: steps
+eval_steps: 30
+save_only_model: true
+output_dir: checkpoints/qwen3.6-35b-a3b-mtp-head-only
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+assistant_message_template: "<|im_start|>assistant\n"
+pad_token: <|endoftext|>
+eos_token: <|im_end|>
+chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # an empty think block before every reply; without one the trunk reads far worse
+force_chat_template: true

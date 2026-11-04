@@ -112,6 +112,7 @@ def run_row(monkeypatch):
     monkeypatch.setattr(weight_push_exact, "_token_rows", lambda checkpoint, limit: _ROWS)
     monkeypatch.setattr(weight_push_exact, "weight_transfer_port", lambda knob: 0)
     monkeypatch.setattr(weight_push_exact, "_trainer_scores", _engine_scores_of_the_trainer)
+    monkeypatch.setattr(weight_push_exact, "_server_answers", lambda backend: True)
 
     def run(
         backend: str, drop_from_push: str | None = None, reach: bool = False, reach_leave_out: str | None = None
@@ -132,6 +133,12 @@ def test_a_push_that_leaves_the_server_alone_passes_every_round(run_row, backend
 
     assert checks.pop("leaving_the_declared_buffers_out_acts_as_the_engine_loader_says")
     assert all(checks.values()), checks
+
+
+def test_an_engine_wedged_by_the_close_fails_the_row(run_row, monkeypatch):
+    monkeypatch.setattr(weight_push_exact, "_server_answers", lambda backend: False)
+
+    assert not run_row("sglang")["server_answers_after_the_close"]
 
 
 def test_a_push_missing_a_tensor_vllm_counts_fails_on_vllm(run_row):

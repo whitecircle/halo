@@ -263,11 +263,19 @@ def run_trainer(
 
     state = trainer.state
     # An early stop fails the run, so a scheduler or chained stage does not take its output for a finished one.
-    if any(
-        isinstance(callback, StopsTrainingEarly) and callback.stopped
-        for callback in trainer.callback_handler.callbacks
-    ):
-        raise EarlyStopExit(f"{method_name} training stopped early at step {state.global_step} of {state.max_steps}.")
+    stopping = next(
+        (
+            callback
+            for callback in trainer.callback_handler.callbacks
+            if isinstance(callback, StopsTrainingEarly) and callback.stopped
+        ),
+        None,
+    )
+    if stopping is not None:
+        raise EarlyStopExit(
+            stopping.stop_reason
+            or f"{method_name} training stopped early at step {state.global_step} of {state.max_steps}."
+        )
     if is_global_main_process():
         # A batch sampler that yields fewer batches than its length also ends a run short of the plan:
         # ``no_duplicates`` under ``dataloader_drop_last`` drops the partial batches its duplicates leave.

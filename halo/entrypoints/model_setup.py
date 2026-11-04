@@ -56,6 +56,7 @@ from halo.models.attention.selection import (
 )
 from halo.models.context_window import is_bounded_length, resolve_length_to_context
 from halo.models.modality import is_vlm_model
+from halo.models.mtp.spec import MtpHeadRequest
 from halo.models.seq_cls_heads import multimodal_sequence_classification_model_types
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.filesystem import hub_metadata_main_first
@@ -299,6 +300,7 @@ def load_model_and_tokenizer(
     model_class=None,
     model_config_overrides: dict | None = None,
     init_from_scratch: bool = False,
+    mtp_head: MtpHeadRequest | None = None,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     """The run's policy and tokenizer through ``load_distributed_model``, for a script that pins its own head or takes
     no VLM, and for both branches of :func:`load_policy_model`.
@@ -313,6 +315,14 @@ def load_model_and_tokenizer(
     if hasattr(training_config, "model_init_kwargs"):
         training_config.model_init_kwargs = None
     use_liger_kernel = training_config.use_liger_kernel
+    head_overwritten_by_resume = (
+        mtp_head is not None and context.resume_checkpoint is not None and not context.policy_from_checkpoint
+    )
+    if head_overwritten_by_resume and is_global_main_process():
+        logger.info(
+            f"This resume loads the base and restores {context.resume_checkpoint} over it after the wrap, so the MTP "
+            "head read now is overwritten by the head that checkpoint trained."
+        )
     model, tokenizer = load_distributed_model(
         model_name_or_path=context.model_source,
         parallelism_config=context.parallelism_config,
@@ -331,6 +341,7 @@ def load_model_and_tokenizer(
         text_only_model=args.text_only_model,
         preserve_checkpoint_precision=context.policy_from_checkpoint,
         check_tokenizer=partial(reject_dropped_chat_template, args),
+        mtp_head=mtp_head,
     )
     finalize_liger_after_direct_load(training_config, use_liger_kernel, model)
     if context.policy_from_checkpoint:
@@ -390,6 +401,7 @@ def _load_vlm_model_and_processor(
     *,
     vlm_run: bool,
     attn_default: str | None,
+    mtp_head: MtpHeadRequest | None = None,
 ) -> tuple[PreTrainedModel, Any, PreTrainedTokenizer]:
     """A multimodal policy with ``(model, processing_class, tokenizer)``, both from ``model_name_or_path`` even on a
     resume. The processor is required when ``vlm_run``. The modality is not re-probed: the ``vlm_probe`` store phase
@@ -408,7 +420,9 @@ def _load_vlm_model_and_processor(
             ),
         )
     )
-    model, _ = load_model_and_tokenizer(context, training_config, model_config, args, attn_default=attn_default)
+    model, _ = load_model_and_tokenizer(
+        context, training_config, model_config, args, attn_default=attn_default, mtp_head=mtp_head
+    )
     if is_global_main_process():
         logger.info(f"Loaded VLM model: {type(model).__name__}")
     return model, processor if processor is not None else tokenizer, tokenizer
@@ -423,6 +437,7 @@ def load_policy_model(
     vlm_run: bool,
     attn_default: str | None = None,
     init_from_scratch: bool = False,
+    mtp_head: MtpHeadRequest | None = None,
 ) -> PolicyLoad:
     """The policy in the class its checkpoint declares, with its processor when ``vlm_run``, else its tokenizer.
     ``args.text_only_model`` loads a multimodal checkpoint through its CausalLM sibling; a rank-uniform YAML key, so
@@ -438,11 +453,17 @@ def load_policy_model(
         if init_from_scratch:
             raise ValueError("init_from_scratch is not supported for VLM models.")
         model, processing_class, tokenizer = _load_vlm_model_and_processor(
-            context, training_config, model_config, args, vlm_run=vlm_run, attn_default=attn_default
+            context, training_config, model_config, args, vlm_run=vlm_run, attn_default=attn_default, mtp_head=mtp_head
         )
         return PolicyLoad(model, processing_class, tokenizer, is_vlm=True)
     model, tokenizer = load_model_and_tokenizer(
-        context, training_config, model_config, args, attn_default=attn_default, init_from_scratch=init_from_scratch
+        context,
+        training_config,
+        model_config,
+        args,
+        attn_default=attn_default,
+        init_from_scratch=init_from_scratch,
+        mtp_head=mtp_head,
     )
     return PolicyLoad(model, tokenizer, tokenizer, is_vlm=False)
 

@@ -85,6 +85,7 @@ from halo.trainers.trainer_rules import (
     reject_stock_adamw_on_mixed_params,
     reject_sync_ref_model_on_sharded_policy,
     reject_trainer_router_aux_loss_coef,
+    reject_unreachable_mtp_term,
     reject_unreloadable_best_model,
     reject_unsaveable_external_tables,
 )
@@ -356,6 +357,14 @@ class DistributedTrainerMixin(
         if config.is_tp_mode:
             reject_lora_under_tp(self._top_level_model())
         self._disable_inert_router_logits()
+        reject_unreachable_mtp_term(
+            self._top_level_model(),
+            trainer=type(self).__name__,
+            labelled_forward=self.ROUTER_AUX_LOSS_ADDED_BY == "model_forward",
+            is_cp_mode=config.is_cp_mode,
+            pops_labels=self.label_smoother is not None or self.compute_loss_func is not None,
+            rows_per_forward=self.args.per_device_train_batch_size,
+        )
         reject_unreloadable_best_model(self.args, config, self.model)
         reject_unsaveable_external_tables(
             self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp
