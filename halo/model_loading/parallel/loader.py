@@ -27,6 +27,7 @@ from halo.model_loading.parallel.cp import load_cp_model, load_ep_cp_model
 from halo.model_loading.parallel.ep import load_ep_model
 from halo.model_loading.parallel.load_rules import (
     reject_random_init_tables,
+    reject_remote_composite,
     reject_unsupported_load,
     reject_unsupported_model,
     reject_unsupported_run,
@@ -322,6 +323,7 @@ def _resolve_run_config(
             f"text_only_model=True is ignored: the caller pinned model_class={model_class} "
             f"(task-head scripts resolve their own class). The flag only affects auto-resolution."
         )
+    reject_remote_composite(model_config)
     return source, model_config, model_class, wraps_experts
 
 

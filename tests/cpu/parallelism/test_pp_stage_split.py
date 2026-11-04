@@ -414,6 +414,7 @@ _PP_MOE_EXPORTS_BIAS = {
     "gpt_oss": True,
     "inkling_text": True,
     "laguna": True,
+    "nemotron_h": True,
     "step3p7": True,
     "qwen3_moe": False,
     "qwen3_5_moe_text": False,
@@ -499,6 +500,7 @@ REGISTERED_BACKBONES = {
     "Step3p7TextModel",
     "DeepseekV4Model",
     "Glm5NextTextModel",
+    "NemotronHModel",
     "Qwen4ExpTextModel",
 }
 _TINY_FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
@@ -535,6 +537,7 @@ def test_the_bias_export_table_covers_every_registered_moe_family():
         "laguna",
         "inkling_text",
         "inkling_mm_model",
+        "nemotron_h",
         "qwen4_exp_text",
     ],
 )

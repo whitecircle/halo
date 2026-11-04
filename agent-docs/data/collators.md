@@ -178,6 +178,7 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | LFM-2 | isolated | ShortConv is isolated exactly: the collators and SMPO's padding-free forward emit `seq_idx` for this family and both conv paths honor it |
 | Zaya | isolated — flash needs `patch_zaya_packed_document_isolation` | CCA convolution + delayed-value recurrence — isolated exactly by the same patch, which restarts both at every document start ([Zaya](../models/zaya.md#document-isolation-under-packing)) |
 | Cohere2 MoE | isolated on every backend, no patch needed — the forward feeds `position_ids` into mask construction and through layer kwargs to the attention interface | — |
+| Nemotron-H | isolated on FA4, FA2 and SDPA | the Mamba conv and scan are isolated exactly: the collators and SMPO's padding-free forward emit `seq_idx` for the family, and the toolkit's scan runs each document from a zero state ([Nemotron-H](../models/nemotron-h.md#mamba-layers)) |
 | Step-3.7 Flash | isolated on SDPA and eager, no patch needed — the forward feeds `position_ids` into both mask constructions (full and sliding); bit-exact through dense layers, MoE layers add expert-summation reduction noise (~1e-7 fp32). Training path only: a live cache suppresses the packed mask (`use_cache=False`, as DeepSeek-V4) | — |
 
 These families are refused outright in `select_data_collator`. The checks read the text sub-config

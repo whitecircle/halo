@@ -85,7 +85,7 @@ def export_checks(export_class: type, checkpoint: str, base: str, dtype: torch.d
     model, info = export_class.from_pretrained(checkpoint, output_loading_info=True, dtype=dtype)
     problems = loading_problems(info)
     written, initial = load_full_state_dict(checkpoint), load_full_state_dict(base)
-    backbone = f"{model.base_model_prefix}."
+    backbone = (f"{model.base_model_prefix}.", "backbone.")
     moved = {
         name
         for name, tensor in written.items()

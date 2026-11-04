@@ -11,6 +11,7 @@ from trl.trainer.utils import selective_log_softmax
 
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models import head_transform
+from halo.models import nemotron_h as _sets_the_composite_head_accessors  # noqa: F401
 from halo.models.head_transform import (
     IDENTITY_HEAD_TRANSFORM,
     GraniteHeadTransform,
@@ -36,6 +37,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MINICPM3_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
     TINY_QWEN4_EXP_CONFIG,
@@ -46,6 +48,7 @@ from tests.common.models import (
     TINY_STEP3P7_VISION_CONFIG,
     TINY_ZAYA_CONFIG,
 )
+from tests.common.tiny_models import TINY_LLAMA4_FAMILY, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.tokenizers import load_cached_config
 
 apply_remote_code_compat_shims()
@@ -100,6 +103,11 @@ def _model(class_name: str, config_class_name: str, **config) -> torch.nn.Module
     return model_class(getattr(transformers, config_class_name)(**config)).float().eval()
 
 
+def _tiny(name: str, families: dict) -> torch.nn.Module:
+    torch.manual_seed(0)
+    return tiny_family_model(families[name]).float().eval()
+
+
 # Every roster family with a shared tiny config, plus the dense transform families.
 _TINY_MODELS = {
     "qwen3": lambda: _model("Qwen3ForCausalLM", "Qwen3Config", **TINY_QWEN3_CONFIG),
@@ -130,19 +138,18 @@ _TINY_MODELS = {
     "gemma4": lambda: _model("Gemma4ForConditionalGeneration", "Gemma4Config", text_config=_GEMMA4_SATURATED_TEXT),
     "granite": lambda: _model("GraniteForCausalLM", "GraniteConfig", **TINY_GRANITE_CONFIG),
     "minicpm3": lambda: _model("MiniCPM3ForCausalLM", "MiniCPM3Config", **TINY_MINICPM3_CONFIG),
+    "nemotron_h": lambda: _tiny("nemotron_h", TINY_MOE_FAMILIES),
+    "nemotron_h_omni": lambda: _tiny("nemotron_h_omni", TINY_MOE_VLM_FAMILIES),
+    "llama4": lambda: _tiny("llama4", {"llama4": TINY_LLAMA4_FAMILY}),
 }
 
 _TRANSFORM_FAMILIES = ("inkling", "cohere2_moe", "gemma4_text", "gemma4", "granite", "minicpm3")
 
 
 class _ForwardParityHarness(LogprobScoringMixin):
-    """The chunked sweep fed the hidden state TRL's and the offline trainer's ``_get_last_hidden_state`` take."""
+    """The chunked sweep over the hidden state the trainers take."""
 
     temperature = 1.0
-
-    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
-        hidden = model.base_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-        return hidden.last_hidden_state[:, :-1, :][:, -logits_to_keep:, :]
 
 
 class _UndeclaredSpec:
@@ -311,6 +318,38 @@ def test_chunked_sweep_reproduces_the_family_forward(family):
         assert (untransformed - reference).abs().max() > 0.05, f"{family}'s transform is not load-bearing here"
     else:
         assert harness._head_transform(model) == IDENTITY_HEAD_TRANSFORM
+
+
+def _scaling_logits(model_class: type) -> type:
+    """``model_class`` with a forward scaling its logits, which only a probe running that forward can see."""
+
+    class _Scaling(model_class):
+        def forward(self, *args, **kwargs):
+            output = super().forward(*args, **kwargs)
+            output.logits = output.logits * 2.0
+            return output
+
+    return _Scaling
+
+
+@pytest.mark.parametrize("family", ["nemotron_h", "nemotron_h_omni", "llama4"])
+def test_a_composite_probe_runs_the_forward_above_its_tower(family):
+    """It verifies, and only through that forward: a scale there is refused, a probe that skipped it would pass."""
+    model = _TINY_MODELS[family]()
+    assert verify_head_transform(type(model), model.config) == IDENTITY_HEAD_TRANSFORM
+    with pytest.raises(ValueError, match="forward transforms its head path"):
+        verify_head_transform(_scaling_logits(type(model)), model.config)
+
+
+def test_a_class_with_no_backbone_below_it_is_refused():
+    """A backbone class holding its own layers has nothing for the probe to stand in for."""
+
+    class _Headed(transformers.NemotronHModel):
+        def get_output_embeddings(self):
+            return torch.nn.Linear(4, 4)
+
+    with pytest.raises(ValueError, match="exposes no backbone distinct from its head"):
+        verify_head_transform(_Headed, transformers.NemotronHConfig(**TINY_NEMOTRON_H_CONFIG))
 
 
 def test_the_sweep_refuses_a_family_whose_declaration_is_removed(monkeypatch):

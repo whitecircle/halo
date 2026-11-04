@@ -85,7 +85,7 @@ Under `pipeline_parallel_size > 1` DPO is precompute-only and text-only: no stag
 
 `dpo.py` trains a VLM checkpoint on image+text pairs. The model class follows the checkpoint, the data path follows the **dataset**: text-only pairs on a natively multimodal model take the text pipeline, hub-shape normalization included.
 
-An `images`/`image` column puts TRL in vision mode with `DataCollatorForVisionPreference`. Those rows must already be contract-shaped — prompt a message list, chosen/rejected continuation-only — since TRL normalizes no hub shapes. `tools_field` is refused: the vision render passes no `tools=`. A prefix-LM checkpoint (PaliGemma) is refused on image rows before the model load ([Modality support](../../reference/trainer-architecture.md#modality-support)); train it on images with SFT or distillation.
+An `images`/`image` column puts TRL in vision mode with `DataCollatorForVisionPreference`, except on a family declaring `refuses_trl_image_rows` (Nemotron-H), refused before the load. Those rows must already be contract-shaped — prompt a message list, chosen/rejected continuation-only — since TRL normalizes no hub shapes. `tools_field` is refused: the vision render passes no `tools=`. A prefix-LM checkpoint (PaliGemma) is refused on image rows before the model load ([Modality support](../../reference/trainer-architecture.md#modality-support)); train it on images with SFT or distillation.
 
 Set `images_field: <column>` when the dataset stores images under another name — it is renamed to `images` before the dispatch, the spelling TRL probes for. A name the splits do not carry raises at dataset preparation, after the policy and the reference have loaded.
 

@@ -41,7 +41,7 @@ gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop
 
 Local-expert *count* is the primary lever; batch (per-expert M) shrinks the margin. **Rule: keep grouped (the default); at these shapes the loop is never faster, and the gap is smallest at high EP with large batches (+31% at ep8 b4).** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
-The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime too, between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured.
+The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime too, between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured. Nemotron-H (512 experts, top-22, `ep8`) holds 64 local experts at per-expert M = 2,816 (8192) to 11,264 (32k), derived the same way, and its gateless experts take two grouped calls per layer instead of three; measured at 8192 tokens on one layer of the release, its backward takes 14 ms grouped against 2.0 s for the loop.
 
 **2. Square experts with K not tile-aligned.** If `hidden == intermediate` (no 4× expansion) and `hidden % 128 != 0`, the CUTLASS K-tail epilogue runs on both projections; the loop picks a per-matmul tile and absorbs the misalignment.
 

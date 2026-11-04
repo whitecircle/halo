@@ -11,7 +11,7 @@ from halo.models.attention.layout import (
     has_gated_delta_net_layers,
     has_linear_attention_layers,
 )
-from halo.models.segment_markers import find_unmarked_sequence_mixer, segment_markers_for
+from halo.models.segment_markers import SegmentMarkers, find_unmarked_sequence_mixer, segment_markers_for
 
 COMPOSITE_RELEASES = ("qwen3_5", "qwen3_5_moe", "glm5_next", "qwen4_exp")
 GATED_DELTA_NET = ("qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "qwen3_next", "qwen4_exp")
@@ -48,6 +48,16 @@ def test_both_consumers_resolve_from_the_shared_predicate(model_type):
     assert has_gated_delta_net_layers(config) is gated_delta_net
     assert segment_markers_for(config).cu_seq_lens is gated_delta_net
     assert (find_unmarked_sequence_mixer(config) is None) is gated_delta_net
+
+
+@pytest.mark.parametrize("model_type", ("nemotron_h", "nemotron_h_omni"))
+def test_nemotrons_mamba_is_kept_apart_on_seq_idx_alone(model_type):
+    """Its scan and conv read ``seq_idx``; ``cu_seq_lens`` would move its attention alone, and no marker is what the
+    other Mamba hybrids get."""
+    config = _default_config(model_type)
+    assert has_linear_attention_layers(config) and not has_gated_delta_net_layers(config)
+    assert segment_markers_for(config) == SegmentMarkers(seq_idx=True)
+    assert find_unmarked_sequence_mixer(config) is None
 
 
 def test_hybrid_layer_groups_are_unmarked_without_layer_types():

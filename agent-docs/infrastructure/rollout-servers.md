@@ -141,6 +141,8 @@ update request that declares it and the drain of its sends. A failed chunk drain
 30 s deadline, and on expiry the group is aborted instead of parking the trainer. Closing an SGLang group is bounded
 the same way: a server that does not answer `/health` is aborted outright, and a destroy still blocked after 30 s, as
 under a wedged engine that never enters its half, is aborted too, so the failure that brought the close raises.
+SGLang's `/health` generates through the scheduler, so the client asks it before the destroy occupies the scheduler,
+and waits for a server on `/v1/models`, which a pause does not hold.
 
 Both clients send from their own CUDA streams and allocate their buffers on the caller's stream,
 recorded for the send stream, so a reconnect strands no allocator pool; `HALO_WEIGHT_SYNC_MEM_LOG=1`
@@ -272,7 +274,8 @@ sync for (`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`
   Inkling (no engine run has validated its sync), GLM-5 Next (both engines' per-expert loaders refuse
   the gathered fused pair), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
   SGLang caches a hyper-connection weight copy on SM100-family GPUs that an update leaves stale,
-  [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)) and Cohere2 MoE carry on both engines.
+  [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)), Nemotron-H (no engine run has validated its sync)
+  and Cohere2 MoE carry on both engines.
 - **A stock module tree no engine layout covers**, in three cases. A family with an EP layer but no live
   one (`use_grouped_gemm: false` at `ep_size: 1`): the experts ship in the layout the EP layer's gather
   emits, and the stock tree's fused tensors under module names are dropped by the engine's loader with no
@@ -339,11 +342,11 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Laguna | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
-Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE are refused on both engines by their
+Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
 family spec ([construction gates](#construction-gates)). These sync on both, expert distribution included:
 dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE,
 GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE. A MoE with no family spec is refused on both. Per-family server
-flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
+flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm), [Nemotron-H](../models/nemotron-h.md#checkpoints-and-serving).
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank
 narrows its slice, and under `--ep-size` the loader keeps its local experts. An expert name that
@@ -813,7 +816,7 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 
 | Symptom | Cause → fix |
 |---|---|
-| `/health` is 200 but every completion hangs after a trainer died mid-sync | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused. The next trainer refuses it at startup (`is PAUSED`, or `paused or wedged` after a 60 s probe on SGLang, which has no pause route) → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it if that sync had already streamed part of the model |
+| Every completion hangs after a trainer died mid-sync, with vLLM's `/health` still 200 and SGLang's hanging too | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused. The next trainer refuses it at startup (`is PAUSED`, or `paused or wedged` after a 60 s probe on SGLang, which has no pause route) → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it if that sync had already streamed part of the model |
 | Group formation times out, "1/2 clients joined" | A bridge network hides the rendezvous port → `network_mode: host` on both containers |
 | First sync takes minutes, `/health` unanswered | One-time NCCL group init per server; the engine pauses mid-update → wait |
 | 400 on every rollout (vLLM) | A thinking budget without a reasoning parser → set `VLLM_REASONING_PARSER`; otherwise rollouts return zero tokens and the run trains on all-masked batches |

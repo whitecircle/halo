@@ -911,6 +911,7 @@ def _sft_main_rows(tmp_path, yaml_body: str, *, preprocessed_packed: bool | None
             "reject_unsupported_vlm_sft_options",
             "install_resolved_tokenizer",
             "apply_text_path_padding_side",
+            "apply_vision_options",
             "log_model_info",
             "log_script_dataset_examples",
         )

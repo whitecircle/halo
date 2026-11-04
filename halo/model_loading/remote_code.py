@@ -21,6 +21,7 @@ from halo.checkpoint.atomic import create_staged_file, publish_staged_file
 from halo.model_loading.buffer_repair import default_rope_parameters
 from halo.models.attention.remote_flash_attention import patch_remote_llama_flash_template
 from halo.models.config_access import ties_word_embeddings
+from halo.models.nemotron_h import set_composite_head_accessors
 
 # Names a published modeling file calls but never imports (Ring-mini-linear-2.0's cached forward builds a
 # ``DynamicLayer``); only the module whose global lookup misses can be given them.
@@ -89,6 +90,7 @@ def _repair_remote_module(module) -> None:
     _shim_dispatchless_eager_attention(module)
     patch_remote_llama_flash_template(module)
     _fix_legacy_tied_weights_keys(module)
+    set_composite_head_accessors(module)
 
 
 def register_remote_class_hook(hook: Callable[[ModuleType], None]) -> None:

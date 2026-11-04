@@ -26,13 +26,14 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [LFM-2 MoE](lfm2.md) | `lfm2_moe` | Yes | Yes | No | Yes | No | `examples/sft/lfm2/*` |
 | [Mistral4 MoE](mistral4.md) | `mistral4` | Yes | Yes | Yes ⁸ | Yes | No | `examples/sft/mistral4/*` |
 | [DeepSeek-V4](deepseek-v4.md) | `deepseek_v4` | Yes | Yes ⁶ | No | No | Yes | `examples/sft/deepseek_v4/*` |
+| [Nemotron-H (Nemotron 3.5 Super VL)](nemotron-h.md) | `nemotron_h` | Yes ¹⁵ | Yes ¹⁵ | No | No | Yes ¹⁰ ¹³ | `examples/sft/nemotron_h/*` |
 | [Zaya (ZAYA1)](zaya.md) | `zaya` | Yes ⁹ | Yes ⁹ | No | No | No | `examples/sft/zaya/*` |
 | [Command A+ (Cohere2 MoE)](cohere2-moe.md) | `cohere2_moe` | Yes | Yes ⁶ | Yes ⁶ | Yes ⁶ | No | `examples/sft/cohere2_moe/*` |
 | [GLM-5 Next (GLM-5.3-Flash)](glm5-next.md) | `glm5_next` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/glm5_next/*` |
 | [Step-3.7 Flash](step3p7.md) | `step3p7` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/step3p7/*` |
 | Any other HF model with a `tp_plan` (Llama, Mistral, Phi, …) | — | — | — | No | Yes | No | — |
 
-The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). LoRA adapters train under FSDP/DP and on every axis a row runs except TP, EP+TP and PP, which reject them; expert adapters are also refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). GPU rows train every MoE family's adapters under EP (`ep1` and `ep2`) and, where CP runs, EP+CP; pure-ETP LoRA is verified on every EP family except Command A+, GLM-5 Next, Inkling, Mistral4, Qwen3-Next and Qwen3.8-Flash-Next. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Ring-mini-linear-2.0, Gemma 4 26B and, for a few steps, Qwen3.8-Flash-Next. The other families' LoRA ran on tiny models. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). LoRA adapters train under FSDP/DP and on every axis a row runs except TP, EP+TP and PP, which reject them; expert adapters are also refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). GPU rows train every MoE family's adapters under EP (`ep1` and `ep2`) and, where CP runs, EP+CP; pure-ETP LoRA is verified on every EP family except Command A+, GLM-5 Next, Inkling, Mistral4, Nemotron-H, Qwen3-Next and Qwen3.8-Flash-Next. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Ring-mini-linear-2.0, Gemma 4 26B and, for a few steps, Qwen3.8-Flash-Next. The other families' LoRA ran on tiny models. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 ¹ The tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate; 8B and up split.
 
@@ -61,6 +62,8 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 ¹³ Tiny-model GPU tests, plus a 20-step Qwen3-30B-A3B correctness smoke on Qwen3 MoE: no released checkpoint is otherwise trained under PP here. Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
 
 ¹⁴ Full fine-tuning with `moe_balancing: none`: PP refuses adapters, the split severs `aux_loss`, and the router has no bias slot ([Qwen3.8-Flash-Next](qwen4_exp.md#pipeline-parallelism)).
+
+¹⁵ `ep8` recipes, images included, ran 5–20 steps on the release on 8× B300, with an exact resume at a 9-layer cut. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
 
 ## MoE knobs
 
@@ -127,6 +130,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 - [LFM-2 MoE](lfm2.md) — sigmoid routing with optional expert-bias buffer.
 - [Mistral4 MoE](mistral4.md) — Mistral3 VLM text backbone, MLA attention.
 - [DeepSeek-V4](deepseek-v4.md) — hash-routing bootstrap + top-k MoE, compressed sparse attention, eager-only.
+- [Nemotron-H](nemotron-h.md) — NVIDIA Nemotron 3.5 Super VL: Mamba-2, MoE and attention layers, gateless experts on a latent, a composite VLM with a text-only route.
 - [Zaya](zaya.md) — CCA-augmented MoE with cross-layer router state.
 - [Cohere2 MoE](cohere2-moe.md) — Command A+ VLM text backbone; interleaved sliding/NoPE attention, averaged shared expert.
 - [GLM-5 Next](glm5-next.md) — GLM-5.3-Flash composite VLM; KDA + DeepSeek sparse attention, hyper-connections, 288 routed experts.

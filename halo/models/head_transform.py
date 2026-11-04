@@ -12,7 +12,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from halo.models.config_access import get_config_field, text_config
 from halo.models.model_classes import transformers_model_class
-from halo.models.module_tree import module_path
+from halo.models.module_tree import hidden_state_backbone, module_path
 from halo.models.unwrapping import base_transformers_model
 from halo.subclass_registry import build_class_claim_map
 
@@ -157,9 +157,9 @@ def _probe_logits(model_class: type, config, declared: HeadTransform) -> tuple[t
             f"{model_class.__name__}'s output embedding is a {type(head).__name__}, not a plain "
             f"nn.Linear; the hidden-state head paths compute hidden @ weight.T + bias."
         )
-    backbone = shell.base_model
-    if backbone is shell:
-        raise ValueError(f"{model_class.__name__} exposes no backbone distinct from its head (base_model is itself).")
+    backbone = hidden_state_backbone(shell)
+    if backbone is None or backbone is shell:
+        raise ValueError(f"{model_class.__name__} exposes no backbone distinct from its head.")
     # Log-spaced magnitudes, so a softcap of any practical width saturates on some positions and stays linear on
     # others, and a missing scale or truncation moves every position.
     hidden = torch.diag(torch.logspace(-2.0, 3.0, 8)).unsqueeze(0)

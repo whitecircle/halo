@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from halo.checkpoint.tools import vocab_patch as pv
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _BASE_VOCAB = 100  # len(tokenizer): tokens occupy rows [0, 100)
 _PADDED_ROWS = 128  # the embedding is padded larger than the vocab
@@ -147,6 +148,22 @@ def test_grow_when_vocab_exceeds_padding():
     new_vocab = _BASE_VOCAB + 40
     assert new_vocab > _PADDED_ROWS
     assert model.get_input_embeddings().weight.shape[0] == new_vocab, "embedding failed to grow past padding"
+
+
+def test_a_composite_holding_its_head_under_the_tower_takes_the_new_rows_on_both_sides():
+    """The tool's load takes no family patch, and it writes the head's rows through the accessor."""
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"])
+    vocab = model.config.text_config.vocab_size
+    input_mean = model.get_input_embeddings().weight[:vocab].detach().mean(dim=0)
+    head_mean = model.get_output_embeddings().weight[:vocab].detach().mean(dim=0)
+
+    assert pv.add_tokens_to_model(model, _FakeTokenizer(vocab), ["alpha", "beta"]) == 2
+
+    head = model.language_model.lm_head.weight
+    assert model.get_input_embeddings().weight.shape[0] == head.shape[0] == vocab + 2
+    torch.testing.assert_close(model.get_input_embeddings().weight[vocab].detach(), input_mean)
+    torch.testing.assert_close(head[vocab].detach(), head_mean)
 
 
 if __name__ == "__main__":

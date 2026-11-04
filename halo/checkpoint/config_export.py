@@ -9,8 +9,10 @@ import shutil
 import tempfile
 
 from transformers.dynamic_module_utils import custom_object_save, get_relative_imports
+from transformers.tokenization_utils_base import TOKENIZER_CONFIG_FILE
 from transformers.utils import CONFIG_NAME, cached_file
 
+from halo.checkpoint.format import PROCESSOR_FILES
 from halo.checkpoint.model_card import tag_exported_model_card
 from halo.checkpoint.reading import read_checkpoint_config
 from halo.checkpoint.weights_source import config_schema_source
@@ -23,6 +25,8 @@ logger = info_logger(__name__)
 
 # A key the serialized config does not spell, distinct from one spelled as JSON ``null``.
 _CONFIG_KEY_ABSENT = object()
+# Copied raw from a release by the tools, so they keep an ``auto_map`` naming modules config.json does not.
+_AUX_CONFIG_FILES = (*PROCESSOR_FILES, TOKENIZER_CONFIG_FILE)
 
 
 def write_config_json(output_dir: str, payload: dict) -> None:
@@ -240,12 +244,45 @@ def drop_unshipped_auto_map(output_dir: str) -> None:
     write_config_json(output_dir, payload)
 
 
+def carry_aux_auto_map_modules(output_dir: str, *, source: str | None) -> None:
+    """Copy the remote-code modules a processor or tokenizer config in ``output_dir`` names, as a trusted load of the
+    export reads them there. Warns on what ``source`` lacks, since a trainer's save ends here and the served load
+    raises by itself."""
+    for name in _AUX_CONFIG_FILES:
+        path = os.path.join(output_dir, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            auto_map = json.load(handle).get("auto_map") or {}
+        local = {
+            auto_class: [reference for reference in _auto_map_references(entry) if reference and "--" not in reference]
+            for auto_class, entry in auto_map.items()
+        }
+        absent = {
+            auto_class: references
+            for auto_class, references in local.items()
+            if any(not os.path.isfile(os.path.join(output_dir, f"{r.split('.')[0]}.py")) for r in references)
+        }
+        if not absent:
+            continue
+        try:
+            if not source:
+                raise FileNotFoundError("this export records no source checkpoint")
+            _copy_auto_map_modules(source, absent, output_dir)
+        except OSError as error:
+            logger.warning(
+                f"carry_aux_auto_map_modules: {path} names remote code this export does not carry for "
+                f"{sorted(absent)}, so a trust_remote_code load of it will fail: {error}"
+            )
+
+
 def finalize_exported_config(config, output_dir: str, *, source: str | None) -> None:
     """Bring a just-written ``config.json`` up to the artifact contract and tag the model card; every writer's last
     step. A checkpoint missing a rewrite trains normally and fails only in the merge tools or the rollout server."""
     restore_model_type(config, output_dir)
     export_source_config_schema(config, output_dir, source=source)
     drop_unshipped_auto_map(output_dir)
+    carry_aux_auto_map_modules(output_dir, source=source)
     tag_exported_model_card(output_dir)
 
 

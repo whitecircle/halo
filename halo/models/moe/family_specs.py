@@ -83,6 +83,10 @@ class MoEFamilySpec:
     # vLLM's reload rebuilds a module that received part of its tensors from uninitialized storage
     # (agent-docs/infrastructure/rollout-servers.md#partly-loaded-layers).
     engine_loaded_buffers: EngineLoadedBuffers | None = None
+    # Why TRL's own vision collator and loss (DPO, KTO) do not train the family on images.
+    refuses_trl_image_rows: str | None = None
+    # Why the composite of the family's own remote modeling file does not train, where transformers' class does.
+    remote_composite_refusal: str | None = None
     # Why the family runs eager attention only.
     eager_only_attention: str | None = None
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
@@ -225,6 +229,29 @@ MISTRAL4 = MoEFamilySpec(
     shared_expert_attrs=("shared_experts",),
     attention_reads_row_positions=True,
 )
+# Gateless experts on a latent, stored per expert; no ``per_expert_keys``, as there is no gate half to name. Both engines
+# parse the release's own config schema (``llm_config``, ``vit_hidden_size``), which transformers absorbs at load.
+NEMOTRON_H = MoEFamilySpec(
+    model_types=("nemotron_h", "nemotron_h_omni"),
+    expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_MLP),
+    balancing_slot=_E_SCORE_CORRECTION_BIAS,
+    exports_source_config_schema=True,
+    shared_expert_attrs=("shared_experts",),
+    text_only_layout=CompositeTextLayout(
+        tower="backbone.", composite_tower="language_model.backbone.", composite_head="language_model.lm_head."
+    ),
+    weight_sync_refusal=(
+        "both pinned rollout engines serve the release, but no online update into either has been validated end to end"
+    ),
+    refuses_trl_image_rows=(
+        "TRL's vision path computes no reference ahead of training, so a full fine-tune holds the unsharded frozen "
+        "reference on every GPU beside the policy, and neither method has been validated on this family's images"
+    ),
+    remote_composite_refusal=(
+        "its forward hands the text tower no segment marker, so packed documents would cross the Mamba layers, reads "
+        "no image_grid_hw, and trains Radio's layer scale, which no engine reads"
+    ),
+)
 QWEN3 = MoEFamilySpec(
     model_types=("qwen3_moe",), expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS)
 )
@@ -283,6 +310,7 @@ MOE_FAMILY_SPECS: tuple[MoEFamilySpec, ...] = (
     LAGUNA,
     LFM2,
     MISTRAL4,
+    NEMOTRON_H,
     QWEN3,
     QWEN3_5,
     QWEN3_NEXT,

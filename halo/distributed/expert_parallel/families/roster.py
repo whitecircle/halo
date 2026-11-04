@@ -11,6 +11,7 @@ from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer 
 from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer  # noqa: F401
+from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer  # noqa: F401

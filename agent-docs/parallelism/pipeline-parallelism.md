@@ -134,6 +134,7 @@ MTP-carrying checkpoint names that reason first.
 | DeepSeek-V4 (`DeepseekV4Model`) | registered | hyper-connection boundary, any split offset. Every `hash_moe` layer (`mlp_layer_types`, the first 3 by default) must sit on stage 0 — its `tid2eid` router reads `input_ids`, which only stage 0 has. `bias_update` or `none` balancing; eager attention only (family); offline GRPO takes one row per batch ([Row positions](../training-methods/grpo/offline.md#row-positions)) |
 | GLM-5 Next text tower (`Glm5NextTextModel`) | registered | hyper-connection boundary, any split offset; a stage may not begin on a `shared` DSA indexer layer (`indexer_types`; GLM-5.3-Flash ships all `full`). The composite `Glm5NextForConditionalGeneration` trains text-only, as Step-3.7's does; packing is refused ([Packing](#packing)). `auto` resolves to `aux_loss` and is refused at a live `router_aux_loss_coef`; `bias_update` balances and exports through `gate.e_score_correction_bias` |
 | Qwen3.8-Flash-Next text tower (`Qwen4ExpTextModel`) | registered | hyper-connection boundary, any split offset; later stages take the token ids their PLE layers read ([Token ids on later stages](#token-ids-on-later-stages)), and each stage saves its own n-gram tables ([Checkpoints and resume](#checkpoints-and-resume)). `text_only_model: true`, or the composite text-only; full fine-tuning with `moe_balancing: none` ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#pipeline-parallelism)) |
+| Nemotron-H text class (`NemotronHModel`) | registered | any split offset, as its blocks follow no period and each reads its mask by its own `block_type`; without a cache every Mamba layer scans from a zero state. `text_only_model: true`, since the composite keeps its head below its root and is refused. `auto` resolves to `bias_update` on the EP layers. The hub's `num_nextn_predict_layers: 1` is metadata and passes |
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
 | Any other backbone (Bailing, Mistral 4, LFM-2, Cohere2 MoE, Qwen3-Next, …) | not registered | refused by name |
@@ -383,9 +384,9 @@ gpt-oss-20b. On the single host the same recipes, gpt-oss at `ep4` since a 4-GPU
 
 `packing: true` composes with PP and is the way to avoid full-window compute on short rows: PP pads
 every batch to `max_length`. Each stage rebuilds the segment markers a model's conv / linear-attention layers
-read (`segment_markers_for`: `seq_idx` for GatedDeltaNet and LFM-2 ShortConv, `cu_seq_lens` for the delta rule)
-from its microbatch's `position_ids`, as the packing collator builds them for a flattened row, so Qwen3.5 / 3.6 and
-Qwen3.8-Flash-Next keep each document of a packed row apart; GatedDeltaNet needs its segment-aware kernels for it,
+read (`segment_markers_for`: `seq_idx` for GatedDeltaNet, LFM-2 ShortConv and Nemotron-H's Mamba, `cu_seq_lens` for
+the delta rule) from its microbatch's `position_ids`, as the packing collator builds them for a flattened row, so
+Qwen3.5 / 3.6, Qwen3.8-Flash-Next and Nemotron-H keep each document of a packed row apart; GatedDeltaNet needs its segment-aware kernels for it,
 as off PP. Packing is refused, whatever `allow_cross_document_linear_attention` says, where the layers read no
 boundary at all (`find_unmarked_sequence_mixer`: KDA, Lightning Attention-2, Inkling's short convolutions), whose
 state would carry from each document into the next. In the roster that is GLM-5 Next and Inkling, whose padded

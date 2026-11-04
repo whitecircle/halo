@@ -25,7 +25,7 @@ from halo.models.attention.selection import effective_attn_implementation
 from halo.models.forward_capture import capturing_forward_outputs
 from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.modality import config_declares_multimodality
-from halo.models.module_tree import embedding_module, find_module_path
+from halo.models.module_tree import embedding_module, find_module_path, hidden_state_backbone
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.consensus import rank_consensus
@@ -285,7 +285,7 @@ class LogprobScoringMixin:
     def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
         """Forward the backbone, drop the final position (the causal next-token shift), keep the last
         ``logits_to_keep``."""
-        backbone = base_transformers_model(unwrapped_model).base_model
+        backbone = hidden_state_backbone(unwrapped_model)
         hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
         return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
 

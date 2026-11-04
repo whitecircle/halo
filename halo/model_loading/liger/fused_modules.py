@@ -213,7 +213,7 @@ def apply_fused_modules(module: ModuleType, spec: LigerFamilySpec, flags: dict) 
         patched.append("RoPE")
 
     if flags.get("fused_linear_cross_entropy") and spec.causal_lm:
-        lce_forward = build_lce_forward(spec.router_aux_loss_in_head)
+        lce_forward = build_lce_forward(spec.router_aux_loss_in_head, spec.fp32_logits)
         for name in spec.causal_lm:
             _named_class(module, name, spec).forward = lce_forward
         patched.append(f"FusedLinearCrossEntropy({', '.join(spec.causal_lm)})")
@@ -260,4 +260,4 @@ def apply_fused_modules_to_model(model, spec: LigerFamilySpec, flags: dict) -> N
     if flags.get("fused_linear_cross_entropy") and type(model).__name__ in spec.causal_lm:
         # A bound method, not `_bind_forward`: the closure cannot be pickled by reference anyway, and
         # `_liger_fused_head_installed` detects the head by the function's module, which a partial hides.
-        model.forward = MethodType(build_lce_forward(spec.router_aux_loss_in_head), model)
+        model.forward = MethodType(build_lce_forward(spec.router_aux_loss_in_head, spec.fp32_logits), model)

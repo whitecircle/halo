@@ -49,6 +49,7 @@ RESOLVED_THROUGH_TEXT_CONFIG = {
     "cohere2_vision": "cohere2",
     "mistral3": "mistral4",
     "qwen4_exp": "qwen4_exp_text",
+    "nemotron_h_omni": "nemotron_h",
 }
 
 # Norm classes that compute Liger's function yet must stay undeclared; the sweep would otherwise report each as a gap.
@@ -378,6 +379,19 @@ def test_the_router_logits_probe_really_keys_on_that_parameter_name():
     assert honors_router_logits_flag(_DoesNot()) is False
 
 
+def _head_casts_logits_to_fp32(forward: ast.FunctionDef) -> bool:
+    head = next(stmt for stmt in forward.body if "lm_head" in _self_attributes(stmt))
+    return any(isinstance(node, ast.Attribute) and node.attr == "float" for node in ast.walk(head))
+
+
+@pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.causal_lm], ids=lambda s: s.model_types[0])
+def test_a_head_casting_its_logits_declares_it(spec):
+    """Undeclared, a forward with no labels would hand a log-softmax bf16 logits the family's own head never returns."""
+    module = importlib.import_module(spec.modeling_module)
+    for name in spec.causal_lm:
+        assert _head_casts_logits_to_fp32(_forward_ast(getattr(module, name))) == spec.fp32_logits, name
+
+
 def test_the_head_check_rejects_inklings_rescaled_head():
     cls = importlib.import_module("transformers.models.inkling.modeling_inkling").InklingForCausalLM
     between = _attributes_between_head_and_loss(_forward_ast(cls), cls.__name__)
@@ -394,12 +408,18 @@ from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from tests.common.liger_appliers import liger_applier
-from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN4_EXP_CONFIG
+from tests.common.models import (
+    TINY_COHERE2_MOE_CONFIG,
+    TINY_GLM4_MOE_LITE_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
+)
 
 failures = []
 for model_type, tiny in (
     ("cohere2_moe", TINY_COHERE2_MOE_CONFIG),
     ("glm4_moe_lite", TINY_GLM4_MOE_LITE_CONFIG),
+    ("nemotron_h", TINY_NEMOTRON_H_CONFIG),
     ("qwen4_exp_text", TINY_QWEN4_EXP_CONFIG),
 ):
     config = CONFIG_MAPPING[model_type](**{**tiny, "attn_implementation": "eager"})

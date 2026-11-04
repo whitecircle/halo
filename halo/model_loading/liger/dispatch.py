@@ -283,6 +283,8 @@ def _build_liger_config(
             )
         config["fused_linear_cross_entropy"] = False
         flce_requested = False
+        # A family's FLCE default gave up CE for a head this model never runs, and CE does reach the wrapper's.
+        config["cross_entropy"] = user_overrides.get("cross_entropy", True)
 
     # CE and FLCE are mutually exclusive (FLCE fuses the lm_head projection into the loss) and every
     # applier asserts on the pair. Only CE is a toolkit default, so the default yields to explicit FLCE.

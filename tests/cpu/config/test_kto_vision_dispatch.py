@@ -8,11 +8,13 @@ import types
 from unittest import mock
 
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.entrypoints.model_setup import PreferenceModels
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 # Ids the name heuristic reads the same offline as against the hub, paired with a config that decides the same.
 _VLM_MODEL_ID = "stub/qwen3.5-9b"
@@ -76,7 +78,8 @@ def _run_kto(
     )
 
     model_config = CONFIG_MAPPING["gemma3"]() if vlm_checkpoint else CONFIG_MAPPING["qwen3"]()
-    model = types.SimpleNamespace(config=model_config)
+    model = torch.nn.Module()
+    model.config = model_config
     tokenizer = types.SimpleNamespace(padding_side="right")
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1),
@@ -178,6 +181,14 @@ def test_a_media_part_on_any_row_is_refused_ahead_of_trls_render(tmp_path, colum
     )
     with pytest.raises(ValueError, match="no Halo collator feeds"):
         _run_kto(tmp_path, dataset)
+
+
+def test_an_image_run_of_a_family_trls_vision_path_does_not_carry_is_refused_ahead_of_the_load(tmp_path):
+    config = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]).config
+    dataset = _dataset(prompt=_PLACEHOLDER_PROMPT, extra_columns={"images": [[]]})
+    with mock.patch("halo.entrypoints.data_setup.probe_checkpoint", return_value=(config, True)):
+        with pytest.raises(ValueError, match="KTO on image data cannot train"):
+            _run_kto(tmp_path, dataset)
 
 
 def test_images_field_renames_the_column_to_the_spelling_trl_reads(tmp_path):

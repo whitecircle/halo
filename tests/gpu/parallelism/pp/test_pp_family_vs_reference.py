@@ -4,7 +4,7 @@
 Expert TP reorders each expert's sum, which in bf16 flips near-tied picks with no sync bug, so ETP rows run fp32.
 Gradients score by direction and norm ratio, since a flipped pick moves mass. A gradient under
 ``TOL.grad_negligible_layer_fraction`` of its layer's largest (Qwen3.5's ``A_log`` / ``dt_bias``) is held to that floor
-as absolute error.
+as absolute error, Nemotron-H's Mamba layers to their own.
 """
 
 import argparse
@@ -19,13 +19,15 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_PP_SPLIT_OVERRIDES, tiny_family_model
+from tests.common.tolerances import TOL
 
 SEED = 1234
 PP_SIZE = 2
 PER_DEVICE_BATCH = 2  # 2 microbatches of 1 per DP replica.
 N_MICROBATCHES = 2
 # The shared two-stage overrides, DeepSeek-V4's hash_moe layer on stage 0, GLM-5 Next on its KDA/DSA period, Inkling at
-# the batch's vocabulary.
+# the batch's vocabulary, Nemotron-H at it too with a MoE layer on each stage, its two experts a token as the sum below
+# needs.
 FAMILIES = {
     "qwen3_5_moe_text": (TINY_PP_SPLIT_OVERRIDES["qwen3_5_moe_text"], [4, 4]),
     "step3p7": ({}, [2, 2]),
@@ -34,11 +36,14 @@ FAMILIES = {
     "qwen3_moe": ({}, [4, 4]),
     "glm4_moe_lite": (TINY_PP_SPLIT_OVERRIDES["glm4_moe_lite"], [2, 2]),
     "laguna": (TINY_PP_SPLIT_OVERRIDES["laguna"], [4, 4]),
+    "nemotron_h": ({"vocab_size": ppeq.RAGGED_BATCH_VOCAB_SIZE, "num_experts_per_tok": 2}, [2, 4]),
     "inkling_text": (
         {**TINY_PP_SPLIT_OVERRIDES["inkling_text"], "vocab_size": ppeq.RAGGED_BATCH_VOCAB_SIZE},
         [2, 2],
     ),
 }
+
+NEGLIGIBLE_FRACTIONS = {"nemotron_h": TOL.nemotron_mamba_grad_negligible_layer_fraction}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
@@ -111,7 +116,8 @@ def run(ctx):
     checks.update(c)
     metrics.update(m)
 
-    ppeq.score_stage_grads_vs_reference(ctx, stage, reference, checks, metrics)
+    fraction = NEGLIGIBLE_FRACTIONS.get(ARGS.family, TOL.grad_negligible_layer_fraction)
+    ppeq.score_stage_grads_vs_reference(ctx, stage, reference, checks, metrics, negligible_fraction=fraction)
     return {"checks": checks, "metrics": metrics}
 
 

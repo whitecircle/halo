@@ -28,6 +28,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MISTRAL4_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
     TINY_QWEN4_EXP_CONFIG,
@@ -65,6 +66,7 @@ _PP_ROSTER = {
         lambda: Glm5NextConfig(text_config=dict(TINY_GLM5_CONFIG), vision_config=dict(TINY_GLM5_VISION_CONFIG)),
         True,
     ),
+    "NemotronHModel": (lambda: CONFIG_MAPPING["nemotron_h"](**TINY_NEMOTRON_H_CONFIG), False),
 }
 # The composite config a multimodal Qwen3.5/3.6 MoE stage carries, and off the roster a seq_idx-only family, an
 # unmarked layer-group family, an unlisted family, a softmax-only MoE.

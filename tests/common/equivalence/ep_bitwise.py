@@ -272,10 +272,10 @@ def _forward_case(family: str, variant: str, *, tier: str, perturb: bool, device
     return _forward_backward(model, variant, SEQ[tier], device, batch_index=0), _orders(model)
 
 
-def _save_router(model: torch.nn.Module) -> torch.nn.Module:
+def _save_router(model: torch.nn.Module, family: str) -> torch.nn.Module:
     """``model`` under token-mixer LoRA with each router in ``modules_to_save``, re-hooked as the trainer does."""
     routers = [f"{path}.{layer._ROUTER_ATTR}" for path, layer in named_ep_layers(model) if layer._ROUTER_ATTR]
-    targets = mixer_linear_leaves(model)
+    targets = mixer_linear_leaves(model) or list(TINY_MOE_FAMILIES[family].attention_targets)
     torch.manual_seed(ADAPTER_SEED)
     model = get_peft_model(model, LoraConfig(r=LORA_RANK, target_modules=targets, modules_to_save=routers))
     for _, layer in named_ep_layers(model):
@@ -299,7 +299,7 @@ def _construction_case(family: str, variant: str, *, perturb: bool):
             )
             _wrap(model, ep_config, perturb=perturb)
             if layout.saved_router:
-                model = _save_router(model)
+                model = _save_router(model, family)
             rank_orders = _orders(model)
         tensors |= {f"rank{rank}/{name}": param for name, param in model.named_parameters()}
         orders |= {f"rank{rank}/{name}": order for name, order in rank_orders.items()}

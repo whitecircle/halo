@@ -87,6 +87,7 @@ class WeightSyncClientBase(ABC):
     # The ``rollout_backend`` value the registry keys this client by.
     BACKEND_KEY: str
     BACKEND_NAME: str
+    LIVENESS_ROUTE: str = "/health"
     # The pinned server release every roster fact below describes.
     ENGINE_RELEASE: str
     # Env var naming the trainer NIC this engine dials back to.
@@ -232,7 +233,7 @@ class WeightSyncClientBase(ABC):
         return resp
 
     def check_server(self, total_timeout: float = 0.0):
-        """Poll ``/health`` until it answers 200 or ``total_timeout`` passes."""
+        """Poll the liveness route until it answers 200 or ``total_timeout`` passes."""
         start = time.time()
         last_error: Exception | None = None
         last_result = "no response"
@@ -240,7 +241,7 @@ class WeightSyncClientBase(ABC):
             try:
                 # A blackholed route would otherwise block past the outer deadline.
                 status = self.request(
-                    "GET", "/health", retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False
+                    "GET", self.LIVENESS_ROUTE, retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False
                 ).status_code
                 if status == 200:
                     logger.info(f"{self.BACKEND_NAME} server is up")
@@ -252,7 +253,7 @@ class WeightSyncClientBase(ABC):
             if time.time() - start >= total_timeout:
                 raise ConnectionError(
                     f"{self.BACKEND_NAME} server unreachable at {self.base_url} after {total_timeout}s "
-                    f"(last /health result: {last_result}). A server still loading needs a longer wait: "
+                    f"(last {self.LIVENESS_ROUTE} result: {last_result}). A server still loading needs a longer wait: "
                     f"rollout_connection_timeout, or vllm_server_timeout on online GRPO."
                 ) from last_error
             time.sleep(2.0)
@@ -278,7 +279,7 @@ class WeightSyncClientBase(ABC):
         return False
 
     def probe_generation(self) -> None:
-        """Fail fast when ``/health`` is up but generation is held, a trainer's SIGKILL mid-sync having skipped the exit
+        """Fail fast when the server is up but generation is held, a trainer's SIGKILL mid-sync having skipped the exit
         hook's resume. A paused engine would queue every request, so the pause is asked first where it can be."""
         restart = (
             "unless that sync had already streamed part of the model, in which case the server holds a partly written "
@@ -306,7 +307,7 @@ class WeightSyncClientBase(ABC):
             )
         except requests.exceptions.Timeout as e:
             raise RuntimeError(
-                f"{self.BACKEND_NAME} server {self.base_url} answers /health but GENERATION is paused or wedged (no "
+                f"{self.BACKEND_NAME} server {self.base_url} is up but GENERATION is paused or wedged (no "
                 f"response in {GENERATION_PROBE_TIMEOUT_S:.0f}s to a 1-token probe). A previous trainer most likely "
                 f"died mid-run while attached to the weight-sync routes (SIGKILL skips cleanup). Lift a pause (POST "
                 f"{self.base_url}{self.RESUME_ENDPOINT}) before reconnecting, {restart}."

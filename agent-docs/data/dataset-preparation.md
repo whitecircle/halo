@@ -114,7 +114,10 @@ point `--input` at it with an `@split` suffix.
 
 **VLM mode** (`--is_vlm`; packing not supported, and the Qwen and Gemma 4 processors take the runtime VLM path instead) stores `input_ids` with
 vision placeholders expanded, `attention_mask`, `labels` (image tokens masked to -100),
-`pixel_values` (float16 bytes), `pixel_values_shape`, and `image_grid_thw`.
+`pixel_values` (float16 bytes), `pixel_values_shape`, and the patch grid (`image_grid_thw`, or `image_grid_hw` on Nemotron-H).
+
+A row carrying a video or audio part raises rather than drops, since no collator feeds one and a dropped
+row would leave an artifact that looks whole.
 
 Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field` or
 `--interleaved_thinking` (the offline render would diverge from the runtime one), and a processor
@@ -161,7 +164,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--pack_sequences` | `False` | Pack multiple sequences (text SFT only). Refused where training would refuse the rows: compressed-KV layers (DeepSeek-V4), a family with no flash backend whose dense forward leaks (GLM-5 Next), and sequence mixers no boundary reaches (Ring, Ling 3.0, Inkling) unless `--allow_cross_document_linear_attention` |
 | `--allow_cross_document_linear_attention` | `False` | Needs `--pack_sequences`. Bakes rows for a model whose mixers receive no document boundary; training them takes the same opt-in |
 | `--packing_strategy` | `bfd` | Needs `--pack_sequences`. TRL strategy: `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk — emits no document boundaries, so a packed row attends across itself) |
-| `--is_vlm` | `False` | VLM mode (stores `pixel_values`, `image_grid_thw`; refuses an image row whose processor emits another vision key) |
+| `--is_vlm` | `False` | VLM mode (stores `pixel_values` and their patch grid, `image_grid_thw` or `image_grid_hw`; refuses an image row whose processor emits another vision key) |
 | `--images_field` | `None` | (`--is_vlm`) column holding the row's image(s) for datasets that keep them outside the conversation; merged into the messages like the runtime path. An image column named by nothing is refused |
 | `--min_pixels` / `--max_pixels` | `None` | VLM image pixel bounds; refused without `--is_vlm` and on a processor that does not resize by pixel count (Gemma 4) |
 | `--num_shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |

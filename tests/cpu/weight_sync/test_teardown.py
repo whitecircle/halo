@@ -4,8 +4,10 @@ other, so the engine-side release runs during the local destroy. At exit the des
 import atexit
 import logging
 import threading
+from types import SimpleNamespace
 
 import pytest
+import requests
 
 import halo.weight_sync.clients.sglang as sglang_module
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
@@ -38,6 +40,38 @@ def test_the_pause_is_lifted_on_sglangs_own_route_with_a_body(monkeypatch):
     assert [path for path, _ in posts] == ["/continue_generation"], posts
     assert posts[0][1].get("json") == {}, "the handler rejects an empty body — RESUME_REQUEST must ship {}"
     assert client._paused is False
+
+
+def test_a_paused_engine_is_reported_as_paused_and_not_as_unreachable(monkeypatch):
+    """A pause holds SGLang's ``/health``, which generates through the scheduler, and the wait for a server would run
+    out its whole deadline and then advise waiting longer. ``/v1/models`` stays up, so the generation probe names it."""
+    client = offline_client(SGLangWeightSyncClient)
+
+    def request(method, path, **kwargs):
+        if path in ("/health", "/v1/completions"):
+            raise requests.exceptions.ReadTimeout(path)
+        return SimpleNamespace(status_code=200, json=lambda: {"data": [{"id": "served"}]})
+
+    monkeypatch.setattr(client, "request", request)
+
+    client.check_server(0.0)
+    with pytest.raises(RuntimeError, match="paused or wedged"):
+        client.probe_generation()
+
+
+def test_the_engine_is_asked_before_its_half_of_the_destroy_starts(monkeypatch):
+    """SGLang's ``/health`` generates through the scheduler the remote destroy occupies. Asked during it, a healthy
+    engine reads as dead, the client aborts, and the engine's half of the destroy stays blocked for good."""
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    _teardown_probe(client, monkeypatch)
+    order: list[str] = []
+    monkeypatch.setattr(client, "_destroy_remote_group", lambda: order.append("remote"))
+    monkeypatch.setattr(client, "_engine_answers", lambda: order.append("health") or True)
+
+    client._release_transport(at_exit=False)
+
+    assert order == ["health", "remote"]
 
 
 def test_explicit_close_keeps_the_full_local_destroy(monkeypatch):

@@ -34,7 +34,8 @@ def _image_processing() -> SimpleNamespace:
 
 def _text_tower_names(model) -> set[str]:
     backbone = backbone_with_layers(model)
-    output_embeddings = model.get_output_embeddings()
+    # Nemotron's composite exposes no output embedding of its own.
+    output_embeddings = model.get_output_embeddings() or model.language_model.get_output_embeddings()
     kept = {id(param) for param in backbone.parameters()} | {id(param) for param in output_embeddings.parameters()}
     return {name for name, param in model.named_parameters() if id(param) in kept}
 

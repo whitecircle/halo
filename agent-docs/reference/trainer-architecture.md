@@ -195,7 +195,7 @@ for an image run only.
 | Method | Vision | Notes |
 |---|---|---|
 | SFT | Yes | Conversation-embedded images or an `images_field` column; packing/padding-free rejected on the VLM path; CP is text-only (the CP wrapper raises on a batch carrying `pixel_values`). See [SFT — VLMs](../training-methods/sft.md#vision-language-models) |
-| DPO / KTO | Yes | `images`/`image` column routes to TRL's vision collators. Vision excludes `precompute_ref_log_probs`, so EP vision DPO takes standard-PEFT adapters or a frozen copy. Refused on a prefix-LM checkpoint (PaliGemma) before the model load (`reject_prefix_lm_image_preference`): the collators mark no completion as its causal suffix, and TRL's calls the PaliGemma processor without images |
+| DPO / KTO | Yes | `images`/`image` column routes to TRL's vision collators. Vision excludes `precompute_ref_log_probs`, so EP vision DPO takes standard-PEFT adapters or a frozen copy. A family whose frozen copy does not fit declares `refuses_trl_image_rows` and is refused before the load (Nemotron-H). Refused on a prefix-LM checkpoint (PaliGemma) before the model load (`reject_prefix_lm_image_preference`): the collators mark no completion as its causal suffix, and TRL's calls the PaliGemma processor without images |
 | SMPO | Yes | `DataCollatorForVLMSMPO` processes images at collation; CP and padding-free are text-only; a prefix-LM checkpoint (PaliGemma) is refused as for DPO. See [SMPO — VLMs](../training-methods/preference/smpo.md) |
 | Teacher distillation | Yes | Student and teacher share the processor's vision geometry; over-length rows pre-filtered |
 | Self-distillation (SDPG offline) | Yes | Privileged hint appended to the last user turn; teacher branch fails loud on overflow |

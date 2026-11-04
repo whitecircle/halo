@@ -120,9 +120,14 @@ the head too. A tied embedding is reserved for the root group and does not depen
 classification head (no `lm_head`), a `modules_to_save` copy or a second embedding table (Gemma 4's
 per-layer inputs) is untied and does.
 
-On a composite the embedding and root groups also hold what only an image row reaches, so a rank whose batch has no image would enter their reduce-scatter with a shorter list than its peers'. Before reducing, those groups agree across their process groups which parameters any rank holds a gradient for and zero-fill the rest (`_agree_unsharded_grad_presence`); what no rank reached keeps `grad is None`, so a text-only run never writes its tower. That costs one small all-reduce per group and backward, two under HSDP. Mixed image and text rows therefore train under `torchrun` without `freeze_vision_tower`. Accelerate-managed FSDP2 takes no such wrap, so mixed rows there need `freeze_vision_tower: true`.
+On a composite the embedding and root groups also hold what only an image row reaches, so a rank whose batch has no image would enter their reduce-scatter with a shorter list than its peers'. Before reducing, those groups agree across their process groups which parameters any rank holds a gradient for and zero-fill the rest (`_agree_unsharded_grad_presence`); what no rank reached keeps `grad is None`, so a text-only run never writes its tower. That costs one small all-reduce per group and backward, two under HSDP. Mixed image and text rows therefore train under `torchrun` without `freeze_vision_tower`.
 
-A frozen input embedding beside a trainable tower on mixed rows is not refused, and it hangs until the collective timeout: a text row's first layer gets no gradient-carrying input, so that layer's group reduces at the end of the backward on a text rank and in order on an image rank, and the ranks' reduces stop pairing. `unfreeze_layers_patterns` matching the tower but not the embedding gets there. Set `freeze_vision_tower: true`, or train the embedding.
+Two setups cannot pair those reduces, so a rank's training forward holding no image raises at a data-parallel size above 1, where the step would otherwise hang to the collective timeout (`_refuse_a_batch_holding_no_image`, `halo/entrypoints/data_setup.py`):
+
+- Accelerate-managed FSDP2, which takes no such wrap. Launch with `torchrun`.
+- A frozen input embedding beside a trainable tower with gradient checkpointing off (`unfreeze_layers_patterns` matching the tower but not the embedding). A text row's first layer gets no gradient-carrying input, so that layer's group reduces at the end of the backward on a text rank and in order on an image rank. Checkpointing's input-grad hook gives the embedding's output a gradient on every row, so the same setup pairs with checkpointing on. Train the embedding or turn checkpointing on.
+
+Both also take `freeze_vision_tower: true`, adapters kept off the tower, or a dataset with no text-only rows. A run that holds an image on every rank pairs in either setup. An adapter reaching the tower takes no such check, as the adapter wrap runs past the hook: with checkpointing on it pairs, and with checkpointing off it hangs.
 
 Two setups **raise** rather than wrap:
 

@@ -18,14 +18,20 @@ from halo.data.completion_spans import (
     build_training_labels,
     mask_batch_to_completion_spans,
 )
-from halo.data.conversation import resolve_json_value
+from halo.data.conversation import reject_unsupported_media_parts, resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.rejected_rows import is_valid_example, report_rejected_rows
 from halo.data.pipeline.text_rows import build_chat_row_processor, build_text_row_processor
 from halo.data.pipeline.vlm_rows import build_vlm_history
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
-from halo.data.vlm_render import VLM_OUTPUT_FEATURES, render_vlm_text, resolve_image_token_ids, run_vlm_processor
+from halo.data.vlm_render import (
+    VLM_GRID_COLUMNS,
+    VLM_OUTPUT_FEATURES,
+    render_vlm_text,
+    resolve_image_token_ids,
+    run_vlm_processor,
+)
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.tokenizer_backend import install_processor_backend, resolve_tokenizer_backend
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
@@ -230,7 +236,7 @@ def tokenize_dataset(
 
 
 def _vision_columns(result: Any) -> dict[str, Any]:
-    """Stored form: float16 ``pixel_values`` bytes with their shape, ``image_grid_thw`` as a list."""
+    """Stored form: float16 ``pixel_values`` bytes with their shape, the patch grid as a list."""
     columns = {}
     if "pixel_values" in result:
         pixel_values = result["pixel_values"]
@@ -238,11 +244,12 @@ def _vision_columns(result: Any) -> dict[str, Any]:
             pixel_values = pixel_values.numpy()
         columns["pixel_values"] = pixel_values.astype("float16").tobytes()
         columns["pixel_values_shape"] = list(pixel_values.shape)
-    if "image_grid_thw" in result:
-        grid = result["image_grid_thw"]
-        if hasattr(grid, "numpy"):
-            grid = grid.numpy()
-        columns["image_grid_thw"] = grid.tolist() if hasattr(grid, "tolist") else grid
+    for column in VLM_GRID_COLUMNS:
+        if column in result:
+            grid = result[column]
+            if hasattr(grid, "numpy"):
+                grid = grid.numpy()
+            columns[column] = grid.tolist() if hasattr(grid, "tolist") else grid
     return columns
 
 
@@ -288,7 +295,9 @@ def tokenize_vlm_row(
 ) -> dict[str, Any]:
     """Through the runtime VLM path's own builder and renderer, so it tokenizes as an untouched run renders it. An
     empty, over-length or bad-data row becomes the all-None row, Arrow-safe because the map pins
-    ``VLM_OUTPUT_FEATURES``."""
+    ``VLM_OUTPUT_FEATURES``. A media part no collator feeds raises instead: dropping it would leave an artifact looking
+    whole with those rows gone."""
+    reject_unsupported_media_parts(example.get(config.conversation_field), "A row of this VLM bake")
     try:
         raw_conversation = resolve_json_value(example.get(config.conversation_field))
         if not raw_conversation:
@@ -344,7 +353,7 @@ def tokenize_vlm_dataset(
     *,
     eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
-    """Input_ids with expanded placeholders, attention_mask, labels, fp16 ``pixel_values`` and ``image_grid_thw``."""
+    """Input_ids with expanded placeholders, attention_mask, labels, fp16 ``pixel_values`` and their patch grid."""
     if config.tools_field or config.interleaved_thinking:
         raise NotImplementedError(
             "VLM offline preprocessing does not render tools_field / interleaved_thinking — the "

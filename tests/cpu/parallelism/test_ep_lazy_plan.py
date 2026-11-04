@@ -442,6 +442,95 @@ def test_fuser_fuse_gate_up_values(tmp_path):
         assert torch.allclose(fused[e, M:], up[e])
 
 
+_GATELESS = "mixer.experts"
+_GATELESS_E, _GATELESS_L, _GATELESS_M = 4, 8, 6
+
+
+def _gateless_keys(experts, names=("up_proj", "down_proj")):
+    return [f"{_GATELESS}.{expert}.{name}.weight" for expert in experts for name in names]
+
+
+def _gateless_tasks(fuser, keys):
+    return fuser.detect_tasks(
+        dict.fromkeys(keys, "shard.safetensors"),
+        {key: key for key in keys},
+        {f"{_GATELESS}.up_proj", f"{_GATELESS}.down_proj"},
+    )
+
+
+def test_fuser_stacks_a_gateless_experts_up_proj_alone(tmp_path):
+    """Nemotron-H's experts: an ``up_proj`` key the map files under the GLU pair is the whole of a bank here."""
+    up = {e: torch.randn(_GATELESS_M, _GATELESS_L) for e in range(_GATELESS_E)}
+    down = {e: torch.randn(_GATELESS_L, _GATELESS_M) for e in range(_GATELESS_E)}
+    tensors = {f"{_GATELESS}.{e}.up_proj.weight": up[e] for e in up} | {
+        f"{_GATELESS}.{e}.down_proj.weight": down[e] for e in down
+    }
+    save_file(tensors, tmp_path / "shard.safetensors")
+    model = nn.Module()
+    model.mixer = nn.Module()
+    model.mixer.experts = nn.Module()
+    model.mixer.experts.up_proj = nn.Parameter(torch.empty(_GATELESS_E, _GATELESS_M, _GATELESS_L))
+    model.mixer.experts.down_proj = nn.Parameter(torch.empty(_GATELESS_E, _GATELESS_L, _GATELESS_M))
+
+    fuser = ExpertFuser(2, 4)
+    tasks = _gateless_tasks(fuser, list(tensors))
+    assert {(task.kind, task.model_key) for task in tasks} == {
+        ("up", f"{_GATELESS}.up_proj"),
+        ("down", f"{_GATELESS}.down_proj"),
+    }
+    assert fuser.execute(tasks, model, str(tmp_path), torch.float32, "cpu") == {task.model_key for task in tasks}
+    assert torch.equal(model.mixer.experts.up_proj, torch.stack([up[2], up[3]]))
+    assert torch.equal(model.mixer.experts.down_proj, torch.stack([down[2], down[3]]))
+
+
+def test_fuser_keeps_the_pair_where_the_model_fuses_gate_and_up():
+    """The branch reads the live model: a GLU family's ``up_proj`` keys stay a half of its ``gate_up_proj``."""
+    keys = _gateless_keys(range(2), ("gate_proj", "up_proj"))
+    tasks = ExpertFuser(0, 2).detect_tasks(
+        dict.fromkeys(keys, "shard.safetensors"), {key: key for key in keys}, {f"{_GATELESS}.gate_up_proj"}
+    )
+    assert [(task.kind, task.model_key) for task in tasks] == [("gate_up", f"{_GATELESS}.gate_up_proj")]
+
+
+def test_fuser_refuses_a_gate_half_on_a_gateless_expert():
+    """Stacking whichever half came first would load a gate's weights into the bank at the same shape."""
+    fuser = ExpertFuser(0, 2)
+    [task] = _gateless_tasks(fuser, _gateless_keys(range(2), ("gate_proj", "up_proj")))
+    assert task.kind == "up"
+    with pytest.raises(RuntimeError, match="gateless"):
+        fuser.validate_task(task)
+
+
+def test_fuser_refuses_a_gap_in_a_gateless_bank():
+    """The fuse stacks sorted indices into local slots, so a hole would shift every later expert."""
+    fuser = ExpertFuser(0, 4)
+    keys = [key for key in _gateless_keys(range(4)) if key != f"{_GATELESS}.1.up_proj.weight"]
+    up = next(task for task in _gateless_tasks(fuser, keys) if task.kind == "up")
+    with pytest.raises(RuntimeError, match=r"global expert index\(es\) \[1\] are absent"):
+        fuser.validate_task(up)
+
+
+@pytest.mark.parametrize("rank_start", [0, 4])
+def test_a_gateless_bank_slices_to_this_ranks_experts(rank_start):
+    """Planned whole, it would reach the layer as the first experts on every rank while ``down_proj`` is its own."""
+    planner = WeightPlanner(MockEPConfig(start=rank_start, end=rank_start + 4, total=8))
+    action, dim, start, end = planner._classify("backbone.layers.1.mixer.experts.up_proj")
+    assert (action, dim, start, end) == (WeightAction.EXPERT_SHARD, 0, rank_start, rank_start + 4)
+    assert ExpertKeyLayout.detect({"backbone.layers.1.mixer.experts.up_proj": "s"}) is ExpertKeyLayout.FUSED
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "backbone.layers.1.mixer.shared_experts.up_proj.weight",
+        "backbone.layers.1.mixer.experts.3.up_proj.weight",
+        "backbone.layers.1.mixer.up_proj",
+    ],
+)
+def test_the_gateless_bank_is_told_from_its_neighbours(key):
+    assert WeightPlanner(MockEPConfig())._classify(key)[0] is not WeightAction.EXPERT_SHARD
+
+
 def test_fuser_handles_routed_experts_prefix():
     wm = {
         "model.layers.0.mlp.routed_experts.0.gate_proj.weight": "model.safetensors",

@@ -27,8 +27,10 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy, reject_trainable_si
 from halo.models.config_access import text_config
 from halo.models.context_window import context_window_from_config
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP
+from halo.models.model_classes import is_remote_code_class
 from halo.models.moe.config_fields import (
     has_routed_experts,
+    resolve_dispatch_width,
     resolve_expert_count,
     resolve_expert_ffn_width,
     resolve_router_topk,
@@ -49,9 +51,9 @@ def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> 
     if pc.ep_size <= 1 or pc.ep_rows_per_device <= 0:
         return
     text = text_config(model_config)
-    hidden = getattr(text, "hidden_size", 0)
+    width = resolve_dispatch_width(text)
     num_topk = resolve_router_topk(text)
-    if not hidden or not num_topk:
+    if not width or not num_topk:
         return
     max_length = pc.ep_declared_max_length or context_window_from_config(model_config)
     if not max_length:
@@ -66,7 +68,7 @@ def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> 
         reject_oversized_dispatch(
             capacity,
             num_topk=num_topk,
-            padded_hidden=padded_wire_hidden(hidden),
+            padded_hidden=padded_wire_hidden(width),
             spans_domains=pc.requires_rdma,
         )
     except ValueError as exc:
@@ -189,6 +191,19 @@ def reject_unsupported_model(
             f"experts-distributed in plain bf16 — AdamWBF16's stochastic rounding is the supported "
             f"precision floor there."
         )
+
+
+def reject_remote_composite(model_config) -> None:
+    """Refuse training the composite a family's remote file defines, after a text-only load narrowed its config: that
+    route builds transformers' text class whatever the flag says."""
+    spec = find_moe_family_spec_for_config(model_config)
+    if spec is None or spec.remote_composite_refusal is None or not is_remote_code_class(type(model_config)):
+        return
+    raise ValueError(
+        f"trust_remote_code loaded {model_config.model_type!r} through the release's own modeling file, which cannot "
+        f"train here: {spec.remote_composite_refusal}. Set trust_remote_code: false to load transformers' classes, "
+        f"which read the same checkpoint, or text_only_model: true."
+    )
 
 
 def reject_unsupported_load(

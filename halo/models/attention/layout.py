@@ -19,8 +19,9 @@ from halo.models.unwrapping import unwrap_toolkit_wrappers
 # ``linear_attention`` but declares a single ``linear_num_heads``.
 _GATED_DELTA_NET_HEAD_FIELDS = ("linear_num_key_heads", "linear_num_value_heads")
 _LINEAR_ATTENTION_LAYER_TYPE = "linear_attention"
-# Families interleaving ShortConv layers with softmax attention, dense, MoE and VL alike.
-SHORT_CONV_MODEL_TYPE_PREFIXES = ("lfm2",)
+# Families whose stateful mixers keep documents apart on ``seq_idx`` alone: LFM2's ShortConv, dense, MoE and VL alike,
+# and the Mamba conv and scan of Nemotron-H (halo/models/nemotron_h.py).
+SEQ_IDX_MODEL_TYPE_PREFIXES = ("lfm2", "nemotron_h")
 
 # Score matmul passes per attended key: QK^T and Attn·V forward (2) plus their backward (4). At head
 # width ``heads·(d_qk + d_v)`` this is the PaLM/Megatron ``12·S·H`` (``d_qk = d_v = H / heads``).
@@ -52,6 +53,9 @@ LAYER_TYPE_KINDS: dict[str, _AttentionKind] = {
     "heavily_compressed_attention": _AttentionKind.COMPRESSED,
     _LINEAR_ATTENTION_LAYER_TYPE: _AttentionKind.NONE,
     "conv": _AttentionKind.NONE,
+    # Nemotron-H declares its feed-forward blocks as layers of their own.
+    "moe": _AttentionKind.NONE,
+    "mlp": _AttentionKind.NONE,
 }
 
 _BOUNDED_KINDS = frozenset({_AttentionKind.WINDOW, _AttentionKind.CHUNKED, _AttentionKind.SPARSE})
@@ -143,7 +147,7 @@ class AttentionLayout:
             counts[key] = counts.get(key, 0) + 1
         parts = []
         for (kind, keys, rate), count in counts.items():
-            label = "linear" if kind == _AttentionKind.NONE else str(kind)
+            label = "no-attention" if kind == _AttentionKind.NONE else str(kind)
             if kind in _BOUNDED_KINDS:
                 label += f"({keys})"
             elif kind == _AttentionKind.COMPRESSED:
@@ -395,6 +399,22 @@ def attention_call(module: torch.nn.Module) -> AttentionCall | None:
 def attention_calls(model: torch.nn.Module) -> set[AttentionCall]:
     """Read per module, so a pipeline stage reports its own layers and a Ulysses wrapper the module it wraps."""
     return {call for call in map(attention_call, model.modules()) if call is not None}
+
+
+def non_causal_attention_calls(model: torch.nn.Module, attn_implementation: str) -> set[tuple[int, int]]:
+    """``(heads, head_dim)`` of each module running ``attn_implementation`` with no causal mask, a vision tower's, which
+    :func:`attention_calls` leaves out as no decoder layer makes that call."""
+    return {
+        (
+            getattr(module, "num_heads", None)
+            or getattr(module, "num_attention_heads", None)
+            or module.config.num_attention_heads,
+            module.head_dim,
+        )
+        for module in model.modules()
+        if getattr(module, "is_causal", None) is False
+        and getattr(getattr(module, "config", None), "_attn_implementation", None) == attn_implementation
+    }
 
 
 def attention_layout(model: torch.nn.Module) -> AttentionLayout:

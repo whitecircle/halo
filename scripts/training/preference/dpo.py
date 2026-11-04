@@ -57,7 +57,7 @@ def main():
     # pipeline, and only an image-carrying dataset takes TRL's vision path, rows untouched. Before the model load,
     # which needs the checkpoint's processor.
     is_vlm_data = resolve_preference_vlm_run(
-        args, model_config, ds, text_only_model=args.text_only_model, method="DPO"
+        args, model_config, ds, text_only_model=args.text_only_model, method="DPO", trl_renders_rows=True
     )
     if is_vlm_data:
         # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared

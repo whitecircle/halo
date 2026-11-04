@@ -468,10 +468,18 @@ def check_loss_vs_reference(
     return {"loss_matches_reference": loss_err < tol}, {"loss_rel_err": loss_err}
 
 
-def score_stage_grads_vs_reference(ctx, stage, reference: UnsplitReference, checks: dict, metrics: dict) -> None:
+def score_stage_grads_vs_reference(
+    ctx,
+    stage,
+    reference: UnsplitReference,
+    checks: dict,
+    metrics: dict,
+    *,
+    negligible_fraction: float = TOL.grad_negligible_layer_fraction,
+) -> None:
     """COLLECTIVE (world all-gather). Score every gradient ``stage`` holds against ``reference`` by its unsplit name.
-    Direction and norm ratio; under ``TOL.grad_negligible_layer_fraction``, absolute error. The stages together must
-    cover the reference."""
+    Direction and norm ratio; under ``negligible_fraction``, absolute error. The stages together must cover the
+    reference."""
     ep_modules = named_ep_layers(stage)
     expert_ids = {id(param) for _, module in ep_modules for _, param in module.expert_named_params()}
     pairs, compared = {}, set()
@@ -490,7 +498,7 @@ def score_stage_grads_vs_reference(ctx, stage, reference: UnsplitReference, chec
             compared.add(f"{name}.{key}")
 
     pair_checks, pair_metrics = {}, {}
-    floors = per_layer_grad_floors(pairs, TOL.grad_negligible_layer_fraction)
+    floors = per_layer_grad_floors(pairs, negligible_fraction)
     score_ep_grad_pairs(pairs, pair_checks, pair_metrics, cos_min=TOL.ep_grad_cosine_min, negligible_floors=floors)
     checks[KIND_SCORED_CHECK] = pair_checks.pop(KIND_SCORED_CHECK)
     checks["stage_grads_match_reference"] = all(pair_checks.values())

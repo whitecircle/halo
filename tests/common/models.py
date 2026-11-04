@@ -18,6 +18,7 @@ QWEN3_5_MOE = "Qwen/Qwen3.5-397B-A17B"
 QWEN3_5_MOE_35B = "Qwen/Qwen3.5-35B-A3B"
 QWEN3_NEXT_80B_A3B = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 QWEN3_8_FLASH_NEXT = "Qwen/Qwen3.8-Flash-Next"
+NEMOTRON_3_5_SUPER_VL = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
 QWEN3_5_MOE_122B = "Qwen/Qwen3.5-122B-A10B"
 QWEN3_6_MOE_35B = "Qwen/Qwen3.6-35B-A3B"
 BAILING_MOE_RING_MINI = "inclusionAI/Ring-mini-linear-2.0"
@@ -754,9 +755,8 @@ TINY_INKLING_VISION_CONFIG = {
     "text_hidden_size": TINY_INKLING_CONFIG["hidden_size"],
 }
 
-# Composites in the pinned transformers that no family spec claims. The heads stay at flash-kernel widths, Nemotron's
-# 2:1 and MiniMax's 16:1 GQA keep their release ratios, and MiniMax's T = index_block_size * index_topk_blocks stays
-# under a row's length so selection runs (a document within T attends densely).
+# The heads stay at flash-kernel widths over the release's two KV heads; ``moe_latent_size`` differs from the hidden
+# size, so a layer sizing its wire off the other one fails at its first dispatch.
 TINY_NEMOTRON_H_CONFIG = {
     "model_type": "nemotron_h",
     "vocab_size": 128,
@@ -782,17 +782,61 @@ TINY_NEMOTRON_H_CONFIG = {
     "norm_topk_prob": True,
     "mlp_hidden_act": "relu2",
     "num_nextn_predict_layers": 1,
+    "time_step_limit": [0.0, float("inf")],
     "tie_word_embeddings": False,
 }
+# The release's text and vision shape, for tests planning its checkpoint on a meta-device shell. One letter per block:
+# Mamba, MoE (Expert), Attention.
+NEMOTRON_H_RELEASE_BLOCKS = {"M": "mamba", "E": "moe", "A": "attention"}
+NEMOTRON_H_RELEASE_LAYOUT = "MEMEMEMAEMEMEMEMAEMEMEMEMAEMEMEMEMEMAEMEMEMEMEMAEMEMEMEMEMAEMEMEMEMEMAEMEMEMEMAEMEMEMEME"
+NEMOTRON_H_RELEASE_TEXT_CONFIG = {
+    "model_type": "nemotron_h",
+    "vocab_size": 131072,
+    "hidden_size": 4096,
+    "intermediate_size": 2688,
+    "layers_block_type": [NEMOTRON_H_RELEASE_BLOCKS[block] for block in NEMOTRON_H_RELEASE_LAYOUT],
+    "mamba_num_heads": 128,
+    "mamba_head_dim": 64,
+    "ssm_state_size": 128,
+    "n_groups": 8,
+    "conv_kernel": 4,
+    "chunk_size": 128,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 2,
+    "head_dim": 128,
+    "n_routed_experts": 512,
+    "num_experts_per_tok": 22,
+    "moe_latent_size": 1024,
+    "moe_intermediate_size": 2688,
+    "moe_shared_expert_intermediate_size": 5376,
+    "routed_scaling_factor": 5.0,
+    "norm_topk_prob": True,
+    "mlp_hidden_act": "relu2",
+    "num_nextn_predict_layers": 1,
+    "tie_word_embeddings": False,
+}
+NEMOTRON_H_RELEASE_VISION_CONFIG = {
+    "model_type": "radio",
+    "hidden_size": 1280,
+    "num_hidden_layers": 32,
+    "num_attention_heads": 16,
+    "max_img_size": 2048,
+    "video_temporal_patch_size": 2,
+    "summary_idxs": [0, 1],
+}
+# Its heads at the width FA4 takes, which a GPU row reaches unless it pins another backend.
 TINY_RADIO_VISION_CONFIG = {
     "model_type": "radio",
-    "hidden_size": 32,
+    "hidden_size": 128,
     "num_hidden_layers": 2,
     "num_attention_heads": 2,
     "max_img_size": 64,
     "video_temporal_patch_size": 2,
     "summary_idxs": [0, 1],
 }
+# A composite in the pinned transformers that no family spec claims. The heads stay at flash-kernel widths, its 16:1 GQA
+# keeps the release's ratio, and T = index_block_size * index_topk_blocks stays under a row's length so selection runs (a
+# document within T attends densely).
 TINY_MINIMAX_M3_CONFIG = {
     "vocab_size": 128,
     "hidden_size": 64,

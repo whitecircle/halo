@@ -309,10 +309,22 @@ def zero_filled_expert_banks(layer) -> dict[str, torch.Tensor]:
         name: materialize_dtensor(torch.zeros_like(param) if param.grad is None else param.grad)
         for name, param in layer.expert_named_params()
     }
-    interleaved = layer.FAMILY.expert_layout.kind is ExpertLayoutKind.INTERLEAVED_GLU
+    kind = layer.FAMILY.expert_layout.kind
+    gathered = layer.gather_expert_tensors(local)
+    if kind is ExpertLayoutKind.SEPARATE_MLP:
+        return {name: bank.transpose(1, 2).contiguous() for name, bank in gathered.items()}
+    interleaved = kind is ExpertLayoutKind.INTERLEAVED_GLU
     layout = ExpertLayout(ExpertLayoutKind.INTERLEAVED_GLU if interleaved else ExpertLayoutKind.FUSED, key_prefix="")
     device = next(iter(local.values())).device
-    return to_hub_expert_tensors(layout, layer.gather_expert_tensors(local), device=device)
+    return to_hub_expert_tensors(layout, gathered, device=device)
+
+
+def stores_expert_tp_split_experts(layer) -> bool:
+    """Whether expert TP holds each projection apart: gate and up, or a gateless expert's up. Slicing a fused bank along
+    its output would hand each rank only gate or only up."""
+    if hasattr(layer, "gate_up_proj") or not hasattr(layer, "up_proj"):
+        return False
+    return hasattr(layer, "gate_proj") or layer.FAMILY.expert_layout.kind is ExpertLayoutKind.SEPARATE_MLP
 
 
 def compare_grad(got: torch.Tensor, reference: torch.Tensor, label: str) -> tuple[float, float]:

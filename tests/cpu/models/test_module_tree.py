@@ -1,5 +1,7 @@
 import pytest
+import torch
 import torch.nn as nn
+from peft import LoraConfig, get_peft_model
 
 from halo.models.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
@@ -8,9 +10,25 @@ from halo.models.module_tree import (
     embedding_module,
     find_attr_name,
     find_module_path,
+    hidden_state_backbone,
     module_path,
     split_layer_path,
 )
+from tests.common.tiny_models import (
+    TINY_DENSE_FAMILIES,
+    TINY_LLAMA4_FAMILY,
+    TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
+    tiny_family_model,
+)
+
+# A composite holding ``language_model`` at its root, whose ``base_model`` is itself.
+_ROOT_COMPOSITES = {"llama4": TINY_LLAMA4_FAMILY, "nemotron_h_omni": TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]}
+_ROSTER = {
+    name: family
+    for name, family in {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}.items()
+    if name not in _ROOT_COMPOSITES
+}
 
 
 class _Backbone(nn.Module):
@@ -66,6 +84,30 @@ def test_split_layer_path_reads_the_index_and_remainder_under_its_root():
     assert split_layer_path("model.h.3", "model.h.") == (3, "")
     assert split_layer_path("model.h.x.mlp", "model.h.") is None
     assert split_layer_path("lm_head.weight", "model.h.") is None
+
+
+@pytest.mark.parametrize("name", sorted(_ROSTER))
+def test_the_hidden_state_backbone_is_base_model_on_the_roster(name):
+    """Every shipped family's head path enters where it always did, a composite's ``.model`` included."""
+    torch.manual_seed(0)
+    model = tiny_family_model(_ROSTER[name])
+    assert model.base_model is not model
+    assert hidden_state_backbone(model) is model.base_model
+
+
+@pytest.mark.parametrize("name", sorted(_ROOT_COMPOSITES))
+def test_a_root_composite_answers_its_towers_backbone(name):
+    torch.manual_seed(0)
+    model = tiny_family_model(_ROOT_COMPOSITES[name])
+    assert model.base_model is model, "premise: base_model names no module below this composite"
+    assert hidden_state_backbone(model) is model.language_model.model
+
+
+def test_a_wrapper_is_peeled_to_the_same_backbone():
+    torch.manual_seed(0)
+    model = tiny_family_model(_ROOT_COMPOSITES["nemotron_h_omni"])
+    backbone = model.language_model.model
+    assert hidden_state_backbone(get_peft_model(model, LoraConfig(r=2, target_modules=["q_proj"]))) is backbone
 
 
 def test_embedding_module_reads_the_getter_and_misses_with_none():

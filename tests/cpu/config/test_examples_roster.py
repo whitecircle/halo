@@ -36,7 +36,7 @@ from halo.models.attention.selection import (
 from halo.models.config_access import text_config
 from halo.models.context_window import bounded_row_length, is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
-from halo.models.moe.config_fields import has_routed_experts, resolve_router_topk
+from halo.models.moe.config_fields import has_routed_experts, resolve_dispatch_width, resolve_router_topk
 from halo.models.moe.family_specs import wraps_experts
 from halo.trainers.dataloaders import uses_dp_sharded_loader
 from tests.common.hub_seed import is_hub_repo
@@ -434,7 +434,7 @@ def test_example_eval_batch_fits_the_dispatch_budget(config):
         reject_oversized_dispatch(
             ep_dispatch_capacity(tokens),
             num_topk=resolve_router_topk(decoder),
-            padded_hidden=padded_wire_hidden(decoder.hidden_size),
+            padded_hidden=padded_wire_hidden(resolve_dispatch_width(decoder)),
             spans_domains=parallelism.requires_rdma,
         )
 

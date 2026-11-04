@@ -111,6 +111,7 @@ changes.
 | `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/models/adding-a-model.md`, `agent-docs/models/README.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`; the attention facts also `agent-docs/optimization/flash-attention.md`; a `weight_sync_refusal` also `agent-docs/infrastructure/rollout-servers.md` and `human-docs/supported-matrix.md` |
 | `halo/distributed/expert_parallel/families/zaya.py`, `halo/models/zaya.py` | `agent-docs/models/zaya.md` |
 | `halo/models/mistral4.py` | `agent-docs/models/mistral4.md` |
+| `halo/distributed/expert_parallel/families/nemotron_h.py`, `halo/models/nemotron_h.py` | `agent-docs/models/nemotron-h.md`, `human-docs/cookbooks/halo-nemotron-3.5-super-cookbook.md` |
 | `halo/distributed/expert_parallel/families/qwen3_next.py` | `agent-docs/models/qwen3-next.md` |
 | `halo/distributed/expert_parallel/families/qwen4_exp.py`, `halo/models/qwen4_exp/` | `agent-docs/models/qwen4_exp.md` |
 | `halo/models/external_tables.py`, `halo/model_loading/external_tables.py`, `halo/checkpoint/external_tables.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/models/qwen4_exp.md` |

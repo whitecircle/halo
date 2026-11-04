@@ -102,7 +102,7 @@ def main():
     # Vision routing keys on the dataset: a natively-multimodal model trains text-only data through TRL's text path.
     # Before the load, which needs the checkpoint's processor for a vision run.
     is_vlm_data = resolve_preference_vlm_run(
-        args, model_config, ds, text_only_model=args.text_only_model, method="KTO"
+        args, model_config, ds, text_only_model=args.text_only_model, method="KTO", trl_renders_rows=True
     )
     _reject_embedded_image_parts(ds, args.completion_field)
     reject_unsupported_media_across_ranks(ds, ("prompt", args.completion_field), "KTO")

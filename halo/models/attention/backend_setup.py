@@ -15,7 +15,7 @@ from transformers.integrations.flex_attention import WrappedFlexAttention, flex_
 
 from halo.models.attention.fa4_entry_points import install_fa4_entry_point_wrapper
 from halo.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
-from halo.models.attention.layout import attention_calls
+from halo.models.attention.layout import attention_calls, non_causal_attention_calls
 from halo.models.attention.selection import (
     FLASH_MAX_HEAD_DIM,
     effective_attn_implementation,
@@ -217,11 +217,13 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
         sinks = uses_gpt_oss_sinks(config)
         deterministic = flash_attention_deterministic()
 
-        def _warm(flash_fn, q_shape, kv_shape, **kw) -> None:
+        def _warm(flash_fn, q_shape, kv_shape, *, causal=True, **kw) -> None:
             q = torch.randn(*q_shape, device=device, dtype=dtype, requires_grad=True)
             k = torch.randn(*kv_shape, device=device, dtype=dtype, requires_grad=True)
             v = torch.randn(*kv_shape, device=device, dtype=dtype, requires_grad=True)
-            out = flash_fn(q, k, v, softmax_scale=q_shape[-1] ** -0.5, causal=True, deterministic=deterministic, **kw)
+            out = flash_fn(
+                q, k, v, softmax_scale=q_shape[-1] ** -0.5, causal=causal, deterministic=deterministic, **kw
+            )
             (out[0] if isinstance(out, tuple) else out).sum().backward()
 
         # Two documents, so the varlen kernel compiles against a real cu_seqlens.
@@ -247,6 +249,12 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
                     q_shape, kv_shape = (2 * seq_len, heads, head_dim), (2 * seq_len, kv_heads, head_dim)
                     _warm(varlen_fn, q_shape, kv_shape, **varlen_kwargs, **kwargs)
                     variants += 1
+        # One image reaches the dense call and several the varlen one, each image alone.
+        for heads, head_dim in sorted(non_causal_attention_calls(model, "flash_attention_4")):
+            _warm(dense_fn, (1, seq_len, heads, head_dim), (1, seq_len, heads, head_dim), causal=False)
+            q_shape = (2 * seq_len, heads, head_dim)
+            _warm(varlen_fn, q_shape, q_shape, causal=False, **varlen_kwargs)
+            variants += 2
         torch.cuda.synchronize()
         if is_global_main_process():
             logger.info(

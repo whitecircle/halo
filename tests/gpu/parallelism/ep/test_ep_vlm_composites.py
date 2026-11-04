@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-"""Multimodal MoE composites at EP2 against the replicated composite, on the released processor's image batch.
+"""Multimodal MoE composites at EP2 against the replicated composite, on their processor's image batch.
 
 The batch with its pixels zeroed must score a different loss, so the images reach it at all.
 """
 
 import argparse
+from functools import partial
 
 import numpy as np
 import torch
@@ -19,16 +20,18 @@ from tests.common.memory import cleanup_memory
 from tests.common.models import GEMMA4_26B_A4B, QWEN3_6_MOE_35B
 from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, padded_vocab_size, tiny_family_model
+from tests.common.tiny_processors import tiny_processor
 from tests.common.tokenizers import load_cached_processor
 from tests.common.tolerances import TOL
 
 SEED = 42
 IMAGE_SIDE = 64
-# Each released processor, and the text fields its tiny tower needs (Gemma 4's per-layer input table embeds the same
-# ids as the main one).
+# Each processor, released or the family's own over a tiny vocabulary, and the text fields its tiny tower needs (Gemma
+# 4's per-layer input table embeds the same ids as the main one).
 FAMILIES = {
-    "qwen3_5_moe": (QWEN3_6_MOE_35B, lambda vocab: {}),
-    "gemma4": (GEMMA4_26B_A4B, lambda vocab: {"vocab_size_per_layer_input": vocab}),
+    "qwen3_5_moe": (partial(load_cached_processor, QWEN3_6_MOE_35B), lambda vocab: {}),
+    "gemma4": (partial(load_cached_processor, GEMMA4_26B_A4B), lambda vocab: {"vocab_size_per_layer_input": vocab}),
+    "nemotron_h_omni": (partial(tiny_processor, "nemotron_h_omni"), lambda vocab: {}),
 }
 
 parser = argparse.ArgumentParser()
@@ -60,6 +63,9 @@ def _build(processor, image_token_id: int, device):
         TINY_MOE_VLM_FAMILIES[ARGS.family], processor.tokenizer, overrides=FAMILIES[ARGS.family][1](vocab)
     )
     model.config.image_token_id = image_token_id
+    # The composites that read the id once, at construction.
+    if hasattr(model, "image_token_id"):
+        model.image_token_id = image_token_id
     model.config._attn_implementation = "eager"
     return model.to(device=device, dtype=torch.bfloat16)
 
@@ -85,7 +91,7 @@ def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     torch.cuda.set_device(ctx.device)
-    processor = load_cached_processor(FAMILIES[ARGS.family][0])
+    processor = FAMILIES[ARGS.family][0]()
     batch, image_token_id = _image_batch(processor, ctx.device)
     checks["batch_carries_image_placeholders"] = bool((batch["input_ids"] == image_token_id).any())
 

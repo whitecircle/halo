@@ -39,6 +39,7 @@ reason:
 | GLM-4.7-Flash | `glm4_moe_lite` | ✅ torch's fused `F.rms_norm` in the llama casting mode (`rms_norm_kernel="native"`) | ✅ | — dual interleave/plain MLA | ✅ | ✅ **default** |
 | Laguna | `laguna` | ✅ | ✅ | — half-width on full-attention layers, full on sliding | ✅ | ✅ |
 | Qwen3.8-Flash-Next | `qwen4_exp_text` (the `qwen4_exp` wrapper resolves here) | — one class also runs the hyper-connection norms grouped per stream | — the EP layer owns the experts; the shared expert stays eager | — interleaved mrope | ✅ | ✅ text-only; [forced off under the wrapper](#fused-loss-under-a-multimodal-wrapper) |
+| Nemotron-H | `nemotron_h` (the `nemotron_h_omni` composite resolves here) | ✅ torch's fused `F.rms_norm` in the Gemma casting mode (`rms_norm_kernel="native"`); not `NemotronHRMSNormGated`, grouped per Mamba group | — no gate half on the experts or `NemotronHMLP` | — its attention takes no rotary | ✅ | ✅ **default**, text-only; [forced off under the composite](#fused-loss-under-a-multimodal-wrapper) |
 | GLM-5.3-Flash | `glm5_next`, `glm5_next_text` | ✅ the two plain norms **+ the GDN gated norm** (fla) | — clamped at `swiglu_limit` | — NoPE text tower | ✅ | — no `*ForCausalLM`; the `*ForConditionalGeneration` head adds the router aux loss after the projection |
 | Inkling | `inkling_text`, `inkling_mm_model` | ✅ | — trained `global_scale` on the MLP output | — no rotary (learned relative bias) | ✅ | — head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` |
 | LFM-2 / LFM-2 MoE | `lfm2`, `lfm2_moe` | ✅ | — `w1`/`w3`/`w2`, no `act_fn` | ✅ **the only family whose rotary is Liger's** | ✅ | ✅ text-only; [forced off under `lfm2_vl`](#fused-loss-under-a-multimodal-wrapper) |
@@ -104,6 +105,8 @@ declares ([Adding a Model](../models/adding-a-model.md#declare-the-head-transfor
 `logit_scale`) folds onto the hidden states. It refuses the shapes it cannot reproduce: a softcap or a vocabulary
 cut, an `lm_head` bias, and `output_router_logits` on a family whose head adds the router aux loss *after* the
 projection the fused loss replaces (DeepSeek-V4, Laguna, Qwen3.8-Flash-Next — declared `router_aux_loss_in_head`).
+A head that casts its logits to fp32 (Nemotron-H, declared `fp32_logits`) keeps the cast on a forward with no labels, so
+a log-softmax over them runs in the dtype it does unfused.
 
 There the term would silently leave the objective, so use `moe_balancing: bias_update`, or
 `bias_update_transient` on Qwen3.8-Flash-Next, which has no bias slot. A head that only
@@ -115,7 +118,8 @@ reach the output as they do unfused.
 A checkpoint whose `model_type` is a multimodal wrapper — `gemma4`, `lfm2_vl`, `cohere2_vision`, `mistral3`
 (every Mistral Small 3.x / 4 checkpoint), `qwen4_exp` — loads as its `*ForConditionalGeneration` class, whose own forward
 runs `lm_head` and the loss. The applier resolved through `text_config.model_type` patches the text tower's
-`*ForCausalLM`, which that model never instantiates.
+`*ForCausalLM`, which that model never instantiates. `nemotron_h_omni` does instantiate it, but calls it with no labels
+and scores the loss itself, so the fused path never runs there either.
 
 A fused loss there would report as applied while the logits plane materializes anyway, and trade away the
 CE kernel that does reach the decoder. The dispatch therefore forces `fused_linear_cross_entropy` off
@@ -243,14 +247,14 @@ resolved applier's signature does not accept is dropped, with a warning naming i
 | `swiglu` | On | Auto-off where the applier's own default is `False` (GptOss, whose upstream applier has no SwiGLU patch block; Qwen3-VL), and where an **upstream** applier's expert-FFN swap is replaced by an EP layer, which runs Halo's own fused GLU combine instead. A toolkit spec patches the dense and shared-expert MLPs, which survive EP — see below. Forced off, even when requested, wherever upstream's swap would reach [routed experts Halo does not wrap](#routed-experts) |
 | `geglu` | On | Gemma 4. Served by the toolkit's spec on the always-on dense `Gemma4TextMLP`, which survives the EP layer, so it is **not** forced off under EP |
 | `cross_entropy` | On | Keeps logits for metrics. Always the toolkit's scoped patch. Force-off under TP, CP and PP, and defaulted off when the config explicitly requests `fused_linear_cross_entropy` (the two are mutually exclusive; setting both explicitly raises) |
-| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP and PP, [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper) and on a prefix LM (PaliGemma, same section); under CP the [Ulysses wrapper](../parallelism/context-parallelism.md#fused-head-loss) runs it instead of the model's head |
+| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4, GLM-4.7-Flash and text-only Nemotron-H) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP and PP, [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper) and on a prefix LM (PaliGemma, same section); under CP the [Ulysses wrapper](../parallelism/context-parallelism.md#fused-head-loss) runs it instead of the model's head |
 
 Precedence is generic defaults < per-model defaults < user keys, and user keys win **except** the TP/CP
 force-offs ([below](#ep--cp--tp--pp-behavior)), the wrapper and prefix-LM force-offs, the
 [routed-experts](#routed-experts) force-off and the `layer_norm` force-off, which overwrite an explicit `true`.
 
 Per-model defaults are read off each applier's own signature (`_PER_MODEL_DEFAULTS`), derived from the spec's
-`flce_default`, set by the three large-vocab families above and nothing else.
+`flce_default`, set by the four large-vocab families above and nothing else.
 
 Two library defaults are overridden: TRL's `use_liger_kernel=False` (toolkit → `True`, via
 `_TOOLKIT_DEFAULTS` in `halo/configs/parser.py`), and Liger's `fused_linear_cross_entropy=True,

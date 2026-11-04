@@ -14,11 +14,11 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 from transformers.utils import CONFIG_NAME
 
-import halo.models.conversion_overrides  # noqa: F401  registers the family overrides before any load reads the mapping
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE
 from halo.env import env_flag
 from halo.model_loading.remote_code import reject_untieable_list_ties
 from halo.models.config_access import drop_toolkit_stamps
+from halo.models.conversion_overrides import verify_conversion_overrides_intact
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,8 @@ def from_pretrained_verified(
     if kwargs.get("config") is None:
         drop_toolkit_stamps(model.config)
     reject_untieable_list_ties(model)
+    # Ahead of the coverage gate, which would blame the checkpoint for the keys a replaced mapping misplaced.
+    verify_conversion_overrides_intact(model)
     verify_checkpoint_coverage(
         model, loading_info["missing_keys"], source=model_name_or_path, excuse_task_head=excuse_task_head
     )

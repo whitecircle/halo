@@ -17,6 +17,7 @@ from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironment
 from halo.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin, full_logits_verdict
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _GIB = 1024**3
 _WIDTH = LogitsWidth(1024, "max_completion_length")
@@ -78,6 +79,15 @@ def free_memory(monkeypatch):
         return asked
 
     return _set
+
+
+def test_a_composite_holding_its_head_under_the_tower_is_weighed_by_it(free_memory):
+    """The plane is the tower's vocabulary, the one the composite's own forward returns."""
+    free_memory(1)
+    host = _host()
+    host.model = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"])
+    with pytest.raises(RuntimeError, match=rf"× {host.model.config.text_config.vocab_size} vocab"):
+        LogprobScoringMixin._verify_full_logits_fit(host, _WIDTH)
 
 
 def test_an_oversized_plane_refuses_the_run(free_memory):

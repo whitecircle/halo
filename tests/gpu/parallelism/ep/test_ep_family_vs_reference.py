@@ -23,20 +23,27 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS
 from tests.common.distributed import world_spread
-from tests.common.ep_reference import random_token_batch, score_ep_grad_pairs, sweep_ep_grads, zero_filled_expert_banks
+from tests.common.ep_reference import (
+    random_token_batch,
+    score_ep_grad_pairs,
+    stores_expert_tp_split_experts,
+    sweep_ep_grads,
+    zero_filled_expert_banks,
+)
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
     BAILING_LING_3_TINY,
     TINY_GLM4_MOE_LITE_CONFIG,
     TINY_GLM5_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_STEP3P7_CONFIG,
 )
 from tests.common.numerics import cos_sim
 from tests.common.rank_log import log
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.routed_first_step import RoutedStep, capturing_routed_forwards, pinned_reference_routing
-from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_MOE_FAMILIES, fill_release_scale_bias, tiny_family_model
 from tests.common.tolerances import TOL
 
 SEED = 42
@@ -117,9 +124,7 @@ def _compare_blocks(model, reference, ep_cls: type, ep_size: int, metrics: dict,
             and layer.expert_end - layer.expert_start == layer.experts_per_rank
         )
         if layer.expert_tp_size > 1:
-            etp_split.append(
-                hasattr(layer, "gate_proj") and hasattr(layer, "up_proj") and not hasattr(layer, "gate_up_proj")
-            )
+            etp_split.append(stores_expert_tp_split_experts(layer))
         if layer.expert_tp_rank > 0:
             # A tensor expert TP can't shard (GptOss's down bias) stays whole on expert-TP rank 0; a copy here would be
             # added once per partner by the token-space reduce.
@@ -207,10 +212,28 @@ def _step3p7_checks(model, layers, input_ids) -> dict[str, bool]:
     }
 
 
+def _nemotron_h_checks(model, layers, input_ids) -> dict[str, bool]:
+    """Each mechanism its row exists for: the grouped path, whose kernel refuses the fp32 an autocast relu2 returns;
+    the latent on the wire; the bias at the release's scale, finer than bf16 can hold."""
+    biases = [layer.gate.e_score_correction_bias for layer in layers]
+    return {
+        "grouped_path_ran": all(layer._use_grouped_mm and layer._expert_kernels_warmed for layer in layers),
+        "latent_on_the_wire": all(
+            layer.dispatcher.hidden_dim == TINY_NEMOTRON_H_CONFIG["moe_latent_size"] for layer in layers
+        ),
+        "bias_at_release_scale": all(
+            bias.dtype == torch.float32 and bias.min() > 40.0 and not torch.equal(bias, bias.bfloat16().float())
+            for bias in biases
+        ),
+        "auto_balancing_is_bias_update": resolve_balancing_mode("auto", model, is_moe=True) == "bias_update",
+    }
+
+
 # ``(model, EP layers, input_ids) -> checks``, after the shared comparison.
 FAMILY_CHECKS = {
     "bailing_moe": _bailing_v3_block_checks,
     "deepseek_v4": _deepseek_v4_checks,
+    "nemotron_h": _nemotron_h_checks,
     "step3p7": _step3p7_checks,
 }
 
@@ -219,6 +242,8 @@ FAMILY_CHECKS = {
 # exact bf16 logit ties (top-2 of 8), so reduction order flips picks and moves whole tokens' gradients (router bias
 # cosine down to 0.70 at ep2 x etp2) with no parallelism bug.
 PINNED_ROUTING_FAMILIES = frozenset({"gpt_oss"})
+# A router bias the release stores in fp32, which the row's bf16 cast would round past its spread.
+FP32_BIAS_FAMILIES = frozenset({"nemotron_h"})
 
 
 def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dict:
@@ -227,6 +252,9 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
     log(f"{family}: {pc.mode_string}")
     torch.manual_seed(SEED)
     reference = tiny_family_model(TINY_MOE_FAMILIES[family]).to(ctx.device, torch.bfloat16)
+    if family in FP32_BIAS_FAMILIES:
+        fill_release_scale_bias(reference)
+        reference.to(ctx.device)
     pin_fla_autotune_first_fit(ctx)
     model = apply_ep_layers(copy.deepcopy(reference), pc.ep_config())
     vocab = reference.get_input_embeddings().num_embeddings

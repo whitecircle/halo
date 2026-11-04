@@ -395,4 +395,7 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
     finally:
         if client is not None:
             client.close_communicator()
+    if ctx.rank == 0:
+        # A close that leaves the engine wedged passes every round above and fails the next trainer at launch.
+        checks["server_answers_after_the_close"] = requests.get(f"{_server_url(row.backend)}/health", timeout=60).ok
     return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}

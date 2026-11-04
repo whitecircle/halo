@@ -79,6 +79,10 @@ class _Tolerances:
     # at 1.6e-5..8e-4, where a dropped or doubled TP reduce moves the ratio by 2, and every other parameter at 1.5e-6
     # or more.
     grad_negligible_layer_fraction: float = 1e-6
+    # Nemotron-H's tiny two-stage split leaves two Mamba layers on a stage, whose A_log and dt_bias sit near 4e-9 of
+    # their layer's largest, under the fraction above on every layer, so no layer would score the kind. They hold cos
+    # 0.99999 in bf16 and 1.0 in fp32 at this floor.
+    nemotron_mamba_grad_negligible_layer_fraction: float = 1e-10
     # A near-cancelled pair outside the EP bars, within this multiple of its measured bf16 noise from fp32, is
     # rounding. The 1-8 element hyper-connection vectors of DeepSeek-V4 and GLM-5 Next cancel to 3e-5..1e-2 of their
     # layer's largest: bf16 misses fp32 by up to 3.3x their norm, and an EP policy lands up to 1.6x (DeepSeek-V4) and

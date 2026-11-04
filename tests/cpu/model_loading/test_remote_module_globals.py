@@ -5,6 +5,7 @@ import pathlib
 import sys
 
 import pytest
+import torch
 import transformers.dynamic_module_utils
 from transformers.cache_utils import DynamicCache, DynamicLayer
 
@@ -12,6 +13,7 @@ from halo.model_loading.remote_code import (
     _UNIMPORTED_REMOTE_GLOBALS,
     apply_remote_code_compat_shims,
 )
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 apply_remote_code_compat_shims()
 
@@ -37,6 +39,18 @@ class DynamicLayer:  # noqa: D101 — a deliberate homonym, not the transformers
 class OwnLayerModel:
     def layer_type(self):
         return DynamicLayer
+"""
+
+
+# What the release's file holds of its composite: the tower under ``language_model``, no head accessor of its own.
+REMOTE_COMPOSITE_SOURCE = """
+import torch
+
+
+class NemotronH_Omni_Reasoning_V3(torch.nn.Module):
+    def __init__(self, language_model):
+        super().__init__()
+        self.language_model = language_model
 """
 
 
@@ -86,6 +100,22 @@ def test_every_bound_name_is_absent_from_the_published_import_list():
     for name, symbol in _UNIMPORTED_REMOTE_GLOBALS.items():
         assert symbol is not None, f"{name} resolved to None — the shim would bind a dead name"
         assert isinstance(symbol, type), f"{name} must be a class, got {type(symbol)}"
+
+
+def test_the_releases_own_composite_answers_with_its_towers_head(tmp_path, monkeypatch):
+    """An export carries that file, and a tool on a local directory trusts it by default."""
+    composite_class = _load(tmp_path, monkeypatch, REMOTE_COMPOSITE_SOURCE, "NemotronH_Omni_Reasoning_V3")
+    tower = tiny_family_model(TINY_MOE_FAMILIES["nemotron_h"])
+    composite = composite_class(tower)
+    assert composite.get_output_embeddings() is tower.lm_head
+    replacement = torch.nn.Linear(tower.lm_head.in_features, tower.lm_head.out_features + 8, bias=False)
+    composite.set_output_embeddings(replacement)
+    assert tower.lm_head is replacement
+
+
+def test_another_remote_file_is_left_alone(tmp_path, monkeypatch):
+    composite_class = _load(tmp_path, monkeypatch, REMOTE_SOURCE, "RingLikeModel")
+    assert not hasattr(composite_class, "get_output_embeddings")
 
 
 if __name__ == "__main__":

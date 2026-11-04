@@ -335,7 +335,15 @@ QWEN4_EXP_PP = PPFamilySpec(
     token_ids_kwarg="ple_input_ids",
     validated=True,
 )
-PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, GEMMA4_PP, GLM5_NEXT_PP, QWEN4_EXP_PP)
+# Its blocks follow no period, and each reads its mask by its own ``block_type``; without a cache every Mamba layer scans
+# from a zero state, so nothing crosses a cut. The multi-token head is never built.
+NEMOTRON_H_PP = PPFamilySpec(
+    hf_module_names=("NemotronHModel",),
+    final_norm_attrs=("norm_f",),
+    layer_types_rebase_safe=True,
+    validated=True,
+)
+PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, GEMMA4_PP, GLM5_NEXT_PP, NEMOTRON_H_PP, QWEN4_EXP_PP)
 PP_SPEC_MAP: dict[str, PPFamilySpec] = {name: spec for spec in PP_FAMILY_SPECS for name in spec.hf_module_names}
 if len(PP_SPEC_MAP) != sum(len(spec.hf_module_names) for spec in PP_FAMILY_SPECS):
     raise ValueError("Two PPFamilySpec constants in PP_FAMILY_SPECS claim one HF backbone class name.")

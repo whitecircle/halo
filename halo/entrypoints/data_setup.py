@@ -18,12 +18,15 @@ from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.sources.loading import is_presharded_dataset_load_across_ranks, load_datasets, share_s3_control_files
 from halo.data.vlm_detection import dataset_declares_images_across_ranks, is_vlm_run_across_ranks, reject_image_columns
 from halo.data.vlm_render import apply_image_pixel_bounds
+from halo.distributed.fsdp import fsdp2_param_groups
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import is_accelerate_fsdp_launch
 from halo.log import RUN_LOG_DIR_NAME
 from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_patterns
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
-from halo.models.module_tree import media_module_names
+from halo.models.module_tree import embedding_module, media_module_names
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
@@ -148,8 +151,21 @@ def reject_prefix_lm_image_preference(checkpoint_config, model_name_or_path: str
         )
 
 
-def resolve_preference_vlm_run(args, model_config, datasets, *, text_only_model: bool, method: str) -> bool:
-    """As :func:`resolve_vlm_run`, off one probe that also refuses an image run on a prefix-LM checkpoint."""
+def _reject_trl_image_rows(checkpoint_config, model_name_or_path: str, method: str) -> None:
+    family = find_moe_family_spec_for_config(checkpoint_config)
+    if family is not None and family.refuses_trl_image_rows is not None:
+        raise ValueError(
+            f"{method} on image data cannot train {model_name_or_path!r} "
+            f"(model_type={checkpoint_config.model_type!r}): {family.refuses_trl_image_rows}. Train it on images with "
+            f"SFT or SMPO, or with {method} on text-only pairs."
+        )
+
+
+def resolve_preference_vlm_run(
+    args, model_config, datasets, *, text_only_model: bool, method: str, trl_renders_rows: bool = False
+) -> bool:
+    """As :func:`resolve_vlm_run`, off one probe that also refuses an image run on a prefix-LM checkpoint, and with
+    ``trl_renders_rows`` one on a family TRL's vision path does not carry."""
     checkpoint_config, vlm_checkpoint = probe_checkpoint(
         model_config.model_name_or_path,
         revision=model_config.model_revision,
@@ -160,24 +176,71 @@ def resolve_preference_vlm_run(args, model_config, datasets, *, text_only_model:
     )
     if is_vlm:
         reject_prefix_lm_image_preference(checkpoint_config, model_config.model_name_or_path, method)
+        if trl_renders_rows:
+            _reject_trl_image_rows(checkpoint_config, model_config.model_name_or_path, method)
     return is_vlm
+
+
+def _why_a_batch_holding_no_image_cannot_pair(model) -> str | None:
+    """Where the FSDP2 wrap's agreement on which parameters hold a gradient (``_agree_unsharded_grad_presence``) does not
+    pair a text rank's reduces with an image rank's, with the first remedy. Checkpointing's input-grad hook gives a frozen
+    embedding's output a gradient on every row, so a first layer then reduces in order on each rank."""
+    if is_accelerate_fsdp_launch():
+        return (
+            "Accelerate-managed FSDP2 takes no agreement on which parameters hold a gradient before reducing. "
+            "Launch with torchrun"
+        )
+    if model.is_gradient_checkpointing or any(p.requires_grad for p in embedding_module(model, "input").parameters()):
+        return None
+    return (
+        "a frozen input embedding gives a text row's first layer no gradient-carrying input, so it reduces out of "
+        "order. Train the embedding, enable gradient checkpointing"
+    )
+
+
+def _refuse_a_batch_holding_no_image(model, args, kwargs) -> None:
+    """On a training forward, where the step would otherwise hang to the collective timeout. Positional arguments are a
+    redirected method's, which reads the inputs below this forward."""
+    if args or not model.training or kwargs.get("pixel_values") is not None:
+        return
+    reason = _why_a_batch_holding_no_image_cannot_pair(model)
+    if reason is not None and any(group.mesh_info.mesh.size() > 1 for group in fsdp2_param_groups(model)):
+        raise ValueError(
+            "This rank's batch holds no image while the vision tower trains under data parallelism, so its gradient "
+            f"reduces would never pair with a peer's that holds one: {reason}, set freeze_vision_tower: true, train "
+            "adapters, or drop the text-only rows from the image dataset."
+        )
 
 
 def apply_vision_options(args, model, model_config, processing_class, *, is_vlm: bool) -> None:
     """COLLECTIVE under ``freeze_vision_tower``, after :func:`configure_adapter_training`, so the freeze outlasts its
-    unfreeze patterns. A tower no text row reaches also stops being a parameter FSDP2 reduces on only some ranks."""
+    unfreeze patterns. A tower no text row reaches also stops being a parameter FSDP2 reduces on only some ranks; on an
+    image run that still trains one, a batch holding no image is refused where the reduces could not pair."""
     if args.min_pixels is not None or args.max_pixels is not None:
         if not is_vlm:
             raise ValueError("min_pixels / max_pixels bound images, and this run takes the text data path.")
         apply_image_pixel_bounds(processing_class, args.min_pixels, args.max_pixels)
-    if not args.freeze_vision_tower:
-        return
-    if model_config.use_peft:
-        raise ValueError("freeze_vision_tower has nothing to do with adapters: they freeze the whole base already.")
-    towers = media_module_names(model)
-    reason = None if towers else f"freeze_vision_tower: {type(model).__name__} holds no vision or audio tower here."
-    reject_across_ranks(reason, "freeze_vision_tower", ValueError)
-    freeze_parameters_by_patterns(model, [f"{tower}.*" for tower in towers])
+    if args.freeze_vision_tower:
+        if model_config.use_peft:
+            raise ValueError(
+                "freeze_vision_tower has nothing to do with adapters: they freeze the whole base already."
+            )
+        towers = media_module_names(model)
+        reason = (
+            None if towers else f"freeze_vision_tower: {type(model).__name__} holds no vision or audio tower here."
+        )
+        reject_across_ranks(reason, "freeze_vision_tower", ValueError)
+        freeze_parameters_by_patterns(model, [f"{tower}.*" for tower in towers])
+    elif (
+        is_vlm
+        and not model_config.use_peft
+        and any(
+            param.requires_grad
+            for tower in media_module_names(model)
+            for param in model.get_submodule(tower).parameters()
+        )
+    ):
+        model.register_forward_pre_hook(_refuse_a_batch_holding_no_image, with_kwargs=True)
 
 
 def _write_decoded_samples(

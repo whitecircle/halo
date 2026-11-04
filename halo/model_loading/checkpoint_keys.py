@@ -13,7 +13,7 @@ import torch
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, WeightRenaming, dot_natural_key, rename_source_key
 
-import halo.models.conversion_overrides  # noqa: F401  registers the family overrides before any mapping read
+from halo.models.conversion_overrides import verify_conversion_overrides_intact
 from halo.models.model_classes import transformers_model_class
 
 # A conversion source addressing one tensor per module-list index (``…experts.*.w1.weight``).
@@ -80,6 +80,7 @@ def resolve_model_conversions(model: torch.nn.Module, *, add_legacy: bool) -> li
             if original is not None and type(module) is not original:
                 swapped.append((module, type(module)))
                 module.__class__ = original
+        verify_conversion_overrides_intact(model)
         return get_model_conversion_mapping(model, add_legacy=add_legacy)
     finally:
         for module, wrapped_class in swapped:

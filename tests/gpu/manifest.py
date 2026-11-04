@@ -70,6 +70,7 @@ _TINY_MOE_FAMILY_MARKERS = {
     "laguna": "laguna",
     "lfm2_moe": "lfm2",
     "mistral4": "mistral4",
+    "nemotron_h": "nemotron",
     "qwen3_5_moe_text": "qwen3",
     "qwen3_moe": "qwen3",
     "qwen3_next": "qwen3",
@@ -175,6 +176,7 @@ _PP_MOE_FAMILIES = (
     "glm5_next",
     "inkling_text",
     "laguna",
+    "nemotron_h",
     "qwen3_5_moe_text",
     "qwen3_moe",
     "step3p7",
@@ -339,6 +341,9 @@ MANIFEST: dict[str, TestSpec] = {
                     ("zaya", "zaya", " --attn flash_attention_2"),
                     ("zaya", "zaya", " --attn sdpa"),
                     ("qwen4_exp_text", "qwen3", " --attn sdpa"),
+                    ("nemotron_h", "nemotron", " --attn sdpa"),
+                    ("nemotron_h", "nemotron", " --attn flash_attention_2"),
+                    ("nemotron_h", "nemotron", " --attn flash_attention_4"),
                 )
             ),
             *(
@@ -415,6 +420,13 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_chunked_logprob_precision.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_deepgemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fa4_trainable_sink_rescale.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "kernels/test_nemotron_mamba_mixer.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "nemotron"), timeout=900
+    ),
+    # 900s: FA4 JIT-compiles the 16:1 and head_dim-80 kernels per form, forward and backward, causal and flipped.
+    "kernels/test_nemotron_attention_kernels.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "nemotron"), timeout=900
+    ),
     # 1800s: FA4 JIT-compiles the head_dim-256 forward and backward per shape and layout, dense and varlen.
     "kernels/test_fa4_hd256_strided_inputs.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "qwen3", "glm4"), timeout=1800
@@ -446,7 +458,11 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fa4_gqa_ratio.py": TestSpec(
         nproc=1,
         markers=("gpu", "core", "1gpu"),
-        args_matrix=("--heads 32 --kv-heads 2", "--heads 64 --kv-heads 4", "--heads 16 --kv-heads 1"),
+        args_matrix=(
+            Row("--heads 32 --kv-heads 2", markers=("gpu", "core", "1gpu", "nemotron")),
+            "--heads 64 --kv-heads 4",
+            "--heads 16 --kv-heads 1",
+        ),
         timeout=900,
     ),
     "kernels/test_tree_sparse_attention.py": TestSpec(
@@ -512,6 +528,19 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=8,
         markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"),
         args_matrix=("--mode layers", "--mode export", "--mode resume"),
+        timeout=5400,
+    ),
+    # The cut's weights, or 241 GB per export at --layers 88, where rank 0's CPU reload outlasts the NCCL watchdog.
+    "models/test_nemotron_h_real_checkpoint.py": TestSpec(
+        nproc=8,
+        markers=("gpu", "full", "8gpu", "ep", "moe", "nemotron"),
+        args_matrix=(
+            "--mode layers",
+            "--mode export",
+            "--mode export --route composite",
+            "--mode resume",
+            "--mode profile --seq 8192",
+        ),
         timeout=5400,
     ),
     "optimizers/test_adamw_bf16.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
@@ -840,17 +869,24 @@ MANIFEST: dict[str, TestSpec] = {
                     markers=("gpu", "full", "4gpu", "ep", "etp", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
                     timeout=900,
                 )
-                for family in ("gpt_oss", "inkling_text", "qwen4_exp_text")
+                for family in ("gpt_oss", "inkling_text", "nemotron_h", "qwen4_exp_text")
             ),
         ),
         timeout=1500,
     ),
+    "parallelism/ep/test_ep_chunked_head_path.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", "nemotron"),
+        timeout=600,
+        args_matrix=("--family nemotron_h", "--family nemotron_h_omni"),
+    ),
     "parallelism/ep/test_ep_vlm_composites.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "qwen3", "gemma4"),
+        markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "qwen3", "gemma4", "nemotron"),
         args_matrix=(
             Row("--family qwen3_5_moe", markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "qwen3")),
             Row("--family gemma4", markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "gemma4")),
+            Row("--family nemotron_h_omni", markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "nemotron")),
         ),
         timeout=900,
     ),
@@ -860,12 +896,13 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_lazy_load_inkling.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "inkling"), timeout=900
     ),
-    # A family joins this matrix when it declares ``hub_conversion_keys`` and drops ``supports_lazy_loading=False``.
+    # A family joins this matrix when transformers' conversion is its own to replay: ``hub_conversion_keys``, or
+    # Nemotron-H's level drop and per-expert banks.
     "parallelism/ep/test_lazy_load_converted.py": TestSpec(
         nproc=2,
-        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "step3p7"),
+        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "nemotron", "step3p7"),
         timeout=900,
-        args_matrix=("--family glm5_next", "--family step3p7"),
+        args_matrix=("--family glm5_next", "--family nemotron_h_omni", "--family step3p7"),
     ),
     # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(
@@ -2067,8 +2104,17 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "ep", "moe"),
         args_matrix=tuple(
             Row(f"--family {family}", markers=("gpu", "core", "2gpu", "ep", "moe", _TINY_MOE_FAMILY_MARKERS[family]))
-            for family in ("cohere2_moe", "deepseek_v4", "glm5_next", "qwen3_next", "qwen4_exp_text", "step3p7")
-        ),
+            for family in (
+                "cohere2_moe",
+                "deepseek_v4",
+                "glm5_next",
+                "nemotron_h",
+                "qwen3_next",
+                "qwen4_exp_text",
+                "step3p7",
+            )
+        )
+        + (Row("--family nemotron_h_omni", markers=("gpu", "core", "2gpu", "ep", "moe", "vlm", "nemotron")),),
         timeout=1200,
     ),
     # No `etp` marker: EP+TP+ETP is not a supported axis set.
@@ -2267,6 +2313,17 @@ MANIFEST: dict[str, TestSpec] = {
             "--family qwen3_5_moe --data mixed",
             "--family gemma4 --data mixed",
             "--family qwen3_5 --data mixed --zero3",
+            "--family qwen3_5 --data mixed --freeze-embedding",
+            Row("--family nemotron_h_omni --data all", markers=("gpu", "core", "2gpu", "vlm", "nemotron")),
+            Row("--family nemotron_h_omni --data mixed", markers=("gpu", "core", "2gpu", "vlm", "nemotron")),
+            Row(
+                "--family nemotron_h_omni --data mixed --freeze-embedding",
+                markers=("gpu", "core", "2gpu", "vlm", "nemotron"),
+            ),
+            Row(
+                "--family nemotron_h_omni --data mixed --freeze-tower",
+                markers=("gpu", "core", "2gpu", "vlm", "nemotron"),
+            ),
         ),
     ),
     "trainers/sft/test_sft_vlm.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "vlm", "qwen3"), timeout=600),
@@ -2305,6 +2362,7 @@ ALL_MARKERS = (
     "glm4",
     "gemma4",
     "mistral4",
+    "nemotron",
     "bailing",
     "lfm2",
     "laguna",

@@ -43,6 +43,8 @@ _INFLIGHT_CHUNKS = 2
 class SGLangWeightSyncClient(WeightSyncClientBase):
     BACKEND_KEY = "sglang"
     BACKEND_NAME = "SGLang"
+    # /health generates through the scheduler, so a pause a dead trainer left would read as an unreachable server.
+    LIVENESS_ROUTE = "/v1/models"
     ENGINE_RELEASE = "SGLang 0.5.22"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
     UNSERVABLE_MODEL_TYPES = {
@@ -177,13 +179,16 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         )
 
     def _release_transport(self, *, at_exit: bool) -> None:
-        # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
-        # no local group, or the server refuses every later join.
-        remote = AsyncCall(self._destroy_remote_group)
         group = None if self._transport is None else self._transport[0]
         # Interpreter exit skips the local NCCL destroy, and an aborted group is already gone from torch.
         destroy = not at_exit and not self._aborted
-        if destroy and group is not None and not self._engine_answers():
+        # Ahead of the remote destroy: /health generates through the scheduler that destroy occupies, so asked during
+        # it a healthy engine reads as dead, and aborting here strands its half of the destroy.
+        answers = not (destroy and group is not None) or self._engine_answers()
+        # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
+        # no local group, or the server refuses every later join.
+        remote = AsyncCall(self._destroy_remote_group)
+        if not answers:
             logger.warning(f"SGLang server {self.base_url} does not answer, so its weight-update group is aborted.")
             self._abort_group()
             destroy = False

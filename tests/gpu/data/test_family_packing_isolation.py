@@ -8,9 +8,11 @@ worst rank's, so a token's result reaching the wrong row moves it.
 """
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
+from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMamba2Mixer
 
 from halo.configs.script_arguments import ModelArguments
 from halo.data.collators.factory import select_data_collator
@@ -57,6 +59,14 @@ FA2 = "flash_attention_2"
 SHORT_WINDOW = {"sliding_window": 16}
 # Each release's head width: the width FA4 trains on its dedicated kernel, which a packed run leaves for FA2 on these.
 _GATED_DELTA_NET_256 = {"head_dim": 256}
+# Over ``INIT_STD``: fifty times Mamba's stock ``in_proj``, whose stock init leaves a crossed boundary below rounding.
+MAMBA_IN_PROJ_SCALE = 10.0
+
+
+def _scale_mamba_inputs(model) -> None:
+    for module in model.modules():
+        if isinstance(module, NemotronHMamba2Mixer):
+            module.in_proj.weight.data.mul_(MAMBA_IN_PROJ_SCALE)
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,7 @@ class _FamilyRow:
     documents: tuple[int, int] = DOCUMENTS
     isolates: bool = True
     fp32_isolated_rel_max: float = FP32_ISOLATED_REL_MAX
+    after_randomize: Callable | None = None
 
 
 FAMILIES = {
@@ -119,6 +130,7 @@ FAMILIES = {
         TINY_DENSE_ATTENTION_FAMILIES["qwen2"],
         {**SHORT_WINDOW, "hidden_size": 256, "use_sliding_window": True, "max_window_layers": 0},
     ),
+    "nemotron_h": _FamilyRow(TINY_MOE_FAMILIES["nemotron_h"], after_randomize=_scale_mamba_inputs),
     "qwen3": _FamilyRow(TINY_DENSE_FAMILIES["qwen3"], {"head_dim": 64}),
     "qwen3_5": _FamilyRow(TINY_DENSE_FAMILIES["qwen3_5"], _GATED_DELTA_NET_256, packed_default=FA2),
     # What the Qwen3.5/3.6 recipes load: this decoder, through the composite's M-RoPE forward.
@@ -147,11 +159,17 @@ PARSER.add_argument("--liger", action="store_true", help="Liger's kernels, as a 
 ARGS = PARSER.parse_args()
 
 
-def _randomize(model) -> None:
+def _randomized(after: Callable | None) -> Callable:
     """Widen the random init so a leak reads well above bf16 noise."""
-    for param in model.parameters():
-        if param.dim() >= 2:
-            torch.nn.init.normal_(param, std=INIT_STD)
+
+    def edit(model) -> None:
+        for param in model.parameters():
+            if param.dim() >= 2:
+                torch.nn.init.normal_(param, std=INIT_STD)
+        if after is not None:
+            after(model)
+
+    return edit
 
 
 def _packed_run_request(ckpt: str, attn_implementation: str | None) -> str | None:
@@ -231,7 +249,7 @@ def run(ctx) -> dict:
         f"{ARGS.family}_packing_isolation",
         tokenizer,
         SEED,
-        edit=_randomize,
+        edit=_randomized(row.after_randomize),
         overrides=row.overrides,
     )
     model = _load(ckpt, _packed_run_request(ckpt, ARGS.attn))

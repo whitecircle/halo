@@ -38,6 +38,7 @@ from halo.models.attention.selection import (
 from halo.models.config_access import drop_toolkit_stamps, model_type_matches, text_config
 from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
 from halo.models.moe.family_specs import find_moe_family_spec
+from halo.models.nemotron_h import apply_nemotron_h_patches
 from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
 from halo.models.zaya import apply_zaya_patches
 from halo.runtime.ranks import is_global_main_process
@@ -166,6 +167,10 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # its model forward lacks (it never passes position_ids down to attention or the CCA convs).
     if model_type_matches(model_config, "zaya"):
         apply_zaya_patches()
+    # Else packed documents cross the Mamba scan, autocast runs its fp32 body in bf16, the trainer clamps a time step
+    # no engine clamps, and Radio's layer scale trains a value no engine reads.
+    if model_type_matches(model_config, "nemotron_h"):
+        apply_nemotron_h_patches()
     # Else the 95 GiB n-gram table is a trainable parameter every wrap, cast, optimizer and save would carry, every
     # sparse layer reads a [T, T] mask, and packed documents leak through the per-layer embedding.
     if model_type_matches(model_config, "qwen4_exp"):

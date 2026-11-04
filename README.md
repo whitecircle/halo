@@ -55,10 +55,11 @@ On 8× B300, Halo 1.1.0 trained gpt-oss-20b at up to 3.5× the throughput of sto
   stack: pipeline parallelism for SFT, preference, offline GRPO, reward and classification training,
   alone or with EP or ETP inside each stage, with two recipes run across two machines; 1.11–2.07× the
   throughput of 1.1.0 on twelve benchmarked shapes (TP2 1.82×, EP4+ETP2 2.07×); SFT tree packing, which
-  stores a prefix several rows share once; the Qwen3-Next and experimental Qwen3.8-Flash-Next families;
-  a step guard that skips an optimizer step whose gradient norm is not finite; a causal mask for
-  PaliGemma SFT and distillation, which 1.1.0 trained non-causally; transformers 5.20 and TRL 1.14, with
-  rollouts on vLLM 0.32 or SGLang 0.5.22; and the import package renamed to `halo`.
+  stores a prefix several rows share once; the Qwen3-Next, experimental Qwen3.8-Flash-Next and NVIDIA
+  Nemotron 3.5 Super VL families; a step guard that skips an optimizer step whose gradient norm is not
+  finite; a causal mask for PaliGemma SFT and distillation, which 1.1.0 trained non-causally;
+  transformers 5.20 and TRL 1.14, with rollouts on vLLM 0.32 or SGLang 0.5.22; and the import package
+  renamed to `halo`.
 - **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
   MoE kernels and FlexAttention on sliding-window layers (1.67× over Halo 1.0.0 for Gemma 4 26B-A4B on
   two GPUs), an atomic-free expert permute (up to 27% faster for gpt-oss at EP8), checkpoint and resume

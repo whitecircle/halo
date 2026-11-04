@@ -21,7 +21,12 @@ from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from tests.common.ep_reference import compare_grad, ep_layers
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.liger_appliers import liger_applier
-from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN35_MOE_CONFIG
+from tests.common.models import (
+    TINY_COHERE2_MOE_CONFIG,
+    TINY_GLM4_MOE_LITE_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
+    TINY_QWEN35_MOE_CONFIG,
+)
 from tests.common.numerics import cos_sim, max_abs_rel_err, max_or_nan
 from tests.common.rank_log import log
 
@@ -53,11 +58,12 @@ GRAD_COS_MIN = 0.99
 
 NATIVE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.modeling_module]
 
-# Buildable from a tiny config in this repo. Cohere2 MoE carries a `logit_scale`; GLM-4.7-Flash's FLCE default is what
-# production relies on for long-context runs.
+# Buildable from a tiny config in this repo. Cohere2 MoE carries a `logit_scale`; GLM-4.7-Flash's and Nemotron-H's FLCE
+# defaults are what production relies on for long-context runs.
 FUSED_HEAD_FAMILIES = {
     "cohere2_moe": TINY_COHERE2_MOE_CONFIG,
     "glm4_moe_lite": TINY_GLM4_MOE_LITE_CONFIG,
+    "nemotron_h": TINY_NEMOTRON_H_CONFIG,
 }
 
 # Keyed by the text model_type: the composite config ignores flat decoder kwargs, so only the text one builds tiny.

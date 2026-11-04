@@ -195,7 +195,7 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
   config class (Bailing/Ling) leaves it undeclared; without it every model-type-keyed reader (the shard
   merge, the hub renames) sees no family.
 - **The source checkpoint's own schema** for a family whose engines have no config class and read it
-  only through its `auto_map` modules (`exports_source_config_schema`, Step-3.7 Flash):
+  only through its `auto_map` modules (`exports_source_config_schema`, Step-3.7 Flash and Nemotron-H):
   `export_source_config_schema` writes the run's changed values back under the source's spellings and
   copies the `auto_map` modules in transitively. The source is the checkpoint the model was loaded from,
   so a resume or a `patch_vocab.py` output carries the schema on. A change lands under the spelling the source

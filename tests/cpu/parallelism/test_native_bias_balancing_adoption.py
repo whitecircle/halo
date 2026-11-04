@@ -15,6 +15,7 @@ from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
 from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
@@ -73,6 +74,7 @@ FAMILIES = [
     (EPLagunaMoELayer, "e_score_correction_bias", True),
     (EPDeepseekV4MoELayer, "e_score_correction_bias", False),
     (EPInklingMoELayer, "e_score_correction_bias", True),
+    (EPNemotronHMoELayer, "e_score_correction_bias", False),
     (EPStep3p7MoELayer, "e_score_correction_bias", False),
 ]
 # LFM-2 and GPT-OSS get dedicated tests below.
@@ -304,7 +306,8 @@ def test_a_large_balancing_bias_pulls_its_expert_into_every_selection(family):
     torch.manual_seed(0)
     model = apply_ep_layers(tiny_family_model(TINY_MOE_FAMILIES[family]), single_process_ep_config())
     layer = next(layer for layer in ep_layers(model) if layer.enable_bias_balancing())
-    flat = torch.randn(4, layer.hidden_dim)
+    # What the router reads, which a family with a latent does not send over the wire.
+    flat = torch.randn(4, model.config.get_text_config().hidden_size)
     with torch.no_grad():
         natural, _ = layer._route_hidden_states(flat)
         target = next(expert for expert in range(layer.num_experts) if not (natural == expert).any())

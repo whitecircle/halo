@@ -3,10 +3,7 @@ FA4 keys on the query/KV head ratio, so a global head count leaves the real comp
 
 from __future__ import annotations
 
-import sys
-import types
 from functools import partial
-from typing import NamedTuple
 from unittest import mock
 
 import pytest
@@ -30,19 +27,19 @@ from transformers import (
     MistralForCausalLM,
     PreTrainedModel,
 )
-from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 from transformers.models.step3p7.modeling_step3p7 import Step3p7TextModel
 
 from halo.models.attention import sdpa_flex_sliding
 from halo.models.attention.backend_setup import WARMUP_MIN_SEQ_LEN, warm_fa4_kernels
-from halo.models.attention.layout import AttentionCall, attention_calls
+from halo.models.attention.layout import AttentionCall, attention_calls, non_causal_attention_calls
 from halo.models.attention.sdpa_flex_sliding import (
     flex_attention_calls,
     register_flex_sliding_attention,
     warm_flex_sliding_kernels,
 )
+from tests.common.attention_stubs import CompileCountingCute, install_compile_counting_cute
 from tests.common.flex_sliding import FLEX_ROWS, flex_layers, flex_sliding_on_cpu, no_device_check, train_row
 from tests.common.models import (
     TINY_GEMMA2_CONFIG,
@@ -56,138 +53,19 @@ from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
+    TINY_UNWRAPPED_COMPOSITE_FAMILIES,
     TinyFamily,
     tiny_family_model,
 )
+from tests.common.tiny_processors import TINY_PROCESSOR_MODEL_TYPES, tiny_image_batch, tiny_processor
 
 FA4 = "flash_attention_4"
-# The transformers module globals the flash path caches the bound kernel and its kwarg map in.
-_FLASH_CACHE_GLOBALS = (
-    "_loaded_implementation",
-    "_flash_fn",
-    "_flash_varlen_fn",
-    "_flash_with_kvcache_fn",
-    "_pad_fn",
-    "_unpad_fn",
-    "_process_flash_kwargs_fn",
-    "_process_with_kvcache_kwargs_fn",
-)
-
-
-class _KernelKey(NamedTuple):
-    """The call arguments FA4's compile key reads, for a forward kernel or the backward one."""
-
-    dtype: torch.dtype
-    qk_dim: int
-    v_dim: int
-    head_ratio: int
-    causal: bool
-    window: bool
-    varlen: bool
-    sink: bool
-    softcap: bool
-    lse: bool  # FA4's forward allocates the log-sum-exp only when its inputs require grad
-    backward: bool
-    deterministic: bool  # read by the backward's key alone
-
-
-class _RecordedBackward(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, q, k, v, record):
-        ctx.record = record
-        return q * 1.0
-
-    @staticmethod
-    def backward(ctx, grad):
-        ctx.record()
-        return grad, None, None, None
-
-
-class _CompileCountingCute(types.ModuleType):
-    """Compiles once per key, as FA4's JIT cache does, and raises on a varlen call with a softcap once recorded."""
-
-    def __init__(self):
-        super().__init__("flash_attn.cute")
-        self.compiled: set[tuple] = set()
-        self.calls: list[tuple] = []
-
-        def flash_attn_func(
-            q,
-            k,
-            v,
-            softmax_scale=None,
-            causal=False,
-            window_size=(None, None),
-            learnable_sink=None,
-            softcap=0.0,
-            deterministic=False,
-        ):
-            return self._run(
-                q, k, v, causal, window_size, learnable_sink, softcap, varlen=False, deterministic=deterministic
-            )
-
-        def flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q=None,
-            cu_seqlens_k=None,
-            max_seqlen_q=None,
-            max_seqlen_k=None,
-            softmax_scale=None,
-            causal=False,
-            window_size=(None, None),
-            learnable_sink=None,
-            softcap=0.0,
-            deterministic=False,
-        ):
-            varlen = cu_seqlens_q is not None
-            return self._run(
-                q, k, v, causal, window_size, learnable_sink, softcap, varlen=varlen, deterministic=deterministic
-            )
-
-        self.flash_attn_func = flash_attn_func
-        self.flash_attn_varlen_func = flash_attn_varlen_func
-
-    def _run(self, q, k, v, causal, window_size, learnable_sink, softcap, *, varlen, deterministic):
-        grad = any(t.requires_grad for t in (q, k, v))
-        key = _KernelKey(
-            q.dtype,
-            q.shape[-1],
-            v.shape[-1],
-            q.shape[-2] // k.shape[-2],
-            causal,
-            window_size[0] is not None,
-            varlen,
-            learnable_sink is not None,
-            bool(softcap),
-            lse=grad,
-            backward=False,
-            deterministic=False,
-        )
-        self.calls.append(key)
-        if varlen and softcap:
-            raise AssertionError("an FA4 varlen call with a softcap, which stays off those kernels")
-        self.compiled.add(key)
-        if not grad:
-            return q * 1.0
-        backward_key = key._replace(backward=True, deterministic=deterministic)
-        return _RecordedBackward.apply(q, k, v, partial(self._dispatch_backward, backward_key))
-
-    def _dispatch_backward(self, key: _KernelKey) -> None:
-        self.calls.append(key)
-        self.compiled.add(key)
+TINY_IMAGE_COMPOSITES = {**TINY_MOE_VLM_FAMILIES, **TINY_UNWRAPPED_COMPOSITE_FAMILIES}
 
 
 @pytest.fixture
-def cute(monkeypatch) -> _CompileCountingCute:
-    fake = _CompileCountingCute()
-    monkeypatch.setitem(sys.modules, "flash_attn.cute", fake)
-    for name in _FLASH_CACHE_GLOBALS:
-        monkeypatch.setattr(flash_utils, name, getattr(flash_utils, name))
-    flash_utils._loaded_implementation = None
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda *args, **kwargs: None)
-    return fake
+def cute(monkeypatch) -> CompileCountingCute:
+    return install_compile_counting_cute(monkeypatch)
 
 
 def _step3p7() -> Step3p7TextModel:
@@ -401,7 +279,7 @@ def test_a_warmed_model_compiles_nothing_on_its_first_step(cute, build, full_rat
     assert dispatched <= warmed, f"compiled mid-run: {sorted(dispatched - warmed, key=str)}"
 
 
-def _warm_then_run_rows(cute: _CompileCountingCute, name: str) -> tuple[set[tuple], set[tuple]]:
+def _warm_then_run_rows(cute: CompileCountingCute, name: str) -> tuple[set[tuple], set[tuple]]:
     model = _FLASH_SWEEP[name]()
     if not model._supports_flash_attn:
         pytest.skip(f"{type(model).__name__} declares no flash support, so no run reaches FA4")
@@ -419,6 +297,48 @@ def test_every_flash_model_compiles_nothing_on_its_first_step(cute, name):
     warmed, dispatched = _warm_then_run_rows(cute, name)
     assert any(key.backward for key in dispatched), "no backward reached the flash kernel"
     assert dispatched <= warmed, f"compiled mid-run: {sorted(dispatched - warmed, key=str)}"
+
+
+@pytest.mark.parametrize("name", sorted(TINY_MOE_VLM_FAMILIES))
+def test_every_tower_on_fa4_reports_its_heads_and_a_decoder_none(name):
+    """Gemma 4's tower keeps no head count of its own, and a raise here would skip the whole warm-up."""
+    model = tiny_family_model(TINY_MOE_VLM_FAMILIES[name])
+    for module in model.modules():
+        if hasattr(module, "config") and hasattr(module.config, "_attn_implementation"):
+            module.config._attn_implementation = FA4
+    towers = non_causal_attention_calls(model, FA4)
+    assert all(heads > 0 and head_dim > 0 for heads, head_dim in towers)
+    assert not non_causal_attention_calls(model, "sdpa")
+    expected = {
+        module.config.num_attention_heads if not hasattr(module, "num_heads") else module.num_heads
+        for module in model.modules()
+        if getattr(module, "is_causal", None) is False
+    }
+    assert {heads for heads, _ in towers} == expected
+
+
+@pytest.mark.parametrize("model_type", TINY_PROCESSOR_MODEL_TYPES)
+def test_a_warmed_composite_compiles_nothing_on_its_first_image(cute, model_type):
+    """A vision tower's non-causal call keys kernels of its own, and only an image row reaches them."""
+    processor = tiny_processor(model_type)
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_IMAGE_COMPOSITES[model_type], processor.tokenizer)
+    model.config.image_token_id = processor.image_token_id
+    if hasattr(model, "image_token_id"):
+        model.image_token_id = processor.image_token_id
+    model.to(torch.bfloat16).train()
+    model.config._attn_implementation = FA4
+    for module in model.modules():
+        if hasattr(module, "config") and hasattr(module.config, "_attn_implementation"):
+            module.config._attn_implementation = FA4
+    warm_fa4_kernels(model, dtype=torch.bfloat16, device=torch.device("cpu"))
+    warmed = set(cute.compiled)
+    cute.calls.clear()
+    batch = tiny_image_batch(processor)
+    batch["pixel_values"] = batch["pixel_values"].to(torch.bfloat16)
+    model(**batch, use_cache=False).logits.float().sum().backward()
+    assert any(not key.causal for key in cute.calls), "no call reached the tower's kernel"
+    assert set(cute.calls) <= warmed, sorted(set(cute.calls) - warmed, key=str)
 
 
 @pytest.mark.parametrize("name", sorted(_FLASH_SWEEP))

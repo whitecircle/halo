@@ -8,11 +8,13 @@ import types
 from unittest import mock
 
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.entrypoints.model_setup import PreferenceModels
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 # The name heuristic reads this as multimodal, so the checkpoint verdict holds offline too.
 _VLM_MODEL_ID = "stub/qwen3.5-9b"
@@ -56,7 +58,8 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         f"bf16: false\nuse_cpu: true\nmax_length: 512\n{yaml_body}"
     )
 
-    model = types.SimpleNamespace(config=CONFIG_MAPPING["gemma3"]())
+    model = torch.nn.Module()
+    model.config = CONFIG_MAPPING["gemma3"]()
     tokenizer = types.SimpleNamespace(padding_side="left")
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1),
@@ -98,6 +101,13 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
             for patch in reversed(patches):
                 patch.stop()
     raise AssertionError("main() returned without reaching either data branch")
+
+
+def test_an_image_run_of_a_family_trls_vision_path_does_not_carry_is_refused_ahead_of_the_load(tmp_path):
+    config = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]).config
+    with mock.patch("halo.entrypoints.data_setup.probe_checkpoint", return_value=(config, True)):
+        with pytest.raises(ValueError, match="DPO on image data cannot train"):
+            _run_dpo(tmp_path, _dataset("images"))
 
 
 def _trl_sees_a_vision_dataset(dataset: Dataset) -> bool:

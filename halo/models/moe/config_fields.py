@@ -31,6 +31,9 @@ EXPERT_FFN_WIDTH_FIELDS: tuple[str, ...] = (
     "moe_ffn_hidden_size",
     "intermediate_size",  # GptOss: the expert FFN is the only FFN, so this is the expert width
 )
+# What a MoE layer dispatches between its ranks: the latent of a block projecting into one around its experts, else the
+# hidden state.
+_DISPATCH_WIDTH_FIELDS: tuple[str, ...] = ("moe_latent_size", "hidden_size")
 
 
 def _first_router_field(cfg, fields: tuple[str, ...], default=None):
@@ -63,6 +66,10 @@ def require_expert_count(cfg) -> int:
 def resolve_expert_ffn_width(cfg) -> int | None:
     value = _first_router_field(cfg, EXPERT_FFN_WIDTH_FIELDS)
     return int(value) if value else None
+
+
+def resolve_dispatch_width(cfg) -> int:
+    return int(_first_router_field(cfg, _DISPATCH_WIDTH_FIELDS, 0))
 
 
 def require_router_aux_loss_coef(cfg) -> float:

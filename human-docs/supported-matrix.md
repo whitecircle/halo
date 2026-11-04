@@ -113,7 +113,7 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Laguna | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | Laguna-XS-2.1 on vLLM: `ep1`, `ep2`, replay at `ep2` |
 | Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: a weight push on a tiny hub-layout checkpoint, no training loop |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
-| Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE | No | No (no online RL at all) | No | |
+| Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table has no validated expert layout on either
 engine and is refused too. Offline GRPO needs no server, so these refusals do
@@ -217,6 +217,7 @@ advanced parallelism. What each family is for:
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP on a tiny-model LoRA test only |
 | DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP on tiny models only; LoRA skips the grouped `o_a_proj` |
+| Nemotron-H (Nemotron 3.5 Super VL) | Yes | Yes | No | No | Yes | EP8 on B300; its recipes, image SFT included, ran 5–20 steps on the release, the other modes and image SMPO on tiny models only; no video; no online RL; PP takes the text tower |
 | Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP8 ran on the 200B+ checkpoint, on Halo 1.0.0 or earlier; the other modes and LoRA on tiny models |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; PP takes the text tower; the fp8 release needs `halo run convert-glm5-bf16` first |

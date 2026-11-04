@@ -82,7 +82,8 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
 
     tokenizer = StubTextTokenizer()
     processor = processor if processor is not None else StubProcessor(StubTokenizer())
-    model = SimpleNamespace(config=CONFIG_MAPPING[model_type]())
+    model = nn.Module()
+    model.config = CONFIG_MAPPING[model_type]()
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
             cp_size=1,

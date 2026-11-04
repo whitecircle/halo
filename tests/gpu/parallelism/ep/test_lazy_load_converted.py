@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""Lazy loading of hub-layout composites (GLM-5 Next, Step-3.7) matches a from_pretrained reference, under EP=2 and
-pure ETP.
+"""Lazy loading of hub-layout composites (GLM-5 Next, Step-3.7, Nemotron-H) matches a from_pretrained reference, under
+EP=2 and pure ETP.
 
 Their layout is bridged only inside ``from_pretrained``, including fan-in Concatenates. A half-read source hands each
 ETP rank the wrong half.
@@ -9,7 +9,7 @@ ETP rank the wrong half.
 import sys
 
 import torch
-from transformers import AutoConfig
+from transformers import AutoConfig, NemotronH_Omni_Reasoning_V3, NemotronH_Omni_Reasoning_V3_Config
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditionalGeneration
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
@@ -20,11 +20,14 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
+from tests.common.ep_reference import stores_expert_tp_split_experts
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import (
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
+    TINY_RADIO_VISION_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
@@ -48,6 +51,18 @@ _FAMILIES = {
         lambda: Step3p7Config(text_config=dict(TINY_STEP3P7_CONFIG), vision_config=dict(TINY_STEP3P7_VISION_CONFIG)),
         TINY_STEP3P7_CONFIG["mlp_layer_types"].count("sparse"),
         TINY_STEP3P7_CONFIG["vocab_size"],
+    ),
+    "nemotron_h_omni": (
+        NemotronH_Omni_Reasoning_V3,
+        lambda: NemotronH_Omni_Reasoning_V3_Config(
+            text_config=dict(TINY_NEMOTRON_H_CONFIG),
+            vision_config=dict(TINY_RADIO_VISION_CONFIG),
+            vision_hidden_size=TINY_RADIO_VISION_CONFIG["hidden_size"],
+            projector_hidden_size=TINY_NEMOTRON_H_CONFIG["hidden_size"],
+            image_token_id=18,
+        ),
+        TINY_NEMOTRON_H_CONFIG["layers_block_type"].count("moe"),
+        TINY_NEMOTRON_H_CONFIG["vocab_size"],
     ),
 }
 
@@ -78,7 +93,7 @@ def _tensors_match(model, reference_sd) -> tuple[bool, str]:
         if not isinstance(module, EPMoELayerBase):
             continue
         s, e = module.expert_start, module.expert_end
-        for attr in ("gate_up_proj", "down_proj"):
+        for attr, _ in module._base_expert_named_params():
             want = reference_sd[f"{name}.experts.{attr}"][s:e].transpose(1, 2).contiguous()
             if not tensors_equal_at_narrower_dtype(getattr(module, attr).data.cpu(), want):
                 return False, f"{name}.{attr} (expert slice {s}:{e})"
@@ -147,9 +162,7 @@ def run(ctx):
         attn_implementation="eager",
     )
     etp_layers = [m for m in model.modules() if isinstance(m, EPMoELayerBase)]
-    checks["etp_split_glu_storage"] = bool(etp_layers) and all(
-        hasattr(ep, "gate_proj") and not hasattr(ep, "gate_up_proj") for ep in etp_layers
-    )
+    checks["etp_split_glu_storage"] = bool(etp_layers) and all(stores_expert_tp_split_experts(ep) for ep in etp_layers)
     model.train()
     etp_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["etp_loss"] = etp_loss

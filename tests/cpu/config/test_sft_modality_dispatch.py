@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
@@ -74,7 +75,8 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
         f"bf16: false\nuse_cpu: true\nmax_length: 512\n{yaml_body}"
     )
 
-    model = types.SimpleNamespace(config=CONFIG_MAPPING["gemma3"]())
+    model = torch.nn.Module()
+    model.config = CONFIG_MAPPING["gemma3"]()
     processing_class = types.SimpleNamespace(tokenizer=None)
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1),
@@ -134,7 +136,8 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
         f"bf16: false\nuse_cpu: true\nmax_length: 512\n"
     )
 
-    model = types.SimpleNamespace(config=CONFIG_MAPPING["gemma3"]())
+    model = torch.nn.Module()
+    model.config = CONFIG_MAPPING["gemma3"]()
     processing_class = types.SimpleNamespace(tokenizer=None)
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1),

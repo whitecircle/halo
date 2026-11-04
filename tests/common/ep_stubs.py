@@ -59,6 +59,7 @@ def stubbed_rank_ep_layer(
     rank: int,
     *,
     grouped: bool,
+    weights_already_sharded: bool = False,
     **config_fields,
 ) -> EPMoELayerBase:
     """Rank ``rank``'s ``layer_cls`` around ``block`` at ``ep_size``-way dispatch and quotient expert TP, with no
@@ -69,4 +70,4 @@ def stubbed_rank_ep_layer(
         patch.object(layer_module, "DeepEPDispatcher", _NoDispatcher),
         patch.object(ep_config_module, "supports_grouped_mm", return_value=grouped),
     ):
-        return layer_cls(block, config)
+        return layer_cls(block, config, weights_already_sharded=weights_already_sharded)

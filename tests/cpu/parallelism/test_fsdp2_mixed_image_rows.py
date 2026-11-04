@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """A composite under the FSDP2 wrap, on real gloo, with one rank's batch holding an image and the others' text. Every
 rank must enter each group's reduce with the same parameters, or the reduce-scatter faults or hangs; the tower gradient
-must equal the image rank's single-process gradient over the world, and a frozen tower must stay out of it."""
+must equal the image rank's single-process gradient over the world, and a frozen tower must stay out of it. Where the
+reduces still could not pair, a batch holding no image is refused."""
 
 import copy
 import datetime
@@ -17,8 +18,9 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 
 from halo.distributed import fsdp
 from halo.distributed.fsdp import IdentityParamSet
+from halo.entrypoints import data_setup
 from halo.entrypoints.data_setup import apply_vision_options
-from halo.models.module_tree import backbone_with_layers, decoder_layers, media_module_names
+from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module, media_module_names
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
@@ -45,6 +47,8 @@ _COMPOSITES = {
     "step3p7": TINY_MOE_FAMILIES["step3p7"],
 }
 _MESH_NAMES = {1: ("dp_shard",), 2: ("dp_replicate", "dp_shard")}
+_NEMOTRON = "nemotron_h_omni"
+_ACCELERATE_FSDP = {"ACCELERATE_USE_FSDP": "true"}
 
 
 def _image_row(config) -> dict[str, torch.Tensor]:
@@ -90,6 +94,16 @@ def _full(grad: torch.Tensor) -> torch.Tensor:
     return grad.full_tensor() if hasattr(grad, "full_tensor") else grad
 
 
+def _apply_options(model, *, freeze: bool, peft: bool = False, is_vlm: bool = True) -> None:
+    apply_vision_options(
+        type("Options", (), {"freeze_vision_tower": freeze, "min_pixels": None, "max_pixels": None}),
+        model,
+        type("ModelArgs", (), {"use_peft": peft}),
+        None,
+        is_vlm=is_vlm,
+    )
+
+
 def _worker(rank: int, out_dir: str, case: dict) -> None:
     torch.manual_seed(0)
     model, image_row, text_row = _model_and_rows(case["family"])
@@ -100,18 +114,13 @@ def _worker(rank: int, out_dir: str, case: dict) -> None:
     single_rank = {name: param.grad.clone() for name, param in reference.named_parameters() if param.grad is not None}
     del reference
 
-    if case["freeze"]:
-        apply_vision_options(
-            type("Options", (), {"freeze_vision_tower": True, "min_pixels": None, "max_pixels": None}),
-            model,
-            type("ModelArgs", (), {"use_peft": False}),
-            None,
-            is_vlm=True,
-        )
     if case["freeze_outside_layers"]:
         kept = {id(param) for param in decoder_layers(backbone_with_layers(model)).parameters()}
         for param in model.parameters():
             param.requires_grad = id(param) in kept
+    if case["freeze_embedding"]:
+        embedding_module(model, "input").requires_grad_(False)
+    _apply_options(model, freeze=case["freeze"])
     if _GC_KINDS[case["gc"]] is not None:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": _GC_KINDS[case["gc"]]})
     mesh_shape = tuple(case["mesh"])
@@ -191,6 +200,34 @@ def _tower_worker(rank: int, out_dir: str) -> None:
         json.dump(verdicts, handle)
 
 
+def _refusal_worker(rank: int, out_dir: str, family: str, freeze_embedding: bool) -> None:
+    """Every rank takes the text row, so the refused forward strands no peer in the unshard before it."""
+    torch.manual_seed(0)
+    model, image_row, text_row = _model_and_rows(family)
+    if freeze_embedding:
+        embedding_module(model, "input").requires_grad_(False)
+    _apply_options(model, freeze=False)
+    mesh = init_device_mesh("cpu", (dist.get_world_size(),), mesh_dim_names=_MESH_NAMES[1])
+    fsdp.apply_fsdp2_per_layer(model, mesh, MixedPrecisionPolicy(), False, IdentityParamSet())
+    refused = ""
+    try:
+        model(**text_row)
+    except ValueError as error:
+        refused = str(error)
+    # The eval forward a run takes on text rows reduces nothing.
+    model.eval()
+    with torch.no_grad():
+        model(**text_row)
+    model.train()
+    # Each rank holding an image pairs its reduce.
+    model(**image_row).loss.backward()
+    fsdp.complete_fsdp2_post_backward(fsdp.fsdp2_param_groups(model))
+    towers = tuple(f"{tower}." for tower in media_module_names(model))
+    reached = [name for name, param in model.named_parameters() if name.startswith(towers) and param.grad is not None]
+    with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
+        json.dump({"refused": refused, "reached": len(reached)}, handle)
+
+
 def _run(tmp_path, world: int, **case) -> list[dict]:
     run_gloo_ranks(_worker, world, str(tmp_path), case, pg_timeout=PG_TIMEOUT)
     return [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(world)]
@@ -208,6 +245,7 @@ _CASE = {
     "reshard": False,
     "hold_gathered": False,
     "freeze_outside_layers": False,
+    "freeze_embedding": False,
 }
 
 
@@ -225,6 +263,18 @@ def test_each_tree_shape_agrees_on_its_own_processors_row(tmp_path, family):
     """Where the tower sits differs by family: under the embedding backbone, or on an unwrapped composite's root."""
     for result in _run(tmp_path, 2, **{**_CASE, "family": family}):
         assert result["tower"] and result["absent"] == result["unreached"] < result["tower"], result
+        assert result["worst"] < 1e-5, result
+
+
+@pytest.mark.parametrize("mesh", [[2], [2, 2]], ids=["fsdp", "hsdp"])
+@pytest.mark.parametrize("reshard", [False, True], ids=["zero2", "zero3"])
+@pytest.mark.parametrize("gc", list(_GC_KINDS))
+def test_nemotron_h_tower_takes_the_mixed_path(tmp_path, gc, reshard, mesh):
+    """A composite holding ``language_model`` itself, so its embedding and tower share the root group."""
+    world = 2 if mesh == [2] else 4
+    results = _run(tmp_path, world, **{**_CASE, "family": _NEMOTRON, "gc": gc, "reshard": reshard, "mesh": mesh})
+    for result in results:
+        assert result["absent"] == result["unreached"] < result["tower"], result
         assert result["worst"] < 1e-5, result
 
 
@@ -301,6 +351,73 @@ def test_a_frozen_tower_stays_out_of_the_reduce(tmp_path):
 def test_all_image_rows_reduce_as_before(tmp_path):
     for result in _run(tmp_path, 2, **{**_CASE, "image_ranks": [0, 1]}):
         assert result["absent"] == 0 and result["worst"] < 1e-5, result
+
+
+@pytest.mark.parametrize("family", ["qwen3_vl", _NEMOTRON])
+@pytest.mark.parametrize("gc", ["reentrant", "non_reentrant"])
+def test_a_frozen_embedding_pairs_under_checkpointing(tmp_path, family, gc):
+    """Checkpointing's input-grad hook gives the embedding's output a gradient on a text row too."""
+    for result in _run(tmp_path, 2, **{**_CASE, "family": family, "gc": gc, "freeze_embedding": True}):
+        assert result["absent"] == result["unreached"] < result["tower"], result
+        assert result["worst"] < 1e-5, result
+
+
+def test_every_composite_checkpoints_through_the_input_grad_hook():
+    """What the refusal reads a checkpointed frozen embedding by: a composite the hook skips would hang unrefused."""
+    for name, family in sorted({**_FAMILIES, **_COMPOSITES}.items()):
+        model = tiny_family_model(family)
+        model.gradient_checkpointing_enable()
+        assert model.is_gradient_checkpointing and model._require_grads_hooks, name
+        assert next(embedding_module(model, "input").parameters(), None) is not None, name
+
+
+@pytest.mark.parametrize(
+    ("family", "freeze_embedding", "env", "named"),
+    [
+        ("qwen3_vl", True, {}, "frozen input embedding"),
+        (_NEMOTRON, True, {}, "frozen input embedding"),
+        ("qwen3_vl", False, _ACCELERATE_FSDP, "torchrun"),
+        (_NEMOTRON, False, _ACCELERATE_FSDP, "torchrun"),
+    ],
+    ids=["frozen_embedding", "nemotron_frozen_embedding", "accelerate", "nemotron_accelerate"],
+)
+def test_a_batch_holding_no_image_is_refused_where_the_reduces_cannot_pair(
+    tmp_path, family, freeze_embedding, env, named
+):
+    run_gloo_ranks(_refusal_worker, 2, str(tmp_path), family, freeze_embedding, pg_timeout=PG_TIMEOUT, env=env)
+    for rank in range(2):
+        result = json.loads((tmp_path / f"rank{rank}.json").read_text())
+        assert named in result["refused"] and "freeze_vision_tower" in result["refused"], result
+        assert result["reached"], "the image rows after the refusal must reach the tower"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"freeze": True}, {"freeze": False, "peft": True}, {"freeze": False, "is_vlm": False}],
+    ids=["frozen_tower", "adapters", "text_run"],
+)
+def test_a_run_with_no_trained_tower_or_no_images_registers_no_refusal(options):
+    model, _, _ = _model_and_rows(_NEMOTRON)
+    _apply_options(model, **options)
+    assert data_setup._refuse_a_batch_holding_no_image not in model._forward_pre_hooks.values()
+
+
+@pytest.mark.parametrize("freeze_embedding", [False, True], ids=["trained_embedding", "frozen_embedding"])
+def test_one_rank_reduces_nothing_and_keeps_the_row(tmp_path, monkeypatch, freeze_embedding):
+    """A data-parallel axis of one, where every peer of a rank holds its batch."""
+    monkeypatch.setenv("ACCELERATE_USE_FSDP", "true")
+    dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
+    try:
+        model, _, text_row = _model_and_rows(_NEMOTRON)
+        if freeze_embedding:
+            embedding_module(model, "input").requires_grad_(False)
+        _apply_options(model, freeze=False)
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=_MESH_NAMES[1])
+        fsdp.apply_fsdp2_per_layer(model, mesh, MixedPrecisionPolicy(), False, IdentityParamSet())
+        assert data_setup._refuse_a_batch_holding_no_image in model._forward_pre_hooks.values()
+        assert model(**text_row).loss.isfinite()
+    finally:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

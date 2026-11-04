@@ -12,6 +12,7 @@ import torch
 from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
 from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
 from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
 from halo.distributed.expert_parallel.families.qwen4_exp import EPQwen4ExpMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
@@ -25,6 +26,7 @@ from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
     TINY_DSV4_CONFIG,
     TINY_GLM5_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_QWEN3_NEXT_CONFIG,
     TINY_QWEN4_EXP_CONFIG,
     TINY_STEP3P7_CONFIG,
@@ -99,6 +101,72 @@ class Glm5NextRoundTrip(EPSftRoundTrip):
     }
     hub_conversion = True
     native_bias_layer = TINY_GLM5_CONFIG["mlp_layer_types"].index("sparse")
+
+
+class _NemotronHChecks:
+    ep_layer_cls = EPNemotronHMoELayer
+    num_ep_layers = TINY_NEMOTRON_H_CONFIG["layers_block_type"].count("moe")
+    hub_conversion = True
+    native_bias_layer = TINY_NEMOTRON_H_CONFIG["layers_block_type"].index("moe")
+    # ``auto`` adopts the exported slot, which only the wiring enables.
+    balancing_callbacks = True
+    # The release stores its bias in fp32, where a bf16 cast would round it by more than its spread.
+    fp32_pins = True
+    # Where the checkpoint keeps the tower.
+    tower: str
+
+    def after_load(self, model, ep_layers):
+        biases = [ep.gate.e_score_correction_bias.detach() for ep in ep_layers]
+        return {
+            "bias_loaded_in_fp32": all(bias.dtype == torch.float32 for bias in biases),
+            "bias_finer_than_bf16": all(not torch.equal(bias, bias.bfloat16().float()) for bias in biases),
+        }
+
+    def after_train(self, ep_layers, device):
+        return {
+            "bias_slot_adopted_by_trainer": all(
+                getattr(ep, NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False) for ep in ep_layers
+            ),
+            "bias_slot_fp32_after_training": all(
+                ep.gate.e_score_correction_bias.dtype == torch.float32 for ep in ep_layers
+            ),
+        }
+
+    def after_save(self, ep_layers, base_dir, save_dir):
+        # COLLECTIVE
+        gathered = [ep.gather_expert_state_dict(device="cpu") for ep in ep_layers]
+        written = safetensors_state_dict(save_dir)
+        moe_layers = [index for index, kind in enumerate(TINY_NEMOTRON_H_CONFIG["layers_block_type"]) if kind == "moe"]
+        return {
+            "hub_keyset_matches_plain_save": set(written) == set(safetensors_state_dict(base_dir)),
+            "one_expert_tensor_per_projection": all(
+                f"{self.tower}layers.{index}.mixer.experts.0.up_proj.weight" in written for index in moe_layers
+            ),
+            "experts_bit_exact": all(
+                torch.equal(written[f"{self.tower}layers.{index}.mixer.{key}"], tensor)
+                for index, layer_state in zip(moe_layers, gathered, strict=True)
+                for key, tensor in layer_state.items()
+            ),
+        }
+
+
+class NemotronHRoundTrip(_NemotronHChecks, EPSftRoundTrip):
+    family = "nemotron_h"
+    tower = "backbone."
+
+
+class NemotronHCompositeRoundTrip(_NemotronHChecks, EPSftRoundTrip):
+    """The save under the wrap that groups the embedding at the composite's root, on text rows: every rank skips the
+    tower alike."""
+
+    family = "nemotron_h_omni"
+    tower = "language_model.backbone."
+
+    def after_save(self, ep_layers, base_dir, save_dir):
+        checks = super().after_save(ep_layers, base_dir, save_dir)
+        written = safetensors_state_dict(save_dir)
+        checks["vision_norm_in_the_release_spelling"] = "vision_projector.vision_final_layernorm.weight" in written
+        return checks
 
 
 class Qwen3NextRoundTrip(EPSftRoundTrip):

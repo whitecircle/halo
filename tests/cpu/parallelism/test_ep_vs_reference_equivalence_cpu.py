@@ -27,6 +27,8 @@ from transformers.models.lfm2_moe.configuration_lfm2_moe import Lfm2MoeConfig
 from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeSparseMoeBlock
 from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
+from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
+from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMoE
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
@@ -49,6 +51,7 @@ from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
@@ -250,6 +253,26 @@ def _step3p7() -> Step3p7SparseMoeBlock:
     )
 
 
+def _nemotron_h() -> NemotronHMoE:
+    """A latent narrower than the hidden state, so a wrapper running its experts on the hidden state cannot build."""
+    config = {key: value for key, value in _COMMON.items() if key != "hidden_act"}
+    return NemotronHMoE(
+        NemotronHConfig(
+            n_routed_experts=E,
+            num_experts_per_tok=K,
+            moe_latent_size=H // 2,
+            moe_shared_expert_intermediate_size=M,
+            n_group=1,
+            topk_group=1,
+            mlp_hidden_act="relu2",
+            layers_block_type=["moe"],
+            **_ROUTING_KNOBS,
+            **config,
+        ),
+        layer_idx=0,
+    )
+
+
 def _block_inputs(dtype: torch.dtype) -> tuple[torch.Tensor, ...]:
     generator = torch.Generator().manual_seed(11)
     return (torch.randn(*TOKENS, H, dtype=dtype, generator=generator),)
@@ -267,6 +290,7 @@ FAMILIES = [
     ("glm5_next", EPGlm5NextMoELayer, _glm5_next, _block_inputs),
     ("lfm2_moe", EPLfm2MoELayer, _lfm2_moe, _block_inputs),
     ("mistral4", EPMistral4MoELayer, _mistral4, _block_inputs),
+    ("nemotron_h", EPNemotronHMoELayer, _nemotron_h, _block_inputs),
     ("gemma4", EPGemma4MoELayer, _gemma4_experts, _experts_inputs),
     ("qwen3_moe", EPQwen3MoELayer, _qwen3_moe, _block_inputs),
     ("qwen3_5_moe", EPQwen3_5MoELayer, _qwen3_5_moe, _block_inputs),
@@ -413,7 +437,7 @@ def test_the_wrapper_reads_its_own_selection_bias(family, wrapper, factory, inpu
 
 def test_the_fixtures_carry_non_neutral_routing_knobs():
     """Anti-vacuity: at neutral values a wrapper that dropped either would still reproduce the block."""
-    for factory in (_glm4_moe_lite, _glm5_next, _mistral4, _lfm2_moe):
+    for factory in (_glm4_moe_lite, _glm5_next, _mistral4, _lfm2_moe, _nemotron_h):
         gate = factory().gate  # 5.14 moved both knobs onto the *TopkRouter.
         assert gate.norm_topk_prob is True, f"{factory.__name__}: normalization is off"
         assert gate.routed_scaling_factor == _ROUTING_KNOBS["routed_scaling_factor"], (

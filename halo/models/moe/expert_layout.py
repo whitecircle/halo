@@ -10,10 +10,12 @@ from dataclasses import dataclass
 import torch
 
 # Fused 3-D expert tensor names (dim 0 = expert) as an HF checkpoint spells them, longest first so a suffix
-# matcher never reads a ``_bias`` name as its weight.
-HF_FUSED_EXPERT_KEYS: tuple[str, ...] = ("gate_up_proj_bias", "down_proj_bias", "gate_up_proj", "down_proj")
+# matcher never reads a ``_bias`` name as its weight. ``up_proj`` is a gateless expert's bank.
+HF_FUSED_EXPERT_KEYS: tuple[str, ...] = ("gate_up_proj_bias", "down_proj_bias", "gate_up_proj", "down_proj", "up_proj")
 # The three projections of a GLU expert stored apart, as runtime attributes and as a per-expert hub spelling.
 SEPARATE_GLU_PROJECTIONS: tuple[str, str, str] = ("gate_proj", "up_proj", "down_proj")
+# The two projections of a gateless expert, under one spelling at runtime and on the hub.
+SEPARATE_MLP_PROJECTIONS: tuple[str, str] = ("up_proj", "down_proj")
 
 
 class ExpertLayoutKind(enum.Enum):
@@ -23,6 +25,8 @@ class ExpertLayoutKind(enum.Enum):
     FUSED_SPLIT_PER_EXPERT = "fused_split_per_expert"
     # Gate, up and down stored apart, written one tensor per expert under ``per_expert_keys``.
     SEPARATE_GLU = "separate_glu"
+    # Up and down of a gateless expert (Nemotron-H), written one tensor per expert under their own names.
+    SEPARATE_MLP = "separate_mlp"
     # GPT-OSS: ``[g0, u0, g1, u1, ...]`` with biases, kept in matmul convention.
     INTERLEAVED_GLU = "interleaved_glu"
 
@@ -33,6 +37,7 @@ _RUNTIME_KEYS: dict[ExpertLayoutKind, frozenset[str]] = {
     ExpertLayoutKind.FUSED: frozenset({*HF_FUSED_EXPERT_KEYS, "gate_proj", "up_proj"}),
     ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT: frozenset({"gate_up_proj", "gate_proj", "up_proj", "down_proj"}),
     ExpertLayoutKind.SEPARATE_GLU: frozenset(SEPARATE_GLU_PROJECTIONS),
+    ExpertLayoutKind.SEPARATE_MLP: frozenset(SEPARATE_MLP_PROJECTIONS),
     ExpertLayoutKind.INTERLEAVED_GLU: frozenset(
         {
             *HF_FUSED_EXPERT_KEYS,
@@ -79,6 +84,16 @@ def iter_per_expert_split(banks: Sequence[tuple[torch.Tensor, tuple[str, ...]]])
                 yield f"{expert}.{name}", part
 
 
+def _per_expert_linear_weights(
+    banks: Sequence[tuple[torch.Tensor, tuple[str, ...]]], prefix: str, device: torch.device | str
+) -> dict[str, torch.Tensor]:
+    """Matmul-convention banks stored apart, one ``F.linear``-convention ``<name>.weight`` per expert."""
+    return {
+        f"{prefix}{key}.weight": part.transpose(0, 1).contiguous().to(device)
+        for key, part in iter_per_expert_split(banks)
+    }
+
+
 def to_hub_expert_tensors(
     layout: ExpertLayout, tensors: Mapping[str, torch.Tensor], *, device: torch.device | str
 ) -> dict[str, torch.Tensor]:
@@ -96,10 +111,11 @@ def to_hub_expert_tensors(
             (tensors[attr], (name,))
             for attr, name in zip(SEPARATE_GLU_PROJECTIONS, layout.per_expert_keys, strict=True)
         ]
-        return {
-            f"{prefix}{key}.weight": part.transpose(0, 1).contiguous().to(device)
-            for key, part in iter_per_expert_split(banks)
-        }
+        return _per_expert_linear_weights(banks, prefix, device)
+
+    if layout.kind is ExpertLayoutKind.SEPARATE_MLP:
+        banks = [(tensors[name], (name,)) for name in SEPARATE_MLP_PROJECTIONS]
+        return _per_expert_linear_weights(banks, prefix, device)
 
     if layout.kind is ExpertLayoutKind.INTERLEAVED_GLU:
         gate = next((name for name in ("gate_proj_gmm", "gate_proj") if name in tensors), None)

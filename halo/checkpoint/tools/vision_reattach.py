@@ -69,6 +69,22 @@ def _require_text_tower_keys(
     )
 
 
+def _require_the_bases_tower_shape(
+    input_dir: str, base_dir: str, base_shapes: dict[str, list[int]], vocab_size: int, layout: CompositeTextLayout
+) -> None:
+    """Refuse a base of another size in the same family: what streams back from it was built against its own tower, so
+    its vision projector or MTP tail would land beside a text tower of another width. A grown vocabulary moves only the
+    rows of its embedding and head. Header-only."""
+    for _shard, reader, key in iter_checkpoint_shard_entries(input_dir):
+        shape, base_shape = reader.get_slice(key).get_shape(), base_shapes.get(layout.to_composite_key(key))
+        grown = base_shape is not None and shape[1:] == base_shape[1:] and shape[0] == vocab_size
+        if base_shape is not None and shape != base_shape and not grown:
+            raise ValueError(
+                f"{key!r} of {input_dir} has shape {shape}, and the base checkpoint ({base_dir}) stores it as "
+                f"{base_shape}: the base is another model of this family, not the one this export trained from."
+            )
+
+
 def _grafted_composite_config(base_dir: str, text_config: AutoConfig, trust_remote_code: bool):
     """The base's composite config with its text sub-config replaced by the trained one."""
     composite = AutoConfig.from_pretrained(base_dir, trust_remote_code=trust_remote_code)
@@ -86,6 +102,8 @@ def _grafted_composite_config(base_dir: str, text_config: AutoConfig, trust_remo
         )
     # The attribute holding it, as a release's remote config keeps it under its own name and reads ``text_config`` off it.
     held = composite.get_text_config()
+    # What loading the export stamped on it, which no run changed and the artifact would carry as a local path.
+    text_config._name_or_path, text_config.architectures = held._name_or_path, held.architectures
     setattr(composite, next(name for name, value in vars(composite).items() if value is held), text_config)
     return composite
 
@@ -113,8 +131,10 @@ def reattach_vision_tower(
     # Header-only, ahead of the output directory. The export supersedes the base's text tower only under the wrapper
     # prefix; a base keeping a vendor namespace would be carried whole beside the trained tower, two towers colliding
     # on load.
-    base_keys = [key for _shard, _reader, key in iter_checkpoint_shard_entries(base_dir)]
-    superseded = {key for key in base_keys if key.startswith((layout.composite_tower, layout.composite_head))}
+    base_shapes = {
+        key: reader.get_slice(key).get_shape() for _shard, reader, key in iter_checkpoint_shard_entries(base_dir)
+    }
+    superseded = {key for key in base_shapes if key.startswith((layout.composite_tower, layout.composite_head))}
     base_text_children = {
         key[len(layout.composite_tower) :].split(".", 1)[0]
         for key in superseded
@@ -126,12 +146,13 @@ def reattach_vision_tower(
             f"trained export cannot supersede it — its text keys would be carried over beside the "
             f"trained ones. Re-attach onto a base saved in the wrapper layout."
         )
-    if len(superseded) == len(base_keys):
+    if len(superseded) == len(base_shapes):
         raise ValueError(
             f"the base checkpoint ({base_dir}) contributes no non-text tensors — nothing to "
             f"re-attach. Its weight layout does not match the expected multimodal wrapper."
         )
     _require_text_tower_keys(input_dir, text_config.model_type, base_text_children, layout)
+    _require_the_bases_tower_shape(input_dir, base_dir, base_shapes, text_config.vocab_size, layout)
 
     with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:
         preflight_resource_warning(

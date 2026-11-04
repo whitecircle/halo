@@ -30,7 +30,7 @@ _LAYERSCALE = "lambda1"
 
 def _nemotron_on_meta():
     with torch.device("meta"):
-        return tiny_family_model(TINY_UNWRAPPED_COMPOSITE_FAMILIES["nemotron_h_omni"])
+        return tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"])
 
 
 def _nested_models(model) -> list[tuple[str, PreTrainedModel]]:
@@ -66,7 +66,7 @@ def test_a_towers_own_parameter_is_drawn_by_the_towers_init():
     init_checkpoint_absent_modules(model, set(state) - absent, "cpu", "unit", dtype=torch.bfloat16)
     value = model.config.vision_config.layerscale_value
     for key in absent:
-        tensor = model.get_parameter(key)
+        tensor = model.state_dict(keep_vars=True)[key]
         assert torch.equal(tensor.float(), torch.full_like(tensor, value).float()), key
 
 

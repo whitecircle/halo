@@ -5,17 +5,24 @@ same capacities only after the whole load, or at the step whose batch first reac
 from __future__ import annotations
 
 import pytest
+from transformers import NemotronHConfig
 
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.runner import resolve_microbatch_count
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.config_access import text_config
+from halo.models.moe.config_fields import resolve_dispatch_width
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG
 from tests.common.parallelism import make_parallelism_config, simulated_world
 from tests.common.rosters import distributed_trainer_classes
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 # Hidden 8192 x top-8 puts the 32-bit index ceiling at 2**31 / (8 x 8192) = 32768 tokens/rank, a budget a long-context
 # run can declare.
@@ -341,6 +348,33 @@ def test_every_trainer_states_the_rows_its_forward_carries(trainer):
         f"it on half its tokens. Record the value either way."
     )
     assert expected == trainer.FORWARD_ROWS_PER_EXAMPLE
+
+
+def test_a_latent_block_is_judged_on_the_latent_it_dispatches():
+    """Nemotron-H routes the hidden state and sends its 1024-wide latent, so the ceiling is 2**31 / (22 x 1024) tokens a
+    rank: sized off the 4096-wide hidden state, the gate would refuse every row past a quarter of that."""
+    config = NemotronHConfig(**NEMOTRON_H_RELEASE_TEXT_CONFIG)
+    assert config.moe_latent_size < config.hidden_size, "premise: the wire is narrower than the hidden state"
+    ceiling = 2**31 // (config.num_experts_per_tok * config.moe_latent_size)
+    aligned = ep_dispatch_capacity(ceiling) - 256
+    _reject_unsupported_model(_config(world_size=8, gpus_per_node=8, ep_size=8, budget=aligned), config)
+    with pytest.raises(ValueError, match=f"padded_hidden={config.moe_latent_size} "):
+        _reject_unsupported_model(_config(world_size=8, gpus_per_node=8, ep_size=8, budget=ceiling + 256), config)
+
+
+@pytest.mark.parametrize("name", sorted({**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}))
+def test_the_gate_reads_the_width_each_family_s_layer_sizes_its_wire_at(name):
+    """The gate knows only the config, and the dispatcher sizes its arena off the live block, so they must agree."""
+    model = tiny_family_model({**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}[name])
+    blocks = dict(ep_claimed_blocks(model)).values()
+    assert blocks, f"{name} wraps nothing, so the gate is held to nothing"
+    wires = set()
+    for block in blocks:
+        layer_cls = MOE_LAYER_MAP[type(block).__name__]
+        wires.add(
+            layer_cls._detect_hidden_dim(layer_cls._declared_router(block), layer_cls._find_experts_container(block))
+        )
+    assert wires == {resolve_dispatch_width(text_config(model.config))}
 
 
 def test_a_config_that_declares_no_router_width_is_not_guessed_at():

@@ -156,11 +156,11 @@ def _fused_causal_lm_loss(
     return loss, token_accuracy
 
 
-def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
+def build_lce_forward(router_aux_loss_in_head: bool = False, fp32_logits: bool = False) -> Callable:
     """A fused-loss ``forward`` applying the family's head transform. A logit scale folds onto the hidden states
     (``(s·h) @ Wᵀ == s·(h @ Wᵀ)``), bit-exact in bf16 for power-of-two scales; a softcap or vocabulary cut is refused.
     ``router_aux_loss_in_head`` refuses ``output_router_logits``, since nothing would add that term to the
-    objective."""
+    objective. ``fp32_logits`` casts the logits of a forward that returns them, as the family's own head does."""
 
     def lce_forward(
         self,
@@ -205,6 +205,8 @@ def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
             )
         else:
             logits = transform.project(self.lm_head, kept_hidden_states)
+            if fp32_logits:
+                logits = logits.float()
             if labels is not None or shift_labels is not None:
                 loss = self.loss_function(
                     logits=logits, labels=labels, shift_labels=shift_labels, vocab_size=logits.shape[-1], **kwargs

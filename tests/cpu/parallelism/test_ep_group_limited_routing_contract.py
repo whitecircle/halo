@@ -105,13 +105,14 @@ _KNOB_WRITER_FAMILIES = sorted(
 )
 
 
-def test_the_roster_routing_this_way_is_exactly_the_five_families_that_do():
+def test_the_roster_routing_this_way_is_exactly_the_families_that_do():
     """Equality, since a superset check passes when a family is reparented off this base, dropping its fork check."""
     assert {cls.__name__ for cls in _group_limited_families()} == {
         "EPGlm4MoELayer",
         "EPLagunaMoELayer",
         "EPMistral4MoELayer",
         "EPGlm5NextMoELayer",
+        "EPNemotronHMoELayer",
         "EPStep3p7MoELayer",
     }
 

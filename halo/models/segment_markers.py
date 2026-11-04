@@ -11,7 +11,7 @@ from transformers.utils.import_utils import is_causal_conv1d_available, is_flash
 
 from halo.log import warn_once
 from halo.models.attention.layout import (
-    SHORT_CONV_MODEL_TYPE_PREFIXES,
+    SEQ_IDX_MODEL_TYPE_PREFIXES,
     compressed_layer_types,
     declares_linear_layer_groups,
     has_gated_delta_net_layers,
@@ -88,7 +88,7 @@ def segment_markers_for(model_config) -> SegmentMarkers:
         return SegmentMarkers()
     gated_delta_net = has_gated_delta_net_layers(model_config)
     return SegmentMarkers(
-        seq_idx=gated_delta_net or model_type_matches(model_config, *SHORT_CONV_MODEL_TYPE_PREFIXES),
+        seq_idx=gated_delta_net or model_type_matches(model_config, *SEQ_IDX_MODEL_TYPE_PREFIXES),
         cu_seq_lens=gated_delta_net,
     )
 
@@ -102,7 +102,7 @@ def find_unmarked_sequence_mixer(model_config) -> str | None:
     if spec is not None and spec.unmarked_sequence_mixer is not None:
         return spec.unmarked_sequence_mixer
     declares = declares_linear_layer_groups(model_config) or has_linear_attention_layers(model_config)
-    return "linear-attention layers" if declares and not segment_markers_for(model_config).cu_seq_lens else None
+    return "linear-attention layers" if declares and segment_markers_for(model_config) == SegmentMarkers() else None
 
 
 def reject_unmarked_sequence_mixer_rows(

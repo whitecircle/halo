@@ -5,7 +5,7 @@ no extra work: point `model_name_or_path` at it and launch.
 
 The families below also have expert, context, tensor or pipeline-parallel
 support ([which, per family](supported-matrix.md#model-families)), a tuned
-recipe and GPU-validated coverage, except where a row says otherwise. Seventeen
+recipe and GPU-validated coverage, except where a row says otherwise. Eighteen
 of them are MoE.
 
 | Family | Hub example | Kind | What to know |
@@ -20,6 +20,7 @@ of them are MoE.
 | [LFM-2 MoE](cookbooks/halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2-24B-A2B` | MoE | hybrid short-convolution layers |
 | [ZAYA1](cookbooks/halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | MoE | trains without gradient checkpointing, always |
 | [Command A+](cookbooks/halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | MoE | 200B+; pinned revision |
+| [Nemotron 3.5 Super VL](cookbooks/halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | MoE | Mamba-2 layers; EP8 on B300; short runs on the release; no online RL |
 | [Bailing / Ling](../agent-docs/models/bailing.md) ↗ | `inclusionAI/Ling-mini-2.0` | MoE | needs `trust_remote_code` |
 | [Inkling](../agent-docs/models/inkling.md) ↗ | `thinkingmachines/Inkling-Small` | MoE | multimodal; SDPA; the tokenizer ships no pad token |
 | [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` and `padding_free` refused); convert to bf16 first |
@@ -37,13 +38,13 @@ when a recipe disagrees.
 
 ## Cookbooks
 
-Ten families have a [cookbook](cookbooks/README.md): a worked path from
+Eleven families have a [cookbook](cookbooks/README.md): a worked path from
 `docker pull` to a served checkpoint, with the exact `halo launch` lines and the
 LoRA and RL variants the family supports. If your family has one, start there.
 
 ## Multimodal checkpoints
 
-Gemma 4, Mistral 4, Command A+, Inkling, GLM-5 Next, Step-3.7 Flash,
+Gemma 4, Mistral 4, Command A+, Inkling, GLM-5 Next, Step-3.7 Flash, Nemotron-H,
 Qwen3.5/3.6, Qwen3.8-Flash-Next and Qwen3-VL are natively multimodal. Halo loads the full
 vision-and-text model and picks the data path from your dataset, not the
 checkpoint:
@@ -54,11 +55,11 @@ checkpoint:
   with packing available.
 
 To load a multimodal checkpoint as text-only, set `text_only_model: true`, as the
-Qwen3.8-Flash-Next recipes do. Qwen3.5/3.6, Qwen3.8-Flash-Next and Llama 4 have a
-text-only variant; the others refuse it.
+Qwen3.8-Flash-Next and Nemotron-H recipes do. Qwen3.5/3.6, Qwen3.8-Flash-Next, Nemotron-H
+and Llama 4 have a text-only variant; the others refuse it.
 
 Image data works for SFT, DPO, KTO, SMPO and both distillation trainers; PaliGemma takes it
-through SFT and distillation only. Reward modeling takes images only on checkpoints with a
+through SFT and distillation only, and Nemotron-H refuses it on DPO and KTO. Reward modeling takes images only on checkpoints with a
 multimodal sequence-classification head, such as Gemma 4 and Qwen3.5/3.6. Classification, the
 GRPO trainers and embedding are text-only.
 

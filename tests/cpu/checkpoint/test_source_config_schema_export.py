@@ -4,27 +4,36 @@ at load and engines read only those."""
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import pytest
 import torch
-from transformers import AutoConfig
+from huggingface_hub.errors import StrictDataclassFieldValidationError
+from transformers import AutoConfig, AutoModelForCausalLM, NemotronH_Omni_Reasoning_V3, PretrainedConfig
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
 from halo.checkpoint import config_export
 from halo.checkpoint.config_export import export_source_config_schema, save_model_config
 from halo.checkpoint.tools.offline_export import save_full_checkpoint
+from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
-from halo.models.moe.family_specs import MoEFamilySpec
+from halo.model_loading.model_preparation import auto_load_model
 from tests.common.models import (
+    NEMOTRON_H_RELEASE_TEXT_CONFIG,
+    NEMOTRON_H_RELEASE_VISION_CONFIG,
     TINY_NEMOTRON_H_CONFIG,
     TINY_RADIO_VISION_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
+from tests.common.nemotron_h import nemotron_h_release_config, write_tiny_hub_checkpoint
 from tests.common.rosters import ep_layer_class_by_model_type
 
 # The release's key spellings at the roster's geometry; ``test_the_source_config_parses_to_the_roster_geometry`` pins
@@ -92,17 +101,21 @@ TINY_NEMOTRON_SOURCE_CONFIG = {
     "llm_config": {**TINY_NEMOTRON_H_CONFIG, "time_step_limit": [0.0, {"__float__": "Infinity"}]},
     "vision_config": dict(TINY_RADIO_VISION_CONFIG),
 }
+# The export copies them and never imports them; the modeling entry names siblings to pin the transitive copy.
 _NEMOTRON_MODULES = {
-    "configuration_nemotron_h_omni.py": "class NemotronH_Omni_Reasoning_V3_Config: pass\n",
-    "modeling_nemotron_h_omni.py": "class NemotronH_Omni_Reasoning_V3: pass\n",
+    "configuration_nemotron_h_omni.py": "from .configuration_radio import RadioConfig\n",
+    "configuration_radio.py": "class RadioConfig: pass\n",
+    "modeling_nemotron_h_omni.py": (
+        "from .configuration_nemotron_h_omni import NemotronH_Omni_Reasoning_V3_Config\n"
+        "from .modeling_radio import RadioModel\n"
+    ),
+    "modeling_radio.py": "from .configuration_radio import RadioConfig\n",
 }
-_NEMOTRON_SPEC = MoEFamilySpec(model_types=("nemotron_h", "nemotron_h_omni"), exports_source_config_schema=True)
 
 # The source's, which the pinned engines read, against the native-only ones they have no class for.
 _SOURCE_SPELLINGS = ("moe_num_experts", "moe_top_k", "moe_layers_enum", "attention_other_setting")
 _NATIVE_ONLY_SPELLINGS = ("n_routed_experts", "num_experts_per_tok", "mlp_layer_types", "per_layer_config")
 
-# The export copies them and never imports them; the modeling entry names a sibling to pin the transitive copy.
 _SOURCE_MODULES = {
     "configuration_step3p7.py": "class Step3p7Config: pass\n",
     "processing_step3.py": "class Step3VLProcessor: pass\n",
@@ -110,8 +123,65 @@ _SOURCE_MODULES = {
     "vision_encoder.py": "class VisionEncoder: pass\n",
 }
 
-# wrapper class -> the source checkpoint a declaring family's export must carry forward
-FIXTURES = {EPStep3p7MoELayer: (TINY_STEP3P7_SOURCE_CONFIG, _SOURCE_MODULES)}
+
+@dataclass(frozen=True)
+class _SourceFamily:
+    """The source checkpoint a declaring family's export carries forward, and where its spellings sit."""
+
+    source_config: dict
+    modules: dict[str, str]
+    model_class: type
+    native_config: Callable[[], PretrainedConfig]
+    text_section: str
+    # The section holding the spellings below, "" for the top level.
+    spelled_section: str
+    source_spellings: tuple[str, ...]
+    native_only_spellings: tuple[str, ...]
+
+    def spelled(self, payload: dict) -> dict:
+        return payload[self.spelled_section] if self.spelled_section else payload
+
+
+def _native_step3p7_config() -> PretrainedConfig:
+    return Step3p7Config(
+        text_config=dict(TINY_STEP3P7_CONFIG),
+        vision_config=dict(TINY_STEP3P7_VISION_CONFIG),
+        image_token_id=TINY_STEP3P7_SOURCE_CONFIG["image_token_id"],
+    )
+
+
+def _native_nemotron_config() -> PretrainedConfig:
+    return NemotronH_Omni_Reasoning_V3.config_class(
+        text_config=dict(TINY_NEMOTRON_H_CONFIG),
+        vision_config=dict(TINY_RADIO_VISION_CONFIG),
+        vision_hidden_size=TINY_RADIO_VISION_CONFIG["hidden_size"],
+        projector_hidden_size=TINY_NEMOTRON_H_CONFIG["hidden_size"],
+        image_token_id=TINY_NEMOTRON_SOURCE_CONFIG["img_context_token_id"],
+    )
+
+
+FIXTURES = {
+    EPStep3p7MoELayer: _SourceFamily(
+        TINY_STEP3P7_SOURCE_CONFIG,
+        _SOURCE_MODULES,
+        Step3p7ForConditionalGeneration,
+        _native_step3p7_config,
+        text_section="text_config",
+        spelled_section="text_config",
+        source_spellings=_SOURCE_SPELLINGS,
+        native_only_spellings=_NATIVE_ONLY_SPELLINGS,
+    ),
+    EPNemotronHMoELayer: _SourceFamily(
+        TINY_NEMOTRON_SOURCE_CONFIG,
+        _NEMOTRON_MODULES,
+        NemotronH_Omni_Reasoning_V3,
+        _native_nemotron_config,
+        text_section="llm_config",
+        spelled_section="",
+        source_spellings=("llm_config", "vit_hidden_size", "img_context_token_id"),
+        native_only_spellings=("text_config", "vision_hidden_size", "image_token_id"),
+    ),
+}
 _IDS = [cls.__name__ for cls in FIXTURES]
 
 
@@ -125,20 +195,20 @@ def _write_source(directory, payload: dict, modules: dict[str, str]) -> str:
     return str(directory)
 
 
-def _model_from(source: str):
+def _model_from(cls, source: str):
     """Loaded config, source recorded by the loader."""
     torch.manual_seed(0)
-    model = Step3p7ForConditionalGeneration(AutoConfig.from_pretrained(source)).to(torch.bfloat16)
+    model = FIXTURES[cls].model_class(AutoConfig.from_pretrained(source)).to(torch.bfloat16)
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, source)
     return model
 
 
 def _exported(tmp_path, cls, mutate=None) -> tuple[dict, str, object]:
-    source_config, modules = FIXTURES[cls]
-    source = _write_source(tmp_path / "source", source_config, modules)
+    family = FIXTURES[cls]
+    source = _write_source(tmp_path / "source", family.source_config, family.modules)
     export = str(tmp_path / "export")
     os.makedirs(export, exist_ok=True)
-    model = _model_from(source)
+    model = _model_from(cls, source)
     if mutate is not None:
         mutate(model)
     save_model_config(model, export)
@@ -157,33 +227,30 @@ def test_every_declaring_family_has_a_source_schema_fixture():
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
-def test_the_source_config_parses_to_the_roster_geometry(cls):
+def test_the_source_config_parses_to_the_roster_geometry(cls, tmp_path):
     """Otherwise every assertion below is about a different config than the suite trains."""
-    source_config, _modules = FIXTURES[cls]
-    parsed = Step3p7Config.from_dict(json.loads(json.dumps(source_config))).to_dict()
-    native = Step3p7Config(
-        text_config=dict(TINY_STEP3P7_CONFIG),
-        vision_config=dict(TINY_STEP3P7_VISION_CONFIG),
-        image_token_id=source_config["image_token_id"],
-    ).to_dict()
+    family = FIXTURES[cls]
+    parsed = AutoConfig.from_pretrained(_write_source(tmp_path, family.source_config, family.modules)).to_dict()
+    native = family.native_config().to_dict()
     for section in ("text_config", "vision_config"):
         assert parsed[section] == native[section], f"the {section} stand-in drifted from the roster config"
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_the_export_carries_the_source_schema_and_its_modules(cls, tmp_path):
+    family = FIXTURES[cls]
     payload, export, _model = _exported(tmp_path, cls)
-    text = payload["text_config"]
-    assert all(key in text for key in _SOURCE_SPELLINGS), (
+    spelled = family.spelled(payload)
+    assert all(key in spelled for key in family.source_spellings), (
         f"the export dropped the source spellings the pinned engines read: "
-        f"{[key for key in _SOURCE_SPELLINGS if key not in text]}"
+        f"{[key for key in family.source_spellings if key not in spelled]}"
     )
-    assert not [key for key in _NATIVE_ONLY_SPELLINGS if key in text], (
+    assert not [key for key in family.native_only_spellings if key in spelled], (
         f"the export kept transformers-only spellings the pinned engines have no class for: "
-        f"{[key for key in _NATIVE_ONLY_SPELLINGS if key in text]}"
+        f"{[key for key in family.native_only_spellings if key in spelled]}"
     )
-    assert payload["auto_map"] == FIXTURES[cls][0]["auto_map"]
-    missing = [name for name in FIXTURES[cls][1] if not os.path.isfile(os.path.join(export, name))]
+    assert payload["auto_map"] == family.source_config["auto_map"]
+    missing = [name for name in family.modules if not os.path.isfile(os.path.join(export, name))]
     assert not missing, f"the export ships no {missing} — the directory does not load without them"
 
 
@@ -198,68 +265,70 @@ def test_the_export_reloads_to_the_config_that_was_trained(cls, tmp_path):
 def test_a_patched_vocab_size_reaches_the_carried_config(cls, tmp_path):
     """Carried verbatim, it would serve the source's vocabulary against a resized embedding, an off-by-N no reader
     can detect."""
-    patched = TINY_STEP3P7_CONFIG["vocab_size"] + 128
+    family = FIXTURES[cls]
+    patched = family.source_config[family.text_section]["vocab_size"] + 128
 
     def resize(model):
         model.resize_token_embeddings(patched)
 
     payload, export, model = _exported(tmp_path, cls, mutate=resize)
-    assert all(key in payload["text_config"] for key in _SOURCE_SPELLINGS), "not the carried schema"
-    assert payload["text_config"]["vocab_size"] == patched
+    assert all(key in family.spelled(payload) for key in family.source_spellings), "not the carried schema"
+    assert payload[family.text_section]["vocab_size"] == patched
     assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_the_standalone_writer_carries_the_schema_too(cls, tmp_path):
     """The vocab patch is where a Step-3.7 run starts, through ``save_full_checkpoint``."""
-    source_config, modules = FIXTURES[cls]
-    source = _write_source(tmp_path / "source", source_config, modules)
+    family = FIXTURES[cls]
+    source = _write_source(tmp_path / "source", family.source_config, family.modules)
     export = str(tmp_path / "export")
-    patched = TINY_STEP3P7_CONFIG["vocab_size"] + 128
-    model = _model_from(source)
+    patched = family.source_config[family.text_section]["vocab_size"] + 128
+    model = _model_from(cls, source)
     model.resize_token_embeddings(patched)
 
     save_full_checkpoint(model, export, source_dir=source)
 
     with open(os.path.join(export, "config.json")) as handle:
         payload = json.load(handle)
-    assert all(key in payload["text_config"] for key in _SOURCE_SPELLINGS)
-    assert payload["text_config"]["vocab_size"] == patched
+    assert all(key in family.spelled(payload) for key in family.source_spellings)
+    assert payload[family.text_section]["vocab_size"] == patched
     assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
 
 
-@pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
-def test_a_change_the_source_schema_swallows_is_refused(cls, tmp_path):
+def test_a_change_the_source_schema_swallows_is_refused(tmp_path):
     """A field spelled through a legacy key parses back to the source's value, a geometry the trainer never had."""
 
     def widen_sliding_heads(model):
         model.config.text_config.num_sliding_attention_heads = TINY_STEP3P7_CONFIG["num_attention_heads"]
 
     with pytest.raises(ValueError, match="cannot express this run's config"):
-        _exported(tmp_path, cls, mutate=widen_sliding_heads)
+        _exported(tmp_path, EPStep3p7MoELayer, mutate=widen_sliding_heads)
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_a_source_without_remote_code_leaves_the_native_schema(cls, tmp_path, caplog):
     """A source that was never servable has no schema to hand on."""
-    source_config = {k: v for k, v in FIXTURES[cls][0].items() if k != "auto_map"}
+    family = FIXTURES[cls]
+    source_config = {k: v for k, v in family.source_config.items() if k != "auto_map"}
     source = _write_source(tmp_path / "source", source_config, {})
     export = str(tmp_path / "export")
     os.makedirs(export, exist_ok=True)
     with caplog.at_level("WARNING"):
-        save_model_config(_model_from(source), export)
+        save_model_config(_model_from(cls, source), export)
     with open(os.path.join(export, "config.json")) as handle:
         payload = json.load(handle)
     assert "auto_map" not in payload
-    assert "n_routed_experts" in payload["text_config"]
+    assert family.native_only_spellings[0] in family.spelled(payload)
     assert "declares no auto_map" in caplog.text
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_only_an_unreadable_source_degrades_to_the_native_schema(cls, tmp_path, monkeypatch, caplog):
     """Any other read failure is a bug and must surface rather than ship an unservable config."""
-    source = _write_source(tmp_path / "source", *FIXTURES[cls])
-    model = _model_from(source)
+    family = FIXTURES[cls]
+    source = _write_source(tmp_path / "source", family.source_config, family.modules)
+    model = _model_from(cls, source)
     export = str(tmp_path / "export")
     os.makedirs(export, exist_ok=True)
 
@@ -280,14 +349,14 @@ def test_only_an_unreadable_source_degrades_to_the_native_schema(cls, tmp_path, 
 
 
 @pytest.fixture
-def nemotron_source(tmp_path, monkeypatch) -> str:
-    """The family's source on disk, its spec claimed for this test alone."""
-    monkeypatch.setattr(
-        config_export,
-        "find_moe_family_spec",
-        lambda model_type: _NEMOTRON_SPEC if model_type in _NEMOTRON_SPEC.model_types else None,
-    )
+def nemotron_source(tmp_path) -> str:
     return _write_source(tmp_path / "source", TINY_NEMOTRON_SOURCE_CONFIG, _NEMOTRON_MODULES)
+
+
+@pytest.fixture
+def release_source(tmp_path) -> str:
+    """The release's own ``config.json``, with every field the roster's stand-in leaves out."""
+    return _write_source(tmp_path / "source", nemotron_h_release_config(), _NEMOTRON_MODULES)
 
 
 def _carried(tmp_path, config, source: str) -> tuple[dict, str]:
@@ -304,6 +373,44 @@ def test_an_unchanged_export_is_the_source_config(tmp_path, nemotron_source):
     payload, export = _carried(tmp_path, config, nemotron_source)
     assert payload == TINY_NEMOTRON_SOURCE_CONFIG
     assert all(os.path.isfile(os.path.join(export, name)) for name in _NEMOTRON_MODULES)
+
+
+def test_the_release_config_comes_back_whole(tmp_path, release_source):
+    config = AutoConfig.from_pretrained(release_source)
+    payload, export = _carried(tmp_path, config, release_source)
+    assert payload == nemotron_h_release_config()
+    assert all(os.path.isfile(os.path.join(export, name)) for name in _NEMOTRON_MODULES)
+
+
+def test_a_live_release_shell_exports_the_release_config(tmp_path, release_source):
+    """What a save writes on the real geometry: the stamps a load leaves, the class name and the generation config."""
+    with torch.device("meta"):
+        model = NemotronH_Omni_Reasoning_V3(AutoConfig.from_pretrained(release_source))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, release_source)
+    export = str(tmp_path / "export")
+    save_model_config(model, export)
+    with open(os.path.join(export, "config.json")) as handle:
+        assert json.load(handle) == nemotron_h_release_config()
+    assert os.path.isfile(os.path.join(export, "generation_config.json"))
+
+
+def test_the_release_fixture_is_the_roster_release():
+    release = nemotron_h_release_config()
+    assert release["llm_config"]["layers_block_type"] == NEMOTRON_H_RELEASE_TEXT_CONFIG["layers_block_type"]
+    assert release["vision_config"]["hidden_size"] == NEMOTRON_H_RELEASE_VISION_CONFIG["hidden_size"]
+
+
+def test_the_release_tag_needs_decoding_before_the_class_reads_it():
+    """Raw, the carry would crash on the release's own ``time_step_limit``, so the decode is load-bearing here."""
+    release = nemotron_h_release_config()
+    assert release["llm_config"]["time_step_limit"] == [0.0, {"__float__": "Infinity"}]
+    config_class = NemotronH_Omni_Reasoning_V3.config_class
+    with pytest.raises(StrictDataclassFieldValidationError, match="time_step_limit"):
+        config_class.from_dict(copy.deepcopy(release))
+    assert config_class.from_dict(config_class._decode_special_floats(release)).text_config.time_step_limit == [
+        0.0,
+        float("inf"),
+    ]
 
 
 def test_a_run_change_lands_under_the_legacy_spelling(tmp_path, nemotron_source):
@@ -327,6 +434,47 @@ def test_a_text_only_export_of_a_composite_keeps_its_own_schema(tmp_path, nemotr
     assert "llm_config" not in payload and "vision_config" not in payload
     assert not [name for name in _NEMOTRON_MODULES if os.path.isfile(os.path.join(export, name))]
     assert AutoConfig.from_pretrained(export).to_diff_dict() == config.to_diff_dict()
+
+
+def test_a_reattached_text_export_speaks_the_release_schema_with_its_run_change(tmp_path):
+    """The text export keeps transformers' schema, and the reattach hands the composite the release's back."""
+    checkpoint, export, out = tmp_path / "checkpoint", tmp_path / "export", tmp_path / "out"
+    write_tiny_hub_checkpoint(checkpoint)
+    _write_source(checkpoint, TINY_NEMOTRON_SOURCE_CONFIG, _NEMOTRON_MODULES)
+    model = auto_load_model(str(checkpoint), text_only=True, dtype=torch.bfloat16)
+    model.config.use_cache = False
+    save_full_checkpoint(model, str(export), source_dir=str(checkpoint))
+    assert "llm_config" not in json.loads((export / "config.json").read_text())
+
+    reattach_vision_tower(str(export), str(checkpoint), str(out), trust_remote_code=False)
+
+    payload = json.loads((out / "config.json").read_text())
+    expected = copy.deepcopy(TINY_NEMOTRON_SOURCE_CONFIG)
+    expected["llm_config"] |= {"use_cache": False, "dtype": "bfloat16"}
+    assert payload == expected, "a load's stamp on the export, such as its local path, must not reach the artifact"
+    assert all((out / name).is_file() for name in _NEMOTRON_MODULES)
+
+
+def test_a_text_only_load_of_the_composite_saves_the_text_class(tmp_path, caplog):
+    """The whole path, from the composite's checkpoint: the save names the text class and reloads on its own."""
+    checkpoint = tmp_path / "checkpoint"
+    write_tiny_hub_checkpoint(checkpoint)
+    _write_source(checkpoint, TINY_NEMOTRON_SOURCE_CONFIG, _NEMOTRON_MODULES)
+    model = AutoModelForCausalLM.from_pretrained(
+        checkpoint, config=AutoConfig.from_pretrained(checkpoint).text_config, dtype=torch.bfloat16
+    )
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(checkpoint))
+    export = tmp_path / "export"
+    export.mkdir()
+    with caplog.at_level("WARNING"):
+        save_model_config(model, str(export))
+    with open(export / "config.json") as handle:
+        payload = json.load(handle)
+    assert payload["model_type"] == "nemotron_h" and payload["architectures"] == ["NemotronHForCausalLM"]
+    assert not {"auto_map", "llm_config", "vision_config"} & set(payload)
+    assert not [name for name in _NEMOTRON_MODULES if (export / name).exists()]
+    assert not caplog.records, "a text-only export is the intended outcome, not a degraded one"
+    assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
 
 
 if __name__ == "__main__":

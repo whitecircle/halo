@@ -32,6 +32,7 @@ ROSTER = {
     "DeepseekV4Model": TINY_MOE_FAMILIES["deepseek_v4"],
     "Glm5NextTextModel": TINY_MOE_FAMILIES["glm5_next"],
     "Qwen4ExpTextModel": TINY_MOE_FAMILIES["qwen4_exp_text"],
+    "NemotronHModel": TINY_MOE_FAMILIES["nemotron_h"],
 }
 # The kwarg later stages take the token ids under.
 TOKEN_ID_READERS = {"Qwen4ExpTextModel": "ple_input_ids"}

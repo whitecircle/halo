@@ -660,7 +660,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -722,8 +722,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /health timeout=10 single-shot retry(total=0,read=False)",
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -736,7 +736,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -796,8 +796,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /health timeout=10 single-shot retry(total=0,read=False)",
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -810,7 +810,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -843,7 +843,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -858,8 +858,8 @@
           "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
           "POST /end_weight_update {} timeout=600 single-shot retry(total=0,read=False)",
           "POST /init_weights_update_group {\"backend\":\"nccl\",\"group_name\":\"weight_update_group_<server>\",\"master_address\":\"127.0.0.1\",\"master_port\":\"<group port>\",\"rank_offset\":1,\"world_size\":2} timeout=120 single-shot retry(total=0,read=False)",
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /health timeout=10 single-shot retry(total=0,read=False)",
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "form group",
@@ -880,7 +880,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -913,7 +913,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -946,7 +946,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -993,8 +993,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /health timeout=10 single-shot retry(total=0,read=False)",
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -1007,7 +1007,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -1054,8 +1054,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /health timeout=10 single-shot retry(total=0,read=False)",
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -1068,7 +1068,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -1123,8 +1123,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /health timeout=10 single-shot retry(total=0,read=False)",
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -1137,7 +1137,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -1193,8 +1193,8 @@
         "step": "close_communicator",
         "outcome": "ok",
         "requests": [
-          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)",
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /health timeout=10 single-shot retry(total=0,read=False)",
+          "POST /destroy_weights_update_group {\"group_name\":\"weight_update_group_<server>\"} timeout=30 single-shot retry(total=0,read=False)"
         ],
         "transport": [
           "destroy group"
@@ -1207,7 +1207,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0
@@ -1269,7 +1269,7 @@
         "step": "construct",
         "outcome": "ok",
         "requests": [
-          "GET /health timeout=10 single-shot retry(total=0,read=False)"
+          "GET /v1/models timeout=10 single-shot retry(total=0,read=False)"
         ],
         "transport": [],
         "at_exit_hooks": 0

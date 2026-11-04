@@ -15,6 +15,7 @@ Each cookbook takes one MoE family from an empty host to a trained, served check
 | [LFM-2 MoE](halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2.5-8B-A1B`, `LiquidAI/LFM2-24B-A2B` | 2, or 4 for 24B | vLLM, SGLang |
 | [ZAYA1](halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | 1 or 8 | No |
 | [Command A+](halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | 8 | No |
+| [Nemotron 3.5 Super VL](halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | 8 | No |
 
 Every cookbook has the same sections: Support, Recipes, Settings that matter, Limits, Export and serve,
 and Reference. The GPU counts are the ones the recipes are written for, B300s unless a page says otherwise. On
@@ -26,7 +27,8 @@ more GPUs or a shorter `max_length` there.
 Short runs on the full checkpoints covered these SFT recipes: Gemma 4, GLM-4.7-Flash, Ling 2.0, both ZAYA1
 recipes, Qwen3.5-35B-A3B at 16,384 tokens, and on two 8-GPU machines gpt-oss-20b and the two pipeline
 recipes. They also covered gpt-oss-20b's classification, self-distillation, embedding, offline GRPO, DPO, SMPO
-and reward recipes and Gemma 4's DPO, SMPO and reward recipes.
+and reward recipes and Gemma 4's DPO, SMPO and reward recipes. All four Nemotron 3.5 Super VL recipes ran on the
+text tower, and its image recipe on the composite.
 
 Laguna S, LFM2.5-8B, Mistral Small 4, DeepSeek-V4 LoRA and Command A+ changed shape in 1.2.0, and those shapes
 have not run on the full-size model. Their memory fit is computed (Command A+'s comes from an earlier shape) and

@@ -96,6 +96,15 @@ def input_embedding_backbone(model: torch.nn.Module) -> torch.nn.Module | None:
     return composite if any(module is layer_backbone for module in composite.modules()) else layer_backbone
 
 
+def hidden_state_backbone(model: torch.nn.Module) -> torch.nn.Module | None:
+    """The module whose ``last_hidden_state`` a model's head projects, for a path computing logits past the model's
+    forward: ``base_model``, or under a composite holding ``language_model`` itself, whose ``base_model`` is the
+    composite, the text tower's backbone. Wrappers are peeled."""
+    base = base_transformers_model(model)
+    backbone = base.base_model
+    return backbone if backbone is not base else backbone_with_layers(base)
+
+
 def find_module_path(model: torch.nn.Module, module: torch.nn.Module) -> str | None:
     return next((name for name, candidate in model.named_modules() if candidate is module), None)
 

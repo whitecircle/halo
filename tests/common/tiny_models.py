@@ -64,6 +64,8 @@ from transformers import (
     MixtralForCausalLM,
     NemotronH_Omni_Reasoning_V3,
     NemotronH_Omni_Reasoning_V3_Config,
+    NemotronHConfig,
+    NemotronHForCausalLM,
     Olmo3Config,
     Olmo3ForCausalLM,
     PretrainedConfig,
@@ -232,7 +234,7 @@ def fill_release_scale_bias(model, slot: str = "e_score_correction_bias", seed: 
         if not name.endswith(slot):
             continue
         values = RELEASE_BIAS_CENTER + RELEASE_BIAS_SPREAD * torch.rand(
-            tensor.shape, generator=gen, dtype=torch.float32
+            tensor.shape, generator=gen, dtype=torch.float32, device="cpu"
         )
         if values.to(torch.bfloat16).unique().numel() == values.unique().numel():
             raise ValueError(
@@ -380,6 +382,17 @@ def _with_live_ple_convs(model: PreTrainedModel) -> PreTrainedModel:
     return model
 
 
+def _with_release_scale_bias(build: Callable[[dict], PreTrainedModel]) -> Callable[[dict], PreTrainedModel]:
+    """Random init zeroes a router's bias, where a release's reaches 42: a row at zero never sees it lose precision."""
+
+    def build_filled(overrides: dict) -> PreTrainedModel:
+        model = build(overrides)
+        fill_release_scale_bias(model)
+        return model
+
+    return build_filled
+
+
 def _tiny_remote(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
     """Remote code: the classes come from release ``repo``'s module, which needs the toolkit's shims to import."""
 
@@ -425,6 +438,13 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     # No AutoModelForCausalLM entry for mistral4 in transformers 5.20.
     "mistral4": TinyFamily(
         _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG), load_class=Mistral4ForCausalLM
+    ),
+    # Mamba: a conv and a recurrent scan along the sequence. Its layers are ``mixer``, which no attention spelling names,
+    # and most hold Mamba's two projections.
+    "nemotron_h": TinyFamily(
+        _with_release_scale_bias(_causal(NemotronHConfig, NemotronHForCausalLM, TINY_NEMOTRON_H_CONFIG)),
+        ulysses_cp=False,
+        attention_targets=("q_proj", "v_proj", "in_proj", "out_proj"),
     ),
     # Gated DeltaNet layers: a conv and a recurrent scan along the sequence.
     "qwen3_5_moe_text": TinyFamily(
@@ -512,6 +532,21 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         ),
         load_class=AutoModelForImageTextToText,
     ),
+    "nemotron_h_omni": TinyFamily(
+        _with_release_scale_bias(
+            _composite(
+                NemotronH_Omni_Reasoning_V3_Config,
+                NemotronH_Omni_Reasoning_V3,
+                TINY_NEMOTRON_H_CONFIG,
+                TINY_RADIO_VISION_CONFIG,
+                vision_hidden_size=TINY_RADIO_VISION_CONFIG["hidden_size"],
+                projector_hidden_size=TINY_NEMOTRON_H_CONFIG["hidden_size"],
+                image_token_id=18,
+            )
+        ),
+        load_class=AutoModelForImageTextToText,
+        ulysses_cp=False,
+    ),
     "qwen3_5_moe": TinyFamily(
         _composite(
             Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration, TINY_QWEN35_MOE_CONFIG, TINY_QWEN35_VISION_CONFIG
@@ -529,12 +564,14 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         ulysses_cp=False,
     ),
 }
-# Overrides under which a tiny model splits into two pipeline stages on a layer_types period with a MoE layer on each.
+# Overrides under which a tiny model splits into two pipeline stages on a layer_types period with a MoE layer on each,
+# over the vocabulary the shared packed rows draw from.
 TINY_PP_SPLIT_OVERRIDES = {
     "glm4_moe_lite": {"num_hidden_layers": 4},
     "inkling_mm_model": TINY_INKLING_PP_OVERRIDES,
     "inkling_text": TINY_INKLING_PP_OVERRIDES,
     "laguna": TINY_LAGUNA_PP_OVERRIDES,
+    "nemotron_h": {"vocab_size": 1024},
     "qwen3_5_moe_text": {"num_hidden_layers": 8},
 }
 
@@ -573,7 +610,7 @@ TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
     _tiny_remote(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
 )
 TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(MixtralConfig, MixtralForCausalLM, TINY_MIXTRAL_CONFIG))
-# Composites no family spec claims, so no EP layer wraps them, built on the classes the pinned transformers ships.
+# A composite no family spec claims, so no EP layer wraps it, built on the classes the pinned transformers ships.
 TINY_UNWRAPPED_COMPOSITE_FAMILIES: dict[str, TinyFamily] = {
     "minimax_m3_vl": TinyFamily(
         _composite(
@@ -582,18 +619,6 @@ TINY_UNWRAPPED_COMPOSITE_FAMILIES: dict[str, TinyFamily] = {
             TINY_MINIMAX_M3_CONFIG,
             TINY_MINIMAX_M3_VISION_CONFIG,
             projector_hidden_size=TINY_MINIMAX_M3_CONFIG["hidden_size"],
-        ),
-        load_class=AutoModelForImageTextToText,
-    ),
-    "nemotron_h_omni": TinyFamily(
-        _composite(
-            NemotronH_Omni_Reasoning_V3_Config,
-            NemotronH_Omni_Reasoning_V3,
-            TINY_NEMOTRON_H_CONFIG,
-            TINY_RADIO_VISION_CONFIG,
-            vision_hidden_size=TINY_RADIO_VISION_CONFIG["hidden_size"],
-            projector_hidden_size=TINY_NEMOTRON_H_CONFIG["hidden_size"],
-            image_token_id=18,
         ),
         load_class=AutoModelForImageTextToText,
     ),
@@ -669,18 +694,20 @@ def build_tiny_family_checkpoint(
     overrides: dict | None = None,
 ) -> None:
     """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab as a checkpoint the production loaders read. Rank 0
-    only. Sharded, so it carries the index attention names are read from. ``fp32_pins`` stores pinned parameters at
-    full fp32, as a release does."""
+    only. Sharded, so it carries the index attention names are read from. ``fp32_pins`` stores pinned tensors at full
+    fp32, as a release does."""
     torch.manual_seed(seed)
     model = tiny_family_model(family, tokenizer, overrides=overrides)
     if edit is not None:
         edit(model)
-    pinned = fp32_pinned_names(model) if fp32_pins else frozenset()
-    stored = {name: param.detach().clone() for name, param in model.named_parameters() if name in pinned}
+    pinned = fp32_pinned_names(model, include_buffers=True) if fp32_pins else frozenset()
+    stored = {
+        name: tensor.detach().clone() for name, tensor in model.state_dict(keep_vars=True).items() if name in pinned
+    }
     model.to(torch.bfloat16)
-    for name, param in model.named_parameters():
+    for name, tensor in model.state_dict(keep_vars=True).items():
         if name in stored:
-            param.data = stored[name]
+            tensor.data = stored[name]
     model.save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
     # As a real export does, or a vendor config leaving the class attribute unset reloads family-less.
     restore_model_type(model.config, target_dir)

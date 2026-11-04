@@ -127,6 +127,7 @@ def test_the_preprocessed_vlm_schema_is_the_declared_column_set():
         "pixel_values",
         "pixel_values_shape",
         "image_grid_thw",
+        "image_grid_hw",
     }
     assert set(VLM_OUTPUT_FEATURES) == expected, "the offline writer's Arrow schema changed"
     assert set(PreprocessedVLMDataCollator.required_dataset_columns) == expected, (

@@ -115,8 +115,8 @@ def reject_oversized_dispatch(capacity: int, *, num_topk: int, padded_hidden: in
             f"{DEEPEP_INDEX_LIMIT:,}. The dispatch kernel would illegal-access. The buffer is per-rank, "
             f"so expert_parallel_size does not lower it — reduce the tokens in one MoE forward: "
             f"per_device_train_batch_size=1, a shorter sequence (max_length), or in env-GRPO fewer "
-            f"generations / shorter trajectories (reasoning effort / max_turns / rollout length). At "
-            f"~175k tokens/rank, far beyond training."
+            f"generations / shorter trajectories (reasoning effort / max_turns / rollout length). The ceiling here "
+            f"is {DEEPEP_INDEX_LIMIT // (num_topk * padded_hidden):,} tokens/rank."
         )
     if spans_domains and GIN_MAX_TOKENS_PER_RANK and capacity > GIN_MAX_TOKENS_PER_RANK:
         raise ValueError(

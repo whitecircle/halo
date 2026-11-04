@@ -16,7 +16,7 @@ from tests.common import tiny_models
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import (
     TINY_MOE_FAMILIES,
-    TINY_UNWRAPPED_COMPOSITE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
     TinyFamily,
     fill_release_scale_bias,
     tiny_family_model,
@@ -24,7 +24,7 @@ from tests.common.tiny_models import (
 
 PP_SIZE = 2
 _BIAS_SLOT = "e_score_correction_bias"
-_BIAS_FAMILIES = {**TINY_MOE_FAMILIES, "nemotron_h_omni": TINY_UNWRAPPED_COMPOSITE_FAMILIES["nemotron_h_omni"]}
+_BIAS_FAMILIES = {**TINY_MOE_FAMILIES, "nemotron_h_omni": TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]}
 
 
 def _model() -> DeepseekV4ForCausalLM:

@@ -30,7 +30,7 @@ from tests.common.tiny_models import (
 
 # The name list the derivation replaced, kept as the oracle every roster family's verdict is held to.
 NAMED_GDN_PREFIXES = ("qwen3_5", "qwen3_next")
-SHORT_CONV_PREFIXES = ("lfm2",)
+SEQ_IDX_PREFIXES = ("lfm2", "nemotron_h")
 ROSTER = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 # The transformers configs whose verdict moves: GatedDeltaNet under a name the list never held, and the Qwen3.5
 # vision towers the prefix matched, which hold no GatedDeltaNet layer.
@@ -42,7 +42,7 @@ GDN_HEADS = {"linear_num_key_heads": 2, "linear_num_value_heads": 4}
 
 def _named_verdict(config) -> SegmentMarkers:
     named = model_type_matches(config, *NAMED_GDN_PREFIXES)
-    return SegmentMarkers(seq_idx=named or model_type_matches(config, *SHORT_CONV_PREFIXES), cu_seq_lens=named)
+    return SegmentMarkers(seq_idx=named or model_type_matches(config, *SEQ_IDX_PREFIXES), cu_seq_lens=named)
 
 
 @functools.cache
@@ -85,7 +85,8 @@ def test_every_qwen3_next_fixture_builds_qwen3_next():
 
 
 def test_across_transformers_only_gated_delta_net_layers_decide():
-    """Kimi Delta Attention (GLM-5 Next, Kimi Linear), Lightning attention (MiniMax) and the Mamba hybrids keep none.
+    """Kimi Delta Attention (GLM-5 Next, Kimi Linear), Lightning attention (MiniMax) and the Mamba hybrids keep none,
+    Nemotron-H's Mamba staying on ``seq_idx``.
     Only GatedDeltaNet families gain markers, and only the Qwen3.5 vision towers lose them."""
     moved, unconstructible, compared = set(), set(), 0
     for model_type, config_cls in transformers.CONFIG_MAPPING.items():

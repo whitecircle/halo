@@ -11,6 +11,7 @@ from halo.models.head_transform import resolve_head_transform
 from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module
 from halo.models.moe.balancing import accepts_native_balancing_bias, resolve_balancing_mode
 from halo.models.moe.config_fields import has_routed_experts
+from halo.models.moe.family_specs import find_moe_family_spec
 
 # Every family spelling of the multi-token-prediction tail-layer count.
 MTP_LAYER_COUNT_FIELDS: tuple[str, ...] = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "num_mtp_layers")
@@ -99,14 +100,27 @@ def _reject_live_mtp_layers(model: nn.Module) -> None:
     )
 
 
+def _reject_composite_with_a_text_class(model: nn.Module) -> None:
+    """A stage holds the backbone and the head at its root, and this composite keeps its head under the text class."""
+    config = getattr(model, "config", None)
+    family = find_moe_family_spec(getattr(config, "model_type", None))
+    if family is not None and family.text_only_layout is not None and text_config(config) is not config:
+        raise ValueError(
+            f"{type(model).__name__} splits only as its text class, which holds the head a last stage needs. "
+            f"Set text_only_model: true; reattach_vision_tower.py restores the composite on the export."
+        )
+
+
 def reject_unsupported_pp_structure(model: nn.Module) -> None:
-    """Raise if this model's structure cannot be split: no decoder-layer list, a family refusal, tied embeddings, a
-    head path beyond its ``HeadTransform``, live MTP layers, or an unregistered backbone."""
+    """Raise if this model's structure cannot be split: no decoder-layer list, a family refusal, a composite only its
+    text class splits, tied embeddings, a head path beyond its ``HeadTransform``, live MTP layers, or an unregistered
+    backbone."""
     backbone = require_backbone(model)
     backbone_name = type(backbone).__name__
     spec = resolve_pp_spec(backbone)
     if spec.refusal is not None:
         raise ValueError(f"{backbone_name} is refused for pipeline parallelism. {spec.refusal}")
+    _reject_composite_with_a_text_class(model)
     _reject_tied_embeddings(model)
     resolve_head_transform(model)  # raises on a head path the last stage cannot reproduce
     _reject_live_mtp_layers(model)

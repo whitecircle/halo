@@ -4,7 +4,7 @@ So does costing a packed row as one document, since the varlen kernels attend wi
 import pytest
 import torch
 from torch import nn
-from transformers import CONFIG_MAPPING
+from transformers import CONFIG_MAPPING, NemotronHForCausalLM
 
 from halo.models.attention.layout import (
     INDEX_PASSES,
@@ -15,7 +15,7 @@ from halo.models.attention.layout import (
     attention_layout,
     attention_layout_from_config,
 )
-from tests.common.models import QWEN3_8_FLASH_NEXT
+from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG, QWEN3_8_FLASH_NEXT, TINY_NEMOTRON_H_CONFIG
 from tests.common.tokenizers import load_cached_config
 
 # gpt-oss-120b: 18 full + 18 sliding(128) layers, 64 heads of 64.
@@ -326,6 +326,7 @@ _ROSTER = {
     "lfm2": {"full"},
     "mistral4": {"full"},
     "mistral": {"window"},
+    "nemotron_h": {"full", "none"},
     "step3p7": {"full"},
     "zaya": {"full"},
 }
@@ -345,6 +346,42 @@ def test_lfm2_moe_declares_its_conv_layers_through_layer_types():
     """The hub checkpoint carries the list; a default config leaves it None and derives all-full."""
     config = CONFIG_MAPPING["lfm2_moe"](layer_types=["conv", "full_attention"] * 20, num_hidden_layers=40)
     assert {layer.kind for layer in attention_layout_from_config(config).layers} == {"none", "full"}
+
+
+def _nemotron_h_release_config():
+    return CONFIG_MAPPING["nemotron_h"](
+        **{k: v for k, v in NEMOTRON_H_RELEASE_TEXT_CONFIG.items() if k != "model_type"}
+    )
+
+
+def test_only_nemotrons_attention_layers_score_keys():
+    """40 Mamba and 40 MoE blocks read no key matrix; the 8 attention blocks cost their heads at every key."""
+    config = _nemotron_h_release_config()
+    assert config.layer_types.count("linear_attention") == 40 and config.layer_types.count("moe") == 40
+    layout = attention_layout_from_config(config)
+    seq_len = 8192
+    assert layout.flops_per_token(seq_len) == pytest.approx(SCORE_PASSES * 32 * (128 + 128) * seq_len * 8, rel=1e-12)
+    assert layout.describe() == "80×no-attention + 8×full @ width 8192"
+
+
+def test_nemotrons_blocks_read_their_kinds_off_the_module_tree():
+    """A rank's layout reads the layers it holds, whose block type is what transformers keeps on them."""
+    config = CONFIG_MAPPING["nemotron_h"](**{k: v for k, v in TINY_NEMOTRON_H_CONFIG.items() if k != "model_type"})
+    with torch.device("meta"):
+        layout = attention_layout(NemotronHForCausalLM(config))
+    assert layout.source == "layers"
+    assert layout.describe() == "5×no-attention + 1×full @ width 512"
+
+
+@pytest.mark.parametrize("layer_type", ["moe", "mlp"])
+def test_a_feed_forward_block_has_a_cost_rule_of_its_own(layer_type, monkeypatch):
+    """Without its entry the block raises rather than being costed as full attention."""
+    config = _nemotron_h_release_config()
+    config.layer_types = [layer_type, "full_attention"]
+    assert {layer.kind for layer in attention_layout_from_config(config).layers} == {"none", "full"}
+    monkeypatch.delitem(LAYER_TYPE_KINDS, layer_type)
+    with pytest.raises(ValueError, match=f"{layer_type!r}.*no attention cost rule"):
+        attention_layout_from_config(config)
 
 
 def test_the_vocabulary_covers_every_layer_type_the_roster_declares():

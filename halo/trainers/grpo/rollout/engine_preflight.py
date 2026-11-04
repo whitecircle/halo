@@ -1,6 +1,6 @@
 """COLLECTIVE preflights of each rollout server: its context window, its launch flags, and whether its log-probs are the
 reference the IS ratio divides by. Rank 0 waits for every server, as group formation would, so a loading one cannot pass unread; its
-refusal raises everywhere, while a server that answers /health and then cannot answer a probe only warns."""
+refusal raises everywhere, while a server that is up and then cannot answer a probe only warns."""
 
 import logging
 import math
@@ -419,8 +419,8 @@ def _wait_then_check(
     *args,
 ) -> None:
     for url in urls:
-        # Building the client polls /health, raising ConnectionError past the deadline. A server held by a dead
-        # trainer's pause answers /health, and each probe would wait out its timeout and pass unread.
+        # Building the client polls its liveness route, raising ConnectionError past the deadline. A server held by a
+        # dead trainer's pause still answers it, and each probe would wait out its timeout and pass unread.
         client = client_cls(base_url=url, connection_timeout=connection_timeout, retry_policy=_PROBE_RETRY)
         try:
             client.probe_generation()

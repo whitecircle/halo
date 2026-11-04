@@ -16,11 +16,12 @@ from halo.data.collators.fixed_shape import FixedShapeCollator
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel import stage as stage_module
 from halo.distributed.pipeline_parallel.families import resolve_pp_spec
+from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_structure
 from halo.distributed.pipeline_parallel.runner import resolve_batch_pad_values
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss
 from halo.models.module_tree import backbone_with_layers
-from halo.models.segment_markers import segment_markers_for
+from halo.models.segment_markers import SegmentMarkers, packed_row_segment_kwargs, segment_markers_for
 from tests.common.packed_flash_varlen import (
     PACKING_FAMILIES,
     PAD_ID,
@@ -51,12 +52,16 @@ VOCAB_CEIL = 1000
 
 @functools.cache
 def seam_sweep_skip(name: str) -> str | None:
-    """Why ``name`` has no seam to sweep, or None: PP does not register its backbone, its mixers read the markers, or
-    it never resolves to flash."""
+    """Why ``name`` has no seam to sweep, or None: PP does not register its backbone or refuses its class, its mixers
+    read the markers, or it never resolves to flash."""
     model = tiny_family_model(PACKING_FAMILIES[name])
     spec = resolve_pp_spec(backbone_with_layers(model))
     if not spec.validated or spec.refusal is not None:
         return "pipeline parallelism does not register its backbone"
+    try:
+        reject_unsupported_pp_structure(model)
+    except ValueError as refused:
+        return str(refused)
     if segment_markers_for(model.config).cu_seq_lens:
         return "its GatedDeltaNet mixers read the markers the seam hands them, so no arm runs without it"
     if not getattr(model, "_supports_flash_attn", False):
@@ -105,10 +110,15 @@ def sweep_layouts(model_config) -> dict[str, dict[str, torch.Tensor]]:
     }
 
 
+def _document_markers(position_ids: torch.Tensor, markers: SegmentMarkers) -> dict:
+    """What a mixer outside attention reads to keep documents apart, which no arm runs without."""
+    return packed_row_segment_kwargs(position_ids, SegmentMarkers(seq_idx=True)) if markers.seq_idx else {}
+
+
 @contextlib.contextmanager
 def seam_withheld() -> Iterator[None]:
     """The stage forward with no varlen set handed to the backbone."""
-    with mock.patch.object(stage_module, "packed_row_segment_kwargs", lambda position_ids, markers: {}):
+    with mock.patch.object(stage_module, "packed_row_segment_kwargs", _document_markers):
         yield
 
 
@@ -139,7 +149,8 @@ def _chain(stages: list, input_ids: torch.Tensor, position_ids: torch.Tensor) ->
 
 
 def _unsplit(model, input_ids: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-    return model(input_ids=input_ids, position_ids=position_ids, use_cache=False).logits
+    markers = _document_markers(position_ids, segment_markers_for(model.config))
+    return model(input_ids=input_ids, position_ids=position_ids, use_cache=False, **markers).logits
 
 
 def _compare(where: str, seam: Forward, derived: Forward, unsplit: Forward, width: int) -> list[str]:

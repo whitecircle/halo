@@ -85,7 +85,7 @@ The mode holds an **export contract**: `bias_update` is accepted only where the 
 |---|---|
 | Zaya | Native persistent `balancing_biases` buffer, in every parallelism mode |
 | GPT-OSS | `router.bias`, the hub router's own logit-space bias |
-| GLM-4, Laguna, GLM-5 Next, Inkling, DeepSeek-V4, Step-3.7 | `gate.e_score_correction_bias` (Laguna's hub spelling: `experts.e_score_correction_bias`) |
+| GLM-4, Laguna, GLM-5 Next, Inkling, DeepSeek-V4, Step-3.7, Nemotron-H | `gate.e_score_correction_bias` (Laguna's hub spelling: `experts.e_score_correction_bias`) |
 | Bailing / Ling | The hub gate's persistent `expert_bias`, adopted whole — no side-buffer fallback |
 | LFM-2 | The block's `expert_bias`, materialized with `use_expert_bias` flipped on for the export |
 | Qwen3, Qwen3.5/3.6, Qwen3-Next, Qwen3.8-Flash-Next, Mistral4, Cohere2 MoE | None — `bias_update_transient` only |
@@ -167,7 +167,7 @@ Every case the hooks cannot route raises instead of dropping the gradient: a kep
 
 ### `auto` resolution per family
 
-`auto` wants `bias_update` on three signals: a native `balancing_biases` router (Zaya); EP layers that sever the aux-loss path (DeepSeek-V4, Bailing, Inkling); or a `forward` taking no `output_router_logits` while an EP layer accepts the bias.
+`auto` wants `bias_update` on three signals: a native `balancing_biases` router (Zaya); EP layers that sever the aux-loss path (DeepSeek-V4, Bailing, Inkling, Nemotron-H); or a `forward` taking no `output_router_logits` while an EP layer accepts the bias.
 
 It **commits** only where the bias would land in exported state. GLM-4 MoE Lite, LFM-2 and Step-3.7 qualify on the third signal — none of their modelings has aux-loss machinery. GLM-5 Next does not: its forward honors the flag, so `auto` gives `aux_loss` while the exported slot still serves an explicit `bias_update`, the Laguna shape.
 

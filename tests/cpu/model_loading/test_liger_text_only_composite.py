@@ -21,6 +21,7 @@ from halo.model_loading.parallel import loader as model_loading
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.models.config_access import TOOLKIT_STAMP_PREFIX, config_export_ready, text_config
 from tests.common.parallelism import make_parallelism_config
+from tests.common.repo import probe_findings
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 FLCE = "fused_linear_cross_entropy"
@@ -125,6 +126,76 @@ def test_the_composite_class_load_keeps_the_fused_loss_off(checkpoint, flash_nex
     assert getattr(model.config, dispatch.LIGER_APPLIED_CONFIG_ATTR)[FLCE] is False
     assert [call[FLCE] for call in flash_next_applier.calls] == [False]
     assert [r for r in caplog.records if WRAPPER_WARNING in r.getMessage()]
+
+
+def _nemotron_flags(config, **overrides) -> dict:
+    model_type, fallback = dispatch._liger_model_types(config)
+    resolved, applier = dispatch._resolve_applier(model_type, fallback)
+    return dispatch._build_liger_config(applier, resolved, overrides, frozenset(), wrapper_head=resolved != model_type)
+
+
+def test_nemotrons_composite_takes_cross_entropy_where_its_tower_defaults_to_the_fused_loss():
+    """The tower's default turns CE off for a fused head the composite never reaches, and CE does reach its loss."""
+    composite = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]).config
+    assert _nemotron_flags(composite) == {
+        "rope": False,
+        "cross_entropy": True,
+        FLCE: False,
+        "rms_norm": True,
+    }
+    assert _nemotron_flags(text_config(composite)) == {
+        "rope": False,
+        "cross_entropy": False,
+        FLCE: True,
+        "rms_norm": True,
+    }
+
+
+def test_a_composite_keeps_a_cross_entropy_turned_off():
+    """By the user, or by the parallelism rules, which write the flag the same way."""
+    composite = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]).config
+    assert _nemotron_flags(composite, cross_entropy=False)["cross_entropy"] is False
+
+
+def test_nemotrons_roles_reach_the_classes_of_both_routes():
+    """Subprocess: the applier rebinds the upstream classes for the rest of the process. Each route's flags as the
+    dispatch resolves them, and the norm class each builds from, the head only on the text class."""
+    script = """
+import torch
+from transformers import AutoModelForCausalLM
+from transformers.models.nemotron_h import modeling_nemotron_h as modeling
+
+from halo.model_loading.liger.dispatch import apply_liger_kernel
+from tests.common.models import TINY_NEMOTRON_H_CONFIG
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
+
+failures = []
+stock_norm, stock_head = modeling.NemotronHRMSNorm, modeling.NemotronHForCausalLM.forward
+
+torch.manual_seed(0)
+composite_config = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]).config
+applied = apply_liger_kernel(composite_config, None)
+if applied["fused_linear_cross_entropy"] or not applied["cross_entropy"] or not applied["rms_norm"]:
+    failures.append(f"composite flags {applied}")
+if modeling.NemotronHForCausalLM.forward is not stock_head:
+    failures.append("the composite's tower took the fused head")
+if modeling.NemotronHRMSNorm is stock_norm:
+    failures.append("the composite's tower kept the eager norm")
+composite = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"])
+tower_norm = composite.language_model.model.norm_f
+if tower_norm.native_rms_casting_mode != "gemma":
+    failures.append(f"composite norm mode {tower_norm.native_rms_casting_mode}")
+
+text = tiny_family_model(TINY_MOE_FAMILIES["nemotron_h"])
+applied = apply_liger_kernel(text.config, None)
+if not applied["fused_linear_cross_entropy"] or applied["cross_entropy"]:
+    failures.append(f"text flags {applied}")
+if modeling.NemotronHForCausalLM.forward is stock_head:
+    failures.append("the text class kept its stock head")
+print("FAILURES:" + "|".join(failures))
+"""
+    failures = probe_findings(script, "FAILURES:")
+    assert not failures, "\n".join(failures)
 
 
 def _composite_config(model_type: str):

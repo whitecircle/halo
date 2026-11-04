@@ -181,6 +181,7 @@ runtime tensors; the family's `ExpertLayout` then writes them as it would withou
   convention.
 - GLM4/Laguna/LFM2/Qwen3-Next (`FUSED_SPLIT_PER_EXPERT`) split that to per-expert names.
 - Qwen3/Bailing (`SEPARATE_GLU`) write per-expert `experts.{i}.{gate,up,down}_proj.weight`.
+- Nemotron-H (`SEPARATE_MLP`) writes per-expert `experts.{i}.{up,down}_proj.weight`.
 
 The result is a standard HuggingFace checkpoint; ETP sharding is re-applied automatically at model
 patching when `expert_tp_size > 1`. Per-rank sharded EP save is rejected — see below.

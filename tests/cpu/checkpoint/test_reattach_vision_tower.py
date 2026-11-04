@@ -9,7 +9,6 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForImageTextToText, Glm5NextConfig, Glm5NextForConditionalGeneration
-from transformers.core_model_loading import PrefixChange
 from transformers.models.qwen3_5_moe import (
     Qwen3_5MoeConfig,
     Qwen3_5MoeForCausalLM,
@@ -20,14 +19,12 @@ from halo.checkpoint import config_export
 from halo.checkpoint.tools import vision_reattach
 from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
-from halo.model_loading import model_preparation
 from halo.model_loading.model_preparation import auto_load_model
-from halo.models.conversion_overrides import ConversionOverride, register_conversion_overrides
-from halo.models.moe.family_specs import CompositeTextLayout, MoEFamilySpec
-from tests.common.conversion_mapping import restored_conversion_mapping
+from halo.models.moe.family_specs import NEMOTRON_H, CompositeTextLayout, MoEFamilySpec
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
-from tests.common.tiny_models import TINY_UNWRAPPED_COMPOSITE_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, TINY_UNWRAPPED_COMPOSITE_FAMILIES, tiny_family_model
 
+_COMPOSITES = {**TINY_UNWRAPPED_COMPOSITE_FAMILIES, "nemotron_h_omni": TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]}
 # Composites that keep their text tower under ``language_model.`` whole, with what each declares.
 _DECLARED_LAYOUTS = {
     "minimax_m3_vl": CompositeTextLayout(
@@ -194,7 +191,7 @@ def declared_composite(request, tmp_path, monkeypatch):
     tensors at the root, a marker on the head, under the text sub-config. The spec is claimed for this test alone."""
     name = request.param
     torch.manual_seed(0)
-    composite = tiny_family_model(TINY_UNWRAPPED_COMPOSITE_FAMILIES[name])
+    composite = tiny_family_model(_COMPOSITES[name])
     spec = MoEFamilySpec(
         model_types=(composite.config.model_type, composite.config.text_config.model_type),
         text_only_layout=_DECLARED_LAYOUTS[name],
@@ -240,7 +237,7 @@ def test_a_declared_layout_reloads_as_the_composite_with_the_trained_head(declar
     name, composite, _base_tensors, base_dir, export_dir = declared_composite
     out = tmp_path / "out"
     reattach_vision_tower(export_dir, base_dir, str(out), trust_remote_code=False)
-    reloaded = TINY_UNWRAPPED_COMPOSITE_FAMILIES[name].load_class.from_pretrained(out, dtype=torch.float32)
+    reloaded = _COMPOSITES[name].load_class.from_pretrained(out, dtype=torch.float32)
     assert type(reloaded) is type(composite)
     # Nemotron's composite exposes no output embedding of its own.
     head = reloaded.get_output_embeddings() or reloaded.language_model.get_output_embeddings()
@@ -248,46 +245,28 @@ def test_a_declared_layout_reloads_as_the_composite_with_the_trained_head(declar
     assert torch.equal(reloaded.get_input_embeddings().weight, composite.get_input_embeddings().weight)
 
 
-def test_a_text_only_load_exports_and_reattaches_to_the_release_spelling(tmp_path, monkeypatch):
-    """The whole path on Nemotron's real conversions: the composite's level dropped through an override, the head
-    trained, a text-only export in the tower's spelling, then the composite again."""
+def test_the_roster_declares_nemotrons_layout():
+    assert NEMOTRON_H.text_only_layout == _DECLARED_LAYOUTS["nemotron_h_omni"]
+
+
+def test_a_text_only_load_exports_and_reattaches_to_the_release_spelling(tmp_path):
+    """The whole path on Nemotron's real spec and conversions: the composite's level dropped, the head trained, a
+    text-only export in the tower's spelling, then the composite again."""
     torch.manual_seed(0)
-    composite = tiny_family_model(TINY_UNWRAPPED_COMPOSITE_FAMILIES["nemotron_h_omni"])
+    composite = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"])
     base_dir, export_dir, out = str(tmp_path / "base"), str(tmp_path / "export"), str(tmp_path / "out")
     composite.save_pretrained(base_dir)
-    spec = MoEFamilySpec(
-        model_types=("nemotron_h_omni", "nemotron_h"), text_only_layout=_DECLARED_LAYOUTS["nemotron_h_omni"]
-    )
+    text_only = auto_load_model(base_dir, text_only=True, dtype=torch.float32)
+    assert type(text_only).__name__ == "NemotronHForCausalLM"
+    assert torch.equal(text_only.model.embeddings.weight, composite.language_model.model.embeddings.weight)
+    with torch.no_grad():
+        text_only.lm_head.weight.fill_(3.5)
+    save_full_checkpoint(text_only, export_dir, source_dir=base_dir)
+    exported = load_file(os.path.join(export_dir, "model.safetensors"))
+    assert {key.split(".")[0] for key in exported} == {"backbone", "lm_head"}, sorted(exported)[:6]
+    assert AutoConfig.from_pretrained(export_dir).model_type == "nemotron_h"
 
-    def claim(model_type):
-        return spec if model_type in spec.model_types else None
-
-    for module in (vision_reattach, config_export, model_preparation):
-        monkeypatch.setattr(module, "find_moe_family_spec", claim)
-    upstream = (
-        (("backbone.",), ("model.",)),
-        (("mixer.experts.*.up_proj.weight",), ("mixer.experts.up_proj",)),
-        (("mixer.experts.*.down_proj.weight",), ("mixer.experts.down_proj",)),
-    )
-    with restored_conversion_mapping():
-        register_conversion_overrides(
-            [
-                ConversionOverride(
-                    "nemotron_h", upstream, lambda entries: [PrefixChange(prefix_to_remove="language_model"), *entries]
-                )
-            ]
-        )
-        text_only = auto_load_model(base_dir, text_only=True, dtype=torch.float32)
-        assert type(text_only).__name__ == "NemotronHForCausalLM"
-        assert torch.equal(text_only.model.embeddings.weight, composite.language_model.model.embeddings.weight)
-        with torch.no_grad():
-            text_only.lm_head.weight.fill_(3.5)
-        save_full_checkpoint(text_only, export_dir, source_dir=base_dir)
-        exported = load_file(os.path.join(export_dir, "model.safetensors"))
-        assert {key.split(".")[0] for key in exported} == {"backbone", "lm_head"}, sorted(exported)[:6]
-        assert AutoConfig.from_pretrained(export_dir).model_type == "nemotron_h"
-
-        reattach_vision_tower(export_dir, base_dir, out, trust_remote_code=False)
+    reattach_vision_tower(export_dir, base_dir, out, trust_remote_code=False)
 
     assert set(load_file(os.path.join(out, "model.safetensors"))) == set(
         load_file(os.path.join(base_dir, "model.safetensors"))

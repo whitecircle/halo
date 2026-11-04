@@ -116,7 +116,7 @@ forward's scope (`capacity_scope`, a `CapacityScope` in
 `halo/distributed/expert_parallel/deepep/capacity.py`), so the first-layer miss lands on every rank
 together. The trainer re-registers the hook after PEFT wrapping: a task-typed `PeftModel` reaches the
 model it wraps through `.forward()`, which runs no pre-hook. A caller entering the backbone directly
-(TRL's chunked log-prob path peels `base_model` off the wrapper) opens its own scope with
+(the chunked log-prob path peels the hidden-state backbone off the wrapper) opens its own scope with
 `bump_forward_generation()`.
 
 A layer that dispatches more tokens than the cached capacity raises rather than under-size the wire

@@ -24,7 +24,7 @@ from tests.common.ep_reference import random_token_batch
 from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
-from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
 from tests.common.training_checks import training_run_checks
 
@@ -64,6 +64,7 @@ class EPSftRoundTrip:
     native_bias_layer: int | None = None
     balancing_callbacks: bool = False
     reload_in_bf16: bool = False
+    fp32_pins: bool = False
 
     def after_load(self, model: PreTrainedModel, ep_layers: list) -> dict[str, bool]:
         return {}
@@ -85,7 +86,7 @@ class EPSftRoundTrip:
         checks: dict[str, bool] = {}
         metrics: dict[str, float] = {}
         device = ctx.device
-        tiny = TINY_MOE_FAMILIES[self.family]
+        tiny = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}[self.family]
 
         ensure_model_downloaded(QWEN3_0_6B, ctx.rank)
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
@@ -95,6 +96,7 @@ class EPSftRoundTrip:
             f"{self.family}_sft_roundtrip",
             tokenizer,
             SEED,
+            fp32_pins=self.fp32_pins,
             edit=self._pin_composite_token_ids if self.composite_token_ids else None,
         )
         # Rank 0's dir on every rank: the gathered save is written once and read back by every rank.
@@ -187,8 +189,10 @@ class EPSftRoundTrip:
         if self.reload_in_bf16:
             reloaded.to(torch.bfloat16)
         if self.native_bias_layer is not None:
-            reloaded_bias = (
-                backbone_with_layers(reloaded).layers[self.native_bias_layer].mlp.gate.e_score_correction_bias
+            reloaded_bias = next(
+                module.e_score_correction_bias
+                for module in backbone_with_layers(reloaded).layers[self.native_bias_layer].modules()
+                if hasattr(module, "e_score_correction_bias")
             )
             checks["e_score_bias_roundtrip"] = torch.equal(
                 reloaded_bias.float().cpu(), ep_layers[0].gate.e_score_correction_bias.float().cpu()

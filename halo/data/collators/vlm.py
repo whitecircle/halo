@@ -15,6 +15,7 @@ from halo.data.completion_spans import (
 )
 from halo.data.turn_markers import reject_missing_response_marker, resolve_eos_token_ids
 from halo.data.vlm_render import (
+    VLM_GRID_COLUMNS,
     VLM_OUTPUT_FEATURES,
     reject_over_length_vlm_batch,
     render_vlm_text,
@@ -153,17 +154,18 @@ def _stacked_vision_tensors(examples: list[dict[str, Any]]) -> dict[str, torch.T
     if pixel_values:
         # For Qwen-VL pixel_values are already flattened per image.
         tensors["pixel_values"] = torch.cat(pixel_values, dim=0)
-    grids = []
-    for ex in examples:
-        grid = ex.get("image_grid_thw")
-        if grid is None:
-            continue
-        if isinstance(grid, list):
-            grids.extend(grid if isinstance(grid[0], list) else [grid])
-        else:
-            grids.append(grid.tolist() if hasattr(grid, "tolist") else grid)
-    if grids:
-        tensors["image_grid_thw"] = torch.tensor(grids, dtype=torch.long)
+    for column in VLM_GRID_COLUMNS:
+        grids = []
+        for ex in examples:
+            grid = ex.get(column)
+            if grid is None:
+                continue
+            if isinstance(grid, list):
+                grids.extend(grid if isinstance(grid[0], list) else [grid])
+            else:
+                grids.append(grid.tolist() if hasattr(grid, "tolist") else grid)
+        if grids:
+            tensors[column] = torch.tensor(grids, dtype=torch.long)
     return tensors
 
 
@@ -181,7 +183,7 @@ class PreprocessedVLMDataCollator:
         self._warned: set[str] = set()
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        # Pad only: re-truncating without trimming pixel_values/image_grid_thw desyncs placeholders.
+        # Pad only: re-truncating without trimming pixel_values and their grid desyncs placeholders.
         max_len = max(len(ex["input_ids"]) for ex in examples)
         if max_len > self.max_length:
             warn_once(

@@ -18,6 +18,9 @@ from halo.data.conversation import (
     reject_unsupported_media_parts,
 )
 
+# The per-image patch grid a processor emits beside ``pixel_values``: Qwen's (temporal, height, width), Nemotron's
+# (height, width).
+VLM_GRID_COLUMNS = ("image_grid_thw", "image_grid_hw")
 # A preprocessed VLM dataset's schema, pinned on the bake (an all-None batch infers null columns).
 VLM_OUTPUT_FEATURES = Features(
     {
@@ -26,7 +29,7 @@ VLM_OUTPUT_FEATURES = Features(
         "labels": Sequence(Value("int64")),
         "pixel_values": Value("binary"),
         "pixel_values_shape": Sequence(Value("int64")),
-        "image_grid_thw": Sequence(Sequence(Value("int64"))),
+        **dict.fromkeys(VLM_GRID_COLUMNS, Sequence(Sequence(Value("int64")))),
     }
 )
 
@@ -93,7 +96,7 @@ def reject_over_length_vlm_batch(encoded, max_length: int | None, subject: str) 
         f"VLM {subject} contains a {longest}-token sequence, {longest - max_length} tokens over "
         f"max_length={max_length}, and image expansion happens at collation so a text-only pre-filter "
         f"could not see it. VLM sequences cannot be truncated at collation (cutting expanded image "
-        f"placeholder tokens desyncs them from pixel_values/image_grid_thw), and a runtime batch cannot "
+        f"placeholder tokens desyncs them from pixel_values and their grid), and a runtime batch cannot "
         f"drop rows without desyncing DP ranks. Raise max_length, pre-filter over-length rows (e.g. via "
         f"dataset preprocessing), or use smaller images."
     )
@@ -145,19 +148,22 @@ def decode_image_part(part: dict[str, Any]) -> Image.Image:
 
 def resolve_image_token_ids(tokenizer, processor=None) -> set:
     """Image/video placeholder token ids to mask out of labels, unioned over every source: a missed one
-    raises nothing, its tokens just train as text."""
+    raises nothing, its tokens just train as text. A processor that looks up a token its tokenizer lacks holds the
+    unknown token's id, which no placeholder is."""
     image_token_ids = set()
+    unknown_token_id = getattr(tokenizer, "unk_token_id", None)
 
     for obj in (processor, getattr(processor, "tokenizer", None), tokenizer):
         for attr in ("image_token_id", "video_token_id"):
             token_id = getattr(obj, attr, None)
-            if token_id is not None:
+            if token_id is not None and token_id != unknown_token_id:
                 image_token_ids.add(token_id)
 
     vocab = tokenizer.get_vocab()
     common_image_tokens = [
         "<image>",
         "<img>",
+        "</img>",
         "<|image|>",
         "<|image_pad|>",
         "<|video_pad|>",

@@ -1,5 +1,6 @@
 """Fusing a per-expert checkpoint's local experts into the model's 3D tensors: ``experts.N.gate_proj.weight [M, H]``
-into ``experts.gate_up_proj [E, 2M, H]``, reading only this rank's experts."""
+into ``experts.gate_up_proj [E, 2M, H]``, or a gateless expert's ``up_proj`` into a bank of its own, reading only this
+rank's experts."""
 
 from __future__ import annotations
 
@@ -21,13 +22,16 @@ from halo.models.moe.family_specs import per_expert_fusion_map
 
 logger = logging.getLogger(__name__)
 
+# The model tensor each kind of task fills.
+_FUSED_BANKS = {"gate_up": "gate_up_proj", "up": "up_proj", "down": "down_proj"}
+
 
 @dataclass(frozen=True)
 class FusionTask:
     """One fused model tensor and the per-expert checkpoint keys it stacks."""
 
     model_key: str
-    kind: str  # "gate_up" or "down"
+    kind: str  # A key of ``_FUSED_BANKS``.
     # {expert index: {projection suffix: (disk key, shard file)}}, this rank's experts only.
     experts: dict[int, dict[str, tuple[str, str]]]
 
@@ -94,7 +98,10 @@ class ExpertFuser:
         tasks = []
         for layer_prefix, fusion_groups in groups.items():
             for kind, experts in fusion_groups.items():
-                model_key = layer_prefix + ("gate_up_proj" if kind == "gate_up" else "down_proj")
+                model_key = layer_prefix + _FUSED_BANKS[kind]
+                # The map keys ``up_proj.weight`` as a half of the GLU pair; a model holding it alone has no gate.
+                if kind == "gate_up" and model_key not in model_keys and layer_prefix + "up_proj" in model_keys:
+                    kind, model_key = "up", layer_prefix + "up_proj"
                 if model_key in model_keys:
                     tasks.append(FusionTask(model_key, kind, experts))
                     continue
@@ -152,6 +159,14 @@ class ExpertFuser:
                         "of its two GLU halves in the checkpoint — fusing a half-present expert would "
                         "install garbage for the missing half."
                     )
+        if task.kind == "up":
+            for expert_idx, suffixes in task.experts.items():
+                if {per_expert_fusion_map()[suffix][1] for suffix in suffixes} != {1}:
+                    raise RuntimeError(
+                        f"EP lazy load: expert {expert_idx} carries {sorted(suffixes)} in the checkpoint, but "
+                        f"{task.model_key!r} belongs to gateless experts — stacking a gate half would install its "
+                        "weights as the up projection at the same shape."
+                    )
 
     def execute(
         self,
@@ -183,7 +198,7 @@ class ExpertFuser:
             for task in tasks:
                 self.validate_task(task)
                 tensor = (
-                    self._fuse_gate_up(task, handles) if task.kind == "gate_up" else self._fuse_down(task, handles)
+                    self._fuse_gate_up(task, handles) if task.kind == "gate_up" else self._fuse_single(task, handles)
                 )
                 verify_loaded_shape(
                     model,
@@ -218,8 +233,8 @@ class ExpertFuser:
             slices.append(torch.cat([gate, up], dim=0))
         return torch.stack(slices, dim=0)
 
-    def _fuse_down(self, task: FusionTask, handles: dict | StreamingCheckpointReader) -> torch.Tensor:
-        """The single down projection (``down_proj`` or ``w2``) → ``[E_local, H, M]``."""
+    def _fuse_single(self, task: FusionTask, handles: dict | StreamingCheckpointReader) -> torch.Tensor:
+        """The one projection of a kind (``down_proj`` or ``w2`` ``[E_local, H, M]``, a gateless ``up_proj``) stacked."""
         return torch.stack(
             [self._read_tensor(handles, *next(iter(task.experts[idx].values()))) for idx in sorted(task.experts)],
             dim=0,

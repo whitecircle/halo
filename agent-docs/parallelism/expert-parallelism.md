@@ -46,6 +46,7 @@ the gather and in `merge_ep_shards.py` alike. Callers reach the layers through `
 | Cohere2 MoE | `Cohere2MoeSparseMoeBlock` | `EPCohere2MoELayer` | [cohere2-moe.md](../models/cohere2-moe.md) |
 | GLM-5 Next | `Glm5NextTextMoE` | `EPGlm5NextMoELayer` | [glm5-next.md](../models/glm5-next.md) |
 | Step-3.7 Flash | `Step3p7SparseMoeBlock` | `EPStep3p7MoELayer` | [step3p7.md](../models/step3p7.md) |
+| Nemotron-H | `NemotronHMoE` | `EPNemotronHMoELayer` | [nemotron-h.md](../models/nemotron-h.md) |
 
 Source of truth: `MOE_LAYER_MAP` in `halo/distributed/expert_parallel/families/roster.py`, built from its
 explicit import of every family class.
@@ -65,7 +66,7 @@ explicit import of every family class.
 
 ### Per-family EP restrictions
 
-A family declares six capabilities, five on its `MoEFamilySpec` and one on its EP layer, all on by
+A family declares seven capabilities, six on its `MoEFamilySpec` and one on its EP layer, all on by
 default; a family turning one off is the whole restriction. Every family absent from the table inherits the defaults and runs the full
 EP surface. The table is pinned against the specs and classes by
 `tests/cpu/parallelism/test_docs_limitation_tables.py`.
@@ -81,6 +82,8 @@ EP surface. The table is pinned against the specs and classes by
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `FAMILY.weight_sync_refusal` |
 | Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `FAMILY.supports_lazy_loading` |
 | GLM-5 Next | RL weight sync — both pinned engines' expert loaders are per-expert only, and no sync into either is validated | `FAMILY.weight_sync_refusal` |
+| Nemotron-H | RL weight sync — both pinned engines serve the release, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
+| Nemotron-H | training the composite through the release's modeling file — its forward hands the text tower no `seq_idx` and reads no `image_grid_hw` | `FAMILY.remote_composite_refusal` |
 | Qwen3-Next | RL weight sync — both pinned engines load the per-expert keys the gather emits, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Qwen3.8-Flash-Next | RL weight sync — no sync into either pinned engine is validated, and on SM100-family GPUs SGLang 0.5.22 caches a padded copy of each hyper-connection mix-up weight that an update leaves stale ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)) | `FAMILY.weight_sync_refusal` |
 

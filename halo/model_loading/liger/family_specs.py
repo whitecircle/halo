@@ -42,6 +42,8 @@ class LigerFamilySpec:
     glu_mlp: tuple[str, ...] = ()
     # `*ForCausalLM` classes whose forward the generic fused loss reproduces exactly.
     causal_lm: tuple[str, ...] = ()
+    # The head casts its logits to fp32, which a forward with no labels keeps: a log-softmax over them runs in that dtype.
+    fp32_logits: bool = False
     # The head adds the router aux loss after the projection the fused loss replaces, so the fused forward refuses
     # `output_router_logits`; a head that only forwards the flag passes it through.
     router_aux_loss_in_head: bool = False
@@ -77,6 +79,8 @@ class LigerFamilySpec:
             )
         if self.router_aux_loss_in_head and not self.causal_lm:
             raise ValueError(f"LigerFamilySpec for {self.model_types} declares an in-head aux loss but no causal_lm")
+        if self.fp32_logits and not self.causal_lm:
+            raise ValueError(f"LigerFamilySpec for {self.model_types} declares fp32 logits but no causal_lm")
         if self.rms_norm_casting_mode not in _RMS_NORM_CASTING_MODES:
             raise ValueError(
                 f"LigerFamilySpec for {self.model_types} sets rms_norm_casting_mode="
@@ -176,6 +180,19 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         modeling_module="transformers.models.glm5_next.modeling_glm5_next",
         rms_norm=("Glm5NextTextRMSNorm", "Glm5NextRMSNorm"),
         gated_rms_norm=("Glm5NextTextRMSNormGated",),
+    ),
+    # Nemotron-H, whose `nemotron_h_omni` composite resolves here through `text_config` and keeps its tower's stock head.
+    # `NemotronHRMSNormGated` reduces per group, which the fused gated kernel cannot express. No GLU: its experts and
+    # `NemotronHMLP` have no gate half. Its attention takes no rotary. FLCE by default, as the `[B*S, 131072]` plane binds.
+    LigerFamilySpec(
+        model_types=("nemotron_h",),
+        modeling_module="transformers.models.nemotron_h.modeling_nemotron_h",
+        rms_norm=("NemotronHRMSNorm",),
+        rms_norm_casting_mode="gemma",
+        rms_norm_kernel="native",
+        causal_lm=("NemotronHForCausalLM",),
+        fp32_logits=True,
+        flce_default=True,
     ),
     # Qwen3.5 / 3.6 (dense and MoE) and Qwen3-Next: upstream Liger owns their norms, rotary and head; the
     # toolkit adds the gated-delta-net blocks' gated norm and (MoE only) takes over `swiglu`. The dense

@@ -3,8 +3,8 @@
 forward, the vision tower trains or stays frozen as asked, and the steps complete.
 
 ``--data mixed`` holds an image on some rows and text on the rest, so ranks of one step differ in whether they reach the
-tower; ``--freeze-tower`` takes the tower out of their gradient reduce, and ``--zero3`` reshards every group after its
-forward.
+tower; ``--freeze-tower`` takes the tower out of their gradient reduce, ``--freeze-embedding`` leaves a text row's input
+carrying a gradient only through checkpointing's hook, and ``--zero3`` reshards every group after its forward.
 
     torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_vlm_images.py --family qwen3_5 --data all
     torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_vlm_images.py --family gemma4 --data mixed --freeze-tower
@@ -12,6 +12,7 @@ forward.
 """
 
 import argparse
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,19 +29,23 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.data_setup import apply_vision_options, prepare_raw_vlm_split
 from halo.entrypoints.model_setup import install_resolved_tokenizer, load_policy_model
 from halo.models.attention.selection import effective_attn_implementation
-from halo.models.module_tree import media_module_names
+from halo.models.module_tree import embedding_module, media_module_names
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import GEMMA4_26B_A4B_PATCHED, QWEN3_5_2B, QWEN3_6_MOE_35B, QWEN3_VL_2B
+from tests.common.nemotron_h import write_tiny_hub_checkpoint
 from tests.common.rank_log import log
+from tests.common.tiny_processors import tiny_processor
 from tests.common.training_checks import training_run_checks
 
-# Each family's checkpoint and the expert parallelism it trains at.
+# Each family's checkpoint and the expert parallelism it trains at. Nemotron-H's is written here at its tiny shape.
 FAMILIES = {
     "qwen3_vl": (QWEN3_VL_2B, 1),
     "qwen3_5": (QWEN3_5_2B, 1),
     "qwen3_5_moe": (QWEN3_6_MOE_35B, 2),
     "gemma4": (GEMMA4_26B_A4B_PATCHED, 2),
+    "nemotron_h_omni": (None, 2),
 }
 STEPS = 12
 IMAGE_SIDE = 64
@@ -51,6 +56,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
 parser.add_argument("--data", choices=["all", "mixed"], required=True)
 parser.add_argument("--freeze-tower", action="store_true")
+parser.add_argument("--freeze-embedding", action="store_true")
 parser.add_argument("--zero3", action="store_true")
 ARGS = parser.parse_args()
 
@@ -73,10 +79,19 @@ def _rows(count: int) -> Dataset:
     return Dataset.from_list(rows).cast_column("images", Sequence(HFImage()))
 
 
+def _written_checkpoint(ctx) -> str:
+    directory = Path(shared_output_dir(ctx)) / "checkpoint"
+    if ctx.rank == 0:
+        write_tiny_hub_checkpoint(directory, weights_dtype=torch.bfloat16, processor=tiny_processor(ARGS.family))
+    dist.barrier()
+    return str(directory)
+
+
 @gpu_test_main(exact_world_size=2, prefix="sft_vlm_images")
 def run(ctx):
     torch.cuda.set_device(ctx.device)
     model_name, ep_size = FAMILIES[ARGS.family]
+    model_name = model_name or _written_checkpoint(ctx)
     config = SFTConfig(
         output_dir=ctx.output_dir,
         max_steps=STEPS,
@@ -113,6 +128,8 @@ def run(ctx):
     resolved = effective_attn_implementation(model.config)
     log(f"{ARGS.family}: the unset attention resolved to {resolved}")
     processor = install_resolved_tokenizer(policy.processing_class, policy.tokenizer)
+    if ARGS.freeze_embedding:
+        embedding_module(model, "input").requires_grad_(False)
     apply_vision_options(args, model, model_config, processor, is_vlm=True)
 
     split = _rows(STEPS * ctx.world_size * 2)
