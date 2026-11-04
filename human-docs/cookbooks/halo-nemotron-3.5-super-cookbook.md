@@ -99,7 +99,8 @@ eval metrics that mask label -100 are right.
 - No CP, TP or HSDP: the Mamba scan runs along the sequence axis, and attention is 0.24% of the parameters.
 - No tree packing.
 - No online RL. Both engines serve the release, but no update into either is validated, so Halo refuses weight
-  sync when it builds the trainer. Offline GRPO needs no server.
+  sync at startup. Offline GRPO needs no server: score completions from a served export and train them with the
+  recipe above.
 - DPO and KTO take text rows, a full fine-tune with `precompute_ref_log_probs: true`, and refuse images.
 - No video or audio rows. They raise.
 - `trust_remote_code: true` on the composite is refused at the load: the hub's modeling file hands its text tower
@@ -122,8 +123,9 @@ halo run reattach-vision-tower --input_dir /data/checkpoints/nemotron-sft \
 ```
 
 Serve from the [host](README.md#serve-from-the-host). Both engines have answered an image prompt on an untrained
-reattached export, and vLLM a text prompt too. vLLM needs `--trust-remote-code` and
-`--mamba-ssm-cache-dtype float32`, which `docker-compose.vllm.yml` does not pass, so start the image directly:
+reattached export, and vLLM a text prompt too. vLLM started this way needs `--trust-remote-code` and
+`--mamba-ssm-cache-dtype float32`, which `docker-compose.vllm.yml` takes as `VLLM_TRUST_REMOTE_CODE=1` and
+`VLLM_EXTRA_ARGS`:
 
 ```bash
 docker run -d --rm --name nemotron-vllm --gpus '"device=0,1"' --ipc=host --network host \

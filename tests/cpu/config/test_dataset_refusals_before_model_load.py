@@ -42,6 +42,8 @@ def _run_with_the_model_load_failing(tmp_path, script: tuple[str, str], config_b
         # They read the stub checkpoint's config, which no hub holds.
         if hasattr(module, "reject_multimodal_model_without_seq_cls_head"):
             stack.enter_context(mock.patch.object(module, "reject_multimodal_model_without_seq_cls_head"))
+        if hasattr(module, "probe_checkpoint"):
+            stack.enter_context(mock.patch.object(module, "probe_checkpoint", return_value=(None, False)))
         stack.enter_context(mock.patch("halo.entrypoints.data_setup.probe_checkpoint", return_value=(None, False)))
         stack.enter_context(mock.patch("halo.entrypoints.script.install_log_tee"))
         stack.enter_context(mock.patch.object(sys, "argv", ["prog", str(config)]))

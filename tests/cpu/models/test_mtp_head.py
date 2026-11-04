@@ -18,10 +18,9 @@ from halo.models.mtp.head import (
     find_mtp_head,
     freeze_trunk_for_head,
     frozen_trunk_params,
-    mtp_draft_layer_index,
     mtp_head_path,
 )
-from halo.models.mtp.spec import require_mtp_head_spec
+from halo.models.mtp.spec import mtp_draft_layer_index, require_mtp_head_spec
 from tests.common.mtp_heads import (
     LABEL_IGNORE,
     MTP_TINY_FAMILIES,
@@ -523,11 +522,31 @@ def test_eval_scores_the_next_token_loss_alone(name):
 
 def test_a_forward_with_no_labels_runs_no_head():
     model, head = tiny_model_with_head("qwen3_5_moe_text")
-    install_term(model, head, weight=_WEIGHT, loss_type="soft")
+    term = install_term(model, head, weight=_WEIGHT, loss_type="soft")
     calls = []
     head.register_forward_hook(lambda *_args: calls.append(1))
     model(input_ids=padded_rows()["input_ids"], use_cache=False)
     assert not calls
+    assert term._embeddings is None and term._layer_args is None and term._layer_kwargs is None, (
+        "a forward the head never runs for held the trunk layer's call until the next one"
+    )
+
+
+def test_the_hooks_read_the_trunk_layer_the_head_was_built_from_on_a_trunk_ending_in_another_kind():
+    """A 6-layer Qwen3-Next ends in linear attention. Its head takes the class and call of layer 3, whose full attention
+    takes arguments a linear layer's does not."""
+    kinds = ["linear_attention"] * 3 + ["full_attention"] + ["linear_attention"] * 2
+    model, head = tiny_model_with_head("qwen3_next", overrides={"num_hidden_layers": 6, "layer_types": kinds})
+    install_term(model, head, weight=_WEIGHT)
+    layers = decoder_layers(backbone_with_layers(model))
+    assert getattr(layers[5], "self_attn", None) is None, "this trunk no longer ends in another kind"
+    assert getattr(head.layers[0], "self_attn", None) is not None
+    seen = {}
+    layers[3].register_forward_pre_hook(lambda _m, args, kwargs: seen.update(trunk=kwargs), with_kwargs=True)
+    head.register_forward_pre_hook(lambda _m, args, kwargs: seen.update(head=kwargs), with_kwargs=True)
+    model(**padded_rows()).loss.backward()
+    assert seen["trunk"] and all(seen["head"][key] is seen["trunk"][key] for key in seen["trunk"])
+    assert next(head.parameters()).grad is not None
 
 
 def _release_head_shapes(release: dict, spec) -> dict[str, list[int]]:

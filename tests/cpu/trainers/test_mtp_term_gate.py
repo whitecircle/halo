@@ -44,6 +44,7 @@ def _reject(model, **overrides) -> None:
             "is_cp_mode": False,
             "pops_labels": False,
             "rows_per_forward": 1,
+            "eval_rows_per_forward": 1,
             **overrides,
         },
     )
@@ -74,8 +75,14 @@ def test_a_remote_head_past_one_row_per_forward_is_refused():
         _reject(_RemoteHeadModel(0.3), rows_per_forward=2)
 
 
+def test_a_remote_head_past_one_row_in_an_evaluation_is_refused():
+    """Its forward adds the flattened term with no training check, so ``eval_loss`` holds a row-crossing term."""
+    with pytest.raises(ValueError, match="per_device_eval_batch_size: 1"):
+        _reject(_RemoteHeadModel(0.3), eval_rows_per_forward=2)
+
+
 def test_a_native_head_keeps_its_row_alignment_past_one_row():
-    _reject(_live_head(), rows_per_forward=8)
+    _reject(_live_head(), rows_per_forward=8, eval_rows_per_forward=8)
 
 
 @pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
@@ -91,7 +98,14 @@ def test_a_head_the_freeze_patterns_froze_whole_is_refused(name):
 
 @pytest.mark.parametrize("factor", [None, 0, 0.0], ids=["absent", "zero", "zero_float"])
 def test_no_head_and_no_factor_passes_every_rule(factor):
-    _reject(_RemoteHeadModel(factor), labelled_forward=False, is_cp_mode=True, pops_labels=True, rows_per_forward=8)
+    _reject(
+        _RemoteHeadModel(factor),
+        labelled_forward=False,
+        is_cp_mode=True,
+        pops_labels=True,
+        rows_per_forward=8,
+        eval_rows_per_forward=8,
+    )
 
 
 def test_a_model_with_no_head_is_untouched_by_the_gate():
@@ -110,7 +124,13 @@ class _StoppedBeforeTheWrap(DistributedTrainerMixin):
     def __init__(self, model, *, is_cp_mode=False, label_smoother=None):
         self.model = model
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, is_cp_mode=is_cp_mode)
-        self.args = SimpleNamespace(optim="adamw_torch", per_device_train_batch_size=1)
+        self.args = SimpleNamespace(
+            optim="adamw_torch",
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=8,
+            eval_strategy="no",
+            eval_on_start=False,
+        )
         self.label_smoother = label_smoother
         self.compute_loss_func = None
         self._bf16_optimizer = False
@@ -126,6 +146,32 @@ def test_the_trainer_spine_runs_the_gate_at_mode_setup(monkeypatch):
     monkeypatch.setattr(distributed_trainer, "agree_rank_uniform_env", lambda: None)
     with pytest.raises(ValueError, match="no labels forward"):
         _StoppedBeforeTheWrap(_live_head())._configure_distributed_modes()
+
+
+@pytest.mark.parametrize(
+    ("eval_strategy", "eval_on_start", "rows"), [("no", False, 1), ("steps", False, 8), ("no", True, 8)]
+)
+def test_the_spine_hands_the_gate_the_eval_batch_only_where_the_run_evaluates(
+    monkeypatch, eval_strategy, eval_on_start, rows
+):
+    """Off an evaluation the default eval batch of 8 forwards nothing, and must not refuse a run."""
+
+    class _Stop(Exception):
+        pass
+
+    seen = {}
+
+    def capture(_model, **kwargs):
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(distributed_trainer, "agree_rank_uniform_env", lambda: None)
+    monkeypatch.setattr(distributed_trainer, "reject_unreachable_mtp_term", capture)
+    host = _StoppedBeforeTheWrap(_live_head())
+    host.args.eval_strategy, host.args.eval_on_start = eval_strategy, eval_on_start
+    with pytest.raises(_Stop):
+        host._configure_distributed_modes()
+    assert seen["eval_rows_per_forward"] == rows
 
 
 @pytest.mark.parametrize(

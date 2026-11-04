@@ -48,7 +48,7 @@ def main() -> int:
     parser.add_argument("--revision", default=None, help="Hub revision of --model_id (default: main)")
     parser.add_argument("--rounds", type=int, default=3, help="pushes to time after the group formed")
     parser.add_argument(
-        "--connection_timeout", type=float, default=DEFAULT_CONNECTION_TIMEOUT_S, help="seconds to wait for /health"
+        "--connection_timeout", type=float, default=DEFAULT_CONNECTION_TIMEOUT_S, help="seconds to wait for the server"
     )
     parser.add_argument(
         "--expect",

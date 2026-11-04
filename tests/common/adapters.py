@@ -30,6 +30,7 @@ from halo.checkpoint.writing import cast_to_save_dtype
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_flag
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
@@ -180,7 +181,7 @@ def load_peft_model_from_config(
         model_name_or_path=model_config.model_name_or_path,
         parallelism_config=parallelism_config,
         dtype=torch.bfloat16,
-        trust_remote_code=True,
+        trust_remote_code=env_flag("HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE", True),
         revision=model_config.model_revision,
         attn_implementation=attn_implementation,
         use_liger_kernel=use_liger_kernel,

@@ -241,7 +241,8 @@ NEMOTRON_H = MoEFamilySpec(
         tower="backbone.", composite_tower="language_model.backbone.", composite_head="language_model.lm_head."
     ),
     weight_sync_refusal=(
-        "both pinned rollout engines serve the release, but no online update into either has been validated end to end"
+        "both pinned rollout engines serve the release, and no online update into either has been validated end to "
+        "end (agent-docs/models/nemotron-h.md#rl-weight-sync says what lifts this)"
     ),
     refuses_trl_image_rows=(
         "TRL's vision path computes no reference ahead of training, so a full fine-tune holds the unsharded frozen "

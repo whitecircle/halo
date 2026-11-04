@@ -92,8 +92,8 @@ export are verified.
 
 Online GRPO and online SDPG generate on vLLM only. Async GRPO with environments
 uses vLLM by default; `rollout_backend: sglang` switches engines. The engines
-differ in which families they can take an online weight update for. The trainer
-refuses an unsupported pair at construction, naming the family and the reason.
+differ in which families they can take an online weight update for. The scripts
+refuse an unsupported pair at startup, naming the family and the reason.
 
 The last column is what passed on this release: async GRPO, full fine-tuning on
 a real checkpoint, on one 8× B300 node with a TP=1 server, unless it says

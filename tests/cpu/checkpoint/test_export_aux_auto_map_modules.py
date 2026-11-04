@@ -62,6 +62,35 @@ def test_every_module_the_copied_configs_name_lands_with_its_sibling_imports(tmp
         assert (export / f"{module}.py").read_text() == (release / f"{module}.py").read_text(), module
 
 
+@pytest.mark.parametrize(
+    ("name", "payload", "module"),
+    [
+        ("tokenizer_config.json", {"auto_map": ["tokenization_vendor.Slow", None]}, "tokenization_vendor"),
+        (
+            "processor_config.json",
+            {"image_processor": _IMAGE_MAP, "processor_class": "ProcessorMixin"},
+            "image_processing_vendor",
+        ),
+        (
+            "preprocessor_config.json",
+            {"auto_map": {"AutoImageProcessor": {"pil": "image_processing_vendor.P", "torchvision": None}}},
+            "image_processing_vendor",
+        ),
+    ],
+    ids=["legacy_tokenizer_pair", "nested_sub_processor", "per_backend_entry"],
+)
+def test_every_spelling_a_load_reads_lands_its_module(tmp_path, name, payload, module):
+    """The legacy pair raised out of the save. The other two copied nothing, and a backend's name read as a module."""
+    release, export = _release(tmp_path), _export(tmp_path)
+    _write_json(export / name, payload)
+
+    with patch.object(config_export.logger, "warning") as warning:
+        _finalize(export, release)
+
+    assert (export / f"{module}.py").read_text() == (release / f"{module}.py").read_text()
+    assert not any("trust_remote_code" in str(call) for call in warning.call_args_list)
+
+
 def test_a_repo_qualified_reference_resolves_by_itself(tmp_path):
     release, export = _release(tmp_path), _export(tmp_path)
     _write_json(export / "processor_config.json", {"auto_map": {"AutoProcessor": "org/repo--processing_vendor.P"}})

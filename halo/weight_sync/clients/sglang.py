@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 # Chunks whose sends the host has not settled yet, so a declaration never waits on the previous chunk's tail.
 _INFLIGHT_CHUNKS = 2
+# Past the 20 s the server's /health gives a scheduler step before answering 503 itself, so a busy engine answers.
+_ENGINE_ANSWER_TIMEOUT_S = 30.0
 
 
 class SGLangWeightSyncClient(WeightSyncClientBase):
@@ -329,9 +331,19 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             values.append(float(entry[0]))
         return values
 
-    def _engine_answers(self) -> bool:
+    def _still_starting(self) -> bool:
+        """``/v1/models`` answers ahead of the warm-up generate, whose first forward can outlast the generation probe on
+        a cold kernel cache. ``/health`` answers 503 at once until that generate ends and then generates itself, so a
+        read timeout means the server started and something holds it, which the probe names."""
         try:
             response = self.request("GET", "/health", retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False)
+        except requests.exceptions.Timeout:
+            return False
+        return response.status_code == 503
+
+    def _engine_answers(self) -> bool:
+        try:
+            response = self.request("GET", "/health", retry=False, timeout=_ENGINE_ANSWER_TIMEOUT_S, check=False)
         except requests.exceptions.RequestException:
             return False
         return response.status_code == 200

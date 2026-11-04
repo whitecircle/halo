@@ -88,6 +88,7 @@ _PACKED_DEFAULT_FAMILIES = (
     "laguna",
     "lfm2_moe",
     "mistral4",
+    "nemotron_h",
     "qwen3_5_moe_text",
     "qwen3_moe",
     "qwen3_next",
@@ -103,6 +104,7 @@ _PACKED_EP_FULL_FAMILIES = (
     "laguna",
     "lfm2_moe",
     "mistral4",
+    "nemotron_h",
     "qwen3_next",
     "step3p7",
 )
@@ -354,6 +356,7 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--family qwen3_5", markers=("gpu", "core", "1gpu", "qwen3")),
             Row("--family qwen3_5_moe", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
             Row("--family gemma4", markers=("gpu", "core", "1gpu", "moe", "gemma4")),
+            Row("--family nemotron_h_omni", markers=("gpu", "core", "1gpu", "moe", "nemotron")),
             *(
                 Row(f"--family {family} --ep 2", nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", marker))
                 for family, marker in _PACKED_EP_FAMILIES
@@ -379,6 +382,7 @@ MANIFEST: dict[str, TestSpec] = {
                     *((family, _TINY_MOE_FAMILY_MARKERS[family]) for family in _PACKED_EP_FULL_FAMILIES),
                     ("laguna_remote", "laguna"),
                     ("gemma4", "gemma4"),
+                    ("nemotron_h_omni", "nemotron"),
                     ("qwen3_5_moe", "qwen3"),
                 )
             ),
@@ -401,6 +405,7 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--family qwen3 --liger", markers=("gpu", "full", "1gpu", "qwen3")),
             Row("--family qwen3_5_moe --liger", markers=("gpu", "full", "1gpu", "moe", "qwen3")),
             Row("--family gemma4 --liger", markers=("gpu", "full", "1gpu", "moe", "gemma4")),
+            Row("--family nemotron_h_omni --liger", markers=("gpu", "full", "1gpu", "moe", "nemotron")),
             Row("--family qwen3_5 --liger", markers=("gpu", "full", "1gpu", "qwen3")),
             *(
                 Row(f"--family {family} --ep 2 --liger", nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", marker))

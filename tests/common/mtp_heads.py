@@ -102,11 +102,13 @@ def _eager_experts(model: nn.Module) -> None:
     text_config(model.config)._experts_implementation = "eager"
 
 
-def tiny_model_with_head(name: str, *, dtype: torch.dtype = torch.float64) -> tuple[nn.Module, nn.Module]:
+def tiny_model_with_head(
+    name: str, *, dtype: torch.dtype = torch.float64, overrides: dict | None = None
+) -> tuple[nn.Module, nn.Module]:
     """Family ``name``'s seeded tiny model and its head, attached with the model's own init, the same weights on every
     call. No hook yet, so a caller's arm picks its objective."""
     torch.manual_seed(7)
-    model = tiny_family_model(MTP_TINY_FAMILIES[name]).to(dtype)
+    model = tiny_family_model(MTP_TINY_FAMILIES[name], overrides=overrides).to(dtype)
     _eager_experts(model)
     spec = require_mtp_head_spec(model.config)
     head = build_mtp_head(model, spec, device="cpu")

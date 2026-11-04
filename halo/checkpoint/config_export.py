@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
 
 from transformers.dynamic_module_utils import custom_object_save, get_relative_imports
 from transformers.tokenization_utils_base import TOKENIZER_CONFIG_FILE
@@ -82,9 +83,20 @@ def _source_config_payload(source: str) -> dict | None:
     return payload
 
 
-def _auto_map_references(entry: str | list | tuple) -> tuple[str, ...]:
-    """The class references one ``auto_map`` entry holds (a tokenizer entry is a ``[slow, fast]`` pair)."""
-    return tuple(value for value in ((entry,) if isinstance(entry, str) else entry) if value)
+def _auto_map_references(entry: str | list | tuple | dict) -> tuple[str, ...]:
+    """The class references one ``auto_map`` entry holds: one, a tokenizer's ``[slow, fast]`` pair, or an image
+    processor's mapping of backend to class."""
+    values = entry.values() if isinstance(entry, dict) else (entry,) if isinstance(entry, str) else entry
+    return tuple(value for value in values if value)
+
+
+def _aux_auto_maps(payload: dict) -> Iterator[dict]:
+    """Every ``auto_map`` one processor or tokenizer config holds, as a load reads them: at its top, where a bare list is
+    a tokenizer's legacy pair, or in a sub-processor's section of a ``processor_config.json``."""
+    for section in (payload, *(value for value in payload.values() if isinstance(value, dict))):
+        auto_map = section.get("auto_map")
+        if auto_map:
+            yield auto_map if isinstance(auto_map, dict) else {"AutoTokenizer": auto_map}
 
 
 def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None:
@@ -253,11 +265,12 @@ def carry_aux_auto_map_modules(output_dir: str, *, source: str | None) -> None:
         if not os.path.isfile(path):
             continue
         with open(path, encoding="utf-8") as handle:
-            auto_map = json.load(handle).get("auto_map") or {}
-        local = {
-            auto_class: [reference for reference in _auto_map_references(entry) if reference and "--" not in reference]
-            for auto_class, entry in auto_map.items()
-        }
+            payload = json.load(handle)
+        local: dict[str, list[str]] = {}
+        for auto_map in _aux_auto_maps(payload):
+            for auto_class, entry in auto_map.items():
+                references = (reference for reference in _auto_map_references(entry) if "--" not in reference)
+                local.setdefault(auto_class, []).extend(references)
         absent = {
             auto_class: references
             for auto_class, references in local.items()

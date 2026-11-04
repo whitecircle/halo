@@ -185,6 +185,21 @@ def test_the_documented_route_refuses_rows_it_would_train_across(tmp_path, corpu
     assert "flattens rows before it shifts" in done.stderr + done.stdout
 
 
+@pytest.mark.parametrize(("eval_rows", "refused"), [(2, True), (1, False)])
+def test_an_evaluation_past_one_row_is_refused_as_its_loss_would_cross_rows(tmp_path, corpus, eval_rows, refused):
+    done = _ling_run(
+        tmp_path,
+        corpus,
+        steps=1,
+        eval_strategy="steps",
+        eval_steps=1,
+        per_device_eval_batch_size=eval_rows,
+        model_init_kwargs={"mtp_loss_scaling_factor": 0.3},
+    )
+    assert (done.returncode != 0) == refused, (done.stderr + done.stdout)[-3000:]
+    assert ("per_device_eval_batch_size: 1" in done.stderr + done.stdout) == refused
+
+
 def test_the_override_keeps_the_main_logits_and_exports_no_tail(tmp_path):
     live = _tiny_ling3(num_nextn_predict_layers=1, mtp_loss_scaling_factor=0)
     finalize_loaded_model(live)

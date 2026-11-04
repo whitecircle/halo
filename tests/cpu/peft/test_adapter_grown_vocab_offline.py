@@ -343,7 +343,13 @@ class _ModeSetupHost(DistributedTrainerMixin):
     def __init__(self, model, *, accelerate_manages_fsdp: bool):
         self.model = model
         self.parallelism_config = make_parallelism_config(world_size=1, gpus_per_node=1)
-        self.args = SimpleNamespace(load_best_model_at_end=False, optim="adamw_torch", per_device_train_batch_size=1)
+        self.args = SimpleNamespace(
+            load_best_model_at_end=False,
+            optim="adamw_torch",
+            per_device_train_batch_size=1,
+            eval_strategy="no",
+            eval_on_start=False,
+        )
         self._bf16_optimizer = False
         self._ep_config = None
         self._accelerate_manages_fsdp = accelerate_manages_fsdp

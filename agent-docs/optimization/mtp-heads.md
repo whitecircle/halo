@@ -52,7 +52,7 @@ The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4. 
 
 | Axis | Head |
 |---|---|
-| FSDP2 | Its own shard group on either placement, cut as a decoder layer's is, with a router of another dtype split off and unsharded with it. `head_only` leaves the frozen trunk out of the wrap, so no trunk parameter gathers and a step reduces the head's group alone. |
+| FSDP2 | Its own shard group on either placement, cut as a decoder layer's is, with a router of another dtype split off and unsharded with it. `head_only` leaves the frozen trunk out of the wrap, so no trunk parameter gathers and a step reduces the head's group alone. Every GPU then holds that trunk whole, and at `ep_group_size: 1` that takes in the expert banks a sharded wrap would split: about 244 GB at bf16 on Qwen3.5-122B, by its parameter count. |
 | EP, ETP, EP+ETP | The head's MoE block takes the family's EP layer, and each rank streams its slice of the tail. It dispatches the tokens the first MoE layer sized for, so it adds no capacity all-reduce, and a row with no target still walks its ops on every rank. |
 | Long rows | The term runs Liger's fused kernel where the family's fused loss is on, else fp32 logits in checkpointed chunks, so no `[T, V]` plane stays held through backward. |
 | Gradient checkpointing | Follows the run. `detached` passes the head grad-requiring leaves, so a reentrant checkpoint around a list head keeps its gradient. |
@@ -103,7 +103,7 @@ vLLM reads the head through `VLLM_SPECULATIVE_CONFIG`, SGLang through `--specula
 | SGLang, the same fit | 0.8295 | 0.8415 |
 | vLLM, GLM-4.7 Flash `own_soft` fit the gate stopped | 0.7317 | 0.7450 |
 
-The release head alone moves by about 0.006 between vLLM launches (0.8284, 0.8311, 0.8394). No fit here shows a served gain.
+The release head alone spans 0.011 across three vLLM launches (0.8284, 0.8311, 0.8394). No fit here shows a served gain.
 
 - **SGLang one draft token:** `--speculative-algorithm EAGLE --speculative-draft-model-path <checkpoint> --speculative-num-steps 1 --speculative-eagle-topk 1 --speculative-num-draft-tokens 2`. Its multi-step defaults read 0.62 on the same fit and are not comparable.
 - **A checkpoint with no head:** vLLM exits non-zero at load, `Following weights were not initialized from checkpoint`. SGLang starts on one and every draft misses (0.0000), so read its counters before trusting a server.
@@ -138,7 +138,7 @@ Both Qwen3.6 recipes render `qwen3.6-reasoning-effort.jinja`, an empty think blo
 | `qwen3.6-reasoning-effort.jinja` | 0.8376 to 0.8494 | 0.899 | 0.704 to 0.712 | 0.8339 | 0.8311 |
 | `qwen3-multiturn.jinja` | 0.3076 to 0.8656 | 3.286 | 0.662 to 0.193 | 0.8372 | 0.8394 |
 
-Neither render shows a served gain. Each recipe's rows are ultrachat replies, not a server's own samples after an open think block, so the gate's reading here does not predict the served one; the template only keeps that reading meaningful. The `joint` recipe's cost is under [Step cost](#step-cost), and what it does to a trunk or a served head over a fine-tune is not measured. The GLM-4.7 Flash recipe's numbers are from first-turn rows at its learning rate: acceptance 0.7685 to 0.7649, which the gate stops, and the served reading below.
+Neither render shows a served gain. Each recipe's rows are ultrachat replies, not a server's own samples after an open think block, so the gate's reading here does not predict the served one; the template only keeps that reading meaningful. The `joint` recipe's cost is under [Step cost](#step-cost), and what it does to a trunk or a served head over a fine-tune is not measured. The GLM-4.7 Flash recipe's numbers are from first-turn rows at its learning rate: acceptance 0.7685 to 0.7649, which the gate stops, with its served reading under [Serving](#serving).
 
 ## GPU rows
 

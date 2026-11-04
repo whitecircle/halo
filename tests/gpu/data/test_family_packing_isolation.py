@@ -131,6 +131,8 @@ FAMILIES = {
         {**SHORT_WINDOW, "hidden_size": 256, "use_sliding_window": True, "max_window_layers": 0},
     ),
     "nemotron_h": _FamilyRow(TINY_MOE_FAMILIES["nemotron_h"], after_randomize=_scale_mamba_inputs),
+    # Its text tower through the composite's forward, whose kwargs carry the markers past the tower to the loss too.
+    "nemotron_h_omni": _FamilyRow(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"], after_randomize=_scale_mamba_inputs),
     "qwen3": _FamilyRow(TINY_DENSE_FAMILIES["qwen3"], {"head_dim": 64}),
     "qwen3_5": _FamilyRow(TINY_DENSE_FAMILIES["qwen3_5"], _GATED_DELTA_NET_256, packed_default=FA2),
     # What the Qwen3.5/3.6 recipes load: this decoder, through the composite's M-RoPE forward.

@@ -17,6 +17,11 @@ _RELEASED_TAIL_DEPTH = 1
 # A load-ignore pattern naming a tail: an ``mtp`` module or a fixed decoder index past the trunk. A class's other
 # entries (the vision tower a text-only class drops) do not match, and ``layers\.\d+`` names no index.
 _TAIL_PATTERN = re.compile(r"mtp|layers\\?\.\d")
+# A stored key under an ``mtp`` module, and a decoder list's entry by its index.
+_MTP_MODULE_KEY = re.compile(r"(?:^|\.)mtp\.")
+_DECODER_ENTRY_KEY = re.compile(r"(?:^|\.)layers\.(\d+)\.")
+# The attention a release's draft layer runs, which decides the trunk layer it takes its class and call from.
+_DRAFT_LAYER_TYPE = "full_attention"
 # The attribute a ``root`` head hangs off the model under, as the release's keys spell it.
 ROOT_HEAD_ATTR = "mtp"
 # The chain's decoder layer inside a ``root`` head.
@@ -172,6 +177,26 @@ def mtp_tail_depth(config) -> int:
     )
 
 
+def declared_tail_fields(config) -> dict[str, int]:
+    """The count fields ``config`` declares draft layers under; a missing field and an explicit 0 declare none."""
+    text = text_config(config)
+    return {field: depth for field in MTP_LAYER_COUNT_FIELDS if (depth := getattr(text, field, None))}
+
+
+def mtp_draft_layer_index(text) -> int:
+    """The last trunk layer running the draft layer's attention, whose class and call arguments the head reuses."""
+    kinds = getattr(text, "layer_types", None)
+    if not kinds:
+        return text.num_hidden_layers - 1
+    running = [index for index, kind in enumerate(kinds[: text.num_hidden_layers]) if kind == _DRAFT_LAYER_TYPE]
+    if not running:
+        raise ValueError(
+            f"mtp_loss_weight builds the head's draft layer from the trunk's last {_DRAFT_LAYER_TYPE} layer, and this "
+            f"config's layer_types hold none: {sorted(set(kinds))}. Train from a checkpoint whose config keeps one."
+        )
+    return running[-1]
+
+
 def require_mtp_head_spec(config) -> MtpHeadSpec:
     """The spec of ``config``'s family, the wrapper's ``model_type`` first; raises naming why it has none."""
     levels = [getattr(level, "model_type", None) for level in config_sources(config)]
@@ -187,6 +212,7 @@ def require_mtp_head_spec(config) -> MtpHeadSpec:
                 f"mtp_loss_weight trains the {_RELEASED_TAIL_DEPTH}-layer head {model_type!r} releases ship, and this "
                 f"config declares {depth}. Train from a checkpoint whose config declares the release's depth."
             )
+        mtp_draft_layer_index(text_config(config))
         return spec
     raise ValueError(
         f"mtp_loss_weight has no head to train on {levels[0]!r}: no release of this family ships a tail Halo maps. "
@@ -209,3 +235,20 @@ def stored_tail_keys(keys: Iterable[str], load_ignores: Iterable[str]) -> list[s
     """Those of ``keys`` a class drops at load as its MTP tail, matched as transformers matches: anywhere in the key."""
     patterns = [re.compile(pattern) for pattern in tail_load_patterns(load_ignores)]
     return [key for key in keys if any(pattern.search(key) for pattern in patterns)]
+
+
+def unbuilt_tail_keys(keys: Iterable[str], config, built: Iterable[str]) -> list[str]:
+    """Those of ``keys`` that read as the tail ``config`` declares and ``built`` (the model's own keys) does not hold:
+    under an ``mtp`` module, or at a decoder index past the trunk. A load drops them whether or not the class names
+    them, and Nemotron-H's and Step-3.7's composites name none."""
+    depth = max(declared_tail_fields(config).values(), default=0)
+    if not depth:
+        return []
+    first = text_config(config).num_hidden_layers
+    held = set(built)
+
+    def reads_as_tail(key: str) -> bool:
+        entry = _DECODER_ENTRY_KEY.search(key)
+        return bool(_MTP_MODULE_KEY.search(key) or (entry and first <= int(entry[1]) < first + depth))
+
+    return [key for key in keys if key not in held and reads_as_tail(key)]

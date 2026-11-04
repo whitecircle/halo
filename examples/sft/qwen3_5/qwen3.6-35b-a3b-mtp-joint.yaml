@@ -1,8 +1,8 @@
 # Qwen3.6 35B-A3B — EP=8 SFT whose objective also trains the released MTP head. See agent-docs/optimization/mtp-heads.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 #
-# Measured: the term adds 6% to 7% to a step and about 1 GiB at 33,000 tokens. What it does to the trunk or the head's
-# served acceptance over a fine-tune is not measured. A weight of 0.3 is what DeepSeek-V3 published for pretraining;
+# Measured without this recipe's fp32 masters, on packed random tokens at 33,000 per rank on FA2: the term adds 6% to 7%
+# to a step and about 1 GiB. What it does to the trunk or the head's served acceptance over a fine-tune is not measured. A weight of 0.3 is what DeepSeek-V3 published for pretraining;
 # mtp_train_scope: detached keeps the trunk on the next-token objective, and mtp_loss_type: soft routes the head's gradient
 # to the trunk's own distribution.
 

@@ -3,6 +3,7 @@
 family roster, so a new family's tail cannot pass with no decision."""
 
 import re
+from types import SimpleNamespace
 
 import pytest
 import transformers
@@ -19,6 +20,7 @@ from halo.models.mtp.spec import (
     MTP_LAYER_COUNT_FIELDS,
     MTP_REFUSALS,
     UNSURVEYED_TAIL,
+    mtp_draft_layer_index,
     mtp_tail_depth,
     require_mtp_head_spec,
     stored_tail_keys,
@@ -115,6 +117,29 @@ def test_the_tail_depth_reads_the_declared_field_and_defaults_as_the_engines_do(
 def test_a_depth_no_release_ships_is_refused():
     with pytest.raises(ValueError, match="declares 2"):
         require_mtp_head_spec(AutoConfig.for_model("qwen3_next", mtp_num_hidden_layers=2))
+
+
+def test_a_config_with_no_layer_running_the_draft_attention_is_refused_before_the_load():
+    """The draft layer takes its class and call from such a layer, and a run has nothing to build it from."""
+    config = AutoConfig.for_model("qwen3_next", num_hidden_layers=2, layer_types=["linear_attention"] * 2)
+    with pytest.raises(ValueError, match=r"layer_types hold none: \['linear_attention'\]"):
+        require_mtp_head_spec(config)
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "index"),
+    [
+        (None, 5),
+        (["linear_attention"] * 3 + ["full_attention"] + ["linear_attention"] * 2, 3),
+        (["full_attention"] * 6, 5),
+        # A list a config keeps past its trunk reads as the trunk's.
+        (["full_attention"] + ["linear_attention"] * 5 + ["full_attention"], 0),
+    ],
+    ids=["no_kinds", "not_the_last_layer", "all_full", "past_the_trunk"],
+)
+def test_the_draft_layer_is_the_last_trunk_layer_running_its_attention(layer_types, index):
+    text = SimpleNamespace(num_hidden_layers=6, layer_types=layer_types)
+    assert mtp_draft_layer_index(text) == index
 
 
 def test_a_class_pattern_that_names_no_tail_does_not_mark_keys():

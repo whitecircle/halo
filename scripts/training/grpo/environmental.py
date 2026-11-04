@@ -71,6 +71,7 @@ from halo.environments.reasoning_effort import bind_episode_effort, efforts_by_l
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
@@ -87,6 +88,7 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     verify_server_chat_template,
     verify_server_flags,
 )
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
@@ -326,6 +328,14 @@ def main():
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
     )
     parallelism_config = context.parallelism_config
+
+    # The family's verdict, before the datasets, the load and the server preflights it would pay for first.
+    checkpoint_config, _ = probe_checkpoint(
+        model_config.model_name_or_path,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    reject_unsyncable_config(checkpoint_config, async_config.rollout_backend)
 
     # The trainer gets dataset_presharded so it does not re-shard a per-rank load.
     ds, dataset_presharded = load_script_datasets(

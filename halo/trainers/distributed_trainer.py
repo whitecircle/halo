@@ -89,7 +89,7 @@ from halo.trainers.trainer_rules import (
     reject_unreloadable_best_model,
     reject_unsaveable_external_tables,
 )
-from halo.trainers.training_args_overrides import align_save_on_each_node, disable_trl_liger
+from halo.trainers.training_args_overrides import align_save_on_each_node, disable_trl_liger, uses_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +364,7 @@ class DistributedTrainerMixin(
             is_cp_mode=config.is_cp_mode,
             pops_labels=self.label_smoother is not None or self.compute_loss_func is not None,
             rows_per_forward=self.args.per_device_train_batch_size,
+            eval_rows_per_forward=self.args.per_device_eval_batch_size if uses_evaluation(self.args) else 1,
         )
         reject_unreloadable_best_model(self.args, config, self.model)
         reject_unsaveable_external_tables(

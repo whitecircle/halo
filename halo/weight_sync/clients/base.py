@@ -65,6 +65,7 @@ class ServerFlags(NamedTuple):
     strict_tool_calling: bool | None = None
     captures_routing: bool | None = None
     torch_compile: bool | None = None
+    instance_id: str | None = None
 
 
 def unservable_bailing_model_types(release: str) -> dict[str, str]:
@@ -101,6 +102,8 @@ class WeightSyncClientBase(ABC):
     # The session the engine brackets an update with, inside the quiesce.
     SESSION_OPEN_ENDPOINT: str
     SESSION_CLOSE_ENDPOINT: str
+    # The open takes the weights away until a close restores them, so a session no close can end leaves no model.
+    SESSION_OPEN_UNLOADS_MODEL: bool = False
     SESSION_REQUEST: Mapping[str, object] = {}
     # ``model_type`` → why the pinned release cannot take an online update of the family (the gate quotes it).
     UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
@@ -160,6 +163,8 @@ class WeightSyncClientBase(ABC):
         self._paused = False
         # An update session opened server-side (its reply possibly lost), which only the session close ends.
         self._update_session_open = False
+        # The engine answered the open.
+        self._update_session_confirmed = False
         self._transport: Any = None
         self._reset_buffer_state()
         self._reset_transport_state()
@@ -243,10 +248,12 @@ class WeightSyncClientBase(ABC):
                 status = self.request(
                     "GET", self.LIVENESS_ROUTE, retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False
                 ).status_code
-                if status == 200:
-                    logger.info(f"{self.BACKEND_NAME} server is up")
-                    return
                 last_result = f"HTTP {status}"
+                if status == 200:
+                    if not self._still_starting():
+                        logger.info(f"{self.BACKEND_NAME} server is up")
+                        return
+                    last_result += ", and its start has not finished"
             except requests.exceptions.RequestException as exc:
                 last_error, last_result = exc, f"{type(exc).__name__}: {exc}"
             # A route answering 503 forever is as dead as an unreachable one.
@@ -257,6 +264,10 @@ class WeightSyncClientBase(ABC):
                     f"rollout_connection_timeout, or vllm_server_timeout on online GRPO."
                 ) from last_error
             time.sleep(2.0)
+
+    def _still_starting(self) -> bool:
+        """Whether a server answering the liveness route has yet to finish starting, for a route that answers early."""
+        return False
 
     def served_model_id(self) -> str:
         if self._served_model_id is None:
@@ -535,6 +546,7 @@ class WeightSyncClientBase(ABC):
         issue the collective RPC twice."""
         self._update_session_open = True
         self.request("POST", self.SESSION_OPEN_ENDPOINT, retry=False, timeout=POST_TIMEOUT_S, **self.SESSION_REQUEST)
+        self._update_session_confirmed = True
 
     def _end_update_session(self) -> None:
         """Close the session once the update landed; raises, as the update is then not complete."""
@@ -542,6 +554,7 @@ class WeightSyncClientBase(ABC):
             "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=SESSION_CLOSE_TIMEOUT_S, **self.SESSION_REQUEST
         )
         self._update_session_open = False
+        self._update_session_confirmed = False
 
     def _abandon_update_session(self) -> None:
         """Close a session left open; never raises, as the caller is already failing."""
@@ -553,7 +566,10 @@ class WeightSyncClientBase(ABC):
             )
         except Exception as e:
             logger.warning(f"Failed to close the interrupted weight-update session on {self.base_url}: {e}")
+            if self._update_session_confirmed and self.SESSION_OPEN_UNLOADS_MODEL:
+                self._mark_unusable()
         self._update_session_open = False
+        self._update_session_confirmed = False
 
     def _lift_pause(self, timeout: float, context: str) -> None:
         """Resume a quiesced engine unless it was left partly written. Never raises on a server failure, which must

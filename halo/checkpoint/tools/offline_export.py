@@ -46,9 +46,14 @@ from halo.checkpoint.writing import sweep_after_full_save
 from halo.hardware import available_host_ram_bytes
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
-from halo.models.config_access import text_config
 from halo.models.mtp.head import mtp_head_path
-from halo.models.mtp.spec import MTP_LAYER_COUNT_FIELDS, find_mtp_head_spec, stored_tail_keys, tail_load_patterns
+from halo.models.mtp.spec import (
+    declared_tail_fields,
+    find_mtp_head_spec,
+    stored_tail_keys,
+    tail_load_patterns,
+    unbuilt_tail_keys,
+)
 from halo.models.param_roles import is_normalization_module
 
 logger = logging.getLogger(__name__)
@@ -254,13 +259,20 @@ def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str
     )
 
 
+def _class_load_ignores(model) -> tuple[str, ...]:
+    return getattr(type(model), "_keys_to_ignore_on_load_unexpected", None) or ()
+
+
 def _warn_on_dropped_mtp_tail(model, model_id: str, output_dir: str, weight_map, *, tool: str) -> None:
-    load_ignores = getattr(type(model), "_keys_to_ignore_on_load_unexpected", None) or ()
-    tail = stored_tail_keys(weight_map, load_ignores)
+    tail = sorted(
+        {
+            *stored_tail_keys(weight_map, _class_load_ignores(model)),
+            *unbuilt_tail_keys(weight_map, model.config, model.state_dict()),
+        }
+    )
     if not tail:
         return
-    text = text_config(model.config)
-    declared = {field: value for field in MTP_LAYER_COUNT_FIELDS if (value := getattr(text, field, None))}
+    declared = declared_tail_fields(model.config)
     logger.warning(
         f"{tool}: {model_id} stores {len(tail)} MTP head tensor(s) (e.g. {tail[0]!r}) that {type(model).__name__} drops "
         f"at load, so {output_dir} carries no head while its config keeps {declared or 'its tail fields'}, and vLLM "
@@ -276,9 +288,10 @@ def carried_mtp_tail(
     grows. A tail with no spec stays dropped, as nothing says which of its tensors follow the vocabulary, and warns with
     the config field its output keeps; so does a class with no output embedding for a head to share, and a quantized
     source, whose tail holds no float tensors to cast. Header-only until a head is carried; a family with no spec whose
-    class names no tail never looks at the source, as a Hub id's snapshot fetches files its load did not need."""
+    class names no tail and whose config declares none never looks at the source, as a Hub id's snapshot fetches files
+    its load did not need."""
     spec = find_mtp_head_spec(model.config)
-    if spec is None and not tail_load_patterns(getattr(type(model), "_keys_to_ignore_on_load_unexpected", None) or ()):
+    if spec is None and not tail_load_patterns(_class_load_ignores(model)) and not declared_tail_fields(model.config):
         return {}
     source = resolve_checkpoint_source(model_id)
     weight_map = resolve_checkpoint_weights(source).weight_map

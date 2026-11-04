@@ -38,7 +38,7 @@ lora_target_modules:
 - up_proj
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> a servable checkpoint
-                                      #   (~241 GB each); without it the mixed adapter resumes here but
+                                      #   (~251 GB each); without it the mixed adapter resumes here but
                                       #   merge_peft_adapters.py refuses it
 
 # --- Attention & sequence ---

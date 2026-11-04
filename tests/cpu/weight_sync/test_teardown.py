@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 
+import halo.weight_sync.clients.base as client_base
 import halo.weight_sync.clients.sglang as sglang_module
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.transport import c10d_group
@@ -57,6 +58,85 @@ def test_a_paused_engine_is_reported_as_paused_and_not_as_unreachable(monkeypatc
     client.check_server(0.0)
     with pytest.raises(RuntimeError, match="paused or wedged"):
         client.probe_generation()
+
+
+class _ColdEngine:
+    """SGLang while its warm-up generate runs: ``/v1/models`` answers, ``/health`` refuses at once, and a generation
+    probe waits past its timeout behind that first forward. The warm-up ends after ``warmup_polls`` looks at it."""
+
+    def __init__(self, warmup_polls: int):
+        self.polls_left = warmup_polls
+        self.health_polls = 0
+
+    def request(self, method, path, **kwargs):
+        if path == "/health":
+            self.health_polls += 1
+            self.polls_left -= 1
+            return SimpleNamespace(status_code=503 if self.polls_left >= 0 else 200)
+        if path == "/v1/completions" and self.polls_left >= 0:
+            raise requests.exceptions.ReadTimeout(path)
+        return SimpleNamespace(status_code=200, json=lambda: {"data": [{"id": "served"}]})
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(client_base.time, "sleep", lambda _seconds: None)
+
+
+def test_a_server_in_its_warm_up_is_waited_for_and_not_reported_as_wedged(monkeypatch, no_sleep):
+    """``/v1/models`` answers once the HTTP server is up, so stopping there sends the generation probe into the warm-up's
+    first forward, and a cold kernel cache reads as a pause a dead trainer left."""
+    client = offline_client(SGLangWeightSyncClient)
+    engine = _ColdEngine(warmup_polls=3)
+    monkeypatch.setattr(client, "request", engine.request)
+
+    client.check_server(60.0)
+    client.probe_generation()
+
+    assert engine.health_polls == 4
+
+
+def test_a_warm_up_past_the_deadline_says_the_server_is_still_starting(monkeypatch, no_sleep):
+    client = offline_client(SGLangWeightSyncClient)
+    monkeypatch.setattr(client, "request", _ColdEngine(warmup_polls=10**6).request)
+
+    with pytest.raises(ConnectionError, match="its start has not finished.*needs a longer wait"):
+        client.check_server(0.0)
+
+
+def test_a_health_route_that_stops_connecting_does_not_read_as_started(monkeypatch, no_sleep):
+    client = offline_client(SGLangWeightSyncClient)
+    answers = iter([requests.exceptions.ConnectionError("refused"), SimpleNamespace(status_code=200)])
+
+    def request(method, path, **kwargs):
+        if path != "/health":
+            return SimpleNamespace(status_code=200)
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(client, "request", request)
+
+    client.check_server(60.0)
+
+    assert next(answers, None) is None, "the wait stopped at the refused connection"
+
+
+@pytest.mark.parametrize(("answers_after_s", "answers"), [(15.0, True), (25.0, True), (100.0, False)])
+def test_an_engine_answering_inside_its_own_health_window_reads_as_alive(monkeypatch, answers_after_s, answers):
+    """The server's ``/health`` allows a scheduler step 20 s. A shorter wait reads a busy engine as dead, the client
+    aborts, and the engine's half of the destroy stays blocked."""
+    client = offline_client(SGLangWeightSyncClient)
+
+    def request(method, path, *, timeout, **kwargs):
+        if timeout < answers_after_s:
+            raise requests.exceptions.ReadTimeout(path)
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(client, "request", request)
+
+    assert client._engine_answers() is answers
 
 
 def test_the_engine_is_asked_before_its_half_of_the_destroy_starts(monkeypatch):

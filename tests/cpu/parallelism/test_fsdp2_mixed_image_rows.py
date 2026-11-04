@@ -343,8 +343,9 @@ def test_an_all_text_run_never_writes_its_tower(tmp_path):
         assert result["tower"] and result["absent"] == result["tower"], result
 
 
-def test_a_frozen_tower_stays_out_of_the_reduce(tmp_path):
-    for result in _run(tmp_path, 2, **{**_CASE, "freeze": True}):
+@pytest.mark.parametrize("family", ["qwen3_vl", _NEMOTRON])
+def test_a_frozen_tower_stays_out_of_the_reduce(tmp_path, family):
+    for result in _run(tmp_path, 2, **{**_CASE, "family": family, "freeze": True}):
         assert result["tower"] and result["absent"] == result["tower"], result
 
 

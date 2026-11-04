@@ -155,11 +155,7 @@ def _reject_stock_tree(config, family_layers: list[str], client_cls) -> None:
         )
 
 
-def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
-    """Refuses an unservable family, one with a ``weight_sync_refusal``, a stock tree whose experts or spelling no engine
-    layout covers (:func:`_reject_stock_tree`), and one missing a buffer the push must carry."""
-    client_cls = resolve_weight_sync_client(backend)
-    config = getattr(unwrap_framework_wrappers(model), "config", None)
+def _reject_unservable_model_types(config, backend: str, client_cls) -> None:
     unservable = sorted(client_cls.UNSERVABLE_MODEL_TYPES.keys() & config_model_types(config))
     if unservable:
         facts = "; ".join(
@@ -169,6 +165,36 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
             f"rollout_backend={backend!r} cannot serve model_type {unservable}, so the weight sync has "
             f"no served model to land in — {facts}. See {client_cls.__name__}.UNSERVABLE_MODEL_TYPES."
         )
+
+
+def _reject_refused_families(families: list[tuple[str, type[EPMoELayerBase]]], client_cls) -> None:
+    for where, cls in families:
+        if cls.FAMILY.weight_sync_refusal is not None:
+            raise ValueError(
+                f"{cls.__name__} (at {where!r}) does not support weight sync, which feeds "
+                f"{client_cls.ENGINE_RELEASE}'s model.load_weights directly: {cls.FAMILY.weight_sync_refusal}. "
+                f"Online and environmental GRPO cannot train this model. Train it offline: offline GRPO needs no "
+                f"server (agent-docs/training-methods/grpo/offline.md)."
+            )
+
+
+def reject_unsyncable_config(config, backend: str) -> None:
+    """What ``config`` alone settles, for a script to raise before the load and the server preflights a refused family
+    would pay for first. ``None`` for a config no rank could read, which the trainer's gate still sees as a model."""
+    if config is None:
+        return
+    client_cls = resolve_weight_sync_client(backend)
+    _reject_unservable_model_types(config, backend, client_cls)
+    registry = f"model_type registry for {config.model_type}"
+    _reject_refused_families([(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls)
+
+
+def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
+    """Refuses an unservable family, one with a ``weight_sync_refusal``, a stock tree whose experts or spelling no engine
+    layout covers (:func:`_reject_stock_tree`), and one missing a buffer the push must carry."""
+    client_cls = resolve_weight_sync_client(backend)
+    config = getattr(unwrap_framework_wrappers(model), "config", None)
+    _reject_unservable_model_types(config, backend, client_cls)
     # Without live EP layers (the stock module tree) the registry's classes for the config carry the contract.
     if ep_layers:
         families = [(name, type(module)) for name, module in ep_layers.items()]
@@ -176,14 +202,7 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
         families = [
             (f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)
         ]
-    for where, cls in families:
-        if cls.FAMILY.weight_sync_refusal is not None:
-            raise ValueError(
-                f"{cls.__name__} (at {where!r}) does not support weight sync: the sync feeds "
-                f"{client_cls.ENGINE_RELEASE}'s model.load_weights directly, but "
-                f"{cls.FAMILY.weight_sync_refusal}. Online/environmental GRPO with weight sync "
-                f"is unsupported for this model — see {cls.__name__}.FAMILY.weight_sync_refusal."
-            )
+    _reject_refused_families(families, client_cls)
     if not ep_layers:
         _reject_stock_tree(config, sorted({cls.__name__ for _where, cls in families}), client_cls)
     for where, layer in ep_layers.items():

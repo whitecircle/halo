@@ -57,7 +57,7 @@ halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8 \
 
 Train the `mtp.*` head the release ships, so a server can draft with it. Fit it over a frozen trunk, on rows like
 the ones you will serve, or inside a fine-tune with `qwen3.6-35b-a3b-mtp-joint.yaml`. A 150-step fit served at 0.834
-acceptance on vLLM against the release head's 0.831, inside the 0.006 that head moves between launches, so expect no
+acceptance on vLLM against the release head's 0.831, inside the 0.011 that head spans across launches, so expect no
 served gain from the recipe's rows. What the `joint` recipe does over a fine-tune is not measured.
 
 ```bash

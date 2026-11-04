@@ -92,8 +92,8 @@ Weight sync needs **this repo's** SGLang image, not upstream's. It matches NCCL
 with the training image and patches the Gemma 4 router so a synced router weight
 takes effect.
 
-Which families each engine can update online differs. The trainer refuses an
-unsupported pair at construction and names the reason; the lists are in the
+Which families each engine can update online differs. The scripts refuse an
+unsupported pair at startup and name the reason; the lists are in the
 [Supported Matrix](supported-matrix.md#rollout-engines). Use vLLM unless you
 need SGLang.
 

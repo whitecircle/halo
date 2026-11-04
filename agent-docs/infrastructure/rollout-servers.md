@@ -142,7 +142,12 @@ update request that declares it and the drain of its sends. A failed chunk drain
 the same way: a server that does not answer `/health` is aborted outright, and a destroy still blocked after 30 s, as
 under a wedged engine that never enters its half, is aborted too, so the failure that brought the close raises.
 SGLang's `/health` generates through the scheduler, so the client asks it before the destroy occupies the scheduler,
-and waits for a server on `/v1/models`, which a pause does not hold.
+for longer than the 20 s the server allows a step. It waits for a server on `/v1/models`, which a pause does not hold
+and which answers ahead of the warm-up generate, then through `/health`'s 503s until that generate ends, as its first
+forward can outlast the 60 s generation probe on a cold kernel cache.
+vLLM unloads the model when an update session opens, and a failed chunk ends the session with it, so the client reads
+`instance_id` off `/server_info` before each open. A restart between syncs then reconnects and re-sends instead of
+opening a session on an engine with no group; a session no close can end leaves the server paused, to be restarted.
 
 Both clients send from their own CUDA streams and allocate their buffers on the caller's stream,
 recorded for the send stream, so a reconnect strands no allocator pool; `HALO_WEIGHT_SYNC_MEM_LOG=1`
@@ -267,7 +272,9 @@ change that fails to reach the model shows it.
 ### Construction gates
 
 The online and async GRPO trainers refuse at construction a model the selected engine cannot take a
-sync for (`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`), on every rank alike:
+sync for (`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`), on every rank alike. Their scripts
+settle the family's verdict off the checkpoint's config first (`reject_unsyncable_config`), before the datasets, the
+model load and the server preflights:
 
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which

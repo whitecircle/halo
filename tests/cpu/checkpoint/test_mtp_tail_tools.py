@@ -18,7 +18,13 @@ from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.tools.vocab_patch import patch_vocabulary
 from halo.model_loading.model_preparation import auto_load_model
 from tests.common.mtp_heads import run_entry, saved_tensors, write_entry_corpus, write_entry_run
-from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model, word_level_tokenizer
+from tests.common.tiny_models import (
+    TINY_BAILING_LING3_MLA_FAMILY,
+    TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
+    tiny_family_model,
+    word_level_tokenizer,
+)
 
 _TAIL = {
     "mtp.fc.weight": torch.full((128, 256), 1.5),
@@ -89,9 +95,15 @@ def test_a_family_with_no_tail_never_looks_at_the_source(tmp_path, monkeypatch):
         return str(tmp_path)
 
     monkeypatch.setattr(offline_export, "resolve_checkpoint_source", resolve)
-    for family, expected in (("gpt_oss", []), ("qwen3_5_moe_text", ["org/repo"])):
+    for family, expected in (
+        ("gpt_oss", []),
+        # Its class names no tail, and its config's explicit 0 declares none.
+        ("step3p7", []),
+        ("qwen3_5_moe_text", ["org/repo"]),
+        ("nemotron_h_omni", ["org/repo"]),
+    ):
         looked.clear()
-        model = tiny_family_model(TINY_MOE_FAMILIES[family])
+        model = tiny_family_model({**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}[family])
         assert offline_export.carried_mtp_tail(model, "org/repo", str(tmp_path), tool="t", dtype=torch.bfloat16) == {}
         assert looked == expected, family
 
@@ -114,6 +126,75 @@ def test_a_tail_with_no_spec_is_dropped_with_the_count_and_the_field_it_leaves_b
     assert len(warned) == 1 and "stores 1 MTP head tensor(s)" in warned[0], warned
     assert "num_nextn_predict_layers" in warned[0], warned
     assert tail_key not in _keys(out)
+
+
+def _composite_source(path, family, tail_key: str, **overrides) -> str:
+    torch.manual_seed(0)
+    model = tiny_family_model(family, overrides=overrides)
+    model.save_pretrained(path, max_shard_size="100GB")
+    word_level_tokenizer(["hello", "world"]).save_pretrained(path)
+    tensors = load_file(path / "model.safetensors")
+    save_file({**tensors, tail_key: torch.ones((2, 2))}, path / "model.safetensors", metadata={"format": "pt"})
+    return str(path)
+
+
+def _bf16(source: str, out: str) -> None:
+    convert_to_bf16(source, out, "causal_lm", trust_remote_code=False)
+
+
+def _patched(source: str, out: str) -> None:
+    patch_vocabulary(source, out, patterns=[], trust_remote_code=False)
+
+
+@pytest.mark.parametrize(
+    ("family", "tail_key", "overrides", "tool"),
+    [
+        (TINY_MOE_VLM_FAMILIES["nemotron_h_omni"], "mtp.layers.0.mixer.q_proj.weight", {}, _bf16),
+        (TINY_MOE_VLM_FAMILIES["nemotron_h_omni"], "mtp.layers.1.mlp.gate.weight", {}, _patched),
+        (TINY_MOE_FAMILIES["step3p7"], "model.layers.4.eh_proj.weight", {"num_nextn_predict_layers": 1}, _bf16),
+    ],
+    ids=["nemotron_omni_bf16", "nemotron_omni_patch_vocab", "step3p7_bf16"],
+)
+def test_a_composite_class_naming_no_tail_still_warns_on_the_tail_it_drops(
+    family, tail_key, overrides, tool, tmp_path, caplog
+):
+    """A release's config declares the head and the composite class names none, so the output's config keeps a field
+    with no head under it and a server drafting from it refuses."""
+    source = _composite_source(tmp_path / "source", family, tail_key, **overrides)
+    out = tmp_path / "out"
+    with caplog.at_level(logging.WARNING, logger=offline_export.__name__):
+        tool(source, str(out))
+    warned = _dropped_tail_warnings(caplog)
+    assert len(warned) == 1 and "stores 1 MTP head tensor(s)" in warned[0] and tail_key in warned[0], warned
+    assert "num_nextn_predict_layers" in warned[0], warned
+    assert tail_key not in _keys(out)
+
+
+def test_a_config_declaring_no_tail_leaves_the_composites_keys_alone(tmp_path, caplog):
+    source = _composite_source(
+        tmp_path / "source",
+        TINY_MOE_VLM_FAMILIES["nemotron_h_omni"],
+        "mtp.layers.0.mixer.q_proj.weight",
+        num_nextn_predict_layers=0,
+    )
+    with caplog.at_level(logging.WARNING, logger=offline_export.__name__):
+        _bf16(source, str(tmp_path / "out"))
+    assert not _dropped_tail_warnings(caplog)
+
+
+def test_a_tail_the_class_builds_reads_as_no_dropped_head(tmp_path, caplog):
+    """Ling-3.0's remote class holds its tail at the keys the depth declares, and its save writes them."""
+    model = tiny_family_model(TINY_BAILING_LING3_MLA_FAMILY, overrides={"num_nextn_predict_layers": 1})
+    source = tmp_path / "source"
+    model.save_pretrained(source, max_shard_size="100GB")
+    stored = _keys(source)
+    assert any(f".layers.{model.config.num_hidden_layers}." in key for key in stored), "the tiny class built no tail"
+    with caplog.at_level(logging.WARNING, logger=offline_export.__name__):
+        carried = offline_export.carried_mtp_tail(
+            model, str(source), str(tmp_path / "o"), tool="t", dtype=torch.bfloat16
+        )
+    assert carried == {}
+    assert not _dropped_tail_warnings(caplog)
 
 
 def test_a_quantized_tail_is_dropped_with_the_warning_as_it_holds_no_float_to_cast(tmp_path, caplog):

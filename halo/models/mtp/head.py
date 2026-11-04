@@ -20,10 +20,13 @@ from halo.models.head_transform import resolve_head_transform
 from halo.models.module_tree import backbone_with_layers, decoder_layers, decoder_layers_attr, find_module_path
 from halo.models.moe.config_fields import require_router_aux_loss_coef
 from halo.models.mtp.acceptance import score_drafts
-from halo.models.mtp.spec import ROOT_HEAD_ATTR, ROOT_HEAD_LAYERS_ATTR, MtpHeadSpec, MtpObjective
-
-# The attention a release's draft layer runs, which decides the trunk layer it takes its class and call from.
-_DRAFT_LAYER_TYPE = "full_attention"
+from halo.models.mtp.spec import (
+    ROOT_HEAD_ATTR,
+    ROOT_HEAD_LAYERS_ATTR,
+    MtpHeadSpec,
+    MtpObjective,
+    mtp_draft_layer_index,
+)
 
 
 class MtpLossSplit(NamedTuple):
@@ -74,14 +77,6 @@ def _list_head_class(layer_class: type[nn.Module]) -> type[nn.Module]:
     """The decoder layer holding the projection set among its own children, as a ``list`` release stores them. A class
     of its own, so the layer's forward stays what it was for every trunk layer."""
     return type(f"Mtp{layer_class.__name__}", (MtpHeadChain, layer_class), {})
-
-
-def mtp_draft_layer_index(text) -> int:
-    """The last trunk layer running the draft layer's attention, whose class and call arguments the head reuses."""
-    kinds = getattr(text, "layer_types", None)
-    if not kinds:
-        return text.num_hidden_layers - 1
-    return max(index for index, kind in enumerate(kinds[: text.num_hidden_layers]) if kind == _DRAFT_LAYER_TYPE)
 
 
 def _set_submodule(root: nn.Module, path: str, module: nn.Module) -> None:

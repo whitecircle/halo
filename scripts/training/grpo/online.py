@@ -35,6 +35,7 @@ from halo.entrypoints.script import (
 from halo.environments.reasoning_effort import resolve_reasoning_effort
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.moe.config_fields import has_routed_experts
 from halo.rewards.graders.verifiable import RLVR_GRADERS
@@ -48,6 +49,7 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     verify_sampler_logprob_reference,
     verify_server_flags,
 )
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
 
 
 def build_rlvr_row_fn(args: OnlineGRPOScriptArguments, tokenizer):
@@ -116,6 +118,14 @@ def main():
         trainer_cls=trainer_cls,
     )
     parallelism_config = context.parallelism_config
+
+    # The family's verdict, before the datasets, the load and the server preflights it would pay for first.
+    checkpoint_config, _ = probe_checkpoint(
+        model_config.model_name_or_path,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    reject_unsyncable_config(checkpoint_config, VLLM_BACKEND)
 
     # The trainer gets dataset_presharded so it does not re-shard. The prompt column is the loader's render column: it
     # must exist, and empty-prompt rows drop.

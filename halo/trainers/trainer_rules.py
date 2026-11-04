@@ -35,10 +35,12 @@ def reject_unreachable_mtp_term(
     is_cp_mode: bool,
     pops_labels: bool,
     rows_per_forward: int,
+    eval_rows_per_forward: int,
 ) -> None:
     """A head's term needs the model's forward to see the labels; elsewhere the head runs and pays for its layer and
     nothing trains it. A remote-code head (Ling-3.0's ``mtp_loss_scaling_factor``) also flattens rows before its shift,
-    so past one row per forward each row's last position trains on the next row's token."""
+    so past one row per forward each row's last position trains on the next row's token, and with no training check of
+    its own it adds that term to ``eval_loss`` too."""
     factor = get_config_field(getattr(model, "config", None), "mtp_loss_scaling_factor") or 0
     head = find_mtp_head(model)
     if head is None and factor <= 0:
@@ -64,12 +66,17 @@ def reject_unreachable_mtp_term(
             f"A label smoother or compute_loss_func takes the labels before the model call, so the MTP term of {named} "
             "is never added. Remove it, or train without the head."
         )
-    if head is None and rows_per_forward > 1:
-        raise ValueError(
-            f"mtp_loss_scaling_factor={factor} with per_device_train_batch_size={rows_per_forward}: the release's "
-            "remote head flattens rows before it shifts, so the last position of each row trains on the next row's "
-            "token. Set per_device_train_batch_size: 1."
-        )
+    if head is None:
+        for field, rows in (
+            ("per_device_train_batch_size", rows_per_forward),
+            ("per_device_eval_batch_size", eval_rows_per_forward),
+        ):
+            if rows > 1:
+                raise ValueError(
+                    f"mtp_loss_scaling_factor={factor} with {field}={rows}: the release's remote head flattens rows "
+                    f"before it shifts, so the last position of each row scores the next row's token, in training and "
+                    f"in eval_loss alike. Set {field}: 1."
+                )
 
 
 def reject_cp_trainer_args(

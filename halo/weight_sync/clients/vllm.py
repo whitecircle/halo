@@ -55,6 +55,8 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     RESUME_ENDPOINT = "/resume"
     SESSION_OPEN_ENDPOINT = "/start_weight_update"
     SESSION_CLOSE_ENDPOINT = "/finish_weight_update"
+    # Layerwise reload: a failed chunk also ends the engine's session, so no close can restore the model after it.
+    SESSION_OPEN_UNLOADS_MODEL = True
     IMAGE_REMEDY = (
         "Serve from the toolkit's vLLM image (make build-vllm), and keep its PYTHONPATH, which loads the patches."
     )
@@ -107,6 +109,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             reasoning_parser=config.get("structured_outputs_config", {}).get("reasoning_parser"),
             strict_tool_calling=env.get(_STRICT_TOOL_CALLING_KEY),
             captures_routing=config.get("aux_output_config", {}).get("enable_return_routed_experts"),
+            instance_id=config.get("instance_id"),
         )
 
     def reports_sampled_token_ids(self) -> bool | None:
@@ -162,6 +165,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
         else:
             self._require_toolkit_image(flags)
+            self._group_instance = flags.instance_id
         self.probe_generation()
         return self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()["world_size"]
 
@@ -205,9 +209,23 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._unique_id_store: UniqueIdStore | None = None
         # Created once on the communicator's device; flushes are serialized.
         self._packed_streams: list[torch.cuda.Stream] | None = None
+        # The launch this client's group formed with, ``None`` when unread.
+        self._group_instance: str | None = None
 
     def _prepare_transport(self) -> None:
         self._require_communicator()
+
+    def _start_engine_update(self) -> None:
+        # A restarted engine takes the pause and the session, which unloads its model, and only the first chunk then
+        # finds no group. Refused before either, so the pool's reconnect replays this sync over a new group.
+        if self._group_instance is not None:
+            instance = self.read_server_flags().instance_id
+            if instance != self._group_instance:
+                raise RuntimeError(
+                    f"vLLM server {self.base_url} restarted after this client's group formed (instance "
+                    f"{self._group_instance}, now {instance}), so that group is gone."
+                )
+        super()._start_engine_update()
 
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
         """``final`` is unused, as this engine closes with its own ``/finish_weight_update``."""

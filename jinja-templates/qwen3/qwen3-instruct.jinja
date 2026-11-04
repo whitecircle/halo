@@ -7,8 +7,9 @@
 
 {# --- Main message rendering (user & assistant only, no system prompt) --- #}
 {#- Deliberate deltas vs the hub template: single-turn guard, system messages dropped, and no
-    <think> block on assistant turns (the hub's enable_thinking=False scaffold) — everything else
-    matches the hub render token-for-token, including the newline after every <|im_end|>. -#}
+    <think> block on assistant turns, where the hub's enable_thinking=False render writes an empty
+    one — everything else matches the hub render token-for-token, including the newline after every
+    <|im_end|>. -#}
 {%- for message in messages -%}
   {%- if message.role == "user" -%}
     {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' -}}

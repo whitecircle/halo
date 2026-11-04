@@ -130,12 +130,18 @@ The release is plain bf16 with no conversion step. Load it natively, `trust_remo
 
 Serve a composite with the release's flags. Both engines boot an untrained reattached export and answer an image prompt, vLLM a text prompt too. `reattach_vision_tower.py` carries the modules its processor and tokenizer configs' `auto_map` names, which SGLang's boot and `AutoProcessor` with `trust_remote_code=True` read.
 
-- **vLLM 0.32.0:** `--trust-remote-code` (without it the boot fails on `vit_hidden_size`), `--mamba-ssm-cache-dtype float32`, `--tensor-parallel-size 2`, `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`. `docker-compose.vllm.yml` passes neither of the first two, so start the image directly.
+- **vLLM 0.32.0:** `--trust-remote-code` (without it the boot fails on `vit_hidden_size`), `--mamba-ssm-cache-dtype float32`, `--tensor-parallel-size 2`, `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`. The row that served an export started the image directly with these. `docker-compose.vllm.yml` takes the same flags: `VLLM_TRUST_REMOTE_CODE=1`, `VLLM_TP=2`, `VLLM_TOOL_PARSER=qwen3_coder`, `VLLM_REASONING_PARSER=nemotron_v3`, `VLLM_EXTRA_ARGS="--mamba-ssm-cache-dtype float32"`.
 - **SGLang 0.5.22:** `SGLANG_TRUST_REMOTE_CODE=1`, `SGLANG_TP=2`, `SGLANG_TOOL_PARSER=qwen3_coder`, `SGLANG_REASONING_PARSER=nemotron_3` on the compose file. The model card's `--mamba-ssm-dtype` flags are for its dedicated image and raise on this one.
 
 ## RL weight sync
 
-Online and async GRPO are refused at construction on both engines by the spec's `weight_sync_refusal`. Both engines serve the release, and no online update into either is validated end to end. The transport preflight's default parameter does not exist on this family: pass `--param language_model.backbone.embeddings.weight` to `weight_sync_transport.py`.
+Online and async GRPO are refused on both engines by the spec's `weight_sync_refusal`, off the checkpoint's config before the scripts read a dataset or load the model, and again at trainer construction. Both engines serve the release, and no online update into either is validated end to end.
+
+**What runs today.** Train offline: serve an export ([above](#checkpoints-and-serving)), collect and score completions from it (`scripts/inference/reward_model/rejection_sample.py --output_format offline_grpo`), and train them with `examples/grpo/offline/nemotron_h/offline-grpo-nemotron-3.5-super-vl-gsm8k-ep8.yaml`, which needs no server ([Offline GRPO](../training-methods/grpo/offline.md)).
+
+**What lifts the refusal.** Both engines passing `trainers/grpo/test_weight_push_exact.py` on the release at the serving `--tp-size 2`, its `--reach` rows included, which starts with a `CHECKPOINTS` entry for the family. vLLM's admission also takes a config-parity fixture under `docker/vllm/parity/fixtures/` ([Config-schema parity](../infrastructure/rollout-servers.md#config-schema-parity)), and either engine's a place in `_SYNC_EXACTNESS_SWEEP_FAMILIES` (`tests/gpu/manifest.py`). The run has to push the composite's names: vLLM's loader drops a name without `language_model.`, which is why these trainers refuse `text_only_model`. The router's `gate.e_score_correction_bias` is a buffer on the trainer and a parameter of vLLM's `GateLinear`, so the push has to carry it (`engine_loaded_buffers`), or the partly loaded gate rebuilds from uninitialized storage ([Partly loaded layers](../infrastructure/rollout-servers.md#partly-loaded-layers)).
+
+The transport preflight's default parameter does not exist on this family: pass `--param language_model.backbone.embeddings.weight` to `weight_sync_transport.py`.
 
 ## Pipeline parallelism
 
