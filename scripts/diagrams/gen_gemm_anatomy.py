@@ -83,7 +83,7 @@ dim(Cx, Cy + Ch + 0.22, Cx + Cw, Cy + Ch + 0.22, "N")
 ax.text(
     0.2,
     1.02,
-    "M = rows = tokens  (batch × seq, or routed per expert) — the knob you turn.",
+    "M = rows = tokens (batch × seq, or routed per expert): the knob you turn.",
     fontsize=TINY,
     color=INK,
     va="center",
@@ -91,7 +91,7 @@ ax.text(
 ax.text(
     0.2,
     0.66,
-    "K, N = the layer's width — fixed by the model.   W (the weight) is read from HBM regardless of M.",
+    "K, N = the layer's width, fixed by the model. W (the weight) is read from HBM regardless of M.",
     fontsize=TINY,
     color=INK2,
     va="center",

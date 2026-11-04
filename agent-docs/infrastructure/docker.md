@@ -193,8 +193,10 @@ the caches elsewhere. The Triton cache matters: fla's autotuners persist measure
 (`FLA_CACHE_RESULTS` defaults on), and some keys are shape-derived, so an ephemeral cache re-benchmarks
 per sequence length every run. Fresh caches can pick differently, and a different pick changes bf16 rounding,
 which routing and index selection can amplify: across separate cold caches tiny GLM-5 Next's logits moved up to
-12.4%, while Qwen3.5-35B-A3B, Qwen3.6-35B-A3B and GLM-5.3-Flash cut to six layers stayed bit-identical. Runs that
-must match bit for bit share an already warm cache, and no other run fills it meanwhile.
+12.4%, while Qwen3.5-35B-A3B, Qwen3.6-35B-A3B and GLM-5.3-Flash cut to six layers stayed bit-identical. On one cold
+cache shared by two runs, tiny Qwen3-Next's gradients moved up to 6.1e-5, Qwen3.5 MoE's 2.4e-7 and
+Qwen3.8-Flash-Next's 6e-8, and the 13 other tiny families stayed bit-identical. Runs that must match bit for bit share
+an already warm cache, and no other run fills it meanwhile.
 
 The FA4 cache serializes each kernel file's writer with `flock`. Where `flock` fails (Lustre without
 `flock`), the first use of each kernel raises after a 15 s lock timeout, mid-run included; where locks

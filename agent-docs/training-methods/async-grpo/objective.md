@@ -65,7 +65,7 @@ The `isr_*` stages mask rather than reweight: a masked token loses its policy-gr
 
 The geometric band (NeMo-RL's seq-mask-tis, slime's MIS) needs both bounds, `0 < min < 1 < max`; `[0.99, 1.01]` is a starting point. The veto follows verl and slime (~`1e-4`), and the negative-advantage mask is DeepSeek-V3.2's off-policy sequence masking. The code-contests recipes run it at `[0.95, 1.05]` with `isr_veto_min: 1.0e-4` and `isr_opsm_delta: 0.05`.
 
-**Size the geometric band above the numerical floor.** Trainer and engine are different bf16 stacks ([Trainer and engine noise](#trainer-and-engine-noise)), so their mean log-ratio is negative at identical weights: ~0.002 nats/token at sampling entropy 0.4, ~0.04 at 1.0. A band inside that floor masks every step. Sustained masking at low entropy is a disagreement to fix, not a band to widen.
+**Size the geometric band above the numerical floor.** Trainer and engine are different bf16 stacks ([Trainer and engine noise](#trainer-and-engine-noise)), so their mean log-ratio is not zero at identical weights. Read `sampling/logratio_mean` on your serving shape before setting a band: one inside that floor masks every step. Sustained masking at low entropy is a disagreement to fix, not a band to widen.
 
 TRL's `off_policy_mask_threshold` is refused: this trainer never emits the batch key it reads.
 
@@ -77,7 +77,7 @@ Past a high masked fraction the survivors are a selection-biased sample, the row
 
 ### Engine reference
 
-`isr_engine_reference: true` (off in the recipes) takes the trainer↔engine floor out of the stages: each training round the engine re-scores every train row that carries sampling log-probs, under the weights it last received, and the stages read that log-ratio. The engine's own decode-vs-prefill gap stays in it (−0.003 nats/token at sampling entropy 0.36 with identical weights, against −0.0003 for trainer-vs-engine-prefill) and grows with entropy, so the band still needs room.
+`isr_engine_reference: true` (off in the recipes) takes the trainer↔engine floor out of the stages: each training round the engine re-scores every train row that carries sampling log-probs, under the weights it last received, and the stages read that log-ratio. The engine's own decode-vs-prefill gap stays in it, so the band still needs room: read `sampling/engine_logratio_mean` on your serving shape (`sampling/numerics_logratio_mean` logs the trainer-vs-engine part it leaves out, `sampling/engine_rescore_coverage` the corrected tokens re-scored).
 
 It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row, for which a vLLM server needs memory headroom ([Throughput](../../infrastructure/rollout-servers.md#throughput)). `isr_engine_rescore_per_server` (default 128) bounds the prefills in flight on each server across all ranks; a row whose re-score misses its deadline reads the trainer's log-ratio, counted in `sampling/engine_rescore_miss_frac`. A startup probe refuses a server whose prompt log-probs differ between an eager prefill and CUDA-graph prefills of its prefixes at the positions the model scores above −1.0 log-prob (bf16 noise alone reaches several nats at low-probability ones), as vLLM's V1 runner's do under MTP speculative decoding; the image's Model Runner V2 passes ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
 
@@ -150,25 +150,32 @@ Under `rollout`, the step fails on every rank when a trainable batch carries no 
 
 Trainer and engine disagree on identical weights. bf16 round-off flips near-tie MoE top-k selections, and each flip compounds through the later layers. This is numerics, not a sync error: an unchanged push leaves the served log-probs bit-identical ([Coverage](../../infrastructure/rollout-servers.md#coverage)).
 
-How much of it routing carries varies by family. Measured with no engine, on CPU kernels and fixed text, forcing the top-k takes Laguna-XS from 0.679 nats to 0.058 and LFM-2 from 0.375 to 0.050, but GLM-4.7, whose logits reach 140, only from 0.0955 to 0.0933 and Gemma 4 from 0.683 to 0.623. On those two most of the gap stays with attention and head rounding.
+Forcing the routing closes most of that floor on gpt-oss, Laguna and LFM-2, and not on GLM-4.7 or Gemma 4. Measured with no engine, on CPU kernels and fixed text, forcing the top-k takes Laguna-XS from 0.679 nats to 0.058 and LFM-2 from 0.375 to 0.050, but GLM-4.7, whose logits reach 140, only from 0.095 to 0.072 and Gemma 4 from 0.683 to 0.623. On those two most of the gap is not routing.
+
+![bf16's mean absolute gap to an fp32 forward with natural routing and with fp32's top-k forced: gpt-oss-20b 0.400 to 0.079, Laguna-XS 0.679 to 0.058 and LFM-2 0.375 to 0.050, where forcing closes most of it, and GLM-4.7 0.095 to 0.072 and Gemma 4 0.683 to 0.623, where most of it is not routing](../../assets/benchmarks/routing_forced_gap.png)
 
 On gpt-oss-20b, on six untemplated rows of 32 to 1,024 tokens (2,010 positions, mean log-prob −7.5), stock transformers' bf16 forward sits 0.400 nats (mean absolute) from its fp32 forward, and 0.079 with the fp32 forward's top-k forced. 11.8% of its token-layer selections differ, from 2.7% at the first layer to 23.5% at the last. The served model sits at 0.319 and Halo's FA4 forward at 0.392 on the same rows.
 
-Sampled tokens carry far less. Mean absolute log-ratio over the tokens the IS correction scores, at step 1 before any update: one short tool-call task, two ranks at `ep1`, 8 rows per rank, `rollout_top_p` at its default `0.95`, each arm its own rollouts.
+Sampled tokens carry far less. Mean absolute log-ratio over the tokens the IS correction scores, at step 1 before any update: one short tool-call task, two ranks at `ep1`, 8 rows per rank, one run per arm, each arm its own rollouts. The vLLM rows run `rollout_top_p: 1.0` and `rollout_max_tokens: 128`. The SGLang row runs `rollout_top_p: 0.95`, which SGLang's reported log-probs do not see ([SGLang](../../infrastructure/rollout-servers.md#sglang)).
 
 | Engine, checkpoint | `none` | R2 | R3 | R3 `replay_flip_rate` | Tokens scored per arm |
 |---|:--:|:--:|:--:|:--:|:--:|
-| vLLM, gpt-oss-20b | 0.0658 | 0.0657 | 0.0443 | 0.027 | 533–596 |
+| vLLM, gpt-oss-20b | 0.0300 | 0.0288 | 0.0158 | 0.027 | 1,190–1,280 |
+| vLLM, Qwen3.6-35B-A3B | 0.0279 | 0.0304 | 0.0111 | 0.148 | 2,801–2,998 |
+| vLLM, GLM-4.7-Flash | 0.0375 | 0.0388 | 0.0318 | 0.036 | 1,318–1,412 |
 | SGLang, gpt-oss-20b | 0.0289 | 0.0299 | 0.0147 | 0.027 | 1,134–1,246 |
-| vLLM, Qwen3.6-35B-A3B | 0.0806 | 0.0800 | 0.0403 | 0.150 | 1,052–1,140 |
 
-- R2 changes nothing here, as its two trainer passes predict. R3 takes a third to a half off the mean.
+![Mean absolute log-ratio over scored tokens under no replay, R2 and R3 on four engine and checkpoint rows. R2 sits level with none on each. R3 sits 1.9× below none on vLLM gpt-oss-20b, 2.5× on Qwen3.6-35B-A3B, 1.2× on GLM-4.7-Flash and 2.0× on SGLang gpt-oss-20b. One short task at step 1, not a training result](../../assets/benchmarks/routing_replay_gap.png)
+
+- On vLLM, R3 sits about 1.9× below `none` on gpt-oss-20b, 2.5× on Qwen3.6-35B and 1.2× on GLM-4.7, where most of the gap is not routing. Its p99 falls from 0.2918 to 0.1639, 0.3485 to 0.1532 and 0.5898 to 0.5383.
+- R2 does not separate from `none`, as its two trainer passes predict: 4% under it on vLLM's gpt-oss-20b row and above it on the others.
+- Qwen3.6-35B's tokens are mostly reasoning: 87.5% of its rollouts hit `rollout_max_tokens`.
 - `routing/replay_flip_rate` counts flips per token and layer with upstream layers already forced, so it understates free-running disagreement.
-- `sampling/logratio_mean`, the signed mean, moves little under R3 on vLLM: −0.0325 to −0.0291 on gpt-oss-20b, −0.0288 to −0.0221 on Qwen3.6.
-- The engines do not compare. vLLM reports log-probs after the top-p cut, so it marks more tokens certain (65% of gpt-oss-20b's completion tokens, against 31% on SGLang, which reports before the cut), and its ratio carries that renormalization, which no replay touches.
-- Other families have no comparable number; the rows of Qwen3-30B, LFM-2 and Laguna scored no tokens at step 1.
+- `sampling/logratio_mean`, the signed mean, stays within 0.003 of zero on vLLM's gpt-oss-20b and Qwen3.6-35B rows in every arm.
+- vLLM reports log-probs after a top-p cut, so a vLLM row below `rollout_top_p: 1.0` carries that renormalization, which no replay touches, and does not compare with these.
+- No other family has a usable number: the LFM-2 and Laguna rows scored too few tokens to quote.
 
-This is one task at one step, not a training result. No row compares the modes over a long run, and neither mode makes training exactly on-policy.
+This is one short task at step 1, not a training result. No row compares the modes over a long run, neither mode makes training exactly on-policy, and R3 stays experimental.
 
 ## Batch construction
 

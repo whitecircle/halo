@@ -90,9 +90,8 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
         "(attention sharded, experts distributed) or pure ETP (expert FFN sharded)."
     ),
     frozenset({"pp", "tp"}): (
-        "PP+TP needs at least 2 nodes to launch at all (a stage must be whole NVLink domains), and "
-        "the composition was never exercised on real multi-node hardware. It also excludes the "
-        "dense families most likely to want it: transformers reconciles a "
+        "PP+TP needs at least 2 nodes to launch at all (a stage must be whole NVLink domains), and it "
+        "excludes the dense families most likely to want it: transformers reconciles a "
         "'replicated_with_grad_allreduce' plan entry (Qwen3 q_norm/k_norm) with a per-backward "
         "all-reduce hook, which the pipeline schedule disables on non-final microbatches, so the "
         "hook re-reduces accumulated history. Use PP+EP, or TP inside a single stage-less job."

@@ -69,9 +69,8 @@ This one is a full fine-tune at EP4 with two vLLM servers on GPUs 0–3.
 On the host, start the servers on the SFT checkpoint:
 
 ```bash
-cp jinja-templates/gpt-oss/gpt-oss-harmony.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/gpt-oss-20b-sft
-export VLLM_CHAT_TEMPLATE=/data/gpt-oss-harmony.jinja
+export VLLM_CHAT_TEMPLATE=/jinja-templates/gpt-oss/gpt-oss-harmony.jinja
 export VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text
 export VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss
 VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_PORT=8000 \
@@ -120,16 +119,14 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - Live sinks (`reset_sinks: false`) need a kernel that takes a sink argument. FA2 and SDPA are refused,
   and so is CP. On Blackwell that kernel is FA4, which the GRPO recipes pin. The Hopper image's FA3 takes
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
-  `packing`, so an SFT run there also needs `--packing=false`. Neither is fused: each holds the full
-  attention score matrix (flex under EP runs uncompiled, in fp32), so memory bounds the row length
-  ([Known issues](../../agent-docs/optimization/flash-attention.md#known-issues) ↗).
+  `packing`, so an SFT run there also needs `--packing=false`, and neither is fused, so memory bounds the
+  row length ([Known issues](../../agent-docs/optimization/flash-attention.md#known-issues) ↗).
 - `packing: true` needs a flash attention backend. It is refused on eager, SDPA and flex attention.
 - The DPO, SMPO, reward, classification and offline GRPO recipes pin FA4, so they run on Blackwell only;
   FA4 is also what those scripts pick there unpinned. Unpinned on other GPUs, they take SDPA; on Hopper,
   pass `--attn_implementation=flash_attention_3`. The self-distillation recipe trains without
   gradient checkpointing and reserved 138 GiB per GPU over three steps at 16k tokens, so on an 80 GB
-  GPU it also needs
-  `--gradient_checkpointing=true`.
+  GPU it also needs `--gradient_checkpointing=true`.
 
 ## Export and serve
 

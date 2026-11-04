@@ -61,7 +61,7 @@ multimodal is EP/ETP-only.
 
 ## Multi-node EP
 
-532 GB of bf16 weights do not fit node-local EP=8 alongside full-FT optimizer states — Inkling-Small trains at `ep_size: 16` / `ep_scope: global` on 2×8 B300. Measured on that topology:
+532 GB of bf16 weights do not fit node-local EP=8 alongside full-FT optimizer states — Inkling-Small trains at `ep_size: 16` / `ep_scope: global` on 2×8 B300. Measured on that topology on Halo 1.0.0 or earlier:
 
 - Keep `per_device_train_batch_size × max_length` within the cross-node Gin dispatch cap (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, 8192 — [DeepEP](../infrastructure/deepep.md)); the shipped config runs mbs 2 × 4096 = 8192, validated exactly at the cap.
 - Grouped GEMM and the auto SM count (the 24-SM zero-division fallback) run clean at Inkling's shapes. If the first cross-node combine times out intermittently, pin `HALO_DEEPEP_NUM_SMS=16` — fewer channels shrink the barrier race window.

@@ -28,8 +28,8 @@ halo launch grpo/offline examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-
 ```
 
 Nothing else has to run, so the families online RL refuses for weight sync still train here (on
-Qwen3.8-Flash-Next this path is CPU-tested only). `examples/grpo/offline/` also holds the GPT-OSS and
-Gemma 4 versions. Test a config first with `--max_steps=10 --save_strategy=no` on a slice of the data.
+Qwen3.8-Flash-Next this path is CPU-tested only). `examples/grpo/offline/` also holds the GPT-OSS,
+Gemma 4 and Nemotron versions. Test a config first with `--max_steps=10 --save_strategy=no` on a slice of the data.
 
 Context and pipeline parallelism take full fine-tuning only, and pipeline parallelism needs
 `max_prompt_length` and `max_completion_length` set.

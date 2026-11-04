@@ -48,8 +48,8 @@ Compose refuses to start either file without its host path: `HALO_SCRATCH` (vLLM
 volume) and `SGLANG_MODEL_DIR` (SGLang, the directory it mounts read-only). Export them, or set them once in the
 repo-root `.env`, which compose reads.
 
-Confirm `/health` (`:8000` vLLM, `:30000` SGLang) first, or client init hangs up to `rollout_connection_timeout`
-(default 120 s). Parsers, `--moe-backend triton` and the rest:
+Confirm `/health` (`:8000` vLLM, `:30000` SGLang) first: rank 0 waits only `rollout_connection_timeout` (default
+120 s, 180 in the code-contests recipes) for a server still loading. Parsers, `--moe-backend triton` and the rest:
 [Rollout Servers](../../infrastructure/rollout-servers.md#vllm).
 
 ## Launching the trainer
@@ -95,7 +95,9 @@ round's generation.
 - `rollout_group_port` (default `51216`, either backend) is bound on the **trainer** host, one listener per server, so
   two servers sharing a port collide even on distinct hosts. With several servers it is the base: an entry with no
   `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0`. TRL's `vllm_group_port` is refused here; Online GRPO reads it.
-- Startup and every push fail fast: an error on any rank raises on all ranks together.
+- Startup and every push fail fast: an error on any rank raises on all ranks together. An engine restarted between
+  syncs is the exception: the client reconnects and re-sends, with a warning
+  ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
 - Each EP layer's expert gather transiently materializes the **full expert set** on every rank, so its cost scales
   with total expert count, not `ep_size`.
 
@@ -105,7 +107,7 @@ Prefetch rolls the next rounds out while the current one trains, so each round t
 (one optimizer step each at the default `steps_per_generation`) and the
 [importance sampling correction](objective.md#importance-sampling-correction) covers the lag. `enable_prefetch` unset
 turns it on with two or more servers and off with a **single** one (`rollout_server_url`, default
-`http://localhost:8000`, or a one-entry `rollout_server_configs`), whose step stays serial and on-policy. `true`
+`http://localhost:8000`, or a one-entry `rollout_server_configs`), whose step stays serial with no weight lag. `true`
 prefetches on a single server too; `false` never prefetches.
 
 ```yaml
@@ -126,7 +128,8 @@ rollout_server_configs:
   episodes fill them. Each round in flight holds its own `max_concurrent_rollouts`, so the servers carry up to
   `prefetch_depth` rounds' KV, every sync lands on all of them, and an eval round shares the servers with them.
 - A round spans up to `ceil(prefetch_depth × steps_per_generation × num_iterations ÷ (gradient_accumulation_steps ×
-  sync_weights_every_n_steps))` syncs, a bound never below 1. On SGLang a turn aborted at each of them needs that
+  sync_weights_every_n_steps))` syncs, a bound never below 1, plus one for an eval between cadence pushes when
+  `sync_weights_every_n_steps` is above 1. On SGLang a turn aborted at each of them needs that
   many re-issues, so a span above `max_retries` is refused before the model load, and again at trainer
   construction, on one server that opts in as on several: the shipped SGLang recipes (`max_retries: 1`) take
   `prefetch_depth: 1`. Deepen one by syncing less often, or raise `max_retries` to the span with

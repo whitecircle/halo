@@ -84,7 +84,7 @@ curriculum recipes are the three Qwen3.6 vLLM stages
 | [`max_turns`](../../../episodes.md#trajectory-length) | 16; 18 in the curriculum recipes |
 | [`rollout_max_tokens`](../../../episodes.md#trajectory-length) | 30000 per turn; 38192 in the curriculum recipes |
 | [`rollout_max_answer_tokens`](../../../reasoning.md#answer-room) | 8192 on vLLM, so the engine closes a turn's reasoning at 21,808 tokens (30,000 in the curriculum recipes); unset on SGLang |
-| [`rollout_max_episode_tokens`](../../../episodes.md#episode-output-budget) | 131072 over all turns; 160000 in the curriculum recipes |
+| [`rollout_max_episode_tokens`](../../../episodes.md#episode-output-budget) | 131072 over all turns; 128000 on gpt-oss, so the prompt and tool schema fit its 131072 window; 160000 in the curriculum recipes |
 | [`rollout_stop_tokens`](../../../episodes.md#tool-calls) | `<\|im_start\|>` on the Qwen3.6 vLLM recipes, so a model past a forced close cannot open a chat turn whose `<think>` starts a fresh budget; `<\|call\|>` on the gpt-oss recipes (the harmony tool-call terminator) |
 | [`reasoning_floor`](../../../reasoning.md#reasoning-length-reward) | 0.10 on the Qwen3.6 vLLM recipes, 0.05 elsewhere |
 | [`reasoning_price`](../../../reasoning.md#price-past-the-budget) with `reasoning_price_past_budget: true` | low 0.008, medium 0.006, high 0.004 per 1,000 tokens a turn reasons past its level's budget; `reasoning_price_cap: 0.28` an episode, which one turn at the ceiling stays under |

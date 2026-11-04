@@ -12,11 +12,12 @@ NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collective
 >
 > On MoE models TP shards **attention only**. The experts stay replicated (EP owns them), and
 > `embed_tokens`/`lm_head` stay replicated deliberately. On a fine-grained MoE those are nearly all
-> the parameters, so raising `tp_size` costs collectives and saves little — and every TP rank still
-> holds the full expert set, so a full fine-tune of a 35B-A3B under `tp_size=2` needs ≈280 GB per rank
-> (weights + AdamW-bf16 states + grads) before activations, past a B300's ≈260 GB practical ceiling; that
-> shape runs under EP. The useful MoE shapes are **EP**, **EP+ETP** (expert memory), and **EP+TP**
-> (only when attention itself is the bottleneck).
+> the parameters, so raising `tp_size` costs collectives and saves little. Every TP rank still holds
+> the full expert set: a full fine-tune of a 35B-A3B at `tp_size=2` on two GPUs (DP 1, no FSDP2 wrap)
+> needs ≈280 GB per rank (weights + AdamW-bf16 states + grads) before activations, by arithmetic, nearly
+> all of a B300's 288 GB. At DP > 1 FSDP2 shards their gradients and optimizer state, not the weights it
+> gathers. The useful MoE shapes are **EP**, **EP+ETP** (expert memory), and **EP+TP** (only when attention
+> itself is the bottleneck).
 
 Two sharding mechanisms are in play — HF-native TP (`tp_plan="auto"`, dense models) and the
 toolkit's selective attention TP — and both place their sharded params as **DTensors** on the TP
@@ -262,7 +263,7 @@ the attention reductions feeding the router, which flips a handful of near-tied 
 and moves whole-expert mass. Gradient scale and direction still match; this is bf16 reduction
 order, not a sync bug.
 
-Measured **0.060** loss offset on gpt-oss-20b (top-4-of-32), so the correctness gate uses
+Measured **0.060** loss offset on gpt-oss-20b (top-4-of-32, before 1.2.0), so the correctness gate uses
 `TOL.router_pick_flip_loss_abs` (0.1, shared with the EP+ETP gate) instead of the generic
 parallel-vs-baseline bound.
 

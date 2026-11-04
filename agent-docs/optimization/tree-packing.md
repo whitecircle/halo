@@ -44,8 +44,9 @@ token less; nothing is assumed from the text.
 The digest order replaces the dataset's row order, in both splits. The trainer still shuffles packed
 rows every epoch.
 
-Measured on Halo 1.2.0. The gain is the share of tokens that sit in shared prefixes: a dataset where half the rows share a long
-prefix with others packs into about 1.4× fewer rows. A tree row costs about what a flat row costs where
+Measured on Halo 1.2.0. The gain is the share of tokens that sit in shared prefixes: a synthetic corpus where half the
+rows share a document of about 6k tokens packed into about 1.7× fewer rows at 64k tokens per row (116 to 69 on
+gpt-oss-20b, 130 to 77 on Qwen3.5-35B-A3B). A tree row costs about what a flat row costs where
 sliding-window layers dominate (GPT-OSS). Qwen3-30B-A3B, where every layer is a full layer in the
 `split` form, pays 10% per step, and Qwen3.5-35B-A3B on FA2 (`gather`) about 7%. That cost grows with the
 shared-prefix length and fan-out: on a corpus sharing 6k-token prefixes about 1.8× deep it is 1.41× per step,
@@ -176,8 +177,9 @@ run's.
 row below a tree), `eval_packing` is left on and `train_on_completions_only` is on. It is refused
 under context, tensor and pipeline parallelism, with `torch_compile`, with `train_sinks`, on a
 pre-processed dataset and on the VLM path. The other `tree_*` options raise when set without it.
-Expert parallelism and FSDP2 data parallelism never slice a row, so both admit tree rows; the end-to-end run is
-FSDP2 on Qwen3-0.6B. Pure ETP and EP+ETP are admitted.
+Expert parallelism and FSDP2 data parallelism never slice a row, so both admit tree rows. The end-to-end test is
+FSDP2 on Qwen3-0.6B, and Qwen3.5-35B-A3B ran 5 steps of tree rows at `ep8` on FA2 (`gather`). Pure ETP and EP+ETP are
+admitted.
 
 Families are admitted one by one (`TREE_FAMILIES` in `halo/models/attention/tree.py`), each by passing
 the per-example oracle test; every other family is refused before the model loads. Backends are admitted

@@ -56,11 +56,12 @@ class RolloutConfig:
     """The id closing reasoning, resolved from ``rollout_reasoning_end_token`` by the caller owning the tokenizer:
     the per-turn reasoning count ``episode/thinking_cap_turns`` reads ends at it. None = no count."""
     capture_token_ids: bool = False
-    """Capture the sampled token ids and vLLM's rendered prompt ids, so training uses what the server rendered and
-    the model emitted. Off in a hand-built config; ``get_rollout_config`` derives it from ``train_on_sampled_tokens``."""
+    """Capture the sampled token ids and the engine's rendered prompt ids, so training uses what the server rendered
+    and the model emitted. Off in a hand-built config; ``get_rollout_config`` derives it from
+    ``train_on_sampled_tokens``."""
     capture_routed_experts: bool = False
     """Capture the engine's per-token MoE routing (the raw ``routed_experts`` payload) for R3 routing replay; needs
-    ``--enable-return-routed-experts`` and a non-FlashInfer MoE backend."""
+    ``--enable-return-routed-experts`` and the triton MoE backend the weight sync also needs."""
     stop_token_ids: list[int] | None = None
     """Token ids that end a turn: the model's tool-call terminator, without which a non-eos terminator lets the model
     play the whole episode in one turn."""

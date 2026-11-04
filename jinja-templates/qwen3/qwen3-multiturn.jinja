@@ -1,8 +1,9 @@
 {#- --- Multi-turn chat template for Qwen3 (no system prompt, no tools) --- -#}
 {#- Supports any number of user/assistant turns -#}
 {#- Deliberate deltas vs the hub template: system messages are dropped, and assistant turns carry
-    no <think> block, where the hub's enable_thinking=False render writes an empty one — everything
-    else matches the hub render token-for-token, including the newline after every <|im_end|>. -#}
+    no <think> block, where the hub's enable_thinking=False render writes an empty one (before the
+    last reply on Qwen3.5/3.6, before every reply on Qwen3.8-Flash-Next) — everything else matches
+    that render token-for-token, including the newline after every <|im_end|>. -#}
 {%- for message in messages -%}
   {%- if message.role == "user" -%}
     {{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' -}}

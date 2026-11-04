@@ -588,7 +588,7 @@ either population copies a tensor ([PEFT](../optimization/peft.md#checkpoint-sav
 
 Router balancing biases: under `bias_update` they live in the family's own checkpoint slot, ride
 `model.safetensors` at their trained fp32 (`balancing_param_keys` exempts them from the bf16 cast) and serve
-as trained; under `bias_update_transient` they are a plain per-layer attribute that exports nowhere
+at those values; under `bias_update_transient` they are a plain per-layer attribute that exports nowhere
 ([mechanism](../training-methods/callbacks.md#balancingbiascallback)). The save rank writes both modes'
 biases to `router_balancing_biases.pt` and every rank restores them
 ([The balancing sidecar](../training-methods/callbacks.md#the-balancing-sidecar)); the export tools re-apply
@@ -744,6 +744,11 @@ The save rank and resume detection's listing follow the output filesystem
 off, since every node's local rank 0 would otherwise write and rotate the same files. On a non-shared one it
 forces it on, all nodes must hold equivalent checkpoint dirs at the same path, and each node's local rank 0
 creates the directory before a barrier.
+
+A known limit there: transformers' `save_pretrained` writes weights and config on global rank 0 only
+(`should_save_on_this_rank`), so a save that goes through it for a plain model (DDP, or the embedding trainer's
+sentence-transformers path) leaves the other nodes' copies without weights, with no error. The toolkit's own savers
+and PEFT adapter saves are not gated this way.
 
 A gathered save holds the non-writers in the next chunk's gather while the writer flushes a part, so
 `DIST_NCCL_TIMEOUT_MINUTES` must cover one part (`save_max_shard_size`) at the filesystem's write speed;

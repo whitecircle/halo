@@ -28,11 +28,12 @@ Short runs on the full checkpoints covered these SFT recipes: Gemma 4, GLM-4.7-F
 recipes, Qwen3.5-35B-A3B at 16,384 tokens, and on two 8-GPU machines gpt-oss-20b and the two pipeline
 recipes. They also covered gpt-oss-20b's classification, self-distillation, embedding, offline GRPO, DPO, SMPO
 and reward recipes and Gemma 4's DPO, SMPO and reward recipes. All four Nemotron 3.5 Super VL recipes ran on the
-text tower, and its image recipe on the composite.
+text tower, and its image recipe on the composite. The Nemotron 3.5 Lightning recipe ran for 5 steps. Both
+Qwen3.6-35B-A3B MTP recipes ran, the joint one for 5 steps.
 
-Laguna S, LFM2.5-8B, Mistral Small 4, DeepSeek-V4 LoRA and Command A+ changed shape in 1.2.0, and those shapes
-have not run on the full-size model. Their memory fit is computed (Command A+'s comes from an earlier shape) and
-their speed unmeasured, so try a short run first.
+The Laguna S, LFM2.5-8B, Mistral Small 4, DeepSeek-V4 LoRA and Command A+ recipes have not run at their current
+shape on the full-size model. Their memory fit is computed (Command A+'s comes from an earlier shape) and their
+speed unmeasured, so try a short run first.
 
 ## Start the training container
 
@@ -98,8 +99,9 @@ export SGLANG_MODEL_DIR="$HALO_SCRATCH"   # SGLang mounts it read-only at the sa
 export HF_HOME="$HALO_SCRATCH/hf"         # both servers share the training container's hub cache
 ```
 
-SGLang takes host paths (`$HALO_SCRATCH/checkpoints/<run>`). The vLLM service mounts only the Hugging Face
-cache. Add `- ${HALO_SCRATCH}:/data:ro` under the `vllm-server` service's `volumes:` in
+Both servers mount `jinja-templates/` at `/jinja-templates`, the path a chat template takes. SGLang takes
+host paths for checkpoints (`$HALO_SCRATCH/checkpoints/<run>`). The vLLM service mounts only the Hugging
+Face cache for them. Add `- ${HALO_SCRATCH}:/data:ro` under the `vllm-server` service's `volumes:` in
 `docker-compose.vllm.yml`, then give vLLM the same `/data` paths the trainer uses. vLLM answers a
 request for any other model name with a 404, so the served path must match the trainer's `model_name`,
 which defaults to its `model_name_or_path`.

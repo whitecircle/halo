@@ -4,8 +4,9 @@ Halo against upstream `trl.SFTTrainer` on transformers v5 with native FSDP — s
 kernels, only the framework changes. Measured with the same `EfficiencyCallback` and synthetic dataset as
 [Throughput Benchmarks](throughput-benchmarks.md). The 4k–16k, grouped-GEMM and GC-off tables share their
 main run set with that page; the FLCE, long-context and Qwen3-30B tables come from a separate run set.
-Compare within one run set. Every Halo number here was measured on Halo 1.1.0 code or earlier (the long-context tables on
-1.0.0), before 1.2.0's kernel and clock changes ([1.2.0 against 1.1.0](throughput-benchmarks.md#120-against-110)).
+Compare within one run set. Every number here was measured on Halo 1.1.0 code or earlier (the long-context tables on
+1.0.0), so the stock side ran that release's pinned TRL and transformers, before 1.2.0's kernel and clock changes
+([1.2.0 against 1.1.0](throughput-benchmarks.md#120-against-110)).
 
 Unless a header says otherwise, every number is **gpt-oss-20b** (`unsloth/gpt-oss-20b-BF16`, 20.7B, 32
 experts, top_k=4) on **8× B300**, bf16, FA4 + Liger, `grouped_mm` experts, gradient checkpointing on, DeepEP
@@ -18,7 +19,7 @@ distribute experts.
 |---|---|---|
 | Trainer | `trl.SFTTrainer` | `DistributedSFTTrainer` |
 | Precision | bf16 + FA4 bf16 compute | *identical* |
-| Optimizer | `adamw_torch_fused` — fp32 moments, 12 B/param | AdamWBF16 + stochastic rounding — 6 B/param |
+| Optimizer | `adamw_torch_fused` over the bf16 weights — bf16 moments, nearest rounding, 6 B/param | AdamWBF16 + stochastic rounding — 6 B/param |
 | Sharding | FSDP2 `full_shard` (ZeRO-3) | FSDP2 ZeRO-2 default (`reshard_after_forward=False`) + Expert Parallelism |
 | Expert kernel | `grouped_mm` (transformers v5 default) | `grouped_mm` + EP token distribution |
 | Liger / loss | Liger on → fused-linear-CE (the MoE applier's default) | Liger on, Liger CE default (logits materialized); `--fused_linear_ce` matches at long context |
@@ -30,9 +31,9 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 *8× B300 · Blackwell image · stock TRL (mean of 2 runs) and Halo EP8 (median of 2) each from a separate run set. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
 
-![Throughput: Halo vs stock TRL, 4k/16k](../assets/benchmarks/throughput_4k16k.png)
+![Tokens/s per GPU of stock TRL and four Halo layouts on gpt-oss-20b at 4k and 16k tokens: the fastest Halo layout runs 3.1–3.5× stock TRL in each group](../assets/benchmarks/throughput_4k16k.png)
 
-![Peak memory: Halo vs stock TRL, 4k/16k](../assets/benchmarks/memory_4k16k.png)
+![Peak GiB of stock TRL and four Halo layouts on gpt-oss-20b at 4k and 16k tokens: the lowest-memory Halo layout holds 0.54–0.75× stock TRL's peak in four groups and 1.05× at 16k batch 2](../assets/benchmarks/memory_4k16k.png)
 
 | seq·b | stock TRL (z3) | Halo EP1 (z2) | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|---|---|
@@ -122,7 +123,7 @@ tokens/rank nothing fits GC-off.
 (EP1) is the **throughput** corner — 2.1× TRL at 64k, 1.6× at 128k, 1.28× at 256k, at less memory than
 TRL from 128k (the lead narrows as quadratic attention comes to dominate). `EP8+CP8` and dense `CP-only` are the **memory** corner at ≈½ TRL's memory.
 
-![Long context throughput and memory at 64k/128k/256k](../assets/benchmarks/long_context.png)
+![Throughput and peak memory of Halo layouts against stock TRL at 64k, 128k and 256k tokens: dense EP1 leads at 2.1×, 1.6× and 1.3× stock TRL, its memory passing below stock TRL's from 128k, and at 128k and 256k dense CP-only holds 0.34× and 0.38× stock TRL's memory](../assets/benchmarks/long_context.png)
 
 *32k–64k, every rank holds a full sequence (DP=8) — tok/s/GPU · peak GiB:*
 
@@ -208,7 +209,7 @@ torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_convergence.py \
 
 **Held constant:** bf16, FA4, Liger, `learning_rate=2e-5`, seed 42, 10 steps / 3 warmup (throughput) or 200
 steps (convergence), `gradient_accumulation_steps=1`, `drop_last`, global batch = `8 ×
-per_device_batch_size`. Baseline `trl.SFTTrainer` with `fsdp="full_shard auto_wrap"` and
+per_device_train_batch_size`. Baseline `trl.SFTTrainer` with `fsdp="full_shard auto_wrap"` and
 `fsdp_config={"version": 2, "reshard_after_forward": …}` (True = ZeRO-3, False = ZeRO-2), `adamw_torch_fused`;
 Halo `DistributedSFTTrainer`, FSDP2, `use_grouped_gemm=True`, AdamWBF16. Hardware 8× B300 SXM6 (288 GB), `halo:blackwell`.
 

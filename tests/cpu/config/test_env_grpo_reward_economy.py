@@ -37,6 +37,10 @@ _DEFAULTS = AsyncRolloutConfig()
 # budget is what the rollout servers' context window is sized for, and Qwen3.6 serves twice the others'.
 _EPISODE_TOKENS_CEILING = 131072
 _EPISODE_TOKENS_CEILINGS = {"qwen3_5": 160000}
+# gpt-oss-20b's served context window and its code-contests preamble (system prompt and tool schema, as the recipes'
+# template renders them): the startup check warns once a worst-case episode's budget passes their difference.
+_GPT_OSS_SERVED_WINDOW = 131072
+_GPT_OSS_PREAMBLE_TOKENS = 461
 # The audit's process checks a solved episode can never raise: each is defined on an episode that never passed.
 _FAILURE_ONLY_CHECKS = ("untested_submission",)
 # What each audit check costs fired alone, as the code-contests reward page's audit table states it: the
@@ -63,6 +67,7 @@ _DOCUMENTED_SHAPING_PRICES = {
 }
 # The curriculum stages run one after another on one cluster: one economy and one set of limits.
 _STAGE_RECIPES = [p for p in RECIPES if "-stage" in p.name]
+_GPT_OSS_RECIPES = [p for p in RECIPES if p.parent.parent.name == "gptoss"]
 _STAGE_SHARED_KEYS = (
     "rollout_max_tokens",
     "rollout_max_answer_tokens",
@@ -287,6 +292,14 @@ def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(pa
         f"the per-turn caps alone let an episode sample {uncapped} tokens over {e['max_turns']} turns, so a "
         f"budget of {e['episode_tokens']} never binds"
     )
+
+
+@pytest.mark.parametrize("path", _GPT_OSS_RECIPES, ids=_ids(_GPT_OSS_RECIPES))
+def test_a_gpt_oss_worst_case_episode_fits_the_served_window(path):
+    """The window is the model's own, so a budget at the whole of it warns at every launch of a shipped recipe."""
+    e = _economy(path)
+    worst_case = min(e["max_turns"] * e["max_tokens"], e["episode_tokens"])
+    assert worst_case + _GPT_OSS_PREAMBLE_TOKENS <= _GPT_OSS_SERVED_WINDOW
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))

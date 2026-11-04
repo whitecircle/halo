@@ -89,7 +89,7 @@ vLLM 0.32.0 knows nothing of this family: `mistral4` appears in neither its arch
 
 The public `mistralai/Mistral-Small-4-*` repo serves only because vLLM detects its Mistral-native `params.json` layout and routes the whole model to `PixtralForConditionalGeneration`; a toolkit export is plain HF-format and has no such path. vLLM's generic transformers backend (`--model-impl transformers`) is the one remaining route, neither pinned nor verified here.
 
-**RL weight sync is refused at construction** on both engines, off each client's `UNSERVABLE_MODEL_TYPES`: the sync forwards hub-spelled tensors into the server's own loader, and neither vLLM 0.32.0 nor SGLang 0.5.22 registers a class for this family.
+**RL weight sync is refused at construction** on both engines, off each client's `UNSERVABLE_MODEL_TYPES`: the sync forwards hub-spelled tensors into the server's own loader, and neither vLLM 0.32.0 nor SGLang 0.5.22 registers a Mistral4 class.
 
 A vLLM thinking budget is refused too, by the trainer and by an eval reading a training config: vLLM serves the family with its `mistral_common` tokenizer, whose `[THINK]`/`[/THINK]` markers encode as plain text while the model writes control tokens, so the budget never counts.
 

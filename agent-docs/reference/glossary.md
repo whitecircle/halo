@@ -33,7 +33,7 @@ rejected by default. Tabulated in the
 
 | Term | Definition |
 |---|---|
-| **Flash Attention 2 (FA2)** | The fused attention kernel present on every image (`flash-attn` 2.x). The portable fallback, selected only where FA4/FA3 are unavailable. See [Flash Attention](../optimization/flash-attention.md). |
+| **Flash Attention 2 (FA2)** | The fused attention kernel present on every image (`flash-attn` 2.x). The portable fallback: auto-detection picks it where FA4/FA3 are unavailable, and per-family rules route to it what FA4 cannot train. See [Flash Attention](../optimization/flash-attention.md). |
 | **Flash Attention 3 (FA3)** | Hopper-only (SM90) attention kernel, built from source (`flash-attention/hopper/`). On Hopper the image keeps FA2 + FA3. See [Flash Attention](../optimization/flash-attention.md). |
 | **Flash Attention 4 (FA4)** | Blackwell CuTe-DSL kernel (`flash-attn-4[cu13]`, the `flash_attn.cute` submodule), co-installed with FA2. Faster than FA2 on the attention kernel in isolation; the end-to-end MoE training-step delta is much smaller (attention is a minority of MoE step FLOPs). Auto-selected on SM100+, so it is the production default on Blackwell. See [Flash Attention](../optimization/flash-attention.md). |
 | **Grouped GEMM** | `torch.nn.functional.grouped_mm` batches the per-expert matmuls of a MoE layer into one kernel launch. The default on SM90+ (`use_grouped_gemm: true`); the end-to-end win scales with local experts per rank (`num_experts/ep_size`) and is smallest at high EP (few local experts), where the per-expert loop is still slower at every measured shape. Works EP-distributed or dense-style (`ep_size=1`). See [Grouped GEMM](../optimization/grouped-gemm.md). |

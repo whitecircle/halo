@@ -18,10 +18,12 @@ tokens and gradient checkpointing on:
 | GPT-OSS 20B EP4 + ETP2 | 9,521 | 2.07× |
 | Qwen3.5-35B-A3B EP8 | 8,974 | 1.14× |
 
+![Twelve shapes on 8× B300: 1.2.0 runs each faster than 1.1.0, from 1.11× on Qwen3-8B FSDP2 to 2.07× on GPT-OSS 20B EP4 + ETP2, and peak memory moves by at most 1.65 GiB](../agent-docs/assets/benchmarks/release_comparison.png)
+
 No shape of the twelve benchmarked against 1.1.0 ran slower. Peak memory matched
 1.1.0 within 0.1 GiB or dropped, except FSDP2 (+0.36 GiB) and EP1 (+1.54 GiB), which
 hold two decoder layers per shard group. A bigger batch goes
-much higher: on 1.1.0, GPT-OSS 20B reached about 28,700 at `ep1` (batch 4, no
+much higher: on 1.1.0 or earlier, GPT-OSS 20B reached about 28,700 at `ep1` (batch 4, no
 checkpointing) and Qwen3.5-35B-A3B about 16,400 at `ep2` (batch 4, checkpointing
 on). Pipeline parallelism across two nodes reaches 17,740 on Qwen3-8B
 (`pp2`) and 15,500 on GPT-OSS 20B (`pp2 × ep8`), without checkpointing. More
@@ -29,12 +31,9 @@ shapes:
 [Throughput Benchmarks](../agent-docs/optimization/throughput-benchmarks.md) ↗ ·
 [Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗.
 
-In short:
-
-- **EP costs throughput.** Pick the lowest expert-parallel size that fits, not
-  the largest your GPUs allow.
-- **CP buys sequence length, not speed.**
-- **Sharding buys capacity**, at a cost in tokens per second.
+Pick the lowest expert-parallel size that fits, since EP costs throughput. CP
+and the other sharding modes add sequence length and capacity at a cost in tokens
+per second.
 
 Before you judge a number, check `M = per_device_train_batch_size × max_length`.
 On a B300 MoE run it should be at least ~8k; below that throughput is still
@@ -92,11 +91,11 @@ about half bf16's speed or less, and `torch.compile` on an EP MoE run gained at 
 An expert GEMM with few tokens sits in the memory-bound region. At 128 token
 rows against GPT-OSS's 16 MB expert weight, the tensor cores idle while HBM
 streams the weight, and fine-grained MoEs put even fewer tokens on each expert.
-The fix is a bigger `M`, not a faster kernel.
+A bigger `M` helps here, and a faster kernel does not.
 
 ## Compared with stock TRL
 
-Halo 1.1.0 trains GPT-OSS 20B at 2.6–3.5× stock TRL (dense and `ep2`) on the
+Halo 1.1.0 trained GPT-OSS 20B at 2.6–3.5× stock TRL (`ep1` and `ep2`) on the
 same 8 B300s, with the same kernels on both sides, and both reach the same
 loss. Expert parallelism, no per-micro-step parameter re-gather and 6-byte
 optimizer state make up most of the gap

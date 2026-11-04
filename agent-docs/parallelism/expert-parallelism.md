@@ -154,7 +154,7 @@ Safe single-node pure-EP shapes — one group, or 2-rank groups:
 
 The only 4-way expert split left on 8 GPUs is EP+**ETP** (`ep4 + etp2`), which the gate accepts
 because `ep_group_size` then fills the domain, although its DeepEP dispatch groups stay 4 ranks wide;
-the GPU test matrix runs `ep2 + etp4` instead
+`make bench` measures it and the GPU test matrix runs `ep2 + etp4`
 ([ETP validation rules](expert-tensor-parallelism.md#validation-rules)). Attention **TP does not
 help** at all: it leaves `ep_group_size` untouched, so `ep4 + tp2` is rejected exactly like bare
 `ep4`.
@@ -195,9 +195,10 @@ The EP flags (`expert_parallel_size`, `ep_scope`, `nvlink_domain_size`, `use_gro
 `save_sharded_ep`:
 [checkpoint flags](../reference/configuration-reference.md#model-checkpoint-and-from-scratch-flags).
 
-Training args: `bf16=True`, `gradient_checkpointing=True` (recommended). With GC the trainer calls
-`enable_scoped_gradient_checkpointing()` and sets `args.gradient_checkpointing=False` so HF Trainer does
-not re-enable it.
+Training args: `bf16=True`, and `gradient_checkpointing=True` where activations do not fit: GC off is the
+largest throughput lever ([Maximizing achieved TFLOPS](../optimization/throughput-benchmarks.md#maximizing-achieved-tflops)).
+With GC the trainer calls `enable_scoped_gradient_checkpointing()` and sets
+`args.gradient_checkpointing=False` so HF Trainer does not re-enable it.
 
 **`fp32_grad_reduce`** upcasts the router grad (always reduced) and the expert cross-replica grad
 (only when `num_ep_groups > 1`) to fp32 for the collective and writes back bf16. bf16 reduction is
@@ -345,7 +346,7 @@ beside `torch.utils.deterministic.fill_uninitialized_memory`, which defaults to 
 mode is. The dispatcher switches the fill off at the first dispatch under the mode, with one warning;
 that lasts for the rest of the process and covers every op, not only EP.
 
-Cost on gpt-oss-20b ep2 at 4,096 tokens per rank (2×B300, 30 steps): the deterministic dispatch alone
+Cost on gpt-oss-20b ep2 at 4,096 tokens per rank (2×B300, 30 steps, Halo 1.1.0 or earlier): the deterministic dispatch alone
 costs about 2% of throughput (14.9k vs 15.1k tokens/s/GPU), and the whole `full_determinism` mode about
 11% (13.4k), most of it torch's deterministic kernels. Runs without the mode keep the default dispatch.
 
@@ -519,15 +520,15 @@ the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise.
 host copy) that follows it. The expert-axis gather itself receives into one preallocated buffer
 rather than a shard list plus a `cat`. Both bound the *transient* on every rank that keeps nothing.
 
-The save streams one EP layer at a time into a `StreamingShardWriter` and finalizes with
-`close_as_hf_checkpoint()`, so its host RAM peaks at the replicated non-expert params plus one
-gathered layer, the shard it is filling and one shard per background write thread
+The save streams into a `StreamingShardWriter` one chunk at a time, the non-expert tensors first and
+then one EP layer per chunk, and finalizes with `close_as_hf_checkpoint()`. Its host RAM holds the
+current chunk, the part it is filling and one part per background write thread
 (`save_max_shard_size`, default `5GB`; `HALO_CHECKPOINT_WRITE_THREADS`, default `0`), not the whole
-checkpoint. Writing in line, the default, that peak is ~11 GB on the writer at gpt-oss-120b (ep8)
-and ~26 GB at Qwen3.5-397B-A17B (ep64); each write thread adds up to one shard.
+checkpoint. By arithmetic, writing in line, that peak is about 12 GB on the writer at gpt-oss-120b
+(`ep8`) and about 21 GB at Qwen3.5-397B-A17B (`ep64`); each write thread adds up to one part.
 
 The plain FSDP2, CP and TP gathered saves stream through the same writer
-(`stream_gathered_checkpoint`), one decoder layer at a time: ~22 GB on the in-line writer at 397B instead of the whole 794 GB state dict.
+(`stream_gathered_checkpoint`), one decoder layer at a time.
 
 **Sharded exists for write bandwidth, not for memory.** N ranks write their own slice in parallel,
 so the pause at each save is bounded by one rank's shard instead of by the whole artifact funneled
@@ -552,6 +553,7 @@ the save) whenever any of these holds:
 - a `model_type` no family spec claims, or a load that converted names the gathered save reverts
   through transformers' save-side revert (Step-3.7 Flash, a SigLIP tower, a vendor namespace; the
   merge streams key by key and cannot apply it);
+- a model holding external tables (Qwen3.8-Flash-Next's n-gram tables), which the merge has no model to read from;
 - a non-shared multi-node filesystem;
 - **no EP layers at all** (dense, or an MoE without EP layers): every save would be an ordinary
   gathered checkpoint while a planned merge waits for shards that never appear.

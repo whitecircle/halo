@@ -66,7 +66,11 @@ use_peft: false
 # --- Tokens & chat template ---
 # The tokenizer ships <|im_end|> as eos and <|endoftext|> as pad. eos_token stays unset: the run would record it
 # on the model config, whose eos_token_id (<|endoftext|>) the PLE n-gram history resets at, and every export would
-# carry the change. The hub template injects a reasoning-effort system turn whenever thinking is on.
+# carry the change. The hub template injects a reasoning-effort system turn whenever thinking is on and writes an empty
+# think block before every reply; this render has neither and drops system turns. The export carries this render, so
+# serve it under the same one.
+# A reply with no think block reads far worse on Qwen3.6-35B (agent-docs/optimization/mtp-heads.md#recipes); this
+# checkpoint's reading is not measured.
 assistant_message_template: "<|im_start|>assistant\n"
 chat_template: jinja-templates/qwen3/qwen3-multiturn.jinja  # ultrachat is multi-turn; drops system turns
 force_chat_template: true

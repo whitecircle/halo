@@ -122,7 +122,7 @@ def main() -> int:
     shard_desc = "DDP (no FSDP)" if args.zero1_ddp else f"FSDP2 (reshard_after_forward={reshard_after_fwd})"
     log(f"  World: {world_size}  {shard_desc} = {zero}, wrap {layer_cls}")
     log(f"  Attn: {args.attn_implementation or 'flash_attention_4'}  Liger: {use_liger}  GC: {gc_enabled}")
-    optimizer_desc = "FlashAdamW OOM fallback" if args.optim == "flash_adamw" else "stock fp32-moment AdamW"
+    optimizer_desc = "FlashAdamW OOM fallback" if args.optim == "flash_adamw" else "stock AdamW, bf16 moments"
     log(f"  Optimizer: {args.optim} ({optimizer_desc})")
     log(f"  Experts: experts_implementation={args.experts_impl} (transformers-native)")
     log(f"{'=' * 70}")

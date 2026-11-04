@@ -273,7 +273,7 @@ def apply_balancing_mode(
     ``aux_loss`` is inert there."""
     if mode == "bias_update_transient" and pp_size > 1:
         raise ValueError(
-            f"moe_balancing=bias_update_transient is untested under pipeline parallelism (pp_size={pp_size}): "
+            f"moe_balancing=bias_update_transient does not run under pipeline parallelism (pp_size={pp_size}): "
             "the transient side-buffer is a plain attribute the stage split and the PP resume path never "
             "carry. Use moe_balancing=bias_update on a family with an exported slot, or moe_balancing=none."
         )

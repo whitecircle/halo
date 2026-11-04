@@ -13,6 +13,7 @@ COL_XS, COL_W = columns(W, 3, 0.3, 1.7)
 ROW_H = card_height(2)
 ROW_YS = (2.72, 1.25)
 HEAD_Y = 4.40
+PORT = (0.14, -0.14)  # arrow offset from a card's mid-height, toward the top row and toward the bottom row
 
 LANES = [
     (
@@ -40,9 +41,10 @@ for y, (head, (expert_head, back_head), lines) in zip(ROW_YS, LANES, strict=True
 
 mids = [y + ROW_H / 2 for y in ROW_YS]
 for left, right in ((COL_XS[0], COL_XS[1]), (COL_XS[1], COL_XS[2])):
-    for src in mids:
-        for dst in mids:
-            arrow(ax, left + COL_W, src, right, dst, color=VIOLET, lw=1.3)
+    for i, src in enumerate(mids):
+        for j, dst in enumerate(mids):
+            # Each card holds an upper and a lower port, so no two arrowheads land on one point.
+            arrow(ax, left + COL_W, src + PORT[j], right, dst + PORT[i], color=VIOLET, lw=1.3)
 
 for left, right, name in ((COL_XS[0], COL_XS[1], "dispatch"), (COL_XS[1], COL_XS[2], "combine")):
     ax.text(

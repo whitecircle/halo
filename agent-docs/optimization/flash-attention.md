@@ -32,7 +32,7 @@ and the config-level choice can never disagree about a device.
 
 The order matters because CP calls the **non-varlen** forward, the path FA2 serves worst on both architectures.
 
-On B300, CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memory, the margin widening with sequence length (+19% at 32k, +63% at 128k on gpt-oss-20b ep8+cp8; +197% on dense Qwen3-4B ep1+cp8 at 128k). FA2 is faster only below ~16k, where per-call overhead dominates.
+On B300 (Halo 1.1.0 or earlier), CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memory, the margin widening with sequence length (+19% at 32k, +63% at 128k on gpt-oss-20b ep8+cp8; +197% on dense Qwen3-4B ep1+cp8 at 128k). FA2 is faster only below ~16k, where per-call overhead dominates.
 
 ## Automatic detection
 
@@ -111,7 +111,7 @@ The resolver takes the run's `SinksPolicy` and records its reset verdict on the 
 
 **Gemma4** (5 full-attention layers at `global_head_dim=512`): FA2/FA3/FA4/cuDNN-SDPA all reject head_dim>256 (FA2 cap 256, cuDNN cap 128 on cu13, FA4's SM100 kernel overflows tensor memory and asserts in `flash_fwd_sm100`); math SDPA materializes `[B, heads, S, S]` (64 GB/layer at 32k → OOM).
 
-The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`has_head_dim_beyond_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. On that path alone (`HALO_FLEX_SLIDING=0`), Gemma4 32k EP=8 peaks at ~155 GB/rank. On CUDA the model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
+The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`has_head_dim_beyond_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. On that path alone (`HALO_FLEX_SLIDING=0`), Gemma4 32k EP=8 peaks at ~155 GB/rank (Halo 1.1.0 or earlier). On CUDA the model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
 
 **Qwen3.5 / Qwen3.6 / Qwen3-Next** train on FA4's head_dim-256 path, in every script: its general SM100 forward kernel and its dedicated head_dim-256 backward, for a 256-wide query/key head (`uses_fa4_dedicated_head_dim`, which counts MLA's `qk_nope_head_dim + qk_rope_head_dim` too; transformers' flash path pads a narrower value head up to that width). Qwen3.5's partial-rotary `torch.cat` hands that path q/k strided, which it reads as they are (below). The dedicated backward's deterministic mode is not validated here, so a run that asks for one (`FLASH_ATTENTION_DETERMINISTIC=1`, which `full_determinism` sets as the config is parsed, ahead of SFT's row plan and the model load) falls back from FA4 to **SDPA** on a head_dim-256 model FA4 otherwise trains (`supports_fa4_backward`), to FA2 under Context Parallelism, the kernel the Ulysses path then runs, and to FA2 on SFT rows that hold several documents (below).
 

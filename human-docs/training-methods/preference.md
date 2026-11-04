@@ -41,8 +41,8 @@ halo launch dpo  examples/preference/qwen3_5/dpo-qwen3.5-9b-tulu3-prefmix.yaml -
 halo launch kto  examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml -n 8
 ```
 
-These recipes are dense; the MoE ones under `examples/preference/gptoss/` and
-`examples/preference/gemma4/` run expert parallelism. SMPO alone also takes context parallelism. All
+These recipes are dense; the MoE ones under `examples/preference/gptoss/`,
+`examples/preference/gemma4/` and `examples/preference/nemotron_h/` run expert parallelism. SMPO alone also takes context parallelism. All
 three take pipeline parallelism, where DPO and KTO need precomputed reference log-probs
 ([Supported matrix](../supported-matrix.md#training-methods)).
 

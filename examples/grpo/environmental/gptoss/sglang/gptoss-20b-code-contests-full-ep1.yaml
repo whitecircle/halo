@@ -59,7 +59,7 @@ rewards:
     name: audit
     model: openai/gpt-6-luna   # through OpenRouter; the key is read from OPENROUTER_API_KEY in the launch environment (api_key_env names another)
     view: full
-    max_view_chars: 900000     # a whole episode with its reasoning: 131072 sampled tokens and the tool replies
+    max_view_chars: 900000     # a whole episode with its reasoning: 128000 sampled tokens and the tool replies
     max_tokens: 16384          # room for the verdict's own reasoning on the longest episodes
     request_timeout: 120       # a verdict on a full episode takes ~10 s; with the client's retries it stays inside episode_timeout
     on_error: invalid          # a verdict the judge never reached leaves the episode out of training: an outage never trains unjudged episodes
@@ -91,7 +91,7 @@ rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS refere
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]
 rollout_max_tokens: 30000              # per-turn bound; SGLang enforces no thinking cap below it
-rollout_max_episode_tokens: 131072  # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; with no reasoning cap to keep an answer room past, a turn starts only while a whole rollout_max_tokens is left of it)
+rollout_max_episode_tokens: 128000  # the most an episode may sample over all its turns, reasoning and visible output together, under the 131072 window so the prompt and tool schema fit beside it (never stated to the model; with no reasoning cap to keep an answer room past, a turn starts only while a whole rollout_max_tokens is left of it)
 reasoning_floor: 0.05  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
 reasoning_price: {low: 0.008, medium: 0.006, high: 0.004}  # per 1,000 reasoning tokens a turn spends past its level's soft budget, the lowest level highest
 reasoning_price_past_budget: true  # free within the budget: the soft budget's only ceiling below the turn limit (SGLang caps no reasoning)

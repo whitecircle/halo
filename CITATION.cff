@@ -34,7 +34,7 @@ authors:
     given-names: "Dmitrii"
 license-url: "https://github.com/whitecircle/halo/blob/main/LICENSE"
 version: 1.2.0
-date-released: "2026-11-02"
+date-released: "[[RELEASE-DATE]]"
 repository-code: "https://github.com/whitecircle/halo"
 url: "https://github.com/whitecircle/halo"
 keywords:

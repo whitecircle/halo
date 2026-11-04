@@ -76,7 +76,7 @@ rewards:
     name: audit
     model: openai/gpt-6-luna   # through OpenRouter; the key is read from OPENROUTER_API_KEY in the launch environment (api_key_env names another)
     view: full
-    max_view_chars: 900000     # a whole episode with its reasoning: 131072 sampled tokens and the tool replies
+    max_view_chars: 900000     # a whole episode with its reasoning: 128000 sampled tokens and the tool replies
     max_tokens: 16384          # room for the verdict's own reasoning on the longest episodes
     request_timeout: 120       # a verdict on a full episode takes ~10 s; with the client's retries it stays inside episode_timeout
     on_error: invalid          # a verdict the judge never reached leaves the episode out of training: an outage never trains unjudged episodes
@@ -108,7 +108,7 @@ rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, whi
 rollout_stop_tokens: ["<|call|>"]      # end each turn at the harmony tool-call terminator
 rollout_max_tokens: 30000              # per-turn total; under a soft budget the reasoning may run until only the answer room is left of it
 rollout_max_answer_tokens: 8192      # the most a turn generates past its reasoning cap (never stated to the model): an honest call fits well inside it, a program carrying the reasoning on in its comments is cut at it
-rollout_max_episode_tokens: 131072  # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; a turn's caps narrow to what is left)
+rollout_max_episode_tokens: 128000  # the most an episode may sample over all its turns, reasoning and visible output together, under the 131072 window so the prompt and tool schema fit beside it (never stated to the model; a turn's caps narrow to what is left)
 rollout_reasoning_end_token: "<|end|><|start|>assistant<|channel|>final<|message|>"  # the move into the final channel vLLM's budget forces (openai_gptoss plugin)
 reasoning_floor: 0.05  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
 reasoning_price: {low: 0.008, medium: 0.006, high: 0.004}  # per 1,000 reasoning tokens a turn spends past its level's soft budget, the lowest level highest

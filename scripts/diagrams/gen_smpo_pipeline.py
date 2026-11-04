@@ -19,7 +19,7 @@ TOTAL_W = W - M - TOTAL_X
 
 fig, ax = canvas(W, H)
 
-title(ax, "SMPO — the preference pair", "z = mean logp(chosen) − mean logp(rejected) − margin")
+title(ax, "SMPO: the preference pair", "z = mean logp(chosen) − mean logp(rejected) − margin")
 
 section(ax, M, H - 0.52, "MARGIN TERM")
 
@@ -29,7 +29,7 @@ card(
     ROW1_Y,
     COL_W,
     ROW1_H,
-    "One forward — the pair",
+    "One forward: the pair",
     [
         "the pair concatenated, 2N rows",
         "chosen rows first, then rejected",
@@ -46,7 +46,7 @@ card(
     ROW1_Y,
     COL_W,
     ROW1_H,
-    "Percentile clip — margin path",
+    "Percentile clip: margin path",
     [
         "runs on the per-token log p",
         "rejected tail → 2% token quantile",
@@ -83,7 +83,7 @@ card(
     ROW2_Y,
     COL_W,
     ROW2_H,
-    "Anchors — pre-clip",
+    "Anchors: pre-clip",
     [
         "mean NLL over completion tokens",
         "taken before the clip, both sides",
@@ -119,7 +119,7 @@ footnote(
     M,
     0.22,
     W - 2 * M,
-    "The margin term is exactly zero once z clears 0 — where a sigmoid loss keeps pushing — while the anchors train both sides.",
+    "The margin term is exactly zero once z clears 0, where a sigmoid loss keeps pushing, while the anchors train both sides.",
 )
 
 save(plt.gcf(), "smpo_pipeline")

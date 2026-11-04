@@ -91,14 +91,14 @@ and start the server with `SGLANG_ENABLE_R3=1`.
 
 - **Router balancing.** The recipe sets `moe_balancing: bias_update`, which `auto` also picks under EP.
   Sigmoid routing can collapse onto a few experts during SFT. The updates land in the router's own
-  `expert_bias`, so the trained bias ships in every checkpoint and the served model routes as it
-  trained. LFM-2 has no router auxiliary loss. Without EP or grouped GEMM nothing carries the bias, so
+  `expert_bias`, so the trained bias ships in every checkpoint and the served model routes on
+  it. LFM-2 has no router auxiliary loss. Without EP or grouped GEMM nothing carries the bias, so
   freeze the router instead with `freeze_layers_patterns: ["*.feed_forward.gate.weight"]`.
 - **Gradient checkpointing.** The recipe trains 16,384-token packed rows without it, a shape that has not
   run on the full-size model. The fit on B200 and B300 is computed, not measured. On 80 GB GPUs add
   `--gradient_checkpointing=true`.
 - **Tool parser.** vLLM needs `VLLM_TOOL_PARSER=lfm2`. The default `hermes` leaves LFM-2's tool calls as
-  text, so every episode scores zero.
+  text, and the run stops by its second round.
 
 ## Limits
 

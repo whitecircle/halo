@@ -29,8 +29,8 @@ fig, ax = canvas(W1, H1)
 
 title(ax, "Separate inference node", "one server · one NCCL group · actors beside the trainer")
 
-frame(ax, N1_X, FRAME_Y, N1_W, FRAME_H, "NODE 1 — training + actors")
-frame(ax, N2_X, N2_Y, N2_W, N2_H, "NODE 2 — inference")
+frame(ax, N1_X, FRAME_Y, N1_W, FRAME_H, "NODE 1: training + actors")
+frame(ax, N2_X, N2_Y, N2_W, N2_H, "NODE 2: inference")
 
 trainer_y = FRAME_TOP - FRAME_LABEL - card_height(4)
 card(
@@ -39,7 +39,7 @@ card(
     trainer_y,
     CARD_W,
     card_height(4),
-    "Trainer — torchrun ranks",
+    "Trainer: torchrun ranks",
     [
         "model + optimizer, FSDP2 / EP / TP",
         "WeightSyncPool on the main process",
@@ -56,11 +56,11 @@ card(
     actors_y,
     CARD_W,
     card_height(4),
-    "Ray actors — same node, CPU",
+    "Ray actors: same node, CPU",
     [
         "num_rollout_workers actors per training rank",
         "each holds the environment: tools, sandbox, grader",
-        "no tokenizer — the engine renders the template",
+        "no tokenizer: the engine renders the template",
         "max_concurrent_rollouts bounds in-flight episodes",
     ],
     color=SLATE,
@@ -79,7 +79,7 @@ card(
         "rollout_backend picks the client",
         "its workers join the sync group",
         "and dial the trainer's store",
-        "--moe-backend triton (vLLM)",
+        "MoE backend triton on either engine",
         "GPUs no trainer rank uses",
     ],
     color=BLUE,
@@ -93,7 +93,7 @@ arrow(
     trainer_y,
     CARD_X + 0.5 * CARD_W,
     actors_y + card_height(4),
-    "Ray — local, ray_address null",
+    "Ray: local, ray_address null",
     color=SLATE,
     side="right",
 )
@@ -122,9 +122,9 @@ STRIP = [
     (
         "Ray",
         [
-            "ray_address: null — local",
+            "ray_address: null = local",
             "each rank's ray.init starts Ray",
-            "dashboard off — no port 8265",
+            "dashboard off, no port 8265",
             "actors inherit the trainer's env",
         ],
     ),
@@ -134,7 +134,7 @@ STRIP = [
             "docker-compose.<engine>.efa.yml",
             "+ make EFA=1 on the trainer",
             "else the sync runs on sockets",
-            "weight_sync_transport.py",
+            "preflight: weight_sync_transport.py",
         ],
     ),
 ]
@@ -163,7 +163,7 @@ title(ax, "Dedicated rollout nodes", "rollout_server_configs: one entry per infe
 
 frame(ax, L_X, TOP2 - 2.61, L_W, 2.61, "TRAINING NODE")
 frame(ax, R_X, TOP2 - 3.31, R_W, 3.31, "INFERENCE NODES")
-frame(ax, L_X, TOP2 - 5.82, L_W, 2.61, "ACTOR TIER — GPU-less CPU nodes")
+frame(ax, L_X, TOP2 - 5.82, L_W, 2.61, "ACTOR TIER: GPU-less CPU nodes")
 
 card(
     ax,
@@ -171,7 +171,7 @@ card(
     TOP2 - 2.41,
     L_CARD_W,
     card_height(5),
-    "Trainer — torchrun ranks",
+    "Trainer: torchrun ranks",
     [
         "model + optimizer, FSDP2 / EP / TP",
         "WeightSyncPool on the main process",
@@ -188,7 +188,7 @@ card(
     TOP2 - 1.63,
     R_CARD_W,
     card_height(2),
-    "Inference node 1 — vLLM or SGLang",
+    "Inference node 1: vLLM or SGLang",
     ["url        http://inf1:8000", "group_port 51216"],
     color=BLUE,
     mono_lines=True,
@@ -200,7 +200,7 @@ card(
     TOP2 - 3.11,
     R_CARD_W,
     card_height(2),
-    "Inference node 2 — vLLM or SGLang",
+    "Inference node 2: vLLM or SGLang",
     ["url        http://inf2:8000", "group_port 51217"],
     color=BLUE,
     mono_lines=True,
@@ -212,7 +212,7 @@ card(
     TOP2 - 5.62,
     L_CARD_W,
     card_height(5),
-    "Ray actors — no GPU needed",
+    "Ray actors: no GPU needed",
     [
         "num_rollout_workers ÷ world_size per rank",
         "soft-pinned to the rank's node, then spills",

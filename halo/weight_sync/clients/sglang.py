@@ -121,7 +121,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         return self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
 
     def _fetch_engine_world_size(self) -> int:
-        """Workers join as ``rank_offset + tp_rank``; under ``--enable-dp-attention`` ``tp_rank`` spans every GPU."""
+        """Workers join as ``rank_offset + tp_rank``; under ``--attn-dp-size`` ``tp_rank`` spans every GPU."""
         info = self._server_info()
         self._require_toolkit_image(self._flags_in(info))
         self.probe_generation()
@@ -134,11 +134,11 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 f"(need 'tp_size', optionally 'dp_size'); got keys {sorted(info)[:25]}. "
                 f"The weight-sync group cannot be sized without it."
             ) from e
-        if dp_size > 1 and not bool(info.get("enable_dp_attention", False)):
+        if dp_size > 1:
             raise RuntimeError(
                 f"SGLang weight sync cannot address a plain --dp-size {dp_size} server: each "
                 f"replica restarts tp_rank at 0, so workers collide on rank_offset + tp_rank in "
-                f"the weight-update group. Serve with --enable-dp-attention or dp-size 1."
+                f"the weight-update group. Serve with --attn-dp-size or --dp-size 1."
             )
         return tp_size
 

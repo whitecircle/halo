@@ -2,26 +2,33 @@
 """A composite under the FSDP2 wrap, on real gloo, with one rank's batch holding an image and the others' text. Every
 rank must enter each group's reduce with the same parameters, or the reduce-scatter faults or hangs; the tower gradient
 must equal the image rank's single-process gradient over the world, and a frozen tower must stay out of it. Where the
-reduces still could not pair, a batch holding no image is refused."""
+reduces still could not pair, a batch holding no image is refused, an adapter on the tower included."""
 
 import copy
 import datetime
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 import torch.distributed as dist
+from datasets import Dataset
+from peft import LoraConfig, PeftModel, get_peft_model
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
+from trl import SFTConfig
 
 from halo.distributed import fsdp
 from halo.distributed.fsdp import IdentityParamSet
 from halo.entrypoints import data_setup
 from halo.entrypoints.data_setup import apply_vision_options
+from halo.entrypoints.script import run_trainer
 from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module, media_module_names
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.gloo import run_gloo_ranks
+from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_LLAMA4_FAMILY,
@@ -49,6 +56,12 @@ _COMPOSITES = {
 _MESH_NAMES = {1: ("dp_shard",), 2: ("dp_replicate", "dp_shard")}
 _NEMOTRON = "nemotron_h_omni"
 _ACCELERATE_FSDP = {"ACCELERATE_USE_FSDP": "true"}
+# Where an adapter lands: the tower, the decoder layers, the head.
+_ADAPTER_SPOTS = {
+    "tower_and_layers": ("tower", "layers"),
+    "tower_and_head": ("tower", "head"),
+    "layers": ("layers",),
+}
 
 
 def _image_row(config) -> dict[str, torch.Tensor]:
@@ -94,14 +107,54 @@ def _full(grad: torch.Tensor) -> torch.Tensor:
     return grad.full_tensor() if hasattr(grad, "full_tensor") else grad
 
 
-def _apply_options(model, *, freeze: bool, peft: bool = False, is_vlm: bool = True) -> None:
+def _apply_options(model, *, freeze: bool, peft: bool = False, is_vlm: bool = True, targets=None) -> None:
     apply_vision_options(
         type("Options", (), {"freeze_vision_tower": freeze, "min_pixels": None, "max_pixels": None}),
         model,
-        type("ModelArgs", (), {"use_peft": peft}),
+        type("ModelArgs", (), {"use_peft": peft, "lora_target_modules": targets}),
         None,
         is_vlm=is_vlm,
     )
+
+
+def _linears(model, root: str) -> list[str]:
+    return [
+        f"{root}.{name}"
+        for name, module in model.get_submodule(root).named_modules()
+        if isinstance(module, torch.nn.Linear)
+    ]
+
+
+def _wrap_adapters(model, gc: str, spots: tuple[str, ...], *, embedding_trains: bool = False):
+    """As a script does: the options, then the wrap the trainer takes. Checkpointing is on by the first forward."""
+    layers = next(
+        name for name, module in model.named_modules() if module is decoder_layers(backbone_with_layers(model))
+    )
+    named = {
+        # Enough of the tower that an image row's gradient reaches an adapter on every family.
+        "tower": _linears(model, media_module_names(model)[0])[:4],
+        "layers": _linears(model, layers),
+        "head": [name for name, _ in model.named_modules() if name.rpartition(".")[2] == "lm_head"],
+    }
+    targets = [target for spot in spots for target in named[spot]]
+    _apply_options(model, freeze=False, peft=True, targets=targets)
+    embedding = next(name for name, module in model.named_modules() if module is embedding_module(model, "input"))
+    # A fixed draw of the adapters, on every rank and for the reference copy alike.
+    torch.manual_seed(1)
+    wrapped = get_peft_model(
+        model, LoraConfig(r=2, target_modules=targets, modules_to_save=[embedding] if embedding_trains else None)
+    )
+    if _GC_KINDS[gc] is not None:
+        wrapped.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": _GC_KINDS[gc]})
+    return wrapped
+
+
+def _adapter_grads(model) -> dict[str, torch.Tensor]:
+    return {
+        name.replace("_checkpoint_wrapped_module.", ""): _full(param.grad)
+        for name, param in model.named_parameters()
+        if param.requires_grad and param.grad is not None
+    }
 
 
 def _worker(rank: int, out_dir: str, case: dict) -> None:
@@ -226,6 +279,66 @@ def _refusal_worker(rank: int, out_dir: str, family: str, freeze_embedding: bool
     reached = [name for name, param in model.named_parameters() if name.startswith(towers) and param.grad is not None]
     with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
         json.dump({"refused": refused, "reached": len(reached)}, handle)
+
+
+def _adapter_refusal_worker(
+    rank: int, out_dir: str, family: str, gc: str, spots: tuple[str, ...], reshard: bool = False
+) -> None:
+    """Every rank takes the text row, so the refused forward strands no peer in the reduce past it."""
+    torch.manual_seed(0)
+    model, _, text_row = _model_and_rows(family)
+    wrapped = _wrap_adapters(model, gc, spots)
+    mesh = init_device_mesh("cpu", (dist.get_world_size(),), mesh_dim_names=_MESH_NAMES[1])
+    fsdp.apply_fsdp2_per_layer(wrapped, mesh, MixedPrecisionPolicy(), reshard, IdentityParamSet())
+    data_setup.carry_image_refusal_above_adapters(wrapped)
+    refused = ""
+    try:
+        wrapped(**text_row)
+    except ValueError as error:
+        refused = str(error)
+    # The eval forward a run takes on text rows reduces nothing.
+    wrapped.eval()
+    with torch.no_grad():
+        wrapped(**text_row)
+    with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
+        json.dump({"refused": refused}, handle)
+
+
+def _adapter_worker(rank: int, out_dir: str, case: dict) -> None:
+    torch.manual_seed(0)
+    model, image_row, text_row = _model_and_rows(case["family"])
+    wrapped = _wrap_adapters(
+        model, case["gc"], _ADAPTER_SPOTS[case["spots"]], embedding_trains=case["embedding_trains"]
+    )
+    reference = copy.deepcopy(wrapped)
+    reference(**image_row).loss.backward()
+    single_rank = _adapter_grads(reference)
+    del reference
+    towers = tuple(f"base_model.model.{tower}." for tower in media_module_names(model))
+    mesh = init_device_mesh("cpu", (dist.get_world_size(),), mesh_dim_names=_MESH_NAMES[1])
+    fsdp.apply_fsdp2_per_layer(wrapped, mesh, MixedPrecisionPolicy(), False, IdentityParamSet())
+    data_setup.carry_image_refusal_above_adapters(wrapped)
+    image_rows = set(case["image_ranks"])
+    wrapped(**(image_row if rank in image_rows else text_row)).loss.backward()
+    fsdp.complete_fsdp2_post_backward(fsdp.fsdp2_param_groups(wrapped))
+    world = dist.get_world_size()
+    # A tower adapter only an image row reaches: the image ranks' share of its single-rank gradient.
+    run_grads = _adapter_grads(wrapped)
+    tower_grads = [name for name in single_rank if name.startswith(towers)]
+    worst = 0.0
+    for name in set(tower_grads) & set(run_grads):
+        expected = single_rank[name] * len(image_rows) / world
+        worst = max(worst, float((run_grads[name] - expected).abs().max() / (expected.abs().max() + 1e-9)))
+    with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
+        json.dump(
+            {
+                "tower_grads": len(tower_grads),
+                "lost": sorted(set(tower_grads) - set(run_grads)),
+                "reached": len(single_rank),
+                "worst": worst,
+            },
+            handle,
+        )
 
 
 def _run(tmp_path, world: int, **case) -> list[dict]:
@@ -392,15 +505,211 @@ def test_a_batch_holding_no_image_is_refused_where_the_reduces_cannot_pair(
         assert result["reached"], "the image rows after the refusal must reach the tower"
 
 
+def _no_layer_reason_worker(rank: int, out_dir: str, reshard: bool) -> None:
+    """A fine-tune training the tower and head with the layers and embedding frozen, its text-row verdict by ZeRO level."""
+    torch.manual_seed(0)
+    model, _, _ = _model_and_rows("qwen3_vl")
+    towers = tuple(f"{tower}." for tower in media_module_names(model))
+    for name, param in model.named_parameters():
+        param.requires_grad = name.startswith((*towers, "lm_head"))
+    _apply_options(model, freeze=False)
+    mesh = init_device_mesh("cpu", (dist.get_world_size(),), mesh_dim_names=_MESH_NAMES[1])
+    fsdp.apply_fsdp2_per_layer(model, mesh, MixedPrecisionPolicy(), reshard, IdentityParamSet())
+    with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
+        json.dump({"reason": data_setup._why_a_batch_holding_no_image_cannot_pair(model)}, handle)
+
+
+@pytest.mark.parametrize(("reshard", "refused"), [(False, False), (True, True)], ids=["zero2", "zero3"])
+def test_a_fine_tune_with_no_layer_training_pairs_under_zero2_alone(tmp_path, reshard, refused):
+    run_gloo_ranks(_no_layer_reason_worker, 2, str(tmp_path), reshard, pg_timeout=PG_TIMEOUT)
+    for rank in range(2):
+        assert bool(json.loads((tmp_path / f"rank{rank}.json").read_text())["reason"]) is refused
+
+
 @pytest.mark.parametrize(
     "options",
-    [{"freeze": True}, {"freeze": False, "peft": True}, {"freeze": False, "is_vlm": False}],
-    ids=["frozen_tower", "adapters", "text_run"],
+    [{"freeze": True}, {"freeze": False, "peft": True, "targets": []}, {"freeze": False, "is_vlm": False}],
+    ids=["frozen_tower", "expert_adapters_alone", "text_run"],
 )
 def test_a_run_with_no_trained_tower_or_no_images_registers_no_refusal(options):
     model, _, _ = _model_and_rows(_NEMOTRON)
+    # An expert-only adapter run has no wrap, and its base is frozen by now.
+    model.requires_grad_(not options.get("peft", False))
     _apply_options(model, **options)
     assert data_setup._refuse_a_batch_holding_no_image not in model._forward_pre_hooks.values()
+
+
+@pytest.mark.parametrize("family", ["qwen3_vl", "qwen3_5_moe", _NEMOTRON])
+def test_an_adapter_on_the_tower_is_refused_where_its_reduces_cannot_pair(tmp_path, family):
+    """The frozen embedding an adapter run always has, with no checkpointing to give its output a gradient."""
+    run_gloo_ranks(
+        _adapter_refusal_worker,
+        2,
+        str(tmp_path),
+        family,
+        "off",
+        _ADAPTER_SPOTS["tower_and_layers"],
+        pg_timeout=PG_TIMEOUT,
+    )
+    for rank in range(2):
+        refused = json.loads((tmp_path / f"rank{rank}.json").read_text())["refused"]
+        assert "frozen input embedding" in refused and "gradient checkpointing" in refused, refused
+        assert "lora_target_modules" in refused and "lora_" in refused.split("reached ")[1], refused
+        # An adapter run refuses this knob, and trains adapters already.
+        assert "freeze_vision_tower" not in refused and "train adapters" not in refused, refused
+
+
+@pytest.mark.parametrize("family", ["qwen3_vl", _NEMOTRON])
+def test_a_tower_with_no_layer_adapter_is_refused_under_zero3(tmp_path, family):
+    """ZeRO-2 pairs this, as only end-of-backward groups reduce. Under ZeRO-3 the tower's group re-gathers on an image
+    rank alone, and the step hangs."""
+    run_gloo_ranks(
+        _adapter_refusal_worker,
+        2,
+        str(tmp_path),
+        family,
+        "off",
+        _ADAPTER_SPOTS["tower_and_head"],
+        True,
+        pg_timeout=PG_TIMEOUT,
+    )
+    for rank in range(2):
+        assert "frozen input embedding" in json.loads((tmp_path / f"rank{rank}.json").read_text())["refused"]
+
+
+def test_an_adapter_on_the_tower_is_refused_under_accelerate_with_checkpointing_on(tmp_path):
+    run_gloo_ranks(
+        _adapter_refusal_worker,
+        2,
+        str(tmp_path),
+        "qwen3_vl",
+        "reentrant",
+        _ADAPTER_SPOTS["tower_and_layers"],
+        pg_timeout=PG_TIMEOUT,
+        env=_ACCELERATE_FSDP,
+    )
+    for rank in range(2):
+        assert "torchrun" in json.loads((tmp_path / f"rank{rank}.json").read_text())["refused"]
+
+
+@pytest.mark.parametrize(
+    ("gc", "spots"),
+    [("off", "layers"), ("off", "tower_and_head"), ("reentrant", "tower_and_layers")],
+    ids=["adapters_off_the_tower", "no_layer_adapter", "checkpointed"],
+)
+def test_an_adapter_run_whose_reduces_pair_takes_no_refusal(tmp_path, gc, spots):
+    """A text forward on every rank, which each of these reduces the same way on its peers."""
+    run_gloo_ranks(
+        _adapter_refusal_worker, 2, str(tmp_path), "qwen3_vl", gc, _ADAPTER_SPOTS[spots], pg_timeout=PG_TIMEOUT
+    )
+    for rank in range(2):
+        assert json.loads((tmp_path / f"rank{rank}.json").read_text())["refused"] == ""
+
+
+_ADAPTER_CASE = {
+    "family": "qwen3_vl",
+    "gc": "off",
+    "spots": "tower_and_layers",
+    "image_ranks": [0],
+    "embedding_trains": False,
+}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {"gc": "reentrant"},
+        {"family": _NEMOTRON, "gc": "reentrant"},
+        {"family": _NEMOTRON, "gc": "non_reentrant"},
+        {"family": "qwen3_5_moe", "gc": "reentrant"},
+        {"embedding_trains": True},
+        {"image_ranks": [0, 1]},
+        {"spots": "layers"},
+        {"spots": "tower_and_head"},
+    ],
+    ids=[
+        "reentrant",
+        "nemotron_reentrant",
+        "nemotron_non_reentrant",
+        "moe_reentrant",
+        "trained_embedding",
+        "an_image_on_every_rank",
+        "off_the_tower",
+        "no_layer_adapter",
+    ],
+)
+def test_an_adapter_run_whose_reduces_pair_finishes_a_mixed_step(tmp_path, case):
+    """A tower adapter's gradient, where one reaches it, is the image ranks' share of its own single-rank gradient."""
+    run_gloo_ranks(_adapter_worker, 2, str(tmp_path), {**_ADAPTER_CASE, **case}, pg_timeout=PG_TIMEOUT)
+    for rank in range(2):
+        result = json.loads((tmp_path / f"rank{rank}.json").read_text())
+        assert result["reached"] and not result["lost"] and result["worst"] < 1e-5, result
+
+
+def test_a_tower_adapter_takes_its_share_of_the_gradient_under_non_reentrant_checkpointing(tmp_path):
+    run_gloo_ranks(_adapter_worker, 2, str(tmp_path), {**_ADAPTER_CASE, "gc": "non_reentrant"}, pg_timeout=PG_TIMEOUT)
+    for rank in range(2):
+        result = json.loads((tmp_path / f"rank{rank}.json").read_text())
+        assert result["tower_grads"] == 8 and not result["lost"] and result["worst"] < 1e-5, result
+
+
+def test_a_training_step_through_the_trainers_own_wrap_takes_the_refusal(tmp_path):
+    """TRL wraps inside the trainer's constructor, so only ``run_trainer`` holds the model the loop calls. One process
+    stands in for the data-parallel axis, whose mesh is all the refusal reads of it."""
+    torch.manual_seed(0)
+    model, _, text_row = _model_and_rows(_NEMOTRON)
+    targets = _linears(model, media_module_names(model)[0])[:4] + ["q_proj"]
+    _apply_options(model, freeze=False, peft=True, targets=targets)
+    tokenizer = tiny_processor(_NEMOTRON).tokenizer
+    ids = text_row["input_ids"][0].tolist()
+    trainer = DistributedSFTTrainer(
+        model=model,
+        args=SFTConfig(
+            output_dir=str(tmp_path),
+            use_cpu=True,
+            bf16=False,
+            max_length=len(ids),
+            max_steps=1,
+            per_device_train_batch_size=1,
+            gradient_checkpointing=False,
+            use_liger_kernel=False,
+            remove_unused_columns=False,
+            dataloader_num_workers=0,
+            eval_strategy="no",
+            save_strategy="no",
+            report_to="none",
+            dataset_kwargs={"skip_prepare_dataset": True},
+        ),
+        train_dataset=Dataset.from_dict({"input_ids": [ids] * 2, "labels": [ids] * 2}),
+        processing_class=tokenizer,
+        peft_config=LoraConfig(r=2, target_modules=targets, task_type="CAUSAL_LM"),
+        parallelism_config=make_parallelism_config(world_size=1, gpus_per_node=1),
+        moe_balancing="none",
+    )
+    assert isinstance(trainer.model, PeftModel)
+    context = SimpleNamespace(
+        parallelism_config=trainer.parallelism_config, mode_suffix="test", resume_checkpoint=None
+    )
+    wide_mesh = SimpleNamespace(mesh_info=SimpleNamespace(mesh=SimpleNamespace(size=lambda: 2)))
+    with (
+        patch.object(data_setup, "fsdp2_param_groups", return_value=[wide_mesh]),
+        pytest.raises(ValueError, match="an adapter reached"),
+    ):
+        run_trainer(trainer, context, method_name="SFT")
+
+
+def test_one_rank_takes_no_refusal_under_an_adapter(tmp_path):
+    dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
+    try:
+        model, _, text_row = _model_and_rows("qwen3_vl")
+        wrapped = _wrap_adapters(model, "off", _ADAPTER_SPOTS["tower_and_layers"])
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=_MESH_NAMES[1])
+        fsdp.apply_fsdp2_per_layer(wrapped, mesh, MixedPrecisionPolicy(), False, IdentityParamSet())
+        data_setup.carry_image_refusal_above_adapters(wrapped)
+        assert data_setup._refuse_a_batch_holding_no_image in wrapped._forward_pre_hooks.values()
+        assert wrapped(**text_row).loss.isfinite()
+    finally:
+        dist.destroy_process_group()
 
 
 @pytest.mark.parametrize("freeze_embedding", [False, True], ids=["trained_embedding", "frozen_embedding"])

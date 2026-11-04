@@ -75,6 +75,9 @@ the default.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels) or
   `HALO_FLEX_SLIDING=0` on every rank (FlexAttention on SDPA runs of Gemma 4 and Step-3.7,
   also needed for `full_determinism` on more than one GPU).
+- **A weight sync that raises naming `HALO_WEIGHT_SYNC_CHUNK_MB`:** set it above the
+  held size the message states, as Step-3.7 Flash needs under `fp32_non_ep_params`
+  (`1536`).
 - **RL code sandboxes:** `HALO_SANDBOX_BACKEND`; the default `local` does not
   isolate the program ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)).
 - **A rollout server that cannot dial back on the trainer's routed address:**

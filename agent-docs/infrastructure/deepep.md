@@ -66,9 +66,9 @@ defaults are cataloged in
 `CUDA_DEVICE_MAX_CONNECTIONS=1` (an image `ENV`) serializes device work onto one hardware queue. It is
 the setting the EP suites are validated with, and the trainer warns at startup when it differs. No
 supported shape is known to need it: on 8 GPUs, `ep_size=2` (four 2-rank dispatch groups) and
-`ep4+etp2` (two 4-rank groups) each train 120 steps cleanly at `8` too (gpt-oss-20b, seq 4096). It costs
-no throughput: against `8`, `ep_size=8` reads +1.5% and `ep_size=2` +0.2% (8× B300, gpt-oss-20b, seq
-4096, batch 1, GC on). The driver latches it at `cuInit`, so a launch outside the image exports it
+`ep4+etp2` (two 4-rank groups) each train 120 steps cleanly at `8` too (gpt-oss-20b, seq 4096, Halo 1.1.0). It
+costs no throughput: against `8`, `ep_size=8` reads +1.5% and `ep_size=2` +0.2% (8× B300, gpt-oss-20b, seq
+4096, batch 1, GC on, Halo 1.1.0). The driver latches it at `cuInit`, so a launch outside the image exports it
 before the process starts. It does not make the racy single-domain multi-group shape safe
 ([EP grouping](#ep-grouping-what-is-reliable)).
 
@@ -126,7 +126,7 @@ raises while its peers wait in the dispatch for `HALO_DEEPEP_GPU_TIMEOUT_SECONDS
 `HALO_EP_CAPACITY_DEDUP=0` sizes every layer with its own all-reduce.
 
 **One buffer per EP group, on both backends.** Every EP layer dispatching the same shape on the same
-group shares one arena: `_ElasticArena` is keyed on group, padded hidden, top-k, QP count and
+group shares one arena (under `HALO_EP_CAPACITY_DEDUP=0` each layer keeps its own elastic one): `_ElasticArena` is keyed on group, padded hidden, top-k, QP count and
 deterministic mode, `_LegacyArena` on group and buffer bytes. Sharing is safe because a dispatch copies
 its results into allocator-owned tensors and the handle carries the routing layout, not buffer state,
 so a later layer leaves an earlier layer's pending backward intact (bit-exact against per-layer
@@ -190,8 +190,9 @@ behind one interface (`DeepEPBackend`, built by `build_ep_backend` in
 | `legacy` | `deep_ep.Buffer` (V1) | CUDA IPC P2P over NVLink | fixed-size chunked pipeline sized by hidden, streams any length | **No** (rejected at config time) |
 
 The two are numerically identical (bit-identical loss and matching expert/router gradients on
-gpt-oss-20b ep2); legacy takes ≈1.12× elastic's fwd+bwd time at ep2, seq 4096 (2× B300,
-`tests/gpu/profiling/bench_ep_buffer_backends.py` defaults).
+gpt-oss-20b ep2). Legacy runs 9,826 tok/s/GPU against elastic's 11,896 at ep8 (gpt-oss-20b, seq 4096, batch 1,
+GC on, 8× B300, [1.2.0](../optimization/throughput-benchmarks.md#120-against-110));
+`tests/gpu/profiling/bench_ep_buffer_backends.py` A/Bs the two.
 
 Pick **`legacy`** for long-context ep8 within a node: elastic ep8 at extreme tokens/rank (≥~64k·b1)
 fails at step 1, its combine barrier racing FSDP2's reduce-scatter into a deadlock, while legacy's
@@ -212,8 +213,7 @@ trays), since the V1 buffer is built with `num_rdma_bytes=0`.
 
 `ElasticBuffer` computes the SM count from the MoE shape (`get_theoretical_num_sms(num_experts,
 num_topk)`); when that divides by zero on an inter-node Blackwell topology the dispatcher warns and
-uses 24. `HALO_DEEPEP_NUM_SMS=<n>` pins it to A/B the comm/compute split: on 8× B300 qwen3.5-35b ep8
-(seq 4096) a pinned `16`–`32` ran ~5% over the auto count; sweep per shape.
+uses 24. `HALO_DEEPEP_NUM_SMS=<n>` pins it to A/B the comm/compute split; sweep per shape.
 
 The pin applies to both backends: elastic passes it per call, legacy through `Buffer.set_num_sms`
 before V1 reads its per-rank `Config` tables. V1 splits SMs into send/recv channel pairs, so an **odd**

@@ -4,11 +4,11 @@
 
 ## The problem: stale weights in bf16
 
-BF16 has ~0.8% relative precision (7-bit mantissa). When the update `lr * adam_step` is smaller than this threshold relative to the weight magnitude, nearest rounding truncates it to zero, and ~67% of parameters stop updating after the first few steps. The standard fix is fp32 master weights (cast to bf16 for forward/backward), but it doubles optimizer memory:
+BF16 has ~0.8% relative precision (7-bit mantissa). When the update `lr * adam_step` is smaller than this threshold relative to the weight magnitude, nearest rounding truncates it to zero and the weight stops moving. The standard fix is fp32 master weights (cast to bf16 for forward/backward), but it doubles optimizer memory:
 
 | Approach | Weight | States | Total/param |
 |---|---|---|---|
-| Pure bf16 (67% stale) | 2B | 4B bf16 | **6B** |
+| Pure bf16 (small updates lost) | 2B | 4B bf16 | **6B** |
 | FP32 master weights | 4B fp32 | 8B fp32 | **12B** |
 | **bf16 + SR (AdamWBF16)** | **2B bf16** | **4B bf16** | **6B** |
 
@@ -82,7 +82,7 @@ AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR pat
 
 `fp32_non_ep_params: true` moves non-expert (dense) params to fp32 storage (12 B/param) for exact updates; experts stay bf16 + SR. Use it for headroom on large-vocab `lm_head`/embeddings. On a MoE at `ep_size: 1` it needs `fsdp_shard_ep1_experts: false` — otherwise the FSDP-managed experts would stay bf16 inside an fp32 shard group and `ParallelismConfig` refuses the pair ([Precision control](../parallelism/expert-parallelism.md#precision-control)).
 
-**Measured (gpt-oss-20b EP=2, seq 4096, batch 4, 8× B300, FA4, Blackwell image):**
+**Measured (gpt-oss-20b EP=2, seq 4096, batch 4, 8× B300, FA4, Blackwell image, Halo 1.1.0 or earlier):**
 
 | master-weight regime | tok/s/GPU | peak mem | notes |
 |----------------------|:---------:|:--------:|-------|
@@ -95,8 +95,7 @@ AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR pat
 
 `fp32_grad_reduce: true` upcasts gradients to fp32 for every cross-rank reduction the mixin owns (FSDP2 `reduce_dtype=fp32` for dense params, the EP router grad-sync hooks and deferred sweep, the TP replicated-grad sync, the QLoRA adapter AllReduce), then stores the averaged result bf16. It keeps bf16 master weights (6 B/param) — unlike `fp32_non_ep_params` it changes only the reduction, not storage. An fp32 reduction is the TorchTitan, Megatron and DeepSpeed default.
 
-
-NCCL's bf16 all-reduce accumulates in bf16, so error grows with world size. On 8× B300 with real bf16 gradients, fp32 reduce is ~2.2× tighter (0.17% vs 0.37% of signal), and the gap widens with scale. The cost is ~2× bandwidth on that collective only.
+NCCL's bf16 all-reduce accumulates in bf16, so error grows with world size. On 8× B300 with real bf16 gradients (Halo 1.1.0 or earlier), fp32 reduce is ~2.2× tighter (0.17% vs 0.37% of signal), and the gap widens with scale. The cost is ~2× bandwidth on that collective only.
 
 The bucketed sweeps (`reduce_grads_bucketed`: the deferred cross-replica EP sweep, the TP replicated / per-head-norm sweep, the QLoRA sweep) hold **3× `HALO_GRAD_BUCKET_MB` per in-flight bucket** under `fp32_grad_reduce`, not 1×. Each chunk keeps its bf16 flat buffer alive for the scatter-back alongside the fp32 upcast it reduces.
 

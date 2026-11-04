@@ -60,15 +60,16 @@ The episode budget leaves tool output between turns unbounded, so it does not re
 ## Tool calls
 
 Native-tool environments send their `tools` schema, so the server needs the matching
-`--tool-call-parser` (per-family values: [Rollout Servers](../../infrastructure/rollout-servers.md#vllm)).
+`--tool-call-parser` (per-family values: [Rollout Servers](../../infrastructure/rollout-servers.md#running-it)).
 
-- A mismatched parser fails silently: calls come back as text with no `tool_calls`, so a native-protocol episode ends on that turn as a plain-text final answer.
-- A missing parser is a 400 on vLLM; SGLang returns the call as text.
+- A server with no parser is refused at startup ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)).
+- A wrong parser leaves calls as text with no `tool_calls`, so each turn reads as a final answer and the episodes tie. The run raises once `tool_parser_watch_rounds` rounds (default `2`) hold the template's call opening in a turn's text with no call parsed anywhere; one parsed call stands the watch down for the run ([Tool parsers](../../infrastructure/rollout-servers.md#running-it)).
 - [ReAct](environments/protocols/react.md) environments send no `tools` and are served without a parser.
 
 `rollout_stop_tokens` (default empty) lists special-token strings sent as `stop_token_ids`. Use it for a tool-call
 terminator the model's `eos_token_id` omits: gpt-oss with harmony disabled ends a call with `<|call|>` and otherwise
-hallucinates the result (the gpt-oss recipes set `["<|call|>"]`). An unknown name raises at trainer construction.
+hallucinates the result (the gpt-oss recipes set `["<|call|>"]`), so gpt-oss on a tool environment without it is
+refused at trainer construction. An unknown name raises there too.
 
 ## Unproductive turns
 

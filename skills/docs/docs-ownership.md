@@ -96,7 +96,7 @@ changes.
 | `halo/models/forward_capture.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/training-methods/embedding.md` |
 | `halo/model_loading/parallel/frozen_models.py` | `agent-docs/training-methods/distillation/teacher-distillation.md`, `agent-docs/training-methods/preference/dpo.md` |
 | `halo/model_loading/parallel/fp32_masters.py` | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md` |
-| `halo/models/mtp/`, `halo/model_loading/parallel/mtp_head.py`, `halo/callbacks/mtp.py` | `agent-docs/optimization/mtp-heads.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/models/README.md`, `agent-docs/training-methods/callbacks.md` |
+| `halo/models/mtp/`, `halo/model_loading/parallel/mtp_head.py`, `halo/callbacks/mtp.py` | `agent-docs/optimization/mtp-heads.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/models/README.md`, `agent-docs/training-methods/callbacks.md`; a spec or refusal in `spec.py` also that family's `agent-docs/models/` page |
 | `halo/model_loading/parallel/model_source.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/troubleshooting.md` |
 | `halo/entrypoints/model_setup.py` | `agent-docs/training-methods/sft.md`, `agent-docs/models/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/distributed/fsdp.py` | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/checkpoints.md` |
@@ -248,6 +248,8 @@ changes.
 | multi-node / SkyPilot / RunPod / Nomad launch | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |
 | `launcher-configs/**` | `agent-docs/infrastructure/{skypilot,nomad}.md`, `human-docs/clusters.md` |
 | `.github/workflows/**`, `.github/scripts/**`, `Makefile` test targets, `tests/common/hub_seed.py` | `agent-docs/infrastructure/ci.md`; tier composition lives in `agent-docs/contributing/README.md` |
+| `scripts/docs/**` | `agent-docs/infrastructure/ci.md`, `skills/docs/SKILL.md` |
+| `scripts/diagrams/**` | the page embedding the figure; regenerate it in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
 | `tests/baselines/bench/**`, `tests/gpu/profiling/benchmark_sft_{dense,ep}.py` | `agent-docs/contributing/README.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 
 ## Cross-cutting

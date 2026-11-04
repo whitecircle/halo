@@ -6,7 +6,7 @@ Writes the charts ``agent-docs/optimization/halo-vs-stock-trl.md`` embeds: ``thr
 page's tables carry every value.
 
 Numbers mirror that page's tables (gpt-oss-20b, 8x B300, GC-on); edit the rows here and re-run to keep the
-images and the tables in step. No GPU needed.
+images and the tables in step. A layout the tables hold no row for is None and takes no bar. No GPU needed.
 
     python scripts/diagrams/gen_trl_benchmark_charts.py
 """
@@ -33,52 +33,69 @@ GROUPS_LONG = ["64k", "128k", "256k"]
 SERIES_LONG = {
     BASELINE: ([6876, 5961, 4463], [66, 93, 148]),
     "Halo EP1 (ZeRO-3, dense)": ([14654, 9566, 5728], [100, 67, 112]),
-    "Halo EP8+CP8": ([5272, 3810, 2395], [32, 47, 77]),
-    "Halo dense CP-only (ZeRO-3)": ([4007, 3279, 1836], [29, 32, 56]),
+    "Halo EP8+CP8": ([None, 3810, 2395], [None, 47, 77]),
+    "Halo dense CP-only (ZeRO-3)": ([None, 3279, 1836], [None, 32, 56]),
 }
 
 BAR_SPAN = 0.8  # of a group's slot, shared by its bars
 LEGEND_DROP = -0.09
 
 
-def grouped_bars(ax, groups, series, column, shades, pick_lead, ratio_format, inside):
+def grouped_bars(ax, groups, series, column, shades, pick_lead, ratio_format, over_group):
     """One bar per layout per group, the baseline in slate; each group labels its lead Halo layout ÷ the baseline.
 
-    `inside` turns the label up the bar, for a lead too short to clear the taller bars beside it.
+    `over_group` sets the label above the group's tallest bar, for a lead too short to clear the bars beside it.
+    A group's bars center on its tick, however many layouts it holds.
     """
-    x = np.arange(len(groups))
     width = BAR_SPAN / len(series)
     baseline = series[BASELINE][column]
     rows = [(name, values[column]) for name, values in series.items()]
     colors = [SLATE, *shades]
-    for i, (name, values) in enumerate(rows):
-        ax.bar(x + (i - (len(rows) - 1) / 2) * width, values, width, label=name, color=colors[i])
-    for g in x:
-        lead, i = pick_lead((values[g], i) for i, (name, values) in enumerate(rows) if name != BASELINE)
-        ax.text(
-            g + (i - (len(rows) - 1) / 2) * width,
-            lead - 0.02 * ax.get_ylim()[1] if inside else lead,
-            ratio_format.format(lead / baseline[g]),
-            ha="center",
-            va="top" if inside else "bottom",
-            rotation=90 if inside else 0,
-            fontsize=SMALL,
-            fontweight="bold",
-            color=on_fill(colors[i]) if inside else INK,
-        )
-    ax.set_xticks(x)
+    labeled = set()
+    for g in range(len(groups)):
+        present = [i for i, (_, values) in enumerate(rows) if values[g] is not None]
+        lead, lead_i = pick_lead((rows[i][1][g], i) for i in present if rows[i][0] != BASELINE)
+        for slot, i in enumerate(present):
+            name, values = rows[i]
+            label = name if name not in labeled else None
+            labeled.add(name)
+            ax.bar(g + (slot - (len(present) - 1) / 2) * width, values[g], width, label=label, color=colors[i])
+            if i == lead_i and not over_group:
+                ax.text(
+                    g + (slot - (len(present) - 1) / 2) * width,
+                    lead,
+                    ratio_format.format(lead / baseline[g]),
+                    ha="center",
+                    va="bottom",
+                    fontsize=SMALL,
+                    fontweight="bold",
+                    color=INK,
+                )
+        if over_group:
+            ax.text(
+                g,
+                max(rows[i][1][g] for i in present),
+                ratio_format.format(lead / baseline[g]),
+                ha="center",
+                va="bottom",
+                fontsize=SMALL,
+                fontweight="bold",
+                color=INK,
+            )
+    ax.set_xticks(np.arange(len(groups)))
     ax.set_xticklabels(groups)
+    ax.margins(y=0.07)
     tidy(ax, "y")
 
 
 def throughput_axes(ax, groups, series):
-    grouped_bars(ax, groups, series, 0, TEAL_SHADES, max, "{:.1f}×", inside=False)
+    grouped_bars(ax, groups, series, 0, TEAL_SHADES, max, "{:.1f}×", over_group=False)
     k_ticks(ax.yaxis)
     ax.set_ylabel("tokens/s/GPU", fontsize=SMALL, color=INK2)
 
 
 def memory_axes(ax, groups, series):
-    grouped_bars(ax, groups, series, 1, AMBER_SHADES, min, "{:.2f}×", inside=True)
+    grouped_bars(ax, groups, series, 1, AMBER_SHADES, min, "{:.2f}×", over_group=True)
     ax.set_ylabel("peak GiB", fontsize=SMALL, color=INK2)
 
 
@@ -107,7 +124,7 @@ def long_context_chart():
     heading(
         fig,
         "Long context: Halo vs stock TRL",
-        "gpt-oss-20b · 8 × B300 · b1 · GC on · Halo 1.0.0 · labels: fastest and lowest-memory Halo layout ÷ stock TRL",
+        "gpt-oss-20b · 8 × B300 · b1 · GC on · Halo 1.0.0 · labels: fastest and lowest-memory Halo layout measured ÷ stock TRL",
     )
     throughput_axes(left, GROUPS_LONG, SERIES_LONG)
     memory_axes(right, GROUPS_LONG, SERIES_LONG)
@@ -134,7 +151,7 @@ if __name__ == "__main__":
     single_chart(
         memory_axes,
         "Peak memory: Halo vs stock TRL",
-        "gpt-oss-20b · 8 × B300 · GC on · Halo 1.1.0 or earlier · labels: lowest-memory Halo layout ÷ stock TRL",
+        "gpt-oss-20b · 8 × B300 · GC on · Halo 1.1.0 or earlier · above each group: lowest-memory Halo layout ÷ stock TRL",
         "memory_4k16k",
     )
     long_context_chart()

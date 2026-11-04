@@ -20,6 +20,8 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 - **[Low-precision compute (FP8/FP4)](low-precision-moe-kernels.md)** — FP8/FP4 matmul over bf16 masters and checkpoints — a QAT oracle plus a block-scaled weight export (`scripts/after_training/quantize_to_lowp.py`).
 - **[Allocator](throughput-benchmarks.md#allocator-expandable-segments)** — `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` lowers peak reserved memory on dense runs at unchanged throughput; the dense SFT, DPO and SMPO examples launch with it, an EP run sets it only to fit.
 
+![Memory before and after a lever, each row its own run: fsdp_shard_ep1_experts 148.3 to 60.3 GiB on gpt-oss-20b ep1, the length-ordered deal 210.25 to 183.35 GiB on an async GRPO row, the CP fused head loss 53.30 to 46.99 GiB on GLM-4.7-Flash, and expandable segments 13–14% off reserved memory on dense SFT, DPO and SMPO](../assets/benchmarks/memory_levers.png)
+
 ---
 
 ## Throughput
@@ -29,10 +31,10 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 - **[Tree packing](tree-packing.md)** — Rows that share a prefix store it once and branch after it; each example trains as it does packed flat, at fewer tokens.
 - **[Flash attention](flash-attention.md)** — Auto-detected per architecture — FA4 on Blackwell (B200/B300), FA3 on Hopper (H100/H200), FA2 where neither imports.
 - **[Grouped GEMM](grouped-gemm.md)** — Batched MoE expert matmul via `torch.nn.functional.grouped_mm`, default on SM90+. Home to the atomic-free permute and MoE throughput playbook.
-- **[Liger kernels](liger-kernels.md)** — Triton kernels for fused cross-entropy, RMS normalization, and SwiGLU (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 run their norms on torch's fused `F.rms_norm`). On by default — set `use_liger_kernel: false` to disable.
+- **[Liger kernels](liger-kernels.md)** — Triton kernels for fused cross-entropy, RMS normalization, and SwiGLU (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4 and Nemotron-H run their norms on torch's fused `F.rms_norm`). On by default — set `use_liger_kernel: false` to disable.
 - **[torch.compile](torch-compile.md)** — Inductor compilation of the spans between MoE/attention graph breaks (`torch_compile: true`) — at most 1% on EP MoE, and slower in `reduce-overhead` mode.
 - **[Checkpointing plan](../training-methods/callbacks.md#gradientcheckpointingplancallback)** — `gradient_checkpointing_plan: auto` measures one fully checkpointed step and checkpoints only the decoder layers the memory budget needs (opt-in, packed SFT rows).
-- **[Muon optimizer](muon-optimizer.md)** — Newton-Schulz orthogonalization for matrix params, fused Triton (~5× over upstream's Python-loop step). Set `optim: muon`.
+- **[Muon optimizer](muon-optimizer.md)** — Newton-Schulz orthogonalization for matrix params, with fused Triton momentum and update kernels. Set `optim: muon`.
 - **[NUMA binding](throughput-benchmarks.md#numa-binding)** — `torchrun --numa-binding node` runs each rank on its GPU's NUMA node, which helps host-bound rows on a multi-socket host. `torchrun` launches only.
 
 ---

@@ -40,7 +40,7 @@ def _draw_servers(ax, multi):
             TOP_Y - card_height(2),
             RW,
             card_height(2),
-            "Server 1 — GPU 6",
+            "Server 1, GPU 6",
             [":8000 · NCCL group port 51216", "ranks 1+; dials the trainer host"],
             color=VIOLET,
         )
@@ -50,7 +50,7 @@ def _draw_servers(ax, multi):
             BOT_Y,
             RW,
             card_height(2),
-            "Server 2 — GPU 7",
+            "Server 2, GPU 7",
             [":8001 · NCCL group port 51217", "group port = rollout_group_port + index"],
             color=VIOLET,
         )
@@ -67,7 +67,7 @@ def _draw_servers(ax, multi):
         TOP_Y - card_height(8),
         RW,
         card_height(8),
-        "Rollout server — GPU 7",
+        "Rollout server, GPU 7",
         [
             "vLLM :8000 · SGLang :30000 · TP 1",
             "serves POST /v1/chat/completions",
@@ -92,7 +92,7 @@ def _draw_topology(ax, multi, n_trainer):
         MID_Y,
         LW,
         card_height(3),
-        f"Trainer — GPU 0–{n_trainer - 1}",
+        f"Trainer, GPU 0–{n_trainer - 1}",
         [
             f"torchrun --nproc_per_node={n_trainer}",
             "rank 0 of both sync groups" if multi else "rank 0 of the sync group",
@@ -161,12 +161,12 @@ def draw(mode):
     footnote(
         ax,
         LX,
-        0.20,
+        0.10,
         BAR_X1 - LX,
         (
             "The streamed sync pauses both servers for the whole push; prefetch holds prefetch_depth rounds, one by default."
             if multi
-            else "One server, by default: the round and the update run in turn. enable_prefetch: true overlaps them, one step stale."
+            else "One server, by default: the round and the update run in turn. enable_prefetch: true overlaps them, one round stale."
         ),
     )
 

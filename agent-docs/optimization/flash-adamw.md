@@ -1,6 +1,6 @@
 # FlashAdamW (Quantized Optimizer States)
 
-FlashAdamW is a drop-in replacement for AdamW that cuts per-parameter optimizer memory ~57% via 8-bit quantized Adam moments and a 24-bit master weight, with quantize/dequantize fused into the update by Triton kernels. Convergence matches AdamW.
+FlashAdamW is a drop-in replacement for AdamW that cuts per-parameter optimizer memory ~58% via 8-bit quantized Adam moments and a 24-bit master weight, with quantize/dequantize fused into the update by Triton kernels. Convergence matches AdamW.
 
 Per-param state: AdamW 12 B (4B exp_avg + 4B exp_avg_sq + 4B master, all fp32) vs FlashAdamW ~5 B (1B int8 exp_avg + 1B int8 exp_avg_sq + 3B master = bf16 param as the high bits + an 8-bit low-bit correction). At 20B params: 240 GB vs ~100 GB optimizer state.
 
@@ -36,7 +36,7 @@ The value is memory, and it scales with model size — tens of GB at 70B+ params
 
 Optimizer micro-benchmark on B300, Halo 1.1.0 or earlier (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs `torch.optim.AdamW(fused=True)` over the same bf16 parameters (bf16 states), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the same shape, see [Muon](muon-optimizer.md#benchmark).
 
-That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k: ~50 s/step vs ~34 s/step on the default `optim`, which `bf16: true` resolves to AdamWBF16).
+That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k, Halo 1.1.0 or earlier: ~50 s/step vs ~34 s/step on the default `optim`, which `bf16: true` resolves to AdamWBF16).
 
 A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qwen3.5-2B). Correctness is covered by `tests/gpu/optimizers/test_flash_adamw.py` — creation, loss descent, decay filtering, memory savings, and a bit-exact state-dict round-trip.
 

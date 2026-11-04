@@ -220,6 +220,9 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
     exported.pop("auto_map", None)
     with tempfile.TemporaryDirectory() as staging:
         source_values = _reparsed_source_values(config, payload, staging)
+        # A trainer's KV-cache write on a composite's root, which the class does not hold: run state, not geometry.
+        if "use_cache" not in source_values:
+            exported.pop("use_cache", None)
         _apply_config_changes(payload, source_values, exported, config)
         carried = _reparsed_source_values(config, payload, staging)
     if carried != exported:

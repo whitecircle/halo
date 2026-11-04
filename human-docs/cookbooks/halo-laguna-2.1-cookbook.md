@@ -83,6 +83,9 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 
   --output_dir=/data/checkpoints/laguna-s-2.1-grpo
 ```
 
+`routing_replay: rollout` is experimental. It passed on Laguna-XS-2.1 at EP2; this S at EP4 shape has not run with it.
+To train without replay, drop `VLLM_ENABLE_R3=1` and `--routing_replay=rollout`.
+
 ## Settings that matter
 
 - **Attention.** Keep `attn_implementation: sdpa`. The pinned modeling code passes the sliding window
@@ -99,7 +102,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 
   `model_init_kwargs`. `bias_update` trains the router's own correction bias, which ships in the
   checkpoint.
 - **Tool parser.** vLLM needs `VLLM_TOOL_PARSER=poolside_v1`. The default `hermes` leaves Laguna's tool
-  calls as text, so every episode scores zero.
+  calls as text, and the run stops by its second round.
 
 ## Limits
 

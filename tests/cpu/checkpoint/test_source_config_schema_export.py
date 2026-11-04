@@ -430,6 +430,15 @@ def test_the_release_tag_needs_decoding_before_the_class_reads_it():
     ]
 
 
+def test_a_trainers_cache_write_on_the_composite_root_does_not_fail_the_save(tmp_path, nemotron_source):
+    """A trainer writes ``use_cache`` on the root of a composite whose class does not hold it there. It raised out of
+    the first save of an image run, as a field the source schema could not express."""
+    config = AutoConfig.from_pretrained(nemotron_source)
+    config.use_cache = False
+    payload, _ = _carried(tmp_path, config, nemotron_source)
+    assert "use_cache" not in payload
+
+
 def test_a_run_change_lands_under_the_legacy_spelling(tmp_path, nemotron_source):
     config = AutoConfig.from_pretrained(nemotron_source)
     config.text_config.use_cache = False

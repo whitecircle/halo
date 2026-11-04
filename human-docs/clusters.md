@@ -95,7 +95,7 @@ Cross-node EP needs an RDMA fabric. The default `ep_scope: auto` goes global
 once the EP group outgrows the NVLink domain. The ready-made config is
 `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
 
-![Two nodes: node-local TP groups over NVLink, one global EP group whose all-to-all crosses RDMA, and DP pairs formed by matching TP positions](../agent-docs/assets/diagrams/ep_multi_node_layout.png)
+![Two nodes at ep16 + tp8: node-local TP groups over NVLink, one global EP group whose all-to-all crosses RDMA, and DP pairs formed by matching TP positions](../agent-docs/assets/diagrams/ep_multi_node_layout.png)
 
 Above one NVLink domain, EP with TP must be a single EP group spanning the job.
 On 2×8 GPUs, `ep8 + tp2` forms two EP groups and is rejected at config time;

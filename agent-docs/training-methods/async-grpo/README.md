@@ -53,6 +53,8 @@ entry, or an `answer_field` renamed away from `answer`, that names no column rai
   and the `context_fields` columns.
 - The environment owns the system turn and the tool schema: there is no `system_prompt` field and `tools_field` is
   rejected. An override, where accepted, is `environment_kwargs.system_prompt`; the ReAct presets refuse it.
+- `text_only_model` is rejected: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would
+  miss a multimodal server's `model.language_model.layers.*`.
 
 ## Quickstart
 

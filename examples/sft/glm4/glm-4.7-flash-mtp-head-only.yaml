@@ -3,8 +3,7 @@
 #
 # Measured at this learning rate on first-turn rows, not on this recipe's: acceptance 0.7685 to 0.7649, which the gate
 # stops, and that export served at 0.7317 on vLLM against the release head's 0.7450. The learning rate and warmup are
-# the ones the acceptance gate does not warn about on Qwen3.6. Fit on rows like the ones you serve; mtp_loss_type: hard
-# is the other objective.
+# the ones the acceptance gate does not warn about on Qwen3.6. mtp_loss_type: hard is the other objective.
 
 # --- Model ---
 model_name_or_path: zai-org/GLM-4.7-Flash

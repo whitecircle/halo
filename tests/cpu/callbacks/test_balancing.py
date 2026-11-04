@@ -638,14 +638,14 @@ def test_bias_update_transient_is_refused_under_pipeline_parallelism(monkeypatch
     monkeypatch.setattr(balancing, "reject_across_ranks", collective)
     layer = _TransientEPLayer()
     model = _Model(_Cfg(), submodules=[layer])
-    with pytest.raises(ValueError, match="untested under pipeline parallelism"):
+    with pytest.raises(ValueError, match="does not run under pipeline parallelism"):
         apply_balancing_mode(model, "bias_update_transient", is_moe=True, pp_size=2)
     assert not hasattr(layer, "balancing_biases"), "the refusal came after the side-buffer was attached"
 
 
 def test_configure_passes_the_pipeline_size_to_the_refusal():
     model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[_TransientEPLayer()])
-    with pytest.raises(ValueError, match="untested under pipeline parallelism"):
+    with pytest.raises(ValueError, match="does not run under pipeline parallelism"):
         balancing.configure_moe_balancing(
             _perf_args("bias_update_transient"), model, SimpleNamespace(pp_size=2), policy_gradient_loss=False
         )

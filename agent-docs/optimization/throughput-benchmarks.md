@@ -54,8 +54,8 @@ its group and its clock leaves out the host time between steps. Peak is the high
 - Peak memory falls or stays within 0.07 GiB, except Qwen3-8B FSDP2 (+0.36 GiB) and gpt-oss-20b ep1 (+1.54 GiB), the
   cost of [two decoder layers per shard group](../parallelism/data-parallelism.md#shard-groups).
 - The gathered save takes 29.13 s on 1.1.0 and 29.08 s on 1.2.0, at 4.94 and 4.87 GiB peak host RSS.
-- The 1.2.0 arm ran before the release's last product commits, which touch pipeline parallelism, messages and log
-  lines; no row runs those.
+- The 1.2.0 arm is a release candidate from before the rollout-engine fixes, Nemotron-H and MTP heads, whose commits
+  also touch shared EP, FSDP2 and kernel code.
 
 `make bench BAND=1` holds eight of these shapes and the gathered save to the five-repeat baselines in
 `tests/baselines/bench/`, measured on the same code. Same-code A/Bs of the largest changes sit on their owner pages:
@@ -117,7 +117,7 @@ runs the data build, every framework and the summary.
 
 The kernels Halo runs for Gemma 4: [Gemma 4](../models/gemma4.md).
 
-![Gemma 4 SFT throughput against memory at 2,048 and 16,384 tokens per row](../assets/benchmarks/gemma4_sft_pareto.png)
+![Cluster tokens/s against peak GiB per GPU for six frameworks on Gemma 4 26B-A4B. At 2,048 tokens per row Halo leads at 1.65× Axolotl with the least memory. At 16,384 Halo leads at 1.32× Axolotl; Unsloth, NeMo AutoModel, Megatron Bridge and MS-SWIFT needed checkpointing to fit](../assets/benchmarks/gemma4_sft_pareto.png)
 
 **Mistral Small 4 119B**, 4× B300, BF16, sequence length 2,048, batch size 1 per GPU, 25 total steps, mean
 of all 20 post-warmup steps, Halo 1.1.0 or earlier:
@@ -310,7 +310,7 @@ for balanced throughput/memory, **ep8 b1** for minimum memory, **ep8+cp8** for 3
 
 ## Maximizing throughput: sequence & batch
 
-Throughput is dominated by the effective per-GPU token count `M = per_device_batch_size × sequence_length` —
+Throughput is dominated by the effective per-GPU token count `M = per_device_train_batch_size × max_length` —
 bigger `M` amortizes fixed per-step costs (kernel launches, dispatch latency, optimizer step) until a
 memory wall. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b, 49% and 0.4% on Qwen3.5-35B-A3B.
 Cross-node EP is pinned to `M ≤ 8192` by the Gin dispatch ceiling
@@ -341,6 +341,8 @@ token ids, a 1.2.0 development build:
 | gpt-oss-20b ep8 b1 s16384 | 9.0% | 45.6% | 45.4% |
 | gpt-oss-20b ep2 b1 s4096 | 12.2% | 71.8% | 15.9% |
 | Qwen3.5-35B-A3B ep2 b4 s4096 | 12.2% | 74.3% | 13.4% |
+
+![Shares of dispatch, expert compute and combine in the EP spans: at ep8 combine with its wait takes 39–45% and expert compute 46–47%, and at ep2 combine takes 13–16% and expert compute 72–74%](../assets/benchmarks/ep_phase_split.png)
 
 Dispatch is the smallest phase. At ep8 it averages 0.35 ms per layer call at 4,096 tokens per rank and 0.80 ms at
 16,384; both ep2 rows read about 0.2 ms. The recompute's call replays the cached result, so a dispatch on the wire costs

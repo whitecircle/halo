@@ -25,7 +25,7 @@ def _options(**overrides) -> SimpleNamespace:
 
 
 def _no_adapters() -> SimpleNamespace:
-    return SimpleNamespace(use_peft=False)
+    return SimpleNamespace(use_peft=False, lora_target_modules=None)
 
 
 def _image_processing() -> SimpleNamespace:

@@ -150,8 +150,10 @@ elastic backend and the hidden itself on legacy (both 4096 here). Under EP+ETP `
 (`_reject_fsdp_settings`) — every layout on this page is EP, so
 `fsdp_reshard_after_forward: false` is mandatory, not a choice.
 
-**Budget.** 288 GB HBM per B300; the CUDA context, NCCL buffers and allocator fragmentation take the
-practical ceiling to **≈ 260 GB**. Cells are ⚠ between 230 and 260 GB, ✗ above.
+**Budget.** A B300 reports 288 GB (275,040 MiB), and reserved memory is what counts against it. Reserved
+runs above allocated: [Nemotron-H's 32,000-token recipe](../models/nemotron-h.md#memory) allocates 227–235 GB and
+reserves 268–283 GB, 99.4% of the device on its top rank. These plans count allocated memory, so cells are ⚠ between
+230 and 260 GB, ✗ above.
 
 **The DeepEP arena is a separate term**, paid once for the model rather than once per layer. It is
 receive-side and linear in the dispatch-group width: at this model's `hidden=4096`, `top_k=10` an
@@ -202,7 +204,7 @@ NVLink.
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
 | **1** (8) | `ep8` node | 8 | 8 | 386 | 35 | **>420** | — | 117 | ✗ experts alone are 1.5× HBM |
 | 1 | `ep4`+`etp2` · `ep2`+`etp4` | 8 | 4 · 2 | 386 | 35 | **>420** | — | 214 · 407 | ✗ same expert share — `X` cannot exceed the 8 GPUs |
-| **2** (16) | **`ep16` global** | 16 | 16 | 193 | 31 | **263** | 383 | 69 | ✗ the replay cache takes full fine-tuning past the ceiling; frozen layers or `s4096` (244, ⚠) fit |
+| **2** (16) | **`ep16` global** | 16 | 16 | 193 | 31 | **263** | 383 | 69 | ✗ the replay cache takes full fine-tuning past the budget; frozen layers or `s4096` (244, ⚠) fit |
 | 2 | `ep16` global + `tp8` | 16 | 2 | 193 | 55 | **288** | 407 | 69 | ✗ TP collapses `F` to 2 |
 | 2 | `ep2` + `etp8` global | 16 | 2 | 193 | 31 | 240 | 291 | **407** | ✗ load peak |
 | 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
@@ -226,7 +228,7 @@ NVLink.
 
 **One node cannot train this model, in any shape.** Routed experts are only ever divided by `X`,
 which on 8 GPUs is at most 8, so every legal single-node shape puts the same 386 GB of expert state
-on each GPU against a ~260 GB practical ceiling.
+on each GPU against a B300's 288 GB.
 
 Two nodes with `ep16 --ep_scope=global` is the floor, where full fine-tuning fits only with frozen
 layers or at `s4096`; four is the first comfortable size. Freezing
@@ -438,14 +440,14 @@ Pre-shard the corpus with `scripts/before_training/prepare_dataset.py --num_shar
 
 The same arithmetic (8 B/param on the trained experts, `X = ep_size × expert_tp_size`, the
 non-expert weights gathered whole under ZeRO-2) for the three other checkpoints in the 200–320B
-class, on 8 × B300 (≈260 GB usable — [Budget](#per-rank-memory-model)). Every figure is a plan, not
+class, on 8 × B300 ([Budget](#per-rank-memory-model)). Every figure is a plan, not
 a measurement.
 
 | Checkpoint | Routed experts | Cell | Expert leg / rank | Static / rank | What binds |
 |---|---:|---|---:|---:|---|
 | **GLM-5.3-Flash** (321B; 42 MoE layers × 288 × `M=2048, H=4096`) | 304 B | 2 × 8, `ep16 --ep_scope=global` | 19.0 B → 152 GB | ~200 GB (+33 GB gathered non-expert bf16, +13 GB fp32 non-EP masters/state) | the 8192 tokens/rank cross-node dispatch ceiling; `ep8` on one node is 304 GB of experts alone. Needs the bf16 conversion (~650 GB) |
 | GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | same | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
-| **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~47 GB left for activations under the ≈260 GB ceiling at `max_length: 8192` with checkpointing — marginal, unmeasured |
+| **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~75 GB left on the 288 GB device for activations and the allocator's reserve at `max_length: 8192` with checkpointing — marginal, unmeasured |
 | Step-3.7-Flash | 190 B | 2 × 8, `ep16 --ep_scope=global` | 11.9 B → 95 GB | ~115 GB | the 8192 tokens/rank dispatch ceiling |
 | **DeepSeek-V4-Flash** (284B; 43 MoE layers × 256 × `M=2048, H=4096`, 3 of them hash-routed) | 277 B | 2 × 8, `ep16 --ep_scope=global` | 17.3 B → 138 GB | ~155 GB | the 8192 tokens/rank dispatch ceiling. Needs the bf16 conversion (~580 GB output) |
 

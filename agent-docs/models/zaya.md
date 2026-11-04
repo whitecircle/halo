@@ -1,6 +1,6 @@
 # Zaya (Zyphra/ZAYA1)
 
-`ZayaForCausalLM` — Zyphra's 8.84B-parameter MoE (16 routed experts, top-1; ~760M active) with CCA (Compressed Convolutional Attention), cross-layer EDA (Evolving Decision Adapter) router state, and a discard-bucket routing slot. Transformers ships `transformers.models.zaya` natively, so the family loads with no remote code and no revision pin. The most constrained model in Halo.
+`ZayaForCausalLM` — Zyphra's 8.84B-parameter MoE (16 routed experts, top-1; ~760M active) with CCA (Compressed Convolutional Attention), cross-layer EDA (Evolving Decision Adapter) router state, and a discard-bucket routing slot. Transformers ships `transformers.models.zaya` natively, so the family loads with no remote code and no revision pin.
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Every mode runs without gradient checkpointing ([Limitations](#limitations)).
 

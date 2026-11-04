@@ -94,7 +94,7 @@ The SDPA dispatch shim (bound through the same funnel) wraps the module global w
 
 The KDA layers run fla's Triton kernels, whose autotuners re-benchmark on shape-derived keys. The causal-conv1d key includes `ceil(tokens/1024)`, so a fresh row width costs that rank tens of seconds of autotuning while its 7 peers spin in the next collective at idle power.
 
-Measured configs persist in the Triton disk cache, which `configure_training_run` anchors on `HF_HOME` (`TRITON_CACHE_DIR`), so the warm-up is paid once per volume and the slow-step pattern appears only against a fresh cache.
+Measured configs persist in the Triton disk cache, which `configure_training_run` anchors on `HF_HOME` (`TRITON_CACHE_DIR`), so the warm-up is paid once per volume and the slow-step pattern appears only against a fresh cache. Fresh caches can pick differently, which changes bf16 rounding ([Docker](../infrastructure/docker.md#baked-in-environment-variables)).
 
 On Blackwell the KDA path shares the delta-rule state kernel whose `num_warps=4` configs are excluded there; the Ling 3.0 remote code imports `fla` directly, and the restriction applies when its load finishes ([Qwen3.5 linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)).
 
@@ -104,7 +104,7 @@ Bailing is aux-loss-free by design (`moe_router_enable_expert_bias: true`; Ling 
 
 `EPBailingMoELayer` hands exactly that buffer to `BalancingBiasCallback`: under `moe_balancing: bias_update` (or `auto`, which resolves there whenever the EP layer is applied) the DeepSeek-V3 sign-updates land in `expert_bias` itself, upcast to fp32 at enable so the 1e-3 steps survive the add.
 
-The EP layer exposes it as a live property, so callback updates and the `router_balancing_biases.pt` resume-restore always reach the buffer the gate reads. Because the buffer is part of the checkpoint, a gathered save exports the **final** bias and a served checkpoint routes exactly as training did.
+The EP layer exposes it as a live property, so callback updates and the `router_balancing_biases.pt` resume-restore always reach the buffer the gate reads. Because the buffer is part of the checkpoint, a gathered save exports the **final** bias and a served checkpoint routes on it.
 
 Most EP layers adopt a native slot the same way; the per-family slots and the exceptions are in the [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) table. `moe/*` load metrics come with the callback.
 

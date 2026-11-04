@@ -24,6 +24,7 @@ from halo.data.pipeline.coordinated_map import datasets_cache_dir
 from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.rank_uniform_env import agree_rank_uniform_env
+from halo.entrypoints.data_setup import carry_image_refusal_above_adapters
 from halo.entrypoints.run_setup import configure_training_run, install_log_tee, prepare_distributed_resume
 from halo.env import nccl_timeout
 from halo.log import configure_training_logging
@@ -236,6 +237,7 @@ def run_trainer(
     """Train between the start log and EP cleanup; an early-stopped run raises :class:`EarlyStopExit` on every rank."""
     # Integrations add themselves at the HEAD and would consume `logs` before our callbacks' on_log.
     reorder_integration_callbacks_last(trainer)
+    carry_image_refusal_above_adapters(trainer.model)
 
     parallelism_config = context.parallelism_config
     if is_global_main_process():

@@ -35,7 +35,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/sft-qwen3-4b
 ```
 
-`train_on_completions_only` masks prompt tokens, so the loss covers assistant turns only; it needs `assistant_message_template`, the rendered assistant-turn prefix, which startup checks against the chat template. `train_on_last_assistant_only` narrows the loss to the final assistant turn. `packing` packs short rows into fixed `max_length` blocks, [`tree_packing`](../optimization/tree-packing.md) stores a prefix several rows share once, and `padding_free` flattens the batch into one varlen sequence. LoRA (`use_peft`) wants 5–10× the full-FT learning rate ([PEFT](../optimization/peft.md#hyperparameters)), and `lowp_precision` runs fp8/fp4 matmuls over bf16 masters ([QAT](../optimization/low-precision-moe-kernels.md)).
+`train_on_completions_only` masks prompt tokens, so the loss covers assistant turns only; it needs `assistant_message_template`, the rendered assistant-turn prefix, which startup checks against the chat template. `train_on_last_assistant_only` narrows the loss to the final assistant turn. `packing` packs short rows into fixed `max_length` blocks, [`tree_packing`](../optimization/tree-packing.md) stores a prefix several rows share once, and `padding_free` flattens the batch into one varlen sequence. LoRA (`use_peft`) takes a higher learning rate than a full fine-tune: the shipped SFT LoRA recipes run `1e-4` ([PEFT](../optimization/peft.md#hyperparameters)). `lowp_precision` runs fp8/fp4 matmuls over bf16 masters ([QAT](../optimization/low-precision-moe-kernels.md)).
 
 Refused at startup:
 
@@ -78,7 +78,7 @@ Too high a learning rate erases pretrained capability without showing up in the 
 
 | Band | Learning rate | Anchor |
 |---|---|---|
-| Conservative floor | `0.5e-6` – `1.5e-6` | 100B+ MoE; also stage 2 of a two-stage run |
+| Conservative floor | `0.5e-6` – `1.5e-6` | stage 2 of a two-stage run |
 | Default (full FT) | `2.5e-6` – `5e-6` | most shipped full-FT recipes use `5e-6` |
 | Aggressive | `8e-6` – `2e-5` | short runs or small dense models |
 

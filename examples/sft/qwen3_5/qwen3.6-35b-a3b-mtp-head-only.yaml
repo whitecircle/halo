@@ -2,10 +2,11 @@
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 #
 # Measured: 150 steps read acceptance 0.838 to 0.849 on these rows, and the checkpoint served at 0.834 on vLLM against
-# the release head's 0.831. That head spans 0.011 across three launches, so this fit shows no served gain. On packed
+# the release head's 0.831. That head reads 0.83 to 0.84 across launches, so this fit shows no served gain. On packed
 # random tokens at 33,000 per rank on FA2, not this recipe's shape, a step costs 0.37x a no-head step. These rows are
-# ultrachat replies after an empty think block; a server drafts on its own samples after an open one. The learning rate and warmup are the ones the acceptance gate does not warn about. mtp_loss_type:
-# hard is the other objective, and what it does depends on the learning rate.
+# ultrachat replies after an empty think block; a server drafts on its own samples after an open one. The learning rate
+# and warmup are the ones the acceptance gate does not warn about. mtp_loss_type: hard is the other objective, and what
+# it does depends on the learning rate.
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B

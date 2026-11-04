@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="/logo.png" height="100">
+    <img src="/logo.png" height="100" alt="Halo logo: a white ring on black">
     <h3 align="center">Halo</h3>
 </p>
 
@@ -51,16 +51,16 @@ On 8× B300, Halo 1.1.0 trained gpt-oss-20b at up to 3.5× the throughput of sto
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-11-02 — Halo 1.2.0.** Pipeline parallelism, faster parallel steps, tree packing and a newer
+- **[[RELEASE-DATE]] — Halo 1.2.0.** Pipeline parallelism, faster parallel steps, tree packing and a newer
   stack: pipeline parallelism for SFT, preference, offline GRPO, reward and classification training,
   alone or with EP or ETP inside each stage, with two recipes run across two machines; 1.11–2.07× the
   throughput of 1.1.0 on twelve benchmarked shapes (TP2 1.82×, EP4+ETP2 2.07×); SFT tree packing, which
   stores a prefix several rows share once; SFT training of the multi-token-prediction head a release
   ships, under FSDP2, EP and ETP ([MTP heads](agent-docs/optimization/mtp-heads.md)); the Qwen3-Next,
-  experimental Qwen3.8-Flash-Next and NVIDIA Nemotron 3.5 Super VL families; a step guard that skips an optimizer step whose gradient norm is not
-  finite; a causal mask for PaliGemma SFT and distillation, which 1.1.0 trained non-causally;
-  transformers 5.20 and TRL 1.14, with rollouts on vLLM 0.32 or SGLang 0.5.22; and the import package
-  renamed to `halo`.
+  experimental Qwen3.8-Flash-Next and NVIDIA Nemotron 3.5 (Super VL, Lightning) families, for eighteen MoE
+  families in all; a step guard that skips an optimizer step whose gradient norm is not finite; a causal mask for
+  PaliGemma SFT and distillation, which 1.1.0 trained non-causally; transformers 5.20 and TRL 1.14, with
+  rollouts on vLLM 0.32 or SGLang 0.5.22; and the import package renamed to `halo`.
 - **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
   MoE kernels and FlexAttention on sliding-window layers (1.67× over Halo 1.0.0 for Gemma 4 26B-A4B on
   two GPUs), an atomic-free expert permute (up to 27% faster for gpt-oss at EP8), checkpoint and resume
@@ -224,7 +224,7 @@ A typical run is: **pick an `examples/` config → `halo launch <method> <config
 ## Benchmarks
 
 All rows ran on 8× B300 with the Blackwell image unless a row says otherwise. The first two rows are
-Halo 1.2.0. The rest ran on Halo 1.1.0 (the 256k-context row on 1.0.0). The stock TRL baseline uses
+Halo 1.2.0. The rest ran on Halo 1.1.0 or earlier (the 256k-context row on 1.0.0). The stock TRL baseline uses
 `trl.SFTTrainer` with Transformers v5 and FSDP2 ZeRO-3, with the same model, data, bf16 precision,
 FlashAttention 4, Liger kernels, and grouped GEMM.
 
@@ -235,7 +235,7 @@ FlashAttention 4, Liger kernels, and grouped GEMM.
 | **2.6–3.5× stock TRL throughput** | gpt-oss-20b, 4k–16k; EP2 / dense EP1 (EP8: 1.7–2.8×). Loss matches the baseline to within 0.8% by step 100. |
 | **28,700 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off: ~230k tok/s across 8 GPUs. |
 | **16,447 tok/s/GPU at 1,908 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2: the highest achieved TFLOPS of any EP>1 run benchmarked. |
-| **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. EP8+CP8 and dense CP-only run at about half TRL's per-GPU memory. |
+| **Up to 256k context** | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. EP8+CP8 and dense CP-only run at about half TRL's per-GPU memory or less. |
 | **25–76 GiB/GPU on the same 16k workload** | EP8+CP8: 24.6 GiB at 7,149 tok/s/GPU. Dense EP1: 75.8 GiB at 20,690 tok/s/GPU. |
 | **2.45× Grouped GEMM** | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4, GC on; 4.10× at batch 1. |
 | **3.6–3.9× FA4 kernel throughput** | FA4 vs FA2 on the isolated kernel (B2×S8192, head_dim 128); up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
@@ -285,7 +285,7 @@ for the per-model matrix, and [Clusters & Multi-Node](human-docs/clusters.md) fo
 Enabled by default where supported:
 
 - **Attention and kernels.** Flash Attention 4 on Blackwell, FA3 on Hopper, FA2 elsewhere, Liger fused
-  CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 take torch's fused RMSNorm instead),
+  CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4 and Nemotron-H take torch's fused RMSNorm instead),
   fused GLU kernels, and Grouped GEMM for MoE expert compute.
 
 - **Parallel steps.** TP linears on their local shards, one Ulysses all-to-all per exchange, a sync-free
@@ -298,8 +298,8 @@ Enabled by default where supported:
 
 - **Memory and PEFT.** Padding-free, boundary-aware packing with `cu_seq_lens`, SFT tree packing that
   stores a prefix several rows share once, plus LoRA and QLoRA.
-  QLoRA fits a 24 GB consumer GPU: the [Qwen3-4B QLoRA example](examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml)
-  peaks at 7.9 GiB (batch 1, 4k) and Qwen3-8B at 32k fits in 20.9 GiB with the fused loss. Ampere and Ada
+  QLoRA's peak stays under 24 GB on a B300: the [Qwen3-4B QLoRA example](examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml)
+  peaks at 7.9 GiB (batch 1, 4k) and Qwen3-8B at 32k at 20.9 GiB with the fused loss. Ampere and Ada
   cards run single-GPU LoRA/QLoRA from `halo:blackwell` (FA2/SDPA), but that path is not validated.
 
 - **Checkpoints.** Large gathered checkpoints are automatically sharded, with tools for merging per-rank

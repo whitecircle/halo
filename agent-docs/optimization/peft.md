@@ -108,7 +108,8 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
   runs on GPT-OSS, Qwen3 MoE, Gemma 4, Inkling and LFM-2, without reaching the fused expert tensors. Every other EP
   family refuses it, as it would put PEFT layers inside the EP layer. There, name attention and expert projections
   explicitly (see [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
-- **Learning rate:** LoRA needs 5–10× the full-FT rate.
+- **Learning rate:** higher than the same run's full fine-tune. The shipped SFT recipes start at `1e-4`, and the
+  code-contests recipes run `3e-6` against `2e-7`.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
   `disable_dropout_in_model` after the adapter wrap (`disable_dropout` defaults to `True`), zeroing PEFT's
   `lora_dropout` along with the model's own for reference-vs-policy determinism. A warning fires when a
@@ -146,9 +147,11 @@ routes them to native grouped-LoRA built inside each EP layer (`_init_expert_lor
 Requests are **logical**; what gets built follows the family's storage. One adapter is created per stored
 3-D expert tensor that any requested projection touches.
 
-On a family that stores the fused `gate_up_proj` — every family except Qwen3, Bailing and grouped-GEMM
-GptOss (below) — asking for `gate_proj` alone adapts the whole `[E, H, 2M]` tensor: gate and up share one
-rank-`r` subspace. On the separate-storage layouts it adapts gate alone, with its own rank `r`.
+On a family that stores the fused `gate_up_proj` — every family except Qwen3, Bailing, Nemotron-H and
+grouped-GEMM GptOss (below) — asking for `gate_proj` alone adapts the whole `[E, H, 2M]` tensor: gate and up
+share one rank-`r` subspace. On the separate-storage layouts it adapts gate alone, with its own rank `r`.
+Nemotron-H's experts store `up_proj` and `down_proj` only, so a gate-only request builds no adapter and raises
+(`reject_unrealized_expert_lora`).
 
 `lora_r` must be a multiple of 8. The grouped GEMM reads the adapter's rank dimension as a stride that
 spans a multiple of 16 bytes (`GROUPED_MM_STRIDE_ALIGNMENT_BYTES`), and the adapter GEMMs run at the
@@ -279,8 +282,8 @@ slower than attention-only, since adapter matmuls run on every MLP layer. Throug
 within a variant (attn-only ~18.8k, all-linear ~16.0k across r=16/64/128): the frozen base forward/backward
 dominates the step, and only memory grows with rank.
 
-QLoRA saves ~10 GiB more than bf16 all-linear LoRA at ~5% lower throughput. It is the path onto consumer
-GPUs, since plain LoRA needs ~34 GiB even at the minimum rank.
+QLoRA saves ~10 GiB more than bf16 all-linear LoRA at ~5% lower throughput. It is the path onto a smaller
+GPU, since plain LoRA needs ~34 GiB at this shape even at the minimum rank.
 
 MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at EP=2, seq 4096, r=64 (full
 fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchmarks.md#ep-only-batch-scaling)):
@@ -396,9 +399,9 @@ base, set `optim: adamw_8bit`.
 ### FusedLinearCrossEntropy for long sequences
 
 [Liger FLCE](liger-kernels.md) fuses `lm_head` with the loss instead of materializing the
-`batch × seq × vocab` logits. Qwen3-8B QLoRA r=32 all-linear at 32k (BS=1, GC, Liger, FA4) needs **43.5 GiB
-with plain CE and 20.9 GiB with FLCE**, so it fits a 24 GB consumer GPU only with FLCE. FLCE is SFT-only and
-disables entropy logging.
+`batch × seq × vocab` logits. Qwen3-8B QLoRA r=32 all-linear at 32k (BS=1, GC, Liger, FA4, on one B300, Halo 1.1.0 or earlier) peaks at
+**43.5 GiB with plain CE and 20.9 GiB with FLCE**, so by peak it fits a 24 GB GPU only with FLCE. FLCE is
+SFT-only and disables entropy logging.
 
 ## Checkpoint saving
 
@@ -489,7 +492,7 @@ draw (`apply_adapter`, `halo/checkpoint/tools/adapter_merge.py`).
 
 The merge re-applies the run's training sidecars to the merged model and copies both files into the output:
 the GptOss sinks policy recorded in `training_provenance.json`, and `router_balancing_biases.pt` into the
-family's native routing-bias slots, so the merged model routes as it trained.
+family's native routing-bias slots, so the merged model routes on the trained bias.
 
 The script **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LORA` or
 `LORA_WITH_EP_EXPERT_LORA`, or tensor keys ending at `.experts.<attr>.lora_{A,B}`), because

@@ -8,10 +8,11 @@ adapters.
 
 Every save uses the tensor names of the checkpoint the run loaded, vision towers
 included, and an EP save writes the family's own expert layout
-([details](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗). A save holds an MTP head only if the
-run [trained one](../agent-docs/optimization/mtp-heads.md#checkpoints) ↗, under the release's keys, or the family's
-remote class builds its tail (Ling-3.0-flash). Drafting with `method=mtp` needs one: vLLM refuses a checkpoint without
-it.
+([details](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗). A
+save holds an MTP head only if the run
+[trained one](../agent-docs/optimization/mtp-heads.md#checkpoints) ↗, under the
+release's keys, or the family's remote class builds its tail (Ling-3.0-flash).
+Drafting with `method=mtp` needs one: vLLM refuses a checkpoint without it.
 
 | Training mode | Output | Load directly? |
 | --- | --- | --- |
@@ -108,9 +109,13 @@ only where the pinned engine reads that family's layout:
   and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The exports use the
   hub's names, but no engine has served one.
 - **Every other family** serves its normal save as is, except a Cohere2 MoE
-  (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first. On
-  1.2.0, of the trained full-size exports, only Gemma 4's has been served, on both
-  engines.
+  (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first. A
+  `text_only_model` export of Nemotron 3.5 Super VL serves after
+  `reattach-vision-tower`.
+- **What has served on 1.2.0:** one-step RL exports of Qwen3.6-35B-A3B and Gemma 4,
+  an MTP head fit of Qwen3.6-35B-A3B and untrained exports of Nemotron 3.5 Super VL
+  (reattached) and Lightning on both engines, and an MTP head fit of GLM-4.7-Flash
+  on vLLM, each on short prompts.
 - **Fused experts on a per-expert-only loader** are refused or dropped without
   an error. Rewrite such a checkpoint with `unfuse-moe-experts` first; the result
   is the hub's own layout

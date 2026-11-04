@@ -73,7 +73,7 @@ calls (the compose default `hermes` reads JSON `<tool_call>` calls only) the row
 `make seed-hf-cache` (`tests/common/hub_seed.py`) fetches what the CPU tier reads from the Hub into
 `HF_CACHE`: for every Hub id an `examples/` config trains, every checkpoint constant in
 `tests/common/models.py` and the revisions its `PINNED_REVISIONS` pins, the configs, tokenizers, chat
-templates and remote-code `*.py` files, never weights (about 0.6 GB). It names any repo it cannot
+templates and remote-code `*.py` files, never weights. It names any repo it cannot
 fetch. Over a seeded cache the tier runs offline, and `HALO_TEST_REQUIRE_HUB_CACHE=1` turns a Hub miss
 into a failure instead of a skip:
 
@@ -116,9 +116,9 @@ The scope Halo 1.2.0 is validated on:
   engines, and the two PP recipes (training; the Qwen3-8B one also a per-node save, resume, merge
   and load). The other multi-node shapes run as a two-node simulation on one host
   ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
-- **Model size:** full-size checkpoints ran up to Qwen3.5-35B-A3B (`ep8`), plus a few full-depth EP8 LoRA
-  steps of Qwen3.8-Flash-Next. Larger recipes did not run on 1.2.0; gpt-oss-120b and Qwen3.5-122B-A10B at
-  EP8 last ran on earlier code.
+- **Model size:** full-size checkpoints ran up to Qwen3.6-35B-A3B (`ep8`), plus Nemotron 3.5 Super VL at `ep8`
+  for 5 to 20 steps per recipe, a few full-depth EP8 LoRA steps of Qwen3.8-Flash-Next, and Step-3.7 Flash as a weight
+  push at EP=2 and one expert-LoRA step at EP=4. gpt-oss-120b and Qwen3.5-122B-A10B at EP8 last ran on earlier code.
 - **Upgrades:** checkpoints written by 1.1.0 resume with the optimizer restored (step counters continue, every
   second moment carries over, losses continue), and export and merge: FSDP2 full fine-tuning, LoRA adapters, EP
   gathered saves, EP sharded saves after `merge_ep_shards.py`, and async GRPO whose prefetched rounds hold plain

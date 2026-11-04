@@ -57,7 +57,7 @@ ax.text(13, 1780, "MEMORY-BOUND", ha="center", va="top", fontsize=SECTION, fontw
 ax.text(
     13,
     1330,
-    "below the ridge\nmore cores don't help —\nmove fewer bytes, faster HBM",
+    "below the ridge\nmore cores don't help:\nmove fewer bytes, faster HBM",
     ha="center",
     va="top",
     fontsize=SMALL,
@@ -68,7 +68,7 @@ ax.text(1500, 132, "COMPUTE-BOUND", ha="center", va="bottom", fontsize=SECTION, 
 ax.text(
     1500,
     116,
-    "above the ridge\nfaster HBM doesn't help —\nbigger dims, lower precision",
+    "above the ridge\nfaster HBM doesn't help:\nbigger dims, lower precision",
     ha="center",
     va="top",
     fontsize=SMALL,
@@ -108,7 +108,7 @@ ax.text(
     MEASURED[2][0], MEASURED[2][1] / 1.22, "M=8192", fontsize=TINY, color=INK2, ha="center", va="top", fontfamily=MONO
 )
 ax.annotate(
-    "M=128 — below even the memory roof:\ntoo few tiles to fill 148 SMs (§1)",
+    "M=128, below even the memory roof:\ntoo few tiles to fill 148 SMs (§1)",
     xy=(MEASURED[0][0], MEASURED[0][1]),
     xytext=(2.7, 350),
     fontsize=TINY,
@@ -130,8 +130,8 @@ ax.text(
     style="italic",
 )
 
-ax.set_xlabel("Arithmetic intensity — FLOP / byte  (log scale)", fontsize=11, color=INK, labelpad=8)
-ax.set_ylabel("Achievable throughput — TFLOP/s  (log scale)", fontsize=11, color=INK, labelpad=8)
+ax.set_xlabel("Arithmetic intensity, FLOP / byte (log scale)", fontsize=11, color=INK, labelpad=8)
+ax.set_ylabel("Achievable throughput, TFLOP/s (log scale)", fontsize=11, color=INK, labelpad=8)
 ax.set_title("The Roofline", fontsize=TITLE, fontweight="bold", color=INK, pad=32, loc="left")
 ax.text(
     0.0,

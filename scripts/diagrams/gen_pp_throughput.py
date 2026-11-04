@@ -53,6 +53,8 @@ def draw_panel(ax, caption, rows):
             fontsize=SMALL,
             fontweight="bold",
             color=INK,
+            zorder=3,
+            bbox={"facecolor": BG, "edgecolor": "none", "pad": 1.5},
         )
     ax.set_yticks(ys)
     ax.set_yticklabels([row[0] for row in rows], fontsize=SMALL)

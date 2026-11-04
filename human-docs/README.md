@@ -5,8 +5,8 @@ HuggingFace stack (Transformers, TRL, Accelerate). It adds expert, context,
 tensor, expert-tensor and pipeline parallelism to native HuggingFace models.
 
 It covers supervised fine-tuning through asynchronous multi-turn RL, on dense
-models and eighteen MoE families. A HuggingFace model goes in, and a HuggingFace
-model you can load with `from_pretrained` comes out.
+models and eighteen MoE families. You start from a HuggingFace model, and the
+result loads with `from_pretrained`.
 
 Read the guide in order for a first run, or jump to the section you need. Links
 marked ↗ go to [`agent-docs/`](../agent-docs/README.md), the detailed reference

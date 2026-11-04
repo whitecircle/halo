@@ -1,6 +1,6 @@
 # Gemma 4 MoE
 
-`Gemma4ForConditionalGeneration` — Google's MoE with the router living **outside** the EP-wrapped module, plus KV-shared layers and `attention_k_eq_v` patterns. EP and pure ETP (`ep_size=1`) are supported; TP / CP wrappers are not implemented because of the attention quirks described below.
+`Gemma4ForConditionalGeneration` — Google's MoE with the router living **outside** the EP-wrapped module, plus KV-shared layers and `attention_k_eq_v` patterns. EP and ETP (pure at `ep_size=1`, or with EP) are supported; TP / CP wrappers are not implemented because of the attention quirks described below.
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 

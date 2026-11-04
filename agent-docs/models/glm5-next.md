@@ -1,6 +1,6 @@
 # GLM-5 Next
 
-`Glm5NextForConditionalGeneration` (`zai-org/GLM-5.3-Flash`) — 321B total / 18B active composite VLM, native in transformers since 5.16 (`model_type` `glm5_next`, text tower `glm5_next_text`; no remote code). 45 text layers mix KDA linear attention with DeepSeek sparse attention, hyper-connections widen the cross-layer residual 4×, and a 288-expert sigmoid-routed MoE carries most of the parameters.
+`Glm5NextForConditionalGeneration` (`zai-org/GLM-5.3-Flash`) — 321B total / 18B active composite VLM, native in transformers (`model_type` `glm5_next`, text tower `glm5_next_text`; no remote code). 45 text layers mix KDA linear attention with DeepSeek sparse attention, hyper-connections widen the cross-layer residual 4×, and a 288-expert sigmoid-routed MoE carries most of the parameters.
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism takes the text tower only (`GLM5_NEXT_PP`): a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and no stage may begin on a `shared` DSA indexer layer ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
@@ -57,11 +57,11 @@ RL weight sync is off (the spec's `weight_sync_refusal`): both pinned rollout en
 
 ## Router balancing
 
-The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's exact slot — and the forward honors `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` (the Laguna case), whose switch-style aux loss softmaxes the raw router logits and so balances the unbiased routing, not the selection `e_score_correction_bias` shifts. Explicit `bias_update` adopts the native buffer instead: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates it, and the buffer exports with every checkpoint, so a served copy routes as trained.
+The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's exact slot — and the forward honors `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` (the Laguna case), whose switch-style aux loss softmaxes the raw router logits and so balances the unbiased routing, not the selection `e_score_correction_bias` shifts. Explicit `bias_update` adopts the native buffer instead: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates it, and the buffer exports with every checkpoint, so a served copy routes on it.
 
 ## Attention
 
-Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice; they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel the toolkit keeps on `num_warps=2` ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
+Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice, and their autotune picks can move a run's logits across fresh caches ([Docker](../infrastructure/docker.md#baked-in-environment-variables)); they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel the toolkit keeps on `num_warps=2` ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
 
 ## Limitations
 

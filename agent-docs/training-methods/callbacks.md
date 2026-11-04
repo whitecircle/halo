@@ -72,7 +72,7 @@ It emits nothing in three cases:
 - Under pipeline parallelism, where it is not wired: the stage forwards return bare tensors without `router_logits`, so `bias_update`, on a family whose EP layers export the bias, is the route to load metrics there.
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
-Two live paths bypass the hooks even when wired: an EP layer routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
+Two live paths bypass the hooks even when wired: an EP layer routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4, Nemotron-H), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
 
 ### BalancingBiasCallback
 
@@ -80,7 +80,7 @@ DeepSeek-V3 auxiliary-loss-free router balancing (`halo/callbacks/balancing.py`)
 
 The rule is `b_i ← b_i + γ · sign(mean_count − count_i)` over tokens routed to expert *i* in the last step, summed across ranks. It runs every step; only the `moe/*` summary is periodic, since it ends in a host sync. Defaults: `update_rate=1e-3`, `log_every_n_steps=1`, `exclude_last_slot` off the router class attribute `_has_discard_expert_slot`.
 
-The mode holds an **export contract**: `bias_update` is accepted only where the trained bias lands in checkpoint-exported state a serving engine loads, so trainer and server route identically. A family satisfies it with a native buffer, an adopted native slot (an `nn.Parameter` re-registered as a persistent buffer under the same key, frozen out of gradient training), or a materialized zero buffer plus its config flag.
+The mode holds an **export contract**: `bias_update` is accepted only where the trained bias lands in checkpoint-exported state a serving engine loads, so trainer and server route on the same bias. A family satisfies it with a native buffer, an adopted native slot (an `nn.Parameter` re-registered as a persistent buffer under the same key, frozen out of gradient training), or a materialized zero buffer plus its config flag.
 
 | Family | Exported balancing slot |
 |---|---|

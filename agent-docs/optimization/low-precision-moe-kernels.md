@@ -32,6 +32,8 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 | Qwen3-30B-A3B ep8 b8 | 14,063 | 0.294× | 0.098× | 0.425× | 0.369× |
 | Qwen3.5-35B-A3B ep8 b8 | 16,536 | 0.442× | 0.171× | 0.533× | 0.373× |
 
+![Whole-step tokens/s per GPU as a ratio to bf16 on three EP8 shapes: simulated fp8 and mxfp4 at 0.10–0.45× and native fp8 and mxfp4 at 0.37–0.54×, all left of bf16 at 1.0. torchao MXFP8 reads 1.13× on gpt-oss-20b in a test wrapper, in its own row, quality unmeasured and not adopted](../assets/benchmarks/lowp_whole_step.png)
+
 **Kernels.** A sweep on one B300 timed each expert GEMM alone, forward and with both gradients, at the local expert counts, widths and rows per expert of gpt-oss-20b, Qwen3-30B and Qwen3.5-35B, on uniform and skewed routing: 94 cells, 3 repeats each. An arm counts as faster only when its range is disjoint from bf16's and the gap is at least max(2%, 2× bf16's spread). Halo's simulated and adapter paths are faster in 0 of the 94. Arms outside Halo's training path, in the same sweep:
 
 - DeepGEMM's fp8 kernel alone beats the bf16 forward in 59 of 94, but that ratio leaves out the casts: at gpt-oss-20b ep8 b4's shape the activation cast takes 2.66 ms against 0.86–0.89 ms for the whole bf16 forward.
@@ -39,6 +41,8 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 - torchao MXFP8 as a whole path is faster only at 16,384 rows per expert: 1.08–1.30× on gpt-oss-20b, 0.90–1.07× across Qwen3-30B's GEMM pair, and never on Qwen3.5-35B. `F.scaled_grouped_mm` refuses more than 32 groups, which rules out Qwen3-30B and Qwen3.5-35B at ep2, and its mxfp4 kernel failed to initialize on two wide cells.
 
 **Where native's time goes.** gpt-oss-20b ep8 b4 s4096, in a run that syncs the GPU around its timers: bf16 takes 1,311 ms a step and native fp8 2,424 ms, +1,113 ms. Activation cast +392, weight cast +63, padding and un-padding +59, kernel −37 and combine wait +309. Of the remaining +327, about +300 sits outside the EP spans, unattributed. The backward's GEMMs stay bf16 at 114 ms either way. So cheaper casts alone do not win: with every cast and copy free, native reaches about 1.08× (calculated).
+
+![Waterfall from the 1,311 ms bf16 step to the 2,424 ms native fp8 step on gpt-oss-20b ep8 b4: activation cast +392, weight cast +63, padding and un-padding +59, expert kernel −37, combine wait +309, the rest +327](../assets/benchmarks/lowp_native_step.png)
 
 **torchao MXFP8 as a whole step.** Through a test wrapper (torchao forward and input gradient, bf16 weight gradient), gpt-oss-20b ep8 b4 s4096 ran 1.133× bf16 over 3 repeats, peak memory +0.9%. The two Qwen shapes above raised a GPU memory fault in that wrapper, at 16 and 32 local experts, and whether the kernel or the wrapper caused it is unresolved. Quality is unmeasured and torchao is not in the lock, so Halo has not adopted it. On the gpt-oss shape, lower EP and GC off, which ship today, gain more ([tables](throughput-benchmarks.md#gpt-oss-20b-8-b300)).
 

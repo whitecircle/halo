@@ -29,7 +29,7 @@ Consequences:
 
 ## EP layer
 
-`EPDeepseekV4MoELayer` (`halo/distributed/expert_parallel/families/deepseek_v4.py`) replaces `DeepseekV4SparseMoeBlock`. It subclasses `EPMoELayerBase` directly (not the shared-experts forward base): the routers return tuples and hash layers need `input_ids`, which the decoder layer forwards into the MoE block.
+`EPDeepseekV4MoELayer` (`halo/distributed/expert_parallel/families/deepseek_v4.py`) replaces `DeepseekV4SparseMoeBlock`. It takes the routed forward of `EPSharedExpertsMoELayerBase` and overrides `_route_hidden_states`: the routers return tuples and hash layers need `input_ids`, which the decoder layer forwards into the MoE block.
 
 - **Top-k layers**: fp32 scores via `sqrtsoftplus(logits)`, selection on `scores + e_score_correction_bias` (+ the balancing bias when enabled), weights gathered from the unbiased scores, normalized (`+1e-20`), scaled by `routed_scaling_factor` (1.5).
 - **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the EP layer validates at init and raises). It holds one row per token id, so a vocabulary grow (`added_special_tokens` past the embedding's rows, `patch_vocab.py`) is refused: a new token has no expert assignment.

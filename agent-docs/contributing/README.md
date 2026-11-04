@@ -316,15 +316,14 @@ the override set.
 the manifest, not from that intent. Most manifest entries carry a `core` row; within the tier some rows
 need 4 GPUs, many declare 1500–2400 s timeouts, and a large minority load a real multi-billion-parameter
 checkpoint (gpt-oss-20b, ZAYA1-8B, Qwen3-30B-A3B, Qwen3.5-2B, Qwen3-VL-2B and three Ling/Ring
-checkpoints), so the summed worst-case timeouts run to tens of hours. The manifest is the only place
+checkpoints), so the summed worst-case timeouts pass 100 hours. The manifest is the only place
 exact counts live. A big-checkpoint entry stays `core` only as a *correctness gate*, a comparison
 against an independent reference (`parallelism/ep/test_ep_modes_vs_reference.py`: gpt-oss and Qwen3-MoE
 parallel modes vs the dense reference); smokes on the same checkpoint (`trainers/sft/test_sft_gptoss_modes.py`,
 `trainers/lora/test_lora_mixed_merged_save.py`) are `full`.
 
 Run `make test-gpu-core` deliberately, not as a quick check, and mark a new heavy or many-GPU test
-`full`. The tier measures about 4 h 15 m on 8× B300, inside the 6 h `gpu-tests.yml` budgets for it; a new
-core entry that pushes past that budget belongs in `full`.
+`full`. `gpu-tests.yml` budgets the tier 6 h; a new core entry that pushes past that belongs in `full`.
 
 ### A test must not be AI-slop
 

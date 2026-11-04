@@ -237,9 +237,6 @@ export HF_DATASETS_CACHE=/local/hf_cache/datasets
 export TMPDIR=/local/tmp
 ```
 
-For a 20B MoE budget roughly: weights ~40 GB (shared, read-only), HF cache ~80 GB (local), temp
-scratch ~100 GB (local NVMe).
-
 `HF_DATASETS_CACHE` grows without bound across config sweeps: every distinct
 (function, tokenizer, knobs, dataset, library-version) tuple leaves a permanent `cache-*.arrow` set,
 plus `packed_*.arrow` per packing shape and a `transform-*` directory per TRL preparation, and

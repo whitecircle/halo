@@ -55,10 +55,11 @@ halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8 \
 
 ### MTP head
 
-Train the `mtp.*` head the release ships, so a server can draft with it. Fit it over a frozen trunk, on rows like
-the ones you will serve, or inside a fine-tune with `qwen3.6-35b-a3b-mtp-joint.yaml`. A 150-step fit served at 0.834
-acceptance on vLLM against the release head's 0.831, inside the 0.011 that head spans across launches, so expect no
-served gain from the recipe's rows. What the `joint` recipe does over a fine-tune is not measured.
+Train the `mtp.*` head the release ships, so a server can draft with it: over a frozen trunk, or inside a fine-tune
+with `qwen3.6-35b-a3b-mtp-joint.yaml`. A fit repairs a stale head and holds a healthy one. The recipe fits chat rows
+under the think render, not a server's own samples. Its 150 steps served at 0.834 acceptance on vLLM against the
+release head's 0.831, on 64 first-turn prompts, and that head alone reads 0.83 to 0.84 across launches, so no served
+gain is measured. What the `joint` recipe does over a fine-tune is not measured.
 
 ```bash
 halo launch sft examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-head-only.yaml -n 8 \
@@ -68,8 +69,8 @@ halo launch sft examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-head-only.yaml -n 8 \
 The fit scores held-out rows before its first step and at its last, and exits non-zero if acceptance fell. Its last
 checkpoint then holds the rejected head, so serve the one the fit started from. `mtp_train_scope: detached` keeps a
 head current during a fine-tune without changing the trunk's objective. Serve with
-`VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`
-([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
+`VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`, or on SGLang with
+[its one-draft flags](../../agent-docs/optimization/mtp-heads.md#serving) ↗.
 
 ### GRPO
 
@@ -80,9 +81,8 @@ servers on GPUs 4–7.
 On the host, start the servers on the SFT checkpoint:
 
 ```bash
-cp jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-sft
-export VLLM_CHAT_TEMPLATE=/data/qwen3.6-reasoning-effort.jinja
+export VLLM_CHAT_TEMPLATE=/jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja
 export VLLM_TOOL_PARSER=qwen3_xml VLLM_REASONING_PARSER=qwen3
 VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
   docker compose -p qwen36-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
@@ -109,7 +109,7 @@ and a six-GPU trainer:
 
 ```bash
 export SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3.6-35b-a3b-sft"
-export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/qwen3.6-reasoning-effort.jinja" SGLANG_REASONING_PARSER=qwen3
+export SGLANG_CHAT_TEMPLATE=/jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja SGLANG_REASONING_PARSER=qwen3
 SGLANG_CUDA_DEVICES=6 SGLANG_PORT=30000 \
   docker compose -p qwen36-sglang-0 -f docker-compose.sglang.yml up -d sglang-server
 SGLANG_CUDA_DEVICES=7 SGLANG_PORT=30001 \
@@ -138,9 +138,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
   picks) balances through the loss and exports by construction. The transient bias balances training
   only: exported checkpoints serve without it, so near-tied expert picks can differ between trainer and
   server.
+- **Chat template.** The SFT recipes render `qwen3-multiturn.jinja`, which writes assistant turns with no think block.
+  `eval_loss` reads about 3.3 at step 0 on Qwen3.6-35B-A3B and about 0.83 after two updates. Train and serve under the
+  same render.
 - **Long context.** The SFT recipe sets `fp32_non_ep_params: true` for stable training at 33,000 tokens.
 - **Tool parser and thinking budget.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
-  leaves the XML tool calls as text, so every episode scores zero. The code-contests recipes run soft
+  leaves the XML tool calls as text, and the run stops by its second round. The code-contests recipes run soft
   thinking budgets, whose ceiling needs `VLLM_REASONING_PARSER=qwen3`, or every request fails with a 400
   ([Thinking budgets](../training-methods/async-grpo-environments.md#thinking-budgets)).
 - **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and

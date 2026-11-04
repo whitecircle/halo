@@ -527,6 +527,22 @@ def test_probe_generation_resolves_the_served_model_over_the_session(server, cli
     )
 
 
+def test_sglang_replicas_are_refused_while_attention_dp_sizes_the_group_off_its_tp_size():
+    """Replicas restart ``tp_rank`` at 0 and collide in the update group. Attention DP, which the pinned SGLang resolves
+    to ``dp_size`` 1 from either spelling, keeps ``tp_rank`` over every GPU."""
+    server = FakeSGLangServer()
+    server.tp_size = 4
+    try:
+        client = SGLangWeightSyncClient(base_url=server.url)
+        assert client._fetch_engine_world_size() == 4
+        server.dp_size = 2
+        with pytest.raises(RuntimeError, match="plain --dp-size 2 server") as refused:
+            client._fetch_engine_world_size()
+    finally:
+        server.close()
+    assert "--attn-dp-size" in str(refused.value) and "--enable-dp-attention" not in str(refused.value)
+
+
 def test_a_paused_sglang_server_is_refused_with_the_route_that_lifts_it(monkeypatch):
     """SGLang has no pause read and a paused engine queues requests, so each startup probe waited out 60 s, passed
     unread, and the first push died on a bare Bad Request."""

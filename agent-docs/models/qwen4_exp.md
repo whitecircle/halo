@@ -36,7 +36,7 @@ Under gradient checkpointing the recompute reuses the forward's QSA selection an
 
 ## Recipes
 
-`examples/sft/qwen4_exp/qwen3.8-flash-next-ep8-lora.yaml` (16k packed rows) and `-ep8-full.yaml` (8k, B300) train the text tower at ep8 on one node with the fused loss. LoRA sets `moe_balancing: none` (the router is frozen), full fine-tuning `bias_update_transient`. Both pin Halo's `qwen3-multiturn.jinja`: the hub template is Qwen3.8-27B's, with its [reasoning-effort caveats](qwen3_5.md#qwen38-27b). Both leave `eos_token` unset: the PLE n-gram history restarts after the checkpoint's `eos_token_id` (`<|endoftext|>`), and a run's `eos_token` that changes it is refused ([N-gram table](#n-gram-table)).
+`examples/sft/qwen4_exp/qwen3.8-flash-next-ep8-lora.yaml` (16k packed rows) and `-ep8-full.yaml` (8k, B300) train the text tower at ep8 on one node with the fused loss. LoRA sets `moe_balancing: none` (the router is frozen), full fine-tuning `bias_update_transient`. Both pin Halo's `qwen3-multiturn.jinja` ([its first-step loss on Qwen3.6](qwen3_5.md#configs)): the hub template is Qwen3.8-27B's, with its [reasoning-effort caveats](qwen3_5.md#qwen38-27b). Both leave `eos_token` unset: the PLE n-gram history restarts after the checkpoint's `eos_token_id` (`<|endoftext|>`), and a run's `eos_token` that changes it is refused ([N-gram table](#n-gram-table)).
 
 ## LoRA
 

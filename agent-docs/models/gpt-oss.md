@@ -116,7 +116,7 @@ With harmony disabled, five settings are load-bearing.
     The parser keeps the commentary tool call and the `final` answer in `content`: vLLM extracts tool calls from `content` only, so a call left in `reasoning` would be dropped and the turn mis-scored as a giveup.
 
 - **`--return-tokens-as-token-ids`** — required whenever `train_on_sampled_tokens` is on (the default); the compose file passes it ([Rollout Servers](../infrastructure/rollout-servers.md#vllm)).
-- **`rollout_stop_tokens: ["<|call|>"]`** — with harmony disabled `<|call|>` is not an eos, so the model keeps generating past its tool call and hallucinates the result for ~90% of the turn. A tool-bearing environment without it is refused at trainer construction. A server-side `--override-generation-config` eos does not fix it ([Async GRPO with Environments](../training-methods/async-grpo/episodes.md#tool-calls)).
+- **`rollout_stop_tokens: ["<|call|>"]`** — with harmony disabled `<|call|>` is not an eos, so the model keeps generating past its tool call and hallucinates the result for most of the turn. A tool-bearing environment without it is refused at trainer construction. A server-side `--override-generation-config` eos does not fix it ([Async GRPO with Environments](../training-methods/async-grpo/episodes.md#tool-calls)).
 - **Full padded vocab.** GPT-OSS ships 201088 embedding rows against `len(tokenizer)` 200019; rows 200019–201087 are unassigned padding. Every harmony special sits below that line — `<|return|>`/EOS at 200002, `<|call|>` at 200012, highest added id 200018 — so a resize to `len(tokenizer)` keeps them all.
 
     The trap is `tokenizer.vocab_size`, which is **199998**: shrink to that and the checkpoint loses EOS and emits garbage. `scripts/before_training/patch_vocab.py` only **grows** the embedding, so a patched checkpoint keeps every special and serves like the base — unless it was patched with `--reset_sinks`, which leaves it sinks-off, and the pretrained model served sinks-off degenerates (below).
@@ -135,7 +135,7 @@ The shipped SFT examples that stay on `aux_loss` override it back down to `0.001
 
 The DeepSeek-V3 **aux-loss-free bias update** is opt-in on the EP path (`moe_balancing: bias_update`) and adopts the hub router's own **`router.bias`** as the balancing state. The Parameter is re-registered as a persistent buffer under the same key: frozen out of gradient training, sign-updated by [`BalancingBiasCallback`](../training-methods/callbacks.md#balancingbiascallback) each optimizer step, and exported with every checkpoint.
 
-vLLM and SGLang load `router.bias` and route with it (top-k on bias-inclusive logits, combine = softmax over the selected values). `_route_with_bias` computes exactly that arithmetic, so trainer and served copy pick the same experts with the same weights.
+vLLM and SGLang load `router.bias` and route with it (top-k on bias-inclusive logits, combine = softmax over the selected values). `_route_with_bias` computes that arithmetic, so both read the trained bias the same way; bf16 near-ties can still pick differently ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
 `router_aux_loss_coef` is forced to 0 for the run to avoid double-balancing (restored in the exported config). The bias lives in logit space, so the default γ is small for it; size `router_balancing_rate` per [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).
 

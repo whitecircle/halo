@@ -44,10 +44,12 @@ halo launch sft examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml -n 8 \
 
 ### MTP head
 
-Fit the tail the release ships over a frozen trunk, so a server can draft with it. At the recipe's learning rate on
-first-turn rows the acceptance gate stopped the fit (0.7685 to 0.7649), and that export served at 0.7317 on vLLM against
-the release head's 0.7450, so expect no gain. Its export carries the head's trunk copies, which vLLM's loader requires
-([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
+Fit the tail the release ships over a frozen trunk, so a server can draft with it. Its export carries the head's trunk
+copies, which vLLM's loader requires ([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
+
+This recipe's own fit is not measured. A separate fit at its learning rate, on first-turn rows rather than the recipe's,
+fell from 0.7685 to 0.7649 acceptance, which the gate stops, and that export served at 0.7317 on vLLM against the release
+head's 0.7450. No served gain is measured.
 
 ```bash
 halo launch sft examples/sft/glm4/glm-4.7-flash-mtp-head-only.yaml -n 8 \
@@ -63,8 +65,7 @@ RL uses `jinja-templates/glm/glm-native.jinja`, the upstream template with tool 
 template renders no tools. The server must serve the same file. On the host:
 
 ```bash
-cp jinja-templates/glm/glm-native.jinja "$HALO_SCRATCH/"
-VLLM_MODEL=/data/checkpoints/glm-4.7-flash-sft VLLM_CHAT_TEMPLATE=/data/glm-native.jinja \
+VLLM_MODEL=/data/checkpoints/glm-4.7-flash-sft VLLM_CHAT_TEMPLATE=/jinja-templates/glm/glm-native.jinja \
 VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
 VLLM_TOOL_PARSER=glm47 VLLM_ATTENTION_BACKEND=CUTLASS_MLA \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
@@ -97,12 +98,12 @@ the trainer.
   explicit `sdpa` label.
 - **Router balancing.** The recipe sets `moe_balancing: bias_update`, which `auto` also picks. It updates
   the router's own `e_score_correction_bias`, so the trained bias ships in every checkpoint and the
-  served model routes as it trained. The router has no auxiliary loss to use instead.
+  served model routes on it. The router has no auxiliary loss to use instead.
 - **Chat templates.** SFT uses `glm-chat.jinja` for multi-turn data. `glm-instruct.jinja` raises on more
   than one assistant turn. Keep `assistant_message_template: "<|assistant|>"`: the role token alone
   matches both thinking and non-thinking turns.
 - **Tool parser.** vLLM needs `VLLM_TOOL_PARSER=glm47`. The default `hermes` can't read GLM tool calls,
-  so every episode scores zero.
+  and the run stops by its second round.
 
 ## Limits
 

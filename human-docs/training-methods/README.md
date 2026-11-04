@@ -24,14 +24,14 @@ have to the trainer that reads it.
 
 ## What every method shares
 
-- **One config format.** A config is a flat YAML file of trainer fields, any of which can be
+- **Config.** A config is a flat YAML file of trainer fields, any of which can be
   overridden on the command line after the config path ([Writing a config](../configuration.md)).
-- **One data stack.** Datasets come from the Hub, a local path or `s3://` through the same `dataset:`
+- **Data.** Datasets come from the Hub, a local path or `s3://` through the same `dataset:`
   field, and a list mixes them ([Datasets](../data.md)). The columns each method reads differ.
-- **One parallelism stack.** Expert, tensor and expert-tensor parallelism work on every trainer;
+- **Parallelism.** Expert, tensor and expert-tensor parallelism work on every trainer;
   which ones also take context or pipeline parallelism is in the
   [Supported matrix](../supported-matrix.md#training-methods).
-- **HuggingFace in, HuggingFace out.** Checkpoints load with `from_pretrained` and upload to the Hub
+- **Checkpoints.** They load with `from_pretrained` and upload to the Hub
   without their training state ([Uploading](../checkpoints.md#uploading-to-the-huggingface-hub)).
   Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
   writes an adapter you merge with one command; expert LoRA under EP folds into the weights at save

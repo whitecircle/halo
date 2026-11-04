@@ -345,10 +345,10 @@ gpt-oss row runs grouped GEMM and `moe_balancing: bias_update`.
 allocator's maximum over ranks, allocated / reserved. A single `torchrun` refuses an NVLink domain
 smaller than its node (`nvlink_domain_size` must be a multiple of `gpus_per_node`), so the `pp2` rows run
 two `torchrun` agents in one container, `--nnodes=2 --nproc_per_node=4` with `--node_rank=0` on
-`CUDA_VISIBLE_DEVICES=0,1,2,3` and `--node_rank=1` on `4,5,6,7`: each agent is a 4-GPU node, and each
-half is one domain and one stage. The boundary between the halves stays inside the host, so these rows
-price the schedule and the narrower groups, not an inter-node link. The `dp8` and `ep8` rows run one
-agent on the host's 8-GPU domain.
+`CUDA_VISIBLE_DEVICES=0,1,2,3` and `--node_rank=1` on `4,5,6,7`: each agent is a 4-GPU node to the toolkit,
+and each half is one stage. The traffic between the halves stays inside the host, over NCCL shared memory,
+so these rows price the schedule and the narrower groups, not an inter-node link. The `dp8` and `ep8` rows
+run one agent on the host's 8-GPU domain.
 
 | Model | Layout | GC | tok/s/GPU | Peak GiB |
 |---|---|:-:|---:|---:|

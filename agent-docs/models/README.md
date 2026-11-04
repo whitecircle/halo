@@ -127,7 +127,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 - [Qwen3.8-Flash-Next](qwen4_exp.md) — experimental: Qwen3-Next's router over hyper-connection streams, sparse QSA attention and a 95 GiB n-gram table held in host memory.
 - [GPT-OSS](gpt-oss.md) — 20B/120B, GLU experts and attention sinks.
 - [GLM-4 MoE Lite](glm4.md) — LoRA-style attention compression, 64 routed + shared experts.
-- [Laguna](laguna.md) — Poolside MoE; its EP layer subclasses GLM-4 MoE Lite's and overrides the top-k weight default plus the hub↔module key spellings.
+- [Laguna](laguna.md) — Poolside MoE; its EP layer subclasses GLM-4 MoE Lite's, differing in the top-k weight default and the hub↔module key spellings.
 - [Inkling](inkling.md) — Thinking Machines multimodal MoE; joint routed+shared router normalization forces a standalone wrapper, and its shipped config runs multi-node EP16.
 - [Gemma 4 MoE](gemma4.md) — router outside the EP-wrapped module.
 - [Bailing MoE / Ling](bailing.md) — softmax GQA + shared experts; needs `trust_remote_code`.

@@ -60,7 +60,7 @@ learning_rate: 1.0e-06
 - `max_completion_length` must be a positive int; `null` raises, and leaving it out takes TRL's default, so set it. With both length knobs bounded, their sum becomes `model_max_length`.
 - The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedonlinegrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
 - `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it.
-- Learning rate: `1e-6` to `5e-6` in the recipes, roughly 10× that for LoRA ([sizing](../sft.md#learning-rate-and-global-batch-size)).
+- Learning rate: `1e-6` to `5e-6` in the recipes, all full fine-tunes; LoRA takes more ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
 ### Optional objective changes
 
@@ -97,7 +97,7 @@ rlrr_correctness_threshold: 0.5  # the only correctness signal; no gold labels
 A server restarted between syncs is not recovered here: the push raises on every rank, where async GRPO reconnects and re-sends ([Rollout Servers](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
 
 Rank 0 waits for the server at startup, up to `vllm_server_timeout`, and raises past it. Its probe then refuses a
-server whose logprobs the correction cannot use:
+server off the toolkit's image or, on a MoE, not on `--moe-backend triton` ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)), and one whose logprobs the correction cannot use:
 
 - raw pre-temperature logprobs at `temperature != 1.0`; serve vLLM with `--logprobs-mode processed_logprobs`;
 - logprobs renormalized over a sampling cut (`top_p < 1`, a `top_k` or a `min_p`) while the correction sums the per-token log-ratios over each sequence, which stalls the run silently. Keep all three off. A `sequence_*` mode sums them, and so does `loss_type: vespo` in either token mode TRL lets it run.
@@ -111,6 +111,7 @@ TRL sends `top_k`, `min_p` and `repetition_penalty` on every request, so the mod
 - **Dropout is off**, EP expert-LoRA dropout included, overriding `disable_dropout: false`; a config-level float only warns.
 - **MoE balancing is off:** `aux_loss` is inert under a policy-gradient loss, and both bias-update modes downgrade to `none` ([Callbacks](../callbacks.md#balancingbiascallback)).
 - **TRL's `use_liger_kernel` is off:** it routes the log-probs through TRL's chunked LM head, past the family's head transform. Model-level Liger kernels still apply.
+- **`text_only_model` is refused** by the script: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would miss a multimodal server's `model.language_model.layers.*`.
 - **Refused at construction** (online and async GRPO): `use_adaptive_entropy` (a sharded resume does not restore its coefficient), a non-zero `entropy_coef` with `use_chunked_grpo_logprobs` (the chunked sweep returns a detached entropy), and an `IterableDataset` on the DP-sharded loader that TP, ETP and pre-sharded datasets use.
 
 ## GRPO objective for verifiable rewards
@@ -160,7 +161,7 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 
 ### Weight sync
 
-Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). `reject_unsyncable_model` refuses at construction what the sync cannot carry ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)), including a PEFT layer the sync cannot fold or an adapter on a tensor the dense push does not send ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
+Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). The script refuses a family no engine sync reaches right after init (`reject_unsyncable_config`), and `reject_unsyncable_model` refuses at construction what the sync cannot carry ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)), including a PEFT layer the sync cannot fold or an adapter on a tensor the dense push does not send ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)
 

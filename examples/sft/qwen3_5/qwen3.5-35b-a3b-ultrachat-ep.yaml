@@ -55,6 +55,10 @@ dataloader_num_workers: 2
 use_peft: false
 
 # --- Tokens & chat template ---
+# Replies render with no think block, where the hub template writes an empty one before the last reply, and system
+# turns drop. The export carries this render, so serve it under the same one.
+# A reply with no think block reads far worse on Qwen3.6-35B (agent-docs/optimization/mtp-heads.md#recipes); this
+# checkpoint's reading is not measured.
 assistant_message_template: "<|im_start|>assistant\n"
 pad_token: <|endoftext|>
 eos_token: <|im_end|>

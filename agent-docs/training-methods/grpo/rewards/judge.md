@@ -76,7 +76,7 @@ rewards:
 
 ### Evidence
 
-A fired check must quote one to three lines; one found quote suffices (a judge misquotes a long program's line about one time in four). A flag without a counting quote does not fire and counts in `judge/<name>/unsupported_flags`.
+A fired check must quote one to three lines; one found quote suffices. A flag without a counting quote does not fire and counts in `judge/<name>/unsupported_flags`.
 
 A check with `unless` does not fire where the environment establishes that episode fact, whatever the judge answered; the dropped flag counts in `judge/<name>/exempted_flags`. An exemption the environment can decide exactly is not left to the judge. An environment declares the facts it establishes, and a check naming another is refused at construction.
 

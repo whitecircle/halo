@@ -43,7 +43,7 @@ LINE = "#ccd4e0"
 # teal=throughput, violet=communication, rose=bottleneck/waste, slate=neutral structure (`_T` = tint).
 BLUE, BLUE_T = "#4a76cc", "#dce4f4"
 AMBER, AMBER_T = "#c4881f", "#f5e7cc"
-TEAL, TEAL_T = "#2f8b80", "#d1e7e2"
+TEAL, TEAL_T = "#14907f", "#d1e7e2"
 VIOLET, VIOLET_T = "#795fc4", "#e5dff3"
 ROSE, ROSE_T = "#cf5675", "#f6dae1"
 SLATE, SLATE_T = "#5a6a81", "#e4e9f1"

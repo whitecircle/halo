@@ -11,7 +11,7 @@ from matplotlib.ticker import FuncFormatter
 BENCHMARKS = "benchmarks"
 
 # Darkest to palest: one hue per measured quantity, one shade per Halo layout.
-TEAL_SHADES = ("#1f5f57", "#2f8b80", "#74b5ab", "#b5d9d3")
+TEAL_SHADES = ("#0f5f54", "#14907f", "#6fb8ac", "#b5d9d3")
 AMBER_SHADES = ("#8a5f14", "#c4881f", "#deb566", "#f0dcae")
 
 

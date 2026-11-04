@@ -12,8 +12,8 @@ Modes: the Mistral4 MoE row of the [Supported Matrix](../supported-matrix.md#mod
 
 - **Checkpoint:** `mistralai/Mistral-Small-4-119B-2603`, converted to BF16.
 - **GPUs:** eight at EP8, 16 experts per GPU, at 32,000 tokens. This shape has not run on the full-size
-  model, and its fit is computed, not measured. Plan for about 500 GB of disk for the FP8 download and the
-  BF16 copy together.
+  model, and its fit is computed, not measured.
+- **Disk:** by arithmetic the BF16 copy takes about 240 GB (119B parameters at two bytes), beside the FP8 download.
 
 ## Recipes
 

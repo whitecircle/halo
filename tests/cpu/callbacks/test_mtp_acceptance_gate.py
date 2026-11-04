@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 from transformers import TrainerControl
 
 from halo.callbacks import mtp as mtp_module
@@ -137,7 +138,7 @@ class _Trainer:
     def __init__(self, callback):
         self.callback_handler = SimpleNamespace(callbacks=[callback])
         self.state = _state()
-        self.model = SimpleNamespace()
+        self.model = torch.nn.Module()
         self.cleaned_up = False
 
     def train(self, resume_from_checkpoint=None):
@@ -161,7 +162,6 @@ def _context() -> SimpleNamespace:
 
 
 def test_a_failed_fit_exits_after_the_ep_cleanup_saying_why(monkeypatch):
-    monkeypatch.setattr(script, "base_transformers_model", lambda model: model)
     monkeypatch.setattr(script, "reorder_integration_callbacks_last", lambda trainer: None)
     gate = _verdict(_reading(0), _reading(150, tv=0.1))
     trainer = _Trainer(gate)

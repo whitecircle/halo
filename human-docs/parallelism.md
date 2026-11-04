@@ -28,8 +28,8 @@ because an EP rank is also a data-parallel rank
 
 ![Tokens routed to the ranks owning their experts and returned to the rank they came from](../agent-docs/assets/diagrams/ep_token_routing.png)
 
-EP moves tokens, not batches. Each token goes to the rank that holds its expert
-and comes back to the rank it came from.
+Each token goes to the rank that holds its expert and comes back to the rank it
+came from.
 
 ![Two EP dispatch groups inside one NVLink domain, with the ranks holding the same expert slice forming DP replicas](../agent-docs/assets/diagrams/ep_group_hierarchy.png)
 

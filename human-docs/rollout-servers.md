@@ -36,18 +36,20 @@ server older than 0.32.0.
 `docker-compose.vllm.yml` already passes the flags RL depends on. You normally
 set `VLLM_MODEL`, `VLLM_CUDA_DEVICES`, `VLLM_TP` to match the device list,
 `VLLM_GPU_MEM`, `VLLM_TOOL_PARSER` (below), `VLLM_REASONING_PARSER` when the run
-caps reasoning, and `VLLM_CHAT_TEMPLATE` to the trainer's `chat_template:` file.
+caps reasoning, and `VLLM_CHAT_TEMPLATE` to the trainer's `chat_template:` file, which
+the compose file mounts under `/jinja-templates/`.
 Every variable and its default:
 [Rollout Servers → vLLM](../agent-docs/infrastructure/rollout-servers.md#vllm) ↗.
 
 ### Tool parsers
 
-A wrong tool parser fails silently: tool calls come back as plain text, no tool
-runs, and every episode scores zero. Set it per family:
+A wrong tool parser leaves tool calls as plain text, so no tool runs and every
+episode scores alike. A run on a tool-using environment stops by its second round
+holding an unparsed call. Set the parser per family:
 
 - `qwen3_xml`: Qwen3.5/3.6 and Qwen3-Coder.
 - `gpt_oss_text`: GPT-OSS, loaded with `VLLM_TOOL_PARSER_PLUGIN`.
-- `glm45` / `glm47`: GLM-4.5 / GLM-4.7.
+- `glm47`: GLM-4.7-Flash.
 - `gemma4`, `lfm2`, `poolside_v1`, `step3p5`: Gemma 4, LFM-2, Laguna and
   Step-3.7 Flash.
 - `hermes` (default): most others, Qwen3 included.
@@ -78,19 +80,23 @@ SGLANG_MODEL=Qwen/Qwen3-30B-A3B SGLANG_MODEL_DIR=/path/to/checkpoints SGLANG_CUD
 ```
 
 The variables mirror vLLM's (`SGLANG_MODEL`, `SGLANG_PORT`, `SGLANG_CUDA_DEVICES`,
-`SGLANG_TP`, `SGLANG_GPU_MEM`), except that `SGLANG_TOOL_PARSER` reads the parser
-off the chat template by default, and `SGLANG_MODEL_DIR` is required: the host
-directory holding a local `SGLANG_MODEL`, any existing one for a hub id. On a template it cannot read
-(the Qwen3 2507 releases, Ling-mini-2.0) that default turns the parser off with one log line, which the trainer
-refuses at startup on a tool-using environment, so set the parser yourself: `SGLANG_TOOL_PARSER=qwen25` for Qwen3, `hermes` for Ling
-([Tool parsers on SGLang](../agent-docs/infrastructure/rollout-servers.md#tool-parsers-on-sglang) ↗).
-The compose file also sets
-`NCCL_CUMEM_ENABLE=1`; a container you start by hand needs it too
+`SGLANG_TP`, `SGLANG_GPU_MEM`), with two differences:
+
+- `SGLANG_MODEL_DIR` is required: the host directory holding a local
+  `SGLANG_MODEL`, any existing one for a hub id.
+- `SGLANG_TOOL_PARSER` reads the parser off the chat template by default. On a
+  template it cannot read (the Qwen3 2507 releases, Ling-mini-2.0) that turns the
+  parser off, which the trainer refuses on a tool-using environment. Set
+  `SGLANG_TOOL_PARSER=qwen25` for Qwen3, `hermes` for Ling
+  ([Tool parsers on SGLang](../agent-docs/infrastructure/rollout-servers.md#tool-parsers-on-sglang) ↗).
+
+The compose file also sets `NCCL_CUMEM_ENABLE=1`; a container you start by hand
+needs it too
 ([Rollout Servers → SGLang](../agent-docs/infrastructure/rollout-servers.md#sglang) ↗).
 
-Weight sync needs **this repo's** SGLang image, not upstream's. It matches NCCL
-with the training image and patches the Gemma 4 router so a synced router weight
-takes effect.
+Weight sync needs **this repo's** SGLang image, and the trainer refuses any other.
+It matches NCCL with the training image and patches the Gemma 4 router so a synced
+router weight takes effect.
 
 Which families each engine can update online differs. The scripts refuse an
 unsupported pair at startup and name the reason; the lists are in the
@@ -167,9 +173,8 @@ rollout actor re-issues the turn.
 
 MoE models must be served with `--moe-backend triton` (`--moe-runner-backend
 triton` on SGLang), the compose default. The backends the engine picks on its
-own repack expert weights after loading, so an update writes into the wrong
-layout and the served model quietly diverges: nothing errors, and the trainer's
-engine-versus-policy log-ratio drifts negative.
+own repack expert weights after loading, so an update would write into the wrong
+layout with no error. The trainer refuses a server that reports one of them.
 
 ## When it goes wrong
 
@@ -181,6 +186,8 @@ engine-versus-policy log-ratio drifts negative.
 | `… does not report the toolkit's image`, or another `cannot serve this run` at startup | A hand-run or upstream server. Serve from this repo's image and restate the flags the message names. |
 | `Could not bind the weight-transfer group port` | Another process holds the port, two servers share one, or an outbound connection took it. Give each server its own `group_port`, reserve it or pick one outside `32768–60999`, and remove stale containers. |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had started. |
+| A server restarted during the run | Between syncs the trainer reconnects, warns and pushes the current weights. A server that fails mid-push stays paused and logs `RESTART the … server`: restart the container. |
+| A run looks stuck after its server stopped | A slow failure, not a hang. A killed server raised 253–258 s after the fault on both engines, naming the server, at `rollout_connection_timeout: 180`. A frozen SGLang server (`docker pause`) took about 20 minutes at two trainer ranks. |
 
 Group formation and first-collective hangs are in
 [Troubleshooting](troubleshooting.md#rl-runs-vllm--sglang).

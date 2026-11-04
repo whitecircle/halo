@@ -109,10 +109,11 @@ Enforced in `halo/distributed/parallelism_rules.py` before model loading:
     `ep_group_size=8` under a 16-rank world), at either scope; `ep2+etp8` is the working shape.
 
 - On a single NVLink domain the EP rule keys on `ep_group_size`: `ep4+etp2` on 8 GPUs fills the
-  domain and passes, while an ETP shape leaving `ep_group_size` short of the domain is refused like
-  bare `ep4` ([single-domain rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
-  The GPU test matrix runs `ep2+etp4` instead (the 8-GPU Mistral4 and Cohere2 MoE matrices,
-  `tests/gpu/manifest.py`): the same 8-way split through 2-rank dispatch groups, at DP 2 instead of 4.
+  domain and passes, while `ep_size > 2` with `ep_group_size` short of the domain is refused like bare
+  `ep4` (`ep3+etp2` on 12; [single-domain rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
+  `ep2+etp2` on 8 passes: its dispatch groups are 2 ranks wide. `make bench` measures `ep4+etp2`; the GPU
+  test matrix runs `ep2+etp4` (the 8-GPU Mistral4 and Cohere2 MoE matrices, `tests/gpu/manifest.py`): the
+  same 8-way split through 2-rank dispatch groups, at DP 2 instead of 4.
 
 ETP reduces data parallelism — within a stage it counts toward the max of TP, CP and ETP
 ([Stacking the dimensions](README.md#stacking-the-dimensions)). On 8 GPUs
@@ -147,9 +148,9 @@ Sub-EP (dispatch):  [0,8] [1,9] ... [7,15]        ← cross-node DeepEP, size = 
 ```
 
 This is the memory-lean cross-node MoE shape: per-rank expert memory matches a much larger pure-EP
-group. On two 8-GPU B300 nodes over RDMA, gpt-oss-20b at `ep_size=2, expert_tp_size=8` holds ~18 GB
-per rank — the footprint of EP=16. Its eight ETP partners share one batch, so it buys expert memory,
-not throughput. Validate convergence on your own config before a long run.
+group. On two 8-GPU B300 nodes over RDMA (before 1.2.0), gpt-oss-20b at `ep_size=2, expert_tp_size=8`
+holds ~18 GB per rank, the footprint of EP=16. Its eight ETP partners share one batch, so it buys expert
+memory, not throughput. Validate convergence on your own config before a long run.
 
 ## Weight sharding
 
@@ -168,6 +169,8 @@ expert layout (`halo/distributed/expert_parallel/moe_layer/compute.py` + `famili
 - **Qwen3 / Bailing (separate GLU projections)** — the base `_store_separate_glu_params` shards `M`
   and stores matmul-convention `gate_proj`/`up_proj [E, H, M/tp]`, `down_proj [E, M/tp, H]` for
   [Grouped GEMM](../optimization/grouped-gemm.md).
+- **Nemotron-H (no gate, on a latent)** — `up_proj [E, L, M/tp]`, `down_proj [E, M/tp, L]`, with the
+  expert-TP sums inside the latent projections.
 
 ## Checkpoints
 

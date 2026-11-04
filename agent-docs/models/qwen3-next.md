@@ -48,4 +48,4 @@ The family's Liger spec keeps upstream's RMSNorm and FLCE, serves the GatedDelta
 
 ## Configs
 
-`examples/sft/qwen3_next/qwen3-next-80b-a3b-ultrachat-ep.yaml`: 80B-A3B SFT at EP=8 (64 experts per rank), packed rows on FA2. Each rank holds about 9.7B expert parameters, so their weights, gradients and AdamWBF16 moments (8 B/param) take about 77 GB (72 GiB) per GPU before any activation: the recipe fits B200/B300, not an 80 GB H100.
+`examples/sft/qwen3_next/qwen3-next-80b-a3b-ultrachat-ep.yaml`: 80B-A3B SFT at EP=8 (64 experts per rank), packed rows on FA2, on `qwen3-multiturn.jinja` ([its first-step loss on Qwen3.6](qwen3_5.md#configs)). Each rank holds about 9.7B expert parameters, so their weights, gradients and AdamWBF16 moments (8 B/param) take about 77 GB (72 GiB) per GPU before any activation: the recipe fits B200/B300, not an 80 GB H100.

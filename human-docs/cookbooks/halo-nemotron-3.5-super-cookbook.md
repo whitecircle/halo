@@ -12,11 +12,28 @@ Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model
 - **Checkpoint:** `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, loaded through transformers' own
   classes with no conversion step.
 - **GPUs:** EP8 on eight B300s, 64 experts per GPU.
-- **What ran.** All four recipes and the image recipe ran on the release on eight B300s, 5 to 20 steps each, with
-  the figures given below, plus an exact resume at a 9-layer cut and exports byte for byte at full depth. Each
-  `max_length` is a starting point, so watch the first steps' peak. No run has trained to a quality metric. Both
-  engines have served an untrained reattached export: vLLM on one image prompt and one text prompt, SGLang on one
-  image prompt.
+- **Lightning:** `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` is the same text class with no vision tower. Its
+  recipe, `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`, ran 5 steps at EP8 and 8,192 tokens at 9,986
+  tok/s per GPU and 55–60 GB reserved. A full-depth export serves as saved
+  ([Lightning](../../agent-docs/models/nemotron-h.md#lightning) ↗). The rest of this page is Super VL.
+- **What ran.** All four recipes and the image recipe ran on the release on eight B300s, 5 to 20 steps each, plus an
+  exact resume at a 9-layer cut and exports byte for byte at full depth. No run has trained to a quality metric. Both
+  engines have served an untrained reattached export, on one image prompt and one text prompt each.
+
+| Recipe | Length | tok/s per GPU | Reserved by GPU |
+| --- | ---: | ---: | ---: |
+| Full fine-tune | 8,192 | 3,057 | 186–202 GB |
+| Full fine-tune | 32,000 | 3,221 | 268–283 GB |
+| Full, experts frozen | 50,000 | 3,246 | 241–283 GB |
+| LoRA | 16,384 | 3,000 | 118–165 GB |
+| SMPO, a full pair | 2 × 4,096 | — | 178–184 GB |
+| SMPO, the recipe's Tulu rows | — | — | 165–170 GB |
+| Offline GRPO, the recipe's rows | — | — | 169–179 GB |
+| Images | about 6,790 | 3,198 | 184–188 GB |
+| Half image rows, half text | — | 3,166 | 183–186 GB |
+
+A B300 reports 288 GB, and the top GPU reached 99.4% at 32,000 and 99% at 50,000, so treat those as the limit. Each
+`max_length` is a starting point: watch the first steps' peak.
 
 ## Recipes
 
@@ -30,11 +47,9 @@ halo launch sft examples/sft/nemotron_h/nemotron-3.5-super-vl-ep8-full.yaml -n 8
   --output_dir=/data/checkpoints/nemotron-sft
 ```
 
-At 8,192 tokens: 3,057 tok/s per GPU, 186–202 GB reserved by GPU. `--max_length=32000` also ran, at 3,221 tok/s and
-268–283 GB reserved, with the top GPU at 99.4% of its 288 GB, so treat it as the limit. Freezing the experts with
-`freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj` reached `--max_length=50000` at 3,246 tok/s and
-241–283 GB reserved, at the limit too. Each save writes about 241 GB, and a full resume checkpoint comes to about
-725 GB by arithmetic.
+`--max_length=32000` also ran. Freezing the experts with `freeze_layers_patterns` on `*.mixer.up_proj` and
+`*.mixer.down_proj` reached `--max_length=50000`. Each save writes about 241 GB, and a full resume checkpoint comes to
+about 725 GB by arithmetic.
 
 ### LoRA
 
@@ -43,9 +58,8 @@ halo launch sft examples/sft/nemotron_h/nemotron-3.5-super-vl-ep8-lora.yaml -n 8
   --output_dir=/data/checkpoints/nemotron-lora
 ```
 
-These targets adapt attention, the Mamba projections and the experts. At 16,384 tokens: 3,000 tok/s per GPU,
-118–165 GB reserved by GPU. Every save folds the adapters into a full checkpoint, 251 GB with its adapter state, so
-raise `save_steps` when disk is tight.
+These targets adapt attention, the Mamba projections and the experts. Every save folds the adapters into a full
+checkpoint, 251 GB with its adapter state, so raise `save_steps` when disk is tight.
 
 ### SMPO
 
@@ -53,8 +67,6 @@ raise `save_steps` when disk is tight.
 halo launch smpo examples/preference/nemotron_h/smpo-nemotron-3.5-super-vl-tulu3-prefmix-ep8.yaml -n 8 \
   --output_dir=/data/checkpoints/nemotron-smpo
 ```
-
-178–184 GB reserved by GPU for a full 2 × 4,096 pair, and 165–170 GB on the recipe's Tulu rows.
 
 ### Offline GRPO
 
@@ -66,25 +78,25 @@ cp examples/grpo/offline/nemotron_h/offline-grpo-nemotron-3.5-super-vl-gsm8k-ep8
 halo launch grpo/offline nemotron-grpo.yaml -n 8 --output_dir=/data/checkpoints/nemotron-grpo
 ```
 
-169–179 GB reserved by GPU on the recipe's rows.
-
 ### Images
 
 Copy the full fine-tune recipe, delete `text_only_model` and `packing`, and point `dataset` at rows with images
 ([SFT](../training-methods/sft.md#data)). The composite computes its loss on the plain head, which holds more
-per token. On rows of about 6,790 tokens it ran at 3,198 tok/s per GPU with 184–188 GB reserved by GPU. Image and
-text rows can mix under `torchrun`. With Liger on, a training step logs `mean_token_accuracy` 0 and `entropy`
-ln(vocab), because Liger writes its gradient into the fp32 logits the forward returns: the loss, the gradients and
-eval metrics that mask label -100 are right.
+per token.
+
+Image and text rows can mix under `torchrun`: half-image rows ran at EP8 on the release with no hang. Training the
+vision tower on mixed rows rests on tiny-model tests only.
+
+With Liger on, a training step logs `mean_token_accuracy` 0 and `entropy` ln(vocab), because Liger writes its gradient
+into the fp32 logits the forward returns. The loss, the gradients and eval metrics that mask label -100 are right; a
+`compute_metrics` that reads logits at ignored positions sees zeros in eval too.
 
 ## Settings that matter
 
 - **Gradient checkpointing stays on.** By arithmetic a token holds about 66 MB without it, so a GPU fits about
   1,650 tokens per rank. It costs 37% on a Mamba layer.
-- **Speed.** The Mamba scan dominates: at EP8 the Mamba layers took 64.8% of the tower's 2.54 s forward and backward
-  at 8,192 tokens per rank, 3,226 tok/s per GPU, and throughput stays flat with length (3,223 at 32,768 with the
-  experts frozen). Rows of many short documents scan slower: 64 × 128 costs 1.9× one 8,192-token document on a Mamba
-  layer.
+- **Speed.** The Mamba scan dominates, at 64.8% of the tower's forward and backward at EP8, and throughput stays flat
+  with length. Rows of many short documents scan slower: 64 × 128 costs 1.9× one 8,192-token document on a Mamba layer.
 - **Attention.** Leave `attn_implementation` unset: FA4 runs both towers on B300, with FA2 as the fallback.
 - **Pad token.** `pad_token: <unk>` keeps the export's config equal to the release's. The tokenizer's own pad is
   its eos.
@@ -112,8 +124,8 @@ eval metrics that mask label -100 are right.
 ## Export and serve
 
 Smoke-test a text-only export with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Stock
-transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so its scores differ
-slightly from what the run trained. To serve the export, rebuild the composite, which also streams back the
+transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so it scores 0.05–0.09 nats
+worse on real text than the run did. To serve the export, rebuild the composite, which also streams back the
 vision tower and the `mtp.*` head at the release's weights:
 
 ```bash
@@ -122,8 +134,7 @@ halo run reattach-vision-tower --input_dir /data/checkpoints/nemotron-sft \
   --output_dir /data/checkpoints/nemotron-sft-vl
 ```
 
-Serve from the [host](README.md#serve-from-the-host). Both engines have answered an image prompt on an untrained
-reattached export, and vLLM a text prompt too. vLLM started this way needs `--trust-remote-code` and
+Serve from the [host](README.md#serve-from-the-host). vLLM started this way needs `--trust-remote-code` and
 `--mamba-ssm-cache-dtype float32`, which `docker-compose.vllm.yml` takes as `VLLM_TRUST_REMOTE_CODE=1` and
 `VLLM_EXTRA_ARGS`:
 

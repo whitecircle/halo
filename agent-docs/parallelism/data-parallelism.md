@@ -64,7 +64,7 @@ router's weight without calling the router, and FSDP2's root post-backward callb
 gradient. A module that itself owns trainable parameters of two dtypes cannot be split, and the wrap
 raises. A layer whose trainable parameters share one dtype gets no extra group.
 
-On gpt-oss-20b at `ep_size: 1` (2× B300, seq 4096, batch 1) the fp32 router runs 10,647 tok/s/GPU against
+On gpt-oss-20b at `ep_size: 1` (2× B300, seq 4096, batch 1, Halo 1.1.0 or earlier) the fp32 router runs 10,647 tok/s/GPU against
 10,883 with a bf16 router, at the same 104 GiB peak. In that run set, the fp32 router over replicated
 experts (`fsdp_shard_ep1_experts: false`, which keeps the router out of FSDP2) ran 8,770–9,060 at 153 GiB.
 
@@ -125,9 +125,13 @@ On a composite the embedding and root groups also hold what only an image row re
 Two setups cannot pair those reduces, so a rank's training forward holding no image raises at a data-parallel size above 1, where the step would otherwise hang to the collective timeout (`_refuse_a_batch_holding_no_image`, `halo/entrypoints/data_setup.py`):
 
 - Accelerate-managed FSDP2, which takes no such wrap. Launch with `torchrun`.
-- A frozen input embedding beside a trainable tower with gradient checkpointing off (`unfreeze_layers_patterns` matching the tower but not the embedding). A text row's first layer gets no gradient-carrying input, so that layer's group reduces at the end of the backward on a text rank and in order on an image rank. Checkpointing's input-grad hook gives the embedding's output a gradient on every row, so the same setup pairs with checkpointing on. Train the embedding or turn checkpointing on.
+- A frozen input embedding beside a trainable tower with gradient checkpointing off, once a decoder layer trains too or under ZeRO-3 (`unfreeze_layers_patterns` matching the tower but not the embedding). A text row's first trained layer gets no gradient-carrying input, so that layer's group reduces at the end of the backward on a text rank and in order on an image rank, and under ZeRO-3 the tower's group re-gathers at its backward on an image rank alone. Checkpointing's input-grad hook gives the embedding's output a gradient on every row, so the same setup pairs with checkpointing on. Train the embedding or turn checkpointing on.
 
-Both also take `freeze_vision_tower: true`, adapters kept off the tower, or a dataset with no text-only rows. A run that holds an image on every rank pairs in either setup. An adapter reaching the tower takes no such check, as the adapter wrap runs past the hook: with checkpointing on it pairs, and with checkpointing off it hangs.
+Both also take `freeze_vision_tower: true` or a dataset with no text-only rows. A run that holds an image on every rank pairs in either setup. At ZeRO-2 with no layer training, only end-of-backward groups reduce, so a tower beside a trained head pairs. A tower training alone leaves a text row's loss with no gradient, and autograd raises at that row's backward.
+
+An adapter run takes the same refusal: its embedding is frozen unless `modules_to_save` trains it, and `run_trainer` carries the hook onto the `PeftModel` the loop calls (`carry_image_refusal_above_adapters`), whose `.forward()` runs no pre-hook below it. The message names the parameter the adapter reached. Keep `lora_target_modules` off the tower, as `freeze_vision_tower` is refused there, or take a remedy above.
+
+With checkpointing on those adapters' reduces pair, but reentrant checkpointing can leave them with no gradient, with no warning. On tiny rows they took none on Qwen3-VL, Qwen3.5 MoE, MiniMax-M3-VL and Qwen3.8-Flash-Next (0 of 8 tensors, against 8 of 8 under non-reentrant), all 8 on Command A Vision, Gemma 4, LFM2-VL and Mistral 3, and 6 of 8 under either on Nemotron-H. MoE families run reentrant.
 
 Two setups **raise** rather than wrap:
 
@@ -170,7 +174,7 @@ SHARD_GRAD_OP, FSDP2 reshards each module after its backward and re-all-gathers 
 microstep's forward: one full param re-gather per grad-accum microstep for weights that did not
 change in between.
 
-Over NVLink, turning the re-gathers off gains about 4–10% throughput: on 8× B300, dense Qwen3-8B SFT
+Over NVLink, turning the re-gathers off gains about 4–10% throughput (Halo 1.1.0 or earlier): on 8× B300, dense Qwen3-8B SFT
 runs +3.7% (packed `sft.py`, batch 2, `gradient_accumulation_steps: 8`) to +9.7% (4k tokens, batch 1,
 GA 8) faster with `false`, and gpt-oss-20b EP8 +3.6%. Under the default ZeRO-2 wrap
 (`reshard_after_forward=False`) the parameters are already unsharded through each forward and backward,

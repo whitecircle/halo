@@ -24,9 +24,11 @@ from halo.env import is_accelerate_fsdp_launch
 from halo.log import RUN_LOG_DIR_NAME
 from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_patterns
 from halo.model_loading.parallel.model_source import probe_checkpoint
+from halo.model_loading.parallel.peft_setup import wraps_in_peft_model
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
-from halo.models.module_tree import embedding_module, media_module_names
+from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module, media_module_names
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
+from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
@@ -181,10 +183,21 @@ def resolve_preference_vlm_run(
     return is_vlm
 
 
+def _first_trained_tower_param(model) -> str | None:
+    for tower in media_module_names(model):
+        for name, param in model.get_submodule(tower).named_parameters():
+            if param.requires_grad:
+                return f"{tower}.{name}"
+    return None
+
+
 def _why_a_batch_holding_no_image_cannot_pair(model) -> str | None:
     """Where the FSDP2 wrap's agreement on which parameters hold a gradient (``_agree_unsharded_grad_presence``) does not
     pair a text rank's reduces with an image rank's, with the first remedy. Checkpointing's input-grad hook gives a frozen
-    embedding's output a gradient on every row, so a first layer then reduces in order on each rank."""
+    embedding's output a gradient on every row, so a first layer then reduces in order on each rank; with no layer
+    trained, only the groups reducing at the end of each rank's backward reduce at all. ZeRO-3 pairs neither way: a group
+    re-gathers at its backward only where its output carries a gradient, which the tower's group does on an image rank
+    alone."""
     if is_accelerate_fsdp_launch():
         return (
             "Accelerate-managed FSDP2 takes no agreement on which parameters hold a gradient before reducing. "
@@ -192,9 +205,14 @@ def _why_a_batch_holding_no_image_cannot_pair(model) -> str | None:
         )
     if model.is_gradient_checkpointing or any(p.requires_grad for p in embedding_module(model, "input").parameters()):
         return None
+    layers = decoder_layers(backbone_with_layers(model) or model)
+    if (layers is None or not any(param.requires_grad for param in layers.parameters())) and not any(
+        group.post_forward_mesh_info is not None for group in fsdp2_param_groups(model)
+    ):
+        return None
     return (
-        "a frozen input embedding gives a text row's first layer no gradient-carrying input, so it reduces out of "
-        "order. Train the embedding, enable gradient checkpointing"
+        "a frozen input embedding leaves a text row's hidden states with no gradient, so the groups they pass through "
+        "reduce out of order. Train the embedding, enable gradient checkpointing"
     )
 
 
@@ -204,18 +222,40 @@ def _refuse_a_batch_holding_no_image(model, args, kwargs) -> None:
     if args or not model.training or kwargs.get("pixel_values") is not None:
         return
     reason = _why_a_batch_holding_no_image_cannot_pair(model)
-    if reason is not None and any(group.mesh_info.mesh.size() > 1 for group in fsdp2_param_groups(model)):
-        raise ValueError(
-            "This rank's batch holds no image while the vision tower trains under data parallelism, so its gradient "
-            f"reduces would never pair with a peer's that holds one: {reason}, set freeze_vision_tower: true, train "
-            "adapters, or drop the text-only rows from the image dataset."
-        )
+    if reason is None or not any(group.mesh_info.mesh.size() > 1 for group in fsdp2_param_groups(model)):
+        return
+    trained = _first_trained_tower_param(model)
+    if trained is None:
+        return
+    remedy = (
+        f"keep lora_target_modules off the tower (an adapter reached {trained})"
+        if find_peft_model(model) is not None
+        else "set freeze_vision_tower: true, train adapters"
+    )
+    raise ValueError(
+        "This rank's batch holds no image while the vision tower trains under data parallelism, so its gradient "
+        f"reduces would never pair with a peer's that holds one: {reason}, {remedy}, or drop the text-only rows from "
+        "the image dataset."
+    )
+
+
+def carry_image_refusal_above_adapters(model) -> None:
+    """Call on the trainer's model: the adapter wrap reaches what it wraps through ``.forward()``, which runs no
+    pre-hook, and only past that wrap does a tower hold its adapters."""
+    peft_model = find_peft_model(unwrap_framework_wrappers(model))
+    if (
+        peft_model is not None
+        and _refuse_a_batch_holding_no_image in peft_model.get_base_model()._forward_pre_hooks.values()
+    ):
+        peft_model.register_forward_pre_hook(_refuse_a_batch_holding_no_image, with_kwargs=True)
 
 
 def apply_vision_options(args, model, model_config, processing_class, *, is_vlm: bool) -> None:
     """COLLECTIVE under ``freeze_vision_tower``, after :func:`configure_adapter_training`, so the freeze outlasts its
     unfreeze patterns. A tower no text row reaches also stops being a parameter FSDP2 reduces on only some ranks; on an
-    image run that still trains one, a batch holding no image is refused where the reduces could not pair."""
+    image run that still trains one, a batch holding no image is refused where the reduces could not pair. Under an
+    adapter wrap the refusal waits for :func:`carry_image_refusal_above_adapters`, as the tower's adapters do not exist
+    yet."""
     if args.min_pixels is not None or args.max_pixels is not None:
         if not is_vlm:
             raise ValueError("min_pixels / max_pixels bound images, and this run takes the text data path.")
@@ -231,15 +271,7 @@ def apply_vision_options(args, model, model_config, processing_class, *, is_vlm:
         )
         reject_across_ranks(reason, "freeze_vision_tower", ValueError)
         freeze_parameters_by_patterns(model, [f"{tower}.*" for tower in towers])
-    elif (
-        is_vlm
-        and not model_config.use_peft
-        and any(
-            param.requires_grad
-            for tower in media_module_names(model)
-            for param in model.get_submodule(tower).parameters()
-        )
-    ):
+    elif is_vlm and (wraps_in_peft_model(model_config) or _first_trained_tower_param(model) is not None):
         model.register_forward_pre_hook(_refuse_a_batch_holding_no_image, with_kwargs=True)
 
 

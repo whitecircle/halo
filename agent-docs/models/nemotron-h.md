@@ -10,18 +10,19 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
 The release has trained through the toolkit at `ep8` on 8× B300, with real weights and text, reentrant checkpointing and FA4. `models/test_nemotron_h_real_checkpoint.py` and the shipped recipes ran these:
 
-- **Recipes:** full fine-tune at 8,192 tokens (20 steps) and 32,000 (5), frozen experts at 50,000 (5), LoRA at 16,384 (10), SMPO (5), offline GRPO (5) and images on the composite (5). [Memory](#memory) has their figures.
-- **Load:** the lazy route, at a peak host RSS of 10.1 GiB per rank on the release cut to 9 layers. The EP loss at that cut lands at 12.646353 against 12.646244 on one rank.
-- **Packed rows:** at the cut, a document's mean logit gap against itself alone is 2.07e-6 with the markers and 1.13 without them.
+- **Recipes:** full fine-tune at 8,192 tokens (20 steps) and 32,000 (5), frozen experts at 50,000 (5), LoRA at 16,384 (10), SMPO (5), offline GRPO (5) and images on the composite (5), also with half the rows text-only (5). [Memory](#memory) has their figures.
+- **Load:** the lazy route, at a peak host RSS of about 10 GiB per rank on the release cut to 9 layers. The EP loss at that cut lands within 4e-4 of one rank's.
+- **Packed rows:** at the cut, a document's mean logit gap against itself alone is at most 5.49e-5 with the markers across the three texts the row has read, with no position past its bar, and 1.13 without them.
 - **Resume:** exact at the 9-layer cut: loss delta 0, final weights equal, optimizer state bit-exact, no warm restart.
-- **Exports:** byte for byte against the release at the 9-layer cut on both routes, with an NLL gap of 6e-5 on reload, and at full depth: 41,643 tensors on the text-only route and 42,101 on the composite one (the release's 42,037 plus 64 `lambda1`), each with an NLL gap of 0.0013. `reattach_vision_tower.py` turns the text-only export back into the release's 43,079 tensors with no `config.json` difference.
+- **Exports:** byte for byte against the release at the 9-layer cut on both routes, with an NLL gap of at most 6e-5 on reload, and at full depth: 41,643 tensors on the text-only route and 42,101 on the composite one (the release's 42,037 plus 64 `lambda1`), each with an NLL gap of 0.0013. `reattach_vision_tower.py` turns the text-only export back into the release's 43,079 tensors with no `config.json` difference.
 - **Adapters:** the LoRA recipe's folded export differs from the release on its targets and the moved bias alone (41,112 tensors, 531 identical), and loads and generates in stock transformers at an NLL of 2.03296 against 2.03301. `merge_peft_adapters.py` merges attention and Mamba adapters byte for byte the same with `--trust_remote_code` on or off, changing 152 tensors of the release (80 Mamba, 32 attention, 40 bias), and refuses a mixed adapter.
 
 What these rows leave:
 
 - **Length of run:** 5 to 20 steps each. No run has trained the release to a quality metric, so a step's loss is all they say about training.
-- **Serving:** both engines have served an export, an untrained reattached one: vLLM on one image prompt and one text prompt, SGLang on one image prompt ([Checkpoints and serving](#checkpoints-and-serving)).
-- **Other axes:** mixed image and text rows, pipeline parallelism, pure ETP and EP+ETP have run on tiny models only.
+- **Serving:** both engines have served an export, an untrained reattached one, on one image prompt and one text prompt ([Checkpoints and serving](#checkpoints-and-serving)). Engine sync stays refused ([RL weight sync](#rl-weight-sync)).
+- **Mixed rows:** image and text rows ran at `ep8` on the release with no hang. That the tower trains on them rests on tiny rows.
+- **Other axes:** pipeline parallelism, pure ETP and EP+ETP have run on tiny models only.
 
 ## Lightning
 
@@ -77,6 +78,8 @@ The conv runs `causal_conv1d`, which takes `seq_idx` on CUDA. Under reentrant ch
 | 32,768 | frozen | 3,223 | 10.17 s |
 | 50,000 | frozen | 3,272 | 15.28 s |
 
+![A forward and backward at EP8 and 8,192 tokens per rank, split by block kind: Super VL takes 2.54 s at 3,226 tok/s per rank, 64.8% Mamba and 32.6% MoE; Lightning takes 0.766 s at 10,694 tok/s per rank, 58.0% Mamba and 36.2% MoE; attention and the head take the rest](../assets/benchmarks/nemotron_block_time.png)
+
 At 8,192 the Mamba layers take 64.8% of that step, MoE 32.6%, attention 1.6% and the head 1.0%. By arithmetic the scan is 2–2.5% of the FLOPs, as a B300's fp32 GEMM runs at 32.5T MAC/s against 726T for bf16. No native scan kernel ships. TF32 would take the step to 1.13× of upstream's body at 3e-4 output error per layer, and stays off. MFU costs a Mamba layer by its parameters (`6N`), with no term for the scan, so a low MFU here means the scan. A whole training step adds the optimizer and the reduce: [Memory](#memory) gives those rates.
 
 ## EP layer
@@ -91,7 +94,7 @@ FSDP2 alone cannot hold the model: about 241 GB gathered plus 93 GB of sharded g
 
 ## Memory
 
-Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at the lengths below. A B300 reports 288 GB (275,040 MiB). Reserved memory differs by rank, so each cell is the range across ranks, and tok/s per rank includes the optimizer and the FSDP2 reduce.
+Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at the lengths below. Size a run by reserved memory against the device's 288 GB (275,040 MiB). Reserved differs by rank, so each cell is the range across ranks, and tok/s per rank includes the optimizer and the FSDP2 reduce.
 
 | Recipe | Tokens per rank | tok/s per rank | Peak allocated | Reserved |
 |---|---:|---:|---:|---:|
@@ -100,9 +103,12 @@ Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at t
 | Full fine-tune, `--max_length=32000` | about 31,700 | 3,221 | 227–235 GB | 268–283 GB |
 | Frozen experts, `--max_length=50000` | about 48,800 | 3,246 | 188–194 GB | 241–283 GB |
 | Full fine-tune on images (the cookbook's recipe) | about 6,790 | 3,198 | 168 GB | 184–188 GB |
+| The same recipe, half the rows text-only | | 3,166 | 168 GB | 183–186 GB |
 | SMPO, full pairs | 2 × 4,096 | | 170 GB | 178–184 GB |
 | SMPO, its Tulu rows | up to 2 × 4,096 | | 157–161 GB | 165–170 GB |
 | Offline GRPO | the recipe's rows | | 164–165 GB | 169–179 GB |
+
+![Peak allocated and reserved memory per GPU for each recipe against the device's 288 GB: LoRA reserves 118–165 GB, the full fine-tune at 8,192 tokens 186–202 GB, the 32,000-token and frozen 50,000-token rows reach 283 GB, and Lightning's full fine-tune reserves 55–60 GB](../assets/benchmarks/nemotron_memory.png)
 
 The 32,000 and frozen 50,000 rows are at the limit: their top ranks reached 99.4% and 99% of the device over 5 steps, so no longer row has a measured fit. Frozen experts train with `freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj`, 7.93B trainable parameters.
 
@@ -128,7 +134,7 @@ The hub chat template renders every assistant turn with no reasoning as `<think>
 
 ## Images
 
-The composite takes images through the VLM path, with `image_grid_hw` in the bake, the collators and the forward. FA4 runs both towers ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The fused loss stays off, as the composite scores its own loss. Image and text rows mix under `torchrun`: the embedding and the tower share the root group, whose reduce agrees across ranks ([Shard groups](../parallelism/data-parallelism.md#shard-groups)). On a training step with Liger on, the logged `mean_token_accuracy` reads 0 and `entropy` ln(vocab): Liger writes its gradient into the fp32 logits the forward returns, which a bf16 head would have copied. Loss, gradients and eval metrics that mask label -100 are right, while a `compute_metrics` reading logits at ignored positions sees zeros in eval too. Video and audio parts raise: the release has no sound tower, and transformers' video forward does not run on it.
+The composite takes images through the VLM path, with `image_grid_hw` in the bake, the collators and the forward. FA4 runs both towers ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The fused loss stays off, as the composite scores its own loss. Image and text rows mix under `torchrun`: the embedding and the tower share the root group, whose reduce agrees across ranks ([Shard groups](../parallelism/data-parallelism.md#shard-groups)). On a training step with Liger on, the logged `mean_token_accuracy` reads 0 and `entropy` ln(vocab), which mean nothing here; loss, gradients and eval metrics that mask label -100 are right ([Metrics on fp32 logits](../optimization/liger-kernels.md#known-issue-metrics-on-fp32-logits)). Video and audio parts raise: the release has no sound tower, and transformers' video forward does not run on it.
 
 ## LoRA
 
@@ -153,7 +159,7 @@ The release is plain bf16 with no conversion step. Load it natively, `trust_remo
 - **`reattach_vision_tower.py`:** turns a text-only export into the composite, streaming the vision tower, connector and 5.48 GiB `mtp.*` head back from the base byte for byte, and warns with the head's tensor count. The head stays at the release's weights. Its acceptance on a trained tower is unmeasured.
 - **Refused:** `save_sharded_ep` and `merge_ep_shards.py`, since the merge cannot respell `backbone.*` and the vision norm. `unfuse_moe_experts.py` copies a checkpoint through, as the layout stores per expert already. Gathered saves stream one 5.25 GiB layer at a time.
 
-Serve a composite with the release's flags. Both engines boot an untrained reattached export and answer an image prompt, vLLM a text prompt too. `reattach_vision_tower.py` carries the modules its processor and tokenizer configs' `auto_map` names, which SGLang's boot and `AutoProcessor` with `trust_remote_code=True` read.
+Serve a composite with the release's flags. Both engines boot an untrained reattached export and answer an image prompt and a text prompt. `reattach_vision_tower.py` carries the modules its processor and tokenizer configs' `auto_map` names, which SGLang's boot and `AutoProcessor` with `trust_remote_code=True` read.
 
 - **vLLM 0.32.0:** `--trust-remote-code` (without it the boot fails on `vit_hidden_size`), `--mamba-ssm-cache-dtype float32`, `--tensor-parallel-size 2`, `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`. The row that served an export started the image directly with these. `docker-compose.vllm.yml` takes the same flags: `VLLM_TRUST_REMOTE_CODE=1`, `VLLM_TP=2`, `VLLM_TOOL_PARSER=qwen3_coder`, `VLLM_REASONING_PARSER=nemotron_v3`, `VLLM_EXTRA_ARGS="--mamba-ssm-cache-dtype float32"`.
 - **SGLang 0.5.22:** `SGLANG_TRUST_REMOTE_CODE=1`, `SGLANG_TP=2`, `SGLANG_TOOL_PARSER=qwen3_coder`, `SGLANG_REASONING_PARSER=nemotron_3` on the compose file. The model card's `--mamba-ssm-dtype` flags are for its dedicated image and raise on this one.

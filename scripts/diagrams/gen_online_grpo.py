@@ -59,7 +59,7 @@ card(
     ROW1_Y,
     COL_W,
     ROW1_H,
-    "vLLM server — GPU 7",
+    "vLLM server, GPU 7",
     [
         "separate container, :8000",
         "server mode only, never colocate",
@@ -78,9 +78,9 @@ card(
     ROW2_H,
     "Rewards",
     [
-        r"rewards: accuracy — last \boxed{}",
+        r"accuracy: last \boxed{}",
         "equals answer → 1.0 / 0.0",
-        "rewards: format — regex, off",
+        "format: regex, off",
         "weighted sum → reward_weights",
     ],
     color=TEAL,
@@ -140,12 +140,12 @@ sync_x1 = COL_C + 0.10 * COL_W
 polyline_arrow(
     ax,
     [
-        (sync_x0, ROW2_Y + ROW2_H),
+        (sync_x0, ROW2_Y + ROW2_H + 0.04),
         (sync_x0, SYNC_LANE_Y),
         (sync_x1, SYNC_LANE_Y),
-        (sync_x1, ROW1_Y),
+        (sync_x1, ROW1_Y - 0.05),
     ],
-    "NCCL weight sync — before the next generation",
+    "NCCL weight sync, before the next generation",
     ((sync_x0 + sync_x1) / 2, SYNC_LANE_Y + 0.09),
     color=VIOLET,
 )
@@ -155,7 +155,7 @@ footnote(
     M,
     0.22,
     W - 2 * M,
-    "vLLM only, server mode only: the engine must own GPUs no trainer rank uses — a rank cannot broadcast to itself.",
+    "vLLM only, server mode only: the engine must own GPUs no trainer rank uses, as a rank cannot broadcast to itself.",
 )
 
 save(plt.gcf(), "online_grpo_pipeline")

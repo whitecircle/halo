@@ -9,7 +9,7 @@ any PR, and PRs from unapproved contributors are closed automatically. The
 issue templates, the gate and working from a fork are in the full policy; report
 security issues privately ([`SECURITY.md`](../SECURITY.md)).
 
-## The one rule
+## Own your code
 
 You must understand and own every line you submit. Writing code with AI is fine:
 Halo itself is built with AI, and the images ship [skills](ai-tooling.md) that

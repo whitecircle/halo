@@ -22,13 +22,13 @@ TOPOLOGIES = {
 W, H = 11.6, 5.75
 
 WORLD_Y, WORLD_H = 4.80, 0.55
-GROUP_Y, GROUP_H, GROUP_W, GROUP_XS = 2.30, 2.00, 5.4, (0.3, 5.9)
-GPU_Y, GPU_W, GPU_DXS = 2.65, 2.35, (0.25, 2.80)
-LINK_YS = (1.90, 1.55)
+GROUP_Y, GROUP_H, GROUP_W, GROUP_XS = 2.30, 2.10, 5.4, (0.3, 5.9)
+GPU_Y, GPU_W, GPU_DXS = 2.74, 2.35, (0.25, 2.80)
+LINK_YS = (1.98, 1.60)
 
 GROUPS = [
-    ("EP group 0 — ranks 0, 1", [("rank 0", "experts 0–15", "batch b0"), ("rank 1", "experts 16–31", "batch b1")]),
-    ("EP group 1 — ranks 2, 3", [("rank 2", "experts 0–15", "batch b2"), ("rank 3", "experts 16–31", "batch b3")]),
+    ("EP group 0: ranks 0, 1", [("rank 0", "experts 0–15", "batch b0"), ("rank 1", "experts 16–31", "batch b1")]),
+    ("EP group 1: ranks 2, 3", [("rank 2", "experts 0–15", "batch b2"), ("rank 3", "experts 16–31", "batch b3")]),
 ]
 
 
@@ -49,7 +49,7 @@ ax.add_patch(world)
 ax.text(
     5.8,
     WORLD_Y + WORLD_H / 2,
-    "WORLD — 4 ranks, one NVLink domain",
+    "WORLD: 4 ranks, one NVLink domain",
     ha="center",
     va="center",
     fontsize=LABEL,
@@ -63,8 +63,8 @@ for gi, (group_head, ranks) in enumerate(GROUPS):
     ax.text(gx + 0.25, GROUP_Y + GROUP_H - 0.12, group_head, ha="left", va="top", fontsize=LABEL, fontweight="bold")
     ax.text(
         gx + GROUP_W / 2,
-        GROUP_Y + 0.22,
-        "DeepEP all-to-all inside the group",
+        GROUP_Y + 0.21,
+        "DeepEP all-to-all in this group",
         ha="center",
         va="center",
         fontsize=SMALL,
@@ -84,12 +84,28 @@ for gi, (group_head, ranks) in enumerate(GROUPS):
         )
     arrow(ax, gx + GROUP_W / 2, WORLD_Y, gx + GROUP_W / 2, GROUP_Y + GROUP_H)
 
-replica_link(ax, gpu_center(0, 0), gpu_center(1, 0), LINK_YS[0])
-replica_link(ax, gpu_center(0, 1), gpu_center(1, 1), LINK_YS[1])
+for rank_idx, (link_y, head) in enumerate(zip(LINK_YS, ("experts 0–15", "experts 16–31"), strict=True)):
+    x0, x1 = gpu_center(0, rank_idx), gpu_center(1, rank_idx)
+    for x in (x0, x1):
+        ax.plot([x, x], [link_y, GPU_Y - 0.03], color=SLATE, lw=1.0, ls=DASH, zorder=1)
+    replica_link(ax, x0, x1, link_y)
+    # The label sits on the stretch of its link that no other rank's drop line crosses.
+    clear_x0, clear_x1 = (x0, gpu_center(0, 1)) if rank_idx == 0 else (gpu_center(1, 0), x1)
+    ax.text(
+        (clear_x0 + clear_x1) / 2,
+        link_y,
+        head,
+        ha="center",
+        va="center",
+        fontsize=TINY,
+        color=INK2,
+        zorder=3,
+        bbox={"facecolor": BG, "edgecolor": "none", "pad": 2.0},
+    )
 ax.text(
     5.8,
-    LINK_YS[1] - 0.24,
-    "DP replicas — the ranks holding one expert slice; their expert grads are averaged after the backward",
+    LINK_YS[1] - 0.2,
+    "The ranks on one line are DP replicas of that slice: their expert grads are averaged after the backward",
     ha="center",
     va="top",
     fontsize=SMALL,
@@ -129,7 +145,7 @@ title(
     f"{M['nodes']} × {M['gpus']} · tp {M['tp']} node-local · ep {M['ep']} {M['scope']} · dp {M['dp']}",
 )
 
-for ni, (nx, head) in enumerate(zip(NODE_XS, ("Node 0 — ranks 0–7", "Node 1 — ranks 8–15"), strict=True)):
+for ni, (nx, head) in enumerate(zip(NODE_XS, ("Node 0: ranks 0–7", "Node 1: ranks 8–15"), strict=True)):
     frame(ax, nx, NODE_Y, NODE_W, NODE_H, dashed=False)
     ax.text(nx + 0.25, NODE_Y + NODE_H - 0.12, head, ha="left", va="top", fontsize=LABEL, fontweight="bold")
     for i in range(8):
@@ -142,7 +158,7 @@ for ni, (nx, head) in enumerate(zip(NODE_XS, ("Node 0 — ranks 0–7", "Node 1 
         NODE_W - 0.5,
         TP_H,
         "",
-        ["TP group, 8 ranks — attention sharded as DTensor over NVLink"],
+        ["TP group, 8 ranks: attention sharded over NVLink"],
         color=BLUE,
     )
     arrow(ax, nx + NODE_W / 2, NODE_Y, nx + NODE_W / 2, EP_Y + EP_H, "tokens", side="right")
@@ -153,7 +169,7 @@ card(
     EP_Y,
     BAND_W,
     EP_H,
-    "One global EP group — all 16 ranks (ep_scope='global')",
+    "One global EP group: all 16 ranks (ep_scope='global')",
     [
         "128 experts / ep 16 = 8 per rank",
         "rank r owns experts 8r … 8r+7",
@@ -184,7 +200,7 @@ footnote(
     0.3,
     0.3,
     BAND_W,
-    "Above one NVLink domain, EP under TP must be a single group spanning the job —"
+    "Above one NVLink domain, EP under TP must be a single group spanning the job:"
     " ep8/tp2 on 2×8 forms two groups and is rejected at config time.",
 )
 

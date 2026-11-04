@@ -35,8 +35,8 @@ Three settings decide most runs:
 - **`packing: true`** fills `max_length` blocks with short rows and needs an explicit `max_length`. Rows
   that share a long prefix can pack as trees instead
   ([Tree Packing](../../agent-docs/optimization/tree-packing.md) ↗).
-- **The learning rate.** `2.5e-6`–`5e-6` for a full fine-tune of a large model, 5–10× that for LoRA. Too
-  high a rate erases pretrained capability without showing in the loss.
+- **The learning rate.** `2.5e-6`–`5e-6` for a full fine-tune of a large model; the shipped LoRA recipes use
+  `1e-4`. Too high a rate erases pretrained capability without showing in the loss.
 
 A family whose release ships a multi-token-prediction head can train it for speculative decoding:
 `mtp_loss_weight` adds it to a fine-tune, `mtp_train_scope: head_only` fits it over a frozen trunk, and

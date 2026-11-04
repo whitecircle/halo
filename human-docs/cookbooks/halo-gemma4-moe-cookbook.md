@@ -51,9 +51,8 @@ This one is a full fine-tune at EP4 with two vLLM servers on GPUs 4–7.
 On the host, start the servers on the SFT checkpoint:
 
 ```bash
-cp jinja-templates/gemma4/gemma4-reasoning-effort.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/gemma-4-26b-a4b-sft
-export VLLM_CHAT_TEMPLATE=/data/gemma4-reasoning-effort.jinja
+export VLLM_CHAT_TEMPLATE=/jinja-templates/gemma4/gemma4-reasoning-effort.jinja
 export VLLM_TOOL_PARSER=gemma4 VLLM_REASONING_PARSER=gemma4
 VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
   docker compose -p gemma4-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
@@ -88,8 +87,8 @@ file and `SGLANG_REASONING_PARSER=gemma4`.
 - **No router balancing.** Keep `moe_balancing: none`. Gemma 4 has no auxiliary loss, and an explicit
   bias mode raises.
 - **RL.** The environment GRPO recipes set `use_chunked_grpo_logprobs: true` for the 262k-token
-  vocabulary. vLLM needs `VLLM_TOOL_PARSER=gemma4`; `hermes` leaves the tool calls as text, so every
-  episode scores zero.
+  vocabulary. vLLM needs `VLLM_TOOL_PARSER=gemma4`; `hermes` leaves the tool calls as text, and the
+  run stops by its second round.
 
 ## Limits
 

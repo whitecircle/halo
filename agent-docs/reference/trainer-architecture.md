@@ -415,8 +415,8 @@ every clip path, so every rank reaches the same verdict. The optimizer picks how
 
 On the device path the warning and both raises come at the late read, at the latest before the next step's
 update, so no later step is applied and a final non-finite step is reported before training ends. Against no guard
-on 8× B300 at s4096 (1.2.0) that path stays within 0.5% (TP2 +0.50%, CP2 +0.12%, ep1 +0.11%, ep2 −0.06%), where a
-host read before every step costs TP2 3.26% and ep2 42 ms of sync wait per step.
+on 8× B300 at s4096 (1.2.0) that path reads TP2 +0.88%, ep1 +0.31%, ep2 +0.69% and CP2 −0.96% (six rounds, ranges
+overlapping), where a host read before every step costs TP2 3.26% and ep2 42 ms of sync wait per step.
 
 The skip is installed in `create_optimizer` on the optimizer that steps (the one inside accelerate's wrapper), so
 every trainer gets it: before the LR scheduler wraps its `step`, or over the scheduler's wrapper when the caller

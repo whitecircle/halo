@@ -24,7 +24,7 @@ long sequences flat (cp4 at s16384 −0.4%, ep8 × cp8 at s32768 −0.1%).
 
 ![Ulysses attention: RoPE runs on the local chunk, one all-to-all on Q, K and V scatters heads and gathers the sequence so each rank attends over the full sequence with 16 of 64 heads, and an all-to-all on the output restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
 
-![An SFT training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the logits stay sharded, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
+![An SFT training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the head scores the chunk from sharded logits or fused with the loss with no logits plane, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
 
 ## Implementation
 
@@ -252,9 +252,8 @@ at construction, so the best checkpoint cannot be reloaded in place). See
 
 ## Optimizations
 
-Native GQA (no `repeat_kv`) saves on the order of 6 GB per forward on a 20B-class GQA model, and the
-`[B, S, H, D]` layout drops the transposes. The all-to-alls run in native BFloat16, with Q, K and V
-in one buffer.
+Native GQA holds K and V at their own head count (no `repeat_kv`), and the `[B, S, H, D]` layout drops
+the transposes. The all-to-alls run in native BFloat16, with Q, K and V in one buffer.
 
 `torch.compile` traces the exchange without a graph break, though the reentrant checkpointing CP
 forces still breaks the graph; its throughput effect under CP is not measured. Use Liger (default on).

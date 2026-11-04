@@ -69,7 +69,7 @@ advertise is inert here. The spec's `gated_rms_norm` role therefore binds `flash
 It rides the same `rms_norm` flag, so one knob turns both norm kernels off.
 
 Measured on a B300 over `[1, 8192, 32, 128]` (262144 rows × 128) forward and backward (Blackwell
-image): **2.7–6.3×** (1.79–1.98 ms eager → 0.32–0.66 ms fused).
+image, Halo 1.1.0 or earlier): **2.7–6.3×** (1.79–1.98 ms eager → 0.32–0.66 ms fused).
 
 The kernel keeps the reduction, the weight multiply and the gate in fp32, as GLM-5's module does. The Qwen
 modules round the normalized activation to storage dtype *before* the weight multiply, so the fused path is
@@ -195,7 +195,7 @@ validates its Blackwell input gradient against fp32 eager experts (the gradient
   class (Mixtral) under any configuration.
 
 Under the force-off those experts run transformers' `grouped_mm`: as an op it is 18% slower than `LigerExperts`
-at Qwen3-30B-A3B's expert shape (8192 tokens, 128 experts) on B300, and faster at small shapes. The default
+at Qwen3-30B-A3B's expert shape (8192 tokens, 128 experts) on B300, and faster at small shapes (Halo 1.1.0 or earlier). The default
 grouped path is unaffected.
 
 The force-off keys on the config having experts, not on what upstream's flag patches, and drops the flag
@@ -294,6 +294,18 @@ saving](#benchmarks)). Trade-offs: `outputs.logits` is `None` (entropy logging d
 `DistributedSFTTrainer.prediction_step` injects `skip_logits=True` on a loss-only eval batch carrying labels,
 unless something still needs real logits: CP mode, a subclass loss that reads `outputs.logits`, or a forward
 with no `skip_logits` parameter.
+
+### Known issue: metrics on fp32 logits
+
+Liger's cross-entropy kernel writes into its input: the gradient on a training step
+([Liger-Kernel#272](https://github.com/linkedin/Liger-Kernel/issues/272)), and zeros over the rows labeled -100 when
+no gradient is needed ([Liger-Kernel#1594](https://github.com/linkedin/Liger-Kernel/issues/1594)). transformers' loss
+calls `logits.float()` first, so bf16 logits hand the kernel a copy and fp32 logits hand it the model's own tensor.
+
+So on a training step under Liger with a forward that returns fp32 logits, such as the
+[Nemotron-H composite](../models/nemotron-h.md#images), the logged `mean_token_accuracy` and `entropy` are not
+meaningful. Eval metrics that mask label -100, the loss and the gradients are right, while a `compute_metrics` reading
+logits at ignored positions sees zeros in eval too.
 
 ## EP / CP / TP / PP behavior
 
@@ -426,7 +438,7 @@ torchrun --nproc_per_node=2 \
     [--no_liger | --fused_linear_ce]
 ```
 
-The kernels are Triton, so they need a supported GPU (H100/H200, B200/B300).
+The kernels are Triton and need a CUDA GPU; these runs are on B300.
 
 ## Related pages
 

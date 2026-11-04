@@ -1,6 +1,6 @@
 # Step-3.7 Flash
 
-`Step3p7ForConditionalGeneration` (`stepfun-ai/Step-3.7-Flash`) — 198B total / ~11B active composite VLM (196B language backbone + 1.8B vision encoder), native in transformers since 5.16 (`model_type` `step3p7`, text config `step3p5`; no remote code). 45 text layers interleave 12 full-attention and 33 sliding-window layers, every head carries a sigmoid attention gate, and a 288-expert sigmoid-routed MoE carries most of the parameters.
+`Step3p7ForConditionalGeneration` (`stepfun-ai/Step-3.7-Flash`) — 198B total / ~11B active composite VLM (196B language backbone + 1.8B vision encoder), native in transformers (`model_type` `step3p7`, text config `step3p5`; no remote code). 45 text layers interleave 12 full-attention and 33 sliding-window layers, every head carries a sigmoid attention gate, and a 288-expert sigmoid-routed MoE carries most of the parameters.
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism takes the text tower only: a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and stage boundaries land on the period-4 `layer_types` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
@@ -75,9 +75,9 @@ Online and async GRPO sync into vLLM 0.32.0, which serves the family from the **
 
 The sync forwards that namespace: the same save-side revert the gathered save runs rewrites every forwarded key. The fused `experts.gate_up_proj` gather is split into the two hub stacks, the vision q/k/v are fused back into the un-permuted `in_proj`, and the `model.language_model.*` / `mlp.*` spellings return to the hub's, so the served model receives exactly the tensors a gathered checkpoint would carry.
 
-`tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server serving a tiny hub-layout checkpoint, with no training loop. Serve the hub repo or a toolkit export directly, and note:
+`tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server serving a tiny hub-layout checkpoint, with no training loop. On the release at EP=2 against a TP=2 server, an unchanged push forwards 1,378 tensors and moves no served log-prob on 2,010 positions. Serve the hub repo or a toolkit export directly, and note:
 
-- At the release shape (288 experts × 1280 × 4096) one MoE layer gathers 8.44 GiB, its hub split copies 5.63 GiB beside that, and each 2.81 GiB stack rides alone through its snapshot and send buffer: about 19.7 GiB on the forwarding GPU at the peak (calculated). `fp32_non_ep_params` holds the vision q/k/v at 1.24 GiB, past the 1 GiB bound on held dense tensors, and raises at the first push with its remedy, `HALO_WEIGHT_SYNC_CHUNK_MB=1536`.
+- At the release shape (288 experts × 1280 × 4096) one MoE layer gathers 8.44 GiB, its hub split copies 5.63 GiB beside that, and each 2.81 GiB stack rides alone through its snapshot and send buffer: about 19.7 GiB on the forwarding GPU at the peak (calculated). On the release a sync adds 18 GiB at EP=2 and 16 GiB at EP=4 on that GPU, read by a 2 s sampler. `fp32_non_ep_params` takes the held vision q/k/v past the 1 GiB bound on held dense tensors, so the first push raises at that bound, naming `HALO_WEIGHT_SYNC_CHUNK_MB`, and passes at `HALO_WEIGHT_SYNC_CHUNK_MB=1536`. At EP=4 on 4 GPUs the release takes one async step of expert LoRA at a 140 GiB peak on the forwarding GPU, and a full fine-tune runs out of memory at its first optimizer step.
 
 - `--trust-remote-code` (`VLLM_TRUST_REMOTE_CODE=1` under compose) — vLLM cannot parse transformers' native `step3p7` config, so the composite config is the repo's own `configuration_step3p7.py` (the text tower resolves to vLLM's `step3p5`). A toolkit export ships that module and the ones it imports itself ([Checkpoint](#checkpoint)), so it needs the same flag and nothing else.
 - `--moe-backend triton` and the layerwise-reload patch, as for every MoE family ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)); the experts are a `RoutedExperts`, which the patch already excludes from the reload lifecycle.
@@ -87,7 +87,7 @@ The sync forwards that namespace: the same save-side revert the gathered save ru
 
 ## Router balancing
 
-The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP layers `moe_balancing: auto` therefore resolves to `bias_update`: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own slot (selection only) and a served copy routes as trained.
+The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP layers `moe_balancing: auto` therefore resolves to `bias_update`: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own slot (selection only) and a served copy routes on it.
 
 On a tree with no EP layer (`ep_size=1` with `use_grouped_gemm: false`) nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning.
 

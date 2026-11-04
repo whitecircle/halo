@@ -282,6 +282,7 @@ class FakeSGLangServer(FakeEngineServer):
     def __init__(self):
         super().__init__()
         self.tp_size = 1
+        self.dp_size = 1
         self.torch_compile = False
         self.groups: set[str] = set()
         self.session_open = False
@@ -290,7 +291,7 @@ class FakeSGLangServer(FakeEngineServer):
         if (method, path) == ("GET", "/server_info"):
             info = {
                 "tp_size": self.tp_size,
-                "dp_size": 1,
+                "dp_size": self.dp_size,
                 "moe_runner_backend": self.moe_backend,
                 # SGLang reports a parser it has none of as null.
                 "reasoning_parser": self.reasoning_parser or None,

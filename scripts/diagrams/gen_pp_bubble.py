@@ -171,7 +171,7 @@ for x0, label in ((0, "fill"), (SLOTS - (P - 1), "drain")):
 ax.text(
     SLOTS / 2,
     FLOOR_1F1B - 0.38,
-    "steady state — one forward and one backward per stage, per pair of slots",
+    "steady state: one forward and one backward per stage, per pair of slots",
     ha="center",
     va="top",
     fontsize=TINY,
@@ -182,7 +182,7 @@ ax.text(-1.75, P + 0.5, "GPipe", fontsize=SECTION, fontweight="bold", va="center
 ax.text(
     SLOTS / 2,
     P + 0.36,
-    f"all forwards, then all backwards — the same {SLOTS} slots",
+    f"all forwards, then all backwards: the same {SLOTS} slots",
     ha="center",
     va="bottom",
     fontsize=SMALL,

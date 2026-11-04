@@ -355,14 +355,14 @@ Split a model across GPUs and a third speed enters the picture: inter-GPU bandwi
 The one recorded collective, an NCCL all-reduce at **767 GB/s** bus bandwidth, ran on 16 GPUs across two
 nodes, so it measures a job that crosses the node boundary, not NVLink alone.
 
-![The bandwidth ladder on a log scale: HBM at 6.6 TB/s measured (spec 8 TB/s), NVLink/NVSwitch inside the node at 1.8 TB/s spec (~4× below HBM), with the repo's one recorded all-reduce bus bandwidth, 767 GB/s across 16 GPUs on 2 nodes, drawn as the measured bar, PCIe Gen5 ×16 at 64 GB/s per direction by spec (~100× below HBM), and InfiniBand / EFA across nodes: 93 GB/s measured NCCL broadcast on B300 EFA (spec ~100), ~48 GB/s on NDR, 65–130× below HBM, the node boundary. Filled bars are measured, dashed outlines are spec; a collective is priced by the slowest tier it touches](../assets/diagrams/interconnect_tiers.png)
+![The bandwidth ladder on a log axis, filled dots measured and hollow dots spec. Inside a node: HBM at 6.6 TB/s measured (spec 8 TB/s), NVLink 5 / NVSwitch at 1.8 TB/s spec, about 4× below HBM, and PCIe Gen5 ×16 at 64 GB/s per direction by spec, about 100× below HBM. Across nodes: an NCCL all-reduce on 16 GPUs over 2 nodes at 767 GB/s bus bandwidth measured, EFA on B300 at 93 GB/s NCCL broadcast measured (spec about 100), and InfiniBand NDR at about 50 GB/s by spec, about 130× below HBM. A collective is priced by the slowest tier it touches](../assets/diagrams/interconnect_tiers.png)
 
 One ratio drives distributed design. Crossing a node boundary costs ~18–36× more per byte than staying on NVLink (1.8 TB/s vs 50–100 GB/s per GPU). A collective inside the NVLink domain is cheap. Stretch it across nodes and it hits the InfiniBand wall.
 
 - **NVLink** is direct GPU-to-GPU (Blackwell NVLink 5 ≈ 1.8 TB/s/GPU, Hopper NVLink 4 ≈ 0.9) and bypasses the CPU.
 - **NVSwitch** is an on-board crossbar: all 8 GPUs reach each other at full NVLink bandwidth, any-to-any.
 
-    NCCL's effective all-reduce bus bandwidth sits below the link spec because of algorithm and protocol overhead, the same measured-vs-spec gap HBM shows. The repo's one measured all-reduce figure, 767 GB/s, is from 16 GPUs across two 8-GPU B300 nodes — NVLink inside each node plus a cross-node RDMA hop — so a single node's all-reduce lands above it ([DeepEP](../infrastructure/deepep.md)).
+    NCCL's effective all-reduce bus bandwidth sits below the link spec because of algorithm and protocol overhead, the same measured-vs-spec gap HBM shows. The repo's one measured all-reduce figure, 767 GB/s, is from 16 GPUs across two 8-GPU B300 nodes — NVLink inside each node plus a cross-node RDMA hop — so a single node's all-reduce lands above it.
 
 - **NVLink SHARP (NVLS)** does the all-reduce sum inside the NVSwitch ASIC. NCCL enables it where the fabric supports it.
 

@@ -84,7 +84,7 @@ class MtpAcceptanceGate(StopsTrainingEarly):
                     f"The MTP head fit failed its acceptance gate: {metric} is {last[metric]:.4f} at step "
                     f"{last['step']}, under {bar:.4f}, its step {first['step']} reading {first[metric]:.4f} plus "
                     f"mtp_min_acceptance_gain {self.min_gain}. {held} Serve the head this fit started from, or refit "
-                    "at a lower learning_rate with warmup_steps, on rows like the ones you serve. "
+                    "at a lower learning_rate with warmup_steps. "
                     "mtp_min_acceptance_gain: null turns the gate off."
                 )
         return None

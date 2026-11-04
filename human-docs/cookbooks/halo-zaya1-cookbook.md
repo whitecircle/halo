@@ -34,14 +34,15 @@ halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/zaya1-8b-sft-ep8
 ```
 
-Both recipes pack 16,384-token rows at gradient accumulation 4. Zaya cannot use gradient checkpointing,
-so the one-GPU command needs a B200 or B300 (about 102–124 GB at 16k; its ~72 GB of state leaves an
-80 GB GPU no room for a useful row). On eight 80 GB GPUs, launch the plain FSDP2 recipe with
-`-n 8 --max_length=8192 --gradient_accumulation_steps=8`; the EP8 recipe fits there as shipped.
-For long context at EP8, raise the limit with `--max_length=32768 --gradient_accumulation_steps=2`,
-which fits at `per_device_train_batch_size: 1` because the fused loss never builds the full logits tensor.
-Three steps on eight B300s at 16k peaked at 66 GiB reserved per GPU under EP8 and 80 GiB under plain
-FSDP2. The other fits are computed, not measured.
+Both recipes pack 16,384-token rows at gradient accumulation 4. Three steps on eight B300s peaked at 66 GiB
+reserved per GPU under EP8 and 80 GiB under plain FSDP2. Zaya cannot use gradient checkpointing, so other shapes
+need their own fit, computed rather than measured:
+
+- **One GPU:** a B200 or B300 (about 102–124 GB). Its ~72 GB of state leaves an 80 GB GPU no room for a useful row.
+- **Eight 80 GB GPUs:** the EP8 recipe as shipped, or plain FSDP2 with
+  `-n 8 --max_length=8192 --gradient_accumulation_steps=8`.
+- **Long context at EP8:** `--max_length=32768 --gradient_accumulation_steps=2`. The fused loss never builds the
+  full logits tensor.
 
 ### Other layouts
 

@@ -44,10 +44,10 @@ LoRA and RL variants the family supports. If your family has one, start there.
 
 ## Multimodal checkpoints
 
-Gemma 4, Mistral 4, Command A+, Inkling, GLM-5 Next, Step-3.7 Flash, Nemotron-H's Super VL,
-Qwen3.5/3.6, Qwen3.8-Flash-Next and Qwen3-VL are natively multimodal. Halo loads the full
-vision-and-text model and picks the data path from your dataset, not the
-checkpoint:
+Gemma 4, Mistral 4, Command A+, Inkling, GLM-5 Next, Step-3.7 Flash, Nemotron 3.5
+Super VL, Qwen3.5/3.6, Qwen3.8-Flash-Next and Qwen3-VL are natively multimodal.
+Halo loads the full vision-and-text model and picks the data path from your
+dataset, not the checkpoint:
 
 - Rows with images train through the VLM pipeline, with standard padding.
   Images can't be packed.
@@ -55,12 +55,14 @@ checkpoint:
   with packing available.
 
 To load a multimodal checkpoint as text-only, set `text_only_model: true`, as the
-Qwen3.8-Flash-Next and Nemotron-H recipes do. Qwen3.5/3.6, Qwen3.8-Flash-Next, Nemotron-H
-and Llama 4 have a text-only variant; the others refuse it.
+Qwen3.8-Flash-Next and Nemotron 3.5 Super VL recipes do. Qwen3.5/3.6,
+Qwen3.8-Flash-Next, Nemotron 3.5 Super VL and Llama 4 have a text-only variant;
+the others refuse it.
 
-Image data works for SFT, DPO, KTO, SMPO and both distillation trainers; PaliGemma takes it
-through SFT and distillation only, and Nemotron-H refuses it on DPO and KTO. Reward modeling takes images only on checkpoints with a
-multimodal sequence-classification head, such as Gemma 4 and Qwen3.5/3.6. Classification, the
+Image data works for SFT, DPO, KTO, SMPO and both distillation trainers. PaliGemma
+takes it through SFT and distillation only, and Nemotron-H refuses it on DPO and
+KTO. Reward modeling takes images only on checkpoints with a multimodal
+sequence-classification head, such as Gemma 4 and Qwen3.5/3.6. Classification, the
 GRPO trainers and embedding are text-only.
 
 ## Adding a family

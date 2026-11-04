@@ -66,7 +66,7 @@ card_row(
 )
 
 # --- Band 2: the episode ---
-section(ax, L, 5.70, "MULTI-TURN EPISODE  —  one row, one actor")
+section(ax, L, 5.70, "MULTI-TURN EPISODE: one row, one actor")
 sy, sh = 4.46, card_height(1)
 SGAP, SR = 0.45, 9.15
 SW = (SR - L - 3 * SGAP) / 4
@@ -88,11 +88,11 @@ card_row(
 card(
     ax,
     9.60,
-    sy + sh - card_height(3),
+    sy + sh - card_height(4),
     R - 9.60,
-    card_height(3),
+    card_height(4),
     "The episode ends at",
-    ["a final answer", "max_turns burned", "spent recoveries"],
+    ["a final answer", "max_turns burned", "spent recoveries", "a spent output budget"],
     color=SLATE,
 )
 
@@ -110,7 +110,7 @@ card(
     SR - L,
     card_height(1, has_title=False),
     None,
-    ["A turn the engine cut at its token cap is nudged and retried: it costs a turn, not the episode."],
+    ["A cut or empty turn is nudged and retried: it costs a turn, not the episode."],
     color=ROSE,
     dashed=True,
 )

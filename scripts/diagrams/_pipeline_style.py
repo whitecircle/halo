@@ -18,6 +18,7 @@ FOOT_H = 0.5  # height of the takeaway strip
 FRAME_PAD = 0.20  # inset from a frame's boundary to the cards inside it
 FRAME_LABEL = 0.45  # height a frame's label takes at the top of the frame
 COLUMN_GAP = 1.0  # column gap, wide enough to hold an arrow label clear of both borders
+LINE_INK = 0.13  # height a `SMALL` line takes on the page
 DASH = (0, (4, 2))
 
 TINTS = {BLUE: BLUE_T, AMBER: AMBER_T, TEAL: TEAL_T, VIOLET: VIOLET_T, ROSE: ROSE_T, SLATE: SLATE_T}
@@ -58,10 +59,12 @@ def card(ax, x, y, w, h, title, lines, *, color=SLATE, mono_lines=False, dashed=
         patch.set_linestyle(DASH)
     ax.add_patch(patch)
 
-    ty = y + h - CARD_PAD
     if title:
+        ty = y + h - CARD_PAD
         ax.text(x + CARD_PAD, ty, title, ha="left", va="top", fontsize=LABEL, fontweight="bold", color=INK)
         ty -= TITLE_DROP
+    else:
+        ty = y + h / 2 + ((len(lines) - 1) * LINE_H + LINE_INK) / 2
     for line in lines:
         ax.text(
             x + CARD_PAD,

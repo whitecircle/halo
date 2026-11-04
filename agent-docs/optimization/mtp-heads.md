@@ -44,6 +44,8 @@ A run logs `ntp_ce` and `mtp_ce`, each cross-entropy per target over the world, 
 | Own, `hard` | 3.33e-6 | 0.8187, 0.8094, 0.8082, 0.8075, 0.8057, 0.8004 | Stops |
 | Own, `hard` | 1e-6 | 0.8187, 0.8172, 0.8129, 0.8119, 0.8109, 0.8106 | Stops |
 
+![Held-out acceptance of Qwen3.6-35B heads at EP8 over 150 steps, one panel per start and one line per loss and learning rate. From the stale start, soft at 1e-5 climbs from 0.776 to 0.825, and hard climbs, then falls at 1e-5 to 0.764, where the gate stops it. From the release's head, soft climbs slightly at all three rates and hard falls at all three, each stopped by the gate](../assets/benchmarks/mtp_acceptance.png)
+
 What `hard` does depends on the rate: from a stale start it climbs then falls at 1e-5 and holds at 1e-6, and from the release's own head it falls at all three. Only `soft` fits have been served, so this page names no winner.
 
 The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4. On the trunk's own samples at temperature 1, an own start reads 0.8704, 0.8877, 0.8919, 0.8916, 0.8902, 0.8901. Under `detached` at 5e-6, acceptance follows the moving trunk over 200 steps: 0.8187 to 0.8158 `soft`, 0.8187 to 0.8136 `hard`.
@@ -56,7 +58,7 @@ The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4. 
 | EP, ETP, EP+ETP | The head's MoE block takes the family's EP layer, and each rank streams its slice of the tail. It dispatches the tokens the first MoE layer sized for, so it adds no capacity all-reduce, and a row with no target still walks its ops on every rank. |
 | Long rows | The term runs Liger's fused kernel where the family's fused loss is on, else fp32 logits in checkpointed chunks, so no `[T, V]` plane stays held through backward. |
 | Gradient checkpointing | Follows the run. `detached` passes the head grad-requiring leaves, so a reentrant checkpoint around a list head keeps its gradient. |
-| Several nodes | EP groups replicate each other, with the head's experts in the deferred sweep as the trunk's are, and plain FSDP2 spans the nodes. A save writes the head on every node's disk under per-node output storage. |
+| Several nodes | EP groups replicate each other, with the head's experts in the deferred sweep as the trunk's are, and plain FSDP2 spans the nodes. A save writes the head on every node's disk under per-node output storage. Node-local `ep_size: 4` and plain FSDP2 ran on two machines at 4 GPUs each, each on its own disk. |
 
 ## Step cost
 
@@ -70,6 +72,8 @@ The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4. 
 | `joint`, `hard` | 2.189 (2.126, 2.263) | 1.06 | 15,069 | 86.2 GiB | 256.9 GiB |
 | `joint`, `soft` | 2.209 (2.143, 2.260) | 1.07 | 14,933 | 87.0 GiB | 255.7 GiB |
 | `head_only`, `soft` | 0.762 (0.761, 0.763) | 0.37 | 43,303 | 25.3 GiB | 58.2 GiB |
+
+![Seconds per step and peak allocated memory on Qwen3.6-35B at EP8: no head at 2.06 s and 85.8 GiB, joint hard at 1.06× and 86.2 GiB, joint soft at 1.07× and 87.0 GiB, head_only soft at 0.37× and 25.3 GiB](../assets/benchmarks/mtp_step_cost.png)
 
 The row's bars hold on these arms: `joint` at most 1.30x, `soft` within 2% of `hard` (0.9%, inside the quartiles), `head_only` at most 0.60x. Reserved memory is the allocator's cache filling a 268 GiB card, so read allocated for what a head adds. `detached`, `head_only` with `hard`, and the repeat of the no-head arm are not measured.
 
@@ -103,11 +107,11 @@ vLLM reads the head through `VLLM_SPECULATIVE_CONFIG`, SGLang through `--specula
 | SGLang, the same fit | 0.8295 | 0.8415 |
 | vLLM, GLM-4.7 Flash `own_soft` fit the gate stopped | 0.7317 | 0.7450 |
 
-The release head alone spans 0.011 across three vLLM launches (0.8284, 0.8311, 0.8394). No fit here shows a served gain.
+The release head alone reads 0.83 to 0.84 across launches: 0.8284, 0.8311, 0.8394, 0.8438 and 0.8371 on vLLM. No fit here shows a served gain.
 
 - **SGLang one draft token:** `--speculative-algorithm EAGLE --speculative-draft-model-path <checkpoint> --speculative-num-steps 1 --speculative-eagle-topk 1 --speculative-num-draft-tokens 2`. Its multi-step defaults read 0.62 on the same fit and are not comparable.
 - **A checkpoint with no head:** vLLM exits non-zero at load, `Following weights were not initialized from checkpoint`. SGLang starts on one and every draft misses (0.0000), so read its counters before trusting a server.
-- **Greedy output:** a draft changes a forward's batch shape and so its bf16 rounding, so greedy output parts from a plain server's on about half of the prompts, the release head's too. Each first split is a near-tie: the widest measured is 0.625 logprob, and the row holds it to 1.0. vLLM takes neither of these models at fp32, so no bf16-free reading exists.
+- **Greedy output:** a draft changes a forward's batch shape and so its bf16 rounding, so greedy output parts from a plain server's on about half of the prompts, the release head's too. Each first split is a near-tie: the widest measured is 0.5 logprob, and the row holds it to 1.0. vLLM takes neither of these models at fp32, so no bf16-free reading exists.
 
 ## Acceptance
 
@@ -122,7 +126,7 @@ Every evaluation of a run with a head scores each held-out draft against the tru
 
 `head_only` gates on them unless `mtp_min_acceptance_gain` is `null`. The run scores before its first step and at its last, and exits non-zero on every rank, after its teardown, when either acceptance ended below its first logged reading plus the gain; a resume keeps that first reading. The last step's save already holds the head judged, and the error names that checkpoint, which is not one to serve.
 
-The loss cannot make this call: a released head at `learning_rate: 1e-4` with no warmup lost acceptance while its loss fell, and the fit warns off `learning_rate: 1e-5` over 20 warmup steps. Fit on rows like the ones you serve; a fit on other rows can pass its gate and leave served acceptance where it was, as the Qwen3.6 recipe does below.
+The loss cannot make this call: a released head at `learning_rate: 1e-4` with no warmup lost acceptance while its loss fell, and the fit warns off `learning_rate: 1e-5` over 20 warmup steps. A fit on rows other than the ones you serve can pass its gate and leave served acceptance where it was, as the Qwen3.6 recipe does below.
 
 ## Recipes
 
@@ -147,13 +151,13 @@ Neither render shows a served gain. Each recipe's rows are ultrachat replies, no
 | Script | Holds |
 |---|---|
 | `test_sft_mtp_head.py` | Per family and shard layout: the head's gradient against a plain model at the run's dtype, one dispatch and one capacity generation per forward, equal first loss hard and soft, accumulated forwards, packed rows on flash, a rank with no head token |
-| `test_sft_mtp_head_checkpoint.py` | Exact resume, fp32 masters included, export, shard merge, a scope change and the gate; two EP groups as replicas of a head that moved, on two simulated domains or, by its docstring's launch, two machines |
+| `test_sft_mtp_head_checkpoint.py` | Exact resume, fp32 masters included, export, shard merge, a scope change and the gate; two EP groups as replicas of a head that moved, on two simulated domains or two machines |
 | `test_sft_mtp_head_real.py` | Qwen3.6-35B at EP8: acceptance hard and soft from a stale and from its own head, at the safe learning rate; the fit on the trunk's own samples; the gate on an oversized rate and an off-by-one target; a `detached` trunk against a run with no head |
 | `test_sft_mtp_head_cost.py` | Seconds per step and peak memory of each scope, hard and soft, against no head at 33,000 tokens; `--arms` picks a subset, which leaves out the bars needing every arm |
 | `test_sft_mtp_head_serving.py` | The acceptance a live engine reads off a checkpoint's head, against a control head on the same prompts, and on vLLM that greedy output parts from a server with no draft only within 1.0 logprob |
 
 ## Refusals
 
-Before the load (`reject_unsupported_mtp_options`, `halo/trainers/sft_rules.py`): context, tensor and pipeline parallelism, HSDP, an accelerate launch, adapters and quantized loads, `lowp_precision`, `torch_compile`, `tree_packing`, image rows, label smoothing, `loss_type` other than `nll`, and `save_sharded_ep` where the export writes trunk copies. `head_only` also refuses gradient checkpointing, freeze patterns, `init_from_scratch`, a balancing mode that updates off the trunk, `fp32_non_ep_params`, `fp32_experts`, and a gate with no eval split. A trainer whose forward takes no labels raises at construction, as does a head the freeze patterns froze whole.
+Before the load (`reject_unsupported_mtp_options`, `halo/trainers/sft_rules.py`): context, tensor and pipeline parallelism, HSDP, an accelerate launch, adapters and quantized loads, `lowp_precision`, `torch_compile`, `tree_packing`, image rows, label smoothing, `loss_type` other than `nll` or `chunked_nll`, `save_sharded_ep` where the export writes trunk copies, and `mtp_head_source` under `init_from_scratch`. `head_only` also refuses gradient checkpointing and `gradient_checkpointing_plan`, freeze patterns, `init_from_scratch`, a balancing mode that updates off the trunk, `fp32_non_ep_params`, `fp32_experts`, and a gate with no eval split. A trainer whose forward takes no labels raises at construction, as does a head the freeze patterns froze whole.
 
 A run trained under context or tensor parallelism gets a head through a `head_only` fit on its export, at rows short enough to run without either.

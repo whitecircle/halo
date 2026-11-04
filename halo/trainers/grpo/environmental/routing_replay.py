@@ -344,10 +344,9 @@ class RoutingReplayMixin:
             elif step.tool_mask.any():
                 self._batch_errors.record(
                     "routing_replay='rollout' but no rollout in this batch returned routed_experts "
-                    "— serve vLLM >= 0.22 with --enable-return-routed-experts and a non-FlashInfer "
-                    "MoE backend (--moe-backend triton), or SGLang with --enable-return-routed-experts "
-                    "and --moe-runner-backend triton (the triton_kernel/flashinfer runners bypass "
-                    "the capture hook)."
+                    "— serve vLLM with --enable-return-routed-experts and --moe-backend triton, or "
+                    "SGLang with --enable-return-routed-experts and --moe-runner-backend triton (the "
+                    "triton_kernel/flashinfer runners bypass the capture hook)."
                 )
             elif is_global_main_process():
                 logger.warning(

@@ -6,7 +6,7 @@ The MoE expert step sorts tokens by expert (contiguous per-expert blocks), build
 
 ## Performance
 
-Every figure on this page is from Halo 1.1.0 or earlier, except the two 1.2.0 rows that open this section.
+Every figure on this page is from Halo 1.1.0 or earlier, except the two 1.2.0 rows that open this section and Nemotron-H's backward below.
 
 **Routing sort (1.2.0).** The counting sort against the torch construction, which runs about 31 small aten ops per MoE layer pass. On 8× B300 at the [1.2.0 comparison's shapes](throughput-benchmarks.md#120-against-110), three rounds, peaks equal, step-1 loss bitwise: gpt-oss-20b ep8 × cp2 **+10.6%**, Qwen3.5-35B-A3B ep8 +9.0%, gpt-oss-20b ep2 +6.8%, ep8 × tp2 +5.7%, ep8 +2.2%.
 
@@ -41,7 +41,7 @@ gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop
 
 Local-expert *count* is the primary lever; batch (per-expert M) shrinks the margin. **Rule: keep grouped (the default); at these shapes the loop is never faster, and the gap is smallest at high EP with large batches (+31% at ep8 b4).** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
-The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime too, between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured. Nemotron-H (512 experts, top-22, `ep8`) holds 64 local experts at per-expert M = 2,816 (8192) to 11,264 (32k), derived the same way, and its gateless experts take two grouped calls per layer instead of three; measured at 8192 tokens on one layer of the release, its backward takes 14 ms grouped against 2.0 s for the loop.
+The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime too, between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured. Nemotron 3.5 Super (512 experts, top-22, `ep8`) holds 64 local experts at per-expert M = 2,816 (8192) to 11,264 (32k), derived the same way, and its gateless experts take two grouped calls per layer instead of three; measured at 8192 tokens on one layer of the release, its backward takes 14 ms grouped against 2.0 s for the loop.
 
 **2. Square experts with K not tile-aligned.** If `hidden == intermediate` (no 4× expansion) and `hidden % 128 != 0`, the CUTLASS K-tail epilogue runs on both projections; the loop picks a per-matmul tile and absorbs the misalignment.
 
@@ -128,6 +128,7 @@ Every EP MoE family ([roster](../parallelism/expert-parallelism.md#supported-mod
 the call count follows the stored weight layout. A family keeping the fused `gate_up_proj` pair runs 2 calls
 (gate_up + down). Three store the halves apart and run 3 (gate + up + down): Qwen3 MoE splits its pre-fused
 tensors at init, GPT-OSS de-interleaves its interleaved pair, and Bailing/Ling stacks its per-expert modules.
+Nemotron-H's experts have no gate and run 2 (up + down).
 
 The GLU activation and multiply run as one fused Triton kernel wherever the family's activation allows
 ([GLM-4 → Fused SwiGLU](../models/glm4.md#fused-swiglu) lists who gets which); GPT-OSS's clamped SwiGLU
@@ -136,7 +137,7 @@ has its own kernel (`GluCombine.gptoss`, `halo/kernels/fused_glu.py`).
 > [!NOTE]
 > **Expert Tensor Parallelism**
 >
-> When `expert_tp_size > 1`, every family runs grouped GEMM on the 3-call separate-projection path, over its slice of each local expert: the halves are stored apart as `gate_proj`/`up_proj` before the intermediate dim is sharded (a fused `gate_up_proj` is split, GptOss's interleaved pair de-interleaved), and `down_proj` is sharded on its input dim.
+> When `expert_tp_size > 1`, every family with a gate runs grouped GEMM on the 3-call separate-projection path, over its slice of each local expert: the halves are stored apart as `gate_proj`/`up_proj` before the intermediate dim is sharded (a fused `gate_up_proj` is split, GptOss's interleaved pair de-interleaved), and `down_proj` is sharded on its input dim. Nemotron-H keeps its 2 calls over the same slices.
 
 ## Standalone grouped GEMM mode
 
@@ -158,7 +159,8 @@ Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap 
 All EP MoE layers store expert weights in matmul convention `[E, K, N]` (so `A @ B[group]` works directly, no runtime transpose). Per-family init conversions:
 
 - **Qwen3**: pre-fused `gate_up_proj [E, 2M, H]` chunked to gate/up and transposed to `[E, H, M]`; `down_proj [E, H, M]` → `[E, M, H]` (`EPQwen3MoELayer` raises at construction if the experts container is not pre-fused).
-- **Fused-GLU families** (everything but Qwen3, Bailing and GptOss): transpose from `F.linear` convention (`gate_up_proj → [E, H, 2M]`, `down_proj → [E, M, H]`) in `_init_fused_glu_params`.
+- **Fused-GLU families** (everything but Qwen3, Bailing, GptOss and Nemotron-H): transpose from `F.linear` convention (`gate_up_proj → [E, H, 2M]`, `down_proj → [E, M, H]`) in `_init_fused_glu_params`.
+- **Nemotron-H**: `up_proj` and `down_proj` transposed the same way, at the latent's width rather than the hidden's (`up_proj → [E, L, M]`, `down_proj → [E, M, L]`).
 - **GptOss**: matmul convention natively; the interleaved `gate_up_proj [E, H, 2M]` (`[g0,u0,g1,u1,…]`) is de-interleaved at init into `gate_proj_gmm`/`up_proj_gmm [E, H, M]` (even/odd cols), avoiding stride-2 slicing on `grouped_mm` output.
 
 Each family's `ExpertLayout` reverses its conversion on save, so checkpoints stay compatible with the original architecture and non-EP inference. See [Checkpoints](../reference/checkpoints.md).

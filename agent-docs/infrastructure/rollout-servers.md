@@ -98,10 +98,10 @@ pinned host memory instead crosses PCIe twice before the NIC sees it: 19–24 GB
 staged on the device (8× B300 nodes over EFA; the vLLM rate measured on vLLM 0.26.0, the SGLang rate
 measured on SGLang 0.5.17).
 
-The forwarding rank's peak during a sync is the assembled EP layer being sent (~28 GB for one 397B
+The forwarding rank's peak during a sync is the assembled EP layer being sent (~13 GB for one 397B
 layer), plus the snapshot of the chunk being sent and the engine path's send buffer, each the size of that chunk:
-SGLang's arena, grown to the largest chunk, or vLLM's packed buffer, so 28 + 18.6 + 18.6 GB on vLLM at 397B (calculated
-from the fused bank's 18.6 GB). A family whose hub split is a reverse converter (Step-3.7) also holds the split copies
+SGLang's arena, grown to the largest chunk, or vLLM's packed buffer, so 12.9 + 8.6 + 8.6 GB on vLLM at 397B (calculated
+from the fused bank's 8.6 GB). A family whose hub split is a reverse converter (Step-3.7) also holds the split copies
 beside the layer.
 
 With several servers (`rollout_server_configs`) one snapshot per parameter is shared, each chunk goes
@@ -504,7 +504,7 @@ their recipes serve without a parser.
 | Qwen3, the 2507 releases included; most others | `hermes` (JSON inside `<tool_call>` tags) |
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does not parse their XML `<function=…>` calls) |
 | GPT-OSS | plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
-| GLM-4 | `glm45` / `glm47` |
+| GLM-4.7-Flash | `glm47` |
 | Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text); with a thinking cap also `VLLM_REASONING_PARSER=gemma4` |
 | LFM-2 | `lfm2` (pythonic calls between `<\|tool_call_start\|>` and `<\|tool_call_end\|>`) |
 | Laguna | `poolside_v1` (`<tool_call>` with `<arg_key>`/`<arg_value>` pairs) |
@@ -573,8 +573,10 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
   in each choice's `meta_info` when sampled ids are captured, response-level under
   `sglext.routed_experts` otherwise; rows cover the full sequence. The capturer exits at start for a dense
   model and Gemma 4 (no `num_experts_per_tok`; Gemma 4 has no routing replay on either engine). Families with
-  a passing R3 row: [Coverage](#coverage). Keep `--enable-torch-compile` off under R3: capture × compile
-  produces isolated catastrophic log-ratio rows.
+  a passing R3 row: [Coverage](#coverage).
+- **`--enable-torch-compile`** is refused under `routing_replay: rollout`, as capture under it returns corrupt rows.
+  With no replay, on 0.5.22, a server under the flag does not start on Qwen3-30B-A3B and takes about 10 minutes to
+  start on gpt-oss-20b.
 - **`rollout_max_thinking_tokens` is refused** for every model (SGLang ignores unknown request fields).
   Steer with `reasoning_effort`, which reaches the chat template only; a per-level `thinking_tokens`
   reaches no request field and is warned once.
@@ -596,11 +598,12 @@ Ling-mini-2.0 land there, since their templates carry no `enable_thinking` toggl
 Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25`, which ran on Qwen3-30B-A3B-Instruct-2507 (0.5.22 logs it
 as the old spelling of `qwen`), and Ling-mini-2.0 with `SGLANG_TOOL_PARSER=hermes`, the parser its rows ran on.
 
-Sampling stays off any grammar. Upstream, `glm47`, the parser `auto` resolves on GLM-4.7, builds a full-assistant
-grammar for every tool-bearing request: the sampler masks tokens under it, the reported log-probs carry the mask, and
-the trainer scores the unmasked distribution. `docker/sglang/patches/patch_sglang.py` removes that flag and the build
-asserts, on the real parser, that `tool_choice: auto` carries no constraint on any parser a family resolves to, so a
-malformed call stays text the environment scores, as on vLLM.
+Sampling stays off any grammar. By upstream's code, `glm47`, the parser `auto` resolves on GLM-4.7, builds a
+full-assistant grammar for every tool-bearing request: the sampler masks tokens under it, the reported log-probs carry
+the mask, and the trainer scores the unmasked distribution. `docker/sglang/patches/patch_sglang.py` removes that flag
+and the build asserts, on the real parser, that `tool_choice: auto` carries no constraint on any parser a family
+resolves to, so a malformed call stays text the environment scores, as on vLLM. On GLM-4.7-Flash the patch makes no
+visible change on the prompts that ran.
 
 ### NCCL transport (SGLang)
 
@@ -704,10 +707,7 @@ compose `cpuset:`). Batch sizes and timeouts:
 
 **Servers × TP.** Run one engine per GPU, grouped into the fewest servers that hold the model: a second
 engine on one GPU only time-slices it (and two starting at once fail their memory profiling), and
-fewer servers shrink the sync fan-out. Where rollout collection dominates (a tool-heavy environment
-such as `code_contests`, gpt-oss-20b on 4 B300s, measured on vLLM 0.26.0), 2×(TP=2) and 4×(TP=1) give the
-same step time; re-measure short single-turn
-environments before consolidating. Per-server request load is
+fewer servers shrink the sync fan-out. Per-server request load is
 `max_concurrent_rollouts × world_size / num_servers` per round in flight (`prefetch_depth` of them under
 prefetch): every rank builds its own actor pool, under TP
 too ([Ray → Pool sizing](ray.md#pool-sizing)), and dispatch is round-robin regardless of load, each rank starting at
@@ -720,8 +720,9 @@ R3 then refuses to start): speculation can poison the align-mode prefix cache an
 guard for the pair.
 
 **Speculative decoding (MTP).** A checkpoint with a multi-token-prediction head (Qwen3.5/3.6, `mtp.*`
-tensors) drafts with it through `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":2}'`.
-It is sound for RL: rejection sampling keeps the target distribution, `processed_logprobs` come from the
+tensors) drafts with it through `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`.
+Rejection sampling keeps the target distribution, up to the bf16 rounding a draft's batch shape changes
+([Serving](../optimization/mtp-heads.md#serving), SGLang's flags too), `processed_logprobs` come from the
 target logits, the thinking budget is enforced on the target, and the drafter's embeddings and
 `lm_head` are the target's modules, so the sync updates them (the MTP layer keeps launch weights, which
 only moves acceptance), except Step-3.5/3.7, which keep one head per draft layer. The server base must store
@@ -769,7 +770,7 @@ A dash is a shape the code admits with no row on that engine.
 **Weight push** (`test_weight_push_exact.py`, 40 rows). A push of the unchanged checkpoint leaves every served
 log-prob bit-identical, on 2,010 positions (987 on Step-3.7's tiny checkpoint): dense Qwen3-0.6B plain and at TP=2;
 gpt-oss-20b, every checkpoint of the second table below and Step-3.7 at `ep1` and EP=2, on each engine that takes the
-family.
+family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2 (2,010 positions).
 
 **Async GRPO, full fine-tuning**: vLLM on Qwen3-30B-A3B at 2 ranks and gpt-oss-20b at 4, SGLang on gpt-oss-20b at 2 and
 4, dense rows on Qwen3-0.6B.
@@ -788,7 +789,7 @@ family.
 | Native expert LoRA | EP=2, EP=4, EP=2 resume | EP=2, EP=4, EP=2 resume |
 | Resume | EP=2, `ep1` LoRA | `ep1`, `ep1` LoRA |
 | Prefetch | EP=2 at depth 1 and 2 | `ep1` at depth 1 |
-| Two servers | EP=2 at prefetch depth 1; one rank at depth 1 and 2 | - |
+| Two servers | EP=2 at prefetch depth 1; one rank at depth 1 and 2 | 2 ranks, no prefetch |
 | R3 | `ep1`, EP=2, chunked, prefetch depth 1 | `ep1`, `ep1` LoRA, TP=2, `ep1` resume, chunked, prefetch depth 1 |
 | R2 | EP=2 | EP=2 |
 | A server at TP=2 | Qwen3-30B-A3B at `ep1` | Qwen3-30B-A3B at `ep1` |
@@ -810,7 +811,8 @@ Other checkpoints, async GRPO at 2 ranks:
 Online GRPO and SDPG ran on Qwen3-30B-A3B (`ep1`, EP=2, EP=2 × DP=2, EP=2 on two simulated domains, EP=2 + TP=2, EP=2 +
 ETP=2, attention and expert LoRA) and Qwen3-0.6B (FSDP2, one rank, TP=2, TP=2 × DP=2, ZeRO-3, HSDP on two simulated
 domains, LoRA); online GRPO also on gpt-oss-20b, Qwen3.6-35B-A3B and Gemma 4 26B-A4B at EP=2. Step-3.7 ran as a weight
-push on a tiny hub-layout checkpoint, with no training loop. The R2 and R3 rows show capture and replay work; what they
+push on a tiny hub-layout checkpoint and on the release, with no training loop, and on the release as one step of expert
+LoRA at EP=4. The R2 and R3 rows show capture and replay work; what they
 change: [Trainer and engine noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise).
 
 An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`) takes
@@ -825,7 +827,8 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 
 | Symptom | Cause → fix |
 |---|---|
-| Every completion hangs after a trainer died mid-sync, with vLLM's `/health` still 200 and SGLang's hanging too | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused. The next trainer refuses it at startup (`is PAUSED`, or `paused or wedged` after a 60 s probe on SGLang, which has no pause route) → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it if that sync had already streamed part of the model |
+| Every completion hangs after a trainer died mid-sync, with vLLM's `/health` still 200 and SGLang's hanging too | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused. The next trainer refuses it at startup (`is PAUSED`, or `paused or wedged` after a 60 s probe on SGLang, which has no pause route) → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it if that sync had already streamed part of the model. vLLM's update session unloads the model when it opens, and `/resume` then takes the engine down: restart it |
+| A server dies mid-run and the trainer goes on for minutes | Rollouts and the sync run out their timeouts first: a killed engine (`docker kill`, one server) raises after about 4 minutes on either engine, naming the server, and a frozen one (`docker pause`, SGLang at 2 ranks) after about 20 → let it raise or stop the run, then restart the server |
 | Group formation times out, "1/2 clients joined" | A bridge network hides the rendezvous port → `network_mode: host` on both containers |
 | First sync takes minutes, `/health` unanswered | One-time NCCL group init per server; the engine pauses mid-update → wait |
 | 400 on every rollout (vLLM) | A thinking budget without a reasoning parser → set `VLLM_REASONING_PARSER`; otherwise rollouts return zero tokens and the run trains on all-masked batches |
