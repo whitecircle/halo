@@ -1,0 +1,62 @@
+# NVIDIA Nemotron 3.5 Lightning (nemotron_h) — EP=8 fit of the released MTP head over a frozen trunk: an attention block
+# and a MoE block at mtp.layers.0 and mtp.layers.1. See agent-docs/optimization/mtp-heads.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+#
+# This recipe ran 6 steps at 9,075 tok/s per rank and 14.1-14.5 GiB peak allocated, too few to show a fit. On first-turn
+# rows the acceptance gate stopped a fit at learning_rate 1e-5 and passed one at 1e-6, the rate here, with no gain to
+# quote. mtp_loss_type: hard is the other objective.
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+
+# --- MTP head ---
+mtp_loss_weight: 1.0
+mtp_loss_type: soft
+mtp_train_scope: head_only
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.001                      # the gate scores held-out rows at step 0 and every eval_steps
+
+# --- Parallelism ---
+expert_parallel_size: 8               # 128 routed experts -> 16/rank; one dispatch group on 8 GPUs
+gradient_checkpointing: false         # the frozen trunk holds no graph
+
+# --- Attention & sequence ---
+max_length: 4096
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+max_steps: 150
+
+# --- Optimizer & LR schedule ---
+learning_rate: 1.0e-06
+lr_scheduler_type: constant_with_warmup
+warmup_steps: 20
+
+# --- Checkpointing & evaluation ---
+save_steps: 150
+eval_strategy: steps
+eval_steps: 30
+save_only_model: true
+output_dir: checkpoints/nemotron-3.5-lightning-mtp-head-only
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# The tokenizer pads with its eos, <|im_end|>; <unk> is the pad id the release's config records, so an export keeps it.
+pad_token: <unk>
+# The hub template renders every assistant turn with no reasoning as <think></think> plus its text, and the empty block
+# trains as part of the completion.
+assistant_message_template: "<|im_start|>assistant\n"

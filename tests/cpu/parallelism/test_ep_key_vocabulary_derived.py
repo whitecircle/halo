@@ -18,9 +18,8 @@ from halo.model_loading.parallel.lazy_plan import (
     ExpertKeyLayout,
     is_lazy_loadable,
 )
-from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, to_hub_expert_tensors
+from halo.models.moe.expert_layout import GLU_PROJECTIONS, HF_FUSED_EXPERT_KEYS, to_hub_expert_tensors
 from halo.models.moe.family_specs import (
-    GLU_PROJECTIONS,
     MOE_FAMILY_SPECS,
     ZAYA,
     MoEFamilySpec,

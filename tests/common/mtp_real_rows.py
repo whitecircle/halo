@@ -47,18 +47,24 @@ def ultrachat_conversations(split: str) -> Dataset:
 
 
 def first_turn_rows(
-    conversations: Iterable[dict], tokenizer, count: int, *, length: int, max_prompt: int
+    conversations: Iterable[dict],
+    tokenizer,
+    count: int,
+    *,
+    length: int,
+    max_prompt: int,
+    template_kwargs: dict | None = None,
 ) -> list[tuple[list[int], int]]:
     """``count`` rows of a first user turn and the reply it got, tokenized apart, as ``(ids, reply_start)``: long enough
     to fill ``length``, with a prompt of at most ``max_prompt``. The SFT pipeline renders a whole conversation and masks
-    every turn, so a bar set on these rows does not transfer to it."""
+    every turn, so a bar set on these rows does not transfer to it. ``template_kwargs`` reach the chat template."""
     rows: list[tuple[list[int], int]] = []
     for conversation in conversations:
         messages = conversation["messages"]
         if len(messages) < 2 or messages[0]["role"] != "user" or messages[1]["role"] != "assistant":
             continue
         rendered = tokenizer.apply_chat_template(
-            messages[:1], tokenize=True, add_generation_prompt=True, return_dict=False
+            messages[:1], tokenize=True, add_generation_prompt=True, return_dict=False, **(template_kwargs or {})
         )
         prompt = list(rendered["input_ids"] if hasattr(rendered, "keys") else rendered)
         if len(prompt) > max_prompt:

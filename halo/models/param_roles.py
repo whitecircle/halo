@@ -67,15 +67,19 @@ def fp32_pin_matches(names: Iterable[str], pins: Iterable[str]) -> frozenset[str
     return frozenset(name for name in names if pattern.search(name))
 
 
-def fp32_pinned_names(model: torch.nn.Module, *, include_buffers: bool = False) -> frozenset[str]:
-    """Read off every class in the tree, so a wrapper derives the same set as the model; a pin can name a buffer (GLM-5
-    Next's ``e_score_correction_bias``)."""
-    pins = {
+def declared_fp32_pins(model: torch.nn.Module) -> set[str]:
+    """Read off every class in the tree, so a wrapper derives the same set as the model."""
+    return {
         pin
         for cls in {type(module) for module in model.modules()}
         for attr in ("_keep_in_fp32_modules", "_keep_in_fp32_modules_strict")
         for pin in (getattr(cls, attr, None) or [])
     }
+
+
+def fp32_pinned_names(model: torch.nn.Module, *, include_buffers: bool = False) -> frozenset[str]:
+    """A pin can name a buffer (GLM-5 Next's ``e_score_correction_bias``)."""
+    pins = declared_fp32_pins(model)
     names = [name for name, _ in model.named_parameters()]
     if include_buffers:
         names += [name for name, _ in model.named_buffers()]

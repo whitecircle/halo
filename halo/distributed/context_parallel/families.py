@@ -9,6 +9,7 @@ from transformers.models.cohere2_moe.modeling_cohere2_moe import rotate_half as 
 from transformers.models.mistral4.modeling_mistral4 import get_llama_4_attn_scale
 
 from halo.distributed.context_parallel.ulysses_attention import MLAUlyssesAttention, UlyssesAttention
+from halo.models.attention.gpt_oss_sinks import neutralized_sink_floor
 from halo.subclass_registry import build_class_claim_map
 
 
@@ -125,7 +126,7 @@ class GptOssUlyssesAttention(UlyssesAttention):
             return
         self._sinks_checked = True
         sinks = self.sinks
-        if sinks is not None and not torch.all(sinks <= torch.finfo(sinks.dtype).min * 0.99):
+        if sinks is not None and not torch.all(sinks <= neutralized_sink_floor(sinks)):
             raise ValueError(
                 "GPT-OSS under Context Parallelism requires reset sinks (reset_sinks: true): the CP "
                 "attention kernels drop the sink column, so non-reset sinks give a wrong softmax "

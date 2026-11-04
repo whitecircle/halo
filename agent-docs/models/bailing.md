@@ -16,6 +16,8 @@ Attention is what differs: layers alternate in groups of `layer_group_size`, wit
 
 Neither layer type keeps a packed row's documents apart. The MLA layers build their mask from `attention_mask` alone, like Ling 2.0's SDPA path, and the KDA op's `cu_seqlens` kwarg is unreachable: the model forward passes its layers no extra kwargs ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
+Transformers also ships a native `bailing_hybrid` class, which `trust_remote_code: false` loads where the checkpoint's config validates (Ling-3.0-flash does; Ling-3.0-tiny's `kda_lower_bound: -5` raises `StrictDataclassFieldValidationError`). It builds `BailingHybridMoE`, which no EP layer claims, so an EP group on it is refused at load (`reject_ep_without_family`) and Liger warns that nothing is patched: train Ling 3.0 under `trust_remote_code: true`.
+
 Four consequences for a training config:
 
 - **Pin `attn_implementation: sdpa`.** The modeling file declares only the v4-era `_supports_flash_attn_2`, which transformers v5 ignores in favor of `_supports_flash_attn`, and carries no flash attention class for the [template patch](#attention-and-packing) to route, so an auto-selected flash label (FA4 on Blackwell, FA3 on Hopper) is refused at model build. The KDA layers run their own `fla` kernels either way.

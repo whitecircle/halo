@@ -220,11 +220,11 @@ def test_zero_bias_routing_matches_the_stock_qwen3_5_router():
     router = Qwen3_5MoeTopKRouter(config)
 
     class _Wrapper:
-        """What ``_deepseek_biased_route`` reads at zero bias. It must track the base methods it borrows by name."""
+        """What Qwen3.5's ``_biased_route`` reads at zero bias. It must track the base methods it borrows by name."""
 
         top_k = config.num_experts_per_tok
         balancing_biases = torch.zeros(config.num_experts)
-        _deepseek_biased_route = EPMoELayerBase._deepseek_biased_route
+        _biased_route = EPQwen3_5MoELayer._biased_route
         _biased_topk = EPMoELayerBase._biased_topk
         _transient_balancing_bias = EPMoELayerBase._transient_balancing_bias
 
@@ -232,7 +232,7 @@ def test_zero_bias_routing_matches_the_stock_qwen3_5_router():
             return indices
 
     logits, router_weights, router_indices = router(torch.randn(64, config.hidden_size))
-    indices, weights = _Wrapper()._deepseek_biased_route(logits)
+    indices, weights = _Wrapper()._biased_route(logits)
 
     assert torch.equal(indices, router_indices), "a zero bias must select exactly the router's experts"
     assert torch.allclose(weights, router_weights.float(), atol=1e-6), "and gate them the same way"

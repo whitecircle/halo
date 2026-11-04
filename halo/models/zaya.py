@@ -15,6 +15,7 @@ from halo.models.attention.packed_position_ids import get_stashed_position_ids, 
 from halo.models.gradient_checkpointing import counts_toward_expert_load
 from halo.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR
 from halo.models.segment_markers import document_ids, document_starts
+from halo.models.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,30 @@ _DOCUMENT_ISOLATED_ATTR = "_halo_document_isolated"
 
 
 def apply_zaya_patches() -> None:
+    verify_upstream_parameters(
+        zaya_modeling.ZayaCCAProjection.forward,
+        ("self", "hidden_states", "past_key_values", "conv_mask"),
+        "_install_document_isolated_cca",
+    )
+    verify_upstream_parameters(
+        zaya_modeling.ZayaRouter.forward,
+        ("self", "hidden_states", "router_states"),
+        "patch_zaya_router_load_recording",
+    )
+    verify_upstream_parameters(
+        zaya_modeling.ZayaModel.forward,
+        (
+            "self",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "past_key_values",
+            "inputs_embeds",
+            "use_cache",
+            "kwargs",
+        ),
+        "patch_zaya_packed_document_isolation",
+    )
     patch_zaya_router_load_recording()
     patch_zaya_gradient_checkpointing_refusal()
     patch_zaya_fp32_interlayer_residual()

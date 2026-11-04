@@ -15,7 +15,7 @@ _LEARNING_RATE = 3e-3
 _LOW_TOKEN, _HIGH_TOKEN = 4, 90
 _CHANCE_BAR = 0.1
 _FIT_BAR = 0.9
-_NAMES = ("qwen3_5_moe_text", "glm4_moe_lite")
+_NAMES = ("qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h")
 
 
 def _tokens(seed: int, rows: int = 16, length: int = 24) -> torch.Tensor:

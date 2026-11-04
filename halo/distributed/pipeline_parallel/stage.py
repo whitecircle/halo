@@ -4,6 +4,7 @@ last stage. Non-first stages run on ``inputs_embeds`` so HF's own ``embed_tokens
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 from dataclasses import dataclass, replace
 from types import MethodType
@@ -35,6 +36,7 @@ from halo.models.module_tree import (
     split_layer_path,
 )
 from halo.models.segment_markers import packed_row_segment_kwargs, segment_markers_for
+from halo.models.upstream_guard import verify_upstream_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +390,9 @@ def build_pipeline_stage(
         _replace_submodule(model, layout.embedding_path, None)
         stream_forward = resolve_pp_spec(backbone).stream_forward
         if stream_forward is not None:
+            verify_upstream_parameters(
+                type(backbone).forward, tuple(inspect.signature(stream_forward).parameters), stream_forward.__name__
+            )
             # Per instance, not on the class: stage 0 and any unsplit model in the process keep the
             # real forward, while nn.Module.__call__ and every FSDP2/GC hook resolve this one.
             backbone.forward = MethodType(stream_forward, backbone)

@@ -591,8 +591,8 @@ each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 **Models.** The wrapped families in the [table above](#supported-models), plus the per-family
-restrictions. A `ep_group_size > 1` run that patches **zero** MoE layers raises — that is how a
-dense model under EP or pure ETP is rejected.
+restrictions. A `ep_group_size > 1` run on a dense model or a MoE with no family spec is refused at load,
+before the process groups (`reject_ep_without_family`), and one that still patches **zero** MoE layers raises.
 
 **Axis combinations.** EP composes with one of TP, CP or ETP; the allowlist and the topology rules
 on top of it: [Supported combinations](README.md#supported-combinations).

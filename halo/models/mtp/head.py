@@ -1,4 +1,4 @@
-"""A family's released MTP head built from its own decoder layer at the release's key path, and the hooks that run it
+"""A family's released MTP head built from its own decoder layers at the release's key path, and the hooks that run it
 inside the model's forward so its term shares the next-token loss's normalizer."""
 
 from __future__ import annotations
@@ -17,7 +17,13 @@ from accelerate import init_empty_weights
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, logit_chunk_rows
 from halo.models.config_access import text_config
 from halo.models.head_transform import resolve_head_transform
-from halo.models.module_tree import backbone_with_layers, decoder_layers, decoder_layers_attr, find_module_path
+from halo.models.module_tree import (
+    backbone_with_layers,
+    decoder_layers,
+    decoder_layers_attr,
+    find_module_path,
+    module_path,
+)
 from halo.models.moe.config_fields import require_router_aux_loss_coef
 from halo.models.mtp.acceptance import score_drafts
 from halo.models.mtp.spec import (
@@ -40,7 +46,7 @@ class MtpLossSplit(NamedTuple):
 
 
 class MtpHeadChain:
-    """``forward(e_next, h_in, *layer_args, **layer_kwargs)``: norms, projection, the family's decoder layer and the
+    """``forward(e_next, h_in, *layer_args, **layer_kwargs)``: norms, projection, the family's decoder layers and the
     output norm as one call, so a wrapper that gathers on a forward holds the whole head for it."""
 
     _mtp_spec: MtpHeadSpec
@@ -62,15 +68,19 @@ class MtpHeadChain:
 
 
 class RootMtpHead(MtpHeadChain, nn.Module):
-    """``mtp.*``: the draft layer under ``mtp.layers.0``, the projection set beside it."""
+    """``mtp.*``: the draft blocks under ``mtp.layers``, the projection set where the release stores it. Each block takes
+    the attention layer's call, which a block of another kind ignores as the trunk's does."""
 
-    def __init__(self, spec: MtpHeadSpec, layer: nn.Module):
+    def __init__(self, spec: MtpHeadSpec, blocks: list[nn.Module]):
         super().__init__()
         self._mtp_spec = spec
-        self.add_module(ROOT_HEAD_LAYERS_ATTR, nn.ModuleList([layer]))
+        self.add_module(ROOT_HEAD_LAYERS_ATTR, nn.ModuleList(blocks))
 
     def _run_draft_layer(self, hidden: torch.Tensor, *layer_args, **layer_kwargs):
-        return getattr(self, ROOT_HEAD_LAYERS_ATTR)[0](hidden, *layer_args, **layer_kwargs)
+        for block in getattr(self, ROOT_HEAD_LAYERS_ATTR):
+            output = block(hidden, *layer_args, **layer_kwargs)
+            hidden = output[0] if isinstance(output, tuple) else output
+        return hidden
 
 
 def _list_head_class(layer_class: type[nn.Module]) -> type[nn.Module]:
@@ -94,11 +104,9 @@ def build_mtp_head(model: nn.Module, spec: MtpHeadSpec, *, device: str | torch.d
     text = text_config(model.config)
     backbone = backbone_with_layers(model)
     layers = decoder_layers(backbone)
-    index = mtp_draft_layer_index(text)
-    layer_class = type(layers[index])
     hidden_size = text.hidden_size
 
-    def build_layer(cls: type[nn.Module]) -> nn.Module:
+    def build_block(cls: type[nn.Module], index: int) -> nn.Module:
         if str(device) == "meta":
             # Parameters on meta, buffers real, as the lazy shell holds them.
             with init_empty_weights(include_buffers=False):
@@ -107,21 +115,26 @@ def build_mtp_head(model: nn.Module, spec: MtpHeadSpec, *, device: str | torch.d
             return cls(text, index)
 
     if spec.placement == "root":
-        head = RootMtpHead(spec, build_layer(layer_class))
+        indices = [mtp_draft_layer_index(text, kind) for kind in spec.chain_kinds]
+        head = RootMtpHead(spec, [build_block(type(layers[index]), index) for index in indices])
     else:
-        head = build_layer(_list_head_class(layer_class))
+        index = mtp_draft_layer_index(text)
+        head = build_block(_list_head_class(type(layers[index])), index)
         head._mtp_spec = spec
     with torch.device(device):
         _set_submodule(head, spec.projection, nn.Linear(2 * hidden_size, hidden_size, bias=False))
+    trunk_norm = getattr(backbone, spec.trunk_norm)
     for path in (spec.embedding_norm, spec.hidden_norm, spec.output_norm):
-        _set_submodule(head, path, copy.deepcopy(backbone.norm).to(device))
+        _set_submodule(head, path, copy.deepcopy(trunk_norm).to(device))
     return head
 
 
 def mtp_head_path(model: nn.Module, spec: MtpHeadSpec) -> str:
-    """Where ``spec``'s release stores the head, relative to ``model``'s state dict."""
+    """Where ``spec``'s release stores the head, relative to ``model``'s state dict: a ``root`` head beside the output
+    embedding it shares, whichever level of a composite holds that."""
     if spec.placement == "root":
-        return ROOT_HEAD_ATTR
+        owner = module_path(model, model.get_output_embeddings()).rpartition(".")[0]
+        return f"{owner}.{ROOT_HEAD_ATTR}" if owner else ROOT_HEAD_ATTR
     backbone = backbone_with_layers(model)
     parent = find_module_path(model, backbone)
     layers = f"{parent}.{decoder_layers_attr(backbone)}" if parent else decoder_layers_attr(backbone)
@@ -131,7 +144,7 @@ def mtp_head_path(model: nn.Module, spec: MtpHeadSpec) -> str:
 def attach_mtp_head_module(model: nn.Module, head: nn.Module, spec: MtpHeadSpec) -> None:
     """A ``list`` head joins the decoder list past ``num_hidden_layers``, which the family's forward slices off."""
     if spec.placement == "root":
-        model.add_module(ROOT_HEAD_ATTR, head)
+        model.get_submodule(mtp_head_path(model, spec).rpartition(".")[0]).add_module(ROOT_HEAD_ATTR, head)
     else:
         decoder_layers(backbone_with_layers(model)).append(head)
 

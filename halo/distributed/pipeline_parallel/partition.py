@@ -9,7 +9,7 @@ from halo.distributed.pipeline_parallel.model_rules import require_backbone
 from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from halo.models.config_access import get_config_field, text_config
 from halo.models.module_tree import backbone_with_layers, decoder_layers
-from halo.models.moe.config_fields import has_routed_experts, resolve_router_topk
+from halo.models.moe.config_fields import has_routed_experts, resolve_expert_ffn_width, resolve_router_topk
 
 
 def layer_types_shift_invariant(layer_types, shift: int) -> bool:
@@ -116,9 +116,7 @@ def head_cost_layer_equivalents(config) -> float:
     head_dim = resolve_head_dim(config)
     kv_heads = resolve_num_key_value_heads(config)
     attn = 2 * hidden * heads * head_dim + 2 * hidden * kv_heads * head_dim
-    intermediate = get_config_field(config, "moe_intermediate_size", per_layer_reduce=max) or get_config_field(
-        config, "intermediate_size", per_layer_reduce=max
-    )
+    intermediate = resolve_expert_ffn_width(config, per_layer_reduce=max)
     if not intermediate:
         return 0.0
     # Gated on the model being MoE: the ``top_k`` spelling doubles as a legacy generation parameter a

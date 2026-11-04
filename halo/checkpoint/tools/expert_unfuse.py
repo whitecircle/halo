@@ -25,12 +25,12 @@ from halo.checkpoint.tools.offline_export import (
     reject_in_place_conversion,
 )
 from halo.checkpoint.writing import StreamingShardWriter
+from halo.models.moe.config_fields import EXPERT_FFN_WIDTH_FIELDS
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, iter_per_expert_split
 from halo.models.moe.family_specs import (
     experts_container_attrs,
     find_moe_family_spec,
     per_expert_hub_model_types,
-    per_expert_layouts,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,16 +68,12 @@ def resolve_per_expert_layout(ckpt_dir: str) -> tuple[str, str, str]:
 
 
 def _moe_dims(ckpt_dir: str) -> tuple[int | None, int | None, str]:
-    """``(hidden_size, moe_intermediate_size, model_type)`` from config.json, VLM ``text_config`` fallback."""
+    """``(hidden_size, expert FFN width, model_type)`` from config.json, VLM ``text_config`` fallback."""
     cfg = read_checkpoint_config(ckpt_dir)
     tc = cfg.get("text_config", {})
     hidden = cfg.get("hidden_size") or tc.get("hidden_size")
-    # moe_intermediate_size is the expert FFN width on contiguous fused-GLU families; some declare only the dense.
-    inter = (
-        cfg.get("moe_intermediate_size")
-        or tc.get("moe_intermediate_size")
-        or cfg.get("intermediate_size")
-        or tc.get("intermediate_size")
+    inter = next(
+        (value for field in EXPERT_FFN_WIDTH_FIELDS for source in (cfg, tc) if (value := source.get(field))), None
     )
     return hidden, inter, detect_model_type(ckpt_dir)
 
@@ -85,23 +81,13 @@ def _moe_dims(ckpt_dir: str) -> tuple[int | None, int | None, str]:
 @lru_cache(maxsize=1)
 def _fused_key_kinds() -> tuple[tuple[str, str, bool, bool], ...]:
     """``(key suffix, container attr, splits_gate_up, is_bias)`` per fused expert tensor on the roster; cached, as
-    ``_split_fused_key`` asks once per key. A fused key naming a per-expert projection is the down matrix; the rest
-    split in half."""
-    per_expert_names = {name for layout in per_expert_layouts() for name in layout}
+    ``_split_fused_key`` asks once per key. Only ``gate_up_proj`` holds two projections to split in half."""
     kinds = []
     # Every declared container spelling, or a family nesting under ``routed_experts`` would read as already per-expert.
     for container in experts_container_attrs():
         for name in HF_FUSED_EXPERT_KEYS:
             is_bias = name.endswith("_bias")
-            stem = name.removesuffix("_bias")
-            kinds.append((f".{container}.{name}", container, stem not in per_expert_names, is_bias))
-    if not any(not splits for _suffix, _container, splits, _bias in kinds):
-        # All gate/up means the declarations drifted; splitting the down matrix would halve every output projection.
-        raise RuntimeError(
-            f"No fused expert key {[k for k, _c, _s, _b in kinds]} matches a declared per-expert projection "
-            f"{sorted(per_expert_names)}, so none can be identified as the single down matrix. "
-            f"HF_FUSED_EXPERT_KEYS and the specs' per_expert_keys have drifted apart."
-        )
+            kinds.append((f".{container}.{name}", container, name.removesuffix("_bias") == "gate_up_proj", is_bias))
     return tuple(kinds)
 
 

@@ -13,6 +13,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextTopKRouter
 
 from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
@@ -33,6 +34,12 @@ T, E, K = 6, 8, 2  # tokens, experts, top_k
 class _BareLayer(BareEPLayer):
     def __init__(self, **attrs):  # noqa: D107 — test double
         super().__init__(top_k=K, num_experts=E, **attrs)
+
+
+class _SoftmaxGatedLayer(_BareLayer):
+    """The softmax over the selected logits, as GptOss's router gates and Qwen3.5's biased route does."""
+
+    _gate_weights_at = EPGptOssMoELayer._gate_weights_at
 
 
 def _injector(layers) -> RoutingReplayInjector:
@@ -181,27 +188,27 @@ def test_group_limited_topk_forced_weights_are_live_gathers():
     assert torch.allclose(w, expected)
 
 
-def test_deepseek_biased_route_forced_equals_natural():
-    layer = _BareLayer()
+def test_biased_route_forced_equals_natural():
+    layer = _SoftmaxGatedLayer()
     layer.balancing_biases = torch.zeros(E)
     layer.expert_load_counter = None
     logits = torch.randn(T, E)
-    base_idx, base_scores = layer._deepseek_biased_route(logits)
+    base_idx, base_scores = layer._biased_route(logits)
     layer._forced_topk_indices = base_idx.clone()
-    forced_idx, forced_scores = layer._deepseek_biased_route(logits)
+    forced_idx, forced_scores = layer._biased_route(logits)
     assert torch.equal(forced_idx, base_idx)
     assert torch.equal(forced_scores, base_scores)
 
 
 def test_forced_selection_keeps_router_grad_path():
     # Replaying weights (the RSPO anti-pattern) would show zero grad at the forced indices.
-    layer = _BareLayer()
+    layer = _SoftmaxGatedLayer()
     layer.balancing_biases = torch.zeros(E)
     layer.expert_load_counter = None
     logits = torch.randn(T, E, requires_grad=True)
-    natural_idx, _ = layer._deepseek_biased_route(logits)
+    natural_idx, _ = layer._biased_route(logits)
     layer._forced_topk_indices = _shuffled_valid_indices(natural_idx)
-    idx, scores = layer._deepseek_biased_route(logits)
+    idx, scores = layer._biased_route(logits)
     # A plain scores.sum() is constant (softmax rows sum to 1) and would zero the grad by algebra.
     (scores * torch.randn_like(scores)).sum().backward()
     grad_at_forced = logits.grad.gather(1, idx)

@@ -17,15 +17,12 @@ class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("BailingMoeV2SparseMoeBlock", "BailingMoeV3SparseMoeBlock")
     FAMILY = BAILING
 
-    SUPPORTS_BIAS_BALANCING = True
     # Selection happens inside the gate (the forward never consults ``_transient_balancing_bias``), so the
     # base's transient fallback would register a buffer nothing reads.
     _supports_transient_balancing_bias = False
     # The EP layer returns a bare tensor where the V3 block returns ``(hidden, router_logits)``, so
     # ``outputs.router_logits`` stays empty; no Bailing modeling computes an aux loss regardless.
     SEVERS_AUX_LOSS = True
-
-    _NUM_EXPERTS_ATTR_PATHS = ("experts", "gate.num_experts")
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.ModuleList) -> None:
         """Resolve the activation off the first expert this rank fuses; the ``nn.ModuleList`` container holds none."""
@@ -53,6 +50,4 @@ class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
     def _route_hidden_states(self, flat: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.amp.autocast("cuda", enabled=False):
             topk_idx, topk_weight, router_logits = self.gate(self._router_input(flat))
-        topk_idx, topk_weight = self._replay_router_choice(router_logits, topk_idx, topk_weight)
-        self._record_expert_load(topk_idx)
-        return topk_idx, topk_weight
+        return self._replay_router_choice(router_logits, topk_idx, topk_weight)

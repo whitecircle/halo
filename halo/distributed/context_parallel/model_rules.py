@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
-from halo.models.attention.layout import has_linear_attention_layers
+from halo.models.attention.layout import LINEAR_ATTENTION_LAYER_TYPE, has_linear_attention_layers
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from halo.models.config_access import get_config_field, text_config
 
@@ -87,7 +87,7 @@ def reject_unsupported_ulysses_model(model: nn.Module, cp_size: int) -> None:
     # The config-only signal, for modules not instantiated yet (meta-init).
     if has_linear_attention_layers(config):
         layer_types = get_config_field(config, "layer_types")
-        num_linear = sum(layer_type == "linear_attention" for layer_type in layer_types)
+        num_linear = sum(layer_type == LINEAR_ATTENTION_LAYER_TYPE for layer_type in layer_types)
         raise CPConfigError(
             f"Ulysses CP cannot run on {model_type!r} because {num_linear} of {len(layer_types)} "
             f"layers are ``linear_attention``: {_LINEAR_ATTENTION_DETAIL}"
@@ -98,7 +98,9 @@ def reject_unsupported_ulysses_model(model: nn.Module, cp_size: int) -> None:
         raise CPConfigError(
             f"Ulysses CP only supports specific attention architectures. "
             f"Supported: {tuple(ULYSSES_ATTENTION_MAP)}. "
-            f"Model type '{model_type}' does not appear to use a supported attention module."
+            f"Model type '{model_type}' does not appear to use a supported attention module. "
+            f"Set context_parallel_size: 1, or add a Ulysses wrapper for its attention "
+            f"(agent-docs/parallelism/context-parallelism.md)."
         )
     attention_class = attention_module.__class__.__name__
     wrapper_cls = ULYSSES_ATTENTION_MAP[attention_class]

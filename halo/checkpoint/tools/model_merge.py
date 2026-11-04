@@ -28,6 +28,7 @@ from halo.model_loading.dtype import DTYPE_BY_NAME
 from halo.model_loading.model_preparation import declared_load_ignores
 from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
 from halo.models.moe.balancing import is_balancing_state_key
+from halo.models.mtp.spec import tail_load_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,8 @@ def _excused_base_keys(
     if not base_only:
         return set()
     config = AutoConfig.from_pretrained(config_source, trust_remote_code=trust_remote_code)
-    patterns = declared_load_ignores(config)
+    # The text class's tail too, as Nemotron-H's composite names none: not its other drops, a vision tower the composite reads.
+    patterns = (*declared_load_ignores(config), *tail_load_patterns(declared_load_ignores(config.get_text_config())))
     # Matched as transformers matches them: searched anywhere in the key.
     load_ignored = {key for key in base_only if any(re.search(pattern, key) for pattern in patterns)}
     return load_ignored | _tied_head_key(reference, base_only, readers, config)

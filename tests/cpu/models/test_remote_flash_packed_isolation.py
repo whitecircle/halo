@@ -13,6 +13,7 @@ from transformers import modeling_flash_attention_utils as flash_utils
 
 from halo.data.collators.factory import select_data_collator
 from halo.models.attention import remote_flash_attention
+from halo.models.attention.packed_position_ids import is_position_ids_stash_installed
 from halo.models.attention.remote_flash_attention import patch_remote_llama_flash_template
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
 from halo.models.attention.tensor_memo import TensorMemo
@@ -283,6 +284,25 @@ def test_sdpa_leaks_and_packing_is_refused_there(reference_varlen):
     with pytest.raises(ValueError, match="packed row runs as ONE dense"):
         select_data_collator(**_packing_options(ring))
     select_data_collator(**_packing_options(_tiny_ling("flash_attention_4").config))
+
+
+def test_a_template_flash_class_taking_position_ids_through_kwargs_stays_unpatched():
+    """Its non-packed runs keep working; the stash would otherwise read None on every call."""
+
+    class _Flash:
+        def forward(self, hidden_states, **kwargs):
+            return hidden_states
+
+        def _flash_attention_forward(
+            self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
+        ):
+            return query_states
+
+    module = types.ModuleType("fake_remote_modeling")
+    module.ATTENTION_CLASSES = {"flash_attention_2": _Flash}
+    assert patch_remote_llama_flash_template(module) is False
+    assert not is_position_ids_stash_installed(_Flash)
+    assert set(module.ATTENTION_CLASSES) == {"flash_attention_2"}
 
 
 def test_patch_marks_only_the_template_and_is_idempotent(reference_varlen):

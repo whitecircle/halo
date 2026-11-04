@@ -200,7 +200,7 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
   copies the `auto_map` modules in transitively. The source is the checkpoint the model was loaded from,
   so a resume or a `patch_vocab.py` output carries the schema on. A change lands under the spelling the source
   already uses: the key itself, its `attribute_map` alias or its `_legacy_field_names` alias. The rewritten config
-  is re-parsed against the live one, so a change the source schema swallows raises. A source of the same `model_type`
+  is re-parsed against the live one, so a change the source schema swallows raises, while a field the class holds none for, the Trainer's `use_cache` on Nemotron-H's composite, is no change. A source of the same `model_type`
   in transformers' causal mapping needs no `auto_map` (Nemotron 3.5 Lightning), as stock `from_pretrained` and vLLM
   read it through transformers' class and SGLang through its own: it carries with no modules to copy. Any other
   source with no `auto_map` warns and keeps transformers' own schema, and a source of another `model_type` (a

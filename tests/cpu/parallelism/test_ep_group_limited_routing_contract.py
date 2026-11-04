@@ -13,6 +13,7 @@ from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLite
 from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
 
 from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
@@ -24,7 +25,7 @@ E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
 # Keep in lockstep with _group_limited_topk's body.
 _ROUTING_KNOBS = (
-    "n_routed_experts",
+    "num_experts",
     "n_group",
     "topk_group",
     "norm_topk_prob",
@@ -59,8 +60,7 @@ class _GroupRoutedBlock(nn.Module):
         self.gate = _Gate()
         self.routed_experts = _FusedExperts()
         self.experts = self.routed_experts
-        self.shared_experts = None
-        self.n_routed_experts = E
+        self.shared_experts = nn.Identity()
         self.n_group = 2
         self.topk_group = 1
         self.routed_scaling_factor = 2.5
@@ -77,11 +77,10 @@ class _BareBlock(_GroupRoutedBlock):
 
 
 class _Step3p7Block(_GroupRoutedBlock):
-    """What Step-3.7's own hooks read: an always-built shared expert and the per-layer clamp bound."""
+    """What Step-3.7's own hook reads: the per-layer clamp bound."""
 
     def __init__(self, **overrides):
         super().__init__(**overrides)
-        self.shared_experts = nn.Identity()
         self.routed_experts.limit = float("inf")
 
 
@@ -136,7 +135,7 @@ def test_every_consumed_knob_is_populated(cls):
     layer = _build(cls, _GroupRoutedBlock(norm_topk_prob=True))
     for knob in _ROUTING_KNOBS:
         assert hasattr(layer, knob), f"{cls.__name__} never set '{knob}' (read by _group_limited_topk)"
-    assert layer.n_routed_experts == E
+    assert layer.num_experts == E
     assert layer.n_group == 2
     assert layer.topk_group == 1
     assert layer.routed_scaling_factor == 2.5
@@ -210,7 +209,7 @@ def test_real_upstream_blocks_deliver_non_neutral_knobs(cls, build):
     block exercises."""
     torch.manual_seed(0)
     layer = _build(cls, build())
-    assert layer.n_routed_experts == E
+    assert layer.num_experts == E
     assert layer.n_group == 2, "group count fell back to 1 — group-limited routing silently disabled"
     assert layer.topk_group == 1
     assert layer.routed_scaling_factor == 2.5, "scaling fell back to 1.0 — routed weights silently unscaled"
@@ -245,6 +244,7 @@ def test_a_knob_can_be_opted_out_under_either_of_its_spellings():
         # A test-local subclass inheriting GLM-4's registrations would shadow the real family in every registry walk.
         HF_MODULE_NAMES = ()
         FAMILY = MoEFamilySpec(model_types=())
+        _SHARED_EXPERT_REQUIRED = False
         _OPTIONAL_ROUTING_KNOBS = ("num_group", "topk_group")
 
     torch.manual_seed(0)
@@ -254,12 +254,17 @@ def test_a_knob_can_be_opted_out_under_either_of_its_spellings():
     assert _build(_AliasSpelled, block).n_group == 1
 
 
-def test_the_weight_norm_floor_is_the_familys_own():
-    """DeepSeek-V3 floors at 1e-20, Step-3.7 declares 0.0; they agree where the sum is O(1), so this feeds a sum
-    small enough for the floor to dominate."""
+@pytest.mark.parametrize(
+    ("unfloored_cls", "unfloored_block"),
+    [(EPStep3p7MoELayer, _Step3p7Block), (EPLagunaMoELayer, _GroupRoutedBlock)],
+    ids=["step3p7", "laguna"],
+)
+def test_the_weight_norm_floor_is_the_familys_own(unfloored_cls, unfloored_block):
+    """DeepSeek-V3 floors at 1e-20, Step-3.7 and Laguna declare 0.0; they agree where the sum is O(1), so this feeds a
+    sum small enough for the floor to dominate."""
     torch.manual_seed(0)
     floored = _build(EPGlm4MoELayer, _GroupRoutedBlock(norm_topk_prob=True))
-    unfloored = _build(EPStep3p7MoELayer, _Step3p7Block(norm_topk_prob=True))
+    unfloored = _build(unfloored_cls, unfloored_block(norm_topk_prob=True))
     assert (floored._TOPK_WEIGHT_NORM_EPS, unfloored._TOPK_WEIGHT_NORM_EPS) == (1e-20, 0.0)
 
     scores = torch.full((1, E), 1e-30)

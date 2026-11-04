@@ -8,6 +8,9 @@ import shlex
 import pytest
 from transformers import AutoConfig
 
+from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from halo.models.moe.family_specs import find_moe_family_spec, find_moe_family_spec_for_config
 from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
@@ -202,6 +205,24 @@ def test_the_tp_reference_rows_run_every_tp_planned_moe_family_alone_and_beside_
     }
     expected = {(family, mode) for family in TINY_MOE_FAMILIES if _has_tp_plan(family) for mode in ("tp2", "ep2tp2")}
     assert moe == expected, f"TP reference MoE rows {sorted(moe)} != every TP-planned family x mode {sorted(expected)}"
+
+
+def test_the_cp_roster_reaches_every_ulysses_wrapper():
+    """A wrapper no CP family builds has no equivalence row, so its path goes untested with nothing failing."""
+    reached = {
+        ULYSSES_ATTENTION_MAP[type(module).__name__]
+        for family in CP_FAMILIES.values()
+        for module in tiny_family_model(family.tiny, overrides=family.overrides).modules()
+        if type(module).__name__ in ULYSSES_ATTENTION_MAP
+    }
+    missed = sorted(wrapper.__name__ for wrapper in set(ULYSSES_ATTENTION_MAP.values()) - reached)
+    assert not missed, f"no CP roster family builds an attention these Ulysses wrappers claim: {missed}"
+
+
+def test_ring_is_refused_for_its_own_linear_attention_class():
+    """Ring's file also names Ling 2.0's full-attention classes, so a dropped entry would slice its scan silently."""
+    with pytest.raises(CPConfigError, match="BailingMoeV2LinearAttention"):
+        reject_unsupported_ulysses_model(tiny_family_model(TINY_BAILING_RING_FAMILY), 2)
 
 
 @pytest.mark.parametrize("suite", CP_SUITES)

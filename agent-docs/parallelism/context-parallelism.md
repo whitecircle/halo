@@ -326,6 +326,8 @@ torchrun --nproc_per_node=2 \
     tests/gpu/parallelism/combined/test_ep_cp_correctness.py
 ```
 
-Further CP tests live in `tests/gpu/parallelism/cp/`.
+Further CP tests live in `tests/gpu/parallelism/cp/`. Add the family to `FAMILIES` in
+`tests/common/equivalence/cp_equivalence.py` and set `ulysses_cp=True` on its `TinyFamily`:
+`tests/cpu/conventions/test_tiny_family_roster.py` fails on a wrapper no roster family builds.
 
 Background: [DeepSpeed-Ulysses](https://arxiv.org/abs/2309.14509).

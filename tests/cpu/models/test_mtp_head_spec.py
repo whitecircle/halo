@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import transformers
-from transformers import AutoConfig
+from transformers import CONFIG_MAPPING, AutoConfig
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
     MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES,
@@ -23,9 +23,11 @@ from halo.models.mtp.spec import (
     mtp_draft_layer_index,
     mtp_tail_depth,
     require_mtp_head_spec,
+    stored_head_prefix,
     stored_tail_keys,
     tail_load_patterns,
 )
+from tests.common.nemotron_h import nemotron_h_lightning_config, nemotron_h_release_config
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
@@ -87,6 +89,7 @@ def test_every_moe_family_is_on_the_tiny_roster_the_sweep_reads(family):
 
 def test_the_families_a_design_decision_refuses_keep_their_named_reason():
     assert {"qwen4_exp", "glm5_next", "step3p7", "inkling_text", "deepseek_v4", "bailing_hybrid"} <= set(MTP_REFUSALS)
+    assert not set(NEMOTRON_H.model_types) & set(MTP_REFUSALS)
 
 
 @pytest.mark.parametrize("family", MOE_FAMILY_SPECS, ids=lambda family: family.model_types[0])
@@ -94,11 +97,54 @@ def test_no_family_on_the_roster_is_refused_as_outside_it(family):
     assert not [name for name in family.model_types if MTP_REFUSALS.get(name) == UNSURVEYED_TAIL], family.model_types
 
 
-def test_nemotron_h_stays_refused_for_the_two_block_chain_its_config_declares():
-    config = AutoConfig.for_model("nemotron_h")
-    assert len(set(config.mtp_layers_block_type)) == 2, config.mtp_layers_block_type
-    for name in NEMOTRON_H.model_types:
-        assert "two blocks of different kinds" in MTP_REFUSALS[name], name
+@pytest.mark.parametrize("release", [nemotron_h_lightning_config(), nemotron_h_release_config()["llm_config"]])
+def test_a_nemotron_h_release_declares_the_chain_its_spec_builds(release):
+    """Read off each release's own config, so a chain a later release changes refuses instead of building another."""
+    readable = {key: value for key, value in release.items() if key != "time_step_limit"}
+    config = CONFIG_MAPPING["nemotron_h"](**readable)
+    spec = require_mtp_head_spec(config)
+    assert tuple(config.mtp_layers_block_type) == spec.chain_kinds == ("full_attention", "moe")
+    assert config.layer_types[mtp_draft_layer_index(config, "moe")] == "moe"
+    assert config.layer_types[mtp_draft_layer_index(config)] == "full_attention"
+
+
+@pytest.mark.parametrize("chain", [["moe", "attention"], ["attention"], ["attention", "moe", "moe"]])
+def test_a_chain_no_release_ships_is_refused_by_name(chain):
+    config = AutoConfig.for_model("nemotron_h", num_nextn_predict_layers=1, mtp_layers_block_type=chain)
+    with pytest.raises(ValueError, match="mtp_layers_block_type declares"):
+        require_mtp_head_spec(config)
+
+
+@pytest.mark.parametrize(
+    ("kinds", "missing"),
+    [(["mamba", "moe"], "full_attention"), (["mamba", "attention"], "moe")],
+    ids=["no_attention", "no_moe"],
+)
+def test_a_trunk_holding_no_layer_of_a_blocks_kind_is_refused_before_the_load(kinds, missing):
+    """A depth cut can leave one out, and each block takes its class from such a layer."""
+    config = AutoConfig.for_model("nemotron_h", num_nextn_predict_layers=1, layers_block_type=kinds)
+    with pytest.raises(ValueError, match=f"trunk's last {missing} layer"):
+        require_mtp_head_spec(config)
+
+
+@pytest.mark.parametrize(
+    ("level", "keys", "prefix"),
+    [
+        ("mtp", ["mtp.layers.0.norm.weight", "backbone.norm_f.weight"], "mtp."),
+        ("mtp", ["language_model.mtp.layers.0.norm.weight"], "language_model.mtp."),
+        ("language_model.mtp", ["mtp.layers.0.norm.weight"], "mtp."),
+        ("language_model.mtp", ["language_model.mtp.layers.0.norm.weight"], "language_model.mtp."),
+        ("mtp", ["backbone.norm_f.weight"], None),
+    ],
+)
+def test_a_text_class_and_its_composite_read_the_tail_at_either_level(level, keys, prefix):
+    assert stored_head_prefix(keys, AutoConfig.for_model("nemotron_h"), level) == prefix
+
+
+def test_a_family_with_no_text_only_layout_reads_its_head_at_its_path_alone():
+    config = AutoConfig.for_model("qwen3_next")
+    assert stored_head_prefix(["mtp.fc.weight"], config, "mtp") == "mtp."
+    assert stored_head_prefix(["language_model.mtp.fc.weight"], config, "mtp") is None
 
 
 def test_the_composite_and_its_text_config_resolve_to_one_spec():

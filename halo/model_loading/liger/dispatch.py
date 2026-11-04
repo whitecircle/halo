@@ -18,6 +18,7 @@ from halo.model_loading.liger.cross_entropy import patch_loss_utils_cross_entrop
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
 from halo.models.config_access import set_config_field_run_scoped, text_config
+from halo.models.model_classes import is_remote_code_class
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.runtime.ranks import is_global_main_process
@@ -393,6 +394,20 @@ def _run_resolved_applier(
     return filtered_config
 
 
+def _warn_remote_only_spec_on_native_config(model_type: str | None, fallback_type: str | None, model_config) -> None:
+    """A spec naming only a remote file's classes arms on the module that file loads as, and transformers' own class
+    never loads one, so the applied line that follows would be all a run on that class shows."""
+    resolved_type, applier = _resolve_applier(model_type, fallback_type)
+    if not isinstance(applier, LigerApplier) or applier.spec.modeling_module or not applier.spec.remote_classes:
+        return
+    if not is_remote_code_class(type(model_config)) and is_global_main_process():
+        logger.warning(
+            f"The Liger spec for {resolved_type} patches only the release's modeling file "
+            f"({', '.join(applier.spec.remote_classes)}), and this run loads transformers' {type(model_config).__name__}: "
+            f"nothing is patched and these paths run eager. Set trust_remote_code: true for the fused kernels."
+        )
+
+
 def apply_liger_kernel(
     model_config: AutoConfig,
     liger_kernel_config: dict | None = None,
@@ -428,6 +443,7 @@ def apply_liger_kernel(
 
     # The raw dict: the fold writes `swiglu: False` under EP, a toolkit decision that must not read as a user request.
     requested = frozenset(key for key, value in (liger_kernel_config or {}).items() if value)
+    _warn_remote_only_spec_on_native_config(model_type, fallback_type, model_config)
     applied_config = _run_resolved_applier(model_type, user_overrides, fallback_type, requested)
     set_config_field_run_scoped(model_config, LIGER_APPLIED_CONFIG_ATTR, applied_config)
     return applied_config

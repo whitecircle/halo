@@ -25,6 +25,13 @@ def transformers_model_class(model: torch.nn.Module) -> type[PreTrainedModel] | 
     )
 
 
+def auto_map_references(entry: str | list | tuple | dict) -> tuple[str, ...]:
+    """The class references one ``auto_map`` entry holds: one, a tokenizer's ``[slow, fast]`` pair, or an image
+    processor's mapping of backend to class."""
+    values = entry.values() if isinstance(entry, dict) else (entry,) if isinstance(entry, str) else entry
+    return tuple(value for value in values if value)
+
+
 def is_remote_code_class(cls: type) -> bool:
     return cls.__module__.startswith(_REMOTE_CODE_PACKAGE)
 

@@ -35,6 +35,23 @@ def test_injection_without_attention_registry_raises_and_leaves_the_forward():
     assert owner.forward is original_forward, "a stash nothing re-injects must not be installed"
 
 
+def test_injection_on_a_forward_taking_position_ids_through_kwargs_raises_and_leaves_the_forward():
+    """The stash's signature bind would find none there and hand every attention None, with the patch reading as
+    installed."""
+
+    class _KwargsOnly:
+        def forward(self, hidden_states, **kwargs):
+            return hidden_states
+
+    modeling = types.ModuleType("fake_modeling")
+    modeling.ALL_ATTENTION_FUNCTIONS = {}
+    original_forward = _KwargsOnly.forward
+    with pytest.raises(RuntimeError, match="takes no position_ids"):
+        packed_position_ids.install_packed_position_ids_injection(modeling, _KwargsOnly, lambda module: (module,))
+    assert _KwargsOnly.forward is original_forward
+    assert modeling.ALL_ATTENTION_FUNCTIONS == {}
+
+
 def test_injection_with_registry_wraps_it():
     modeling = types.ModuleType("fake_modeling")
     modeling.ALL_ATTENTION_FUNCTIONS = {}

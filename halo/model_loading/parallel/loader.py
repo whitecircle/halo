@@ -26,6 +26,7 @@ from halo.model_loading.model_preparation import (
 from halo.model_loading.parallel.cp import load_cp_model, load_ep_cp_model
 from halo.model_loading.parallel.ep import load_ep_model
 from halo.model_loading.parallel.load_rules import (
+    reject_ep_without_family,
     reject_random_init_tables,
     reject_remote_composite,
     reject_unsupported_load,
@@ -313,6 +314,7 @@ def _resolve_run_config(
         init_from_scratch=init_from_scratch,
         wraps_experts=wraps_experts,
     )
+    reject_ep_without_family(pc, model_config, wraps_experts=wraps_experts)
 
     # Multimodal wrappers need AutoModelForImageTextToText (CausalLM drops the vision tower);
     # text_only_model opts into that drop deliberately (and restores config-honored aux loss).

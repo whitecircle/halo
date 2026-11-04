@@ -54,13 +54,21 @@ _RELEASE_OF_FAMILY = {
     "qwen3_5_moe": "Qwen/Qwen3.5-122B-A10B",
     "qwen3_next": "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "glm4_moe_lite": "zai-org/GLM-4.7-Flash",
+    "nemotron_h": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+    "nemotron_h_no_latent": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+    "nemotron_h_omni": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
 }
-_HEAD_PATHS = {"glm4_moe_lite": "model.layers.2."}
-_RELEASE_PATHS = {"glm4_moe_lite": "model.layers.47."}
+_HEAD_PATHS = {"glm4_moe_lite": "model.layers.2.", "nemotron_h_omni": "language_model.mtp."}
+_RELEASE_PATHS = {
+    "glm4_moe_lite": "model.layers.47.",
+    "nemotron_h": "language_model.mtp.",
+    "nemotron_h_omni": "language_model.mtp.",
+}
 _STEPS = 1
 _FUSED_TO_PER_EXPERT = {
     "experts.gate_up_proj": ("experts.N.gate_proj.weight", "experts.N.up_proj.weight"),
     "experts.down_proj": ("experts.N.down_proj.weight",),
+    "experts.up_proj": ("experts.N.up_proj.weight",),
 }
 _TINY_QUERY_PROJECTION = re.compile(r"self_attn\.q_(proj|a_proj|a_layernorm|b_proj)\.")
 _WORLD = 2
@@ -151,7 +159,7 @@ def test_only_a_head_with_trunk_copies_takes_the_gathered_saver_on_one_process()
     assert select_checkpoint_saver(save_context(no_head)) is None
 
 
-@pytest.mark.parametrize("name", [_ROOT_FAMILY, _LIST_FAMILY, "qwen3_5"])
+@pytest.mark.parametrize("name", [_ROOT_FAMILY, _LIST_FAMILY, "qwen3_5", "nemotron_h", "nemotron_h_omni"])
 def test_a_stock_load_of_the_export_ignores_the_head_and_a_sync_finds_nothing_to_gather(name, tmp_path, corpus):
     """An RL run starting from a trained head's export: its server reads the head at launch, and its trainer holds no
     live head for the sync's parameter walk to push."""
@@ -167,7 +175,7 @@ def test_a_stock_load_of_the_export_ignores_the_head_and_a_sync_finds_nothing_to
     assert not walked & tail_keys, sorted(walked & tail_keys)[:4]
 
 
-@pytest.mark.parametrize("name", [_ROOT_FAMILY, _LIST_FAMILY, "qwen3_next"])
+@pytest.mark.parametrize("name", [_ROOT_FAMILY, _LIST_FAMILY, "qwen3_next", "nemotron_h", "nemotron_h_omni"])
 def test_a_gathered_ep_save_writes_the_releases_keys_at_the_export_dtype(name, tmp_path):
     """The EP saver on one rank: the head's experts in the family's layout, its norms at the trunk's fp32 and the rest at
     bf16, the trunk copies beside them."""
@@ -194,7 +202,9 @@ def test_a_gathered_ep_save_writes_the_releases_keys_at_the_export_dtype(name, t
     )
     projection = next(key for key in saved if key.startswith(prefix) and key.endswith(("fc.weight", "eh_proj.weight")))
     assert saved[projection].dtype == torch.bfloat16
-    assert saved[f"{prefix}norm.weight" if name != _LIST_FAMILY else f"{prefix}enorm.weight"].dtype == torch.float32
+    norm = {_LIST_FAMILY: "enorm.weight", "nemotron_h": "layers.0.enorm.weight"}
+    norm["nemotron_h_omni"] = norm["nemotron_h"]
+    assert saved[f"{prefix}{norm.get(name, 'norm.weight')}"].dtype == torch.float32
 
 
 def _rank_ep_config() -> EPConfig:
@@ -275,7 +285,7 @@ def _save_on_each_node(rank: int, name: str, root: str) -> None:
     reset_shared_filesystem_consensus()
 
 
-@pytest.mark.parametrize("name", [_ROOT_FAMILY, _LIST_FAMILY])
+@pytest.mark.parametrize("name", [_ROOT_FAMILY, _LIST_FAMILY, "nemotron_h", "nemotron_h_omni"])
 def test_on_per_node_storage_every_node_holds_the_whole_head(name, tmp_path):
     run_gloo_ranks(_save_on_each_node, _WORLD, name, str(tmp_path), env=_TWO_NODES)
     first, second = (saved_tensors(_node_dir(str(tmp_path), rank)) for rank in range(_WORLD))

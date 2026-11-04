@@ -50,11 +50,12 @@ from halo.models.mtp.head import mtp_head_path
 from halo.models.mtp.spec import (
     declared_tail_fields,
     find_mtp_head_spec,
+    stored_head_prefix,
     stored_tail_keys,
     tail_load_patterns,
     unbuilt_tail_keys,
 )
-from halo.models.param_roles import is_normalization_module
+from halo.models.param_roles import declared_fp32_pins, fp32_pin_matches, is_normalization_module
 
 logger = logging.getLogger(__name__)
 
@@ -300,17 +301,21 @@ def carried_mtp_tail(
         _warn_on_dropped_mtp_tail(model, model_id, output_dir, weight_map, tool=tool)
         return {}
     path = mtp_head_path(model, spec)
-    if not any(key.startswith(f"{path}.") for key in weight_map):
+    prefix = stored_head_prefix(weight_map, model.config, path)
+    if prefix is None:
         return {}
     embeddings = {"input": model.get_input_embeddings(), "output": model.get_output_embeddings()}
     copies = {
         f"{path}.{key}": embeddings[copied].weight.detach().to("cpu", dtype).clone()
         for key, copied in spec.trunk_copies
     }
+    pinned = fp32_pin_matches(weight_map, declared_fp32_pins(model)) if spec.tail_keeps_fp32_pins else frozenset()
     tail = {
-        key: tensor.to(dtype) if tensor.is_floating_point() else tensor
+        f"{path}.{key[len(prefix) :]}": tensor.to(dtype)
+        if tensor.is_floating_point() and key not in pinned
+        else tensor
         for key, tensor in iter_checkpoint_tensors(
-            source, predicate=lambda key: key.startswith(f"{path}.") and key not in copies
+            source, predicate=lambda key: key.startswith(prefix) and key not in copies
         )
     }
     logger.info(

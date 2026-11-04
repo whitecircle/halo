@@ -20,7 +20,7 @@ from halo.checkpoint.reading import read_checkpoint_config
 from halo.checkpoint.weights_source import config_schema_source
 from halo.log import info_logger
 from halo.models.config_access import config_export_ready
-from halo.models.model_classes import remote_code_model_class, transformers_model_class
+from halo.models.model_classes import auto_map_references, remote_code_model_class, transformers_model_class
 from halo.models.moe.family_specs import find_moe_family_spec
 
 logger = info_logger(__name__)
@@ -92,13 +92,6 @@ def _source_config_payload(source: str, config) -> dict | None:
     return payload
 
 
-def _auto_map_references(entry: str | list | tuple | dict) -> tuple[str, ...]:
-    """The class references one ``auto_map`` entry holds: one, a tokenizer's ``[slow, fast]`` pair, or an image
-    processor's mapping of backend to class."""
-    values = entry.values() if isinstance(entry, dict) else (entry,) if isinstance(entry, str) else entry
-    return tuple(value for value in values if value)
-
-
 def _aux_auto_maps(payload: dict) -> Iterator[dict]:
     """Every ``auto_map`` one processor or tokenizer config holds, as a load reads them: at its top, where a bare list is
     a tokenizer's legacy pair, or in a sub-processor's section of a ``processor_config.json``."""
@@ -110,7 +103,7 @@ def _aux_auto_maps(payload: dict) -> Iterator[dict]:
 
 def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None:
     """Copy the remote-code modules ``auto_map`` names, with their sibling imports (Step-3.7's ``vision_encoder``)."""
-    pending = {reference.split(".")[0] for entry in auto_map.values() for reference in _auto_map_references(entry)}
+    pending = {reference.split(".")[0] for entry in auto_map.values() for reference in auto_map_references(entry)}
     copied: set[str] = set()
     while pending:
         module = pending.pop()
@@ -220,9 +213,8 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
     exported.pop("auto_map", None)
     with tempfile.TemporaryDirectory() as staging:
         source_values = _reparsed_source_values(config, payload, staging)
-        # A trainer's KV-cache write on a composite's root, which the class does not hold: run state, not geometry.
-        if "use_cache" not in source_values:
-            exported.pop("use_cache", None)
+        # What the class itself holds no field for, as the Trainer's use_cache on a composite, is no change a reload sees.
+        exported = _reparsed_source_values(config, exported, staging)
         _apply_config_changes(payload, source_values, exported, config)
         carried = _reparsed_source_values(config, payload, staging)
     if carried != exported:
@@ -250,7 +242,7 @@ def drop_unshipped_auto_map(output_dir: str) -> None:
         for auto_class, entry in auto_map.items()
         if any(
             "--" not in reference and not os.path.isfile(os.path.join(output_dir, f"{reference.split('.')[0]}.py"))
-            for reference in _auto_map_references(entry)
+            for reference in auto_map_references(entry)
         )
     }
     if not unshipped:
@@ -281,7 +273,7 @@ def carry_aux_auto_map_modules(output_dir: str, *, source: str | None) -> None:
         local: dict[str, list[str]] = {}
         for auto_map in _aux_auto_maps(payload):
             for auto_class, entry in auto_map.items():
-                references = (reference for reference in _auto_map_references(entry) if "--" not in reference)
+                references = (reference for reference in auto_map_references(entry) if "--" not in reference)
                 local.setdefault(auto_class, []).extend(references)
         absent = {
             auto_class: references

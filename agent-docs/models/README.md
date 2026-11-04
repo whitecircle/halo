@@ -79,7 +79,7 @@ Every MoE family shares three settings:
 
 Every expert / router config field — the expert count, the top-k spelling, `router_aux_loss_coef`, `output_router_logits` — lives on the **text** sub-config for a composite (multimodal) family (Qwen3.5/3.6-MoE, Gemma 4, Mistral-4 under its VLM wrapper). `PreTrainedConfig` does not delegate attribute reads, so the toolkit resolves these through `get_config_field` / `set_config_field` over `config` **and** `config.get_text_config()`. Read one field off the wrapper alone and balancing plus `moe/*` metrics silently disappear.
 
-Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `resolve_expert_count` and `resolve_router_topk` in `halo/models/moe/config_fields.py` are the one reader every consumer calls — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP, the EP layer's own `_NUM_EXPERTS_ATTR_PATHS` resolves the count off the live module instead.
+Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `resolve_expert_count` and `resolve_router_topk` in `halo/models/moe/config_fields.py` are the one reader every consumer calls — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP, `detect_num_experts` reads the count off the live expert container instead.
 
 [MoEMetricsCallback](../training-methods/callbacks.md#moemetricscallback) logs per-layer expert load by default (`enable_moe_metrics`).
 
@@ -115,7 +115,7 @@ family pins a parameter). The reward-scoring tool casts the whole model, buffers
 
 ## MTP heads
 
-Qwen3.5/3.6, Qwen3.8-27B, Qwen3-Next and GLM-4 MoE Lite train the head their release ships under `mtp_loss_weight` ([MTP heads](../optimization/mtp-heads.md)); other tail-bearing families refuse by name. Without it, every family drops its tail at load and exports carry none, so `method=mtp` refuses them, except Ling-3.0-flash, whose remote class builds and re-exports its tail ([Bailing](bailing.md#mtp-tail)). `convert_to_bf16` and `patch_vocab` write a stored head of these families back; any other family's tail drops, with a warning naming the config field its output keeps. `reattach_vision_tower.py` carries the base's head at its weights, or keeps the one a text-only export trained.
+Qwen3.5/3.6, Qwen3.8-27B, Qwen3-Next, GLM-4 MoE Lite and Nemotron-H train the head their release ships under `mtp_loss_weight` ([MTP heads](../optimization/mtp-heads.md)); other tail-bearing families refuse by name. Without it, every family drops its tail at load and exports carry none, so `method=mtp` refuses them, except Ling-3.0-flash, whose remote class builds and re-exports its tail ([Bailing](bailing.md#mtp-tail)). `convert_to_bf16` and `patch_vocab` write a stored head of these families back; any other family's tail drops, with a warning naming the config field its output keeps. `reattach_vision_tower.py` carries the base's head at its weights, or keeps the one a text-only export trained.
 
 ## Per-family pages
 

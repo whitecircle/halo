@@ -233,12 +233,11 @@ def test_expert_activation_is_read_from_the_wrapped_module(name, wrapper, factor
 
 @pytest.mark.parametrize(_FAMILY_FIELDS, FAMILIES, ids=_FAMILY_IDS)
 def test_the_activation_name_fallback_reads_the_wrapped_block(name, wrapper, factory, act_owner, tracks_hidden_act):
-    """An upstream rename lands here: a wrapper that stops handing its block to ``_resolve_activation`` drops to the
-    SiLU default with no error."""
+    """An upstream rename lands here: a wrapper that stops handing its block to ``_resolve_activation`` raises."""
 
     def strip_container_activation(block):
         delattr(_resolve(block, act_owner), "act_fn")
-        # Distinct from ``ACT`` and the ``silu`` default, so neither a config read nor the default can fake this pass.
+        # Distinct from ``ACT``, so a config read cannot fake this pass.
         block.hidden_act = "relu"
 
     _block, layer = _build(factory, wrapper, prepare=strip_container_activation)

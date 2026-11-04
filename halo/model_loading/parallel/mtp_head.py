@@ -32,7 +32,7 @@ from halo.models.mtp.head import (
     freeze_trunk_for_head,
     mtp_head_path,
 )
-from halo.models.mtp.spec import MtpHeadRequest, MtpHeadSpec, require_mtp_head_spec
+from halo.models.mtp.spec import MtpHeadRequest, MtpHeadSpec, require_mtp_head_spec, stored_head_prefix
 from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.ranks import get_global_rank, get_local_rank, is_global_main_process
 
@@ -65,11 +65,15 @@ def _reject_stored_quantization(source: ModelSource) -> None:
         )
 
 
-def _tail_map(source: ModelSource, spec: MtpHeadSpec, path: str, *, resuming: bool) -> dict[str, str]:
-    """The tail keys ``source`` stores under the head's path, without the trunk's copies the head shares."""
+def _tail_map(
+    source: ModelSource, spec: MtpHeadSpec, path: str, config, *, resuming: bool
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The tail keys ``source`` stores of the head at ``path``, without the trunk's copies the head shares, and each
+    one's live key."""
     weight_map = resolve_checkpoint_weights(source.local_dir).require_safetensors("checkpoint").weight_map
     copies = tuple(f"{path}.{key}" for key, _embedding in spec.trunk_copies)
-    tail = {key: shard for key, shard in weight_map.items() if key.startswith(f"{path}.") and key not in copies}
+    prefix = stored_head_prefix(weight_map, config, path) or f"{path}."
+    tail = {key: shard for key, shard in weight_map.items() if key.startswith(prefix) and key not in copies}
     if not tail and resuming:
         raise ValueError(
             f"{source.name} stores no MTP head under {path}.*, and a resume continues the head its checkpoint holds, so "
@@ -81,29 +85,33 @@ def _tail_map(source: ModelSource, spec: MtpHeadSpec, path: str, *, resuming: bo
             f"{source.name} stores no MTP head under {path}.*, so this run has no head to train. Set mtp_head_source "
             "to a checkpoint that stores one, for example the release this model was fine-tuned from."
         )
-    return tail
+    return tail, {key: f"{path}.{key[len(prefix) :]}" for key in tail}
 
 
-def _full_bank_fusion_tasks(tail: dict[str, str], shell_keys: set[str], config) -> list[FusionTask]:
+def _full_bank_fusion_tasks(
+    tail: dict[str, str], disk_to_model: dict[str, str], shell_keys: set[str], config
+) -> list[FusionTask]:
     """The fusion of every expert a per-expert tail stores, whichever rank will read it, each task checked whole."""
     if ExpertKeyLayout.detect(tail) != ExpertKeyLayout.PER_EXPERT:
         return []
     fuser = ExpertFuser(0, require_expert_count(config))
-    tasks = fuser.detect_tasks(tail, {key: key for key in tail}, shell_keys)
+    tasks = fuser.detect_tasks(tail, disk_to_model, shell_keys)
     for task in tasks:
         fuser.validate_task(task)
     return tasks
 
 
-def _reject_tail_mismatch(tail: dict[str, str], shell_keys: set[str], config, source: ModelSource) -> None:
+def _reject_tail_mismatch(
+    tail: dict[str, str], disk_to_model: dict[str, str], shell_keys: set[str], config, source: ModelSource
+) -> None:
     """Refuse a tail that is not the head this config builds, in either direction: a key left out stays random against
     the rest, and a key beyond them is a head this run would not carry on to its export."""
-    tasks = _full_bank_fusion_tasks(tail, shell_keys, config)
+    tasks = _full_bank_fusion_tasks(tail, disk_to_model, shell_keys, config)
     fused = {
         disk_key for task in tasks for suffixes in task.experts.values() for disk_key, _shard in suffixes.values()
     }
-    extra = sorted(key for key in tail if key not in shell_keys and key not in fused)
-    missing = sorted(shell_keys - set(tail) - {task.model_key for task in tasks})
+    extra = sorted(key for key in tail if disk_to_model[key] not in shell_keys and key not in fused)
+    missing = sorted(shell_keys - set(disk_to_model.values()) - {task.model_key for task in tasks})
     if missing or extra:
         raise ValueError(
             f"The MTP tail in {source.name} is not the head this config builds: it lacks {len(missing)} tensor(s) "
@@ -136,14 +144,14 @@ def _stream_tail(
     what = f"MTP head load from {source.name}"
     guard = DeferredRankFailure(what)
 
-    def read_tail() -> tuple[dict[str, str], list[WeightPlan]]:
+    def read_tail() -> tuple[dict[str, str], dict[str, str], list[WeightPlan]]:
         _reject_stored_quantization(source)
-        tail = _tail_map(source, spec, path, resuming=preserve_checkpoint_precision)
+        tail, disk_to_model = _tail_map(source, spec, path, shell.config, resuming=preserve_checkpoint_precision)
         shell_keys = set(shell.state_dict())
-        _reject_tail_mismatch(tail, shell_keys, shell.config, source)
-        return tail, WeightPlanner(ep_config).build(tail, {key: key for key in tail}, shell_keys)
+        _reject_tail_mismatch(tail, disk_to_model, shell_keys, shell.config, source)
+        return tail, disk_to_model, WeightPlanner(ep_config).build(tail, disk_to_model, shell_keys)
 
-    tail, plans = guard.run(read_tail) or ({}, [])
+    tail, disk_to_model, plans = guard.run(read_tail) or ({}, {}, [])
     guard.reject()
 
     fuser = None
@@ -162,7 +170,7 @@ def _stream_tail(
         shard_files=sorted(set(tail.values())),
         missing_shard_files=[],
         expert_layout=layout,
-        disk_to_model={key: key for key in tail},
+        disk_to_model=disk_to_model,
         model_keys=set(shell.state_dict()),
         dtype=dtype,
     )

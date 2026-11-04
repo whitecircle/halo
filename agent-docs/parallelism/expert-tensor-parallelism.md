@@ -198,8 +198,8 @@ patching when `expert_tp_size > 1`. Per-rank sharded EP save is rejected — see
 ([roster](expert-parallelism.md#supported-models)). ETP shards expert FFN
 weights only: the router stays replicated in every family, whether it sits outside the EP layer
 and is FSDP-managed (Gemma 4) or inside it and is synced by the EP router hook (everyone else,
-including Zaya). A dense model raises: pure ETP has `ep_group_size > 1`, so patching zero MoE layers
-is an error.
+including Zaya). A dense model raises at load: pure ETP has `ep_group_size > 1`, which
+`reject_ep_without_family` refuses where no EP layer wraps.
 
 `expert_tp_size` must divide each expert's intermediate size, else the top units of every expert
 would be dropped silently. `reject_unsupported_model` checks it off

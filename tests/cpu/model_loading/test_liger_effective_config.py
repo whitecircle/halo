@@ -631,5 +631,28 @@ def test_finalize_noop_when_liger_disabled():
     assert training_config.use_liger_kernel is False
 
 
+def _remote_only_warnings(config, caplog, monkeypatch) -> list[str]:
+    monkeypatch.setattr(dispatch, "_run_resolved_applier", lambda *_args, **_kwargs: None)
+    with caplog.at_level(logging.WARNING, logger="halo.model_loading.liger.dispatch"):
+        dispatch.apply_liger_kernel(config, None)
+    return [record.getMessage() for record in caplog.records if "patches only" in record.getMessage()]
+
+
+def test_a_remote_only_spec_warns_on_transformers_own_class(caplog, monkeypatch):
+    """The applier arms on a module that never loads, and its applied line would be all the run shows."""
+    assert _remote_only_warnings(CONFIG_MAPPING["bailing_hybrid"](num_experts=4), caplog, monkeypatch)
+
+
+def test_a_remote_only_spec_stays_quiet_on_the_remote_class(caplog, monkeypatch):
+    native = CONFIG_MAPPING["bailing_hybrid"]
+    remote = type(native.__name__, (native,), {"__module__": "transformers_modules.x"})
+    assert not _remote_only_warnings(remote(num_experts=4), caplog, monkeypatch)
+
+
+def test_a_spec_with_a_modeling_module_stays_quiet_on_the_native_class(caplog, monkeypatch):
+    """Laguna names remote classes too, and its in-library module patches on the native class."""
+    assert not _remote_only_warnings(CONFIG_MAPPING["laguna"](), caplog, monkeypatch)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

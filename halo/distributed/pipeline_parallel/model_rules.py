@@ -125,7 +125,8 @@ def reject_unsupported_pp_structure(model: nn.Module) -> None:
     if not spec.validated:
         registered = ", ".join(name for name, claim in PP_SPEC_MAP.items() if claim.validated)
         raise ValueError(
-            f"{backbone_name} is not registered for pipeline parallelism (PP_FAMILY_SPECS); registered: {registered}."
+            f"{backbone_name} is not registered for pipeline parallelism (PP_FAMILY_SPECS); registered: {registered}. "
+            f"Set pipeline_parallel_size: 1, or add a PPFamilySpec (agent-docs/parallelism/pipeline-parallelism.md)."
         )
 
 

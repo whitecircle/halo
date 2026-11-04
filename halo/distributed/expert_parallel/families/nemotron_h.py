@@ -21,10 +21,7 @@ class EPNemotronHMoELayer(EPGroupLimitedMoELayerBase):
     FAMILY = NEMOTRON_H
 
     # The router's module never runs here, and the modeling has no aux loss to lose: the bias is the one balancing.
-    SUPPORTS_BIAS_BALANCING = True
     SEVERS_AUX_LOSS = True
-
-    _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts",)
 
     _SHARED_EXPERT_REQUIRED = True
 
@@ -54,6 +51,9 @@ class EPNemotronHMoELayer(EPGroupLimitedMoELayerBase):
 
     def _glu_ffn(self, x: torch.Tensor, proj: Callable[[torch.Tensor, str], torch.Tensor]) -> torch.Tensor:
         return proj(self._expert_activation(proj(x, "up_proj")), "down_proj")
+
+    def _glu_combine_name(self) -> str:
+        return "none (gateless)"
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         return self._expert_activation(gate_up)

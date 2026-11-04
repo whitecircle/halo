@@ -328,14 +328,14 @@ def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
 @dataclass(frozen=True)
 class TinyFamily:
     """How to build one family's tiny model at a tokenizer's vocab, and how a server reloads it. ``ulysses_cp`` is
-    False where Ulysses CP refuses the family at load. ``attention_targets`` names LoRA's projections where the
+    True where Ulysses CP admits the family at load. ``attention_targets`` names LoRA's projections where the
     checkpoint index cannot."""
 
     build: Callable[[dict], PreTrainedModel]
     load_class: type = AutoModelForCausalLM
     trust_remote_code: bool = False
     text_overrides: dict = field(default_factory=dict)
-    ulysses_cp: bool = True
+    ulysses_cp: bool = False
     attention_targets: tuple[str, ...] = ()
 
 
@@ -411,66 +411,65 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "bailing_moe": TinyFamily(
         _tiny_remote(BAILING_MOE_LING_MINI, TINY_BAILING_MOE_CONFIG),
         trust_remote_code=True,
+        ulysses_cp=True,
         attention_targets=("query_key_value", "dense"),
     ),
-    "cohere2_moe": TinyFamily(_causal(Cohere2MoeConfig, Cohere2MoeForCausalLM, TINY_COHERE2_MOE_CONFIG)),
+    "cohere2_moe": TinyFamily(
+        _causal(Cohere2MoeConfig, Cohere2MoeForCausalLM, TINY_COHERE2_MOE_CONFIG), ulysses_cp=True
+    ),
     # The CSA/HCA compressor and indexer pool token windows along the sequence.
-    "deepseek_v4": TinyFamily(_tiny_deepseek_v4, ulysses_cp=False, attention_targets=("q_a_proj", "o_b_proj")),
+    "deepseek_v4": TinyFamily(_tiny_deepseek_v4, attention_targets=("q_a_proj", "o_b_proj")),
     # Not an attention the Ulysses wrapper implements.
-    "gemma4_text": TinyFamily(_tiny_gemma4, text_overrides={"max_position_embeddings": 512}, ulysses_cp=False),
-    "glm4_moe_lite": TinyFamily(_causal(Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG)),
+    "gemma4_text": TinyFamily(_tiny_gemma4, text_overrides={"max_position_embeddings": 512}),
+    "glm4_moe_lite": TinyFamily(
+        _causal(Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG), ulysses_cp=True
+    ),
     # KDA linear attention: a causal conv and a recurrent scan along the sequence.
     "glm5_next": TinyFamily(
         _composite(Glm5NextConfig, Glm5NextForConditionalGeneration, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
-    "gpt_oss": TinyFamily(_causal(GptOssConfig, GptOssForCausalLM, TINY_GPTOSS_CONFIG)),
+    "gpt_oss": TinyFamily(_causal(GptOssConfig, GptOssForCausalLM, TINY_GPTOSS_CONFIG), ulysses_cp=True),
     # A depthwise causal conv inside attention and around each sublayer.
     "inkling_text": TinyFamily(
         _causal(InklingTextConfig, InklingForCausalLM, TINY_INKLING_CONFIG),
         text_overrides={"max_position_embeddings": 512},
-        ulysses_cp=False,
     ),
     # Neither attention is one the Ulysses wrapper implements.
-    "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG), ulysses_cp=False),
-    "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG), ulysses_cp=False),
+    "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG)),
+    "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG)),
     # No AutoModelForCausalLM entry for mistral4 in transformers 5.20.
     "mistral4": TinyFamily(
-        _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG), load_class=Mistral4ForCausalLM
+        _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG),
+        load_class=Mistral4ForCausalLM,
+        ulysses_cp=True,
     ),
     # Mamba: a conv and a recurrent scan along the sequence. Its layers are ``mixer``, which no attention spelling names,
     # and most hold Mamba's two projections.
     "nemotron_h": TinyFamily(
         _with_release_scale_bias(_causal(NemotronHConfig, NemotronHForCausalLM, TINY_NEMOTRON_H_CONFIG)),
-        ulysses_cp=False,
         attention_targets=("q_proj", "v_proj", "in_proj", "out_proj"),
     ),
     # Gated DeltaNet layers: a conv and a recurrent scan along the sequence.
-    "qwen3_5_moe_text": TinyFamily(
-        _causal(Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, TINY_QWEN35_MOE_CONFIG), ulysses_cp=False
-    ),
-    "qwen3_moe": TinyFamily(_causal(Qwen3MoeConfig, Qwen3MoeForCausalLM, TINY_QWEN3_MOE_CONFIG)),
-    "qwen3_next": TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN3_NEXT_CONFIG), ulysses_cp=False),
+    "qwen3_5_moe_text": TinyFamily(_causal(Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, TINY_QWEN35_MOE_CONFIG)),
+    "qwen3_moe": TinyFamily(_causal(Qwen3MoeConfig, Qwen3MoeForCausalLM, TINY_QWEN3_MOE_CONFIG), ulysses_cp=True),
+    "qwen3_next": TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN3_NEXT_CONFIG)),
     # Gated DeltaNet layers and the PLE conv along the sequence.
     "qwen4_exp_text": TinyFamily(
         lambda overrides: _with_live_ple_convs(
             _causal(Qwen4ExpTextConfig, Qwen4ExpForCausalLM, TINY_QWEN4_EXP_CONFIG)(overrides)
         ),
-        ulysses_cp=False,
     ),
     # Not an attention the Ulysses wrapper implements.
     "step3p7": TinyFamily(
         _composite(Step3p7Config, Step3p7ForConditionalGeneration, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     # The CCA projection convolves and shifts along the sequence and yields q, k and v, so ``o_proj`` is the one plain
     # linear.
     "zaya": TinyFamily(
         _tiny_zaya,
         text_overrides={"max_position_embeddings": 512},
-        ulysses_cp=False,
         attention_targets=("o_proj",),
     ),
 }
@@ -487,6 +486,7 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             alignment_intermediate_size=64,
         ),
         load_class=AutoModelForImageTextToText,
+        ulysses_cp=True,
     ),
     "gemma4": TinyFamily(
         lambda overrides: _composite(
@@ -503,12 +503,10 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             }
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "inkling_mm_model": TinyFamily(
         _composite(InklingConfig, InklingForConditionalGeneration, TINY_INKLING_CONFIG, TINY_INKLING_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "lfm2_vl": TinyFamily(
         _composite(
@@ -519,7 +517,6 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             projector_hidden_size=64,
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "mistral3": TinyFamily(
         _composite(
@@ -531,6 +528,7 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             tie_word_embeddings=TINY_MISTRAL4_CONFIG["tie_word_embeddings"],
         ),
         load_class=AutoModelForImageTextToText,
+        ulysses_cp=True,
     ),
     "nemotron_h_omni": TinyFamily(
         _with_release_scale_bias(
@@ -545,14 +543,12 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             )
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "qwen3_5_moe": TinyFamily(
         _composite(
             Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration, TINY_QWEN35_MOE_CONFIG, TINY_QWEN35_VISION_CONFIG
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "qwen4_exp": TinyFamily(
         lambda overrides: _with_live_ple_convs(
@@ -561,7 +557,6 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             )(overrides)
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
 }
 # Overrides under which a tiny model splits into two pipeline stages on a layer_types period with a MoE layer on each,
@@ -590,7 +585,7 @@ TINY_SLIDING_DENSE_FAMILIES: dict[str, TinyFamily] = {
     "mistral": TinyFamily(_causal(MistralConfig, MistralForCausalLM, TINY_MISTRAL_SLIDING_CONFIG)),
     "olmo3": TinyFamily(_causal(Olmo3Config, Olmo3ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG)),
 }
-TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
+TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG), ulysses_cp=True)
 # Gated DeltaNet and attention layers, which the MoE roster does not carry.
 TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
@@ -598,16 +593,20 @@ TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3
 TINY_BAILING_RING_FAMILY = TinyFamily(
     _tiny_remote(BAILING_MOE_RING_MINI, TINY_BAILING_RING_CONFIG),
     trust_remote_code=True,
-    ulysses_cp=False,
     attention_targets=("query_key_value", "dense"),
 )
 # Laguna's pinned hub file, which the Laguna recipes load, where the roster's entry builds the in-library classes.
-TINY_LAGUNA_REMOTE_FAMILY = TinyFamily(
-    _tiny_remote(LAGUNA_XS_2_1, TINY_LAGUNA_CONFIG), trust_remote_code=True, ulysses_cp=False
+TINY_LAGUNA_REMOTE_FAMILY = TinyFamily(_tiny_remote(LAGUNA_XS_2_1, TINY_LAGUNA_CONFIG), trust_remote_code=True)
+# Nemotron 3.5 Lightning's shape: no latent, so the wire and the experts run at the hidden state's width.
+TINY_NEMOTRON_H_NO_LATENT_FAMILY = TinyFamily(
+    _with_release_scale_bias(
+        _causal(NemotronHConfig, NemotronHForCausalLM, {**TINY_NEMOTRON_H_CONFIG, "moe_latent_size": None})
+    ),
+    attention_targets=("q_proj", "v_proj", "in_proj", "out_proj"),
 )
 # Ling-3.0's MLA attention without its KDA layers, at the same shape.
 TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
-    _tiny_remote(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
+    _tiny_remote(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True
 )
 TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(MixtralConfig, MixtralForCausalLM, TINY_MIXTRAL_CONFIG))
 # A composite no family spec claims, so no EP layer wraps it, built on the classes the pinned transformers ships.
@@ -632,6 +631,7 @@ TINY_LLAMA4_FAMILY = TinyFamily(
 TINY_QWEN3_VL_FAMILY = TinyFamily(
     _composite(Qwen3VLConfig, Qwen3VLForConditionalGeneration, TINY_QWEN3_VL_TEXT_CONFIG, TINY_QWEN3_VL_VISION_CONFIG),
     load_class=AutoModelForImageTextToText,
+    ulysses_cp=True,
 )
 
 # Past the dense roster, at its geometry: plain GQA (Llama, Qwen2), a config-level window (Mistral), Gemma 2's softcaps

@@ -65,7 +65,6 @@ def check_route_injection(checks, cls, score_fn, device, **attrs):
     layer = cls.__new__(cls)
     layer.training = True
     layer.balancing_biases = None
-    layer.expert_load_counter = None
     # __init__ is bypassed, so mirror the routing-replay defaults the selection helpers read.
     layer._forced_topk_indices = None
     layer._forced_cursor = 0
@@ -85,15 +84,8 @@ def check_route_injection(checks, cls, score_fn, device, **attrs):
 
     idx_s, _ = layer.route_tokens_to_experts(logits)
     layer.balancing_biases = torch.zeros(NUM_EXPERTS, device=device)
-    layer.expert_load_counter = None
     idx0, _ = layer.route_tokens_to_experts(logits)
     check(checks, f"{name} zero-bias selection == stock", torch.equal(idx0.sort(-1).values, idx_s.sort(-1).values))
-    check(
-        checks,
-        f"{name} counter sum == T*top_k",
-        int(layer.expert_load_counter.sum().item()) == T * TOP_K,
-        f"{int(layer.expert_load_counter.sum().item())}",
-    )
 
     # Forces an otherwise-unselected expert in; gate weights stay unbiased.
     unsel = ~torch.isin(torch.arange(NUM_EXPERTS, device=device), idx0.flatten())
@@ -101,7 +93,6 @@ def check_route_injection(checks, cls, score_fn, device, **attrs):
     big = torch.zeros(NUM_EXPERTS, device=device)
     big[free] = 1e3
     layer.balancing_biases = big
-    layer.expert_load_counter = None
     idxb, wb = layer.route_tokens_to_experts(logits)
     check(checks, f"{name} large +bias forces expert {free}", bool((idxb == free).any(-1).all()))
     check(checks, f"{name} gate weights bias-free", (wb - scores.gather(1, idxb)).abs().max().item() < 1e-4)
@@ -155,7 +146,6 @@ def run(ctx) -> dict:
     # Both read the same adopted router.bias through the same F.linear, so selection and gate weights coincide exactly:
     # the train/serve parity this adoption exists for.
     def check_matches_stock(tag: str):
-        l0.expert_load_counter = None
         logits, weights, experts = l0._route_with_bias(x)
         s_logits, s_scores, s_idx = l0.router(x)  # Stock 3-tuple (logits, softmax-over-topk, indices).
         same_sel = torch.equal(experts.sort(-1).values, s_idx.sort(-1).values.to(experts.dtype))
@@ -176,11 +166,6 @@ def run(ctx) -> dict:
     x = torch.randn(BATCH * SEQ_LEN, HIDDEN, device=device, dtype=l0.router.weight.dtype)
     l0.balancing_biases.zero_()  # Writes into router.bias, which both paths read.
     experts = check_matches_stock("zero bias")
-
-    l0.expert_load_counter = None
-    l0._route_with_bias(x)
-    tot = int(l0.expert_load_counter.sum().item())
-    check(checks, "counter sum == tokens * top_k", tot == x.shape[0] * TOP_K, f"{tot} vs {x.shape[0] * TOP_K}")
 
     # The stock router, what an engine serves, steers identically: the bias is model state.
     free = (
@@ -217,7 +202,6 @@ def run(ctx) -> dict:
         device,
         gate=SimpleNamespace(),
         n_group=1,
-        n_routed_experts=NUM_EXPERTS,
         topk_group=1,
     )
     check_route_injection(checks, EPLfm2MoELayer, lambda l: l.sigmoid(), device, use_expert_bias=False)
@@ -227,7 +211,6 @@ def run(ctx) -> dict:
         lambda l: l.softmax(dim=-1),
         device,
         n_group=1,
-        n_routed_experts=NUM_EXPERTS,
         topk_group=1,
     )
 

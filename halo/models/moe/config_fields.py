@@ -36,9 +36,9 @@ EXPERT_FFN_WIDTH_FIELDS: tuple[str, ...] = (
 _DISPATCH_WIDTH_FIELDS: tuple[str, ...] = ("moe_latent_size", "hidden_size")
 
 
-def _first_router_field(cfg, fields: tuple[str, ...], default=None):
+def _first_router_field(cfg, fields: tuple[str, ...], default=None, *, per_layer_reduce=None):
     for field in fields:
-        if value := get_config_field(cfg, field):
+        if value := get_config_field(cfg, field, per_layer_reduce=per_layer_reduce):
             return value
     return default
 
@@ -63,8 +63,8 @@ def require_expert_count(cfg) -> int:
     )
 
 
-def resolve_expert_ffn_width(cfg) -> int | None:
-    value = _first_router_field(cfg, EXPERT_FFN_WIDTH_FIELDS)
+def resolve_expert_ffn_width(cfg, *, per_layer_reduce=None) -> int | None:
+    value = _first_router_field(cfg, EXPERT_FFN_WIDTH_FIELDS, per_layer_reduce=per_layer_reduce)
     return int(value) if value else None
 
 

@@ -32,8 +32,6 @@ def test_registration():
     assert EPInklingMoELayer.FAMILY.model_types == ("inkling_text", "inkling_mm_model")
     assert EPInklingMoELayer.SUPPORTS_BIAS_BALANCING
     assert EPInklingMoELayer.SEVERS_AUX_LOSS
-    # gate.weight is [n_routed + n_shared, hidden]; inferring the expert count from it over-counts.
-    assert "gate.weight" not in EPInklingMoELayer._NUM_EXPERTS_ATTR_PATHS
 
 
 def test_capability_contracts():

@@ -10,15 +10,22 @@ import torch
 import torch.utils.checkpoint as torch_checkpoint
 from transformers import Trainer
 
-from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.models.gradient_checkpointing import scoped_checkpoint_func
 from halo.models.moe.balancing import expert_load_token_weights
 from halo.trainers.sft import DistributedSFTTrainer
 from halo.trainers.world_metrics import WorldMetrics
+from tests.common.ep_reference import random_token_batch
+from tests.common.parallelism import single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 _INDICES = torch.tensor([0, 1, 1, 3])
 _EXPECTED = torch.tensor([1.0, 2.0, 0.0, 1.0])
+_BATCH, _SEQ = 2, 16
+# Their routers sit outside the EP layer's selection, so it holds no bias.
+_NO_EP_LAYER_BIAS = {"gemma4_text", "zaya"}
 
 
 def _stub(num_experts: int = 4):
@@ -141,6 +148,21 @@ def test_no_grad_forward_through_a_checkpointed_block_does_not_count():
     assert stub.expert_load_counter is None, (
         "a no_grad reference pass through a checkpointed block must not record expert load"
     )
+
+
+@pytest.mark.parametrize("family", TINY_MOE_FAMILIES)
+def test_one_forward_counts_each_selection_once_on_every_family(family):
+    """One seam at the dispatch, so a family's route cannot forget the count or take it twice."""
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_MOE_FAMILIES[family])
+    apply_ep_layers(model, single_process_ep_config())
+    layers = [layer for _, layer in named_ep_layers(model) if layer.enable_bias_balancing()]
+    assert bool(layers) != (family in _NO_EP_LAYER_BIAS), family
+    model.train()
+    input_ids, _ = random_token_batch(model.get_input_embeddings().num_embeddings, _BATCH, _SEQ, "cpu")
+    model(input_ids=input_ids)
+    for layer in layers:
+        assert layer.expert_load_counter.sum().item() == _BATCH * _SEQ * layer.top_k, family
 
 
 if __name__ == "__main__":

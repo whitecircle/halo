@@ -67,7 +67,7 @@ gets TP. Advanced parallelism (EP, CP, ETP, PP) needs per-family registration, n
 reimplementation or a checkpoint conversion.
 
 For EP, that is a frozen `MoEFamilySpec` holding the family's facts plus an EP layer under
-`halo/distributed/expert_parallel/families/` (88 lines or fewer; GPT-OSS's is 171) subclassing `EPMoELayerBase`, declaring
+`halo/distributed/expert_parallel/families/` (83 lines or fewer; GPT-OSS's is 168) subclassing `EPMoELayerBase`, declaring
 its `HF_MODULE_NAMES` and pointing `FAMILY` at the spec, with `MOE_LAYER_MAP` built from the roster's
 imports; for PP, a validated `PPFamilySpec` in `PP_FAMILY_SPECS`. Eighteen MoE families ship an EP layer;
 the per-family × per-mode matrix is

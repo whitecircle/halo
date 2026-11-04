@@ -5,23 +5,37 @@ noop dispatcher."""
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.activations import ACT2FN
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
 from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
 from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
+from halo.models.moe.family_specs import find_moe_family_spec
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from tests.common.parallelism import single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
+
+_SHARED_EXPERT_LAYERS = sorted(
+    {cls for cls in MOE_LAYER_MAP.values() if cls.FAMILY.shared_expert_attrs}, key=lambda cls: cls.__name__
+)
+# Upstream builds these only under a config flag (LFM-2 never), so an absent module there is a configuration.
+_CONDITIONAL_SHARED_EXPERT = (EPBailingMoELayer, EPCohere2MoELayer, EPLfm2MoELayer)
 
 
 def _ep_config(experts_fsdp_managed: bool = False) -> EPConfig:
@@ -52,6 +66,7 @@ class _FusedExperts(nn.Module):
         super().__init__()
         self.gate_up_proj = nn.Parameter(torch.randn(E, 2 * M, H))
         self.down_proj = nn.Parameter(torch.randn(E, H, M))
+        self.act_fn = F.silu
 
 
 class _Qwen3Block(nn.Module):
@@ -67,8 +82,8 @@ class _Qwen35Block(nn.Module):
         super().__init__()
         self.gate = _Gate()
         self.experts = _FusedExperts()
-        self.shared_expert = None
-        self.shared_expert_gate = None
+        self.shared_expert = nn.Identity()
+        self.shared_expert_gate = nn.Linear(H, 1, bias=False)
 
 
 class _BailingGate(nn.Module):
@@ -86,6 +101,7 @@ class _BailingExpert(nn.Module):
         self.gate_proj = nn.Linear(H, M, bias=False)
         self.up_proj = nn.Linear(H, M, bias=False)
         self.down_proj = nn.Linear(M, H, bias=False)
+        self.act_fn = F.silu
 
 
 class _BailingBlock(nn.Module):
@@ -151,8 +167,69 @@ class _DeepseekV4Block(nn.Module):
         super().__init__()
         self.gate = _DeepseekV4Gate()
         self.experts = _DeepseekV4Experts(missing)
-        self.shared_experts = None
+        self.shared_experts = nn.Identity()
         self.is_hash = False
+
+
+def _tiny_block_with_renamed_shared_expert(wrapper) -> tuple[nn.Module, list[str]]:
+    """The family's real tiny block with each shared-expert spelling it builds moved to a new name; the spellings."""
+    family = next(name for name in TINY_MOE_FAMILIES if find_moe_family_spec(name) is wrapper.FAMILY)
+    _path, block = ep_claimed_blocks(tiny_family_model(TINY_MOE_FAMILIES[family]))[0]
+    built = [attr for attr in wrapper.FAMILY.shared_expert_attrs if getattr(block, attr, None) is not None]
+    for attr in built:
+        block.add_module(f"{attr}_renamed", getattr(block, attr))
+        delattr(block, attr)
+    return block, built
+
+
+@pytest.mark.parametrize("wrapper", _SHARED_EXPERT_LAYERS, ids=lambda cls: cls.__name__)
+def test_a_renamed_shared_expert_raises_where_upstream_always_builds_it(wrapper, monkeypatch):
+    """Adopting nothing drops the FFN from every output with no shape, dtype or key changing."""
+    block, built = _tiny_block_with_renamed_shared_expert(wrapper)
+    config = single_process_ep_config(wrapper.detect_num_experts(block))
+    if wrapper not in _CONDITIONAL_SHARED_EXPERT:
+        assert built, f"{wrapper.__name__}: the tiny block builds no shared expert to rename"
+        with pytest.raises(AttributeError, match="renamed it upstream"):
+            wrapper(block, config)
+        # The flag is what raises: without it the same block adopts an empty slot and trains on.
+        monkeypatch.setattr(wrapper, "_SHARED_EXPERT_REQUIRED", False)
+    layer = wrapper(block, config)
+    assert getattr(layer, layer._shared_expert_attr) is None
+
+
+def test_a_renamed_shared_expert_gate_raises():
+    """Upstream always builds it, and without it the shared leg would run at full strength on every token."""
+    block = _Qwen35Block()
+    del block.shared_expert_gate
+    with pytest.raises(AttributeError, match="shared_expert_gate"):
+        EPQwen3_5MoELayer(block, _ep_config())
+
+
+def test_the_shared_expert_output_is_scaled_by_its_gate():
+    torch.manual_seed(0)
+    block = _Qwen35Block()
+    layer = EPQwen3_5MoELayer(block, _ep_config())
+    hidden = torch.randn(2, H)
+    expected = hidden * torch.sigmoid(block.shared_expert_gate(hidden))
+    assert torch.equal(layer._shared_expert_output(hidden), expected)
+
+
+def test_an_expert_activation_nothing_names_raises():
+    """A default would train another non-linearity with no shape, dtype or key changing."""
+    block = _Qwen3Block()
+    del block.experts.act_fn
+    with pytest.raises(AttributeError, match="names the expert activation"):
+        EPQwen3MoELayer(block, _ep_config())
+
+
+def test_the_expert_activation_reads_the_container_then_the_block_then_its_config():
+    block = _Qwen3Block()
+    block.hidden_act, block.config = "gelu", SimpleNamespace(hidden_act="relu")
+    assert EPQwen3MoELayer(block, _ep_config()).act_fn is F.silu
+    del block.experts.act_fn
+    assert isinstance(EPQwen3MoELayer(block, _ep_config()).act_fn, type(ACT2FN["gelu"]))
+    del block.hidden_act
+    assert isinstance(EPQwen3MoELayer(block, _ep_config()).act_fn, type(ACT2FN["relu"]))
 
 
 def _build_all(fsdp_shard_ep1_experts: bool = False):

@@ -37,7 +37,7 @@ from halo.models.attention.selection import (
 )
 from halo.models.config_access import drop_toolkit_stamps, model_type_matches, text_config
 from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
-from halo.models.model_classes import mapped_model_class
+from halo.models.model_classes import auto_map_references, mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec
 from halo.models.nemotron_h import apply_nemotron_h_patches
 from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
@@ -48,13 +48,10 @@ logger = logging.getLogger(__name__)
 
 
 def _auto_map_class_name(auto_map: dict, key: str) -> str | None:
-    """Bare class name of an ``auto_map`` entry (``"module.Class"``, or hub's two-slot list form)."""
-    target = auto_map.get(key)
-    if isinstance(target, (tuple, list)):
-        target = next((entry for entry in target if entry), None)
-    if not target:
-        return None
-    return str(target).rsplit(".", 1)[-1]
+    """Bare class name of an ``auto_map`` entry's first reference."""
+    entry = auto_map.get(key)
+    references = auto_map_references(entry) if entry else ()
+    return references[0].rsplit(".", 1)[-1] if references else None
 
 
 def resolve_text_only_config(model_config):

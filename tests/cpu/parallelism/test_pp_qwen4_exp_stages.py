@@ -193,6 +193,15 @@ def test_a_text_only_composite_splits_at_its_text_tower(composite):
     assert torch.equal(logits, reference), (logits - reference).abs().max().item()
 
 
+def test_a_moved_upstream_forward_refuses_the_stream_forward(model, monkeypatch):
+    """The stream forward restates upstream's, so a release that moved it would otherwise run the old contract."""
+    stage_model = copy.deepcopy(model)
+    backbone = next(module for module in stage_model.modules() if type(module).__name__ in PP_SPEC_MAP)
+    monkeypatch.setattr(type(backbone), "forward", lambda self, inputs_embeds: None)
+    with pytest.raises(RuntimeError, match="qwen4_exp_stream_forward"):
+        build_pipeline_stage(stage_model, 1, 2, moe_balancing="none", pp_split=[2, 2])
+
+
 def test_a_later_stage_refuses_a_collapsed_boundary(model):
     stage = _stages(model, [2, 2])[1]
     input_ids, kwargs = _padded_rows(model)

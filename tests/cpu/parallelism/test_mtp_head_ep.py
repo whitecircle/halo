@@ -24,7 +24,7 @@ from tests.common.mtp_heads import LABEL_IGNORE, MTP_TINY_FAMILIES, padded_rows,
 from tests.common.parallelism import single_process_ep_config, stubbed_rank_ep_config
 from tests.common.tiny_models import tiny_family_model
 
-_ROUTED = ("qwen3_5_moe_text", "qwen3_next", "glm4_moe_lite")
+_ROUTED = ("qwen3_5_moe_text", "qwen3_next", "glm4_moe_lite", "nemotron_h", "nemotron_h_omni")
 _WEIGHT = 0.7
 _EXPERTS = 8
 _FORWARD_ORDER = ["dispatch_forward", "combine_forward"]
@@ -171,7 +171,7 @@ def test_the_head_dispatches_within_the_capacity_the_first_layer_all_reduced(
 
 
 @pytest.mark.parametrize("rank", range(4))
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_under_expert_tp_a_rank_streams_the_slice_the_eager_path_would_cut(name, rank, tmp_path):
     """Two EP ways by two ETP ways on four ranks: the lazy planner reads what a full bank patched in memory would keep."""
     world, ways = 4, 2

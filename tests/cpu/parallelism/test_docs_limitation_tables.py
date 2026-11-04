@@ -20,6 +20,7 @@ from halo.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
 from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
+from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from scripts.docs.markdown import parse_tables
 from tests.common.repo import REPO_ROOT
 from tests.common.rosters import distributed_trainer_classes
@@ -29,6 +30,7 @@ _EXPERT_PARALLELISM = REPO_ROOT / "agent-docs" / "parallelism" / "expert-paralle
 _TRAINER_ARCHITECTURE = REPO_ROOT / "agent-docs" / "reference" / "trainer-architecture.md"
 _MODELS_INDEX = REPO_ROOT / "agent-docs" / "models" / "README.md"
 _HUMAN_MATRIX = REPO_ROOT / "human-docs" / "supported-matrix.md"
+_ROLLOUT_SERVERS = REPO_ROOT / "agent-docs" / "infrastructure" / "rollout-servers.md"
 
 # No trainer refuses EP, ETP or TP, so the matrix carries the two axes a trainer declares.
 _TRAINER_AXIS_SUPPORT = {"CP": lambda cls: cls.SUPPORTS_CP, "PP": lambda cls: cls.PP_REFUSAL is None}
@@ -317,6 +319,26 @@ def test_human_trainer_table_matches_the_support_flags():
                 f"trainers {sorted(trainers)} {'admit' if declared == {True} else 'do not all admit'} {column}"
             )
     assert seen == set(classes), f"distributed trainers in no {_HUMAN_MATRIX.name} row: {sorted(set(classes) - seen)}"
+
+
+def _engine_refusal_table():
+    tables = parse_tables(_ROLLOUT_SERVERS.read_text(encoding="utf-8"))
+    return next(table for table in tables if table.headers[0] == "Family (`model_type`)")
+
+
+@pytest.mark.parametrize("backend", rollout_backends())
+def test_the_engine_table_ticks_match_the_clients_unservable_model_types(backend):
+    """The table answers which family an engine takes an online update for; the client is what refuses it."""
+    client = resolve_weight_sync_client(backend)
+    table = _engine_refusal_table()
+    column = table.headers.index(client.ENGINE_RELEASE)
+    refused, taken = set(), set()
+    for row in table.rows:
+        model_types = re.findall(r"`([a-z0-9_]+)`", row[0])
+        assert model_types, f"{_ROLLOUT_SERVERS.name} row {row[0]!r} names no model_type"
+        {"✗": refused, "✓": taken}[row[column]].update(model_types)
+    assert refused == set(client.UNSERVABLE_MODEL_TYPES), backend
+    assert not taken & set(client.UNSERVABLE_MODEL_TYPES), backend
 
 
 if __name__ == "__main__":

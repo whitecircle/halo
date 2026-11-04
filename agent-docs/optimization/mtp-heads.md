@@ -1,6 +1,6 @@
 # MTP heads
 
-`mtp_loss_weight` trains the multi-token-prediction head a family's release ships, as that release's architecture: the family's own decoder layer plus its projection and norms, at the release's key path. The SFT script alone carries the knobs ([fields](../reference/configuration-reference.md#sftscriptarguments)). At weight 0 nothing is built and no hook is installed.
+`mtp_loss_weight` trains the multi-token-prediction head a family's release ships, as that release's architecture: the family's own decoder layers plus its projection and norms, at the release's key path. The SFT script alone carries the knobs ([fields](../reference/configuration-reference.md#sftscriptarguments)). At weight 0 nothing is built and no hook is installed.
 
 ## Families
 
@@ -8,10 +8,13 @@
 |---|---|---|
 | Qwen3.5/3.6 dense and MoE, text and composite; Qwen3.8-27B; Qwen3-Next | `mtp.*`, beside the backbone | `fc`, `pre_fc_norm_embedding`, `pre_fc_norm_hidden`, `layers.0`, `norm` |
 | GLM-4 MoE Lite | decoder list entry at `num_hidden_layers` | `eh_proj`, `enorm`, `hnorm`, `shared_head.norm` beside the layer's own children; the release's `embed_tokens` and `shared_head.head` copies are the trunk's in training |
+| Nemotron-H: Lightning, and Super VL on its text and composite routes | `mtp.*` beside the output embedding it shares, so `language_model.mtp.*` on the composite | `layers.0`, an attention block with `eh_proj`, `enorm` and `hnorm`; `layers.1`, a MoE block with `final_layernorm` |
 
-Every other tail is refused by name (`MTP_REFUSALS`, `halo/models/mtp/spec.py`): Flash-Next's draft layer reads hyper-connection streams, GLM-5.3's tail lacks layers its class builds and is stored in fp8, Step-3.7 owns a head per draft layer, Inkling needs renames, DeepSeek-V4 stores vendor names and quantized experts, Nemotron-H's config declares a draft chain of two blocks of different kinds. A family with no tail gets a plain refusal. `tests/cpu/models/test_mtp_head_spec.py` holds every class declaring a tail to a spec or a refusal.
+Every other tail is refused by name (`MTP_REFUSALS`, `halo/models/mtp/spec.py`): Flash-Next's draft layer reads hyper-connection streams, GLM-5.3's tail lacks layers its class builds and is stored in fp8, Step-3.7 owns a head per draft layer, Inkling needs renames, DeepSeek-V4 stores vendor names and quantized experts. A family with no tail gets a plain refusal. `tests/cpu/models/test_mtp_head_spec.py` holds every class declaring a tail to a spec or a refusal.
 
 Ling-3.0-flash's remote forward runs its own head; see [Bailing](../models/bailing.md#mtp-tail).
+
+A Nemotron-H head is the chain both engines draft with: the norms and the projection, the attention block, the MoE block, the final norm, then the trunk's output embedding, with each block's residual folded before the next block's norm and no zeroed embedding at position 0. Each block takes its class from the trunk's last layer of its kind, and the attention block takes that layer's call, so packed rows keep their documents apart. A config declaring another `mtp_layers_block_type`, or a depth cut whose trunk holds no layer of a block's kind, refuses before the load. Super VL's text route reads `language_model.mtp.*` and writes `mtp.*`.
 
 ## Objective
 
@@ -48,6 +51,8 @@ A run logs `ntp_ce` and `mtp_ce`, each cross-entropy per target over the world, 
 
 What `hard` does depends on the rate: from a stale start it climbs then falls at 1e-5 and holds at 1e-6, and from the release's own head it falls at all three. Only `soft` fits have been served, so this page names no winner.
 
+On first-turn rows through `--release`, Nemotron-H's own head reads 0.8124 on Lightning and 0.8876 on Super VL before any fit. A `soft` fit at 1e-5 falls and the gate stops it (0.8076 and 0.8854). At 1e-6 Lightning holds at 0.8126 and the gate passes. Super VL did not run at that rate.
+
 The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4. On the trunk's own samples at temperature 1, an own start reads 0.8704, 0.8877, 0.8919, 0.8916, 0.8902, 0.8901. Under `detached` at 5e-6, acceptance follows the moving trunk over 200 steps: 0.8187 to 0.8158 `soft`, 0.8187 to 0.8136 `hard`.
 
 ## Parallel axes
@@ -83,16 +88,16 @@ The row's bars hold on these arms: `joint` at most 1.30x, `soft` within 2% of `h
 
 ## Checkpoints
 
-A save walks the head as it walks the trunk, so a checkpoint holds it at the release's key path on every saver, and on every node's disk under per-node output storage. Its expert bank takes the family's gathered layout, which both engines read. A GLM-4 head's `embed_tokens` and `shared_head.head` are written off the trained embeddings, on one process too, where that save takes the gathered writer since `save_pretrained` writes the state dict alone. A stock load ignores the head.
+A save walks the head as it walks the trunk, so a checkpoint holds it at the release's key path on every saver, and on every node's disk under per-node output storage. Its expert bank takes the family's gathered layout, which both engines read. A GLM-4 head's `embed_tokens` and `shared_head.head` are written off the trained embeddings, on one process too, where that save takes the gathered writer since `save_pretrained` writes the state dict alone. A stock load ignores the head. A Nemotron-H head's expert bank is per expert, so an untrained tail comes back byte for byte, its router bias in fp32.
 
 A resume writes the bytes of a run that never stopped. It reads the checkpoint's head and ignores `mtp_head_source`; a resume built from the base (`use_grouped_gemm: false`) reads the usual source, and the FSDP2 restore overwrites it. A head cannot join a run midway: a checkpoint with none refuses at the load, or over a base load at the optimizer gate (`have no saved optimizer state`), which `head_only` to `joint` also raises. `joint` to `head_only` passes: the head's moments restore, and the trunk's go unread. A resume at `mtp_loss_weight: 0` builds no head, so what it saves carries none; keep the last checkpoint that does.
 
 | Tool | A stored head |
 |---|---|
-| `convert_to_bf16`, `patch_vocab` | Written back at the output's dtype on a family with a head, in the expert layout of the class's save, GLM-4's copies off the live embeddings a patch grew. Any other family's tail drops, with a warning naming the config field its output keeps. |
-| `merge_ep_shards` | Merged with the trunk's experts into the gathered save's bytes. A family whose export writes trunk copies refuses `save_sharded_ep`. |
+| `convert_to_bf16`, `patch_vocab` | Written back at the output's dtype on a family with a head, in the expert layout of the class's save, GLM-4's copies off the live embeddings a patch grew, Nemotron-H's router bias at its stored fp32. Any other family's tail drops, with a warning naming the config field its output keeps. |
+| `merge_ep_shards` | Merged with the trunk's experts into the gathered save's bytes. A family whose export writes trunk copies refuses `save_sharded_ep`, and Nemotron-H refuses it for its trunk's names. |
 | `merge_models` | Merged where every input carries it, refused where only some do, except a base's under `task_arithmetic` or `ties` that no fine-tune stores, which the merge leaves out. |
-| `reattach_vision_tower` | The export's head supersedes the base's whole; with none, the base's is carried with a warning, which offers a `head_only` fit only on a family with a head spec. |
+| `reattach_vision_tower` | The export's head supersedes the base's whole, at the composite's level; with none, the base's is carried with a warning, which offers a `head_only` fit only on a family with a head spec. |
 | `unfuse_moe_experts`, `quantize_to_lowp` | Streamed with the trunk. |
 
 ## Serving
@@ -106,8 +111,12 @@ vLLM reads the head through `VLLM_SPECULATIVE_CONFIG`, SGLang through `--specula
 | vLLM, Qwen3.6 stale `soft` fit | 0.8215 | 0.8284 |
 | SGLang, the same fit | 0.8295 | 0.8415 |
 | vLLM, GLM-4.7 Flash `own_soft` fit the gate stopped | 0.7317 | 0.7450 |
+| vLLM, Lightning `own_soft` fit the gate stopped | 0.8282 | 0.8372 |
+| SGLang, the same fit | 0.8366 | 0.8407 |
+| vLLM, Super VL `own_soft` fit the gate stopped, reattached | 0.8335 | 0.8262 |
+| SGLang, the same fit | 0.8337 | 0.8385 |
 
-The release head alone reads 0.83 to 0.84 across launches: 0.8284, 0.8311, 0.8394, 0.8438 and 0.8371 on vLLM. No fit here shows a served gain.
+Qwen3.6's release head alone reads 0.83 to 0.84 across launches: 0.8284, 0.8311, 0.8394, 0.8438 and 0.8371 on vLLM. The Nemotron-H rows are one launch each. No fit here shows a served gain.
 
 - **SGLang one draft token:** `--speculative-algorithm EAGLE --speculative-draft-model-path <checkpoint> --speculative-num-steps 1 --speculative-eagle-topk 1 --speculative-num-draft-tokens 2`. Its multi-step defaults read 0.62 on the same fit and are not comparable.
 - **A checkpoint with no head:** vLLM exits non-zero at load, `Following weights were not initialized from checkpoint`. SGLang starts on one and every draft misses (0.0000), so read its counters before trusting a server.
@@ -133,6 +142,7 @@ The loss cannot make this call: a released head at `learning_rate: 1e-4` with no
 | Recipe | Fits |
 |---|---|
 | `examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-head-only.yaml`, `examples/sft/glm4/glm-4.7-flash-mtp-head-only.yaml` | The head over a frozen trunk, at the learning rate and warmup the gate does not warn off |
+| `examples/sft/nemotron_h/nemotron-3.5-lightning-mtp-head-only.yaml` | The same fit, at the lower learning rate whose fit passed the gate on first-turn rows |
 | `examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-joint.yaml` | The head inside the SFT recipe's objective, at the weight DeepSeek-V3 published for pretraining |
 
 Both Qwen3.6 recipes render `qwen3.6-reasoning-effort.jinja`, an empty think block before every reply. Without the block, the same reply tokens read a next-token cross-entropy of 3.03 and top-1 of 0.27, against 0.85 and 0.77 with it, on Halo, stock transformers and vLLM alike. So `qwen3-multiturn.jinja` gives a run an `eval_loss` near 3.3 that a frozen trunk keeps; a no-head SFT run reads 0.83 after its first two real optimizer steps at 1e-5, its `grad_norm` falling from 244 to 4.5.
@@ -152,9 +162,9 @@ Neither render shows a served gain. Each recipe's rows are ultrachat replies, no
 |---|---|
 | `test_sft_mtp_head.py` | Per family and shard layout: the head's gradient against a plain model at the run's dtype, one dispatch and one capacity generation per forward, equal first loss hard and soft, accumulated forwards, packed rows on flash, a rank with no head token |
 | `test_sft_mtp_head_checkpoint.py` | Exact resume, fp32 masters included, export, shard merge, a scope change and the gate; two EP groups as replicas of a head that moved, on two simulated domains or two machines |
-| `test_sft_mtp_head_real.py` | Qwen3.6-35B at EP8: acceptance hard and soft from a stale and from its own head, at the safe learning rate; the fit on the trunk's own samples; the gate on an oversized rate and an off-by-one target; a `detached` trunk against a run with no head |
+| `test_sft_mtp_head_real.py` | Qwen3.6-35B at EP8: acceptance hard and soft from a stale and from its own head, at the safe learning rate; the fit on the trunk's own samples; the gate on an oversized rate and an off-by-one target; a `detached` trunk against a run with no head. `--release` runs an own-head row on a Nemotron-H release through its knob, recording only |
 | `test_sft_mtp_head_cost.py` | Seconds per step and peak memory of each scope, hard and soft, against no head at 33,000 tokens; `--arms` picks a subset, which leaves out the bars needing every arm |
-| `test_sft_mtp_head_serving.py` | The acceptance a live engine reads off a checkpoint's head, against a control head on the same prompts, and on vLLM that greedy output parts from a server with no draft only within 1.0 logprob |
+| `test_sft_mtp_head_serving.py` | The acceptance a live engine reads off a checkpoint's head, against a control head on the same prompts, and on vLLM that greedy output parts from a server with no draft only within 1.0 logprob. `--release` reads a Nemotron-H server's tokenizer through that release's knob |
 
 ## Refusals
 

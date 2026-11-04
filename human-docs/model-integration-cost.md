@@ -23,11 +23,11 @@ naming the HF MoE class it claims, one frozen `MoEFamilySpec` holding its config
 one import line in the family roster.
 
 - EP layers subclass a shared base. A family whose expert-weight layout matches
-  an existing one subclasses that instead: Laguna reuses GLM-4's in 18 lines,
+  an existing one subclasses that instead: Laguna reuses GLM-4's in 21 lines,
   Qwen3-Next reuses Qwen3.5-MoE's in 25, and Qwen3.8-Flash-Next reuses
   Qwen3-Next's in 11.
-- Every other EP layer file is 88 lines or fewer.
-- GPT-OSS is the outlier at 171, because of its interleaved, biased gate/up
+- Every other EP layer file is 83 lines or fewer.
+- GPT-OSS is the outlier at 168, because of its interleaved, biased gate/up
   weights and its own clamped SwiGLU compute.
 
 Context parallelism works the same way: one `UlyssesAttention` subclass in

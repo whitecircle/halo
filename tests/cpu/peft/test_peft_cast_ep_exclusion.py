@@ -41,6 +41,7 @@ class _Lfm2Block(nn.Module):
         self.experts = nn.Module()
         self.experts.gate_up_proj = nn.Parameter(torch.randn(E, 2 * M, H))
         self.experts.down_proj = nn.Parameter(torch.randn(E, H, M))
+        self.experts.act_fn = F.silu
         self.top_k = K
         self.norm_topk_prob = True
         self.routed_scaling_factor = 1.0

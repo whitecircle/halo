@@ -15,6 +15,7 @@ from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.zaya import (
     _same_document_masks,
+    apply_zaya_patches,
     is_zaya_cca_document_isolated,
     patch_zaya_gradient_checkpointing_refusal,
     patch_zaya_packed_document_isolation,
@@ -68,6 +69,20 @@ def _doc_b_drift(model, lens: tuple[int, int]) -> tuple[float, float]:
         swapped = model(input_ids=variant, position_ids=position_ids, use_cache=False).logits[0, lens[0] :]
         alone = model(input_ids=input_ids[:, lens[0] :], use_cache=False).logits[0]
     return (base - swapped).abs().max().item(), (base - alone).abs().max().item()
+
+
+@pytest.mark.parametrize(
+    ("owner", "patch"),
+    [
+        ("ZayaCCAProjection", "_install_document_isolated_cca"),
+        ("ZayaRouter", "patch_zaya_router_load_recording"),
+        ("ZayaModel", "patch_zaya_packed_document_isolation"),
+    ],
+)
+def test_a_moved_upstream_signature_refuses_the_patches(owner, patch, monkeypatch):
+    monkeypatch.setattr(getattr(zaya_modeling, owner), "forward", lambda self, moved: None)
+    with pytest.raises(RuntimeError, match=patch):
+        apply_zaya_patches()
 
 
 def test_native_registration_is_not_shadowed():

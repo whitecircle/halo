@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import ZAYA
@@ -17,11 +16,6 @@ class EPZayaMoELayer(EPMoELayerBase):
 
     HF_MODULE_NAMES = ("ZayaSparseMoeBlock",)
     FAMILY = ZAYA
-
-    _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts",)
-
-    def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return ("native balancing_biases gate",)
 
     def forward(  # type: ignore[override]
         self,

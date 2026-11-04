@@ -243,7 +243,7 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 | Muon, FlashAdamW | supported optimizer options, except under PP |
 | HuggingFace, local and `s3://` datasets | supported; offline tokenize, pack and shard with `halo run prepare-dataset` |
 | Tree packing (`tree_packing`) | SFT on raw text datasets: GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE) on FA4 or FA2, GLM-5 Next on SDPA; refused under CP, TP and PP; ETP and EP+ETP are admitted ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗) |
-| MTP head training (`mtp_loss_weight`) | SFT on text rows: Qwen3.5/3.6 (dense and MoE), Qwen3.8-27B, Qwen3-Next and GLM-4 MoE Lite, each as its release ships it, under FSDP2, EP and ETP; refused under CP, TP, PP, HSDP, tree packing, adapters, quantized loads and `lowp_precision`, and on every other tail by name ([MTP heads](../agent-docs/optimization/mtp-heads.md) ↗) |
+| MTP head training (`mtp_loss_weight`) | SFT on text rows: Qwen3.5/3.6 (dense and MoE), Qwen3.8-27B, Qwen3-Next, GLM-4 MoE Lite and Nemotron-H, each as its release ships it, under FSDP2, EP and ETP; refused under CP, TP, PP, HSDP, tree packing, adapters, quantized loads and `lowp_precision`, and on every other tail by name ([MTP heads](../agent-docs/optimization/mtp-heads.md) ↗) |
 | VLM packing / padding-free | unsupported: images cannot be packed, so VLM inputs use standard padding |
 | Streaming an infinite corpus | unsupported: the loaders build a map-style `Dataset`; pre-tokenize and shard offline |
 

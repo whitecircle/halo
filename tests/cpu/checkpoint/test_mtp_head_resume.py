@@ -59,25 +59,31 @@ def _assert_resume_replays(name: str, target, corpus: str, *, ranks: int, **fiel
 
 
 @pytest.mark.parametrize("arm", ["joint_soft", "detached_hard", "head_only_soft"])
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_one_process_replays_every_scope_on_either_placement(name, arm, tmp_path, corpus):
     _assert_resume_replays(name, tmp_path, corpus, ranks=1, **_HEAD, **_ARMS[arm])
 
 
-@pytest.mark.parametrize("name", ["qwen3_5", "qwen3_next", "qwen3_5_moe"])
+@pytest.mark.parametrize("name", ["qwen3_5", "qwen3_next", "qwen3_5_moe", "nemotron_h_omni", "nemotron_h_no_latent"])
 def test_one_process_replays_the_other_families(name, tmp_path, corpus):
     _assert_resume_replays(name, tmp_path, corpus, ranks=1, **_HEAD, **_ARMS["joint_soft"])
 
 
+def test_a_text_only_fit_of_a_composite_replays_off_its_own_checkpoint(tmp_path, corpus):
+    """The fit reads the composite's ``language_model.mtp.*``, and its checkpoint stores ``mtp.*``, which the resume reads
+    at the class's own path."""
+    _assert_resume_replays("nemotron_h_omni", tmp_path, corpus, ranks=1, text_only_model=True, **_HEAD)
+
+
 @pytest.mark.parametrize("arm", ["joint_soft", "head_only_hard"])
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "qwen3_5"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "qwen3_5", "nemotron_h", "nemotron_h_omni"])
 def test_two_ranks_replay_through_the_shard_groups(name, arm, tmp_path, corpus):
     """FSDP2's restore over the head's own group, and under ``head_only`` over a trunk the wrap left out."""
     _assert_resume_replays(name, tmp_path, corpus, ranks=2, **_HEAD, **_ARMS[arm])
 
 
 @pytest.mark.parametrize("arm", ["joint_soft", "head_only_hard"])
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "qwen3_5"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "qwen3_5", "nemotron_h"])
 def test_two_ranks_replay_over_a_base_load_the_restore_overwrites(name, arm, tmp_path, corpus):
     """No EP layer in the run, so a resume builds from the base and FSDP2's restore writes the head and the trunk."""
     _assert_resume_replays(name, tmp_path, corpus, ranks=2, use_grouped_gemm=False, **_HEAD, **_ARMS[arm])

@@ -37,7 +37,6 @@ _IDS = [family[0] for family in FAMILIES]
 # number the block owns is the failure caught here.
 _KNOB_SPELLINGS = {
     "top_k": ROUTER_TOPK_FIELDS,
-    "n_routed_experts": ("n_routed_experts",),
     "n_group": ("n_group", "num_group"),
     "topk_group": ("topk_group",),
     "norm_topk_prob": ("norm_topk_prob",),
@@ -52,9 +51,6 @@ _KNOB_SPELLINGS = {
     "n_shared_experts": ("n_shared_experts",),
     "route_scale": ("route_scale",),
 }
-
-# Their fallback reads the live tree, so an absent declaration cannot become a wrong number.
-_LIVE_TREE_FALLBACKS = {"n_routed_experts"}
 
 
 def _build(factory, wrapper, ep_config=None):
@@ -120,7 +116,7 @@ def _parity_failures(block: nn.Module, layer, wrapper) -> list[str]:
     ):
         failures.append(f"_shared_expert_attr='{layer._shared_expert_attr}' names no module on the block")
 
-    allowed_defaults = set(getattr(wrapper, "_OPTIONAL_ROUTING_KNOBS", ())) | _LIVE_TREE_FALLBACKS
+    allowed_defaults = set(getattr(wrapper, "_OPTIONAL_ROUTING_KNOBS", ()))
     for attr, spellings in _KNOB_SPELLINGS.items():
         if not hasattr(layer, attr):
             continue
@@ -182,7 +178,7 @@ def test_the_hidden_dim_and_expert_count_come_from_the_block(family, wrapper, fa
     if expected_hidden is None:
         expected_hidden = experts.gate_up_proj.shape[2]
     # A block projecting tokens into a latent dispatches that latent.
-    if (latent := getattr(block, "fc1_latent_proj", None)) is not None:
+    if isinstance(latent := getattr(block, "fc1_latent_proj", None), nn.Linear):
         expected_hidden = latent.out_features
     assert layer.hidden_dim == expected_hidden, f"{family}: hidden_dim {layer.hidden_dim} != {expected_hidden}"
 
@@ -344,7 +340,10 @@ def test_the_parity_check_is_sensitive_to_a_dropped_declaration():
     forgot_shared = type(
         "_ForgotSharedExpert",
         (glm4_wrapper,),
-        {"FAMILY": dataclasses.replace(glm4_wrapper.FAMILY, model_types=(), shared_expert_attrs=())},
+        {
+            "FAMILY": dataclasses.replace(glm4_wrapper.FAMILY, model_types=(), shared_expert_attrs=()),
+            "_SHARED_EXPERT_REQUIRED": False,
+        },
     )
     block, layer = _build(glm4_factory, forgot_shared)
     assert any("shared" in failure for failure in _parity_failures(block, layer, forgot_shared)), (
@@ -354,7 +353,6 @@ def test_the_parity_check_is_sensitive_to_a_dropped_declaration():
     # Reading knobs off the block alone, each resolves to its neutral default, a live wrong number rather than a
     # missing attribute.
     def _block_only_knobs(self, original_layer):
-        self.n_routed_experts = getattr(original_layer, "n_routed_experts", self.num_experts)
         self.n_group = getattr(original_layer, "n_group", 1)
         self.topk_group = getattr(original_layer, "topk_group", 1)
         self.norm_topk_prob = getattr(original_layer, "norm_topk_prob", False)

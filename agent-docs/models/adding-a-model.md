@@ -13,10 +13,11 @@
 | transformers' conversion mapping misplaces or misses the hub's keys | [Correct the conversion mapping](#correct-the-conversion-mapping) |
 | Multimodal composite whose CausalLM transformers does not map, or whose tower stores keys elsewhere | [Text-only load of a composite](#text-only-load-of-a-composite) |
 | A forward the toolkit replaces, or one walking a row's documents | [Replacing an upstream forward](#replacing-an-upstream-forward) |
+| New release of a family the toolkit already supports | [New release of a supported family](#new-release-of-a-supported-family) |
 
 For plain FSDP, no work is needed — any `AutoModelForCausalLM` that fits one GPU works ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
-Pipeline parallelism is an allowlist: a new backbone splits under PP only once its class is in a `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`; `STOCK_FORWARD_PP` when the upstream forward splits as-is), added after its PP GPU rows pass. Until then `reject_unsupported_pp_structure` refuses it by name.
+Pipeline parallelism is an allowlist: a new backbone splits under PP only once its class is in a `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`; `STOCK_FORWARD_PP` when the upstream forward splits as-is), added after its PP GPU rows pass (a MoE joins `_PP_MOE_FAMILIES` in `tests/gpu/manifest.py`). Until then `reject_unsupported_pp_structure` refuses it by name.
 
 Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`halo/model_loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`has_routed_experts` finds the experts on the nested `text_config`). No EP-layer work is VLM-specific. A prefix-LM family, whose decoder reads the prefix/suffix split from `token_type_ids` (PaliGemma), is declared in `PREFIX_LM_MODEL_TYPE_PREFIXES` (`halo/models/attention/prefix_lm.py`), which keeps it off flash kernels and has the VLM collators write that split ([SFT → Vision-language models](../training-methods/sft.md#vision-language-models)).
 
@@ -60,7 +61,7 @@ The declaration is verified, never trusted: `verify_head_transform` runs the fam
 
 ## Declare the MTP head
 
-A family whose release stores an MTP tail takes one entry in `halo/models/mtp/spec.py`: `MTP_HEAD_SPECS` where the tail is the family's own decoder layer plus a projection and norms, `MTP_REFUSALS` with the reason otherwise. `tests/cpu/models/test_mtp_head_spec.py` fails a class naming a tail in `_keys_to_ignore_on_load_unexpected` with neither.
+A family whose release stores an MTP tail takes one entry in `halo/models/mtp/spec.py`: `MTP_HEAD_SPECS` where the tail is the family's own decoder layers plus a projection and norms, `MTP_REFUSALS` with the reason otherwise. `tests/cpu/models/test_mtp_head_spec.py` fails a class naming a tail in `_keys_to_ignore_on_load_unexpected` with neither.
 
 A spec declares only what a release spells its own way: placement (`root` for `mtp.*`, `list` for the decoder list's entry at `num_hidden_layers`), the projection and norm paths, trunk copies the release stores, and a drafter that zeroes the first embedding. Layer class, index and norm class are read off the trunk.
 
@@ -71,6 +72,16 @@ For a spec:
 - [ ] Confirm the head trains inside the forward: `tests/cpu/models/test_mtp_head.py` holds causality and the soft identity per tiny family, and fails a head reading its own target.
 - [ ] Serve a `head_only` export on each engine that takes the family: `test_sft_mtp_head_serving.py`. If either loader checks completeness, the export must write what it reads, as GLM-4's trunk copies do.
 - [ ] Add the family to the table in [MTP heads](../optimization/mtp-heads.md#families) and its model page.
+
+## New release of a supported family
+
+A checkpoint under a `model_type` a spec already claims often loads with nothing to add. Check before training it:
+
+1. **Read rank 0's `LOAD REPORT`.** transformers prints one where a load is not clean: an `UNEXPECTED`, `MISMATCH` or `CONVERSION` line names a key the class or the mapping does not take ([Correct the conversion mapping](#correct-the-conversion-mapping)).
+2. **New config spellings** extend the registries in `halo/models/moe/config_fields.py`, and a new `model_type` extends the spec's `model_types`. A composite wrapper or text tower is a `model_type` too.
+3. **A hub modeling file** (`trust_remote_code`, `model_revision` pinned) may differ from transformers' class. Read it for what the EP layer assumes: the expert and router spellings on the spec, `_SHARED_EXPERT_REQUIRED`, `_OPTIONAL_ROUTING_KNOBS` and the router's own `_TOPK_WEIGHT_NORM_EPS`.
+4. **Add a recipe** under `examples/`. `tests/cpu/config/test_examples_roster.py` holds it to the cached `config.json`: expert count against `expert_parallel_size`, context window, export contract.
+5. **Serving.** Read the [engine table](../infrastructure/rollout-servers.md#which-families-each-engine-serves); the release's own loader, not the family, decides whether an online update lands.
 
 ## Add EP support
 
@@ -106,11 +117,25 @@ The base (`moe_layer/layer.py`, with its compute, routing, grad-sync, expert-LoR
 | Hook | Default | Overridden by |
 |---|---|---|
 | `_detect_hidden_dim(router, experts)` | the router projection's input width, else `gate_up_proj`'s | Nemotron-H, whose wire carries the experts' width, the latent where a release has one; Gemma4 and Zaya reach the fallback by having no bare router projection |
-| `_adopt_routing(block)` | `self.top_k = self._find_top_k(block)` | every family with more knobs: a selection function, a correction-bias buffer. Group-limited families inherit `EPGroupLimitedMoELayerBase`, whose `_adopt_routing` resolves the six DeepSeek-V3 knobs off block → gate → config |
+| `_adopt_routing(block)` | `self.top_k = self._find_top_k(block)` | every family with more knobs: a selection function, a correction-bias buffer. Group-limited families inherit `EPGroupLimitedMoELayerBase`, whose `_adopt_routing` resolves the DeepSeek-V3 knobs off block → gate → config |
 | `_adopt_shared_experts(block)` | adopt `FAMILY.shared_expert_attrs` | Cohere2 (combination strategy), Qwen3.5/3.6 (a second gate module) |
-| `_adopt_expert_compute(block, experts)` | `_resolve_activation` off the container | families owning their combine: GptOss (`alpha`/`limit`), DeepSeek-V4, GLM-5, Step-3.7 (clamp bounds), Bailing (activation on the per-expert module) |
-| `_adopt_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params` | Qwen3 (split), Bailing (stack), GptOss (interleave), Nemotron-H (no gate) |
-| `_init_summary_extras(block)` | `()` | any family with a field worth printing at construction |
+| `_adopt_expert_compute(block, experts)` | `_resolve_activation` off the container | families owning their combine: GptOss (`alpha`/`limit`), DeepSeek-V4, GLM-5, Step-3.7 (clamp bounds), Bailing (activation on the per-expert module); Nemotron-H adds its latent projections |
+| `_adopt_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params`, which stores a `SEPARATE_GLU` family's halves apart (Qwen3) | Bailing (stack), GptOss (interleave), Nemotron-H (no gate) |
+| `_init_summary_extras(block)` | `()`; the group-limited base adds its resolved knobs, and every line already prints `wire_width` and `top_k` | any family with a field worth printing at construction, extending `super()` |
+
+The forward's seams, each overridden only where the family differs:
+
+| Hook | Default | Overridden by |
+|---|---|---|
+| `_route_hidden_states(flat, **kwargs)` | `route_tokens_to_experts` over `_router_logits` | a router that selects itself: Qwen3, Qwen3.5/3.6, Bailing, DeepSeek-V4 |
+| `_router_logits(flat)` | the gate's logits | a router whose forward also selects: LFM-2; Nemotron-H (fp32) |
+| `_gate_weights_at(logits, indices)` | required where routing replay or `_biased_route` runs | every family whose router selects or whose route is biased in the base, with the router's own arithmetic |
+| `_routing_scores(logits)` | sigmoid, on the group-limited base | Mistral4 (softmax) |
+| `_shared_expert_output(hidden)` | the shared expert | Qwen3.5/3.6 (sigmoid gate) |
+| `_dispatch_compute_combine(...)` | dispatch, compute, combine; records the expert load | Nemotron-H (latent projections around it) |
+| `_glu_ffn(x, proj)` / `_grouped_expert_ffn(...)` | the GLU FFN on either stored layout | Nemotron-H (no gate) / GptOss (three GEMMs with biases) |
+| `_warm_expert_activation(gate_up)` | the combine over a synthetic `[T, 2M]` | GptOss, Nemotron-H |
+| `_glu_combine_name()` | read off the `_fused_glu_mul` latch | GptOss, Nemotron-H |
 
 A hook may read only the wrapped module and the `EPConfig`. **No hook may issue a collective**: some load paths patch layers before every rank has reached group setup, so a collective here deadlocks the job rather than failing it (DeepEP builds its buffer lazily, at the first dispatch, for that reason).
 
@@ -133,20 +158,21 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `text_only_layout` — a composite transformers' CausalLM mapping does not name ([Text-only load of a composite](#text-only-load-of-a-composite)).
 - `refuses_trl_image_rows` — why TRL's own vision collator and loss (DPO, KTO) do not train the family on images, refused before the load.
 - `remote_composite_refusal` — why the composite of the release's own modeling file does not train, for a family transformers also ships natively, refused at the load unless a text-only route narrows it away.
-- `supports_lazy_loading` / `supports_gradient_checkpointing` / `supports_routing_replay` / `supports_fp32_non_ep_params` — all default `True`; set one `False` and the owning gate rejects loudly instead of corrupting silently. `weight_sync_refusal` — `None`, or the reason no end-to-end weight sync into the family's served model is validated. Which family switches off which is published, pinned against the specs, in [Per-family EP restrictions](../parallelism/expert-parallelism.md#per-family-ep-restrictions).
+- `ep_layer_needs_remote_code` — why the family's EP layer needs the release's own modeling file, for a family whose native class builds a block no EP layer claims (Ling 3.0). `reject_ep_without_family` refuses an EP group on the native class before the process groups.
+- `supports_lazy_loading` / `supports_gradient_checkpointing` / `supports_routing_replay` / `supports_fp32_non_ep_params` — all default `True`. Set `supports_lazy_loading` to `False` and the EP loader falls back to `from_pretrained`, logging `lazy_family_unverified`; set any of the others to `False` and the owning gate rejects loudly instead of corrupting silently. `weight_sync_refusal` — `None`, or the reason no end-to-end weight sync into the family's served model is validated. Which family switches off which is published, pinned against the specs, in [Per-family EP restrictions](../parallelism/expert-parallelism.md#per-family-ep-restrictions).
 - `tool_call_terminator` — the special token that ends a rendered tool call, for a family where it is no eos of its own `generation_config` (gpt-oss's `<|call|>`). The trainer refuses a tool environment that does not stop on it; left unset the gate passes the family unread, and a served turn runs past its call.
 - `eager_only_attention` / `dense_packing_leaks` — the attention facts the resolver and the collator gate read: the reason the family runs eager only (DeepSeek-V4), and a forward that passes no `position_ids` to its mask, so packing is refused on a dense backend (GPT-OSS, Bailing/Ling, GLM-5 Next). FA4's head_dim-256 kernel is read off the head widths (`uses_fa4_dedicated_head_dim`), and the multi-head latent attention it does not train off `kv_lora_rank` (`has_latent_attention`), not declared.
 - `attention_reads_row_positions` — the family's attention reads a token's row index, not only relative distance, so offline GRPO scores each row alone and refuses a pipeline batch above one row ([Row positions](../training-methods/grpo/offline.md#row-positions)).
 - `unmarked_sequence_mixer` — a sequence mixer its forward reaches with no segment marker (Inkling's short convolutions), named in the refusal of multi-document rows, which `allow_cross_document_linear_attention` lifts ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 - `token_indexed_table` — a buffer its routers index by token id (DeepSeek-V4's `gate.tid2eid`), which gives a new token no row, so a vocabulary grow is refused.
-- GatedDeltaNet layers need no entry: `has_gated_delta_net_layers` (`halo/models/attention/layout.py`) reads `linear_attention` in `layer_types` on a config declaring `linear_num_key_heads` / `linear_num_value_heads`, under any `model_type`, and gives packed rows their segment markers, kernel refusal and multi-document FA2 default. These sites stay keyed on `model_type`, since dense or spec-less families share their facts; a new hybrid, Mistral-like or VL family checks each: `SEQ_IDX_MODEL_TYPE_PREFIXES` in `halo/models/attention/layout.py` (the `seq_idx` of ShortConv and Nemotron-H's Mamba), the `mistral4`, `zaya`, `nemotron_h` and `qwen4_exp` branches of `apply_family_patches` in `halo/model_loading/model_preparation.py` (Mistral 4's flash `position_ids` plumbing, Zaya's load patches, Nemotron-H's Mamba scan, Qwen3.8-Flash-Next's host n-gram table and document forwards), and `_VISION_REUSE_MODEL_TYPES` in `halo/trainers/distillation/self_distillation.py` (self-distillation's image-feature replay).
+- GatedDeltaNet layers need no entry: `has_gated_delta_net_layers` (`halo/models/attention/layout.py`) reads `linear_attention` in `layer_types` on a config declaring `linear_num_key_heads` / `linear_num_value_heads`, under any `model_type`, and gives packed rows their segment markers, kernel refusal and multi-document FA2 default. These sites stay keyed on `model_type`, since dense or spec-less families share their facts; a new hybrid, Mistral-like or VL family checks each: `_SEQ_IDX_MODEL_TYPE_PREFIXES` in `halo/models/segment_markers.py` (the `seq_idx` of ShortConv and Nemotron-H's Mamba), the `mistral4`, `zaya`, `nemotron_h` and `qwen4_exp` branches of `apply_family_patches` in `halo/model_loading/model_preparation.py` (Mistral 4's flash `position_ids` plumbing, Zaya's load patches, Nemotron-H's Mamba scan, Qwen3.8-Flash-Next's host n-gram table and document forwards), and `_VISION_REUSE_MODEL_TYPES` in `halo/trainers/distillation/self_distillation.py` (self-distillation's image-feature replay).
 
 **3. Declare the class contract.** These class attributes are what the layer machinery reads — `EPDeepseekV4MoELayer` exercises most of them.
 
 - `HF_MODULE_NAMES` — the HF MoE block class name(s) this EP layer replaces. The sole registration point.
-- `_NUM_EXPERTS_ATTR_PATHS` — the family's expert-count attribute paths on the live HF module, resolved in order by the base `detect_num_experts()` before its generic container probe. Every EP layer declares or inherits one (Laguna takes GLM-4's).
+- The expert count is not declared: the base `detect_num_experts()` reads it off the expert container, a per-expert `nn.ModuleList`'s length or else its `num_experts`, so a container carrying neither raises at the first build.
 
-    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` in `halo/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
+    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` / `resolve_expert_ffn_width` / `resolve_dispatch_width` (the hidden state, or the latent of a block projecting into one around its experts) in `halo/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
 
 - `MoEFamilySpec.expert_layout` — the family's one `ExpertLayout` (`halo/models/moe/expert_layout.py`), which the EP gather, the RL weight sync and `merge_ep_shards.py` all apply through `to_hub_expert_tensors`:
 
@@ -164,7 +190,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
     Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `halo/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `reject_unsyncable_model` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). An engine that cannot enforce a thinking budget for the family takes an entry in the same client's `UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES` (vLLM's Mistral 4), which the budget refusal quotes.
 
-- `SUPPORTS_BIAS_BALANCING` — `True` when routing *selection* happens in-layer. Select through the shared helpers, not a hand-added `self._transient_balancing_bias(...)`, which is `None` when balancing is off and in native-adoption mode (the adopted slot already sits in the selection): score-routed layers take top-k over `self._selection_scores(scores)` (the group-limited base, DeepSeek-V4, Inkling, LFM-2); logit-routed ones use `self._biased_topk(logits)` (Qwen3, Qwen3-Next, Cohere2 MoE) or `_deepseek_biased_route`, which also returns the unbiased gate (GPT-OSS, Qwen3.5). Gate weights come from the **unbiased** scores, and the caller records the load with `self._record_expert_load(indices)`.
+- `SUPPORTS_BIAS_BALANCING` — `True` when routing *selection* happens in-layer, which every `EPSharedExpertsMoELayerBase` family inherits. Select through the shared helpers, not a hand-added `self._transient_balancing_bias(...)`, which is `None` when balancing is off and in native-adoption mode (the adopted slot already sits in the selection): score-routed layers take top-k over `self._selection_scores(scores)` (the group-limited base, DeepSeek-V4, Inkling, LFM-2); logit-routed ones use `self._biased_topk(logits)` or `_biased_route`, which also returns the family's unbiased `_gate_weights_at` (GPT-OSS, Qwen3, Qwen3.5, Cohere2 MoE). Gate weights come from the **unbiased** scores, and `_dispatch_compute_combine` records the load, so a route never does.
 
     A layer can refuse per-instance by overriding `enable_bias_balancing` (DeepSeek-V4 hash layers). Leave `False` when the router sits outside the EP layer (Gemma4) or the family's own gate owns a native balancing buffer (Zaya). An explicit `bias_update` on a model where no layer accepts the bias raises.
 
@@ -175,11 +201,12 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `SEVERS_AUX_LOSS` — `True` when the EP layer bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `halo/models/moe/balancing.py`, applied by `halo/callbacks/balancing.py`).
 - `_SHARED_EXPERT_REQUIRED` — `True` for a family whose block always builds its shared expert, so a rename raises instead of dropping the FFN from every output.
 
-    `replicated_named_params()` is derived from the adopted name, so a family with the ordinary single shared expert writes no override. Replicated submodules are FSDP-ignored and DP-averaged by the router hook, and an undeclared one trips the same construction-time scan. Override `replicated_named_params()` only when the replicated set is a different *shape* — Qwen3.5/3.6, whose gate is a second module.
+    `replicated_named_params()` is derived from the adopted name, so a family with the ordinary single shared expert writes no override. Replicated submodules are FSDP-ignored and DP-averaged by the router hook, and an undeclared one trips the same construction-time scan. Override `replicated_named_params()` only when the replicated set is a different *shape* — Qwen3.5/3.6, whose gate is a second module, and Nemotron-H, with its latent projections.
 
-- `_ROUTER_ATTR` / `_DEFAULT_ACTIVATION` — the attribute the router hangs off on both the block and the EP layer (default `gate`; GptOss says `router`), and the activation name the resolution chain falls back to when neither the container nor the block names one.
+- `_TOPK_WEIGHT_NORM_EPS` — the floor the family's router adds to a top-k weight sum before dividing by it (default DeepSeek-V3's `1e-20`). Read it off the router: Qwen3, Qwen3.5/3.6, Cohere2 MoE, Laguna and Step-3.7 say `0.0`, LFM-2 `1e-6`.
+- `_ROUTER_ATTR` — the attribute the router hangs off on both the block and the EP layer (default `gate`; GptOss says `router`).
 
-    That activation default is `silu`. Gemma4 says `gelu_pytorch_tanh`, since its config spells the field `hidden_activation`.
+    The expert activation has no such declaration: `_resolve_activation` reads `act_fn` off the expert container, then `hidden_act` off the block, then off its config, and raises when none names one.
 
     `_ROUTER_ATTR = None` declares the router *external* to the EP layer — Gemma4's sibling module. Nothing is adopted, no routing knob is read, and no grad-sync hook registers: FSDP-ignored experts sync in the trainer's post-backward sweep.
 
@@ -195,11 +222,13 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 **4. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`halo/models/moe/expert_lora_spec.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
 
-**5. Sharded-save merge.** `merge_ep_shards.py` resolves a checkpoint to its spec through `find_moe_family_spec(model_type)` and writes the spec's `ExpertLayout`, the same transform the gathered save applies, so a family needs nothing more; a `model_type` no spec claims **raises** at trainer construction under `save_sharded_ep=True` (`reject_unmergeable_ep_sharded_save`). Add the family to `test_full_merge_matches_gathered_save` in `tests/cpu/checkpoint/test_merge_ep_shards.py`.
+**5. Sharded-save merge.** `merge_ep_shards.py` resolves a checkpoint to its spec through `find_moe_family_spec(model_type)` and writes the spec's `ExpertLayout`, the same transform the gathered save applies, so a family needs nothing more; a `model_type` no spec claims **raises** at trainer construction under `save_sharded_ep=True` (`reject_unmergeable_ep_sharded_save`). So does a load whose conversions the merge's key-by-key stream cannot revert, a vendor namespace or SigLIP's `vision_model` level (`_reject_unmergeable_hub_keys`, `halo/checkpoint/parallel/ep.py`); those families use the gathered save. Add the family to `test_full_merge_matches_gathered_save` in `tests/cpu/checkpoint/test_merge_ep_shards.py`.
 
 **6. Buffers.** `finalize_loaded_model()` (`halo/model_loading/finalization.py`) is the post-load repair every load path runs: it walks the two fixer chains of `halo/model_loading/buffer_repair.py` — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — re-ties shared weights, sets the FLA launch options loaded modules need before their first launch (`apply_fla_launch_options`: FLA's delta-rule state kernel on Blackwell; [Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)), and attaches the external tables a family holds outside its module state ([Checkpoints](../reference/checkpoints.md#external-tables)). transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
 
 **7. Tests.** The DeepSeek-V4 trio is the template: an EP=2-vs-stock row (`tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family deepseek_v4`, generated from `TINY_MOE_FAMILIES`; family-specific checks go in its `FAMILY_CHECKS`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_ep_roundtrip.py --family deepseek_v4`, a thin subclass of `EPSftRoundTrip` in `tests/common/ep_sft_roundtrip.py` — add one beside it and override only the family hooks), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`). The family's tiny model also goes into `TINY_MOE_FAMILIES` (`tests/common/tiny_models.py`), keyed by its `model_type`, and its name into `_TINY_MOE_FAMILY_MARKERS` in the manifest: the merge-on-save and precompute-resume sweeps run every entry, and `tests/cpu/conventions/test_tiny_family_roster.py` fails on a registered EP family missing from either. `tests/cpu/parallelism/test_ep_family_instantiation.py` builds every registered family's EP layer on its tiny model, and `tests/cpu/parallelism/test_ep_gc_replay.py` replays its dispatch under gradient checkpointing for every family whose layer supports it.
+
+    Past those, a family joins a roster per axis it runs: `FAMILIES` in `tests/common/equivalence/cp_equivalence.py` with `ulysses_cp=True` on its `TinyFamily` for a CP wrapper, `TP_MOE_FAMILIES` in `tests/gpu/parallelism/tp/test_tp_family_vs_reference.py` for a TP-planned attention, `_PP_MOE_FAMILIES` in the manifest for a PP backbone, and `TINY_MOE_VLM_FAMILIES` for each multimodal wrapper it ships under. A VL family's rows read its grid columns from `VLM_GRID_COLUMNS` and its masked placeholders from `resolve_image_token_ids` (`halo/data/vlm_render.py`); a family TRL's vision path does not carry declares `refuses_trl_image_rows`, which `trl_renders_rows` (`halo/entrypoints/data_setup.py`) reads for DPO and KTO.
 
     A tiny row has to reach the mechanism it names, and assert that it did. Green rows that never ran it are the usual trap: a document within a sparse attention's top-k span attends densely, so selection needs a row longer than the blocks it can pick; a head dim no flash kernel accepts never reaches flash; a bias near zero survives a bf16 cast, so a lost fp32 pin passes (`fill_release_scale_bias`, `tests/common/tiny_models.py`, refuses a scale where the cast changes nothing); a row with no zeroed-pixels control can pass with no image. A composite's image row builds its batch with `tiny_processor` and `tiny_image_batch` (`tests/common/tiny_processors.py`), so it needs no released processor in the cache. Before a family has a spec, its tiny model sits in `TINY_UNWRAPPED_COMPOSITE_FAMILIES`.
 
@@ -219,14 +248,14 @@ Full procedure in [Context Parallelism — Adding a new model](../parallelism/co
 
     Override `_resolve_scaling` / `OUTPUT_PROJECTION` when the module computes its scale inline or names its output projection something other than `o_proj`.
 
-3. **Test** with `tests/gpu/parallelism/cp/test_cp_correctness.py`.
+3. **Test** with `tests/gpu/parallelism/cp/test_cp_correctness.py`, and add the family to the CP roster: `FAMILIES` in `tests/common/equivalence/cp_equivalence.py`, `ulysses_cp=True` on its `TinyFamily`. `tests/cpu/conventions/test_tiny_family_roster.py` fails on a wrapper no roster family builds.
 
-The wrapper must split Q/K/V into the local-rank slice before all-to-all, apply RoPE on the correct side of it for the layout, run the output projection locally, finish with a final all-to-all, pass position IDs through the chunk boundary, and slice any per-head buffers (e.g. GPT-OSS sinks) to this rank's head range. CP runs only on full-attention blocks — linear-attention and gated-delta layers are rejected by `_UNSUPPORTED_SEQUENCE_AXIS_LAYERS`.
+The wrapper splits Q/K/V into the local-rank slice before the all-to-all, applies RoPE on the correct side of it for the layout, runs the output projection locally and passes position IDs through the chunk boundary; the final all-to-all is the base's. Live per-head buffers are refused rather than sliced: GPT-OSS's wrapper raises on sinks that are not reset. CP runs only on full-attention blocks — linear-attention and gated-delta layers are rejected by `_UNSUPPORTED_SEQUENCE_AXIS_LAYERS`.
 
 ## Add TP support
 
 - **Model already has `base_model_tp_plan`** — `tp_plan="auto"` does everything (Llama, Mistral, most Qwen variants). Nothing to add.
-- **Selective TP for EP+TP** — add the attention class to `TP_SHARDABLE_ATTENTION_CLASSES` in `halo/distributed/tensor_parallel/parallelize_attention.py`. The selective path only visits attention submodules, so MoE blocks need no opt-out; `embed_tokens` and `lm_head` stay replicated.
+- **Selective TP for EP+TP** — add the attention class to `TP_SHARDABLE_ATTENTION_CLASSES` in `halo/distributed/tensor_parallel/parallelize_attention.py`, and the family to `TP_MOE_FAMILIES` in `tests/gpu/parallelism/tp/test_tp_family_vs_reference.py`. The selective path only visits attention submodules, so MoE blocks need no opt-out; `embed_tokens` and `lm_head` stay replicated.
 
     If the attention has a non-standard shape (GLM-4's LoRA-style compression, GPT-OSS's sinks), add a case in `parallelize_attention.py`. A non-shardable attention (DeepSeek-V4's shared-KV MQA) stays off the list, and `apply_tp_to_attention_only` raises when it ends up patching zero modules.
 

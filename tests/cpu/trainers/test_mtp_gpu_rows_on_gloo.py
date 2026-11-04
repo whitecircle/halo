@@ -59,6 +59,10 @@ def _passes(done) -> dict:
         ("--family", "glm4_moe_lite", "--mode", "fsdp_zero3", "--arms", "soft", "--kernel", "chunked"),
         ("--family", "qwen3_5_moe_text", "--mode", "ep1_ignored", "--arms", "soft", "--kernel", "chunked"),
         ("--family", "glm4_moe_lite", "--mode", "ep1", "--arms", "soft", "--kernel", "chunked", "--packed"),
+        ("--family", "nemotron_h", "--mode", "fsdp", "--arms", "soft", "--kernel", "chunked", "--gc"),
+        ("--family", "nemotron_h_no_latent", "--mode", "ep1", "--arms", "soft", "--kernel", "chunked", "--gc"),
+        ("--family", "nemotron_h_omni", "--mode", "fsdp_zero3", "--arms", "soft", "--kernel", "chunked"),
+        ("--family", "nemotron_h", "--mode", "ep1_ignored", "--arms", "soft", "--kernel", "chunked"),
     ],
     ids=lambda flags: "-".join(flags[1:4:2]) + ("-packed" if "--packed" in flags else ""),
 )
@@ -127,6 +131,19 @@ def test_the_two_machine_row_writes_each_nodes_own_copy_and_feeds_each_rank_its_
     assert result["checks"]["head_only_hard_resume_replays_every_tensor"] is True
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--family", "nemotron_h", "--mode", "fsdp", "--flip", "--gate"),
+        ("--family", "nemotron_h_omni", "--mode", "ep1"),
+    ],
+    ids=["text_fsdp", "composite_ep1"],
+)
+def test_the_resume_row_replays_nemotron_h(flags, tmp_path):
+    result = _passes(run_gpu_row(_CHECKPOINT, *flags, work=tmp_path))
+    assert result["checks"]["a_stock_reload_holds_no_head"] is True
+
+
 def test_the_ignored_experts_row_holds_replica_experts_byte_equal(tmp_path):
     result = _passes(run_gpu_row(_CHECKPOINT, "--family", "qwen3_5_moe_text", "--mode", "ep1_ignored", work=tmp_path))
     assert result["checks"]["joint_soft_replica_experts_byte_equal"] is True
@@ -146,7 +163,7 @@ def _stand_in(root: Path, family: str) -> dict:
     write_checkpoint_with_tail(family, root / "stale", per_expert=True)
     write_checkpoint_with_tail(family, root / "own", per_expert=True, seed=321)
     load_cached_tokenizer(QWEN3_0_6B).save_pretrained(root / "own")
-    vocab = AutoConfig.from_pretrained(root / "own").vocab_size
+    vocab = AutoConfig.from_pretrained(root / "own").get_text_config().vocab_size
     DatasetDict(
         {
             "train": tokenized_rows(vocab, 16, seed=1, length=_LENGTH, prompt=_PROMPT),
@@ -194,6 +211,86 @@ def test_the_real_fit_row_scores_at_both_ends_and_leaves_the_trunk_alone(real_st
     assert result["checks"]["the_export_holds_the_head"] is True
     assert [step for step, _tv, _greedy in result["metrics"]["acceptance"]][0] == 0
     assert (tmp_path / "export" / "checkpoint-4").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("family", "release", "knob", "flags"),
+    [
+        ("nemotron_h_no_latent", "lightning", "HALO_TEST_NEMOTRON_LIGHTNING_MODEL", ()),
+        ("nemotron_h_omni", "super", "HALO_TEST_NEMOTRON_MODEL", ()),
+        ("nemotron_h_omni", "super", "HALO_TEST_NEMOTRON_MODEL", ("--text_only",)),
+    ],
+    ids=["lightning", "super_composite", "super_text"],
+)
+def test_a_nemotron_release_row_fits_through_its_knob_and_exports_the_head(family, release, knob, flags, tmp_path):
+    stand_in = _stand_in(tmp_path / "stand_in", family)
+    own = stand_in["env"]["HALO_TEST_MTP_REAL_MODEL"]
+    # The knob alone: a row reading the Qwen default would skip here on an empty cache and pass.
+    result = _passes(
+        run_gpu_row(
+            _REAL,
+            "--row",
+            "own_soft",
+            "--release",
+            release,
+            "--ep_size",
+            "1",
+            "--kernel",
+            "chunked",
+            "--stream_dir",
+            stand_in["rows"],
+            "--steps",
+            "4",
+            "--learning_rate",
+            "0.1",
+            "--export_dir",
+            str(tmp_path / "export"),
+            *flags,
+            work=tmp_path,
+            env={knob: own},
+        )
+    )
+    assert result["checks"]["every_head_tensor_moved"] is True
+    assert result["checks"]["the_trunk_kept_its_bytes"] is True
+    assert result["checks"]["the_export_holds_the_head"] is True
+
+
+@pytest.mark.parametrize(
+    ("family", "release", "knob", "flags"),
+    [
+        ("nemotron_h_no_latent", "lightning", "HALO_TEST_NEMOTRON_LIGHTNING_MODEL", ()),
+        ("nemotron_h_omni", "super", "HALO_TEST_NEMOTRON_MODEL", ()),
+        ("nemotron_h_omni", "super", "HALO_TEST_NEMOTRON_MODEL", ("--text_only",)),
+    ],
+    ids=["lightning", "super_composite", "super_text"],
+)
+def test_a_nemotron_release_row_holds_an_untrained_export_to_the_release(family, release, knob, flags, tmp_path):
+    stand_in = _stand_in(tmp_path / "stand_in", family)
+    result = _passes(
+        run_gpu_row(
+            _REAL,
+            "--row",
+            "untrained_export",
+            "--release",
+            release,
+            "--ep_size",
+            "1",
+            "--kernel",
+            "chunked",
+            "--stream_dir",
+            stand_in["rows"],
+            *flags,
+            work=tmp_path,
+            env={knob: stand_in["env"]["HALO_TEST_MTP_REAL_MODEL"]},
+        )
+    )
+    assert result["checks"]["the_export_holds_the_release_head_byte_for_byte"] is True
+
+
+def test_a_nemotron_release_row_refuses_a_start_it_has_no_stale_head_for(tmp_path):
+    done = run_gpu_row(_REAL, "--row", "stale_soft", "--release", "lightning", work=tmp_path)
+    assert done.returncode != 0
+    assert "--release has no stale head to start from" in done.stdout + done.stderr
 
 
 def test_the_real_detached_row_holds_the_trunk_to_a_run_with_no_head(real_stand_in, tmp_path):

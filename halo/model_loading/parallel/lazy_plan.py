@@ -41,6 +41,10 @@ PER_EXPERT_KEY_PATTERN = re.compile(rf"\.({_CONTAINER_ALT})\.(\d+)\.")
 # An expert index nested under an extra module (``…experts.local_experts.N.linear_fc1``), which neither
 # pattern above matches, so the layout would read as FUSED and every expert plan would drop.
 _NESTED_EXPERT_KEY_PATTERN = re.compile(rf"\.(?:{_CONTAINER_ALT})\.[A-Za-z_]\w*\.\d+\.")
+# Why a checkpoint takes ``from_pretrained``, each a declared route rather than a failure.
+LAZY_FAMILY_UNVERIFIED = "lazy_family_unverified"
+LAZY_QUANTIZED = "quantized_checkpoint"
+LAZY_NESTED_EXPERT_KEYS = "lazy_incompatible_expert_layout"
 
 
 class ExpertKeyLayout(Enum):
@@ -58,24 +62,28 @@ class ExpertKeyLayout(Enum):
         return ExpertKeyLayout.FUSED
 
 
-def is_lazy_loadable(model_path: str) -> bool:
-    """Whether the lazy loaders can materialize this checkpoint; ``True`` when neither config nor index reads.
-    Checkpoint-native quantization is refused, as its scale tensors map to nothing live and the experts would load as
-    garbage unseen."""
+def lazy_load_blocker(model_path: str) -> str | None:
+    """Why the lazy loaders cannot materialize this checkpoint, ``None`` when they can or neither config nor index
+    reads. Checkpoint-native quantization counts, as its scale tensors map to nothing live and the experts would load
+    as garbage unseen."""
     try:
         config = read_checkpoint_config(model_path, missing_ok=True) or {}
     except (OSError, ValueError):
         config = {}
     spec = find_moe_family_spec(config.get("model_type"))
     if spec is not None and not spec.supports_lazy_loading:
-        return False
+        return LAZY_FAMILY_UNVERIFIED
     if config.get("quantization_config"):
-        return False
+        return LAZY_QUANTIZED
     try:
         weight_map = resolve_checkpoint_weights(model_path).require_safetensors("checkpoint").weight_map
     except (FileNotFoundError, KeyError, OSError, ValueError):
-        return True
-    return not any(_NESTED_EXPERT_KEY_PATTERN.search(k) for k in weight_map)
+        return None
+    return LAZY_NESTED_EXPERT_KEYS if any(_NESTED_EXPERT_KEY_PATTERN.search(k) for k in weight_map) else None
+
+
+def is_lazy_loadable(model_path: str) -> bool:
+    return lazy_load_blocker(model_path) is None
 
 
 def agree_lazy_load(source: ModelSource) -> bool:

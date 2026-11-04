@@ -18,6 +18,7 @@ from halo.models.config_access import text_config
 from halo.models.module_tree import backbone_with_layers
 from halo.models.mtp.head import MtpForwardTerm, attach_mtp_head_module, build_mtp_head, mtp_head_path
 from halo.models.mtp.spec import MtpObjective, require_mtp_head_spec
+from halo.models.param_roles import declared_fp32_pins, fp32_pin_matches
 from tests.common.models import QWEN3_0_6B
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT
@@ -25,6 +26,7 @@ from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
+    TINY_NEMOTRON_H_NO_LATENT_FAMILY,
     build_tiny_family_checkpoint,
     tiny_family_model,
 )
@@ -36,6 +38,9 @@ MTP_TINY_FAMILIES = {
     "qwen3_5_moe": TINY_MOE_VLM_FAMILIES["qwen3_5_moe"],
     "qwen3_next": TINY_MOE_FAMILIES["qwen3_next"],
     "glm4_moe_lite": TINY_MOE_FAMILIES["glm4_moe_lite"],
+    "nemotron_h": TINY_MOE_FAMILIES["nemotron_h"],
+    "nemotron_h_no_latent": TINY_NEMOTRON_H_NO_LATENT_FAMILY,
+    "nemotron_h_omni": TINY_MOE_VLM_FAMILIES["nemotron_h_omni"],
 }
 LABEL_IGNORE = -100
 # The GPU rows' shard layouts, each with the ranks it runs on. ``fsdp`` leaves a MoE's experts as its class builds them,
@@ -152,7 +157,7 @@ def packed_rows(seed: int = 3) -> dict[str, torch.Tensor]:
 
 
 def _release_layout(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Fused experts split into one tensor per expert, as the Qwen3.5 and GLM-4 tails ship them."""
+    """Fused experts split into one tensor per expert, as the Qwen3.5, GLM-4 and Nemotron-H tails ship them."""
     split = {}
     for key, tensor in tensors.items():
         if key.endswith("experts.gate_up_proj"):
@@ -161,10 +166,10 @@ def _release_layout(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
             for index, expert in enumerate(tensor):
                 split[f"{prefix}{index}.gate_proj.weight"] = expert[:half].clone()
                 split[f"{prefix}{index}.up_proj.weight"] = expert[half:].clone()
-        elif key.endswith("experts.down_proj"):
-            prefix = key[: -len("down_proj")]
+        elif key.endswith(("experts.down_proj", "experts.up_proj")):
+            prefix, _, bank = key.rpartition(".")
             for index, expert in enumerate(tensor):
-                split[f"{prefix}{index}.down_proj.weight"] = expert.clone()
+                split[f"{prefix}.{index}.{bank}.weight"] = expert.clone()
         else:
             split[key] = tensor
     return split
@@ -180,9 +185,10 @@ def write_checkpoint_with_tail(name: str, target: Path, *, per_expert: bool, see
     head = build_mtp_head(model, spec, device="cpu")
     torch.manual_seed(seed)
     fused = {}
+    pinned = fp32_pin_matches(head.state_dict(), declared_fp32_pins(model)) if spec.tail_keeps_fp32_pins else ()
     for key, tensor in head.state_dict().items():
         drawn = torch.randn_like(tensor.float()) * 0.02 if tensor.dim() > 1 else torch.ones_like(tensor.float())
-        fused[f"{path}.{key}"] = drawn.to(torch.bfloat16)
+        fused[f"{path}.{key}"] = drawn if key in pinned else drawn.to(torch.bfloat16)
     stored = _release_layout(fused) if per_expert else dict(fused)
     for key, copied in spec.trunk_copies:
         embedding = model.get_input_embeddings() if copied == "input" else model.get_output_embeddings()

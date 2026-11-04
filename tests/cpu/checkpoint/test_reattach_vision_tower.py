@@ -22,6 +22,7 @@ from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
 from halo.model_loading.model_preparation import auto_load_model
 from halo.models.moe.family_specs import NEMOTRON_H, CompositeTextLayout, MoEFamilySpec
+from halo.models.mtp.spec import find_mtp_head_spec
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, TINY_UNWRAPPED_COMPOSITE_FAMILIES, tiny_family_model
 
@@ -32,7 +33,10 @@ _DECLARED_LAYOUTS = {
         composite_tower="language_model.model.", composite_head="language_model.lm_head."
     ),
     "nemotron_h_omni": CompositeTextLayout(
-        tower="backbone.", composite_tower="language_model.backbone.", composite_head="language_model.lm_head."
+        tower="backbone.",
+        composite_tower="language_model.backbone.",
+        composite_head="language_model.lm_head.",
+        composite_mtp_tail="language_model.mtp.",
     ),
 }
 
@@ -310,14 +314,20 @@ def test_a_declared_layout_restores_the_hub_spelling(declared_composite, tmp_pat
     assert reloaded.model_type == name and reloaded.vision_config is not None
 
 
-def test_a_carried_head_of_a_family_with_no_spec_warns_without_offering_a_fit(declared_composite, tmp_path, caplog):
-    """``mtp_loss_weight`` refuses these families, so the warning cannot send a reader to it."""
-    _name, _composite, _base_tensors, base_dir, export_dir = declared_composite
+def test_a_carried_heads_warning_offers_a_fit_only_on_a_family_with_a_spec(declared_composite, tmp_path, caplog):
+    """``mtp_loss_weight`` refuses a family with no spec, so the warning cannot send a reader to it."""
+    _name, composite, _base_tensors, base_dir, export_dir = declared_composite
     with caplog.at_level(logging.WARNING, logger=vision_reattach.__name__):
         reattach_vision_tower(export_dir, base_dir, str(tmp_path / "out"), trust_remote_code=False)
     warned = _head_warnings(caplog)
     assert len(warned) == 1 and "1 tensor(s)" in warned[0], warned
-    assert "mtp_train_scope" not in warned[0], warned
+    assert ("mtp_train_scope" in warned[0]) == (find_mtp_head_spec(composite.config) is not None), warned
+
+
+def test_only_some_declared_layouts_have_a_head_to_fit():
+    """Both sides of the check above stay in the sweep."""
+    specs = {name: find_mtp_head_spec(tiny_family_model(_COMPOSITES[name]).config) for name in _DECLARED_LAYOUTS}
+    assert specs["nemotron_h_omni"] is not None and specs["minimax_m3_vl"] is None
 
 
 def test_a_declared_layout_reloads_as_the_composite_with_the_trained_head(declared_composite, tmp_path):

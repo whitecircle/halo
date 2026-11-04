@@ -18,16 +18,15 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("DeepseekV4SparseMoeBlock",)
     FAMILY = DEEPSEEK_V4
 
-    SUPPORTS_BIAS_BALANCING = True
     # Routing is re-derived from ``gate.weight``, so ``outputs.router_logits`` stays empty under EP.
     SEVERS_AUX_LOSS = True
 
-    _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")
+    _SHARED_EXPERT_REQUIRED = True
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         super()._adopt_routing(original_layer)
-        self.is_hash = bool(getattr(original_layer, "is_hash", False))
-        self.routed_scaling_factor = getattr(self.gate, "routed_scaling_factor", 1.0)
+        self.is_hash = bool(original_layer.is_hash)
+        self.routed_scaling_factor = self.gate.routed_scaling_factor
         self.score_fn = self.gate.score_fn
 
         if self.is_hash and self.gate.tid2eid.numel() > 0 and not self.gate.tid2eid.is_meta:
@@ -73,6 +72,4 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
             indices = self.gate.tid2eid[input_ids.reshape(-1)].long()
         # Replay stays in lockstep across EP layers, so hash layers consume their identity slice too.
         indices = self._apply_routing_replay(indices)
-        weights = self._renormalize_topk_weights(scores.gather(1, indices)) * self.routed_scaling_factor
-        self._record_expert_load(indices)
-        return indices, weights
+        return indices, self._renormalize_topk_weights(scores.gather(1, indices)) * self.routed_scaling_factor

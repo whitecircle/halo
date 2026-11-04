@@ -11,7 +11,6 @@ from transformers.utils.import_utils import is_causal_conv1d_available, is_flash
 
 from halo.log import warn_once
 from halo.models.attention.layout import (
-    SEQ_IDX_MODEL_TYPE_PREFIXES,
     compressed_layer_types,
     declares_linear_layer_groups,
     has_gated_delta_net_layers,
@@ -26,6 +25,9 @@ logger = logging.getLogger(__name__)
 # A script refuses before the model load and the collator again after it.
 _crossing_allowed_warned: set[tuple[str | None, str]] = set()
 
+# Families whose stateful mixers keep documents apart on ``seq_idx`` alone: LFM2's ShortConv, dense, MoE and VL alike,
+# and the Mamba conv and scan of Nemotron-H (halo/models/nemotron_h.py).
+_SEQ_IDX_MODEL_TYPE_PREFIXES = ("lfm2", "nemotron_h")
 # Dense families measured to keep packed documents apart; a MoE family's verdict is on its spec. No config states
 # whether a forward carries position_ids into its mask or keeps a recurrence per document.
 _PACKING_MEASURED_DENSE_MODEL_TYPES = frozenset(
@@ -88,7 +90,7 @@ def segment_markers_for(model_config) -> SegmentMarkers:
         return SegmentMarkers()
     gated_delta_net = has_gated_delta_net_layers(model_config)
     return SegmentMarkers(
-        seq_idx=gated_delta_net or model_type_matches(model_config, *SEQ_IDX_MODEL_TYPE_PREFIXES),
+        seq_idx=gated_delta_net or model_type_matches(model_config, *_SEQ_IDX_MODEL_TYPE_PREFIXES),
         cu_seq_lens=gated_delta_net,
     )
 

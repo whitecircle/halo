@@ -16,3 +16,6 @@ class EPLagunaMoELayer(EPGlm4MoELayer):
 
     # ``LagunaSparseMoeBlock`` declares only ``routed_scaling_factor``, which stays required.
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group", "norm_topk_prob")
+
+    # ``LagunaTopKRouter`` and both pinned remote revisions renormalize with no floor.
+    _TOPK_WEIGHT_NORM_EPS = 0.0

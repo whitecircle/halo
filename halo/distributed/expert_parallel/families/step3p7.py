@@ -19,18 +19,12 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
     HF_MODULE_NAMES = ("Step3p7SparseMoeBlock",)
     FAMILY = STEP3P7
 
-    # The modeling has no aux-loss machinery, so ``moe_balancing: auto`` resolves to ``bias_update``.
-    SUPPORTS_BIAS_BALANCING = True
-
     # ``Step3p7TopKRouter`` renormalizes unconditionally with no floor, and nothing declares ``norm_topk_prob`` or a
     # group knob, so the shared body runs as plain top-k. ``routed_scaling_factor``, which upstream applies to the
     # routed-expert sum, resolves into the per-token weights instead: equivalent, since the combine is linear.
     # Required: at 1.0 every routed weight misses the model's own factor.
-    _TOPK_WEIGHT_NORM_EPS = 0.0  # a floor here would change every routed weight the router emits
+    _TOPK_WEIGHT_NORM_EPS = 0.0  # the value its router divides with
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group", "norm_topk_prob")
-
-    # The block carries no config reference, so the count comes off the router or the experts container.
-    _NUM_EXPERTS_ATTR_PATHS = ("gate.num_experts",)
 
     _SHARED_EXPERT_REQUIRED = True
 
@@ -43,4 +37,4 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
             self._fused_glu_mul = resolve_clamped_glu_mul(self.act_fn, self.swiglu_limit, clamp_activated=True)
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return (f"swiglu_limit={self.swiglu_limit}",)
+        return (*super()._init_summary_extras(original_layer), f"swiglu_limit={self.swiglu_limit}")

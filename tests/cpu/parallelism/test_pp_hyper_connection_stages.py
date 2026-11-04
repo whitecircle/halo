@@ -12,7 +12,7 @@ from transformers import (
     Glm5NextForConditionalGeneration,
 )
 
-from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.distributed.pipeline_parallel.families import DEEPSEEK_V4_PP, PP_SPEC_MAP, build_pp_spec_map
 from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
 from halo.distributed.pipeline_parallel.partition import validate_partition
 from halo.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
@@ -128,6 +128,29 @@ def test_mid_chain_forward_is_bound_per_stage_and_rejects_a_collapsed_boundary()
     hidden = TINY_DSV4_CONFIG["hidden_size"]
     with pytest.raises(RuntimeError, match="hyper-connection stream"):
         s1(torch.randn(_BATCH, _SEQ, hidden))
+
+
+@pytest.mark.parametrize(
+    ("build_model", "stream_forward"),
+    [
+        pytest.param(_dsv4_model, "deepseek_v4_stream_forward", id="deepseek_v4"),
+        pytest.param(_glm5_model, "glm5_next_stream_forward", id="glm5_next"),
+    ],
+)
+def test_a_moved_upstream_forward_refuses_the_stream_forward(build_model, stream_forward, monkeypatch):
+    """The stream forward restates upstream's, so a release that moved it would otherwise run the old contract."""
+    model = build_model()
+    backbone = next(module for module in model.modules() if type(module).__name__ in PP_SPEC_MAP)
+    monkeypatch.setattr(type(backbone), "forward", lambda self, inputs_embeds: None)
+    with pytest.raises(RuntimeError, match=stream_forward):
+        build_pipeline_stage(model, 1, 2, moe_balancing="none")
+
+
+def test_a_class_two_pp_specs_claim_is_named():
+    """A class claimed twice would run whichever spec came last."""
+    with pytest.raises(ValueError, match="DeepseekV4Model"):
+        build_pp_spec_map((DEEPSEEK_V4_PP, DEEPSEEK_V4_PP))
+    assert build_pp_spec_map((DEEPSEEK_V4_PP,)) == dict.fromkeys(DEEPSEEK_V4_PP.hf_module_names, DEEPSEEK_V4_PP)
 
 
 def test_hash_moe_layers_are_pinned_to_stage_zero():

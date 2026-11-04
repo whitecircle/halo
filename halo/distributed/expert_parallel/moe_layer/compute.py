@@ -16,6 +16,7 @@ from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
 from halo.kernels.lowp.spec import QuantFormat
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
+from halo.models.moe.expert_layout import ExpertLayoutKind
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -56,20 +57,22 @@ class EPExpertComputeMixin:
         self._lowp_weight_cacheable = weight_cacheable
         return self._use_grouped_mm
 
-    def _resolve_activation(self, *sources, original_layer: nn.Module | None = None, default: str = "silu") -> None:
-        """Set ``act_fn`` from the first source carrying one, else by name off ``original_layer``, and latch the fused
-        combine that activation has."""
-        for source in sources:
-            act_fn = getattr(source, "act_fn", None) if source is not None else None
-            if act_fn is not None:
-                self.act_fn = act_fn
-                break
-        else:
+    def _resolve_activation(self, source: nn.Module, *, original_layer: nn.Module) -> None:
+        """Set ``act_fn`` from ``source``, else by name off ``original_layer`` or its config, and latch the fused combine
+        that activation has. Naming none raises, since a default would train another non-linearity."""
+        act_fn = getattr(source, "act_fn", None)
+        if act_fn is None:
             hidden_act = getattr(original_layer, "hidden_act", None)
             if hidden_act is None:
                 hidden_act = getattr(getattr(original_layer, "config", None), "hidden_act", None)
-            self.act_fn = ACT2FN[hidden_act or default]
-        self._fused_glu_mul = resolve_fused_glu_mul(self.act_fn)
+            if hidden_act is None:
+                raise AttributeError(
+                    f"{type(self).__name__}: neither {type(source).__name__}.act_fn nor a hidden_act on "
+                    f"{type(original_layer).__name__} or its config names the expert activation."
+                )
+            act_fn = ACT2FN[hidden_act]
+        self.act_fn = act_fn
+        self._fused_glu_mul = resolve_fused_glu_mul(act_fn)
 
     def _init_fused_glu_params(self, experts: nn.Module, weights_already_sharded: bool = False):
         """Store this rank's fused-GLU experts in matmul convention ``[E, K, N]``: ``gate_up_proj`` +
@@ -78,7 +81,7 @@ class EPExpertComputeMixin:
         start, end = self._local_expert_range(weights_already_sharded)
         gate_up = experts.gate_up_proj.data[start:end]  # [E, 2M, H], dim 1 = [gate(M) | up(M)]
         down = experts.down_proj.data[start:end]  # [E, H, M]
-        if self.expert_tp_size > 1:
+        if self.expert_tp_size > 1 or self.FAMILY.expert_layout.kind is ExpertLayoutKind.SEPARATE_GLU:
             self._store_separate_glu_params(*gate_up.chunk(2, dim=1), down)
         else:
             self.gate_up_proj = nn.Parameter(gate_up.transpose(1, 2).contiguous())

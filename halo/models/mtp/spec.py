@@ -9,7 +9,16 @@ from dataclasses import dataclass
 from typing import Literal
 
 from halo.models.config_access import config_sources, text_config
-from halo.models.moe.family_specs import BAILING, DEEPSEEK_V4, GLM5_NEXT, INKLING, NEMOTRON_H, QWEN4_EXP, STEP3P7
+from halo.models.moe.family_specs import (
+    BAILING,
+    DEEPSEEK_V4,
+    GLM5_NEXT,
+    INKLING,
+    NEMOTRON_H,
+    QWEN4_EXP,
+    STEP3P7,
+    find_moe_family_spec,
+)
 
 MTP_LAYER_COUNT_FIELDS: tuple[str, ...] = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "num_mtp_layers")
 # Every spec's release stores one draft layer; a config declaring no count (Qwen3-Next) reads as the engines read it.
@@ -22,6 +31,7 @@ _MTP_MODULE_KEY = re.compile(r"(?:^|\.)mtp\.")
 _DECODER_ENTRY_KEY = re.compile(r"(?:^|\.)layers\.(\d+)\.")
 # The attention a release's draft layer runs, which decides the trunk layer it takes its class and call from.
 _DRAFT_LAYER_TYPE = "full_attention"
+_MOE_LAYER_TYPE = "moe"
 # The attribute a ``root`` head hangs off the model under, as the release's keys spell it.
 ROOT_HEAD_ATTR = "mtp"
 # The chain's decoder layer inside a ``root`` head.
@@ -59,8 +69,8 @@ class MtpHeadRequest:
 @dataclass(frozen=True)
 class MtpHeadSpec:
     """Layer class, index, config and norm class are read off the trunk; only what a release spells its own way is
-    declared. ``placement`` is ``root`` for ``mtp.*`` beside the backbone and ``list`` for the decoder list's entry at
-    ``num_hidden_layers``. The module paths are relative to the head."""
+    declared. ``placement`` is ``root`` for ``mtp.*`` beside the output embedding the head shares and ``list`` for the
+    decoder list's entry at ``num_hidden_layers``. The module paths are relative to the head."""
 
     model_types: tuple[str, ...]
     placement: Literal["root", "list"]
@@ -72,6 +82,14 @@ class MtpHeadSpec:
     trunk_copies: tuple[tuple[str, Literal["input", "output"]], ...] = ()
     # The release's drafter reads zeros for the embedding at position 0, which holds no draft context.
     zero_first_embedding: bool = False
+    # The blocks of a ``root`` head's ``layers``, in order, each built as the trunk's last layer of its kind.
+    chain_kinds: tuple[str, ...] = (_DRAFT_LAYER_TYPE,)
+    # The config field declaring ``chain_kinds``, where a release's config does.
+    chain_field: str | None = None
+    # The trunk's final norm, whose class and epsilon the head's norms copy.
+    trunk_norm: str = "norm"
+    # A conversion keeps the tail's stored fp32 pins at their width, as it does the trunk's.
+    tail_keeps_fp32_pins: bool = False
 
 
 MTP_HEAD_SPECS: tuple[MtpHeadSpec, ...] = (
@@ -94,6 +112,20 @@ MTP_HEAD_SPECS: tuple[MtpHeadSpec, ...] = (
         trunk_copies=(("embed_tokens.weight", "input"), ("shared_head.head.weight", "output")),
         zero_first_embedding=True,
     ),
+    # Both engines' drafters: the projection set opens an attention block, a MoE block follows, and its final norm feeds
+    # the trunk's output embedding, with no zeroed embedding at position 0.
+    MtpHeadSpec(
+        model_types=NEMOTRON_H.model_types,
+        placement="root",
+        projection="layers.0.eh_proj",
+        embedding_norm="layers.0.enorm",
+        hidden_norm="layers.0.hnorm",
+        output_norm="layers.1.final_layernorm",
+        chain_kinds=(_DRAFT_LAYER_TYPE, _MOE_LAYER_TYPE),
+        chain_field="mtp_layers_block_type",
+        trunk_norm="norm_f",
+        tail_keeps_fp32_pins=True,
+    ),
 )
 
 MTP_REFUSALS: dict[str, str] = {
@@ -114,11 +146,6 @@ MTP_REFUSALS: dict[str, str] = {
     **dict.fromkeys(
         INKLING.model_types,
         "its release stores eight draft layers under names that need renames",
-    ),
-    **dict.fromkeys(
-        NEMOTRON_H.model_types,
-        "its config declares mtp_layers_block_type [attention, moe], a draft chain of two blocks of different kinds, "
-        "which one decoder layer does not build",
     ),
     **dict.fromkeys(
         QWEN4_EXP.model_types,
@@ -183,18 +210,29 @@ def declared_tail_fields(config) -> dict[str, int]:
     return {field: depth for field in MTP_LAYER_COUNT_FIELDS if (depth := getattr(text, field, None))}
 
 
-def mtp_draft_layer_index(text) -> int:
-    """The last trunk layer running the draft layer's attention, whose class and call arguments the head reuses."""
+def mtp_draft_layer_index(text, block_kind: str = _DRAFT_LAYER_TYPE) -> int:
+    """The last trunk layer running ``block_kind``, the draft layer's attention by default, whose class and call
+    arguments the head reuses."""
     kinds = getattr(text, "layer_types", None)
     if not kinds:
         return text.num_hidden_layers - 1
-    running = [index for index, kind in enumerate(kinds[: text.num_hidden_layers]) if kind == _DRAFT_LAYER_TYPE]
+    running = [index for index, kind in enumerate(kinds[: text.num_hidden_layers]) if kind == block_kind]
     if not running:
         raise ValueError(
-            f"mtp_loss_weight builds the head's draft layer from the trunk's last {_DRAFT_LAYER_TYPE} layer, and this "
+            f"mtp_loss_weight builds the head's draft layer from the trunk's last {block_kind} layer, and this "
             f"config's layer_types hold none: {sorted(set(kinds))}. Train from a checkpoint whose config keeps one."
         )
     return running[-1]
+
+
+def _reject_another_chain(spec: MtpHeadSpec, text, model_type: str) -> None:
+    declared = tuple(getattr(text, spec.chain_field)) if spec.chain_field is not None else spec.chain_kinds
+    if declared != spec.chain_kinds:
+        raise ValueError(
+            f"mtp_loss_weight trains the {list(spec.chain_kinds)} chain {model_type!r} releases ship, and this config's "
+            f"{spec.chain_field} declares {list(declared)}. Train from a checkpoint whose config declares the release's "
+            "chain."
+        )
 
 
 def require_mtp_head_spec(config) -> MtpHeadSpec:
@@ -212,7 +250,10 @@ def require_mtp_head_spec(config) -> MtpHeadSpec:
                 f"mtp_loss_weight trains the {_RELEASED_TAIL_DEPTH}-layer head {model_type!r} releases ship, and this "
                 f"config declares {depth}. Train from a checkpoint whose config declares the release's depth."
             )
-        mtp_draft_layer_index(text_config(config))
+        text = text_config(config)
+        _reject_another_chain(spec, text, model_type)
+        for kind in spec.chain_kinds:
+            mtp_draft_layer_index(text, kind)
         return spec
     raise ValueError(
         f"mtp_loss_weight has no head to train on {levels[0]!r}: no release of this family ships a tail Halo maps. "
@@ -224,6 +265,17 @@ def find_mtp_head_spec(config) -> MtpHeadSpec | None:
     """The spec of ``config``'s family, the wrapper's ``model_type`` first, or ``None`` where it has none."""
     levels = (getattr(level, "model_type", None) for level in config_sources(config))
     return next((_SPECS_BY_MODEL_TYPE[level] for level in levels if level in _SPECS_BY_MODEL_TYPE), None)
+
+
+def stored_head_prefix(keys: Iterable[str], config, path: str) -> str | None:
+    """Where ``keys`` hold the head that lives at ``path``: there, or at the family's other level, since a text-only
+    class reads a composite's tail and a composite an export's. ``None`` with no head."""
+    prefixes = [f"{path}."]
+    family = find_moe_family_spec(config.model_type)
+    if family is not None and family.text_only_layout is not None:
+        prefixes += [family.text_only_layout.mtp_tail, family.text_only_layout.composite_mtp_tail]
+    stored = list(keys)
+    return next((prefix for prefix in prefixes if any(key.startswith(prefix) for key in stored)), None)
 
 
 def tail_load_patterns(load_ignores: Iterable[str]) -> tuple[str, ...]:
@@ -240,7 +292,7 @@ def stored_tail_keys(keys: Iterable[str], load_ignores: Iterable[str]) -> list[s
 def unbuilt_tail_keys(keys: Iterable[str], config, built: Iterable[str]) -> list[str]:
     """Those of ``keys`` that read as the tail ``config`` declares and ``built`` (the model's own keys) does not hold:
     under an ``mtp`` module, or at a decoder index past the trunk. A load drops them whether or not the class names
-    them, and Nemotron-H's and Step-3.7's composites name none."""
+    them, and Step-3.7's composite names none."""
     depth = max(declared_tail_fields(config).values(), default=0)
     if not depth:
         return []

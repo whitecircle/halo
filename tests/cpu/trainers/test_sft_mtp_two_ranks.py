@@ -12,7 +12,13 @@ from tests.common.mtp_heads import moved_keys, run_entry, saved_tensors, write_e
 _RANKS = 2
 _STEPS = 3
 _NO_CLIP = {"max_grad_norm": 0, "full_determinism": True, "seed": 42}
-_HEAD_PREFIXES = {"qwen3_5_moe_text": "mtp.", "glm4_moe_lite": "model.layers.2.", "qwen3_5": "mtp."}
+_HEAD_PREFIXES = {
+    "qwen3_5_moe_text": "mtp.",
+    "glm4_moe_lite": "model.layers.2.",
+    "qwen3_5": "mtp.",
+    "nemotron_h": "mtp.",
+    "nemotron_h_omni": "language_model.mtp.",
+}
 # A detached run's ntp_ce against a run with no head: the float sum over a rank's targets. A joint run's sits past it
 # by the third step.
 _SAME_CURVE_BAR = 1e-6
@@ -50,7 +56,7 @@ def _largest_gap(first: list[float], second: list[float]) -> float:
 
 
 @pytest.mark.parametrize("loss_type", ["hard", "soft"])
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_detached_leaves_the_trunk_byte_equal_to_a_run_with_no_head_and_joint_does_not(
     name, loss_type, tmp_path, corpus
 ):
@@ -103,7 +109,7 @@ def _gated_run(name: str, target, corpus: str, *, gain: float, **fields):
     )
 
 
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_the_gate_reads_a_world_of_held_out_rows_through_the_heads_group(name, tmp_path, corpus):
     done = _gated_run(name, tmp_path, corpus, gain=-1.0)
     assert done.returncode == 0, (done.stderr + done.stdout)[-3000:]
@@ -123,7 +129,7 @@ def test_the_gate_reads_a_world_of_held_out_rows_through_the_heads_group(name, t
     assert all(entry["eval_mtp_scored_positions"] == expected["eval_mtp_scored_positions"] for entry in readings)
 
 
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_a_failed_fit_exits_every_rank_through_the_teardown_naming_the_checkpoint(name, tmp_path, corpus):
     done = _gated_run(name, tmp_path, corpus, gain=2.0, fsdp_reshard_after_forward=True)
     assert done.returncode != 0
@@ -132,7 +138,7 @@ def test_a_failed_fit_exits_every_rank_through_the_teardown_naming_the_checkpoin
     assert (tmp_path / "run" / f"checkpoint-{_STEPS}" / "trainer_state.json").is_file()
 
 
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_stochastic_rounding_leaves_a_detached_trunk_byte_equal_at_bf16(name, tmp_path, corpus):
     """Its seeds key on step and name, so the head's parameters shift no trunk parameter's draw; and the split survives
     the forward's fp32 output wrap, which rebuilds a model output from its keys."""
@@ -172,7 +178,7 @@ def test_head_only_moves_the_head_alone(name, tmp_path, corpus):
 
 
 @pytest.mark.parametrize("zero3", [False, True], ids=["zero2", "zero3"])
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_an_evaluation_between_steps_scores_the_head_and_leaves_training_as_it_was(name, zero3, tmp_path, corpus):
     """Each shard group gathers for the eval forward, the head's too, and what it leaves registered must not reach the
     next step's forward or the optimizer."""

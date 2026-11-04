@@ -20,7 +20,6 @@ class BareEPLayer(EPGroupLimitedMoELayerBase):
         nn.Module.__init__(self)
         self.top_k = top_k
         self.num_experts = num_experts
-        self.n_routed_experts = num_experts
         self.n_group = 1
         self.topk_group = 1
         self.norm_topk_prob = True

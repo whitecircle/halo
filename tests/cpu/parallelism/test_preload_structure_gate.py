@@ -22,9 +22,11 @@ from halo.model_loading.parallel.load_rules import reject_unsupported_structure
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.models.attention import selection
 from tests.common.parallelism import make_parallelism_config
-from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 ROSTER = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
+# Dense TP goes through ``tp_plan``, not this gate, so the dense families join only the CP verdict.
+CP_ROSTER = {**TINY_DENSE_FAMILIES, **ROSTER}
 # As (is_blackwell, is_hopper, detected backend).
 HOSTS = {
     "blackwell": (True, False, "flash_attention_4"),
@@ -57,9 +59,9 @@ def _weight_read(*_args, **_kwargs):
 def _materialized(name: str, attn_implementation: str | None = None):
     """Remote code may pick its attention class by the label (Ling 2.0's flash class)."""
     if attn_implementation is None:
-        return tiny_family_model(ROSTER[name])
+        return tiny_family_model(CP_ROSTER[name])
     with _host("hopper"):
-        return tiny_family_model(ROSTER[name], overrides={"_attn_implementation": attn_implementation})
+        return tiny_family_model(CP_ROSTER[name], overrides={"_attn_implementation": attn_implementation})
 
 
 @contextlib.contextmanager
@@ -77,7 +79,7 @@ def _host(host: str):
 
 def _gate_outcome(name: str, tmp_path, host: str = "hopper", **pc_fields) -> str | None:
     """Asserts it never reaches a weight read."""
-    family = ROSTER[name]
+    family = CP_ROSTER[name]
     config = copy.deepcopy(_materialized(name).config)
     env = {k: v for k, v in os.environ.items() if k not in _ACCELERATE_VARS}
     with (
@@ -115,10 +117,10 @@ def _post_load_outcome(check, *args) -> str | None:
 
 
 @pytest.mark.parametrize("host", HOSTS)
-@pytest.mark.parametrize("name", ROSTER)
+@pytest.mark.parametrize("name", CP_ROSTER)
 def test_cp_refuses_a_family_before_its_load_exactly_where_the_roster_says_ulysses_cannot_run(name, host, tmp_path):
     refusal = _gate_outcome(name, tmp_path, host, cp_size=2)
-    assert (refusal is None) == ROSTER[name].ulysses_cp, f"{name} on {host}: {refusal or 'admitted'}"
+    assert (refusal is None) == CP_ROSTER[name].ulysses_cp, f"{name} on {host}: {refusal or 'admitted'}"
     if refusal is not None:
         model = _materialized(name)
         assert refusal == _post_load_outcome(reject_unsupported_ulysses_model, model, 2)

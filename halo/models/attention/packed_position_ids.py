@@ -63,6 +63,11 @@ def is_position_ids_stash_installed(owner_cls) -> bool:
     return getattr(owner_cls.forward, _STASH_ATTR, False)
 
 
+def forward_names_position_ids(owner_cls) -> bool:
+    """Through ``**kwargs`` the stash's signature bind finds none, so every call would stash ``None``."""
+    return "position_ids" in inspect.signature(owner_cls.forward).parameters
+
+
 def install_position_ids_stash(owner_cls, stash_targets) -> bool:
     """Leave ``owner_cls.forward``'s ``position_ids`` on the modules ``stash_targets(self)`` returns, for each call."""
     if is_position_ids_stash_installed(owner_cls):
@@ -93,6 +98,11 @@ def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targ
     sequence on flash; dense backends form the packed mask at the model level."""
     if is_position_ids_stash_installed(owner_cls):
         return False
+    if not forward_names_position_ids(owner_cls):
+        raise RuntimeError(
+            f"{owner_cls.__qualname__}.forward takes no position_ids parameter, so the stash that keeps a packed row's "
+            f"documents apart would read None: re-derive the patch on this release's forward."
+        )
     registry = modeling_module.ALL_ATTENTION_FUNCTIONS
     install_position_ids_stash(owner_cls, stash_targets)
     if not isinstance(registry, PositionIdsInjectingRegistry):

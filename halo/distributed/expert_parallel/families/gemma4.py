@@ -19,13 +19,6 @@ class EPGemma4MoELayer(EPMoELayerBase):
     # The router is a sibling module in the decoder layer, so only expert grad-sync hooks register.
     _ROUTER_ATTR = None
 
-    # Gemma4 spells its config field ``hidden_activation``, which the name-resolution chain does not
-    # read, so the family fallback must be its own default rather than the roster's SiLU.
-    _DEFAULT_ACTIVATION = "gelu_pytorch_tanh"
-
-    # ``gate_up_proj`` is ``[E, 2M, H]``, so its length is the expert count.
-    _NUM_EXPERTS_ATTR_PATHS = ("num_experts", "gate_up_proj")
-
     @classmethod
     def _find_experts_container(cls, layer: nn.Module) -> nn.Module:
         """The wrapped module is itself the expert container."""
@@ -33,9 +26,6 @@ class EPGemma4MoELayer(EPMoELayerBase):
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """No-op: the sibling ``Gemma4TextRouter`` passes the routing decision in already made."""
-
-    def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return ("router=sibling-module (FSDP-managed)",)
 
     def forward(  # type: ignore[override]
         self,

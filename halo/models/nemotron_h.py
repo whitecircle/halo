@@ -15,6 +15,7 @@ import transformers.models.radio.modeling_radio as radio_modeling
 from torch import nn
 
 from halo.models.attention.tensor_memo import TensorMemo
+from halo.models.conversion_overrides import NEMOTRON_H_COMPOSITE_CLASS
 from halo.models.row_documents import row_documents
 from halo.models.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
@@ -24,7 +25,6 @@ logger = logging.getLogger(__name__)
 # Documents share a scan while the padded batch they make costs at most this over their tokens. A short document's cost
 # is mostly the scan's own, so a row of them gains from sharing, and a skewed row pays the longest for every member.
 _MAX_PADDED_AREA = 1.25
-_COMPOSITE_CLASS = "NemotronH_Omni_Reasoning_V3"
 
 
 class _RowLayout(NamedTuple):
@@ -249,7 +249,7 @@ def set_composite_head_accessors(module: ModuleType) -> None:
     """On the composite ``module`` defines, transformers' or the release's own file an export carries. Upstream's
     accessors look for ``lm_head`` on the composite, which holds it under ``language_model``: a reader would find no
     head, and a resize would grow the embedding alone."""
-    composite = getattr(module, _COMPOSITE_CLASS, None)
+    composite = getattr(module, NEMOTRON_H_COMPOSITE_CLASS, None)
     if isinstance(composite, type):
         composite.get_output_embeddings = _composite_output_embeddings
         composite.set_output_embeddings = _set_composite_output_embeddings

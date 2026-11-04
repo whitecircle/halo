@@ -452,6 +452,15 @@ def test_a_run_change_lands_under_the_legacy_spelling(tmp_path, nemotron_source)
     assert AutoConfig.from_pretrained(export).to_diff_dict() == config.to_diff_dict()
 
 
+def test_a_trainers_cache_write_on_the_composite_leaves_the_release_config(tmp_path, release_source):
+    """transformers' Trainer sets ``model.config.use_cache`` on every run. The composite holds no such field, only its text
+    tower does, so a reload would not see it, and refusing it refused every Trainer save off the release."""
+    config = AutoConfig.from_pretrained(release_source)
+    config.use_cache = False
+    payload, _export = _carried(tmp_path, config, release_source)
+    assert payload == nemotron_h_release_config()
+
+
 def test_a_text_only_export_of_a_composite_keeps_its_own_schema(tmp_path, nemotron_source):
     """Carried, it would come out spelling the composite's ``model_type`` over the text tower's weights."""
     config = AutoConfig.from_pretrained(nemotron_source).text_config

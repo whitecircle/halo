@@ -51,9 +51,6 @@ class EPMoELayerBase(
     # HF class name(s) of the MoE block this EP layer replaces; ``roster.MOE_LAYER_MAP`` claims them.
     HF_MODULE_NAMES: tuple[str, ...] = ()
 
-    # Per-family dotted paths on the original HF MoE module, probed by :meth:`detect_num_experts` first.
-    _NUM_EXPERTS_ATTR_PATHS: tuple[str, ...] = ()
-
     # The family's checkpoint name, which becomes the export key in ``replicated_named_params``; resolved per instance
     # from ``FAMILY.shared_expert_attrs`` for a family that declares one.
     _shared_expert_attr: str = "shared_experts"
@@ -61,9 +58,6 @@ class EPMoELayerBase(
     # True where the architecture always builds the shared expert: an absent or ``None`` slot is then an
     # upstream rename rather than a configuration, and adopting nothing would drop it from every output.
     _SHARED_EXPERT_REQUIRED: bool = False
-
-    # Fallback when neither the expert container nor the wrapped block names an activation.
-    _DEFAULT_ACTIVATION: str = "silu"
 
     # Attribute the router hangs off, on the wrapped HF block and on this EP layer, declared once per family so the
     # probe, the fp32 upcast and the grad-sync hook cannot point at different modules. ``None``: the router is external
@@ -87,18 +81,10 @@ class EPMoELayerBase(
 
     @classmethod
     def detect_num_experts(cls, layer: nn.Module) -> int:
-        """The routed-expert count of an HF MoE block: the first dotted :attr:`_NUM_EXPERTS_ATTR_PATHS` entry,
-        then the expert container, holding an ``int`` or a sized value."""
-        generic = tuple(p for attr in cls.FAMILY.experts_container_attrs for p in (attr, f"{attr}.num_experts"))
-        for path in (*cls._NUM_EXPERTS_ATTR_PATHS, *generic):
-            value = layer
-            for attr in path.split("."):
-                value = getattr(value, attr, None)
-            if isinstance(value, int):
-                return value
-            if hasattr(value, "__len__"):
-                return len(value)
-        raise AttributeError(f"Cannot detect num_experts from {type(layer).__name__}")
+        """The routed-expert count off the expert container: a per-expert ``nn.ModuleList``'s length, else its
+        ``num_experts``."""
+        experts = cls._find_experts_container(layer)
+        return len(experts) if isinstance(experts, nn.ModuleList) else experts.num_experts
 
     def expert_named_params(self) -> list:
         """``(name, param)`` for this rank's expert weights, then its expert LoRA adapters; a family's layout is
@@ -107,7 +93,7 @@ class EPMoELayerBase(
 
     def replicated_named_params(self) -> list:
         """``(name, param)`` for the fully replicated submodules the router hook DP-averages: the shared expert, empty
-        when its slot is ``None``. Qwen3.5/3.6 overrides it for its second gate module."""
+        when its slot is ``None``. Qwen3.5/3.6 and Nemotron-H extend it for their other replicated modules."""
         return self._submodule_named_params(
             [(self._shared_expert_attr, getattr(self, self._shared_expert_attr, None))]
         )
@@ -221,7 +207,7 @@ class EPMoELayerBase(
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """A family reads its extra constants here directly, so an upstream rename raises instead of defaulting."""
-        self._resolve_activation(experts, original_layer=original_layer, default=self._DEFAULT_ACTIVATION)
+        self._resolve_activation(experts, original_layer=original_layer)
 
     def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False) -> None:
         self._init_fused_glu_params(experts, weights_already_sharded=weights_already_sharded)
@@ -241,7 +227,7 @@ class EPMoELayerBase(
         return current_device() if device is None or device.type == "meta" else device
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        """This family's extra fields for the construction line."""
+        """This family's extra fields for the construction line; an override extends ``super()``."""
         return ()
 
     def _log_init_summary(self, *extras: str) -> None:
@@ -254,6 +240,9 @@ class EPMoELayerBase(
         if not is_global_main_process():
             return
         fields = [f"{self.expert_end - self.expert_start}/{self.num_experts} experts per EP rank"]
+        fields.append(f"wire_width={self.hidden_dim}")
+        if hasattr(self, "top_k"):
+            fields.append(f"top_k={self.top_k}")
         if self.FAMILY.shared_expert_attrs:
             shared = getattr(self, self._shared_expert_attr, None) is not None
             fields.append(f"{self._shared_expert_attr}={'yes' if shared else 'no'}")
@@ -316,6 +305,8 @@ class EPMoELayerBase(
         # Before the dispatch, not inside the span: a first-call trace between dispatch and combine
         # stalls every peer in DeepEP's barrier.
         self._warm_expert_kernels(flat.device, input_dtype, flat.shape[-1], experts.shape[1])
+
+        self._record_expert_load(experts)
 
         if self._capture_routing:
             # Capture the global expert ids before dispatch localizes them; int16 (num_experts < 32768).

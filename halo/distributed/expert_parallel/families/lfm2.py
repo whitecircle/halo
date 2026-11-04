@@ -16,12 +16,8 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("Lfm2MoeSparseMoeBlock",)
     FAMILY = LFM2
 
-    SUPPORTS_BIAS_BALANCING = True
-
     # ``Lfm2MoeTopKRouter``'s renormalization floor.
     _TOPK_WEIGHT_NORM_EPS = 1e-6
-
-    _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the sigmoid-routing knobs off the gate, without defaults: they change the routing math, so a
@@ -84,5 +80,4 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
 
         topk_weights = topk_weights * self.routed_scaling_factor
 
-        self._record_expert_load(selected_experts)
         return selected_experts, topk_weights

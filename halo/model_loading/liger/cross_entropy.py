@@ -26,7 +26,7 @@ _TORCH_CROSS_ENTROPY = F.cross_entropy
 
 @functools.lru_cache(maxsize=1)
 def _default_ce():
-    return LigerCrossEntropyLoss(ignore_index=-100, reduction="mean")
+    return LigerCrossEntropyLoss(ignore_index=LABEL_IGNORE_INDEX, reduction="mean")
 
 
 def liger_cross_entropy(
@@ -34,7 +34,7 @@ def liger_cross_entropy(
     target: torch.Tensor,
     weight: torch.Tensor | None = None,
     size_average: bool | None = None,
-    ignore_index: int = -100,
+    ignore_index: int = LABEL_IGNORE_INDEX,
     reduce: bool | None = None,
     reduction: str = "mean",
     label_smoothing: float = 0.0,
@@ -52,7 +52,7 @@ def liger_cross_entropy(
             reduction=reduction,
             label_smoothing=label_smoothing,
         )
-    if weight is not None or (ignore_index, reduction, label_smoothing) != (-100, "mean", 0.0):
+    if weight is not None or (ignore_index, reduction, label_smoothing) != (LABEL_IGNORE_INDEX, "mean", 0.0):
         return LigerCrossEntropyLoss(
             weight=weight,
             ignore_index=ignore_index,

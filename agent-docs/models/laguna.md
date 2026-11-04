@@ -10,7 +10,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
 `EPLagunaMoELayer` (`halo/distributed/expert_parallel/families/laguna.py`) subclasses GLM-4 MoE Lite's `EPGlm4MoELayer` and claims `LagunaSparseMoeBlock` / `model_type: laguna`. The two families share the whole contract (sigmoid routing, fused `gate_up_proj`/`down_proj` 3D storage, a shared expert on every token, and the per-expert hub checkpoint layout), so the gather and the sharded merge are inherited unchanged.
 
-The layer's one delta is the optional-routing-knob opt-out, which gives the top-k weight default. The hub↔module key renames sit on the spec, and the served-bias warnings read the vLLM client's `DROPPED_BALANCING_BIAS_MODEL_TYPES`. Those, plus the two inherited GLM-4 behaviors that decide a Laguna load:
+The layer's deltas are the optional-routing-knob opt-out, which gives the top-k weight default, and the floor-free top-k sum below. The hub↔module key renames sit on the spec, and the served-bias warnings read the vLLM client's `DROPPED_BALANCING_BIAS_MODEL_TYPES`. Those, plus the two inherited GLM-4 behaviors that decide a Laguna load:
 
 - **Shared-expert attribute** (inherited). Both in-library blocks name it `shared_experts`; `shared_expert` is the hub (and remote-code) spelling. The wrapper registers the submodule under whichever name its block actually used and records it in `_shared_expert_attr`.
 
@@ -19,6 +19,8 @@ The layer's one delta is the optional-routing-knob opt-out, which gives the top-
 - **Top-k weight normalization.** `LagunaTopKRouter.forward` divides the gathered sigmoid scores by their sum **unconditionally**, and `LagunaConfig` declares no `norm_topk_prob` at all (`modular_laguna` deletes the inherited field), so nothing on the in-library block, gate or config can supply it.
 
     `EPLagunaMoELayer` therefore opts the knob out (`_OPTIONAL_ROUTING_KNOBS`), which resolves it to the normalizing default. GLM-4 MoE Lite, whose gate and config both declare it, requires it and raises on an upstream rename. Skipping the division scales every token's routed output by the sum of its top-k scores (~0.9-2.0x, data dependent) with no shape or dtype signal.
+
+    The sum takes no floor (`_TOPK_WEIGHT_NORM_EPS = 0.0`), in the in-library router and both pinned remote revisions, so an all-zero top-k sum gives NaN as upstream does. An fp32 sigmoid reaches zero below a logit of about -88.
 
 - **Where the routing knobs live.** In-library GLM-4 hangs `routed_scaling_factor` / `num_group` / `topk_group` / `norm_topk_prob` on the router and leaves `n_routed_experts` / `n_group` on the config; the Laguna remote-code revisions put `norm_topk_prob` on the router and declare no groups.
 

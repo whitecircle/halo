@@ -11,7 +11,13 @@ import pytest
 from tests.common.mtp_heads import moved_keys, run_entry, saved_tensors, write_entry_corpus, write_entry_run
 
 _STEPS = 2
-_HEAD_PREFIXES = {"qwen3_5_moe_text": "mtp.", "glm4_moe_lite": "model.layers.2."}
+_HEAD_PREFIXES = {
+    "qwen3_5_moe_text": "mtp.",
+    "glm4_moe_lite": "model.layers.2.",
+    "nemotron_h": "mtp.",
+    "nemotron_h_no_latent": "mtp.",
+    "nemotron_h_omni": "language_model.mtp.",
+}
 
 
 @pytest.fixture(scope="module")

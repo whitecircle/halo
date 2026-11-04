@@ -99,7 +99,7 @@ def _built(name: str, row: dict, *, ep1: bool, fp32_router: bool):
 
 
 def _router_of(head: nn.Module) -> nn.Module:
-    return next(module for path, module in head.named_modules() if path.endswith("mlp.gate"))
+    return next(module for path, module in head.named_modules() if path.endswith(("mlp.gate", "mixer.gate")))
 
 
 def _checkpoint(model) -> None:
@@ -245,13 +245,13 @@ def _assert_row(tag: str, result: dict, *, errors: str = "errors", head_bar=_HEA
         assert result["groups"] > 2 and result["trunk_dtensors"] > 0, f"{tag}: the trunk went unsharded"
 
 
-@pytest.mark.parametrize("name", ["glm4_moe_lite", "qwen3_5_moe_text"])
+@pytest.mark.parametrize("name", ["glm4_moe_lite", "qwen3_5_moe_text", "nemotron_h"])
 def test_every_gradient_is_the_mean_of_the_ranks_rows_across_scopes_and_zero_modes(name, tmp_path):
     for tag, result in _results(tmp_path, name, _matrix()).items():
         _assert_row(tag, result)
 
 
-@pytest.mark.parametrize("name", ["qwen3_5", "qwen3_next", "qwen3_5_moe"])
+@pytest.mark.parametrize("name", ["qwen3_5", "qwen3_next", "qwen3_5_moe", "nemotron_h_omni", "nemotron_h_no_latent"])
 def test_the_other_families_hold_the_mean_on_the_hardest_rows(name, tmp_path):
     rows = [
         {"loss_type": "soft", "scope": "joint", "zero": "zero3", "gc": True},
@@ -262,7 +262,7 @@ def test_the_other_families_hold_the_mean_on_the_hardest_rows(name, tmp_path):
         _assert_row(tag, result)
 
 
-@pytest.mark.parametrize("name", ["glm4_moe_lite", "qwen3_5_moe_text"])
+@pytest.mark.parametrize("name", ["glm4_moe_lite", "qwen3_5_moe_text", "nemotron_h"])
 def test_ep1_experts_managed_by_fsdp2_reduce_in_the_heads_group(name, tmp_path):
     rows = [
         {"loss_type": "soft", "scope": "joint", "zero": "zero2", "gc": True},
@@ -274,7 +274,7 @@ def test_ep1_experts_managed_by_fsdp2_reduce_in_the_heads_group(name, tmp_path):
         _assert_row(tag, result)
 
 
-@pytest.mark.parametrize("name", ["glm4_moe_lite", "qwen3_5_moe_text"])
+@pytest.mark.parametrize("name", ["glm4_moe_lite", "qwen3_5_moe_text", "nemotron_h"])
 def test_an_fp32_router_splits_off_the_heads_group_and_still_reduces_at_bf16_compute(name, tmp_path):
     """FSDP2 asserts one dtype per group, and the head's forward reads the gate's weight off the module."""
     rows = [

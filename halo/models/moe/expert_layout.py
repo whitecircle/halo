@@ -16,6 +16,23 @@ HF_FUSED_EXPERT_KEYS: tuple[str, ...] = ("gate_up_proj_bias", "down_proj_bias", 
 SEPARATE_GLU_PROJECTIONS: tuple[str, str, str] = ("gate_proj", "up_proj", "down_proj")
 # The two projections of a gateless expert, under one spelling at runtime and on the hub.
 SEPARATE_MLP_PROJECTIONS: tuple[str, str] = ("up_proj", "down_proj")
+# The ``(gate, up, down)`` per-expert hub spelling of DeepSeek-V4 and LFM-2.
+W_GLU_PROJECTIONS: tuple[str, str, str] = ("w1", "w3", "w2")
+# The attributes a GLU EP layer holds across its fused, separate and expert-TP layouts.
+GLU_PROJECTIONS: tuple[str, ...] = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
+# GPT-OSS adds its biases and the de-interleaved pair the grouped-GEMM and expert-TP layouts store. A root missing here
+# drops an expert weight from grad-sync registration; ordered, as the gathers iterate them.
+INTERLEAVED_GLU_ROOTS: tuple[str, ...] = (
+    *GLU_PROJECTIONS,
+    "gate_up_proj_bias",
+    "gate_proj_gmm",
+    "up_proj_gmm",
+    "gate_proj_gmm_bias",
+    "up_proj_gmm_bias",
+    "gate_proj_bias",
+    "up_proj_bias",
+    "down_proj_bias",
+)
 
 
 class ExpertLayoutKind(enum.Enum):
@@ -34,16 +51,11 @@ class ExpertLayoutKind(enum.Enum):
 # The runtime attributes each kind has a branch for; expert TP stores the GLU halves apart under the plain names,
 # GPT-OSS's grouped GEMM under ``*_gmm``.
 _RUNTIME_KEYS: dict[ExpertLayoutKind, frozenset[str]] = {
-    ExpertLayoutKind.FUSED: frozenset({*HF_FUSED_EXPERT_KEYS, "gate_proj", "up_proj"}),
-    ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT: frozenset({"gate_up_proj", "gate_proj", "up_proj", "down_proj"}),
+    ExpertLayoutKind.FUSED: frozenset({*HF_FUSED_EXPERT_KEYS, *GLU_PROJECTIONS}),
+    ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT: frozenset(GLU_PROJECTIONS),
     ExpertLayoutKind.SEPARATE_GLU: frozenset(SEPARATE_GLU_PROJECTIONS),
     ExpertLayoutKind.SEPARATE_MLP: frozenset(SEPARATE_MLP_PROJECTIONS),
-    ExpertLayoutKind.INTERLEAVED_GLU: frozenset(
-        {
-            *HF_FUSED_EXPERT_KEYS,
-            *(f"{half}_proj{suffix}" for half in ("gate", "up") for suffix in ("", "_bias", "_gmm", "_gmm_bias")),
-        }
-    ),
+    ExpertLayoutKind.INTERLEAVED_GLU: frozenset(INTERLEAVED_GLU_ROOTS),
 }
 
 

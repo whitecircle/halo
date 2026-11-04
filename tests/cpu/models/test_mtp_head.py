@@ -3,12 +3,18 @@
 term scales with the next-token loss on one normalizer, and the soft route and the scopes reach what they claim."""
 
 import json
+import re
 
 import pytest
 import torch
 import torch.nn.functional as F
 from accelerate import init_empty_weights
-from transformers import CONFIG_MAPPING, AutoModelForCausalLM
+from transformers import (
+    CONFIG_MAPPING,
+    AutoModelForCausalLM,
+    NemotronH_Omni_Reasoning_V3,
+    NemotronH_Omni_Reasoning_V3_Config,
+)
 
 from halo.model_loading.liger import cross_entropy
 from halo.models.config_access import text_config
@@ -21,6 +27,7 @@ from halo.models.mtp.head import (
     mtp_head_path,
 )
 from halo.models.mtp.spec import mtp_draft_layer_index, require_mtp_head_spec
+from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG, NEMOTRON_H_RELEASE_VISION_CONFIG
 from tests.common.mtp_heads import (
     LABEL_IGNORE,
     MTP_TINY_FAMILIES,
@@ -29,13 +36,18 @@ from tests.common.mtp_heads import (
     padded_rows,
     tiny_model_with_head,
 )
+from tests.common.nemotron_h_hub_keys import nemotron_h_hub_keys
 from tests.common.repo import REPO_ROOT
 
 _WEIGHT = 0.7
 # Read from each release's safetensors headers and config.json.
 _RELEASE_TAILS = json.loads((REPO_ROOT / "tests/common/mtp_release_tails.json").read_text(encoding="utf-8"))
 _FAMILIES = sorted(MTP_TINY_FAMILIES)
-_MOE_TEXT_FAMILIES = ("qwen3_5_moe_text", "qwen3_next", "glm4_moe_lite")
+_MOE_TEXT_FAMILIES = ("qwen3_5_moe_text", "qwen3_next", "glm4_moe_lite", "nemotron_h")
+_NEMOTRON_ROUTES = ("nemotron_h", "nemotron_h_omni")
+_LIGHTNING = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
+_SUPER_VL = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+_SUPER_VL_TAIL_LEVEL = "language_model."
 
 
 def _grads(module) -> dict[str, torch.Tensor]:
@@ -406,8 +418,10 @@ def test_the_glm_head_zeroes_the_embedding_at_a_document_start_as_its_engine_doe
         assert (moved[0, start + 1] - base[0, start + 1]).abs().max() > 1e-3, "the change reached nothing"
 
 
-def test_a_root_head_keeps_the_embedding_at_a_document_start():
-    model, head = tiny_model_with_head("qwen3_5_moe_text")
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "nemotron_h"])
+def test_a_root_head_keeps_the_embedding_at_a_document_start(name):
+    """Neither engine's Nemotron-H drafter zeroes position 0, where both GLM-4's and DeepSeek's do."""
+    model, head = tiny_model_with_head(name)
     install_term(model, head, weight=0.1, scope="detached")
     rows = packed_rows()
     base = _draft_of(model, head, rows)
@@ -491,13 +505,82 @@ def test_the_chain_is_the_one_a_server_drafts_with(name):
     )
 
 
+@pytest.mark.parametrize("name", _NEMOTRON_ROUTES)
+def test_the_chain_is_the_arithmetic_both_engines_draft_with(name):
+    """Recomputed by hand off the head's own modules: the projection opens the attention block, each block's residual
+    folds before the next one's norm, no norm separates them, and the final norm is the last thing before the shared
+    output embedding. A block run in the other order, or a dropped residual, trains and reads as no acceptance."""
+    model, head = tiny_model_with_head(name)
+    install_term(model, head, weight=_WEIGHT, scope="detached")
+    seen = {}
+    head.register_forward_hook(lambda _module, args, output: seen.update(args=args, draft=output))
+    head.layers[0].mixer.register_forward_pre_hook(
+        lambda _module, _args, kwargs: seen.update(attention_kwargs=kwargs), with_kwargs=True
+    )
+    model(**padded_rows())
+    embedding, hidden = seen["args"]
+    attention, moe = head.layers
+    x0 = attention.eh_proj(torch.cat([attention.enorm(embedding), attention.hnorm(hidden)], dim=-1))
+    call = {key: value for key, value in seen["attention_kwargs"].items() if key != "hidden_states"}
+    x1 = x0 + attention.mixer(hidden_states=attention.norm(x0), **call)[0]
+    x2 = x1 + moe.mixer(moe.norm(x1))
+    assert torch.equal(moe.final_layernorm(x2), seen["draft"])
+    assert not torch.equal(x1, x0) and not torch.equal(x2, x1), (
+        "a block contributed nothing, so its order proves nothing"
+    )
+    assert not hasattr(attention, "final_layernorm") and not hasattr(moe, "eh_proj")
+
+
+@pytest.mark.parametrize("name", _NEMOTRON_ROUTES)
+def test_the_head_shares_the_trunks_output_embedding_past_its_final_norm(name):
+    """Both engines project a draft through the target's lm_head, and the term scores through the one the trunk trains."""
+    model, head = tiny_model_with_head(name)
+    assert not [key for key in head.state_dict() if "lm_head" in key or "embeddings" in key]
+    install_term(model, head, weight=_WEIGHT, scope="detached")
+    draft_seen = []
+    head.register_forward_hook(lambda _module, _args, output: draft_seen.append(output))
+    loss = model(**padded_rows()).loss
+    weight = model.get_output_embeddings().weight
+    labels = padded_rows()["labels"]
+    expected = F.cross_entropy(
+        F.linear(draft_seen[0][:, :-2], weight).reshape(-1, weight.size(0)),
+        labels[:, 2:].reshape(-1),
+        ignore_index=LABEL_IGNORE,
+        reduction="sum",
+    )
+    plain, _ = tiny_model_with_head(name)
+    assert torch.isclose(
+        (loss - plain(**padded_rows()).loss) * (labels[:, 1:] != LABEL_IGNORE).sum(), _WEIGHT * expected
+    )
+
+
+@pytest.mark.parametrize("name", _NEMOTRON_ROUTES)
+def test_the_moe_block_takes_a_call_it_ignores_as_the_trunks_does(name):
+    """The attention layer's mask and markers reach the attention block; a MoE mixer runs on the hidden state alone."""
+    model, head = tiny_model_with_head(name)
+    install_term(model, head, weight=_WEIGHT)
+    seen = {}
+    head.layers[0].mixer.register_forward_pre_hook(
+        lambda _m, _a, kwargs: seen.update(attention=kwargs), with_kwargs=True
+    )
+    head.layers[1].mixer.register_forward_pre_hook(
+        lambda _m, args, kwargs: seen.update(moe=(args, kwargs)), with_kwargs=True
+    )
+    rows = padded_rows()
+    model(**rows)
+    assert seen["attention"]["attention_mask"] is not None, "the attention block lost the trunk's mask"
+    assert len(seen["moe"][0]) == 1 and not seen["moe"][1]
+
+
 @pytest.mark.parametrize("name", _FAMILIES)
 def test_the_head_takes_the_call_of_the_trunk_layer_running_its_attention(name):
     """A linear-attention layer's mask and position arguments are not a full-attention layer's."""
     model, head = tiny_model_with_head(name)
     install_term(model, head, weight=_WEIGHT)
     layer = decoder_layers(backbone_with_layers(model))[mtp_draft_layer_index(text_config(model.config))]
-    assert getattr(layer, "self_attn", None) is not None, "the draft layer's kind has no full attention"
+    assert getattr(layer, "self_attn", None) is not None or layer.block_type == "full_attention", (
+        "the draft layer's kind has no full attention"
+    )
     seen = {}
     layer.register_forward_pre_hook(lambda _m, args, kwargs: seen.update(trunk=(args[1:], kwargs)), with_kwargs=True)
     head.register_forward_pre_hook(lambda _m, args, kwargs: seen.update(head=(args[2:], kwargs)), with_kwargs=True)
@@ -565,6 +648,9 @@ def _release_head_shapes(release: dict, spec) -> dict[str, list[int]]:
             expected[f"{prefix}.experts.gate_up_proj"] = [num_experts, 2 * shape[0], shape[1]]
         elif name == "down_proj.weight":
             expected[f"{prefix}.experts.down_proj"] = [num_experts, *shape]
+        elif f"{prefix}.experts.N.gate_proj.weight" not in release["tail"]:
+            # A gateless bank stores ``up_proj`` apart.
+            expected[f"{prefix}.experts.up_proj"] = [num_experts, *shape]
     return expected
 
 
@@ -576,6 +662,40 @@ def test_the_head_holds_a_release_tail_key_for_key_and_shape_for_shape(repo):
         model = AutoModelForCausalLM.from_config(config)
     spec = require_mtp_head_spec(config)
     path = mtp_head_path(model, spec)
+    live = {f"{path}.{key}": list(tensor.shape) for key, tensor in build_mtp_head(model, spec).state_dict().items()}
+    release = {**release, "tail": {key.removeprefix(_SUPER_VL_TAIL_LEVEL): v for key, v in release["tail"].items()}}
+    assert live == _release_head_shapes(release, spec)
+
+
+@pytest.mark.parametrize(("repo", "keys"), [(_LIGHTNING, 270), (_SUPER_VL, 1040)])
+def test_the_pinned_nemotron_tails_expand_to_the_release_key_counts(repo, keys):
+    """Read off each release's safetensors headers, 16 and 18 spellings, so a dropped row is not a shorter pass."""
+    release = _RELEASE_TAILS[repo]
+    experts = release["config"]["n_routed_experts"]
+    per_expert = [key for key in release["tail"] if ".experts.N." in key]
+    assert len(per_expert) == 2
+    assert len(release["tail"]) - len(per_expert) + len(per_expert) * experts == keys
+
+
+def test_the_pinned_super_vl_tail_is_the_digest_pinned_release_index():
+    expected = {re.sub(r"\.experts\.\d+\.", ".experts.N.", key) for key in nemotron_h_hub_keys() if ".mtp." in key}
+    assert set(_RELEASE_TAILS[_SUPER_VL]["tail"]) == expected
+
+
+def test_super_vls_composite_holds_its_tail_at_the_release_path():
+    release = _RELEASE_TAILS[_SUPER_VL]
+    config = NemotronH_Omni_Reasoning_V3_Config(
+        text_config=NEMOTRON_H_RELEASE_TEXT_CONFIG,
+        vision_config=NEMOTRON_H_RELEASE_VISION_CONFIG,
+        vision_hidden_size=NEMOTRON_H_RELEASE_VISION_CONFIG["hidden_size"],
+        projector_hidden_size=20480,
+        image_token_id=18,
+    )
+    with init_empty_weights():
+        model = NemotronH_Omni_Reasoning_V3(config)
+    spec = require_mtp_head_spec(config)
+    path = mtp_head_path(model, spec)
+    assert path == "language_model.mtp"
     live = {f"{path}.{key}": list(tensor.shape) for key, tensor in build_mtp_head(model, spec).state_dict().items()}
     assert live == _release_head_shapes(release, spec)
 

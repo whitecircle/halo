@@ -7,9 +7,14 @@ from functools import lru_cache
 
 from halo.models.config_access import config_sources, text_config
 from halo.models.moe.config_fields import has_routed_experts
-from halo.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS, ExpertLayout, ExpertLayoutKind
-
-GLU_PROJECTIONS: tuple[str, ...] = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
+from halo.models.moe.expert_layout import (
+    GLU_PROJECTIONS,
+    INTERLEAVED_GLU_ROOTS,
+    SEPARATE_GLU_PROJECTIONS,
+    W_GLU_PROJECTIONS,
+    ExpertLayout,
+    ExpertLayoutKind,
+)
 
 
 @dataclass(frozen=True)
@@ -24,17 +29,25 @@ class NativeBalancingSlot:
 @dataclass(frozen=True)
 class CompositeTextLayout:
     """Where a composite checkpoint stores what its text-only export keeps at the root: the tower's keys under
-    ``composite_tower``, the head's under ``composite_head``. The defaults are transformers' multimodal wrapper layout."""
+    ``composite_tower``, the head's under ``composite_head``, an ``mtp.*`` tail under ``composite_mtp_tail``. The
+    defaults are transformers' multimodal wrapper layout."""
 
     tower: str = "model."
     composite_tower: str = "model.language_model."
     head: str = "lm_head."
     composite_head: str = "lm_head."
+    mtp_tail: str = "mtp."
+    composite_mtp_tail: str = "mtp."
 
     def to_composite_key(self, key: str) -> str:
-        if key.startswith(self.tower):
-            return self.composite_tower + key[len(self.tower) :]
-        return self.composite_head + key[len(self.head) :] if key.startswith(self.head) else key
+        for own, composite in (
+            (self.tower, self.composite_tower),
+            (self.head, self.composite_head),
+            (self.mtp_tail, self.composite_mtp_tail),
+        ):
+            if key.startswith(own):
+                return composite + key[len(own) :]
+        return key
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,8 @@ class MoEFamilySpec:
     refuses_trl_image_rows: str | None = None
     # Why the composite of the family's own remote modeling file does not train, where transformers' class does.
     remote_composite_refusal: str | None = None
+    # Why its EP layer needs the release's own modeling file: transformers' class builds a block no EP layer claims.
+    ep_layer_needs_remote_code: str | None = None
     # Why the family runs eager attention only.
     eager_only_attention: str | None = None
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
@@ -117,6 +132,10 @@ BAILING = MoEFamilySpec(
     balancing_slot=NativeBalancingSlot(("gate.expert_bias",)),
     shared_expert_attrs=("shared_experts",),
     engine_loaded_buffers=EngineLoadedBuffers(("gate.expert_bias",), config_flag="moe_router_enable_expert_bias"),
+    ep_layer_needs_remote_code=(
+        "transformers' own Ling 3.0 class builds BailingHybridMoE, and EPBailingMoELayer claims only the sparse MoE "
+        "blocks of the release's modeling file"
+    ),
 )
 COHERE2_MOE = MoEFamilySpec(
     model_types=("cohere2_moe", "cohere2_vision"),
@@ -131,7 +150,7 @@ COHERE2_MOE = MoEFamilySpec(
 )
 DEEPSEEK_V4 = MoEFamilySpec(
     model_types=("deepseek_v4",),
-    expert_layout=ExpertLayout(per_expert_keys=("w1", "w3", "w2")),
+    expert_layout=ExpertLayout(per_expert_keys=W_GLU_PROJECTIONS),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("deepseek_v4",),
@@ -177,19 +196,7 @@ GPT_OSS = MoEFamilySpec(
     expert_layout=ExpertLayout(ExpertLayoutKind.INTERLEAVED_GLU),
     # The router's own logit-space bias, which vLLM and SGLang both load and route with.
     balancing_slot=NativeBalancingSlot(("router.bias",)),
-    # Its biases, then the de-interleaved pair the grouped-mm and ETP layouts store; a root missing here drops an
-    # expert weight from grad-sync registration.
-    expert_weight_roots=(
-        *GLU_PROJECTIONS,
-        "gate_up_proj_bias",
-        "gate_proj_gmm",
-        "up_proj_gmm",
-        "gate_proj_gmm_bias",
-        "up_proj_gmm_bias",
-        "gate_proj_bias",
-        "up_proj_bias",
-        "down_proj_bias",
-    ),
+    expert_weight_roots=INTERLEAVED_GLU_ROOTS,
     # Matmul convention [E, H, 2M] / [E, M, H]: nothing is transposed on the way out.
     fused_contraction_axis=1,
 )
@@ -219,7 +226,7 @@ LAGUNA = MoEFamilySpec(
 )
 LFM2 = MoEFamilySpec(
     model_types=("lfm2_moe", "lfm2_vl"),
-    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, ("w1", "w3", "w2")),
+    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, W_GLU_PROJECTIONS),
     balancing_slot=NativeBalancingSlot(("expert_bias",), config_flag="use_expert_bias"),
     shared_expert_attrs=("shared_experts",),
 )
@@ -238,7 +245,10 @@ NEMOTRON_H = MoEFamilySpec(
     exports_source_config_schema=True,
     shared_expert_attrs=("shared_experts",),
     text_only_layout=CompositeTextLayout(
-        tower="backbone.", composite_tower="language_model.backbone.", composite_head="language_model.lm_head."
+        tower="backbone.",
+        composite_tower="language_model.backbone.",
+        composite_head="language_model.lm_head.",
+        composite_mtp_tail="language_model.mtp.",
     ),
     weight_sync_refusal=(
         "both pinned rollout engines serve the release, and no online update into either has been validated end to "

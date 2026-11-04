@@ -15,14 +15,11 @@ class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
     HF_MODULE_NAMES = ("Glm4MoeLiteMoE",)
     FAMILY = GLM4
 
-    SUPPORTS_BIAS_BALANCING = True
-
     # Remote-code revisions declare no group limiting, so those two fall through to the neutral 1. ``norm_topk_prob``
     # and ``routed_scaling_factor`` (1.8 in-library) stay required: defaulting either rescales every routed weight.
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group")
 
-    # The remote-code revisions spell the container ``routed_experts``, so it is probed first.
-    _NUM_EXPERTS_ATTR_PATHS = ("routed_experts.num_experts", "config.num_local_experts")
+    _SHARED_EXPERT_REQUIRED = True
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Also materialize the correction bias a lazy load can leave on meta: Laguna's pinned remote-code revision
@@ -35,11 +32,7 @@ class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
             )
         super()._adopt_routing(original_layer)
 
-    def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return (f"hf_layer={type(original_layer).__name__}",)
-
     def _native_slot_absence_is_legal(self) -> bool:
         """True only for a remote-code router: those revisions ship no correction bias, while the in-library routers
         register it unconditionally, so an absent slot there is a rename."""
-        router = getattr(self, self._ROUTER_ATTR, None) if self._ROUTER_ATTR else None
-        return not type(router).__module__.startswith("transformers.models.")
+        return not type(self._live_router_module()).__module__.startswith("transformers.models.")

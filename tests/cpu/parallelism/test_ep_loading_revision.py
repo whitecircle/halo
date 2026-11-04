@@ -2,6 +2,7 @@
 """Revision pinning on the EP / EP+TP / EP+CP load paths: an unpinned fallback silently trains hub ``main`` weights
 against the pinned config."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -35,6 +36,33 @@ def _ep_pc(**overrides) -> SimpleNamespace:
 # Every load here is patched out, so only its threading matters.
 _MODEL_CONFIG = SimpleNamespace()
 _KWARGS = {"config": _MODEL_CONFIG, "revision": _REVISION}
+
+
+@pytest.mark.parametrize(
+    ("config", "reason"),
+    [
+        pytest.param({"model_type": "cohere2_moe"}, "lazy_family_unverified", id="family_unverified"),
+        pytest.param(
+            {"model_type": "qwen3_moe", "quantization_config": {"quant_method": "fp8"}},
+            "quantized_checkpoint",
+            id="quantized",
+        ),
+    ],
+)
+def test_the_lazy_fallback_logs_why_the_checkpoint_took_from_pretrained(config, reason, tmp_path):
+    """One label for every reason sends a Cohere2 or quantized run hunting an expert layout it does not have."""
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    source = ModelSource("org/repo", _REVISION, str(tmp_path))
+    with (
+        patch(f"{_EP_LOADING}.agree_lazy_load", lambda *a, **k: False),
+        patch(f"{_EP_LOADING}.has_whole_model_weight_file", lambda *a, **k: True),
+        patch(f"{_EP_LOADING}._load_ep_model_huggingface", lambda *a, **k: nn.Linear(2, 2)),
+        patch(f"{_EP_LOADING}.logger") as log,
+    ):
+        model = load_ep_model(source, _ep_pc(), None, _KWARGS, preserve_checkpoint_precision=False)
+    assert isinstance(model, nn.Linear), f"{reason} must still reach from_pretrained"
+    assert any(f"reason={reason}" in call.args[0] for call in log.info.call_args_list)
+    assert log.warning.call_count == 0
 
 
 def test_lazy_fallback_level_separates_a_family_property_from_an_environment_failure():

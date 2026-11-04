@@ -41,7 +41,7 @@ NEUTRALIZED_TEACHER_SINKS_COST = (
 _FA4_RESCALE_ATTR = "_halo_trainable_sink_rescale"
 
 # A fraction of the dtype's minimum, as a bf16 dtype-min sink loaded at fp32 sits just above fp32's own minimum.
-_NEUTRALIZED_SINK_FLOOR = 0.99
+_NEUTRALIZED_SINK_FRACTION = 0.99
 
 
 class SinksPolicy(enum.StrEnum):
@@ -286,6 +286,11 @@ def has_live_attention_sinks(model) -> bool:
     return config is not None and uses_gpt_oss_sinks(config)
 
 
+def neutralized_sink_floor(sinks: torch.Tensor) -> float:
+    """At or below this a sink tensor counts as neutralized."""
+    return _NEUTRALIZED_SINK_FRACTION * torch.finfo(sinks.dtype).min
+
+
 def holds_unneutralized_sinks(model) -> bool:
     """Read off every module's tensors, so a model loaded without a policy answers with the sinks its checkpoint
     carries, and so does a family no spec names (Granite SWA)."""
@@ -293,7 +298,7 @@ def holds_unneutralized_sinks(model) -> bool:
         sinks = getattr(module, "sinks", None)
         if not isinstance(sinks, torch.Tensor):
             continue
-        if bool((sinks.detach() > _NEUTRALIZED_SINK_FLOOR * torch.finfo(sinks.dtype).min).any()):
+        if bool((sinks.detach() > neutralized_sink_floor(sinks)).any()):
             return True
     return False
 

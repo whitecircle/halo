@@ -341,12 +341,12 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 
 | Family (`model_type`) | vLLM 0.32.0 | SGLang 0.5.22 | Loader fact |
 |---|:--:|:--:|---|
-| Mistral4 | ✗ | ✗ | neither registers a class ([Mistral4](../models/mistral4.md#serving)) |
+| Mistral4 (`mistral4`) | ✗ | ✗ | neither registers a class ([Mistral4](../models/mistral4.md#serving)) |
 | Ling 3.0 (`bailing_hybrid`) | ✗ | ✗ | both register `BailingMoeV3ForCausalLM`; no online update into it is validated |
 | Ring (`bailing_moe_linear`) | ✗ | ✗ | the checkpoints declare `BailingMoeLinearV2ForCausalLM`; both register `BailingMoeV2_5ForCausalLM` |
-| Zaya | ✗ | ✗ | vLLM ships no class; SGLang's loader reads the pre-transformers-5.14 per-expert checkpoint (`zaya_block.experts.local_experts.N.linear_fc1`) |
-| DeepSeek-V4 | ✗ | ✗ | both map per-expert `w1/w2/w3` where the gather emits the fused pair |
-| Laguna | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
+| Zaya (`zaya`) | ✗ | ✗ | vLLM ships no class; SGLang's loader reads the pre-transformers-5.14 per-expert checkpoint (`zaya_block.experts.local_experts.N.linear_fc1`) |
+| DeepSeek-V4 (`deepseek_v4`) | ✗ | ✗ | both map per-expert `w1/w2/w3` where the gather emits the fused pair |
+| Laguna (`laguna`) | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
 Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
@@ -719,15 +719,15 @@ weights. Turn it off with speculative decoding (`VLLM_PREFIX_CACHING_FLAG=--no-e
 R3 then refuses to start): speculation can poison the align-mode prefix cache and the engine has no
 guard for the pair.
 
-**Speculative decoding (MTP).** A checkpoint with a multi-token-prediction head (Qwen3.5/3.6, `mtp.*`
+**Speculative decoding (MTP).** A checkpoint with a multi-token-prediction head (Qwen3.5/3.6 or Nemotron-H, `mtp.*`
 tensors) drafts with it through `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`.
 Rejection sampling keeps the target distribution, up to the bf16 rounding a draft's batch shape changes
 ([Serving](../optimization/mtp-heads.md#serving), SGLang's flags too), `processed_logprobs` come from the
 target logits, the thinking budget is enforced on the target, and the drafter's embeddings and
 `lm_head` are the target's modules, so the sync updates them (the MTP layer keeps launch weights, which
-only moves acceptance), except Step-3.5/3.7, which keep one head per draft layer. The server base must store
+only moves acceptance), except Step-3.5/3.7, which keep one head per draft layer, and Nemotron-H, whose family the sync refuses. The server base must store
 the head, and exports of a run that did not [train it](../optimization/mtp-heads.md) do not, so vLLM
-refuses them at startup; `patch_vocab` and `convert_to_bf16` write a stored Qwen3.5/3.6, Qwen3-Next or GLM-4 Lite head back, and drop any other family's. SGLang has no such check on Qwen3.5/3.6, so its export must carry the tail. Under speculation a request with `min_p > 0` or a `logit_bias` raises; never
+refuses them at startup; `patch_vocab` and `convert_to_bf16` write a stored Qwen3.5/3.6, Qwen3-Next, GLM-4 Lite or Nemotron-H head back, and drop any other family's. SGLang has no such check on Qwen3.5/3.6, so its export must carry the tail. Under speculation a request with `min_p > 0` or a `logit_bias` raises; never
 use `ngram` on linear-attention families (an unguarded output-corruption bug); `suffix` fails at
 startup on Model Runner V2. The prompt-log-prob probe passes under MTP on Model Runner V2 (Qwen3.6-35B-A3B,
 one speculative token).

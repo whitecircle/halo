@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.moe_layer.routing import EPRoutingMixin
 from halo.models.moe.family_specs import QWEN3_NEXT
 
 
@@ -19,7 +20,6 @@ class EPQwen3NextMoELayer(EPQwen3_5MoELayer):
         return self._softmax_gate_weights_at(router_logits, indices, normalize=self.gate.norm_topk_prob)
 
     def _biased_route(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """The biased top-k gated by :meth:`_gate_weights_at`, since the unconditional renormalization of
-        ``_deepseek_biased_route`` would mis-gate a ``norm_topk_prob: false`` router."""
-        topk_indices = self._biased_topk(router_logits)
-        return topk_indices, self._gate_weights_at(router_logits, topk_indices)
+        """Gated by :meth:`_gate_weights_at`, since Qwen3.5's unconditional renormalization would mis-gate a
+        ``norm_topk_prob: false`` router."""
+        return EPRoutingMixin._biased_route(self, router_logits)

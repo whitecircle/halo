@@ -22,9 +22,7 @@ class EPInklingMoELayer(EPMoELayerBase):
     # The causal-LM loss never reads router_logits, so there is no aux-loss path either way.
     SEVERS_AUX_LOSS = True
 
-    # ``gate.weight`` is ``[n_routed_experts + n_shared_experts, hidden]``, so it over-counts by
-    # ``n_shared_experts`` and cannot be used to infer the routed-expert count.
-    _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts",)
+    _SHARED_EXPERT_REQUIRED = True
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         super()._adopt_routing(original_layer)
@@ -36,7 +34,7 @@ class EPInklingMoELayer(EPMoELayerBase):
             raise ValueError(f"EPInklingMoELayer requires n_shared_experts >= 1, got {self.n_shared_experts}")
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return (f"top_k={self.top_k}, n_shared={self.n_shared_experts}, route_scale={self.route_scale}",)
+        return (f"n_shared={self.n_shared_experts}", f"route_scale={self.route_scale}")
 
     def _route_joint(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reproduce ``InklingTopkRouter``; returns ``(topk_indices, topk_weights, shared_gammas)``."""
@@ -52,7 +50,6 @@ class EPInklingMoELayer(EPMoELayerBase):
         weights = torch.exp(log_probs - torch.logsumexp(log_probs, dim=-1, keepdim=True))
         weights = weights * self.route_scale * self.gate.global_scale
 
-        self._record_expert_load(topk_indices)
         return (
             topk_indices,
             weights[..., : self.top_k].contiguous(),

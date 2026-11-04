@@ -94,7 +94,7 @@ _PACKED_DEFAULT_FAMILIES = (
     "qwen3_next",
     "step3p7",
 )
-_PACKED_EP_FAMILIES = (("gpt_oss", "gptoss"), ("qwen3_5_moe_text", "qwen3"), ("qwen3_moe", "qwen3"), ("zaya", "zaya"))
+_PACKED_EP_FAMILIES = ("gpt_oss", "qwen3_5_moe_text", "qwen3_moe", "zaya")
 # The other EP layers a packed recipe runs.
 _PACKED_EP_FULL_FAMILIES = (
     "bailing_moe",
@@ -215,17 +215,21 @@ _SYNC_EXACTNESS_SWEEP_FAMILIES = (
 
 # Row family → its marker, on both engines but for the two SGLang refuses; each needs a fresh server on the family's
 # checkpoint (tests/common/weight_push_exact.py), so a tier pass on another checkpoint skips them.
+# Qwen3.6's text tower is past the tiny roster, on Qwen3.5's layer.
 _PUSH_EXACT_MOE_FAMILY_MARKERS = {
-    "bailing_moe": "bailing",
-    "gemma4_text": "gemma4",
-    "glm4_moe_lite": "glm4",
-    "gpt_oss": "gptoss",
-    "laguna": "laguna",
-    "lfm2_moe": "lfm2",
-    "qwen3_5_moe_text": "qwen3",
-    "qwen3_6_moe_text": "qwen3",
-    "qwen3_moe": "qwen3",
-    "step3p7": "step3p7",
+    family: {**_TINY_MOE_FAMILY_MARKERS, "qwen3_6_moe_text": "qwen3"}[family]
+    for family in (
+        "bailing_moe",
+        "gemma4_text",
+        "glm4_moe_lite",
+        "gpt_oss",
+        "laguna",
+        "lfm2_moe",
+        "qwen3_5_moe_text",
+        "qwen3_6_moe_text",
+        "qwen3_moe",
+        "step3p7",
+    )
 }
 _PUSH_EXACT_VLLM_ONLY = ("laguna", "step3p7")
 _PUSH_EXACT_MOE_ROWS = tuple(
@@ -358,20 +362,27 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--family gemma4", markers=("gpu", "core", "1gpu", "moe", "gemma4")),
             Row("--family nemotron_h_omni", markers=("gpu", "core", "1gpu", "moe", "nemotron")),
             *(
-                Row(f"--family {family} --ep 2", nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", marker))
-                for family, marker in _PACKED_EP_FAMILIES
+                Row(
+                    f"--family {family} --ep 2",
+                    nproc=2,
+                    markers=("gpu", "core", "2gpu", "ep", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family in _PACKED_EP_FAMILIES
             ),
             *(
-                Row(f"--family {family} --attn {attn}", markers=("gpu", "full", "1gpu", "moe", marker))
-                for family, marker, attn in (
-                    ("cohere2_moe", "cohere2_moe", "flash_attention_2"),
-                    ("gpt_oss", "gptoss", "flash_attention_2"),
-                    ("laguna", "laguna", "flash_attention_2"),
-                    ("lfm2_moe", "lfm2", "flash_attention_2"),
-                    ("mistral4", "mistral4", "flash_attention_2"),
-                    ("qwen3_moe", "qwen3", "flash_attention_2"),
-                    ("qwen3_5_moe_text", "qwen3", "flash_attention_4"),
-                    ("qwen3_next", "qwen3", "flash_attention_4"),
+                Row(
+                    f"--family {family} --attn {attn}",
+                    markers=("gpu", "full", "1gpu", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family, attn in (
+                    ("cohere2_moe", "flash_attention_2"),
+                    ("gpt_oss", "flash_attention_2"),
+                    ("laguna", "flash_attention_2"),
+                    ("lfm2_moe", "flash_attention_2"),
+                    ("mistral4", "flash_attention_2"),
+                    ("qwen3_moe", "flash_attention_2"),
+                    ("qwen3_5_moe_text", "flash_attention_4"),
+                    ("qwen3_next", "flash_attention_4"),
                 )
             ),
             Row("--family qwen3 --attn flash_attention_2", markers=("gpu", "full", "1gpu", "qwen3")),
@@ -395,12 +406,11 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--family laguna_remote", markers=("gpu", "full", "1gpu", "moe", "laguna")),
             Row("--family laguna_remote --liger", markers=("gpu", "full", "1gpu", "moe", "laguna")),
             *(
-                Row(f"--family {family} --liger", markers=("gpu", "full", "1gpu", "moe", marker))
-                for family, marker in (
-                    ("bailing_moe", "bailing"),
-                    ("zaya", "zaya"),
-                    *((family, _TINY_MOE_FAMILY_MARKERS[family]) for family in _PACKED_DEFAULT_FAMILIES),
+                Row(
+                    f"--family {family} --liger",
+                    markers=("gpu", "full", "1gpu", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
                 )
+                for family in ("bailing_moe", "zaya", *_PACKED_DEFAULT_FAMILIES)
             ),
             Row("--family qwen3 --liger", markers=("gpu", "full", "1gpu", "qwen3")),
             Row("--family qwen3_5_moe --liger", markers=("gpu", "full", "1gpu", "moe", "qwen3")),
@@ -408,8 +418,12 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--family nemotron_h_omni --liger", markers=("gpu", "full", "1gpu", "moe", "nemotron")),
             Row("--family qwen3_5 --liger", markers=("gpu", "full", "1gpu", "qwen3")),
             *(
-                Row(f"--family {family} --ep 2 --liger", nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", marker))
-                for family, marker in _PACKED_EP_FAMILIES
+                Row(
+                    f"--family {family} --ep 2 --liger",
+                    nproc=2,
+                    markers=("gpu", "full", "2gpu", "ep", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family in _PACKED_EP_FAMILIES
             ),
         ),
         timeout=900,
@@ -2144,8 +2158,45 @@ MANIFEST: dict[str, TestSpec] = {
     # takes the backend the family's production load selects.
     "trainers/sft/test_sft_mtp_head.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "1gpu", "2gpu", "4gpu", "ep", "etp", "moe", "qwen3", "glm4"),
+        markers=("gpu", "full", "1gpu", "2gpu", "4gpu", "ep", "etp", "moe", "qwen3", "glm4", "nemotron"),
         args_matrix=(
+            *_rows(
+                (
+                    "--family nemotron_h --mode single",
+                    "--family nemotron_h_no_latent --mode single --arms soft",
+                    "--family nemotron_h_omni --mode single --arms soft --kernel chunked",
+                ),
+                nproc=1,
+                markers=("gpu", "full", "1gpu", "moe", "nemotron"),
+            ),
+            *_rows(
+                tuple(
+                    f"--family nemotron_h --mode {mode}{gc}"
+                    for mode in ("fsdp", "fsdp_zero3", "ep", "ep1", "ep1_ignored")
+                    for gc in ("", " --gc")
+                )
+                + (
+                    "--family nemotron_h_no_latent --mode ep --arms soft --gc",
+                    "--family nemotron_h_no_latent --mode ep --arms soft --attn flash_attention_4",
+                    "--family nemotron_h_omni --mode ep --arms soft --kernel chunked --gc",
+                    "--family nemotron_h_omni --mode fsdp --arms soft --kernel chunked",
+                    "--family nemotron_h --mode ep --kernel chunked",
+                    "--family nemotron_h --mode ep --starve",
+                    "--family nemotron_h --mode ep1_fp32_router --bf16",
+                    "--family nemotron_h --mode ep_fp32_masters --arms trunk_trains --gc",
+                    "--family nemotron_h --mode ep --attn auto --gc",
+                    "--family nemotron_h --mode ep --attn flash_attention_2 --packed",
+                    "--family nemotron_h --mode ep --attn flash_attention_4 --packed --gc",
+                    "--family nemotron_h --mode etp --gc",
+                    "--family nemotron_h --mode ep --arms soft --accumulation 2 --gc",
+                ),
+                markers=("gpu", "full", "2gpu", "ep", "moe", "nemotron"),
+            ),
+            *_rows(
+                ("--family nemotron_h --mode ep_etp --gc", "--family nemotron_h --mode ep_etp"),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "nemotron"),
+            ),
             *_rows(
                 tuple(
                     f"--family {family} --mode single{arms}"
@@ -2211,8 +2262,34 @@ MANIFEST: dict[str, TestSpec] = {
     # as replicas over two NVLink domains simulated on one machine; the script's docstring has the launch on two.
     "trainers/sft/test_sft_mtp_head_checkpoint.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "1gpu", "2gpu", "4gpu", "ep", "etp", "moe", "qwen3", "glm4"),
+        markers=("gpu", "full", "1gpu", "2gpu", "4gpu", "ep", "etp", "moe", "qwen3", "glm4", "nemotron"),
         args_matrix=(
+            *_rows(
+                ("--family nemotron_h --mode single",), nproc=1, markers=("gpu", "full", "1gpu", "moe", "nemotron")
+            ),
+            *_rows(
+                (
+                    "--family nemotron_h --mode ep --flip --gate",
+                    "--family nemotron_h --mode ep --gc",
+                    "--family nemotron_h_no_latent --mode ep --flip",
+                    "--family nemotron_h_omni --mode ep",
+                    "--family nemotron_h --mode ep_fp32_masters --gc",
+                    "--family nemotron_h --mode etp",
+                    "--family nemotron_h --mode ep1",
+                    "--family nemotron_h --mode ep1_ignored",
+                    "--family nemotron_h --mode fsdp --flip --gate",
+                ),
+                markers=("gpu", "full", "2gpu", "ep", "moe", "nemotron"),
+            ),
+            *_rows(
+                (
+                    "--family nemotron_h --mode ep_etp",
+                    "--family nemotron_h --mode multi_node --ep_size 2 --simulated_domain 2",
+                    "--family nemotron_h --mode multi_node --simulated_domain 2",
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "nemotron"),
+            ),
             *_rows(
                 ("--family qwen3_5_moe_text --mode single", "--family glm4_moe_lite --mode single"),
                 nproc=1,
@@ -2254,8 +2331,20 @@ MANIFEST: dict[str, TestSpec] = {
     # A few minutes a row on Qwen3.6-35B. Each records its acceptance curve; a bar holds at the default weights only.
     "trainers/sft/test_sft_mtp_head_real.py": TestSpec(
         nproc=8,
-        markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3"),
+        markers=("gpu", "full", "8gpu", "ep", "moe", "qwen3", "nemotron"),
         args_matrix=(
+            *_rows(
+                (
+                    "--release lightning --row untrained_export --attn flash_attention_4",
+                    "--release super --row untrained_export --attn flash_attention_4 --text_only",
+                    "--release super --row untrained_export --attn flash_attention_4 --kernel chunked",
+                    "--release lightning --row own_soft --attn flash_attention_4",
+                    "--release lightning --row own_hard --attn flash_attention_4",
+                    "--release super --row own_soft --attn flash_attention_4 --text_only",
+                    "--release super --row own_soft --attn flash_attention_4 --kernel chunked",
+                ),
+                markers=("gpu", "full", "8gpu", "ep", "moe", "nemotron"),
+            ),
             "--row stale_soft",
             "--row stale_hard",
             "--row own_soft",
@@ -2280,10 +2369,14 @@ MANIFEST: dict[str, TestSpec] = {
     # has the launch.
     "trainers/sft/test_sft_mtp_head_serving.py": TestSpec(
         nproc=1,
-        markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"),
+        markers=("gpu", "full", "1gpu", "qwen3", "nemotron", "vllm_server"),
         args_matrix=(
             Row("--engine vllm --at_least 0.7"),
             Row("--engine sglang --at_least 0.7", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+            Row("--engine vllm --release lightning", markers=("gpu", "full", "1gpu", "nemotron", "vllm_server")),
+            Row("--engine sglang --release lightning", markers=("gpu", "full", "1gpu", "nemotron", "sglang_server")),
+            Row("--engine vllm --release super", markers=("gpu", "full", "1gpu", "nemotron", "vllm_server")),
+            Row("--engine sglang --release super", markers=("gpu", "full", "1gpu", "nemotron", "sglang_server")),
         ),
         timeout=3600,
     ),

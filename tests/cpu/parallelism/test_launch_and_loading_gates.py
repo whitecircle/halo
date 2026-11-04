@@ -17,6 +17,7 @@ import torch
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
+from transformers.models.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
 from transformers.models.mixtral import MixtralConfig
 from transformers.models.qwen3 import Qwen3Config
 from transformers.models.qwen3_moe import Qwen3MoeConfig
@@ -42,13 +43,15 @@ from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.pp import _load_stage_lazy
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
-from halo.models.moe.family_specs import GEMMA4, MoEFamilySpec
+from halo.models.moe.family_specs import GEMMA4, MoEFamilySpec, wraps_experts
 from halo.trainers.accelerator import accelerate_manages_ddp
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_MIXTRAL_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 _SOURCE = ModelSource("org/x", None, "org/x")
+_EP_AXES = {"ep2": {"ep_size": 2}, "etp2": {"expert_tp_size": 2}}
 
 _MULTI_GPU_ENV = {"ACCELERATE_MIXED_PRECISION": "bf16"}
 _FSDP_ENV = {"ACCELERATE_MIXED_PRECISION": "bf16", "ACCELERATE_USE_FSDP": "true"}
@@ -397,6 +400,60 @@ def test_the_class_declaration_is_what_drives_the_refusal(monkeypatch):
     _reject_unsupported_model(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig("gemma4"))
 
 
+def _load_refused_before_the_process_groups(config, pc: ParallelismConfig, match: str) -> None:
+    def groups_built(_self):
+        raise AssertionError("pc.ep_config() built the process groups before the refusal")
+
+    with (
+        patch.dict(os.environ, _env({}), clear=True),
+        patch.object(
+            model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
+        ),
+        patch.object(model_loading, "resolve_build_config", lambda *a, **k: config),
+        patch.object(ParallelismConfig, "ep_config", groups_built),
+        pytest.raises(ValueError, match=match),
+    ):
+        load_distributed_model("org/x", parallelism_config=pc, trust_remote_code=False)
+
+
+@pytest.mark.parametrize("axes", _EP_AXES.values(), ids=_EP_AXES)
+def test_an_ep_group_on_a_moe_with_no_family_is_refused_before_the_process_groups(axes):
+    _load_refused_before_the_process_groups(MixtralConfig(**TINY_MIXTRAL_CONFIG), _pc(**axes), "no Halo family spec")
+
+
+@pytest.mark.parametrize("axes", _EP_AXES.values(), ids=_EP_AXES)
+def test_an_ep_group_on_a_dense_model_is_refused_before_the_process_groups(axes):
+    _load_refused_before_the_process_groups(Qwen3Config(), _pc(**axes), "dense model")
+
+
+def _ling3_config(module: str) -> BailingHybridConfig:
+    """Transformers' config class, or the same fields under a remote-code module's name."""
+    cls = type(BailingHybridConfig.__name__, (BailingHybridConfig,), {"__module__": module})
+    return cls(num_experts=4)
+
+
+def test_an_ep_group_on_the_native_ling3_class_names_the_remote_file():
+    """Without this, it loads, claims no block and tells the user to add an EP layer for a family that has one."""
+    config = _ling3_config(BailingHybridConfig.__module__)
+    _load_refused_before_the_process_groups(config, _pc(ep_size=2), "modeling file")
+
+
+def test_only_the_native_class_at_an_ep_group_is_refused():
+    """Ep1 keeps the stock block, and the remote spelling is the class the EP layer claims."""
+    native = _ling3_config(BailingHybridConfig.__module__)
+    load_rules.reject_ep_without_family(_pc(), native, wraps_experts=True)
+    load_rules.reject_ep_without_family(_pc(ep_size=2), _ling3_config("transformers_modules.x"), wraps_experts=True)
+
+
+@pytest.mark.parametrize("family", TINY_MOE_FAMILIES)
+def test_every_tiny_family_passes_the_ep_family_gate(family):
+    """A roster family with an EP layer must not be refused for wanting one."""
+    config = tiny_family_model(TINY_MOE_FAMILIES[family]).config
+    wraps = wraps_experts(config, ep_layers_requested=True)
+    assert wraps
+    load_rules.reject_ep_without_family(_pc(ep_size=2), config, wraps_experts=wraps)
+
+
 def test_the_family_gate_is_wired_into_the_loader_right_after_the_config_read():
     """Everything but the download and config read is real, so a dropped call site fails here."""
     config = _ModelConfig("gemma4")
@@ -528,19 +585,11 @@ def test_a_moe_with_an_ep_layer_is_refused_qlora_and_accelerate_through_the_same
             _resolve_run_flag(config, _pc(use_grouped_gemm=True), quantization_config=quantization_config)
 
 
-@pytest.mark.parametrize(
-    ("config", "pc_fields", "has_ep_config"),
-    [
-        (MixtralConfig(**TINY_MIXTRAL_CONFIG), {"ep_size": 2}, True),
-        (MixtralConfig(**TINY_MIXTRAL_CONFIG), {}, False),
-        (Qwen3Config(), {"ep_size": 2}, False),
-    ],
-    ids=["ep-on-a-moe-with-no-ep-layer", "grouped-gemm-on-a-moe-with-no-ep-layer", "ep-on-a-dense-model"],
-)
-def test_a_pp_stage_builds_an_ep_config_for_apply_ep_layers_to_refuse_it(config, pc_fields, has_ep_config):
-    """The stage load is the one rung whose EP layers hang off the config: without one, EP on a MoE no EP layer wraps
-    would train replicated experts instead of raising."""
-    pc = make_parallelism_config(world_size=4, gpus_per_node=2, pp_size=2, **pc_fields)
+@pytest.mark.parametrize("wraps_experts", [True, False])
+def test_a_pp_stage_takes_an_ep_config_only_where_ep_layers_wrap(wraps_experts):
+    """The stage load is the one rung whose EP layers hang off the config; the load gate has refused an EP group on any
+    other model by here."""
+    pc = make_parallelism_config(world_size=4, gpus_per_node=2, pp_size=2, ep_size=2)
     stage_kwargs = {}
 
     def _stage(*args, **kwargs):
@@ -556,11 +605,22 @@ def test_a_pp_stage_builds_an_ep_config_for_apply_ep_layers_to_refuse_it(config,
             _SOURCE,
             pc,
             AutoModelForCausalLM,
-            {"config": config},
+            {},
             preserve_checkpoint_precision=False,
-            wraps_experts=False,
+            wraps_experts=wraps_experts,
         )
-    assert stage_kwargs["ep_config"] == ("ep-config" if has_ep_config else None)
+    assert stage_kwargs["ep_config"] == ("ep-config" if wraps_experts else None)
+
+
+@pytest.mark.parametrize(
+    ("config", "match"),
+    [(MixtralConfig(**TINY_MIXTRAL_CONFIG), "no Halo family spec"), (Qwen3Config(), "dense model")],
+    ids=["moe-with-no-ep-layer", "dense"],
+)
+def test_a_pp_load_refuses_an_ep_group_no_ep_layer_wraps_before_the_process_groups(config, match):
+    """Before the groups and the load; the trainer's every-stage MoE check answers only after both."""
+    pc = make_parallelism_config(world_size=4, gpus_per_node=2, pp_size=2, ep_size=2)
+    _load_refused_before_the_process_groups(config, pc, match)
 
 
 def test_scratch_and_lowp_pass_where_each_is_supported():

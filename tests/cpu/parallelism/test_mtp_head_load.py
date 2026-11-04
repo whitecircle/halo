@@ -32,8 +32,15 @@ from tests.common.tiny_models import tiny_family_model
 
 _PER_EXPERT_KEY = re.compile(r"(?P<bank>.*\.experts\.)(?P<index>\d+)\.(?P<name>\w+)\.weight")
 _EXPERTS = 8
-_BANK_PATHS = {"qwen3_5_moe_text": ".layers.0.mlp.experts.", "glm4_moe_lite": ".mlp.experts."}
-_ROUTED = ("qwen3_5_moe_text", "qwen3_5_moe", "qwen3_next", "glm4_moe_lite")
+_BANK_PATHS = {
+    "qwen3_5_moe_text": ".layers.0.mlp.experts.",
+    "glm4_moe_lite": ".mlp.experts.",
+    "nemotron_h": ".layers.1.mixer.experts.",
+}
+_ROUTED = ("qwen3_5_moe_text", "qwen3_5_moe", "qwen3_next", "glm4_moe_lite", "nemotron_h", "nemotron_h_omni")
+# Each family's fused banks; a gateless family stores ``up_proj`` as its own bank.
+_BANKS = {"nemotron_h": ("up_proj", "down_proj")}
+_GLU_BANKS = ("gate_up_proj", "down_proj")
 
 
 def _pc(ep_config=None, *, keep_fp32: bool = False) -> SimpleNamespace:
@@ -98,10 +105,13 @@ def _gathered_tail(model, target) -> dict[str, torch.Tensor]:
                 bank = banks.setdefault(per_expert["bank"], {}).setdefault(per_expert["name"], {})
                 bank[int(per_expert["index"])] = value
     for bank, names in banks.items():
-        gate, up, down = (names[name] for name in ("gate_proj", "up_proj", "down_proj"))
-        indices = sorted(gate)
-        fused[f"{bank}gate_up_proj"] = torch.stack([torch.cat([gate[i], up[i]]) for i in indices])
-        fused[f"{bank}down_proj"] = torch.stack([down[i] for i in indices])
+        indices = sorted(names["down_proj"])
+        fused[f"{bank}down_proj"] = torch.stack([names["down_proj"][i] for i in indices])
+        if "gate_proj" in names:
+            gate, up = names["gate_proj"], names["up_proj"]
+            fused[f"{bank}gate_up_proj"] = torch.stack([torch.cat([gate[i], up[i]]) for i in indices])
+        else:
+            fused[f"{bank}up_proj"] = torch.stack([names["up_proj"][i] for i in indices])
     return fused
 
 
@@ -138,7 +148,7 @@ _EP_WORLD = 2
 
 @pytest.mark.parametrize("per_expert", [True, False], ids=["per_expert", "fused"])
 @pytest.mark.parametrize("rank", range(_EP_WORLD))
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h"])
 def test_each_rank_holds_its_own_slice_of_the_tails_expert_bank(name, rank, per_expert, tmp_path):
     tail = write_checkpoint_with_tail(name, tmp_path / "ckpt", per_expert=per_expert)
     ep_config = stubbed_rank_ep_config(_EP_WORLD, _EP_WORLD, rank, _EXPERTS)
@@ -150,7 +160,7 @@ def test_each_rank_holds_its_own_slice_of_the_tails_expert_bank(name, rank, per_
     path = mtp_head_path(model, require_mtp_head_spec(model.config))
     [(_, layer)] = named_ep_layers(head)
     held = dict(layer.expert_named_params())
-    for name_in_tail in ("gate_up_proj", "down_proj"):
+    for name_in_tail in _BANKS.get(name, _GLU_BANKS):
         full = tail[f"{path}{_BANK_PATHS[name]}{name_in_tail}"]
         assert full.shape[0] == _EXPERTS
         # The layer keeps a bank in its contraction order, which the gather turns back.
@@ -181,7 +191,7 @@ def _add_one(stored: dict) -> None:
 
 
 def _drop_one_expert(stored: dict) -> None:
-    del stored[next(key for key in stored if ".experts.3.gate_proj" in key)]
+    del stored[next(key for key in stored if ".experts.3.gate_proj" in key or ".experts.3.up_proj" in key)]
 
 
 @pytest.mark.parametrize(
@@ -194,7 +204,7 @@ def _drop_one_expert(stored: dict) -> None:
     ],
     ids=["partial", "extra", "expert_half_missing", "absent"],
 )
-@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite"])
+@pytest.mark.parametrize("name", ["qwen3_5_moe_text", "glm4_moe_lite", "nemotron_h", "nemotron_h_omni"])
 def test_a_tail_that_is_not_this_head_is_refused_by_name(name, edit, per_expert, match, tmp_path):
     write_checkpoint_with_tail(name, tmp_path / "ckpt", per_expert=per_expert, edit=edit)
     model = _trunk(name)
@@ -402,11 +412,12 @@ def test_a_trunk_with_no_head_has_no_key_or_hook_of_the_heads(name):
     assert not stored_tail_keys(model.state_dict(), getattr(type(model), "_keys_to_ignore_on_load_unexpected", ()))
 
 
-def test_bias_balancing_takes_the_heads_gate_and_the_sidecar_restores_it_by_name(tmp_path):
+@pytest.mark.parametrize("name", ["glm4_moe_lite", "nemotron_h"])
+def test_bias_balancing_takes_the_heads_gate_and_the_sidecar_restores_it_by_name(name, tmp_path):
     """The head's slot stays the release's key, so an export carries it where its engine reads it."""
     ep_config = single_process_ep_config()
-    write_checkpoint_with_tail("glm4_moe_lite", tmp_path / "ckpt", per_expert=True)
-    model = _trunk("glm4_moe_lite", ep_config=ep_config)
+    write_checkpoint_with_tail(name, tmp_path / "ckpt", per_expert=True)
+    model = _trunk(name, ep_config=ep_config)
     head = _attach(model, tmp_path / "ckpt", ep_config=ep_config)
     keys = set(model.state_dict())
     trunk_layers = len(named_ep_layers(model)) - 1
@@ -437,6 +448,45 @@ def test_the_trunk_copies_are_read_from_the_trunk_and_not_loaded_into_the_head(t
     stored = load_file(tmp_path / "ckpt" / "model.safetensors")
     assert {f"{path}.{copy}" for copy, _ in spec.trunk_copies} <= set(stored)
     _assert_head_holds(model, tail)
+
+
+def _stored_at_the_other_level(stored: dict) -> None:
+    """A text-only export's ``mtp.*`` for a composite's ``language_model.mtp.*``, and the other way round."""
+    for key in list(stored):
+        other = key.removeprefix("language_model.") if key.startswith("language_model.") else f"language_model.{key}"
+        stored[other] = stored.pop(key)
+
+
+@pytest.mark.parametrize("name", ["nemotron_h", "nemotron_h_omni"])
+def test_either_route_reads_a_tail_stored_at_the_other_level(name, tmp_path):
+    """Super VL stores ``language_model.mtp.*``: the text-only route reads it past that level, as a composite run reads
+    a text-only export's. The live key is the route's own either way."""
+    tail = write_checkpoint_with_tail(name, tmp_path / "ckpt", per_expert=True, edit=_stored_at_the_other_level)
+    model = _trunk(name)
+    _attach(model, tmp_path / "ckpt")
+    assert mtp_head_path(model, require_mtp_head_spec(model.config)) == (
+        "mtp" if name == "nemotron_h" else "language_model.mtp"
+    )
+    _assert_head_holds(model, tail)
+
+
+@pytest.mark.parametrize("name", ["nemotron_h", "nemotron_h_omni"])
+def test_the_router_bias_loads_at_its_stored_fp32_on_a_bf16_run(name, tmp_path):
+    """Stored at 4-42, where a bf16 cast erases its spread and flips near-tie top-k picks."""
+    write_checkpoint_with_tail(name, tmp_path / "ckpt", per_expert=True)
+    model = _trunk(name)
+    head = _attach(model, tmp_path / "ckpt")
+    assert head.layers[1].mixer.gate.e_score_correction_bias.dtype == torch.float32
+    assert head.layers[1].mixer.gate.weight.dtype == torch.bfloat16
+
+
+def test_the_composite_head_sits_on_the_text_class_beside_the_output_embedding_it_shares(tmp_path):
+    write_checkpoint_with_tail("nemotron_h_omni", tmp_path / "ckpt", per_expert=True)
+    model = _trunk("nemotron_h_omni")
+    head = _attach(model, tmp_path / "ckpt")
+    assert model.language_model.mtp is head
+    assert model.get_output_embeddings() is model.language_model.lm_head
+    assert not hasattr(model, "mtp")
 
 
 if __name__ == "__main__":

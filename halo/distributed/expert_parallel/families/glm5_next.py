@@ -19,11 +19,6 @@ class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
 
     # ``SEVERS_AUX_LOSS`` stays False: ``_router_logits`` calls the real ``Glm5NextTextTopkRouter``, so
     # ``outputs.router_logits`` still populates and the aux loss keeps working under EP.
-    SUPPORTS_BIAS_BALANCING = True
-
-    # ``gate.weight`` is ``[num_experts, hidden]``; the config spells the count
-    # ``num_local_experts`` (attribute-mapped onto its stored ``n_routed_experts``).
-    _NUM_EXPERTS_ATTR_PATHS = ("gate.num_experts", "config.num_local_experts")
 
     _SHARED_EXPERT_REQUIRED = True
 
@@ -34,4 +29,4 @@ class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
         self._fused_glu_mul = resolve_clamped_glu_mul(F.silu, self.swiglu_limit, clamp_activated=False)
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return (f"swiglu_limit={self.swiglu_limit}",)
+        return (*super()._init_summary_extras(original_layer), f"swiglu_limit={self.swiglu_limit}")

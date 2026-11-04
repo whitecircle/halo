@@ -6,7 +6,6 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 from safetensors import safe_open
@@ -24,7 +23,8 @@ from halo.checkpoint.tools.offline_export import (
     resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import sweep_after_full_save
-from halo.models.attention.gpt_oss_sinks import is_sink_key, neutralized_sink_value, uses_gpt_oss_sinks
+from halo.models.attention.gpt_oss_sinks import is_sink_key, neutralized_sink_value
+from halo.models.moe.family_specs import GPT_OSS, find_moe_family_spec
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +182,7 @@ def reset_sinks(
     if not sink_keys:
         # A sinks-carrying family whose keys miss the sink spelling would otherwise be copied through
         # and reported reset with its sinks still live.
-        if any(
-            uses_gpt_oss_sinks(SimpleNamespace(model_type=model_type)) for model_type in detect_model_types(source)
-        ):
+        if any(find_moe_family_spec(model_type) is GPT_OSS for model_type in detect_model_types(source)):
             raise RuntimeError(
                 f"{checkpoint_dir} is a sink-carrying family, but none of its tensors is named like a sink "
                 f"(is_sink_key): its sink spelling changed, so nothing would be reset. Extend is_sink_key."

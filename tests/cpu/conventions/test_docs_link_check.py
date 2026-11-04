@@ -2,6 +2,7 @@
 """The docs link gate checks heading anchors the way GitHub generates them, and the code its pages cite. The
 expected slugs are the ids GitHub's renderer emits for the same headings."""
 
+import re
 import subprocess
 
 import pytest
@@ -9,6 +10,19 @@ import pytest
 from scripts.docs.markdown import parse_markdown
 from scripts.docs.references import PACKAGE
 from tests.common.repo import REPO_ROOT
+
+_DOC_TREES = ("agent-docs", "human-docs", "skills")
+_SOURCE_TREES = (PACKAGE, "scripts", "tests", "docker")
+_SOURCE_SUFFIXES = (".py", ".sh", ".patch")
+_PRIVATE_NAME_SPAN = re.compile(r"`(_[A-Za-z][A-Za-z0-9_]{3,})(?:\(\))?`")
+# Private names of the libraries and engines the pages discuss, which no first-party file holds.
+_EXTERNAL_PRIVATE_NAMES = frozenset({"_all_gather_base", "_load_w2", "_reduce_scatter_base"})
+
+
+def _private_names_outside(page: str, source: str) -> set[str]:
+    return {
+        name for name in _PRIVATE_NAME_SPAN.findall(page) if name not in _EXTERNAL_PRIVATE_NAMES and name not in source
+    }
 
 
 def _anchors(markdown: str) -> set[str]:
@@ -149,6 +163,25 @@ def test_gate_fails_on_a_stale_path_or_name_in_code(tmp_path):
         f"UNRESOLVED  {page}:3  {package}/gone.py  (no such file or directory)",
         f"UNRESOLVED  {page}:6  from {package}.env import gone_too  ({package}.env has no 'gone_too')",
     ]
+
+
+def test_every_private_name_a_page_spells_is_in_the_repo():
+    """The gate resolves paths and dotted names, so a bare ``_NAME`` a removal left behind reads as live with nothing
+    behind it."""
+    assert _private_names_outside("`_GONE_DECLARATION` and `_LIVE_ONE()`", "_LIVE_ONE = 1") == {"_GONE_DECLARATION"}
+    source = "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for tree in _SOURCE_TREES
+        for path in (REPO_ROOT / tree).rglob("*")
+        if path.suffix in _SOURCE_SUFFIXES
+    )
+    stale = {
+        str(page.relative_to(REPO_ROOT)): names
+        for tree in _DOC_TREES
+        for page in (REPO_ROOT / tree).rglob("*.md")
+        if (names := _private_names_outside(page.read_text(encoding="utf-8"), source))
+    }
+    assert not stale, stale
 
 
 if __name__ == "__main__":

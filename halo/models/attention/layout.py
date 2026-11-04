@@ -18,10 +18,7 @@ from halo.models.unwrapping import unwrap_toolkit_wrappers
 # The key/value head split a GatedDeltaNet mixer is built from. Kimi Delta Attention also spells its layers
 # ``linear_attention`` but declares a single ``linear_num_heads``.
 _GATED_DELTA_NET_HEAD_FIELDS = ("linear_num_key_heads", "linear_num_value_heads")
-_LINEAR_ATTENTION_LAYER_TYPE = "linear_attention"
-# Families whose stateful mixers keep documents apart on ``seq_idx`` alone: LFM2's ShortConv, dense, MoE and VL alike,
-# and the Mamba conv and scan of Nemotron-H (halo/models/nemotron_h.py).
-SEQ_IDX_MODEL_TYPE_PREFIXES = ("lfm2", "nemotron_h")
+LINEAR_ATTENTION_LAYER_TYPE = "linear_attention"
 
 # Score matmul passes per attended key: QK^T and Attn·V forward (2) plus their backward (4). At head
 # width ``heads·(d_qk + d_v)`` this is the PaLM/Megatron ``12·S·H`` (``d_qk = d_v = H / heads``).
@@ -51,7 +48,7 @@ LAYER_TYPE_KINDS: dict[str, _AttentionKind] = {
     "indexed_attention": _AttentionKind.SPARSE,
     "compressed_sparse_attention": _AttentionKind.COMPRESSED,
     "heavily_compressed_attention": _AttentionKind.COMPRESSED,
-    _LINEAR_ATTENTION_LAYER_TYPE: _AttentionKind.NONE,
+    LINEAR_ATTENTION_LAYER_TYPE: _AttentionKind.NONE,
     "conv": _AttentionKind.NONE,
     # Nemotron-H declares its feed-forward blocks as layers of their own.
     "moe": _AttentionKind.NONE,
@@ -447,7 +444,7 @@ def attention_layout_from_config(config) -> AttentionLayout:
 
 
 def has_linear_attention_layers(config) -> bool:
-    return config is not None and _LINEAR_ATTENTION_LAYER_TYPE in (get_config_field(config, "layer_types") or ())
+    return config is not None and LINEAR_ATTENTION_LAYER_TYPE in (get_config_field(config, "layer_types") or ())
 
 
 def has_gated_delta_net_layers(config) -> bool:

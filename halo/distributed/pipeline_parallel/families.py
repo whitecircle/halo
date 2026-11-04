@@ -344,9 +344,17 @@ NEMOTRON_H_PP = PPFamilySpec(
     validated=True,
 )
 PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, GEMMA4_PP, GLM5_NEXT_PP, NEMOTRON_H_PP, QWEN4_EXP_PP)
-PP_SPEC_MAP: dict[str, PPFamilySpec] = {name: spec for spec in PP_FAMILY_SPECS for name in spec.hf_module_names}
-if len(PP_SPEC_MAP) != sum(len(spec.hf_module_names) for spec in PP_FAMILY_SPECS):
-    raise ValueError("Two PPFamilySpec constants in PP_FAMILY_SPECS claim one HF backbone class name.")
+
+
+def build_pp_spec_map(specs: tuple[PPFamilySpec, ...]) -> dict[str, PPFamilySpec]:
+    """One spec per HF backbone class name; a class two specs claim would run whichever came last."""
+    claims = [name for spec in specs for name in spec.hf_module_names]
+    if repeated := sorted({name for name in claims if claims.count(name) > 1}):
+        raise ValueError(f"Two PPFamilySpec constants in PP_FAMILY_SPECS claim {repeated}.")
+    return {name: spec for spec in specs for name in spec.hf_module_names}
+
+
+PP_SPEC_MAP: dict[str, PPFamilySpec] = build_pp_spec_map(PP_FAMILY_SPECS)
 
 
 def resolve_pp_spec(backbone: nn.Module) -> PPFamilySpec:

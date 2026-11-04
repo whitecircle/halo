@@ -59,7 +59,10 @@ class EPRoutingMixin:
             for attr in ROUTER_TOPK_FIELDS:
                 if source is not None and hasattr(source, attr):
                     return getattr(source, attr)
-        raise AttributeError(f"Cannot determine top_k from {type(layer).__name__}")
+        raise AttributeError(
+            f"Cannot determine top_k from {type(layer).__name__}: none of {ROUTER_TOPK_FIELDS} is on it or its router "
+            f"{cls._ROUTER_ATTR!r}. Add the family's spelling to ROUTER_TOPK_FIELDS."
+        )
 
     def _live_router_module(self) -> nn.Module | None:
         """Resolved by name now, so a PEFT ``modules_to_save`` copy is the one returned; None if external."""
@@ -99,12 +102,10 @@ class EPRoutingMixin:
         if is_global_main_process():
             logger.info(f"{type(self).__name__}: FP32 router (compute stays BF16)")
 
-    def _deepseek_biased_route(self, logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """DeepSeek-V3 routing off logits: ``(indices, weights)``, each ``[T, top_k]``, selected by
-        :meth:`_biased_topk` and gated by the unbiased softmax over the selected logits."""
-        indices = self._biased_topk(logits)
-        weights = F.softmax(torch.gather(logits.float(), -1, indices), dim=-1)
-        return indices, weights
+    def _biased_route(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(indices, weights)``: :meth:`_biased_topk`, gated by the family router's own :meth:`_gate_weights_at`."""
+        indices = self._biased_topk(router_logits)
+        return indices, self._gate_weights_at(router_logits, indices)
 
     def _softmax_gate_weights_at(
         self, router_logits: torch.Tensor, indices: torch.Tensor, *, normalize: bool

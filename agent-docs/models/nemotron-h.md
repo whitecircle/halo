@@ -1,6 +1,6 @@
 # Nemotron-H
 
-`model_type` `nemotron_h_omni` (`NemotronH_Omni_Reasoning_V3`, the release `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) wrapping the text tower `nemotron_h` (`NemotronHForCausalLM`), both native in transformers 5.20. The text tower holds 120.7B parameters, 112.7B of them routed experts, beside a 0.84B vision tower and connector and a 2.9B multi-token head (`mtp.*`) no class builds. It has 88 layers: 40 Mamba-2, 40 MoE and 8 attention. A MoE layer routes 512 gateless experts at top-22 beside one shared expert, on a 1024-wide latent it projects into from hidden 4096 and back. The vision tower is C-RADIO: 32 layers, 16 heads at head_dim 80.
+`model_type` `nemotron_h_omni` (`NemotronH_Omni_Reasoning_V3`, the release `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) wrapping the text tower `nemotron_h` (`NemotronHForCausalLM`), both native in transformers 5.20. The text tower holds 120.7B parameters, 112.7B of them routed experts, beside a 0.84B vision tower and connector and a 2.9B multi-token head (`mtp.*`), which [`mtp_loss_weight`](#mtp-head) builds and a stock class does not. It has 88 layers: 40 Mamba-2, 40 MoE and 8 attention. A MoE layer routes 512 gateless experts at top-22 beside one shared expert, on a 1024-wide latent it projects into from hidden 4096 and back. The vision tower is C-RADIO: 32 layers, 16 heads at head_dim 80.
 
 Nemotron 3.5 Lightning (`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`) is that text class alone, with no composite around it and no latent ([Lightning](#lightning)). Everywhere else on this page, "the release" means Super VL.
 
@@ -26,7 +26,7 @@ What these rows leave:
 
 ## Lightning
 
-The release is `NemotronHForCausalLM` itself: `model_type` `nemotron_h`, no vision tower and no `auto_map`, stored plain bf16 with its router bias in fp32. The tower holds 31.6B parameters, 29.4B of them routed experts, beside a 1.3B multi-token head (`mtp.*`) no class builds. It has 52 layers: 23 Mamba-2, 23 MoE and 6 attention. A MoE layer routes 128 gateless experts at top-6 beside one shared expert with no latent, so the experts and the wire run at hidden 2688, which DeepEP pads to 2816. `ep8` holds 16 experts per rank.
+The release is `NemotronHForCausalLM` itself: `model_type` `nemotron_h`, no vision tower and no `auto_map`, stored plain bf16 with its router bias in fp32. The tower holds 31.6B parameters, 29.4B of them routed experts, beside a 1.3B multi-token head (`mtp.*`), which [`mtp_loss_weight`](#mtp-head) builds and a stock class does not. It has 52 layers: 23 Mamba-2, 23 MoE and 6 attention. A MoE layer routes 128 gateless experts at top-6 beside one shared expert with no latent, so the experts and the wire run at hidden 2688, which DeepEP pads to 2816. `ep8` holds 16 experts per rank.
 
 The family's layers, balancing and refused modes below apply, and these differ:
 
@@ -36,7 +36,7 @@ The family's layers, balancing and refused modes below apply, and these differ:
 - **Time-step limit:** the config declares none, so the class default (0, inf) applies, which both engines apply too. A stock reload keeps upstream's floor ([Mamba layers](#mamba-layers)).
 - **Recipe:** `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`.
 - **Export:** the release's own `config.json` with this run's changes, its `auto_map` absent, so there are no modules to copy ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)). `layers_block_type` keeps `mamba` and `attention`, the spellings SGLang's config class requires, and no `time_step_limit` reaches the file, so it holds no JSON float tag. vLLM's and SGLang's config readers parse the file; SGLang's refuses transformers' `linear_attention` and `full_attention`. Stock `from_pretrained` reloads a tiny copy's export to the release's tensors and logits. A depth cut writes its layer list in transformers' spelling, which SGLang refuses, so serve a full-depth export.
-- **Head:** an export carries no `mtp.*`, and no tool restores one: `reattach_vision_tower.py` needs a composite base and refuses this one.
+- **Head:** a run with no `mtp_loss_weight` exports no `mtp.*`, and `reattach_vision_tower.py` cannot restore one, as it needs a composite base. A run training the [head](#mtp-head) writes the release's 270 keys.
 
 On the real weights:
 
@@ -136,6 +136,18 @@ The hub chat template renders every assistant turn with no reasoning as `<think>
 
 The composite takes images through the VLM path, with `image_grid_hw` in the bake, the collators and the forward. FA4 runs both towers ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The fused loss stays off, as the composite scores its own loss. Image and text rows mix under `torchrun`: the embedding and the tower share the root group, whose reduce agrees across ranks ([Shard groups](../parallelism/data-parallelism.md#shard-groups)). On a training step with Liger on, the logged `mean_token_accuracy` reads 0 and `entropy` ln(vocab), which mean nothing here; loss, gradients and eval metrics that mask label -100 are right ([Metrics on fp32 logits](../optimization/liger-kernels.md#known-issue-metrics-on-fp32-logits)). Video and audio parts raise: the release has no sound tower, and transformers' video forward does not run on it.
 
+## MTP head
+
+`mtp_loss_weight` [trains the release's head](../optimization/mtp-heads.md#families) at its own keys: `mtp.layers.0` an attention block, `mtp.layers.1` a MoE block, under `language_model.mtp` on the composite route. Super VL's latent applies to its head, and Lightning has none. Its expert bank stores per expert, and its router bias stays fp32.
+
+- **Axes:** EP, pure ETP, EP+ETP and FSDP2, as the trunk's. The head's MoE block takes `EPNemotronHMoELayer`, and its attention takes the backend the run selects.
+- **Refused:** the [list every family shares](../optimization/mtp-heads.md#refusals), which covers the family's refused axes. `save_sharded_ep` stays refused, as for any run here, and images are refused as the head trains on text rows. A depth cut with no attention or no MoE layer refuses before the load.
+- **Recipe:** `examples/sft/nemotron_h/nemotron-3.5-lightning-mtp-head-only.yaml`.
+- **Memory:** by arithmetic, as no row isolates the head. At `ep8` a rank holds 218M of the head's parameters on Lightning and 476M on Super VL: 0.41 and 0.89 GiB of bf16 weights, 1.2 and 2.7 GiB with `AdamWBF16`'s state. Whole, the head's weights are 2.5 and 5.5 GiB. Its dispatch shares the trunk's DeepEP arena, and its blocks' activations are not measured here.
+- **Real rows:** an untrained export holds the release's head byte for byte on both releases (270 and 1,040 tensors). A fit moves only `mtp.*`, and its acceptance is in [Hard and soft](../optimization/mtp-heads.md#hard-and-soft). Both engines draft with the head at about 0.83 to 0.84 on Lightning and on a reattached Super VL ([Serving](../optimization/mtp-heads.md#serving)), which shows the layout matches and no served gain. The Lightning recipe ran 6 steps at 9,075 tok/s per rank, at 14.1–14.5 GiB peak allocated, too few to show a fit.
+
+The weight sync carries no head and refuses the family, so a server drafts with the head of its launch checkpoint.
+
 ## LoRA
 
 `lora_target_modules` for the recipes: `q_proj`, `k_proj`, `v_proj`, `o_proj` on the attention layers, `in_proj`, `out_proj` on the Mamba layers, and `up_proj`, `down_proj`, which peel to the native expert adapters.
@@ -155,8 +167,8 @@ The composite takes images through the VLM path, with `image_grid_hw` in the bak
 The release is plain bf16 with no conversion step. Load it natively, `trust_remote_code: false`. Training the composite through the hub's modeling file is refused at the load (`remote_composite_refusal`): its forward hands the text tower no `seq_idx` and reads no `image_grid_hw`. That file also replaces the conversion mapping for the whole process, so a native load after a remote one is refused: load the family one way per process, a teacher beside a policy included.
 
 - **Text-only export:** `backbone.*` and `lm_head.weight` under transformers' `nemotron_h` schema. It reloads in stock transformers through `AutoModelForCausalLM`, whose forward keeps upstream's time-step floor ([above](#mamba-layers)), so a stock reload smoke-tests the export but does not compute what the run trained.
-- **Composite export:** the hub's spellings, per expert, under the release's own `config.json` and modules (`exports_source_config_schema`). It carries no `mtp.*`, and no tool restores one onto it. Stock transformers reads it whole with `trust_remote_code=True`; its native class, without this toolkit's conversion entries, leaves the vision norm at identity.
-- **`reattach_vision_tower.py`:** turns a text-only export into the composite, streaming the vision tower, connector and 5.48 GiB `mtp.*` head back from the base byte for byte, and warns with the head's tensor count. The head stays at the release's weights. Its acceptance on a trained tower is unmeasured.
+- **Composite export:** the hub's spellings, per expert, under the release's own `config.json` and modules (`exports_source_config_schema`). It carries `language_model.mtp.*` where the run trained a [head](#mtp-head), and otherwise none, which no tool restores onto it. Stock transformers reads it whole with `trust_remote_code=True`; its native class, without this toolkit's conversion entries, leaves the vision norm at identity.
+- **`reattach_vision_tower.py`:** turns a text-only export into the composite, streaming the vision tower and connector back from the base byte for byte. An export that trained a [head](#mtp-head) writes it at `language_model.mtp.*` over the base's. Otherwise the base's 5.48 GiB head streams back at the release's weights, with a warning giving its tensor count and offering a `head_only` fit.
 - **Refused:** `save_sharded_ep` and `merge_ep_shards.py`, since the merge cannot respell `backbone.*` and the vision norm. `unfuse_moe_experts.py` copies a checkpoint through, as the layout stores per expert already. Gathered saves stream one 5.25 GiB layer at a time.
 
 Serve a composite with the release's flags. Both engines boot an untrained reattached export and answer an image prompt and a text prompt. `reattach_vision_tower.py` carries the modules its processor and tokenizer configs' `auto_map` names, which SGLang's boot and `AutoProcessor` with `trust_remote_code=True` read.
@@ -183,4 +195,3 @@ The transport preflight's default parameter does not exist on this family: pass 
 - **CP:** the scan is a recurrence along the sequence axis.
 - **TP:** `NemotronHAttention` is not in `TP_SHARDABLE_ATTENTION_CLASSES`. Attention is 0.24% of the parameters, and two KV heads would cap it at 2.
 - **HSDP:** refused with EP, and pure DP cannot hold the model.
-- **MTP training:** `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md). The config declares `mtp_layers_block_type: [attention, moe]`, a draft chain of two blocks of different kinds, which one decoder layer does not build, and both classes drop the head at load.

@@ -10,6 +10,9 @@ from transformers import PreTrainedModel
 from transformers.conversion_mapping import get_checkpoint_conversion_mapping, register_checkpoint_conversion_mapping
 from transformers.core_model_loading import WeightRenaming, WeightTransform
 
+# The class name the release's remote file and transformers' own composite share.
+NEMOTRON_H_COMPOSITE_CLASS = "NemotronH_Omni_Reasoning_V3"
+
 # The override keys a native model has read in this process, as a remote load can follow one and still strand it.
 _natively_read_keys: set[str] = set()
 
@@ -59,7 +62,7 @@ CONVERSION_OVERRIDES: tuple[ConversionOverride, ...] = (
         _with_composite_level_dropped,
     ),
     ConversionOverride(
-        "NemotronH_Omni_Reasoning_V3",
+        NEMOTRON_H_COMPOSITE_CLASS,
         (
             ((r"^mlp1\.0\.",), ("multi_modal_projector.layer_norm.",)),
             ((r"^mlp1\.1\.",), ("multi_modal_projector.linear_1.",)),

@@ -193,6 +193,33 @@ def reject_unsupported_model(
         )
 
 
+def reject_ep_without_family(pc: ParallelismConfig, model_config, *, wraps_experts: bool) -> None:
+    """Refuse an EP group on a model no EP layer wraps, before ``pc.ep_config()`` builds its process groups. Past here
+    only ``apply_ep_layers`` notices, after the load and with a message written for a family with no layer."""
+    if not pc.has_ep_group:
+        return
+    axes = f"expert_parallel_size={pc.ep_size}, expert_tensor_parallel_size={pc.expert_tp_size}"
+    model_type = model_config.model_type
+    if not wraps_experts:
+        if has_routed_experts(model_config):
+            raise ValueError(
+                f"Expert Parallelism ({axes}) needs a family EP layer, and {model_type!r} is a MoE with no Halo family "
+                f"spec, so its stock experts would stay replicated. Set both sizes to 1, or add the family "
+                f"(agent-docs/models/adding-a-model.md)."
+            )
+        raise ValueError(
+            f"Expert Parallelism ({axes}) needs routed experts, and {model_type!r} is a dense model. Set both sizes "
+            f"to 1; a dense model scales with data, tensor or context parallelism."
+        )
+    spec = find_moe_family_spec_for_config(model_config)
+    if spec.ep_layer_needs_remote_code and not is_remote_code_class(type(model_config)):
+        raise ValueError(
+            f"Expert Parallelism ({axes}) on {model_type!r} needs the release's own modeling file: "
+            f"{spec.ep_layer_needs_remote_code}. Set trust_remote_code: true and pin model_revision, or set both "
+            f"sizes to 1."
+        )
+
+
 def reject_remote_composite(model_config) -> None:
     """Refuse training the composite a family's remote file defines, after a text-only load narrowed its config: that
     route builds transformers' text class whatever the flag says."""

@@ -20,8 +20,6 @@ class EPGptOssMoELayer(EPMoELayerBase):
 
     SUPPORTS_BIAS_BALANCING = True
 
-    _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "router.num_experts")
-
     _ROUTER_ATTR = "router"
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
@@ -93,8 +91,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         # transient-fallback route on a bias-less router.
         bias = self.router.bias
         logits = F.linear(router_input, self.router.weight, bias if bias is None else bias.to(router_input.dtype))
-        experts, weights = self._deepseek_biased_route(logits)
-        self._record_expert_load(experts)
+        experts, weights = self._biased_route(logits)
         return logits, weights, experts.long()
 
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:

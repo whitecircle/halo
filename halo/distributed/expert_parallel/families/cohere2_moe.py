@@ -18,31 +18,25 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("Cohere2MoeSparseMoeBlock",)
     FAMILY = COHERE2_MOE
 
-    # No exported bias slot: ``moe_balancing: auto`` resolves to ``none``, ``bias_update_transient`` opts in.
-    SUPPORTS_BIAS_BALANCING = True
-
     # The sigmoid top-k renorm adds no floor.
     _TOPK_WEIGHT_NORM_EPS = 0.0
-
-    # ``gate.weight`` is ``[num_experts, hidden]``, so its length is the expert count.
-    _NUM_EXPERTS_ATTR_PATHS = ("num_experts", "experts.num_experts", "experts", "gate.weight")
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the router's activation choice and renorm flag, which determine every gate weight."""
         super()._adopt_routing(original_layer)
-        self.expert_selection_fn = getattr(self.gate, "expert_selection_fn", "softmax")
+        self.expert_selection_fn = self.gate.expert_selection_fn
         if self.expert_selection_fn not in ("softmax", "sigmoid"):
             raise ValueError(
                 f"{type(self).__name__}: expert_selection_fn must be 'softmax' or 'sigmoid', "
                 f"got {self.expert_selection_fn!r} — transformers changed the router contract."
             )
-        self.norm_topk_prob = bool(getattr(self.gate, "norm_topk_prob", True))
+        self.norm_topk_prob = bool(self.gate.norm_topk_prob)
 
     def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
         """The shared expert plus the block's combination strategy, which scales the whole output:
         defaulting ``average`` to ``sum`` would emit 2x every token."""
         super()._adopt_shared_experts(original_layer)
-        strategy = getattr(original_layer, "shared_expert_combination_strategy", "sum")
+        strategy = original_layer.shared_expert_combination_strategy
         if strategy not in ("sum", "average"):
             raise ValueError(
                 f"{type(self).__name__}: shared_expert_combination_strategy must be 'sum' or "
@@ -58,10 +52,7 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
 
     def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Top-k on the raw logits (bias-perturbable), gate weights from the unbiased selected scores."""
-        topk_indices = self._biased_topk(router_logits)
-        topk_weights = self._gate_weights_at(router_logits, topk_indices)
-        self._record_expert_load(topk_indices)
-        return topk_indices, topk_weights
+        return self._biased_route(router_logits)
 
     def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """Router weights at ``indices``: softmax over the k scores, or sigmoid with optional renorm."""

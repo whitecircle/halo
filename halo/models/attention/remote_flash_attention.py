@@ -10,7 +10,11 @@ import logging
 from transformers import PreTrainedModel
 from transformers import modeling_flash_attention_utils as flash_utils
 
-from halo.models.attention.packed_position_ids import get_stashed_position_ids, install_position_ids_stash
+from halo.models.attention.packed_position_ids import (
+    forward_names_position_ids,
+    get_stashed_position_ids,
+    install_position_ids_stash,
+)
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, is_flash_attn_implementation
 from halo.models.attention.tensor_memo import TensorMemo
 from halo.models.segment_markers import packed_row_varlen_kwargs
@@ -41,7 +45,7 @@ def _template_flash_class(module) -> type | None:
     method = None if flash_cls is None else flash_cls.__dict__.get("_flash_attention_forward")
     if method is None or tuple(inspect.signature(method).parameters) != _TEMPLATE_FLASH_PARAMS:
         return None
-    return flash_cls
+    return flash_cls if forward_names_position_ids(flash_cls) else None
 
 
 def _varlen_flash_attention_forward(

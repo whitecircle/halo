@@ -16,10 +16,13 @@ from transformers import Qwen3MoeConfig
 
 from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from halo.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraMixin
-from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.fused_glu import GluCombine
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
@@ -27,6 +30,7 @@ from halo.models.moe.family_specs import MoEFamilySpec
 from halo.trainers.parallelism.ep_layers import EPLayersMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
@@ -218,6 +222,7 @@ def _grouped_mm_probe(use_grouped_mm: bool, expert_tp_size: int) -> EPGptOssMoEL
     layer._use_grouped_mm = use_grouped_mm
     layer.expert_tp_size = expert_tp_size
     layer._gptoss_glu = GluCombine.gptoss(1.702, 7.0)
+    layer.hidden_dim = H
     return layer
 
 
@@ -233,6 +238,20 @@ def test_init_summary_reports_the_effective_grouped_mm_decision(caplog, use_grou
     (record,) = [r for r in caplog.records if r.levelno == logging.INFO]
     assert f"grouped_mm={use_grouped_mm}" in record.getMessage(), record.getMessage()
     assert "extra=1" in record.getMessage(), record.getMessage()
+
+
+@pytest.mark.parametrize("family", TINY_MOE_FAMILIES)
+def test_the_construction_line_states_what_the_family_runs(family, caplog):
+    with caplog.at_level(logging.INFO, logger=EPMoELayerBase.__module__):
+        model = apply_ep_layers(tiny_family_model(TINY_MOE_FAMILIES[family]), single_process_ep_config())
+    (_, layer), *_ = named_ep_layers(model)
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith(f"{type(layer).__name__}: "))
+    assert f"wire_width={layer.hidden_dim}" in line, line
+    assert ("top_k=" in line) == hasattr(layer, "top_k"), line
+    if isinstance(layer, EPGroupLimitedMoELayerBase):
+        assert f"n_group={layer.n_group}" in line, line
+        assert f"routed_scaling_factor={layer.routed_scaling_factor}" in line, line
+    assert ("glu_combine=none (gateless)" in line) == isinstance(layer, EPNemotronHMoELayer), line
 
 
 @pytest.mark.parametrize("is_main", [True, False])
@@ -268,6 +287,13 @@ def test_every_rank_debug_logs_the_expert_range_it_owns(caplog, is_main):
 
     (record,) = [r for r in caplog.records if r.levelno == logging.DEBUG]
     assert f"EP rank 1 owns experts {E // 2}-{E - 1} of {E}" in record.getMessage(), record.getMessage()
+
+
+def test_a_top_k_nothing_spells_names_the_fields_it_tried():
+    block = SimpleNamespace(gate=nn.Linear(2, 2))
+    with pytest.raises(AttributeError, match="num_experts_per_tok") as refusal:
+        EPQwen3MoELayer._find_top_k(block)
+    assert "ROUTER_TOPK_FIELDS" in str(refusal.value)
 
 
 def test_router_probe_reads_the_declared_attribute_not_a_name_ladder():

@@ -12,6 +12,9 @@ to within ``--within_control`` of it. ``--plain_url`` serves this checkpoint wit
 forward's batch shape and so its bf16 rounding, so greedy output may part from the plain server's only at a near-tie
 (vLLM alone). A server that refuses to start on a checkpoint with no head never reaches a row: its exit is the
 result, as ``agent-docs/optimization/mtp-heads.md`` says.
+
+``--release`` reads a Nemotron-H server's tokenizer through that release's knob (``HALO_TEST_NEMOTRON_MODEL``,
+``HALO_TEST_NEMOTRON_LIGHTNING_MODEL``), where the id the server reports names a path inside its own container.
 """
 
 import argparse
@@ -25,6 +28,7 @@ from transformers import AutoTokenizer
 from halo.env import env_str
 from tests.common.harness import gpu_test_main
 from tests.common.mtp_real_rows import prometheus_total, ultrachat_conversations
+from tests.common.nemotron_h import NEMOTRON_RELEASES, release_model_id
 from tests.common.rank_log import log
 
 _MAX_TOKENS = 256
@@ -155,12 +159,13 @@ def run(ctx) -> dict:
     parser.add_argument("--control_url", default=None)
     parser.add_argument("--within_control", type=float, default=0.03)
     parser.add_argument("--plain_url", default=None)
+    parser.add_argument("--release", choices=sorted(NEMOTRON_RELEASES), default=None)
     cli = parser.parse_args()
     if cli.plain_url and cli.engine != "vllm":
         parser.error("--plain_url reads vLLM's completion logprobs.")
 
     url = env_str(_URL_VARS[cli.engine]) or _DEFAULT_URLS[cli.engine]
-    tokenizer = AutoTokenizer.from_pretrained(_served_model(url))
+    tokenizer = AutoTokenizer.from_pretrained(release_model_id(cli.release) if cli.release else _served_model(url))
     prompts = _first_turn_prompts(tokenizer, cli.prompts)
     won, proposed = _draft_counts(cli.engine, url, prompts)
     if not proposed:

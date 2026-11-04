@@ -149,11 +149,10 @@ def _patched(source: str, out: str) -> None:
 @pytest.mark.parametrize(
     ("family", "tail_key", "overrides", "tool"),
     [
-        (TINY_MOE_VLM_FAMILIES["nemotron_h_omni"], "mtp.layers.0.mixer.q_proj.weight", {}, _bf16),
-        (TINY_MOE_VLM_FAMILIES["nemotron_h_omni"], "mtp.layers.1.mlp.gate.weight", {}, _patched),
         (TINY_MOE_FAMILIES["step3p7"], "model.layers.4.eh_proj.weight", {"num_nextn_predict_layers": 1}, _bf16),
+        (TINY_MOE_FAMILIES["step3p7"], "model.layers.4.eh_proj.weight", {"num_nextn_predict_layers": 1}, _patched),
     ],
-    ids=["nemotron_omni_bf16", "nemotron_omni_patch_vocab", "step3p7_bf16"],
+    ids=["step3p7_bf16", "step3p7_patch_vocab"],
 )
 def test_a_composite_class_naming_no_tail_still_warns_on_the_tail_it_drops(
     family, tail_key, overrides, tool, tmp_path, caplog
@@ -173,8 +172,8 @@ def test_a_composite_class_naming_no_tail_still_warns_on_the_tail_it_drops(
 def test_a_config_declaring_no_tail_leaves_the_composites_keys_alone(tmp_path, caplog):
     source = _composite_source(
         tmp_path / "source",
-        TINY_MOE_VLM_FAMILIES["nemotron_h_omni"],
-        "mtp.layers.0.mixer.q_proj.weight",
+        TINY_MOE_FAMILIES["step3p7"],
+        "model.layers.4.eh_proj.weight",
         num_nextn_predict_layers=0,
     )
     with caplog.at_level(logging.WARNING, logger=offline_export.__name__):
@@ -272,6 +271,31 @@ def test_merged_fine_tunes_where_only_one_carries_a_head_are_refused(tmp_path):
     with pytest.raises(ValueError, match="does not carry the merge's reference key set"):
         model_merge.merge_models([a, b], str(out), method="linear", allow_missing_tokenizer=True, verbose=False)
     assert not out.exists()
+
+
+def test_a_merge_excuses_no_vision_tower_off_the_text_class_load_patterns(tmp_path):
+    """Qwen3.5's text class drops ``model.visual.*``, which its composite reads, so fine-tunes without it merge into a
+    composite whose tower would load random."""
+    base = tmp_path / "base"
+    tiny_family_model(TINY_MOE_VLM_FAMILIES["qwen3_5_moe"]).save_pretrained(base)
+    stored = load_file(base / "model.safetensors")
+    assert any(key.startswith("model.visual.") for key in stored)
+    for fine_tune in ("a", "b"):
+        (tmp_path / fine_tune).mkdir()
+        trunk = {key: value for key, value in stored.items() if not key.startswith("model.visual.")}
+        save_file(trunk, tmp_path / fine_tune / "model.safetensors", metadata={"format": "pt"})
+        (tmp_path / fine_tune / "config.json").write_text((base / "config.json").read_text())
+    with pytest.raises(ValueError, match="model.visual"):
+        model_merge.merge_models(
+            [str(tmp_path / "a"), str(tmp_path / "b")],
+            str(tmp_path / "merged"),
+            method="task_arithmetic",
+            base_model=str(base),
+            allow_missing_tokenizer=True,
+            trust_remote_code=False,
+            verbose=False,
+        )
+    assert not (tmp_path / "merged").exists()
 
 
 def test_unfuse_splits_the_tails_experts_with_its_bytes(tmp_path):

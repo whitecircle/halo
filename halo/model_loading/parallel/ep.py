@@ -22,9 +22,11 @@ from halo.model_loading.parallel.expert_fuser import ExpertFuser
 from halo.model_loading.parallel.lazy_load import load_planned_weights
 from halo.model_loading.parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
+    LAZY_NESTED_EXPERT_KEYS,
     ExpertKeyLayout,
     LazyLoadPlan,
     agree_lazy_load,
+    lazy_load_blocker,
     lazy_load_prologue,
 )
 from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
@@ -190,12 +192,12 @@ def load_ep_model(
             ),
         )
     else:
-        # An unmappable expert layout is a family property (from_pretrained is its route); missing
-        # safetensors is an environment problem costing every rank the full checkpoint in RAM.
+        # A declared blocker is the checkpoint's property (from_pretrained is its route); missing safetensors is an
+        # environment problem costing every rank the full checkpoint in RAM.
         if not has_whole_model_weight_file(source.local_dir, safetensors_only=True):
             fallback_reason, log = "no_safetensors", logger.warning
         else:
-            fallback_reason, log = "lazy_incompatible_expert_layout", logger.info
+            fallback_reason, log = lazy_load_blocker(source.local_dir) or LAZY_NESTED_EXPERT_KEYS, logger.info
         if main:
             log(f"[Rank 0] Using HuggingFace from_pretrained + EP patch (reason={fallback_reason})")
         method = f"huggingface_ep_fallback_{fallback_reason}"
