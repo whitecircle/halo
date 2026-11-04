@@ -18,6 +18,7 @@ from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.adapters import load_peft_model
+from tests.common.checkpoint_io import loading_problems, model_save_checks, safetensors_state_dict
 from tests.common.distributed import shared_scratch_dir
 from tests.common.dp_layout import dp_layout_checks, probe_forward
 from tests.common.memory import cleanup_memory, finish_phase
@@ -168,10 +169,14 @@ def _columns_equal(actual: dict, reference: dict) -> bool:
 
 
 @patch.dict(os.environ, PLAIN_SDPA_ENV)
-def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bool, kto_loss: str) -> dict:
+def run_precompute_resume(
+    ctx, *, trainer: str, family: str, mode: str, peft: bool, kto_loss: str, chunked_dpo: bool = False
+) -> dict:
     """The phases for one trainer, family and layout on plain SDPA; ``peft`` trains attention LoRA over a frozen base,
     whose disabled adapters are the reference."""
     kind = trainer
+    if chunked_dpo and (kind != "dpo" or peft or (family, mode) not in ((DENSE, "dp2"), ("qwen3_moe", "ep2"))):
+        raise ValueError("The bounded DPO lifecycle rows cover dense DP2 and Qwen3-MoE EP2, without adapters.")
     tiny = TINY_DENSE_FAMILY if family == DENSE else TINY_MOE_FAMILIES[family]
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
@@ -229,6 +234,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
             processing_class=tokenizer,
             parallelism_config=pc,
             peft_config=peft_config,
+            **({"use_chunked_dpo_logprobs": True} if chunked_dpo else {}),
             **resume_context,
         )
         ctx.on_teardown(built.cleanup_ep)
@@ -247,6 +253,35 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     )
     built.train()
     continuous = _losses_by_step(built)
+    if chunked_dpo:
+        evaluation = built.evaluate()
+        checks["bounded_eval_loss_is_finite"] = all(
+            math.isfinite(evaluation[f"eval_{name}_loss"]) for name in EVAL_SPLITS
+        )
+        exported = os.path.join(shared, "export")
+        built.save_model(exported)
+        ctx.barrier()
+        export_checks = model_save_checks(exported, ctx.rank)
+        if ctx.rank == 0:
+            stock, info = tiny.load_class.from_pretrained(
+                exported, dtype=torch.float32, attn_implementation="eager", output_loading_info=True
+            )
+            base = tiny.load_class.from_pretrained(tiny_dir, dtype=torch.bfloat16).state_dict()
+            export_checks["bounded_export_loads_with_stock_hf"] = not loading_problems(info)
+            weights = safetensors_state_dict(exported)
+            trained = safetensors_state_dict(os.path.join(train_out, f"checkpoint-{TOTAL_STEPS}"))
+            export_checks["bounded_export_contains_trained_weights"] = bool(weights) and any(
+                not torch.equal(value, base[name].to(value.dtype)) for name, value in weights.items()
+            )
+            export_checks["bounded_export_matches_final_checkpoint"] = weights.keys() == trained.keys() and all(
+                torch.equal(value, trained[name].to(value.dtype)) for name, value in weights.items()
+            )
+            with torch.no_grad():
+                export_checks["bounded_export_forward_is_finite"] = bool(
+                    stock(input_ids=torch.ones(1, 4, dtype=torch.long), use_cache=False).logits.isfinite().all()
+                )
+            del stock, base, weights, trained
+        checks |= ctx.broadcast_checks(export_checks)
     checks |= dp_layout_checks(
         built.model,
         config_fields(mode),

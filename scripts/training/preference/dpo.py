@@ -96,6 +96,7 @@ def main():
         callbacks=callbacks,
         resume_checkpoint=context.resume_checkpoint,
         policy_from_checkpoint=context.policy_from_checkpoint,
+        use_chunked_dpo_logprobs=args.use_chunked_dpo_logprobs,
         **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(

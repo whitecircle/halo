@@ -84,7 +84,7 @@ precision each split was scored in (`LOGPROB_PRECISION_KEY`;
 [DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run),
 [offline GRPO](../training-methods/grpo/offline.md#reference-model)).
 
-DPO and KTO share one `TRLPreferenceMixin` (`preference/trl_preference.py`), first in their bases: it
+DPO and KTO share one `TRLPreferenceMixin` (`preference/trl_preference.py`), ahead of their distributed and TRL bases: it
 runs their construction (TRL's Liger path off, reference resume, distributed config, reference gates,
 TRL's construction-time reference hash skipped), rebinds TRL's log-prob functions to fp32 ones, and runs
 the reference sweep on the DP axis. Ahead of `DistributedTrainerMixin` its sidecar hook wins over the
@@ -92,6 +92,7 @@ checkpointing default; ahead of the TRL base its rebinds wrap TRL's loss and ref
 declares `REFERENCE_COLUMNS` and its Liger reason; `CTOR_POSITIONS` is derived from the TRL base's
 signature per subclass. SMPO, DPO and KTO construction refusals are pure functions in
 `preference/preference_rules.py`.
+DPO's opt-in `ChunkedDPOScoringMixin` precedes it and replaces policy and reference scoring inside the wrapped root forward; the shared reference lifecycle stays unchanged ([bounded head scoring](../training-methods/preference/dpo.md#bounded-head-scoring)).
 Offline GRPO's `reference_cache.py` streams current-batch scores to filesystem-aware writers and
 maps the ordered ragged token values; its reference mixin attaches those buffers without repacking
 them ([Reference model](../training-methods/grpo/offline.md#reference-model)).

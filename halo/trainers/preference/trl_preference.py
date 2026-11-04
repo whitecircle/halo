@@ -95,7 +95,7 @@ def _attach_reference_columns(dataset: Dataset, columns: Mapping[str, torch.Tens
 
 
 class TRLPreferenceMixin(ReferenceLogpsMixin):
-    """Listed first in the bases: ahead of ``DistributedTrainerMixin`` so its checkpoint hook wins, ahead of the TRL
+    """Ahead of ``DistributedTrainerMixin`` so its checkpoint hook wins, ahead of the TRL
     base so the fp32 rebinds wrap TRL's loss and reference pass. A subclass declares ``REFERENCE_COLUMNS``,
     ``LIGER_DISABLE_REASON`` and ``_reference_settings``."""
 
