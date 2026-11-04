@@ -12,15 +12,32 @@ from peft import LoraConfig
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
-from transformers import Gemma2Config, Gemma2ForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import (
+    Gemma2Config,
+    Gemma2ForCausalLM,
+    PreTrainedTokenizerFast,
+    Qwen3Config,
+    Qwen3ForCausalLM,
+    Qwen3MoeConfig,
+)
 from trl import DPOConfig
 from trl.models.utils import _ForwardRedirection
 from trl.trainer.dpo_trainer import DataCollatorForPreference
 
 import halo.trainers.preference.chunked_dpo as chunked_dpo
+import tests.common.dpo_scoring as dpo_scoring
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.trainers.preference.chunked_dpo import CHUNKED_DPO_SCORER, DPO_SCORER_KEY, reject_chunked_dpo_options
 from halo.trainers.preference.dpo import DistributedDPOTrainer
+from tests.common.dpo_scoring import (
+    assert_dpo_gradients_match,
+    assert_dpo_loss_matches,
+    assert_sgd_deltas_match,
+    assert_sgd_update,
+)
+from tests.common.parallelism import make_parallelism_config
 from tests.common.preference_precompute import column, precompute_trainer, token_rows
 
 
@@ -189,6 +206,26 @@ def test_frozen_head_and_no_full_logits_forward(monkeypatch):
     trainer.compute_loss(model, batch).backward()
     assert model.lm_head.weight.grad is None
     assert model.model.embed_tokens.weight.grad.abs().max() > 1e-5
+
+
+def test_gradient_checkpointing_loss_and_all_gradients_match_full_head():
+    policy, oracle = _model(), _model()
+    for model in (policy, oracle):
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    bounded, full = _loss_trainer(policy, bounded=True), _loss_trainer(oracle, bounded=False)
+    for trainer in (bounded, full):
+        trainer.args.gradient_checkpointing_kwargs = {"use_reentrant": False}
+    batch = _reference_batch(full, oracle)
+    assert policy.is_gradient_checkpointing and oracle.is_gradient_checkpointing
+    got, want = bounded.compute_loss(policy, batch), full.compute_loss(oracle, batch)
+    torch.testing.assert_close(got, want, rtol=2e-5, atol=2e-6)
+    got.backward()
+    want.backward()
+    assert_dpo_gradients_match(
+        {name: parameter.grad for name, parameter in policy.named_parameters()},
+        {name: parameter.grad for name, parameter in oracle.named_parameters()},
+        bf16=False,
+    )
 
 
 def test_explicit_reference_scores_its_own_weights_not_the_policy():
@@ -519,6 +556,91 @@ def test_real_cpu_training_checkpoint_resume_and_export(tmp_path):
     inputs = {key: value for key, value in _batch().items() if key != "completion_mask"}
     with torch.no_grad():
         torch.testing.assert_close(stock(**inputs).logits, resumed.model(**inputs).logits, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("bf16", [False, True])
+def test_distributed_gradient_comparison_rejects_missing_scaled_and_nonfinite_shards(bf16):
+    expected = {"head.weight": torch.arange(1, 17).float().reshape(4, 4), "norm.weight": torch.zeros(4)}
+    assert assert_dpo_gradients_match(expected, expected, bf16=bf16) == 0.0
+    with pytest.raises(AssertionError, match="parameter set"):
+        assert_dpo_gradients_match({"head.weight": expected["head.weight"]}, expected, bf16=bf16)
+    with pytest.raises(AssertionError, match="Non-finite or wrong-shaped"):
+        assert_dpo_gradients_match(expected | {"head.weight": None}, expected, bf16=bf16)
+    with pytest.raises(AssertionError, match="relative L2"):
+        assert_dpo_gradients_match(expected | {"head.weight": expected["head.weight"] * 2}, expected, bf16=bf16)
+    with pytest.raises(AssertionError, match="Expected-zero"):
+        assert_dpo_gradients_match(expected | {"norm.weight": torch.ones(4)}, expected, bf16=bf16)
+    with pytest.raises(AssertionError, match="Non-finite"):
+        assert_dpo_gradients_match(
+            expected | {"head.weight": expected["head.weight"] * float("nan")}, expected, bf16=bf16
+        )
+
+
+def test_fp32_distributed_gradient_comparison_rejects_diluted_sparse_error():
+    expected = {"head.weight": torch.ones(4096)}
+    changed = expected["head.weight"].clone()
+    changed[0] += 0.001
+    assert (changed - expected["head.weight"]).norm() / expected["head.weight"].norm() < 5e-4
+    with pytest.raises(AssertionError):
+        assert_dpo_gradients_match({"head.weight": changed}, expected, bf16=False)
+
+
+def test_fp32_objective_gate_rejects_constant_offset_even_when_gradients_match():
+    margin = torch.tensor(0.3, requires_grad=True)
+    loss = -F.logsigmoid(margin)
+    changed = loss + 0.001
+    assert torch.equal(
+        torch.autograd.grad(loss, margin, retain_graph=True)[0], torch.autograd.grad(changed, margin)[0]
+    )
+    assert_dpo_loss_matches(loss, loss.detach().double())
+    with pytest.raises(AssertionError):
+        assert_dpo_loss_matches(changed, loss)
+
+
+@pytest.mark.parametrize("omitted", ["head.weight", "backbone.weight"])
+def test_sgd_proof_rejects_one_omitted_parameter_update(omitted):
+    before = {"head.weight": torch.full((8,), 0.7), "backbone.weight": torch.full((4,), 0.25)}
+    gradients = {name: torch.full_like(value, 0.3) for name, value in before.items()}
+    after = {name: value.clone().add_(gradients[name], alpha=-0.05) for name, value in before.items()}
+    for name in before:
+        assert_sgd_update(before[name], gradients[name], after[name], 0.05)
+        assert_sgd_deltas_match(
+            (before[name], gradients[name], after[name]), (before[name], gradients[name], after[name]), 0.05
+        )
+    with pytest.raises(AssertionError):
+        assert_sgd_update(before[omitted], gradients[omitted], before[omitted], 0.05)
+    with pytest.raises(AssertionError, match="SGD delta"):
+        assert_sgd_deltas_match(
+            (before[omitted], gradients[omitted], before[omitted]),
+            (before[omitted], gradients[omitted], after[omitted]),
+            0.05,
+        )
+
+
+@pytest.mark.parametrize("family", ["dense", "qwen3_moe"])
+def test_gpu_numerical_row_passes_real_preallocation_model_and_precision_guards(family, monkeypatch):
+    config = Qwen3Config() if family == "dense" else Qwen3MoeConfig(num_experts=4, num_experts_per_tok=2)
+    observed = []
+
+    def preflight(**kwargs):
+        pc = kwargs["parallelism_config"]
+        reject_unsupported_run(pc, kwargs["dtype"])
+        reject_unsupported_model(pc, config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=family == "qwen3_moe")
+        observed.append(pc)
+        raise RuntimeError("configuration preflight completed before GPU allocation")
+
+    monkeypatch.setattr(
+        dpo_scoring,
+        "ParallelismConfig",
+        lambda **kwargs: make_parallelism_config(world_size=2, gpus_per_node=2, **kwargs),
+    )
+    monkeypatch.setattr(dpo_scoring, "load_distributed_model", preflight)
+    with pytest.raises(RuntimeError, match="configuration preflight completed"):
+        dpo_scoring._build_trainer(
+            SimpleNamespace(), "/unread/local/fixture", family=family, dtype=torch.bfloat16, bounded=True
+        )
+    assert len(observed) == 1 and observed[0].fp32_non_ep_params
+    assert observed[0].ep_fp32_experts == (family == "qwen3_moe")
 
 
 if __name__ == "__main__":
