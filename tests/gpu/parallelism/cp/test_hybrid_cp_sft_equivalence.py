@@ -25,7 +25,7 @@ from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.selection import flash_kernel, preferred_flash_impl
 from halo.models.unwrapping import base_transformers_model
-from halo.runtime.dtensor import gather_full_tensors, materialize_dtensor
+from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_output_dir, world_mean
 from tests.common.ep_reference import full_grad
@@ -33,6 +33,8 @@ from tests.common.harness import gpu_test_main
 from tests.common.hybrid_cp import (
     build_gpu_hybrid_model,
     hybrid_hidden_batch,
+    hybrid_sgd_agreement,
+    hybrid_sgd_step,
     hybrid_tensor_agreement,
     hybrid_token_batch,
 )
@@ -121,7 +123,11 @@ def _gdn_blocks(ctx, batch, checkpointing):
 
 def _full_weights(model):
     reshard_fsdp2_modules(model)
-    return gather_full_tensors(((name, value.detach()) for name, value in model.named_parameters()), retain=True)
+    return {
+        name: materialize_dtensor(value.detach()).clone()
+        for name, value in model.named_parameters()
+        if value.requires_grad
+    }
 
 
 def _build_trainer(ctx, source, tokenizer, batch, checkpointing, cp_size, attention):
@@ -202,18 +208,31 @@ def _step(trainer, batch):
     input_gradient = captured[0].grad.detach().float().cpu() / trainer.parallelism_config.cp_size
     clip_norm = trainer._clip_grad_norm(model)
     trainer._get_grad_norm(model, grad_norm=clip_norm)
-    clipped = {name: full_grad(value).cpu() for name, value in model.named_parameters() if value.requires_grad}
+    clipped = {
+        name: materialize_dtensor(value.grad).detach().clone()
+        for name, value in model.named_parameters()
+        if value.requires_grad
+    }
+    assert all(
+        group["lr"] == LEARNING_RATE
+        and group.get("momentum", 0) == group.get("weight_decay", 0) == 0
+        and not group.get("maximize", False)
+        for group in trainer.optimizer.param_groups
+    )
     trainer.optimizer.step()
     final = _full_weights(model)
+    assert initial.keys() == clipped.keys() == final.keys()
+    sgd = {name: hybrid_sgd_step(initial[name], clipped[name], final[name], LEARNING_RATE) for name in initial}
     trainer.state.global_step += 1
     return {
         "loss": world_mean(float(loss.detach()), trainer.accelerator.device),
         "logits": outputs.logits.detach().float().cpu(),
         "gradients": gradients,
-        "clipped": clipped,
+        "clipped": {name: value.cpu() for name, value in clipped.items()},
         "input_gradient": input_gradient,
         "clip_norm": float(materialize_dtensor(clip_norm)),
-        "updates": {name: final[name] - value for name, value in initial.items()},
+        "updates": {name: value.delta for name, value in sgd.items()},
+        "sgd": sgd,
         "convolution_calls": convolution.call_count,
         "delta_rule_calls": delta.call_count,
     }
@@ -243,12 +262,17 @@ def _whole_model(ctx, source, tokenizer, batch, checkpointing, attention):
             expected["input_gradient"][:, part],
             gradient=True,
         )
-        for field in ("gradients", "clipped", "updates"):
+        for field in ("gradients", "clipped"):
             checks[f"{prefix}/{field}_every_parameter_covered"] = actual[field].keys() == expected[field].keys()
             for name, want in expected[field].items():
                 _check_tensor(
                     checks, metrics, f"{prefix}/{field}/{name}", actual[field].get(name), want, gradient=True
                 )
+        checks[f"{prefix}/updates_every_parameter_covered"] = actual["sgd"].keys() == expected["sgd"].keys()
+        for name, want in expected["sgd"].items():
+            passed, values = hybrid_sgd_agreement(actual["sgd"].get(name), want)
+            checks[f"{prefix}/updates/{name}"] = passed
+            metrics.update({f"{prefix}/updates/{name}/{key}": value for key, value in values.items()})
         checks[f"{prefix}/clip_active"] = actual["clip_norm"] > MAX_NORM and expected["clip_norm"] > MAX_NORM
         clipped_norm = sum(value.double().square().sum() for value in actual["clipped"].values()).sqrt()
         checks[f"{prefix}/clip_achieved"] = float(clipped_norm) <= MAX_NORM * (1 + TOL.clip_achieved_norm_rel)

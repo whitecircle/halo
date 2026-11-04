@@ -1,6 +1,7 @@
 """Tiny native dense hybrid fixtures for CP2 layer and trainer qualification."""
 
 import math
+from dataclasses import dataclass
 
 import torch
 from transformers import Qwen3_5ForCausalLM, Qwen3_5TextConfig
@@ -11,6 +12,59 @@ GDN_OUTPUT_REL_L2 = 1e-2
 GDN_GRAD_REL_L2 = 2e-2
 GDN_GRAD_COSINE_MIN = 0.999
 GDN_ZERO_ABS_L2 = 1e-12
+
+
+@dataclass(frozen=True)
+class HybridSGDStep:
+    delta: torch.Tensor
+    ideal: torch.Tensor
+    rounding: torch.Tensor
+
+
+def hybrid_sgd_step(before, gradient, after, learning_rate):
+    """Require exact native-device/dtype SGD, then retain host doubles for the cross-arm rounding proof."""
+    if (
+        before.shape != gradient.shape
+        or before.shape != after.shape
+        or before.dtype != gradient.dtype
+        or before.dtype != after.dtype
+        or before.device != gradient.device
+        or before.device != after.device
+        or not math.isfinite(learning_rate)
+        or learning_rate <= 0
+        or not bool(before.isfinite().all() & gradient.isfinite().all() & after.isfinite().all())
+    ):
+        raise AssertionError("SGD requires finite, same-shaped native-device/dtype snapshots and a positive rate")
+    expected = before.clone().add_(gradient, alpha=-learning_rate)
+    torch.testing.assert_close(after, expected, rtol=0, atol=0)
+    ideal = -learning_rate * gradient.double()
+    delta = after.double() - before.double()
+    rounding = expected.double() - before.double() - ideal
+    return HybridSGDStep(delta.cpu(), ideal.cpu(), rounding.cpu())
+
+
+def hybrid_sgd_agreement(actual, expected):
+    """Bound raw update disagreement only by ideal-gradient disagreement and predicted storage rounding."""
+    if actual is None or any(
+        got.shape != want.shape or not bool(got.isfinite().all() & want.isfinite().all())
+        for got, want in (
+            (actual.delta, expected.delta),
+            (actual.ideal, expected.ideal),
+            (actual.rounding, expected.rounding),
+        )
+    ):
+        return False, {"finite_and_same_shape": False}
+    gradient_difference = float((actual.ideal - expected.ideal).norm())
+    actual_rounding, reference_rounding = float(actual.rounding.norm()), float(expected.rounding.norm())
+    budget = gradient_difference + actual_rounding + reference_rounding
+    absolute = float((actual.delta - expected.delta).norm())
+    _, scores = hybrid_tensor_agreement(actual.delta, expected.delta, gradient=True)
+    return absolute <= budget, scores | {
+        "ideal_gradient_difference": gradient_difference,
+        "actual_storage_rounding": actual_rounding,
+        "reference_storage_rounding": reference_rounding,
+        "derived_rounding_budget": budget,
+    }
 
 
 def hybrid_text_config(**overrides):
