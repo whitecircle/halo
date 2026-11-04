@@ -1,7 +1,16 @@
 """Tiny native dense hybrid fixtures for CP2 layer and trainer qualification."""
 
+import math
+
 import torch
 from transformers import Qwen3_5ForCausalLM, Qwen3_5TextConfig
+
+from tests.common.numerics import cos_sim
+
+GDN_OUTPUT_REL_L2 = 1e-2
+GDN_GRAD_REL_L2 = 2e-2
+GDN_GRAD_COSINE_MIN = 0.999
+GDN_ZERO_ABS_L2 = 1e-12
 
 
 def hybrid_text_config(**overrides):
@@ -40,3 +49,57 @@ def hybrid_hidden_batch(batch, length, hidden_size, *, device="cpu"):
     mask = torch.arange(length, device=device)[None, :] < lengths[:, None]
     targets = torch.linspace(-0.5, 0.7, hidden.numel(), device=device).reshape_as(hidden)
     return hidden, mask, targets
+
+
+def build_gpu_hybrid_model(**overrides):
+    model = build_hybrid_model(
+        hidden_size=128,
+        intermediate_size=256,
+        head_dim=32,
+        linear_key_head_dim=32,
+        linear_value_head_dim=32,
+        **overrides,
+    )
+    with torch.no_grad():
+        for layer in model.model.layers:
+            if hasattr(layer, "linear_attn"):
+                mixer = layer.linear_attn
+                mixer.A_log.copy_(torch.linspace(-1.0, 0.2, mixer.num_v_heads))
+                mixer.dt_bias.copy_(torch.linspace(-0.3, 0.5, mixer.num_v_heads))
+    return model
+
+
+def hybrid_token_batch(batch, vocabulary, *, boundary_only=False, length=130):
+    if length % 2 or length == 16386:
+        raise ValueError("Use an even hybrid CP2 fixture length other than the excluded 16,386 vendor row")
+    generator = torch.Generator().manual_seed(114)
+    ids = torch.randint(3, vocabulary, (batch, length), generator=generator)
+    mask = torch.arange(length)[None, :] < (length - 1 - 2 * torch.arange(batch))[:, None]
+    labels = ids.masked_fill(~mask, -100)
+    if boundary_only:
+        labels.fill_(-100)
+        labels[:, length // 2] = ids[:, length // 2]
+    else:
+        labels[:, : length // 2 + 1] = -100
+    return {"input_ids": ids, "attention_mask": mask.long(), "labels": labels}
+
+
+def hybrid_tensor_agreement(actual, expected, *, gradient=False):
+    """Strict native-block bars, including absolute L2 for expected zero; no negligible-gradient exemption."""
+    if (
+        actual is None
+        or actual.shape != expected.shape
+        or not bool(torch.isfinite(actual).all() & torch.isfinite(expected).all())
+    ):
+        return False, {"finite_and_same_shape": False}
+    actual, expected = actual.double(), expected.double()
+    reference_norm, actual_norm = float(expected.norm()), float(actual.norm())
+    absolute = float((actual - expected).norm())
+    scores = {"reference_norm": reference_norm, "actual_norm": actual_norm, "absolute_l2": absolute}
+    if reference_norm == 0:
+        return absolute <= GDN_ZERO_ABS_L2, scores | {"expected_zero": True}
+    relative = absolute / reference_norm
+    cosine = cos_sim(actual, expected, label="hybrid native agreement") if actual_norm else 0.0
+    scores |= {"relative_l2": relative, "cosine": cosine}
+    passed = math.isfinite(relative) and relative <= (GDN_GRAD_REL_L2 if gradient else GDN_OUTPUT_REL_L2)
+    return passed and (not gradient or cosine >= GDN_GRAD_COSINE_MIN), scores
