@@ -94,7 +94,9 @@ for the wrapped model.
 
 A tower whose projections are plain `nn.Linear` (CLIP/SigLIP/Pixtral-style) is untouched by any of
 this and keeps its adapters; on text-only data those adapters receive no gradient and stay at their
-zero initialization, costing optimizer state and nothing else.
+zero initialization, costing optimizer state and nothing else. On an image row they train under
+either checkpointing mode, at the cost of recomputing the tower in the backward
+([Tower blocks](../parallelism/data-parallelism.md#tower-blocks-under-reentrant-checkpointing)).
 
 One consequence for a mistyped target: a name that matches a container rather than a leaf (`mlp` on
 Qwen3) drops out of the injection with that warning, so the run trains the targets that did match. Read the excluded count — it is the tell.

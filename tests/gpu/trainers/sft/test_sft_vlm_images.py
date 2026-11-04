@@ -4,7 +4,9 @@ forward, the vision tower trains or stays frozen as asked, and the steps complet
 
 ``--data mixed`` holds an image on some rows and text on the rest, so ranks of one step differ in whether they reach the
 tower; ``--freeze-tower`` takes the tower out of their gradient reduce, ``--freeze-embedding`` leaves a text row's input
-carrying a gradient only through checkpointing's hook, and ``--zero3`` reshards every group after its forward.
+carrying a gradient only through checkpointing's hook, ``--zero3`` reshards every group after its forward, and
+``--tower-adapters`` trains adapters on the tower's checkpointed blocks alone, behind its frozen patch embedding, under
+reentrant checkpointing whatever the family's default.
 
     torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_vlm_images.py --family qwen3_5 --data all
     torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_vlm_images.py --family gemma4 --data mixed --freeze-tower
@@ -20,7 +22,9 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset, DatasetDict, Sequence
 from datasets import Image as HFImage
+from peft import LoraConfig
 from PIL import Image
+from transformers.modeling_layers import GradientCheckpointingLayer
 from trl import SFTConfig
 
 from halo.configs.script_arguments import ModelArguments
@@ -58,6 +62,7 @@ parser.add_argument("--data", choices=["all", "mixed"], required=True)
 parser.add_argument("--freeze-tower", action="store_true")
 parser.add_argument("--freeze-embedding", action="store_true")
 parser.add_argument("--zero3", action="store_true")
+parser.add_argument("--tower-adapters", action="store_true")
 ARGS = parser.parse_args()
 
 
@@ -87,6 +92,22 @@ def _written_checkpoint(ctx) -> str:
     return str(directory)
 
 
+def _tower_block_linears(model) -> list[str]:
+    return [
+        f"{tower}.{block_name}.{name}"
+        for tower in media_module_names(model)
+        for block_name, block in model.get_submodule(tower).named_modules()
+        if isinstance(block, GradientCheckpointingLayer)
+        for name, module in block.named_modules()
+        if isinstance(module, torch.nn.Linear)
+    ]
+
+
+def _adapter_weights(model) -> dict[str, torch.Tensor]:
+    """``lora_B``, as ``lora_A`` takes no gradient until ``lora_B`` leaves its zero init. Every rank gathers every one."""
+    return {name: _materialized(param).clone() for name, param in model.named_parameters() if ".lora_B." in name}
+
+
 @gpu_test_main(exact_world_size=2, prefix="sft_vlm_images")
 def run(ctx):
     torch.cuda.set_device(ctx.device)
@@ -99,6 +120,7 @@ def run(ctx):
         learning_rate=2e-5,
         bf16=True,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": True} if ARGS.tower_adapters else None,
         use_liger_kernel=False,
         logging_steps=1,
         save_strategy="no",
@@ -144,6 +166,7 @@ def run(ctx):
     )
     towers = tuple(f"{tower}." for tower in media_module_names(model))
     tower_start = {name: param.detach().clone() for name, param in model.named_parameters() if name.startswith(towers)}
+    targets = _tower_block_linears(model)
     trainer = DistributedSFTTrainer(
         model=model,
         args=config,
@@ -151,8 +174,10 @@ def run(ctx):
         data_collator=collator,
         processing_class=processor,
         parallelism_config=parallelism_config,
+        peft_config=LoraConfig(r=2, target_modules=targets, task_type="CAUSAL_LM") if ARGS.tower_adapters else None,
     )
     ctx.on_teardown(trainer.cleanup_ep)
+    adapters_start = _adapter_weights(trainer.model)
 
     pixels_reached: list[bool] = []
     trainer.model.register_forward_pre_hook(
@@ -170,6 +195,12 @@ def run(ctx):
         checks["every_row_carries_pixels"] = bool(per_rank.all())
     else:
         checks["a_step_mixes_image_and_text_ranks"] = bool((per_rank.any(dim=0) & ~per_rank.all(dim=0)).any())
+    if ARGS.tower_adapters:
+        adapters_end = _adapter_weights(trainer.model)
+        checks["every_tower_adapter_trains"] = bool(adapters_start) and all(
+            not torch.equal(adapters_end[name], start) for name, start in adapters_start.items()
+        )
+        return {"checks": checks, "metrics": {"final_loss": result.training_loss}}
     # Not a generator: ``full_tensor`` is collective, so every rank must gather every parameter.
     moved = [
         not torch.equal(_materialized(param), tower_start[name.replace("_checkpoint_wrapped_module.", "")])

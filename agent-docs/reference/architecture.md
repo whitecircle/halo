@@ -43,7 +43,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `halo/models/module_tree.py` | module-tree lookups: the decoder-layer list and the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding, the embedding modules, module paths by identity, the attribute probe |
 | `halo/models/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins |
 | `halo/models/peft_adapters.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write |
-| `halo/models/gradient_checkpointing.py` | the recompute scope both passes of one checkpoint invocation share, expert-load counting off it, and the scoped gradient-checkpointing enable |
+| `halo/models/gradient_checkpointing.py` | the recompute scope both passes of one checkpoint invocation share, expert-load counting off it, the scoped gradient-checkpointing enable, and the input a reentrant checkpoint needs for a layer's trainable parameters to take a gradient (patched onto `GradientCheckpointingLayer.__call__` at import) |
 | `halo/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `halo/model_loading/parallel/model_source.py`) |
 | `halo/models/conversion_overrides.py` | family corrections to transformers' conversion mapping, registered at import behind one guard |
 | `halo/models/row_documents.py` | the documents of a training row as spans: where each sits and which of its tokens padding leaves real |

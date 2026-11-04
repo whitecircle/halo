@@ -131,7 +131,7 @@ Both also take `freeze_vision_tower: true` or a dataset with no text-only rows. 
 
 An adapter run takes the same refusal: its embedding is frozen unless `modules_to_save` trains it, and `run_trainer` carries the hook onto the `PeftModel` the loop calls (`carry_image_refusal_above_adapters`), whose `.forward()` runs no pre-hook below it. The message names the parameter the adapter reached. Keep `lora_target_modules` off the tower, as `freeze_vision_tower` is refused there, or take a remedy above.
 
-With checkpointing on those adapters' reduces pair, but reentrant checkpointing can leave them with no gradient, with no warning. On tiny rows they took none on Qwen3-VL, Qwen3.5 MoE, MiniMax-M3-VL and Qwen3.8-Flash-Next (0 of 8 tensors, against 8 of 8 under non-reentrant), all 8 on Command A Vision, Gemma 4, LFM2-VL and Mistral 3, and 6 of 8 under either on Nemotron-H. MoE families run reentrant.
+With checkpointing on those adapters' reduces pair, and a tower block takes the same gradient under reentrant checkpointing as under non-reentrant ([Tower blocks under reentrant checkpointing](#tower-blocks-under-reentrant-checkpointing)).
 
 Two setups **raise** rather than wrap:
 
@@ -381,6 +381,16 @@ first. A forward leaves the transient unsharded params registered (`reshard_afte
 never reshards after its forward), so a read would see objects the optimizer never steps: param groups
 built over them update orphans, a writer saves state one step stale, and the PEFT save's DTensor probe
 mis-routes.
+
+### Tower blocks under reentrant checkpointing
+
+A reentrant checkpoint runs its first pass under `no_grad`, and its outputs carry a gradient only if a positional input does. transformers' input-grad hook reaches a tower only through a declared `get_input_embeddings`: SigLIP, SigLIP 2, Pixtral and Llama 4's vision model declare one, and Qwen3-VL, Qwen3.5/3.6, Qwen3.8-Flash-Next, GLM-5 Next, MiniMax-M3-VL, Step-3.7, Gemma 4 and Nemotron-H do not. Inkling's tower has no checkpointed layer, and Llama 4's blocks take their hidden state by keyword, which a checkpoint's graph does not see. So a block holding an adapter or a trained parameter behind a frozen patch embedding would stay at no gradient, on a MoE above all, where reentrant is forced.
+
+`GradientCheckpointingLayer.__call__` closes this for every layer it runs, tower or not (`_with_gradient_carrying_input`, `halo/models/gradient_checkpointing.py`). Under a reentrant checkpoint with no gradient-carrying positional input, a keyword hidden state moves to its positional slot, and a layer holding a trainable parameter, or taking a gradient in another argument, takes a detached alias of its first floating input. That covers adapters, a fine-tune of some blocks and a frozen block fed by a trained module beside its hidden state, and each later block already has its input. A layer that holds no float for this raises at its forward.
+
+A block with nothing trainable and no gradient arriving takes no new input, and neither does any layer under non-reentrant checkpointing or with checkpointing off, so a frozen tower or a run whose adapters stay off it steps bit for bit as under transformers' own call. torch's `None of the inputs have requires_grad=True` warning fires on those blocks and names no fault. A frozen tower of Llama 4's shape recomputes its blocks, as its hook-given input reaches them, at the same loss and gradients.
+
+The tower's gradient on an image rank then reaches the reduce through the [agreement](#shard-groups), which is why these runs pair under `torchrun` and why `accelerate launch`, with no agreement, is refused with checkpointing on too. `tests/cpu/parallelism/test_reentrant_tower_gradient.py` holds a reentrant step to a non-reentrant one on each composite, in one process and on gloo ranks across ZeRO-2 and ZeRO-3, HSDP, accumulation windows, a TP text stack, and expert layers with fused and split experts.
 
 ### Layers recomputed more than once per backward
 

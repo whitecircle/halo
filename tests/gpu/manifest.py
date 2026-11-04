@@ -2583,6 +2583,10 @@ MANIFEST: dict[str, TestSpec] = {
             "--family gemma4 --data mixed",
             "--family qwen3_5 --data mixed --zero3",
             "--family qwen3_5 --data mixed --freeze-embedding",
+            "--family qwen3_vl --data mixed --tower-adapters",
+            "--family qwen3_5_moe --data mixed --tower-adapters",
+            "--family qwen3_5 --data mixed --tower-adapters --zero3",
+            "--family gemma4 --data mixed --tower-adapters",
             Row("--family nemotron_h_omni --data all", markers=("gpu", "core", "2gpu", "vlm", "nemotron")),
             Row("--family nemotron_h_omni --data mixed", markers=("gpu", "core", "2gpu", "vlm", "nemotron")),
             Row(
@@ -2591,6 +2595,10 @@ MANIFEST: dict[str, TestSpec] = {
             ),
             Row(
                 "--family nemotron_h_omni --data mixed --freeze-tower",
+                markers=("gpu", "core", "2gpu", "vlm", "nemotron"),
+            ),
+            Row(
+                "--family nemotron_h_omni --data mixed --tower-adapters",
                 markers=("gpu", "core", "2gpu", "vlm", "nemotron"),
             ),
         ),

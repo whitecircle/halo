@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """``prepare_policy_model``: the PEFT wrap, the dropout switch, and the input-grad hook left to gradient checkpointing.
-Under reentrant checkpointing without the hook, LoRA weights inside a checkpointed layer get no gradient."""
+Under reentrant checkpointing LoRA weights inside a checkpointed layer take their gradient with the hook or without."""
 
 from types import SimpleNamespace
 
@@ -77,11 +77,12 @@ def test_gradient_checkpointing_enable_installs_the_hook_the_adapters_train_thro
     assert grads and all(grad is not None and grad.abs().sum() > 0 for grad in grads)
 
 
-def test_without_the_hook_reentrant_checkpointing_leaves_the_loss_no_grad_path():
-    with pytest.warns(UserWarning, match="requires_grad"):
-        _, loss = _checkpointed_loss(keep_input_grad_hook=False)
+def test_without_the_hook_the_adapters_train_through_their_layers_own_input():
+    model, loss = _checkpointed_loss(keep_input_grad_hook=False)
+    loss.backward()
+    grads = [param.grad for name, param in model.named_parameters() if "lora_B" in name]
 
-    assert not loss.requires_grad
+    assert grads and all(grad is not None and grad.abs().sum() > 0 for grad in grads)
 
 
 if __name__ == "__main__":

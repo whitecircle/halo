@@ -119,6 +119,9 @@ class NonFiniteStepGuardMixin:
     def _copy_norm_to_host(self, grad_norm: torch.Tensor) -> torch.Tensor:
         """Start the non-blocking copy of ``grad_norm`` to host memory; return the device flag of a non-finite one."""
         norm = materialize_dtensor(grad_norm).detach().float()
+        # torch's clip returns a CPU zero on a step where no parameter holds a gradient: a mixed image run's text batch.
+        if not norm.is_cuda:
+            norm = norm.to(self._tr_loss.device)
         if self._verdict_norm is None:
             self._verdict_norm = torch.empty((), dtype=torch.float32, pin_memory=norm.is_cuda)
             self._verdict_copied = torch.cuda.Event() if norm.is_cuda else None

@@ -1,15 +1,19 @@
 """Recompute scopes shared by an activation checkpoint's two passes, and the gradient-checkpointing enable that
-installs them. A scope makes the pass count an exact recompute signal and lets a layer replay first-pass results."""
+installs them. A scope makes the pass count an exact recompute signal and lets a layer replay first-pass results. Also
+the input a reentrant checkpoint needs for its layer's trainable parameters to take a gradient."""
 
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 import threading
 from collections.abc import Callable
 
 import torch
 import torch.nn as nn
+from torch.utils._pytree import tree_leaves
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.getLogger(__name__)
 
@@ -185,3 +189,56 @@ def enable_scoped_gradient_checkpointing(model: nn.Module, *, gradient_checkpoin
     logger.info(
         f"Gradient checkpointing enabled on {scoped} modules (kwargs={kwargs}, every_n_layers={every_n_layers})"
     )
+
+
+def _declares_non_reentrant(checkpoint_func: Callable) -> bool:
+    """Read through :func:`scoped_checkpoint_func` to the ``partial`` transformers installs. A function that declares
+    nothing counts as reentrant, as the input it then gets changes no gradient under a non-reentrant one."""
+    while (wrapped := getattr(checkpoint_func, "__wrapped__", None)) is not None:
+        checkpoint_func = wrapped
+    return getattr(checkpoint_func, "keywords", {}).get("use_reentrant") is False
+
+
+def _with_gradient_carrying_input(layer: GradientCheckpointingLayer, args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """A reentrant checkpoint's outputs carry a gradient only if a positional input does. transformers' input-grad hook
+    gives that to the text embedding and to a tower declaring ``get_input_embeddings``; any other layer behind frozen
+    modules, a tower block behind its patch embedding above all, would keep its trainable parameters at no gradient, and
+    a frozen one would drop a gradient arriving in another argument. A hidden state passed by keyword moves to the
+    positional slot it names, and a detached alias leaves the caller's tensor out of the graph. A layer with nothing
+    trainable and no gradient arriving takes no new input."""
+    if any(isinstance(arg, torch.Tensor) and arg.requires_grad for arg in args):
+        return args, kwargs
+    if _declares_non_reentrant(layer._gradient_checkpointing_func):
+        return args, kwargs
+    if not args:
+        first_parameter = next(iter(inspect.signature(layer.forward).parameters), None)
+        if isinstance(kwargs.get(first_parameter), torch.Tensor):
+            args = (kwargs[first_parameter],)
+            kwargs = {name: value for name, value in kwargs.items() if name != first_parameter}
+            if args[0].requires_grad:
+                return args, kwargs
+    arriving = any(isinstance(leaf, torch.Tensor) and leaf.requires_grad for leaf in tree_leaves((args, kwargs)))
+    if not arriving and not any(param.requires_grad for param in layer.parameters()):
+        return args, kwargs
+    for index, arg in enumerate(args):
+        if isinstance(arg, torch.Tensor) and arg.is_floating_point():
+            return (*args[:index], arg.detach().requires_grad_(), *args[index + 1 :]), kwargs
+    raise ValueError(
+        f"{type(layer).__name__} trains or takes a gradient under reentrant gradient checkpointing, and takes no "
+        f"floating tensor as its first argument or positionally, so its checkpoint's outputs could carry no gradient. "
+        f"Pass its hidden state positionally, or train it without gradient checkpointing."
+    )
+
+
+_stock_layer_call = GradientCheckpointingLayer.__call__
+
+
+@functools.wraps(_stock_layer_call)
+def _call_with_gradient_carrying_input(self, *args, **kwargs):
+    if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+        args, kwargs = _with_gradient_carrying_input(self, args, kwargs)
+    return _stock_layer_call(self, *args, **kwargs)
+
+
+# At import, as every trainer imports this module and every transformers layer that checkpoints itself runs this call.
+GradientCheckpointingLayer.__call__ = _call_with_gradient_carrying_input

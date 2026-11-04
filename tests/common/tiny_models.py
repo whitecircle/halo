@@ -73,7 +73,9 @@ from transformers import (
     PreTrainedTokenizerFast,
     Qwen2Config,
     Qwen2ForCausalLM,
+    Qwen3_5Config,
     Qwen3_5ForCausalLM,
+    Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeConfig,
     Qwen3_5MoeForCausalLM,
     Qwen3_5MoeForConditionalGeneration,
@@ -632,6 +634,27 @@ TINY_QWEN3_VL_FAMILY = TinyFamily(
     _composite(Qwen3VLConfig, Qwen3VLForConditionalGeneration, TINY_QWEN3_VL_TEXT_CONFIG, TINY_QWEN3_VL_VISION_CONFIG),
     load_class=AutoModelForImageTextToText,
     ulysses_cp=True,
+)
+
+# A vision block tapped for the text layers, as Qwen3-VL's releases are: the tap reads a checkpointed block's output.
+TINY_QWEN3_VL_DEEPSTACK_FAMILY = TinyFamily(
+    _composite(
+        Qwen3VLConfig,
+        Qwen3VLForConditionalGeneration,
+        TINY_QWEN3_VL_TEXT_CONFIG,
+        {**TINY_QWEN3_VL_VISION_CONFIG, "deepstack_visual_indexes": [0]},
+    ),
+    load_class=AutoModelForImageTextToText,
+)
+# The dense Qwen3.5 text tower behind the same vision tower as its MoE sibling.
+TINY_QWEN3_5_COMPOSITE_FAMILY = TinyFamily(
+    _composite(
+        Qwen3_5Config,
+        Qwen3_5ForConditionalGeneration,
+        TINY_QWEN35_CONFIG,
+        {**TINY_QWEN35_VISION_CONFIG, "out_hidden_size": TINY_QWEN35_CONFIG["hidden_size"]},
+    ),
+    load_class=AutoModelForImageTextToText,
 )
 
 # Past the dense roster, at its geometry: plain GQA (Llama, Qwen2), a config-level window (Mistral), Gemma 2's softcaps

@@ -27,32 +27,16 @@ from halo.entrypoints.data_setup import apply_vision_options
 from halo.entrypoints.script import run_trainer
 from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module, media_module_names
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.composite_rows import COMPOSITE_FAMILIES, composite_model_and_rows, text_row
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import make_parallelism_config
-from tests.common.tiny_models import (
-    TINY_DENSE_FAMILIES,
-    TINY_LLAMA4_FAMILY,
-    TINY_MOE_FAMILIES,
-    TINY_MOE_VLM_FAMILIES,
-    TINY_QWEN3_VL_FAMILY,
-    TINY_UNWRAPPED_COMPOSITE_FAMILIES,
-    tiny_family_model,
-)
-from tests.common.tiny_processors import TINY_PROCESSOR_MODEL_TYPES, tiny_image_batch, tiny_processor
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tiny_processors import TINY_PROCESSOR_MODEL_TYPES, tiny_processor
 
 # Without the agreement a rank waits in a reduce-scatter its peer entered with another list, until this ends it.
 PG_TIMEOUT = datetime.timedelta(seconds=60)
-_IMAGE_TOKEN, _VISION_START = 5, 4
-_TEXT_ROW = "Describe the image . A square of noise ."
 _GC_KINDS = {"off": None, "reentrant": True, "non_reentrant": False}
-_FAMILIES = {"qwen3_vl": TINY_QWEN3_VL_FAMILY, **TINY_MOE_VLM_FAMILIES, **TINY_UNWRAPPED_COMPOSITE_FAMILIES}
 _TEXT_FAMILIES = {"qwen3": TINY_DENSE_FAMILIES["qwen3"], "qwen3_moe": TINY_MOE_FAMILIES["qwen3_moe"]}
-_COMPOSITES = {
-    **_FAMILIES,
-    "glm5_next": TINY_MOE_FAMILIES["glm5_next"],
-    "llama4": TINY_LLAMA4_FAMILY,
-    "step3p7": TINY_MOE_FAMILIES["step3p7"],
-}
 _MESH_NAMES = {1: ("dp_shard",), 2: ("dp_replicate", "dp_shard")}
 _NEMOTRON = "nemotron_h_omni"
 _ACCELERATE_FSDP = {"ACCELERATE_USE_FSDP": "true"}
@@ -64,43 +48,10 @@ _ADAPTER_SPOTS = {
 }
 
 
-def _image_row(config) -> dict[str, torch.Tensor]:
-    vision = config.vision_config
-    merge = vision.spatial_merge_size
-    grid = (1, 2 * merge, 2 * merge)
-    patches = grid[0] * grid[1] * grid[2]
-    ids = torch.tensor([[6, _VISION_START] + [_IMAGE_TOKEN] * (patches // merge**2) + [8, 9]])
-    patch_width = vision.in_channels * vision.temporal_patch_size * vision.patch_size**2
-    return {
-        "input_ids": ids,
-        "attention_mask": torch.ones_like(ids),
-        "labels": ids.clone(),
-        "pixel_values": torch.randn(patches, patch_width, generator=torch.Generator().manual_seed(1)),
-        "image_grid_thw": torch.tensor([grid]),
-        "mm_token_type_ids": (ids == _IMAGE_TOKEN).long(),
-    }
-
-
-def _text_row(ids: list[int] | None = None) -> dict[str, torch.Tensor]:
-    ids = torch.tensor([ids or [6, 7, 8, 9, 10, 11, 12, 13]])
-    return {"input_ids": ids, "attention_mask": torch.ones_like(ids), "labels": ids.clone()}
-
-
 def _model_and_rows(name: str):
-    """The family's own processor builds its rows where it has a local one, so its tower really reads them."""
     if name in _TEXT_FAMILIES:
-        return tiny_family_model(_TEXT_FAMILIES[name]).train(), None, _text_row()
-    if name not in TINY_PROCESSOR_MODEL_TYPES:
-        model = tiny_family_model(_FAMILIES[name]).train()
-        model.config.image_token_id, model.config.vision_start_token_id = _IMAGE_TOKEN, _VISION_START
-        return model, _image_row(model.config), _text_row()
-    processor = tiny_processor(name)
-    model = tiny_family_model(_FAMILIES[name], processor.tokenizer).train()
-    model.config.image_token_id = processor.image_token_id
-    # The composites that read the id once, at construction.
-    if hasattr(model, "image_token_id"):
-        model.image_token_id = processor.image_token_id
-    return model, tiny_image_batch(processor), _text_row(processor.tokenizer(_TEXT_ROW)["input_ids"])
+        return tiny_family_model(_TEXT_FAMILIES[name]).train(), None, text_row()
+    return composite_model_and_rows(name)
 
 
 def _full(grad: torch.Tensor) -> torch.Tensor:
@@ -235,7 +186,7 @@ def _worker(rank: int, out_dir: str, case: dict) -> None:
 def _tower_worker(rank: int, out_dir: str) -> None:
     mesh = init_device_mesh("cpu", (dist.get_world_size(),), mesh_dim_names=_MESH_NAMES[1])
     verdicts = {}
-    for name, family in sorted(_COMPOSITES.items()):
+    for name, family in sorted(COMPOSITE_FAMILIES.items()):
         torch.manual_seed(0)
         model = tiny_family_model(family)
         towers = tuple(f"{tower}." for tower in media_module_names(model))
@@ -400,7 +351,7 @@ def test_every_composites_tower_sits_in_a_group_that_agrees(tmp_path):
     """A tower in a group left out would reduce a shorter list on a text rank, whichever family it is."""
     run_gloo_ranks(_tower_worker, 2, str(tmp_path), pg_timeout=PG_TIMEOUT)
     verdicts = json.loads((tmp_path / "rank0.json").read_text())
-    assert set(verdicts) == set(_COMPOSITES)
+    assert set(verdicts) == set(COMPOSITE_FAMILIES)
     for name, verdict in verdicts.items():
         assert verdict["tower"] and verdict["held"] == verdict["agreeing"] == verdict["tower"], (name, verdict)
 
@@ -478,7 +429,7 @@ def test_a_frozen_embedding_pairs_under_checkpointing(tmp_path, family, gc):
 
 def test_every_composite_checkpoints_through_the_input_grad_hook():
     """What the refusal reads a checkpointed frozen embedding by: a composite the hook skips would hang unrefused."""
-    for name, family in sorted({**_FAMILIES, **_COMPOSITES}.items()):
+    for name, family in sorted(COMPOSITE_FAMILIES.items()):
         model = tiny_family_model(family)
         model.gradient_checkpointing_enable()
         assert model.is_gradient_checkpointing and model._require_grads_hooks, name
@@ -646,8 +597,9 @@ def test_an_adapter_run_whose_reduces_pair_finishes_a_mixed_step(tmp_path, case)
         assert result["reached"] and not result["lost"] and result["worst"] < 1e-5, result
 
 
-def test_a_tower_adapter_takes_its_share_of_the_gradient_under_non_reentrant_checkpointing(tmp_path):
-    run_gloo_ranks(_adapter_worker, 2, str(tmp_path), {**_ADAPTER_CASE, "gc": "non_reentrant"}, pg_timeout=PG_TIMEOUT)
+@pytest.mark.parametrize("gc", ["reentrant", "non_reentrant"])
+def test_a_tower_adapter_takes_its_share_of_the_gradient_under_checkpointing(tmp_path, gc):
+    run_gloo_ranks(_adapter_worker, 2, str(tmp_path), {**_ADAPTER_CASE, "gc": gc}, pg_timeout=PG_TIMEOUT)
     for rank in range(2):
         result = json.loads((tmp_path / f"rank{rank}.json").read_text())
         assert result["tower_grads"] == 8 and not result["lost"] and result["worst"] < 1e-5, result

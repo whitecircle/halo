@@ -108,9 +108,9 @@ The scope Halo 1.2.0 is validated on:
 - **GPU:** 8× B300 machines: the core and pipeline tiers, both rollout-server tiers (vLLM 0.32.0,
   SGLang 0.5.22) and the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`).
 - **Throughput band** (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)): on a second
-  B300 machine, 7 of 9 rows sat within band. `ep1` read 2.3% and `ep4 × etp2` 5.5% under their baseline
-  medians (one slow repeat of three); an A/B of the baseline commit and the tested commit on that machine
-  overlapped on both rows.
+  B300 machine, 8 of 9 rows sat within band over three repeats, and no median moved more than 1.7% from the
+  [benchmark table](../optimization/throughput-benchmarks.md). FSDP2 read under on its mean, from a slow first
+  repeat on a cold node; its second and third repeats are within band.
 - **Multi-node:** two 8-GPU machines ran node-local `ep8` with DP through a per-node save, resume and
   evaluation, cross-node `ep16` through a gathered save and reload, cross-node weight sync on both
   engines, and the two PP recipes (training; the Qwen3-8B one also a per-node save, resume, merge

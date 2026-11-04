@@ -516,7 +516,7 @@ _SLIDING_LAYERS = {"sliding_window": 8, "layer_types": ["sliding_attention", "fu
 
 def _resolve_laguna(config, requested):
     is_avail, capability = _blackwell()
-    with is_avail, capability, patch.object(attention_mod.logger, "info"):
+    with is_avail, capability, patch.object(attention_mod, "flash_kernel"), patch.object(attention_mod.logger, "info"):
         return attention_mod.resolve_attn_implementation(
             config, requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )
@@ -604,7 +604,7 @@ def test_a_composite_whose_every_sub_model_takes_flash_keeps_it():
     config = CONFIG_MAPPING["qwen3_5_moe"]()
     assert attention_mod.declares_flash_attention(config)
     is_avail, capability = _blackwell()
-    with is_avail, capability, patch.object(attention_mod.logger, "info"):
+    with is_avail, capability, patch.object(attention_mod, "flash_kernel"), patch.object(attention_mod.logger, "info"):
         resolved = attention_mod.resolve_attn_implementation(
             config, None, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )

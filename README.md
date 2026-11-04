@@ -51,7 +51,7 @@ On 8× B300, Halo 1.1.0 trained gpt-oss-20b at up to 3.5× the throughput of sto
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **[[RELEASE-DATE]] — Halo 1.2.0.** Pipeline parallelism, faster parallel steps, tree packing and a newer
+- **2026-11-04 — Halo 1.2.0.** Pipeline parallelism, faster parallel steps, tree packing and a newer
   stack: pipeline parallelism for SFT, preference, offline GRPO, reward and classification training,
   alone or with EP or ETP inside each stage, with two recipes run across two machines; 1.11–2.07× the
   throughput of 1.1.0 on twelve benchmarked shapes (TP2 1.82×, EP4+ETP2 2.07×); SFT tree packing, which

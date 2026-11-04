@@ -385,7 +385,9 @@ run non-reentrant ([PP + EP](pipeline-parallelism.md#pp--ep-moe)). Non-reentrant
 lazily, when backward first needs a discarded tensor; nothing imposes a common order across ranks,
 they desynchronize, and DeepEP's barrier times out — `cudaErrorLaunchFailure`, an unrecoverable
 abort, not a raised error. Measured on 2 GPUs: reentrant is grad-exact (worst relative gradient
-error 4.3e-05 vs no checkpointing, across all 155 parameters), non-reentrant aborts.
+error 4.3e-05 vs no checkpointing, across all 155 parameters), non-reentrant aborts. A layer with no
+gradient-carrying input takes one under it where it holds a trainable parameter, which is how a tower
+block behind a frozen patch embedding trains ([Data Parallelism](data-parallelism.md#tower-blocks-under-reentrant-checkpointing)).
 
 Under [routing replay](../training-methods/async-grpo/objective.md#routing-replay)
 the recompute reads the frame's saved expert selection. Expert-load counters record only a scope's

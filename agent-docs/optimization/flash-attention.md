@@ -208,7 +208,9 @@ exception: a reentrant forward runs under `no_grad`, where FSDP2 registers no pr
 stages run non-reentrant and refuse `use_reentrant: true`
 ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)). Under FSDP2,
 a layer the reentrant backward recomputes more than once gets its post-backward completed by the trainer
-([Data Parallelism](../parallelism/data-parallelism.md#layers-recomputed-more-than-once-per-backward)).
+([Data Parallelism](../parallelism/data-parallelism.md#layers-recomputed-more-than-once-per-backward)), and a
+tower block behind a frozen patch embedding takes an input that carries its gradient
+([Tower blocks](../parallelism/data-parallelism.md#tower-blocks-under-reentrant-checkpointing)).
 
 ## Backend benchmark
 

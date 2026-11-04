@@ -104,6 +104,8 @@ A resume writes the bytes of a run that never stopped. It reads the checkpoint's
 
 vLLM reads the head through `VLLM_SPECULATIVE_CONFIG`, SGLang through `--speculative-draft-model-path`. The rollout weight sync carries none: the knobs live on the SFT script alone, every trainer that syncs refuses a head at construction, and a load through the stock class holds none, so the server drafts with the head of its launch checkpoint. See [Rollout servers](../infrastructure/rollout-servers.md).
 
+A head can follow a policy another trainer produced: a `head_only` fit with `mtp_head_source` runs over that trainer's export. Tiny rows from SMPO and offline GRPO exports on Qwen3.5 MoE, GLM-4 Lite and Nemotron-H keep the trunk's bytes and move the head. A stock reload loads the result, and reports GLM-4 Lite's head keys as unexpected, since its class builds no layer past `num_hidden_layers`.
+
 `test_sft_mtp_head_serving.py`, 64 first-turn prompts at temperature 1, one draft token, by the engine's own counters, each against the release head on the same prompts:
 
 | Engine, head | Acceptance | Release head |
