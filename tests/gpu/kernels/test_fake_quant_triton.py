@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-"""Fused Triton MXFP8 fake-quant fast path, verifying that
-- it is bit-identical to the eager quantizer (``_block_round_trip``) on adversarial inputs: exact
-  powers of two, the 448 scale boundary, zeros, -0.0, subnormals, overflow, NaN, inf, e4m3 rounding
-  midpoints, an fp32 one-ulp scale edge, and a near-subnormal scale,
-- ``fake_quant`` routes CUDA / contiguous / last-axis / mxfp8 through it and everything else to eager,
-  including GPUs older than SM 8.9,
+"""Fused Triton MX fake-quant fast paths (mxfp8, mxfp4), verifying that
+- each is bit-identical to the eager quantizer (``_block_round_trip``) on adversarial inputs: exact
+  powers of two, the format-max scale boundary, zeros, -0.0, subnormals, overflow, NaN, inf, rounding
+  midpoints, an fp32 one-ulp scale edge, a near-subnormal scale, and for mxfp4 every e2m1 level and
+  midpoint of both signs at forty scales,
+- ``fake_quant`` routes CUDA / contiguous / last-axis / MX through them and everything else to eager,
+  and mxfp8 to eager on GPUs older than SM 8.9,
 - a new token count never compiles a new kernel variant, which under EP would stall the other ranks,
 - the straight-through backward is unchanged.
 
@@ -15,21 +16,48 @@ import torch
 import triton
 
 import halo.kernels.lowp.quantization as q
-from halo.kernels.lowp.fake_quant_triton import _mxfp8_fake_quant_kernel, fake_quant_mxfp8_triton
-from halo.kernels.lowp.quantization import _AMAX_FLOOR, E4M3_MAX, FORMAT_BLOCK_SIZE, _block_round_trip, fake_quant
+from halo.kernels.lowp.fake_quant_triton import (
+    _launch,
+    _mxfp4_fake_quant_kernel,
+    _mxfp8_fake_quant_kernel,
+    fake_quant_mxfp4_triton,
+    fake_quant_mxfp8_triton,
+)
+from halo.kernels.lowp.quantization import (
+    _AMAX_FLOOR,
+    E2M1_MAX,
+    E4M3_MAX,
+    FORMAT_BLOCK_SIZE,
+    _block_round_trip,
+    fake_quant,
+)
 from tests.common.harness import gpu_test_main, record_check
 
 DEV = "cuda"
 K = 2880
+# Format → (fused kernel, the element maximum its scale targets).
+FUSED = {"mxfp8": (fake_quant_mxfp8_triton, E4M3_MAX), "mxfp4": (fake_quant_mxfp4_triton, E2M1_MAX)}
 
 
-def _cases():
+def _e2m1_grid() -> torch.Tensor:
+    """Rows of 32-element blocks, each led by the format max so the block scale is exactly ``2^k``, then every
+    multiple of 1/8 in [-6, 6]: all e2m1 levels, all midpoints (the tie cases) and the values between them."""
+    grid = torch.arange(-48, 49, device=DEV, dtype=torch.float32) / 8
+    body = grid.repeat(2)[: 4 * 31].reshape(4, 31)
+    lead = torch.full((4, 1), E2M1_MAX, device=DEV)
+    row = torch.cat([lead, body], dim=1).reshape(-1)
+    scales = 2.0 ** torch.arange(-20, 20, device=DEV, dtype=torch.float32)
+    return (row[None, :] * scales[:, None]).to(torch.bfloat16)
+
+
+def _cases(fmt: str):
+    format_max = FUSED[fmt][1]
     g = torch.Generator(device=DEV).manual_seed(0)
     bf = torch.bfloat16
     for shape in [(4096, K), (16384, K), (32, K, K), (7, 32), (1, 64)]:
         yield f"rand{shape}", torch.randn(shape, device=DEV, generator=g, dtype=bf)
     yield "pow2", (2.0 ** torch.randint(-20, 20, (256, K), device=DEV)).to(bf)
-    yield "amax_edge", torch.full((64, K), 448.0, device=DEV, dtype=bf)
+    yield "amax_edge", torch.full((64, K), format_max, device=DEV, dtype=bf)
     yield "zeros", torch.zeros(64, K, device=DEV, dtype=bf)
     yield "negzero", torch.full((64, K), -0.0, device=DEV, dtype=bf)
     yield "tiny", torch.full((64, K), 1e-40, device=DEV, dtype=bf)
@@ -39,14 +67,17 @@ def _cases():
     yield "nan", t
     t = torch.randn(64, K, device=DEV, dtype=bf)
     t[0, 0] = float("inf")
+    t[1, 0] = float("-inf")
     yield "inf", t
     yield "midpoints", torch.randn(64, K, device=DEV, dtype=bf) * 1.0625
-    t = torch.full((64, K), 448.0 * 2.0**5, device=DEV)
+    t = torch.full((64, K), format_max * 2.0**5, device=DEV)
     yield "fp32_ulp_edge", torch.nextafter(t, torch.full_like(t, 1e30))
     yield "near_denorm", torch.full((64, K), 3e-36, device=DEV, dtype=bf)
     yield "empty", torch.empty(0, K, device=DEV, dtype=bf)
     yield "fp16", torch.randn(64, K, device=DEV, dtype=torch.float16)
     yield "fp32", torch.randn(64, K, device=DEV, dtype=torch.float32)
+    if fmt == "mxfp4":
+        yield "e2m1_grid", _e2m1_grid()
 
 
 def _assert_bits_equal(out, ref, name):
@@ -64,60 +95,67 @@ def _kernel_supported() -> bool:
 
 
 class _Spy:
-    """Counts fast-path calls. ``_FakeQuant`` resolves the kernel as a ``quantization`` module global at
-    call time, so patching the module attribute is enough."""
+    """Counts fast-path calls per format by swapping the kernels in ``_FUSED_FAKE_QUANT``, which
+    ``_FakeQuant`` reads at call time."""
 
     def __init__(self):
-        self.calls = 0
-        self._orig = q.fake_quant_mxfp8_triton
+        self.calls = {fmt: 0 for fmt in q._FUSED_FAKE_QUANT}
+        self._orig = dict(q._FUSED_FAKE_QUANT)
 
     def __enter__(self):
-        def spy(t, *a, **k):
-            self.calls += 1
-            return self._orig(t, *a, **k)
+        for fmt, (kernel, format_max) in self._orig.items():
 
-        q.fake_quant_mxfp8_triton = spy
+            def spy(t, *a, _fmt=fmt, _kernel=kernel, **k):
+                self.calls[_fmt] += 1
+                return _kernel(t, *a, **k)
+
+            q._FUSED_FAKE_QUANT[fmt] = (spy, format_max)
         return self
 
     def __exit__(self, *_):
-        q.fake_quant_mxfp8_triton = self._orig
+        q._FUSED_FAKE_QUANT.update(self._orig)
 
 
 def test_bit_exact_against_eager():
-    """The kernel reproduces the eager quantizer bit-for-bit, NaN blocks included."""
-    if not _kernel_supported():
-        print("  below SM 8.9, the fp8 kernel cannot compile — skipped")
-        return
-    n = 0
-    for name, t in _cases():
-        ref = _block_round_trip(t, "mxfp8", -1).to(t.dtype)
-        _assert_bits_equal(fake_quant_mxfp8_triton(t, FORMAT_BLOCK_SIZE["mxfp8"], E4M3_MAX, _AMAX_FLOOR), ref, name)
-        n += 1
-    print(f"  {n} cases bit-exact — OK")
+    """Each kernel reproduces the eager quantizer bit-for-bit, NaN blocks and signed zeros included."""
+    for fmt, (kernel, format_max) in FUSED.items():
+        if fmt == "mxfp8" and not _kernel_supported():
+            print("  mxfp8: below SM 8.9, the fp8 kernel cannot compile — skipped")
+            continue
+        n = 0
+        for name, t in _cases(fmt):
+            ref = _block_round_trip(t, fmt, -1).to(t.dtype)
+            _assert_bits_equal(kernel(t, FORMAT_BLOCK_SIZE[fmt], format_max, _AMAX_FLOOR), ref, f"{fmt}/{name}")
+            n += 1
+        print(f"  {fmt}: {n} cases bit-exact — OK")
 
 
 def test_routing():
-    """fake_quant takes the fast path only for CUDA / contiguous / last-axis / mxfp8 / K % 32 == 0."""
+    """fake_quant takes the fast path only for CUDA / contiguous / last-axis / MX / K % 32 == 0."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
-    fast = int(_kernel_supported())  # below SM 8.9 even the canonical case runs eager
+    expected = {"mxfp8": int(_kernel_supported()), "mxfp4": 1}  # below SM 8.9 mxfp8 runs eager
     with _Spy() as s:
-        _assert_bits_equal(fake_quant(t, "mxfp8"), _block_round_trip(t, "mxfp8", -1), "wired")
-        assert s.calls == fast, f"canonical case: {s.calls} fast-path calls, expected {fast}"
-        fake_quant(t, "mxfp8", axis=0)  # non-last axis → eager
-        fake_quant(t, "mxfp4")  # other format → eager
-        fake_quant(t.t().contiguous().t(), "mxfp8")  # non-contiguous → eager
-        fake_quant(t.cpu(), "mxfp8")  # CPU → eager
-        assert s.calls == fast, f"fallback cases took the fast path ({s.calls - fast} extra calls)"
-    try:
-        fake_quant(torch.randn(8, 33, device=DEV, dtype=torch.bfloat16), "mxfp8")
-        raise AssertionError("non-divisible K did not raise")
-    except ValueError:
-        pass
+        for fmt in FUSED:
+            _assert_bits_equal(fake_quant(t, fmt), _block_round_trip(t, fmt, -1), f"{fmt} wired")
+        assert s.calls == expected, f"fast-path calls {s.calls}, expected {expected}"
+        for fmt in FUSED:
+            fake_quant(t, fmt, axis=0)  # non-last axis → eager
+            fake_quant(t.t().contiguous().t(), fmt)  # non-contiguous → eager
+            fake_quant(t.cpu(), fmt)  # CPU → eager
+        fake_quant(t, "nvfp4")  # tensor-wide scale → eager
+        assert s.calls == expected, f"fallback cases took the fast path: {s.calls}"
+    for fmt in FUSED:
+        try:
+            fake_quant(torch.randn(8, 33, device=DEV, dtype=torch.bfloat16), fmt)
+            raise AssertionError(f"{fmt}: non-divisible K did not raise")
+        except ValueError:
+            pass
     print("  routing and fallbacks — OK")
 
 
 def test_pre_sm89_falls_back():
-    """A GPU below SM 8.9 cannot compile the fp8 kernel, so mxfp8 runs eager there."""
+    """A GPU below SM 8.9 cannot compile the fp8 kernel, so mxfp8 runs eager there. mxfp4 uses no fp8 type
+    and keeps its kernel."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
     orig = torch.cuda.get_device_capability
     q._fp8_triton_supported.cache_clear()
@@ -125,7 +163,9 @@ def test_pre_sm89_falls_back():
     try:
         with _Spy() as s:
             _assert_bits_equal(fake_quant(t, "mxfp8"), _block_round_trip(t, "mxfp8", -1), "sm80")
-            assert s.calls == 0, "SM 8.0 took the fp8 Triton path"
+            assert s.calls["mxfp8"] == 0, "SM 8.0 took the fp8 Triton path"
+            _assert_bits_equal(fake_quant(t, "mxfp4"), _block_round_trip(t, "mxfp4", -1), "sm80 mxfp4")
+            assert s.calls["mxfp4"] == 1, "SM 8.0 dropped the mxfp4 kernel"
     finally:
         torch.cuda.get_device_capability = orig
         q._fp8_triton_supported.cache_clear()
@@ -134,39 +174,41 @@ def test_pre_sm89_falls_back():
 
 def test_no_recompile_across_token_counts():
     """Under EP the token count changes every step. ``n_blocks`` is not specialized, so a new count never compiles
-    a new variant mid-run, where one rank compiling would stall the others at the next collective."""
-    if not _kernel_supported():
-        print("  below SM 8.9, the fp8 kernel cannot compile — skipped")
-        return
-    compiled = []
+    a new variant mid-run, where one rank compiling would stall the others at the next collective. Each check runs
+    on a fresh copy of the kernel with the same ``do_not_specialize``, so variants that earlier tests compiled
+    cannot hide a new one."""
+    kernels = {"mxfp8": _mxfp8_fake_quant_kernel, "mxfp4": _mxfp4_fake_quant_kernel}
+    for fmt, kernel in kernels.items():
+        if fmt == "mxfp8" and not _kernel_supported():
+            print("  mxfp8: below SM 8.9, the fp8 kernel cannot compile — skipped")
+            continue
+        fresh = triton.jit(kernel.fn, do_not_specialize=kernel.do_not_specialize)
+        compiled = []
 
-    def hook(*, fn, **_):
-        if fn.jit_function is _mxfp8_fake_quant_kernel:
-            compiled.append(fn.name)
-        return False  # a truthy return would skip the compile
+        def hook(*, fn, _fresh=fresh, _compiled=compiled, **_):
+            if fn.jit_function is _fresh:
+                _compiled.append(fn.name)
+            return False  # a truthy return would skip the compile
 
-    def quant(*shape):
-        t = torch.randn(*shape, device=DEV, dtype=torch.bfloat16)
-        fake_quant_mxfp8_triton(t, FORMAT_BLOCK_SIZE["mxfp8"], E4M3_MAX, _AMAX_FLOOR)
-
-    quant(64, K)  # n_blocks 5760, divisible by 16
-    prev = triton.knobs.runtime.jit_cache_hook
-    triton.knobs.runtime.jit_cache_hook = hook
-    try:
-        quant(7, K)  # n_blocks 630, not divisible by 16
-        quant(1, 32)  # n_blocks 1
-    finally:
-        triton.knobs.runtime.jit_cache_hook = prev
-    assert not compiled, f"new token counts compiled {len(compiled)} new kernel variant(s)"
-    print("  no recompile across token counts — OK")
+        prev = triton.knobs.runtime.jit_cache_hook
+        triton.knobs.runtime.jit_cache_hook = hook
+        try:
+            for shape in [(64, K), (7, K), (1, 32)]:  # n_blocks 5760 (divisible by 16), 630, 1
+                t = torch.randn(*shape, device=DEV, dtype=torch.bfloat16)
+                _launch(fresh, t, FORMAT_BLOCK_SIZE[fmt], FUSED[fmt][1], _AMAX_FLOOR)
+        finally:
+            triton.knobs.runtime.jit_cache_hook = prev
+        assert len(compiled) == 1, f"{fmt}: 3 token counts compiled {len(compiled)} kernel variants, expected 1"
+        print(f"  {fmt}: no recompile across token counts — OK")
 
 
 def test_ste_backward():
-    """Straight-through: the gradient passes unchanged through the fast path."""
-    t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16, requires_grad=True)
-    g = torch.randn_like(t)
-    fake_quant(t, "mxfp8").backward(g)
-    assert torch.equal(t.grad, g), "backward is not identity"
+    """Straight-through: the gradient passes unchanged through each fast path."""
+    for fmt in FUSED:
+        t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16, requires_grad=True)
+        g = torch.randn_like(t)
+        fake_quant(t, fmt).backward(g)
+        assert torch.equal(t.grad, g), f"{fmt}: backward is not identity"
     print("  STE backward — OK")
 
 

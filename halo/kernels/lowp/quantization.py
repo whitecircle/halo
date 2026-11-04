@@ -13,7 +13,7 @@ import torch
 from torch._dynamo.exc import TorchDynamoException
 
 from halo.env import env_flag
-from halo.kernels.lowp.fake_quant_triton import fake_quant_mxfp8_triton
+from halo.kernels.lowp.fake_quant_triton import fake_quant_mxfp4_triton, fake_quant_mxfp8_triton
 from halo.kernels.lowp.spec import QuantFormat
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,12 @@ _NVFP4_GLOBAL_SCALE_DIVISOR = E4M3_MAX * E2M1_MAX
 
 # Elements per shared scale; the checkpoint exporter sizes its contraction axis from this.
 FORMAT_BLOCK_SIZE: dict[QuantFormat, int] = {"mxfp8": 32, "mxfp4": 32, "nvfp4": 16}
+# Formats with a fused Triton round trip, bit-identical to eager, and the element maximum it scales to. NVFP4's
+# tensor-wide global scale needs a pass over the whole tensor first, so it stays eager.
+_FUSED_FAKE_QUANT: dict[QuantFormat, tuple[Callable[..., torch.Tensor], float]] = {
+    "mxfp8": (fake_quant_mxfp8_triton, E4M3_MAX),
+    "mxfp4": (fake_quant_mxfp4_triton, E2M1_MAX),
+}
 # e8m0 power-of-two block scales (MX) or e4m3 ones (NVFP4).
 _POW2_SCALE: dict[QuantFormat, bool] = {"mxfp8": True, "mxfp4": True, "nvfp4": False}
 # Only power-of-two scales survive compile's reciprocal-multiply exactly; compiled NVFP4 would not match
@@ -257,15 +263,17 @@ class _FakeQuant(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
+        fused = _FUSED_FAKE_QUANT.get(fmt)
         if (
-            fmt == "mxfp8"
+            fused is not None
             and t.is_cuda
             and t.is_contiguous()
             and axis in (-1, t.ndim - 1)
             and t.shape[-1] % FORMAT_BLOCK_SIZE[fmt] == 0
-            and _fp8_triton_supported(t.device.index)
+            and (fmt != "mxfp8" or _fp8_triton_supported(t.device.index))
         ):
-            return fake_quant_mxfp8_triton(t, FORMAT_BLOCK_SIZE[fmt], E4M3_MAX, _AMAX_FLOOR)
+            kernel, format_max = fused
+            return kernel(t, FORMAT_BLOCK_SIZE[fmt], format_max, _AMAX_FLOOR)
         # Eager, as activation shapes vary and a compiled form would recompile constantly.
         return _block_round_trip(t, fmt, axis).to(t.dtype)
 
