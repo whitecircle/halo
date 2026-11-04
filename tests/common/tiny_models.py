@@ -32,6 +32,8 @@ from transformers import (
     Gemma4ForCausalLM,
     Gemma4ForConditionalGeneration,
     Gemma4TextConfig,
+    GemmaConfig,
+    GemmaForCausalLM,
     Glm4MoeLiteConfig,
     Glm4MoeLiteForCausalLM,
     Glm5NextConfig,
@@ -106,6 +108,7 @@ from tests.common.models import (
     BAILING_LING_3_TINY,
     BAILING_MOE_LING_MINI,
     BAILING_MOE_RING_MINI,
+    LAGUNA_XS_2_1,
     MISTRAL3_119B_MOE,
     TINY_ALTERNATING_SLIDING_CONFIG,
     TINY_BAILING_LING3_MLA_CONFIG,
@@ -377,9 +380,8 @@ def _with_live_ple_convs(model: PreTrainedModel) -> PreTrainedModel:
     return model
 
 
-def _tiny_bailing(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
-    """Bailing is remote code: its classes come from release ``repo``'s module, which needs the toolkit's shims to
-    import."""
+def _tiny_remote(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
+    """Remote code: the classes come from release ``repo``'s module, which needs the toolkit's shims to import."""
 
     def build(overrides: dict) -> PreTrainedModel:
         config = remote_config(repo)
@@ -394,7 +396,7 @@ def _tiny_bailing(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
 # registry.
 TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "bailing_moe": TinyFamily(
-        _tiny_bailing(BAILING_MOE_LING_MINI, TINY_BAILING_MOE_CONFIG),
+        _tiny_remote(BAILING_MOE_LING_MINI, TINY_BAILING_MOE_CONFIG),
         trust_remote_code=True,
         attention_targets=("query_key_value", "dense"),
     ),
@@ -557,14 +559,18 @@ TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausa
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
 # Ring-mini-linear-2.0: the Bailing family's other attention layout (Lightning Attention-2 beside softmax).
 TINY_BAILING_RING_FAMILY = TinyFamily(
-    _tiny_bailing(BAILING_MOE_RING_MINI, TINY_BAILING_RING_CONFIG),
+    _tiny_remote(BAILING_MOE_RING_MINI, TINY_BAILING_RING_CONFIG),
     trust_remote_code=True,
     ulysses_cp=False,
     attention_targets=("query_key_value", "dense"),
 )
+# Laguna's pinned hub file, which the Laguna recipes load, where the roster's entry builds the in-library classes.
+TINY_LAGUNA_REMOTE_FAMILY = TinyFamily(
+    _tiny_remote(LAGUNA_XS_2_1, TINY_LAGUNA_CONFIG), trust_remote_code=True, ulysses_cp=False
+)
 # Ling-3.0's MLA attention without its KDA layers, at the same shape.
 TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
-    _tiny_bailing(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
+    _tiny_remote(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
 )
 TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(MixtralConfig, MixtralForCausalLM, TINY_MIXTRAL_CONFIG))
 # Composites no family spec claims, so no EP layer wraps them, built on the classes the pinned transformers ships.
@@ -636,6 +642,8 @@ TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
         )
     ),
 }
+# Past that roster: no window, no softcap, and a head width of its own that the FA4 parity row sets.
+TINY_GEMMA_FAMILY = TinyFamily(_causal(GemmaConfig, GemmaForCausalLM, TINY_QWEN3_CONFIG))
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:

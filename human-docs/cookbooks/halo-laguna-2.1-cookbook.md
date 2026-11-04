@@ -27,9 +27,9 @@ halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/laguna-s-2.1-sft
 ```
 
-The recipe trains without gradient checkpointing. Its fit on a B300 is computed, not measured: about
-114 GB of activations per row beside about 75 GB of state. On smaller GPUs add
-`--gradient_checkpointing=true`. On four GPUs, launch with `-n 4` and add
+The recipe trains without gradient checkpointing, and this shape has not run on the full-size model. Its
+fit on a B300 is computed, not measured: about 114 GB of activations per row beside about 75 GB of state.
+On smaller GPUs add `--gradient_checkpointing=true`. On four GPUs, launch with `-n 4` and add
 `--expert_parallel_size=4 --max_length=2048 --gradient_accumulation_steps=8` for the same tokens per
 step. EP4 on eight GPUs is rejected at startup.
 
@@ -52,10 +52,12 @@ halo launch sft examples/sft/laguna/laguna-xs-2.1-ultrachat.yaml \
 halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 8 \
   --use_peft=true --learning_rate=1e-4 \
   --lora_target_modules=q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
+  --merge_expert_lora_on_save=true \
   --output_dir=/data/checkpoints/laguna-s-2.1-lora
 ```
 
-These targets adapt attention and the experts.
+These targets adapt attention and the experts. No tool merges expert adapters afterwards, so
+`merge_expert_lora_on_save` folds them into each save.
 
 ### GRPO
 

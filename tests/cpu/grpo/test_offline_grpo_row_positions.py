@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from datasets import Dataset
 from transformers import Mistral3Config, MistralConfig
 
 from halo.configs.grpo_offline import OfflineGRPOConfig
@@ -19,10 +18,9 @@ from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin, rows_forward
 from halo.trainers.grpo.offline import trainer as offline_module
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.offline_grpo import (
-    MISTRAL4_SCALE_STEP,
     MISTRAL4_STEPPED_ROPE,
-    OFFLINE_WORDS,
     make_offline_tokenizer,
+    mixed_length_groups,
     offline_grpo_config,
     offline_grpo_dataset,
 )
@@ -97,22 +95,6 @@ def test_a_relative_attention_keeps_the_padded_path_at_batch_two():
     assert not attention_reads_row_positions(Mistral3Config(text_config=MistralConfig())), "a dense tower's wrapper"
 
 
-def _mixed_length_groups(count: int) -> Dataset:
-    """A long prompt beside a short one, so a padded batch would push the short row past the fixed indices."""
-    records = []
-    for index in range(count):
-        word = OFFLINE_WORDS[index % len(OFFLINE_WORDS)]
-        repeats = 1 if index % 2 else MISTRAL4_SCALE_STEP
-        records.append(
-            {
-                "prompt": " ".join(["question", *[word] * repeats, "answer"]),
-                "completions": [f"yes {word}", f"no {word} maybe"],
-                "rewards": [1.0, -1.0],
-            }
-        )
-    return Dataset.from_list(records)
-
-
 @pytest.mark.parametrize("kl_beta", [0.0, 0.1], ids=["no_reference", "reference_sweep"])
 @pytest.mark.parametrize("name", list(_ROWS))
 def test_a_full_run_forwards_every_row_alone_with_no_flag_set(tmp_path, name, kl_beta):
@@ -152,7 +134,7 @@ def test_a_full_run_forwards_every_row_alone_with_no_flag_set(tmp_path, name, kl
     trainer = OfflineGRPOTrainer(
         model=model,
         args=args,
-        train_dataset=_mixed_length_groups(8),
+        train_dataset=mixed_length_groups(8),
         processing_class=tokenizer,
         parallelism_config=ParallelismConfig(),
         moe_balancing="none",

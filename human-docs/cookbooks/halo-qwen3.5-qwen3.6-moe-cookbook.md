@@ -13,8 +13,8 @@ Modes: the Qwen3.5 / Qwen3.6 MoE row of the [Supported Matrix](../supported-matr
 
 - **Checkpoints:** `Qwen/Qwen3.6-35B-A3B` at revision `995ad96eacd98c81ed38be0c5b274b04031597b0` and
   `Qwen/Qwen3.5-35B-A3B` at `59d61f3ce65a6d9863b86d2e96597125219dc754`. The 122B-A10B trains from
-  `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` at EP8 on one node. The recipe is also sized for EP16
-  across two nodes.
+  `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` at EP8 on one node. Across two nodes, add
+  `--expert_parallel_size=16 --ep_scope=global --max_length=8192`.
 - **GPUs:** eight at EP8, 32 experts per GPU, at 33,000 tokens.
 
 ## Recipes

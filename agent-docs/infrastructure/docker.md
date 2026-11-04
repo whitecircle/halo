@@ -21,7 +21,7 @@ tiers run on 580.159.03), and the NVIDIA Container Toolkit.
 The `Makefile` wraps the `docker run` once; `train` runs `halo launch` with `METHOD` (default `sft`):
 
 ```bash
-make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml NPROC=8 EXTRA="--expert_parallel_size=8"
+make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml NPROC=8 EXTRA="--expert_parallel_size=8 --use_grouped_gemm=true"
 ```
 
 The Makefile's `DOCKER_RUN` runs in the foreground and adds `--network host` (the server GPU tiers
@@ -176,7 +176,7 @@ DeepEP or the base image.
 | Variable | Value | Effect |
 |----------|-------|--------|
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Latched by the driver at `cuInit` (DeepEP import), so it must be set from PID 1. The setting EP is validated with ([DeepEP](deepep.md#environment-variables)); it does not make racy single-domain multi-group EP safe, which `ParallelismConfig` rejects. |
-| `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` | `0` | The NGC base defaults fp32 matmuls to TF32, whose 10-bit mantissa collapses adjacent RoPE positions past 2048. |
+| `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` | `0` | The NGC base defaults fp32 matmuls to TF32, whose 10-bit mantissa collapses adjacent RoPE positions past 2048 in remote code that computes RoPE with a matmul. |
 | `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED` | `1` | Persist the FA4 CuTe DSL kernel cache (~10 s JIT per kernel on first use). |
 | `CUTE_DSL_ENABLE_TVM_FFI` | `1` | TVM-FFI direct-invocation ABI for CuTe DSL kernels. Liger's CuTe DSL RoPE returns wrong results under it, so the toolkit pins Liger's RoPE to Triton ([Liger → Kernel implementation](../optimization/liger-kernels.md#kernel-implementation)). |
 | `EP_SUPPRESS_NCCL_CHECK` | `1` | Silences DeepEP's duplicate-NCCL-runtime check, which flags the NGC base's HPC-X NCCL transport plugin beside the pip `libnccl.so.2`. |
@@ -191,7 +191,10 @@ DeepEP or the base image.
 across `--rm` containers. An unwritable location falls back with a warning; set the variables to keep
 the caches elsewhere. The Triton cache matters: fla's autotuners persist measured configs there
 (`FLA_CACHE_RESULTS` defaults on), and some keys are shape-derived, so an ephemeral cache re-benchmarks
-per sequence length every run.
+per sequence length every run. Fresh caches can pick differently, and a different pick changes bf16 rounding,
+which routing and index selection can amplify: across separate cold caches tiny GLM-5 Next's logits moved up to
+12.4%, while Qwen3.5-35B-A3B, Qwen3.6-35B-A3B and GLM-5.3-Flash cut to six layers stayed bit-identical. Runs that
+must match bit for bit share an already warm cache, and no other run fills it meanwhile.
 
 The FA4 cache serializes each kernel file's writer with `flock`. Where `flock` fails (Lustre without
 `flock`), the first use of each kernel raises after a 15 s lock timeout, mid-run included; where locks

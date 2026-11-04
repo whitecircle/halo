@@ -32,6 +32,7 @@ _VLM_MODEL_ID = "stub/qwen3.5-9b"
 _PROMPT = [{"role": "user", "content": "Describe the picture"}]
 _CHOSEN = [{"role": "assistant", "content": "A red square"}]
 _REJECTED = [{"role": "assistant", "content": "A blue circle"}]
+_SIDES = ("prompt", "chosen", "rejected")
 
 
 class StubTextTokenizer(StubTokenizer):
@@ -105,6 +106,10 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
 
     patches = [
         mock.patch.object(module, "reject_multimodal_model_without_seq_cls_head"),
+        mock.patch(
+            "halo.entrypoints.data_setup.probe_checkpoint",
+            return_value=(model.config, is_vlm_model(_VLM_MODEL_ID, model.config)),
+        ),
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(module, "load_model_and_tokenizer", return_value=(model, tokenizer)),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
@@ -171,6 +176,32 @@ def test_a_text_checkpoint_on_text_pairs_stays_a_text_run(tmp_path):
     captured, tokenizer, _processor, processor_loader = _run_rewards(tmp_path, _dataset(), model_type="qwen3")
     assert captured["processing_class"] is tokenizer
     processor_loader.assert_not_called()
+
+
+@pytest.mark.parametrize("column", ["prompt", "chosen", "rejected"])
+@pytest.mark.parametrize(
+    ("part", "message"),
+    [
+        ({"type": "video", "video": "a.mp4"}, "no Halo collator feeds"),
+        ({"type": "image", "image": "a.png"}, "on the TEXT pipeline"),
+    ],
+    ids=["video", "image"],
+)
+def test_a_text_run_refuses_a_media_part_on_any_row_ahead_of_trls_tokenize_map(tmp_path, column, part, message):
+    """TRL templates these rows itself, into placeholders with no pixels. The first row carries none, so only a read of
+    every row sees it, and no image column makes this an image run."""
+    role = "user" if column == "prompt" else "assistant"
+    rows = [
+        {
+            key: [{"role": role if key == column else "user", "content": [{"type": "text", "text": "hi"}]}]
+            for key in _SIDES
+        }
+        for _ in range(2)
+    ]
+    rows[1][column] = [{"role": role, "content": [part, {"type": "text", "text": "this?"}]}]
+    split = Dataset.from_list(rows)
+    with pytest.raises(ValueError, match=message):
+        _run_rewards(tmp_path, DatasetDict({"train": split, "test": split}))
 
 
 def test_mistyped_images_field_raises_before_training(tmp_path):

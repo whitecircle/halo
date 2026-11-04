@@ -31,8 +31,8 @@ contract. No mismatch phase: save and resume run the same topology by constructi
 cp_size=2, ``--mode tp`` uses dense Qwen3 with native TP2, and ``--mode fsdp`` uses FSDP2 alone.
 Each runs phases 1-3.
 
-``--fp32-masters`` enables router, expert and non-expert masters together. The ``ep1`` row needs
-``--unsharded-ep1-experts``: managed EP1 experts cannot combine with ``fp32_non_ep_params``.
+``--fp32-masters`` enables router, expert and non-expert masters together; a dense mode has only the last. The ``ep1``
+row needs ``--unsharded-ep1-experts``: managed EP1 experts cannot combine with ``fp32_non_ep_params``.
 ``--eager-loading`` selects the non-lazy EP loader. Each master row checks live dtypes and that
 trained values outside BF16's representable set survive resume bit for bit. ``--fused-adamw`` (with
 ``--fp32-masters``) turns AdamWBF16 off, so the trainer builds its tensor-type-grouped optimizer under the default
@@ -128,8 +128,8 @@ def _parallelism_config(
         ep_size=world_size if mode in ("ep", "ep_cp") else 1,
         cp_size=world_size if mode in ("cp", "ep_cp") else 1,
         tp_size=world_size if mode == "tp" else 1,
-        ep_fp32_router=fp32_masters,
-        ep_fp32_experts=fp32_masters,
+        ep_fp32_router=fp32_masters and mode in MOE_MODES,
+        ep_fp32_experts=fp32_masters and mode in MOE_MODES,
         fp32_non_ep_params=fp32_masters,
         ep_lazy_loading=not eager_loading,
         fsdp_shard_ep1_experts=not unsharded_ep1_experts,

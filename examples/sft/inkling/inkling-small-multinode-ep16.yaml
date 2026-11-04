@@ -6,11 +6,6 @@
 
 # --- Model ---
 model_name_or_path: thinkingmachines/Inkling-Small
-# transformers defaults moe_intermediate_size=3072 and its compat shim only maps
-# dense_intermediate_size; the checkpoint stores the expert width as intermediate_size=2048.
-# Without this override every expert tensor is built 3072-wide and the load hard-fails.
-model_init_kwargs:
-  moe_intermediate_size: 2048
 # No Inkling flash-attention dispatch in transformers — pin sdpa so ranks cannot fall back unevenly.
 attn_implementation: sdpa
 # The causal-LM loss never reads router_logits — no aux-loss path; auto resolves here anyway.

@@ -56,8 +56,8 @@ Each selected rank writes into `profiler_output_dir`; artifacts carry a `-cycleN
 
 Traces label the toolkit's own phases as named ranges: `ep.dispatch` / `ep.expert_compute` /
 `ep.combine` around the DeepEP spans of every EP layer, and `grad_sync.reduce_bucketed` around the
-post-backward grad-sync sweep — so the all-to-all and grad-sync fractions read off the timeline
-directly.
+post-backward grad-sync sweep — so the EP and grad-sync fractions read off the timeline directly. A rank's
+`ep.combine` includes its wait for the slowest rank, so it is not wire time.
 
 `with_stack=True` puts the Python frames in the trace itself (`python_function` events, readable in
 Perfetto and the TraceLens workbook of §1b); torch's collapsed-stacks export writes nothing on the
@@ -135,7 +135,8 @@ Open the Chrome trace in Perfetto and read the gaps on the CUDA stream:
 
 - Large gaps with NCCL kernels (`ncclDevKernel…`, all-to-all, reduce-scatter) →
   communication-bound. On multi-node, check whether the slow collective is cross-node (RDMA) that
-  could be kept NVLink-local ([Multi-Node](../parallelism/multi-node.md)).
+  could be kept NVLink-local ([Multi-Node](../parallelism/multi-node.md)). At single-node ep8, DeepEP combine gaps are
+  mostly the wait for the busiest rank ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)).
 - CPU thread busy, GPU idle → dataloader / host overhead; confirm with a py-spy flame graph (§1c)
   and raise `dataloader_num_workers`.
 - Back-to-back GEMM/attention, GPU ~100% busy → compute-bound (the good case); read `top_ops.txt`
@@ -158,9 +159,9 @@ per rank without a code change.
 
 **EP phase split** — `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` swaps the EP layers'
 dispatch/expert-compute/combine labels for the benchmark's span timer (`tests/common/ep_span_timer.py`),
-which times each phase on CUDA events, and prints the per-layer split on rank 0. It syncs twice per
-phase, so it measures the communication fraction, not throughput. `enable_torch_profiler` shows the
-same `ep.*` spans at no cost.
+which times each phase on CUDA events, and prints each rank's per-layer split past the warm-up steps. It
+syncs twice per phase, so it measures shares, not throughput, and a rank's combine includes its wait for the
+slowest rank. `enable_torch_profiler` shows the same `ep.*` spans at no cost.
 
 ## 3. GPU memory profiling
 

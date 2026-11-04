@@ -118,16 +118,19 @@ def dataset_declares_images_across_ranks(dataset, conversation_field: str | None
     return agree_probe_across_ranks(local, "the loaded dataset", "dataset_declares_images_across_ranks")
 
 
-def reject_unsupported_media_across_ranks(dataset, columns: tuple[str, ...], method: str) -> None:
+def reject_unsupported_media_across_ranks(
+    dataset, columns: tuple[str, ...], method: str, *, reject_row=reject_unsupported_media_parts
+) -> None:
     """COLLECTIVE, for rows TRL renders itself, so no renderer of ours refuses them row by row. A presharded corpus
-    answers per rank, so the refusal is agreed."""
+    answers per rank, so the refusal is agreed. A text run passes ``reject_image_content``, which refuses image parts
+    too."""
     reason = None
     try:
         for split in _splits(dataset):
             for column in columns:
                 if column in split.column_names:
                     for conversation in split[column]:
-                        reject_unsupported_media_parts(conversation, f"{method} column {column!r}")
+                        reject_row(conversation, f"{method} column {column!r}")
     except ValueError as refused:
         reason = str(refused)
     reject_across_ranks(reason, f"{method} media parts", ValueError)

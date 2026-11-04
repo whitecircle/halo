@@ -113,7 +113,7 @@ baseline is the 4k–16k table above):*
 | 16k | 7,010 | 25,395 | 22,729 | 16,335 |
 
 Measured 4k–16k here; EP8 32k·b1 GC-off also trains on the default elastic transport, at a 159.4 GiB
-peak ([Throughput Benchmarks](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)), and past ~64k
+peak ([Throughput Benchmarks](throughput-benchmarks.md#where-the-ep-steps-time-goes)), and past ~64k
 tokens/rank nothing fits GC-off.
 
 ## Long context: 64k → 256k
@@ -166,7 +166,7 @@ fails on both transports. Past that, split further with CP (EP8+CP8 = 16k/rank a
 ## Second model: Qwen3-30B-A3B
 
 *Separate run set. b1 · GC-on · TRL ZeRO-3 · Halo ZeRO-2 · elastic.* The win holds but is smaller: the heavier router
-(top_k=8 vs gpt-oss's 4) makes a fatter all-to-all, and ZeRO-3 shards the 30B leanly.
+(top_k=8 vs gpt-oss's 4) sends each token to twice the experts, and ZeRO-3 shards the 30B leanly.
 
 | Qwen3-30B b1 | Stock TRL (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|

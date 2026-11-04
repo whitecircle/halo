@@ -297,7 +297,7 @@ every variant runs faster than its 12,432 tok/s/GPU. Experts-only is 5% faster t
 the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either alone.
 
 On `qwen3-30b-a3b` (128 experts) at EP=2, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and
-46.7 GiB. At batch 1 the step is communication-bound, so tok/s/GPU varies ±10% run-to-run.
+46.7 GiB. At batch 1 tok/s/GPU varies ±10% run-to-run.
 
 ## Reference model handling
 

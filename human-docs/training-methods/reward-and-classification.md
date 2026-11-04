@@ -5,7 +5,7 @@ Both methods put a small scoring head on a language model and train it with
 and is fit to preference pairs; use it to rank or filter generations. A classifier emits a label per
 document; use it to tag them. Both need a sequence-classification head for the model family, which
 transformers ships for most dense text families but, among the supported MoE families, only for GPT-OSS,
-Qwen3 MoE and Mistral 4; Halo adds Gemma 4 and MoE Qwen3.5/3.6.
+Qwen3 MoE, Qwen3-Next and Mistral 4; Halo adds Gemma 4 and MoE Qwen3.5/3.6.
 
 ## Reward modeling
 

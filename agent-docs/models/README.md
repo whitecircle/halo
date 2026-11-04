@@ -36,7 +36,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹ The tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate; 8B and up split.
 
-² Text-only batches: a batch carrying `pixel_values` raises mid-run.
+² Text rows only: SFT and SMPO refuse an image run under CP at startup, and the wrapper raises on a batch carrying `pixel_values`.
 
 ³ `tensor_parallel_size` must divide the KV heads: at most 2 on 35B-A3B.
 
@@ -44,7 +44,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ⁵ Only the MLA expansion projections shard.
 
-⁶ Tiny-model verified only. Laguna and DeepSeek-V4 ETP: pure ETP and EP+ETP train, save and resume in the precompute-resume suites. Command A+: only EP runs at full scale.
+⁶ Tiny-model verified only. Laguna and DeepSeek-V4 ETP: pure ETP and EP+ETP train, save and resume in the precompute-resume suites. Command A+: only EP8 ran on the full checkpoint, on Halo 1.0.0 or earlier.
 
 ⁷ Ling 2.0 only; Ring-mini-linear-2.0 and Ling 3.0 are refused. EP+CP's only GPU test is a tiny-model LoRA row.
 
@@ -115,7 +115,7 @@ family pins a parameter). The reward-scoring tool casts the whole model, buffers
 Each family page covers its model-specific caveats (attention quirks, checkpoint variants, balancing) and why it drops an axis.
 
 - [Qwen3](qwen3.md) — dense and MoE; reference platform for trainers and tests.
-- [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) — hybrid linear/full attention; the shipped EP config trains 35B-A3B. The dense Qwen3.8-27B runs the dense path.
+- [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) — hybrid linear/full attention; the shipped EP config trains 35B-A3B. The dense Qwen3.8-27B runs the dense path, Qwen3.8-2.4T-A95B the MoE one.
 - [Qwen3-Next](qwen3-next.md) — Qwen3.5-MoE's block and hybrid attention under a router with a configurable renormalization; per-expert hub checkpoints.
 - [Qwen3.8-Flash-Next](qwen4_exp.md) — experimental: Qwen3-Next's router over hyper-connection streams, sparse QSA attention and a 95 GiB n-gram table held in host memory.
 - [GPT-OSS](gpt-oss.md) — 20B/120B, GLU experts and attention sinks.

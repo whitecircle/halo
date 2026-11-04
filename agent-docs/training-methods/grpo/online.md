@@ -2,7 +2,7 @@
 
 RLVR (Reinforcement Learning with Verifiable Rewards) is on-policy GRPO scored by the config's [reward terms](rewards/README.md), `\boxed{}` exact match by default. Trainer `DistributedOnlineGRPOTrainer`, script `scripts/training/grpo/online.py`. A separate vLLM server generates and receives weights over NCCL; the trainer scores rewards.
 
-Parallelism: EP, TP, EP+TP, EP+ETP and pure ETP (`ep_size=1`). CP and PP are refused before the model loads.
+Parallelism: FSDP2 data parallelism (HSDP across NVLink domains), EP, TP, EP+TP, EP+ETP and pure ETP (`ep_size=1`). CP and PP are refused before the model loads. Which families: [Rollout Servers](../../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
 ![Online GRPO cycle: vLLM generates a group per prompt, the reward terms score it, advantages are group-normalized, the loss steps, and weights sync back over NCCL](../../assets/diagrams/online_grpo_pipeline.png)
 
@@ -185,15 +185,15 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
 
 `halo launch grpo/online <config> --nproc 7` builds the same line (FSDP2 data parallelism); the device split stays yours. Add `--tensor_parallel_size` for dense TP or `--expert_parallel_size` for MoE.
 
-Under EP, set `expert_parallel_size` to the training-GPU count so the trainer forms **one** DeepEP group:
+Under EP, `expert_parallel_size` equal to the training-GPU count forms one DeepEP group, as the recipes do. `expert_parallel_size: 2` also runs as several 2-rank groups, and node-local groups repeat across NVLink domains:
 
-- Above `expert_parallel_size: 2`, a group narrower than the NVLink domain is rejected ([DeepEP](../../infrastructure/deepep.md#ep-grouping-what-is-reliable)).
+- Within one NVLink domain, a group above `expert_parallel_size: 2` narrower than the domain is rejected ([DeepEP](../../infrastructure/deepep.md#ep-grouping-what-is-reliable)).
 - `num_experts` must divide by `ep_size`, so most rosters want a power-of-two split: trainer on GPUs 0–3 with `--expert_parallel_size=4`, server on `VLLM_CUDA_DEVICES=4,5,6,7`.
 - Under EP+TP, `tp_size` must divide the NVLink domain and `ep_size` must be a multiple of `tp_size`.
 
 ### LoRA
 
-Add `use_peft: true` and the `lora_*` fields. LoRA runs under FSDP2 DP, EP and pure ETP (attention adapters only: native expert LoRA is refused at `expert_tensor_parallel_size > 1`); under TP and EP+TP every adapter is **rejected**, native expert adapters included.
+Add `use_peft: true` and the `lora_*` fields. LoRA runs under FSDP2 DP, EP, EP+ETP and pure ETP (under ETP attention adapters only: native expert LoRA is refused at `expert_tensor_parallel_size > 1`); under TP and EP+TP every adapter is **rejected**, native expert adapters included.
 
 The weight sync folds each adapter, native expert-LoRA included, into its base weight as it sends it; vLLM loads no adapter and the trainer's frozen base is never written ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
@@ -234,7 +234,7 @@ Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`
 | Symptom | Cause | Fix |
 |---|---|---|
 | All rewards zero | The policy emits no `\boxed{}` | Ask for it in `system_prompt`, raise `max_completion_length`, read the parquet |
-| IS ratio far from 1 | Trainer and engine disagree (template, sinks, dropout) | Match the served model; `reset_sinks: false` for GPT-OSS |
+| IS ratio far from 1 | Trainer and engine disagree (template, sinks, dropout); a small gap on identical weights is [bf16 routing noise](../async-grpo/objective.md#trainer-and-engine-noise) | Match the served model; `reset_sinks: false` for GPT-OSS |
 | Hang at sync or generation | Server down or wedged, a GPU shared with a trainer rank, blocked ports | `curl .../health`; check both containers' `CUDA_VISIBLE_DEVICES`; raise `DIST_NCCL_TIMEOUT_MINUTES` (default `30`); [Rollout Servers](../../infrastructure/rollout-servers.md#troubleshooting) |
 | OOM | Full-vocab logits or a long completion | `use_chunked_grpo_logprobs: true`, lower the batch or `max_completion_length`, raise EP size |
 

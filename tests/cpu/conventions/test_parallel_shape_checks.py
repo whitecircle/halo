@@ -16,6 +16,7 @@ from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.parallelism import make_parallelism_config
+from tests.common.tiny_models import TINY_UNWRAPPED_MOE_FAMILY, tiny_family_model
 
 WORLD_SIZE = 2
 NUM_EXPERTS = TINY_QWEN3_MOE_CONFIG["num_experts"]
@@ -85,6 +86,11 @@ def test_an_etp_run_reads_the_sharding_off_every_layer(expert_tp_size, ok):
     checks = parallel_shape_checks(model, _config(ep_size=1, expert_tp_size=WORLD_SIZE))
     assert checks["expert_ffn_sharded_etp_way"] is ok
     assert "expert_bank_split_ep_way" not in checks, "ep_size=1 splits no bank"
+
+
+def test_a_moe_with_no_ep_class_owes_no_ep_layer():
+    model = tiny_family_model(TINY_UNWRAPPED_MOE_FAMILY)
+    assert parallel_shape_checks(model, _config()) == {}, "grouped GEMM has no layer to put on stock experts"
 
 
 def test_a_dense_model_owes_no_ep_layer():

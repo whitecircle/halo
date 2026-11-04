@@ -17,7 +17,7 @@ from trl import GRPOConfig
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
 from halo.distributed.fsdp import reshard_fsdp2_modules
-from halo.env import env_int, env_str
+from halo.env import env_flag, env_int, env_str
 from halo.environments.episode_scoring import EpisodeGrade
 from halo.environments.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
@@ -71,6 +71,7 @@ MAX_STEPS = env_int("HALO_TEST_ENV_GRPO_MAX_STEPS", 2)
 # Overrides for a family the defaults do not fit: a backend its code lacks (Bailing has no FA4), or projection names
 # the checkpoint index cannot derive (``query_key_value``). Unset keeps auto-selection.
 ATTN_IMPL = env_str("HALO_TEST_ENV_GRPO_ATTN_IMPL") or None
+TRUST_REMOTE_CODE = env_flag("HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE", True)
 LORA_TARGETS = [name for name in env_str("HALO_TEST_ENV_GRPO_LORA_TARGETS", "").split(",") if name] or None
 # Large, since the sync has to move the served weights measurably within MAX_STEPS.
 LEARNING_RATE = 1e-4
@@ -331,20 +332,22 @@ def record_routing_replay(
     probe: dict[str, float],
     acquired: list[bool],
 ) -> None:
-    """The engine's routed-expert ids reached the loss, lined up with the sampled tokens, and the trainer's router
-    agrees within bf16 noise. Each step's flip rate is held to a bar measured on this policy, since near-tie density
-    differs per family (top-8 of 128 flips far more than top-4 of 32). A popped round was sampled before later updates,
-    so its rate is recorded unbounded."""
+    """The recorded selection reached the loss and the live router agrees within noise. Under ``rollout`` the record is
+    the engine's routed-expert ids, lined up with the sampled tokens; under ``recompute`` it is the trainer's own no-grad
+    pass, with no coverage to check. Each step's flip rate is held to a bar measured on this policy, since near-tie
+    density differs per family (top-8 of 128 flips far more than top-4 of 32). A popped round was sampled before later
+    updates, so its rate is recorded unbounded."""
     history = trainer.state.log_history
     coverage = [
         {key: float(value) for key, value in entry.items() if key.startswith("routing/rollout_")}
         for entry in history
         if any(key.startswith("routing/rollout_") for key in entry)
     ]
-    checks["routing_replay_masks_assembled"] = bool(coverage)
-    checks["routing_replay_placed_every_mask"] = bool(coverage) and all(
-        step["routing/rollout_unresolved_frac"] == 0.0 for step in coverage
-    )
+    if trainer.async_config.routing_replay == "rollout":
+        checks["routing_replay_masks_assembled"] = bool(coverage)
+        checks["routing_replay_placed_every_mask"] = bool(coverage) and all(
+            step["routing/rollout_unresolved_frac"] == 0.0 for step in coverage
+        )
     flips = {
         int(entry["step"]): float(entry["routing/replay_flip_rate"])
         for entry in history
@@ -352,11 +355,16 @@ def record_routing_replay(
     }
     popped = {step for step in flips if step <= len(acquired) and acquired[step - 1]}
     fresh = {step: flip for step, flip in flips.items() if step not in popped}
-    bar = routing_flip_bar(probe["floor"], probe["misplaced"])
-    checks["routing_probe_floor_flips_a_selection"] = probe["floor"] > 0
-    checks["routing_probe_separates_noise_from_a_misplaced_mask"] = (
-        probe["misplaced"] >= ROUTING_PROBE_SEPARATION * probe["floor"]
+    # A router the floor's nudge already flips (36% on Laguna) puts the log-space midpoint too near a misplaced mask to
+    # mean anything, so the rate answers to the separation itself.
+    separated = probe["misplaced"] >= ROUTING_PROBE_SEPARATION * probe["floor"]
+    bar = (
+        routing_flip_bar(probe["floor"], probe["misplaced"])
+        if separated
+        else probe["misplaced"] / ROUTING_PROBE_SEPARATION
     )
+    checks["routing_probe_floor_flips_a_selection"] = probe["floor"] > 0
+    checks["routing_probe_floor_below_a_misplaced_mask"] = probe["floor"] < probe["misplaced"]
     checks["routing_replay_flip_rate_within_the_measured_bar"] = 1 in fresh and all(
         flip <= bar for flip in fresh.values()
     )
@@ -496,7 +504,12 @@ def run_env_grpo_e2e(
 
     parallelism_config = layout.parallelism_config()
     model, peft_config = load_policy(
-        model_name, parallelism_config, peft, attn_implementation=ATTN_IMPL, lora_target_modules=LORA_TARGETS
+        model_name,
+        parallelism_config,
+        peft,
+        attn_implementation=ATTN_IMPL,
+        lora_target_modules=LORA_TARGETS,
+        trust_remote_code=TRUST_REMOTE_CODE,
     )
 
     trainer_kwargs = {
@@ -567,7 +580,7 @@ def run_env_grpo_e2e(
         # The deal resolves at construction; only false turns it off on a chunked row.
         checks["rows_dealt_by_length_as_set"] = trainer._orders_rows_by_length is (length_ordered is not False)
     acquired = record_prefetch_acquisitions(trainer) if prefetch_depth is not None else []
-    if routing_replay == "rollout":
+    if routing_replay != "none":
         # The probe row as the checkpoint routes it; the trained policy disagreeing with it is a real weight mismatch.
         probe_ids = routing_probe_ids(tokenizer, ctx.device)
         routing_before_training = capture_routing(trainer, probe_ids)
@@ -588,7 +601,7 @@ def run_env_grpo_e2e(
         record_grad_norms(trainer, checks, metrics)
     record_dp_layout(ctx, trainer, layout, checks)
     # Before the perturbation rounds move the weights off the trained policy.
-    probe = routing_probe_round(trainer, probe_ids, routing_before_training) if routing_replay == "rollout" else {}
+    probe = routing_probe_round(trainer, probe_ids, routing_before_training) if routing_replay != "none" else {}
 
     # Re-tokenization is a warning-only fallback, so a wrong capture spelling would train on tokens the engine never
     # sampled.
@@ -650,7 +663,7 @@ def run_env_grpo_e2e(
 
     if thinking_budget is not None:
         record_thinking_budget_checks(trainer, checks, thinking_budget)
-    if routing_replay == "rollout":
+    if routing_replay != "none":
         record_routing_replay(trainer, checks, metrics, probe=probe, acquired=acquired)
 
     if not resume:
@@ -688,7 +701,12 @@ def run_env_grpo_e2e(
     log(f"  resume: policy weights from {weights_source}")
 
     model, peft_config = load_policy(
-        weights_source, parallelism_config, peft, attn_implementation=ATTN_IMPL, lora_target_modules=LORA_TARGETS
+        weights_source,
+        parallelism_config,
+        peft,
+        attn_implementation=ATTN_IMPL,
+        lora_target_modules=LORA_TARGETS,
+        trust_remote_code=TRUST_REMOTE_CODE,
     )
     trainer = _make_trainer(
         model=model,

@@ -518,7 +518,7 @@ resumes in `tests/gpu/parallelism/pp/test_pp_resume.py` (dense `pp2`), exports i
 `test_pp_sft_trainer_e2e.py`, and does both with experts in `test_pp_ep_resume.py` (gpt-oss `pp2 × ep2`
 and `pp2 × etp2`); on per-node storage its checkpoint is also merged with `merge_pp_stages.py` and resumed
 from the merge, and the Qwen3-8B recipe saved, resumed, merged and loaded with `from_pretrained` on two
-nodes over EFA ([Verified topologies](multi-node.md#verified-topologies)). The other trainers run in
+nodes ([Verified topologies](multi-node.md#verified-topologies)). The other trainers run in
 `test_pp_trainer_checkpoints.py`, one row per trainer and two for offline GRPO (with and without the KL
 reference that rides each checkpoint as `reference_logps.pt`); each resume there restores the optimizer
 bit for bit and replays the unbroken run.

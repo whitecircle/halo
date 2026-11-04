@@ -329,8 +329,8 @@ def create_variable_length_sft_dataset(
 
 def create_benchmark_dataset(tokenizer, seq_len: int, num_samples: int = 64, seed: int = 0) -> Dataset:
     """The profiling corpus: ``num_samples`` rows of ``seq_len`` uniform token ids from the regular vocabulary,
-    identical on every rank. Uniform ids give nothing to fit, so an MoE's routing, and each EP rank's load and step
-    time, stays where it starts."""
+    identical on every rank. Uniform ids give little to fit, though an MoE's routing still moves over the first steps,
+    so measure past them."""
     rng = random.Random(seed)
     rows = [[rng.randrange(tokenizer.vocab_size) for _ in range(seq_len)] for _ in range(num_samples)]
     return Dataset.from_dict(

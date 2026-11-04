@@ -79,7 +79,7 @@ Optimizer micro-benchmark on one B300, Halo 1.1.0 or earlier (`tests/gpu/optimiz
 
 Muon's step costs 11–15× fused AdamW's here; the script prints no memory row for standard NS. This FFN is worst-case: it is all matrix params, so the Newton-Schulz cost is unamortized. On a real transformer, Newton-Schulz runs on smaller per-layer matrices amortized over a larger fwd+bwd, so the end-to-end slowdown is far smaller; measure on your model.
 
-The fused Triton kernels replace upstream Muon's per-batch Python loop + `torch.compile`, holding the Muon step at ~200 ms on Qwen3.5-2B (H200) versus ~1000 ms for the upstream path.
+The fused Triton kernels replace upstream Muon's per-batch Python loop + `torch.compile`.
 
 Run `tests/gpu/optimizers/bench_muon.py` or `tests/gpu/optimizers/bench_muon_qwen3_5.py` (real Qwen3.5-2B) for tables on your hardware.
 

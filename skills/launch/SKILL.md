@@ -39,7 +39,7 @@ its targets instead of re-typing `docker run`. Run `make help` and use a target 
 # EXTRA passes through extra CLI flags.
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-           NPROC=8 EXTRA="--expert_parallel_size=8"
+           NPROC=8 EXTRA="--expert_parallel_size=8 --use_grouped_gemm=true"
 
 # Tests, benchmarks, images, host-only gates
 make seed-hf-cache && make test-cpu          # CPU tier (no GPU, in the image)

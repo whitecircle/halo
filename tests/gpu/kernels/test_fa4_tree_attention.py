@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""A tree row on the real kernels matches every example run alone, against the fp32 stock forward.
+"""A tree row on the real kernels matches every example run alone, against the fp32 stock forward, dense decoders and
+MoE ones.
 
 The gather form calls the flash varlen kernel with more keys than queries, relying on its bottom-right causal and
 window alignment, a shape neither upstream nor the stock packed path exercises. Models route every token to all their
@@ -29,39 +30,52 @@ from halo.models.attention.tree import (
     warm_split_form_kernels,
 )
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
-from tests.common.harness import gpu_test_main
-from tests.common.numerics import max_abs_rel_err
+from tests.common.attention_kernels import kernel_calls
+from tests.common.harness import gpu_test_main, skip_unless_blackwell
+from tests.common.numerics import fro_rel_err, max_abs_rel_err
 from tests.common.rank_log import log
-from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.trees import concat_columns, example_rows, randomize_sinks, reference_varlen, tree_columns
 
 WINDOW = 16
 VOCAB = 1024
 HIDDEN_REL_TOL = 4e-2  # bf16 through four layers against fp32.
 GRAD_COSINE_FLOOR = 0.999
+GRAD_FRO_TOL = 5e-2  # A cosine is blind to a gradient's scale; this is the error a cosine at the floor allows.
 LEAK_REL_FLOOR = 0.3  # A row without its plan must be far from the reference, or the checks compare nothing.
 _ALL_EXPERTS = {"num_hidden_layers": 4, "num_experts_per_tok": 2}
+_QWEN3_5_GEOMETRY = {
+    "num_attention_heads": 16,
+    "num_key_value_heads": 2,
+    "head_dim": 256,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 32,
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+}
 FAMILIES = {
     "gpt_oss": {**_ALL_EXPERTS, "num_local_experts": 2, "sliding_window": WINDOW},
     "qwen3_moe": {**_ALL_EXPERTS, "num_experts": 2},
-    "qwen3_5_moe_text": {
-        **_ALL_EXPERTS,
-        "num_experts": 2,
-        "num_attention_heads": 16,
-        "num_key_value_heads": 2,
-        "head_dim": 256,
-        "linear_num_key_heads": 16,
-        "linear_num_value_heads": 32,
-        "linear_key_head_dim": 128,
-        "linear_value_head_dim": 128,
-    },
+    "qwen3_5_moe_text": {**_ALL_EXPERTS, "num_experts": 2, **_QWEN3_5_GEOMETRY},
+    "qwen3": {"num_hidden_layers": 4, "head_dim": 64},
+    "qwen3_5_text": {"num_hidden_layers": 4, **_QWEN3_5_GEOMETRY},
+}
+# Keyed by TREE_FAMILIES' model_type, which the tiny dense roster spells differently for Qwen3.5.
+_TINY_FAMILIES = {
+    **TINY_MOE_FAMILIES,
+    "qwen3": TINY_DENSE_FAMILIES["qwen3"],
+    "qwen3_5_text": TINY_DENSE_FAMILIES["qwen3_5"],
 }
 # FA2 returns no log-sum-exp gradient and drops GPT-OSS's live sinks; FA4's head_dim-256 kernel (Qwen3.5) has no such
 # gradient either.
+_SPLIT_ON_FA4 = {"flash_attention_4": ("split", "gather"), "flash_attention_2": ("gather",)}
+_GATHER_ONLY = {"flash_attention_4": ("gather",), "flash_attention_2": ("gather",)}
 BACKENDS = {
     "gpt_oss": {"flash_attention_4": ("split", "gather")},
-    "qwen3_moe": {"flash_attention_4": ("split", "gather"), "flash_attention_2": ("gather",)},
-    "qwen3_5_moe_text": {"flash_attention_4": ("gather",), "flash_attention_2": ("gather",)},
+    "qwen3_moe": _SPLIT_ON_FA4,
+    "qwen3_5_moe_text": _GATHER_ONLY,
+    "qwen3": _SPLIT_ON_FA4,
+    "qwen3_5_text": _GATHER_ONLY,
 }
 _MIXERS = ("self_attn", "linear_attn")
 # (takes a state, returns one, normalizes query and key itself) along a chain: root, middle, leaf. A tree row
@@ -190,7 +204,7 @@ def _gather_accumulation_errors() -> tuple[float, float]:
 
 def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
     torch.manual_seed(0)
-    model = tiny_family_model(TINY_MOE_FAMILIES[name], overrides=FAMILIES[name])
+    model = tiny_family_model(_TINY_FAMILIES[name], overrides=FAMILIES[name])
     finalize_loaded_model(model)
     randomize_sinks(model)
     family = TREE_FAMILIES[name]
@@ -217,9 +231,11 @@ def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
         model.eval()
         with torch.no_grad():
             for form in forms:
-                rel = max_abs_rel_err(_hidden(model, row, **plans[form]), reference)
-                log(f"  [{tag}, {form}] hidden vs each example alone (fp32) rel {rel:.2e}")
+                with kernel_calls() as calls:
+                    rel = max_abs_rel_err(_hidden(model, row, **plans[form]), reference)
+                log(f"  [{tag}, {form}] hidden vs each example alone (fp32) rel {rel:.2e}, kernels {dict(calls)}")
                 checks[f"{tag}_{form}_hidden_matches_examples_alone"] = rel < HIDDEN_REL_TOL
+                checks[f"{tag}_{form}_runs_on_that_kernel"] = set(calls) == {backend}
             leak = max_abs_rel_err(_hidden(model, row), reference)
             log(f"  [{tag}, no plan] hidden vs each example alone (fp32) rel {leak:.2e}")
             checks[f"{tag}_row_without_plan_is_far_from_examples_alone"] = leak > LEAK_REL_FLOOR
@@ -227,9 +243,13 @@ def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
         for form in forms:
             model.zero_grad(set_to_none=True)
             _loss(model, _hidden(model, row, **plans[form]), row["labels"]).backward()
-            cosine = torch.nn.functional.cosine_similarity(_mixer_gradients(model), truth, dim=0).item()
-            log(f"  [{tag}, {form}] mixer gradient cosine vs examples alone (fp32) {cosine:.6f}")
-            checks[f"{tag}_{form}_gradients_match_examples_alone"] = cosine > GRAD_COSINE_FLOOR
+            gradients = _mixer_gradients(model)
+            cosine = torch.nn.functional.cosine_similarity(gradients, truth, dim=0).item()
+            error = fro_rel_err(gradients, truth)
+            log(f"  [{tag}, {form}] mixer gradient vs examples alone (fp32): cosine {cosine:.6f}, error {error:.2e}")
+            checks[f"{tag}_{form}_gradients_match_examples_alone"] = (
+                cosine > GRAD_COSINE_FLOOR and error < GRAD_FRO_TOL
+            )
 
     if recurrence_states is not None:
         recurrence_states.clear()
@@ -261,6 +281,7 @@ def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
 
 @gpu_test_main(exact_world_size=1, prefix="fa4_tree_attention")
 def run(ctx):
+    skip_unless_blackwell("the FA4 tree rows")
     ensure_fa4_kernel_cache_env()
     patch_transformers_flash_varlen_int_seqlen()
     row = _tree_row(torch.Generator().manual_seed(0))

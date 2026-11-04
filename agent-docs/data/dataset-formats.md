@@ -16,7 +16,7 @@ re-splits it: train and test are concatenated and re-divided, destroying the cur
 split you want with `@split` to keep `test_size` splitting only that one (`openai/gsm8k:main@train`).
 
 A sharded or pre-processed dataset carries the split decided at preparation time; `test_size` there
-is ignored with a warning.
+is ignored with a warning. A pre-processed dataset also fixed its rows, so a `dataset_ratio` below 1 raises.
 
 Combine multiple datasets by passing lists; `dataset_ratio` is the per-dataset fraction kept:
 

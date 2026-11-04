@@ -43,7 +43,7 @@ parser.add_argument("--thinking-budget", type=int, default=None)
 # R3: the trainer replays the experts the engine routed each token through. Needs --enable-return-routed-experts with
 # the triton MoE backend (vLLM: VLLM_ENABLE_R3=1; SGLang: --moe-runner-backend triton, as fused runners bypass the
 # capture hook).
-parser.add_argument("--routing-replay", choices=("none", "rollout"), default="none")
+parser.add_argument("--routing-replay", choices=("none", "recompute", "rollout"), default="none")
 # Each round rolls out while the steps before it train, across the push (vLLM freezes it, SGLang aborts and re-issues).
 parser.add_argument("--prefetch-depth", type=int, default=None)
 # One row per micro-batch, two a round: the shape the length deal reorders. --length-ordered false keeps TRL's shuffle,

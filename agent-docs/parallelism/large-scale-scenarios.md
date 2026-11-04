@@ -56,8 +56,8 @@ per-collective cost does not amortize as the message grows
   the declared domain, `requires_rdma` stays false, and wide EP becomes the attractive shape.
 
     On this model that means declaring a **64**-wide domain, not 72
-    ([Recommended cell](#recommended-cell)). Rack-wide domains are **scaffolded and unvalidated** in
-    this toolkit; no rack-scale run backs them ([Scale & Limits](../reference/scale-and-limitations.md)).
+    ([Recommended cell](#recommended-cell)); the fabric check and the bring-up advice are in
+    [Scale & Limits](../reference/scale-and-limitations.md).
 
 ## Model shape
 
@@ -281,7 +281,7 @@ divisor.
 0`, so `ep_size ∈ {2, 4, 8}` — and `8·P_e/8 = 386 GB` of experts per rank before anything else. The
 same ceiling makes node-scope EP useless at 2, 4 and 8 nodes too.
 
-**No EP layout survives without PP; at 24 GPUs only `pp3 × ep8` fits on a validated path.** Each stage is one
+**No EP layout survives without PP; at 24 GPUs only `pp3 × ep8` fits outside experimental PP+ETP.** Each stage is one
 node holding 24, 20 or 16 of the 60 layers, so `ep8` node-local divides the 512 experts and stage 0
 carries 155 GB of them ([Pipeline-parallel cells](#pipeline-parallel-cells)). `pp3 × etp8` passes the
 config gate with the same expert share per rank, but PP+ETP is verified on tiny models only; `pp3 × ep2`
@@ -325,7 +325,7 @@ at the [costs above](#pipeline-parallel-cells).
 | Nodes | Cell | Crosses on | Steady `b1 s8192` | Why |
 |---|---|---|---:|---|
 | 2 | `ep16 --ep_scope=global` + `unfreeze_layers_patterns` | RDMA all-to-all | ≈155 GB partial (263 GB full FT, ✗) | the only layout that loads; full fine-tuning fits only at `s4096`, no headroom for 32k or `b>1` |
-| 3 | `pp3` × `ep8` node, `moe_balancing: none` | boundary activations only | 216 GB | the one layout that fits on a validated path ([The 3-node case](#the-3-node-case)); trains unbalanced |
+| 3 | `pp3` × `ep8` node, `moe_balancing: none` | boundary activations only | 216 GB | the one layout that fits outside experimental PP+ETP ([The 3-node case](#the-3-node-case)); trains unbalanced |
 | 4 | **`ep32 --ep_scope=global`** | RDMA all-to-all | 169 GB | first comfortable point on memory — but the binding limit is the 8192 tokens/rank cross-node dispatch ceiling, not the 90 GB spare |
 | 8 | **`ep64 --ep_scope=global`** | RDMA all-to-all | 122 GB | memory headroom to spare, same 8192 tokens/rank ceiling on `b × max_length`; `ep8 + etp8` if the fabric is EFA |
 
@@ -345,7 +345,8 @@ The working recipe is `NVLINK_DOMAIN_SIZE=64` over 16 of the rack's 18 compute t
 
 Scaling out, `world=512` over 8 racks at domain 64 accepts every node-scope `ep_size` dividing 64
 (the racy guard is inert across multiple domains); `ep64` gives 8 EP groups, one per rack, averaged by
-the deferred cross-replica sweep. Unvalidated on hardware — treat it as a plan.
+the deferred cross-replica sweep. Like the rest of this page, that is rank math and arithmetic: a plan,
+not a measurement.
 
 **Frozen layers are the lever at 2 nodes.** `unfreeze_layers_patterns` leaves untouched parameters at
 2 B/param — weights only, no gradient and no optimizer state. Unfreezing the top 20 of 60 layers plus

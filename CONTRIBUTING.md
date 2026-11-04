@@ -1,10 +1,9 @@
 # Contributing to Halo
 
-Halo is actively developed and maintained by **White Circle**, and we genuinely want your bug
-reports, ideas, and pull requests. Because Halo is itself built with AI — and AI makes plausible-looking
-but ill-fitting contributions cheap to produce — **contributions are gated**: a light process that keeps
-quality high, keeps AI-slop out, and keeps direction under maintainer control. Think of it as routing,
-not a wall. Read this before opening an issue or PR; the full dev guide (build, test, docs) lives in
+Halo is actively developed and maintained by **White Circle**, and we want your bug reports, ideas, and
+pull requests. Halo is itself built with AI, and AI makes plausible-looking but ill-fitting contributions
+cheap to produce, so **contributions are gated**: a light process that keeps quality high and direction
+under maintainer control. Read this before opening an issue or PR; the full dev guide (build, test, docs) lives in
 [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md).
 
 ## The gate (read first)

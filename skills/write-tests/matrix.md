@@ -27,7 +27,7 @@ invariants); every refused one a rejection test (must raise). The cells live onc
 | TP + ETP (`tp_size>1` AND `expert_tp_size>1`, `ep_size==1`) | raises — two shardings of the same ranks |
 | TP + CP (`tp_size>1` AND `cp_size>1`) | raises — both partition the same contiguous rank blocks, and Ulysses redistributes heads TP already split |
 | ETP + CP (`expert_tp_size>1` AND `cp_size>1`) | raises — expert-TP partners sum their outputs in token space while CP hands each rank a different chunk |
-| PP + TP, PP + CP (`pp_size>1` with either) | raises at the allowlist — untested on real multi-node hardware (TP); CP-scaled gradients with no error (CP) |
+| PP + TP, PP + CP (`pp_size>1` with either) | raises at the allowlist — a per-backward all-reduce hook the schedule disables re-reduces accumulated history (TP); CP-scaled gradients with no error (CP) |
 | PP + EP + TP, PP + EP + CP, PP + EP + ETP (all three `>1`) | raises — outside the allowlist; FSDP mesh conflict (TP), CP-scaled expert gradients (CP), the expert-TP reduce cannot be deferred past the combine (ETP) |
 | QLoRA + EP | raises |
 | LoRA/PEFT + TP (`tp_size>1`), native EP expert LoRA included | raises at trainer construction — `reject_lora_under_tp` |

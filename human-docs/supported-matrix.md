@@ -90,22 +90,88 @@ export are verified.
 
 ### Rollout engines
 
-Async GRPO with environments uses vLLM by default; `rollout_backend: sglang`
-switches engines. The engines differ in which families they can take an online
-weight update for. The trainer refuses an unsupported pair at construction,
-naming the family and the reason.
+Online GRPO and online SDPG generate on vLLM only. Async GRPO with environments
+uses vLLM by default; `rollout_backend: sglang` switches engines. The engines
+differ in which families they can take an online weight update for. The trainer
+refuses an unsupported pair at construction, naming the family and the reason.
 
-| Families | vLLM | SGLang |
-| --- | :---: | :---: |
-| Dense families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 | Yes | Yes |
-| Laguna, Step-3.7 Flash | Yes | No (SGLang's loaders assert full coverage per call) |
-| Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No |
-| Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE | No | No (no online RL at all) |
+The last column is what passed on this release: async GRPO, full fine-tuning on
+a real checkpoint, on one 8× B300 node with a TP=1 server, unless it says
+otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
+`tensor_parallel_size: 2`, and replay is `routing_replay: rollout`.
+
+| Family | vLLM 0.32.0 | SGLang 0.5.22 | Replay | Ran on this release |
+| --- | :---: | :---: | :---: | --- |
+| Dense families | Yes | Yes | No, MoE only | vLLM: online GRPO, SDPG and async GRPO on Qwen3-0.6B. SGLang: a weight push on Qwen3-0.6B, no training loop |
+| GPT-OSS | Yes | Yes | Yes | `unsloth/gpt-oss-20b-BF16`. SGLang: every SGLang mode marked Ran below. vLLM: `ep4`, `ep2` with `tp2` or ETP2, `tp2` and `ep2` at DP2, HSDP, online GRPO at `ep2` |
+| Qwen3 MoE | Yes | Yes | Yes | Qwen3-30B-A3B. vLLM: online GRPO, SDPG and async GRPO. SGLang: `ep1`, `ep2`, each also with replay |
+| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | Yes | Qwen3.6-35B-A3B. vLLM: `ep2`, `tp2`, online GRPO at `ep2`. SGLang: `ep1`, `ep2`. Both: LoRA at `ep1`, replay at `ep2`, also on Qwen3.5-35B-A3B |
+| GLM-4 MoE Lite | Yes | Yes | Yes | GLM-4.7-Flash, with and without replay. vLLM: `ep1`, `ep2`, `tp2`. SGLang: `ep1`, `ep2` |
+| LFM-2 MoE | Yes | Yes | Yes | LFM2-24B-A2B, with and without replay. vLLM: `ep1`, `ep2`, `tp2`. SGLang: `ep1`, `ep2` |
+| Gemma 4 MoE | Yes | Yes | No, on either engine | Gemma 4 26B-A4B on both engines: `ep1`, `ep2`, LoRA at `ep1`. vLLM: online GRPO at `ep2` |
+| Ling 2.0 | Yes | Yes | Yes | Ling-mini-2.0. vLLM: `ep1`, `ep2`. Both: replay at `ep2` |
+| Laguna | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | Laguna-XS-2.1 on vLLM: `ep1`, `ep2`, replay at `ep2` |
+| Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: a weight push on a tiny hub-layout checkpoint, no training loop |
+| Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
+| Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE | No | No (no online RL at all) | No | |
 
 Offline GRPO needs no server, so these refusals do not apply to it.
 `rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only. SGLang must
 be served from this repo's image. Setup, ports, weight sync and
 `routing_replay`: [Rollout Servers](rollout-servers.md).
+
+A push of unchanged weights leaves the served log-probs bit-identical on every
+family that syncs, on each engine that takes it (MoE at `ep1` and `ep2`). Trainer
+and engine still disagree on identical weights through bf16 routing flips. Replay
+narrows that gap and is experimental:
+[numbers](../agent-docs/training-methods/async-grpo/objective.md#trainer-and-engine-noise) ↗.
+
+A dense checkpoint under a spelling a MoE family claims is refused with that
+family: LFM2-VL over a dense LFM-2 tower, Mistral 3 over a dense Mistral tower,
+Gemma 4 with `enable_moe_block: false`, Command A Vision over dense Cohere2.
+
+**Ran** means the code admits it and a row passed against a live server on this
+release, on at least one family; **Yes** means the code admits it. The Offline
+GRPO column states what the code admits. A family's own limits from
+[Model families](#model-families) still apply.
+
+| Mode | Online GRPO, SDPG (vLLM) | Async GRPO, vLLM | Async GRPO, SGLang | Offline GRPO |
+| --- | :---: | :---: | :---: | :---: |
+| Plain FSDP2 or one GPU, dense | Ran | Ran | Yes | Yes |
+| MoE `ep1`, experts sharded (default) | Ran | Ran | Ran | Yes |
+| MoE `ep1`, `fsdp_shard_ep1_experts: false` | Ran | Ran | Yes | Yes |
+| ZeRO-3 with no expert group | Ran (dense) | Ran (`ep1`) | Ran (`ep1`) | Yes |
+| MoE with `use_grouped_gemm: false` | No | No | No | Yes |
+| EP, one group (`expert_parallel_size` = trainer GPUs) | Ran (`ep2`) | Ran (`ep2`, `ep4`) | Ran (`ep2`, `ep4`) | Yes |
+| `expert_parallel_size: 2`, several groups in one domain | Ran | Ran | Yes | Yes |
+| `expert_parallel_size` above 2, group narrower than the one domain | No | No | No | No |
+| Node-local EP groups across domains | Ran (two simulated domains) | Ran (two simulated domains) | Yes | Yes |
+| One EP group across domains (`ep_scope: global`) | Yes | Yes | Yes | Yes |
+| TP | Ran | Ran | Ran | Yes |
+| Pure ETP | Ran (attention LoRA) | Ran (attention LoRA) | Yes | Yes |
+| EP+TP | Ran | Ran | Ran | Yes |
+| EP+ETP | Ran | Ran | Ran | Yes |
+| HSDP | Ran (two simulated domains) | Ran (two simulated domains) | Yes | Yes |
+| CP, EP+CP | No | No | No | Full fine-tuning |
+| PP, PP+EP, PP+ETP | No | No | No | Full fine-tuning |
+| TP+CP, TP+ETP, ETP+CP, EP+TP+ETP | No | No | No | No |
+| `accelerate launch`, plain data parallelism | Dense only | Dense only | Dense only | Yes |
+| PEFT attention LoRA, off TP and EP+TP | Ran | Ran | Ran | Yes, off CP and PP too |
+| Native expert LoRA, off ETP, TP and EP+TP | Ran | Ran | Ran | Yes, off CP and PP too |
+| QLoRA | No | No | No | Plain data parallelism only |
+
+| Feature | Online GRPO, SDPG (vLLM) | Async GRPO, vLLM | Async GRPO, SGLang |
+| --- | :---: | :---: | :---: |
+| Resume | Ran | Ran | Ran |
+| Several servers | No, one server | Ran | Yes |
+| Prefetch | No | Ran (depth 1, 2) | Ran (depth 1); `max_retries` must cover the syncs a round spans |
+| `routing_replay: rollout` | No | Ran | Ran |
+| `routing_replay: recompute` | No | Ran | Ran |
+| `rollout_max_thinking_tokens` | No | Ran (GPT-OSS, Qwen3.6) | No |
+| `carry_reasoning` | No | Yes | No |
+| `isr_engine_reference` | No | Yes | Yes |
+| Server at TP above 1 | Yes | Ran (`tp2`) | Ran (`tp2`) |
+| Server on another machine | Yes | Ran | Ran |
 
 ## Parallelism modes
 
@@ -120,7 +186,7 @@ be served from this repo's image. Setup, ports, weight sync and
 | EP+CP, EP+TP | supported for selected families | MoE plus long context or attention sharding |
 | EP+ETP | experimental | expert memory pressure; each ETP group stays inside one NVLink domain, and cross-node EP+ETP forms one ETP group per domain |
 | TP+CP, TP+ETP, ETP+CP, PP+TP, PP+CP, any three axes | unsupported | rejected at config validation |
-| PP, PP+EP | supported for registered families (validated on Blackwell) | depth across NVLink domains; each stage is a whole number of domains, so two nodes at least |
+| PP, PP+EP | supported for registered families | depth across NVLink domains; each stage is a whole number of domains, so two nodes at least |
 | PP+ETP | experimental (tiny models only) | expert FFN memory inside each stage, experts replicated |
 
 Layout rules and the shapes rejected before a run starts:
@@ -136,7 +202,7 @@ advanced parallelism. What each family is for:
 | --- | :---: | :---: | :---: | :---: | :---: | --- |
 | Qwen3 (dense) | — | — | Yes | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | broadest coverage; PP on tiny models only, with `moe_balancing: none` |
-| Qwen3-VL (text) | — | — | Yes | No | No | CP on text-only batches (a batch with images raises mid-run) |
+| Qwen3-VL (text) | — | — | Yes | No | No | CP on text rows only; SFT and SMPO refuse an image run under CP |
 | Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower, with `moe_balancing: none` |
 | Qwen3-Next | Yes | Yes | No | No | No | tiny models only |
@@ -151,7 +217,7 @@ advanced parallelism. What each family is for:
 | Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP on a tiny-model LoRA test only |
 | DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP on tiny models only; LoRA skips the grouped `o_a_proj` |
 | Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |
-| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP validated on the 200B+ checkpoint; the other modes and LoRA on tiny models |
+| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP8 ran on the 200B+ checkpoint, on Halo 1.0.0 or earlier; the other modes and LoRA on tiny models |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; PP takes the text tower; the fp8 release needs `halo run convert-glm5-bf16` first |
 | Step-3.7 Flash | Yes | Yes | No | No | Yes | composite VLM, SDPA only; PP takes the text tower; sharded EP saves refused |
 | Any other HF causal LM | — | — | No | if the model has a `tp_plan` | No | a dense model without a TP plan raises under TP |
@@ -170,7 +236,7 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
 | Muon, FlashAdamW | supported optimizer options, except under PP |
 | HuggingFace, local and `s3://` datasets | supported; offline tokenize, pack and shard with `halo run prepare-dataset` |
-| Tree packing (`tree_packing`) | SFT on raw text datasets: GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE) on FA4 or FA2, GLM-5 Next on SDPA; refused under CP, TP and PP; ETP and EP+ETP are admitted but unverified ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗) |
+| Tree packing (`tree_packing`) | SFT on raw text datasets: GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE) on FA4 or FA2, GLM-5 Next on SDPA; refused under CP, TP and PP; ETP and EP+ETP are admitted ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗) |
 | VLM packing / padding-free | unsupported: images cannot be packed, so VLM inputs use standard padding |
 | Streaming an infinite corpus | unsupported: the loaders build a map-style `Dataset`; pre-tokenize and shard offline |
 
@@ -179,11 +245,11 @@ What each mode writes, and which resumes are exact:
 
 ## Validation
 
-The GPU tests run on single 8× B300 nodes. Hopper gets the image build, the
-CPU tests inside it and an FA3 import check. On two machines
-(B300 over EFA) this release ran cross-node expert parallelism and the two
+The GPU tests run on 8× B300 machines. Two 8-GPU machines ran node-local `ep8`
+with DP through a per-node save, resume and evaluation, cross-node `ep16` through
+a gathered save and reload, cross-node weight sync on both engines, and the two
 pipeline-parallel recipes, the Qwen3-8B one through a per-node save, resume and
-merge; the rest of the multi-node coverage is a two-node simulation on one host.
+merge; the other multi-node shapes run as a two-node simulation on one host.
 Checkpoints written by Halo 1.1.0 resume and export; a sharded EP save needs
 `merge-ep-shards` first.
 The full scope: [Release validation](../agent-docs/infrastructure/ci.md#release-validation) ↗

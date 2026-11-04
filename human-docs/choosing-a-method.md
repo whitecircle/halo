@@ -60,9 +60,9 @@ separate step and train from it. See
 
 ## Extra infrastructure
 
-Online GRPO, online SDPG and async GRPO with environments generate with a
-separate vLLM server ([Rollout servers](rollout-servers.md)). Every other method
-trains without vLLM or Ray.
+Online GRPO and online SDPG generate with a separate vLLM server, async GRPO
+with environments with vLLM or SGLang ([Rollout servers](rollout-servers.md)). Every
+other method trains without a rollout server or Ray.
 
 Async GRPO also runs Ray rollout actors. With two or more servers, or one that
 opts in, it overlaps rollouts with training through a prefetch queue. It can

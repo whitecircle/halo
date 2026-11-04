@@ -9,7 +9,7 @@ from torch.distributed.tensor import DTensor
 
 from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from halo.distributed.mesh import has_tp_dim
-from halo.models.moe.config_fields import has_routed_experts
+from halo.models.moe.family_specs import wraps_experts
 from tests.common.ep_reference import ep_layers
 from tests.common.rank_log import log
 
@@ -54,7 +54,7 @@ def parallel_shape_checks(model, parallelism_config) -> dict[str, bool]:
     pc = parallelism_config
     checks: dict[str, bool] = {}
     layers = ep_layers(model)
-    if pc.needs_ep_layers and has_routed_experts(model.config):
+    if wraps_experts(model.config, ep_layers_requested=pc.needs_ep_layers):
         checks["ep_layers_wrapped"] = bool(layers)
         log(f"  EP layers wrapped: {'PASS' if layers else 'FAIL'} ({len(layers)})")
     if pc.ep_size > 1:

@@ -107,6 +107,23 @@ def offline_grpo_dataset(groups, offset=0):
     return Dataset.from_list(records)
 
 
+def mixed_length_groups(groups) -> Dataset:
+    """Long prompts and short ones, so a batch holding both left-pads a short row past Mistral 4's scale step and
+    DeepSeek-V4's compressor windows."""
+    records = []
+    for index in range(groups):
+        word = OFFLINE_WORDS[index % len(OFFLINE_WORDS)]
+        repeats = 1 if index % 2 else MISTRAL4_SCALE_STEP
+        records.append(
+            {
+                "prompt": " ".join(["question", *[word] * repeats, "answer"]),
+                "completions": [f"yes {word}", f"no {word} maybe"],
+                "rewards": [1.0, -1.0],
+            }
+        )
+    return Dataset.from_list(records)
+
+
 def load_liger_class_patched_model(model_path, *, attn_implementation="flash_attention_4"):
     """``model_path`` at bf16 with Liger's class-level patch applied before the load; a late instance patch misses
     Qwen3's q/k norms."""

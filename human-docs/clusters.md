@@ -72,9 +72,8 @@ Other rules for multi-node storage:
 
 ## Network fabric
 
-InfiniBand and RoCE run on the NCCL defaults in the image, though every real
-multi-node run has used EFA ([Validation](supported-matrix.md#validation)). Three
-setups need extra environment:
+InfiniBand and RoCE run on the NCCL defaults in the image. Three setups need
+extra environment:
 
 - **AWS EFA.** Set `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` and pass `--device
   /dev/infiniband`; cross-node expert parallelism also needs `NCCL_GIN_TYPE=2`

@@ -66,5 +66,6 @@ run: |
     --master_addr=$MASTER_ADDR --master_port=29500 \
     scripts/training/sft.py $CONFIG_PATH \
     --model_name_or_path=$MODEL \
-    --expert_parallel_size=$EXPERT_PARALLEL_SIZE --ep_scope=$EXPERT_PARALLEL_SCOPE --output_dir=$OUTPUT_DIR \
+    --expert_parallel_size=$EXPERT_PARALLEL_SIZE --ep_scope=$EXPERT_PARALLEL_SCOPE --use_grouped_gemm=true \
+    --output_dir=$OUTPUT_DIR \
     --project_name=$WANDB_PROJECT

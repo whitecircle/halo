@@ -189,7 +189,7 @@ def test_the_shared_loader_applies_the_remote_code_shims_before_the_config_fetch
     ):
         model_preparation.auto_load_model(causal_lm_checkpoint, dtype=torch.float32)
 
-    assert order[:2] == ["shims", "config"], order
+    assert order.index("shims") < order.index("config"), order
 
 
 def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights(causal_lm_checkpoint):

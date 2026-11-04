@@ -1,6 +1,6 @@
 # Throughput Benchmarks
 
-Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU count per section). tokens/s/GPU is the headline metric (hardware- and sparsity-independent); achieved TFLOPS is the diagnostic. Hopper numbers are not included here. What MFU measures and why MoE complicates it: [GPU Training Theory §11](../reference/gpu-training-theory.md#mfu-and-why-moe-complicates-it).
+Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU count per section). tokens/s/GPU is the headline metric (hardware- and sparsity-independent); achieved TFLOPS is the diagnostic. What MFU measures and why MoE complicates it: [GPU Training Theory §11](../reference/gpu-training-theory.md#mfu-and-why-moe-complicates-it).
 
 ![Twelve bench shapes on 8× B300: 1.2.0 runs each faster than 1.1.0, from 1.11× on Qwen3-8B FSDP2 to 2.07× on gpt-oss-20b ep4 × etp2, and peak memory moves at most 1.65 GiB](../assets/benchmarks/release_comparison.png)
 
@@ -16,8 +16,9 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
     Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks). Its fused linear cross-entropy also reads the batch's non-ignored target count to the host in every forward, a host sync inside each fused-loss micro-batch (upstream; on Halo's paths the count feeds only token accuracy).
 
-- **Release**: each section names the release that measured it. [1.2.0 against 1.1.0](#120-against-110) and the
-  NUMA A/B ran on 1.2.0 code; every other table ran on Halo 1.1.0 code or earlier. Those older rows predate 1.2.0's
+- **Release**: each section names the release that measured it. [1.2.0 against 1.1.0](#120-against-110), the
+  [EP phase split](#where-the-ep-steps-time-goes) and the NUMA A/B ran on 1.2.0 code; every other table ran on Halo
+  1.1.0 code or earlier. Those older rows predate 1.2.0's
   MoE route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP,
   ep1 and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower
   tok/s than the clock these rows used. Their per-GPU rates count a shared batch once ([Metrics](#metrics)).
@@ -53,11 +54,11 @@ its group and its clock leaves out the host time between steps. Peak is the high
 - Peak memory falls or stays within 0.07 GiB, except Qwen3-8B FSDP2 (+0.36 GiB) and gpt-oss-20b ep1 (+1.54 GiB), the
   cost of [two decoder layers per shard group](../parallelism/data-parallelism.md#shard-groups).
 - The gathered save takes 29.13 s on 1.1.0 and 29.08 s on 1.2.0, at 4.94 and 4.87 GiB peak host RSS.
-- The 1.2.0 arm is the release's code freeze. Later product commits touch pipeline parallelism, messages and log
-  lines, which no row runs.
+- The 1.2.0 arm ran before the release's last product commits, which touch pipeline parallelism, messages and log
+  lines; no row runs those.
 
 `make bench BAND=1` holds eight of these shapes and the gathered save to the five-repeat baselines in
-`tests/baselines/bench/`, measured on the code freeze. Same-code A/Bs of the largest changes sit on their owner pages:
+`tests/baselines/bench/`, measured on the same code. Same-code A/Bs of the largest changes sit on their owner pages:
 [local-shard TP linears](../parallelism/tensor-parallelism.md#local-shard-linears),
 [ETP grouped GEMM](../parallelism/expert-tensor-parallelism.md#forward-path),
 [two-layer shard groups](../parallelism/data-parallelism.md#shard-groups),
@@ -221,11 +222,11 @@ PP, `1/cp_size` of it under CP).
 
 ## GPT-OSS-20B (8× B300)
 
-**Model**: `unsloth/gpt-oss-20b-BF16` (20.7B total, 32 experts, top_k=4, 3.5B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted. Every table in this section: Halo 1.1.0 or earlier, 8× B300 on the Blackwell image; the gpt-oss-20b ep8 rows (EP+CP and EP+TP included) are the median of two runs from a separate run set.
+**Model**: `unsloth/gpt-oss-20b-BF16` (20.7B total, 32 experts, top_k=4, 3.5B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted. Every table in this section but the EP phase split: Halo 1.1.0 or earlier, 8× B300 on the Blackwell image; the gpt-oss-20b ep8 rows (EP+CP and EP+TP included) are the median of two runs from a separate run set.
 
 ### EP-only (batch scaling)
 
-EP distributes experts; DP = world_size = 8. Small-batch pure EP is **communication-bound** — the all-to-all is a fixed per-step cost, so raising batch is the dominant throughput lever:
+EP distributes experts; DP = world_size = 8. Raising batch fills the expert GEMMs, and the dispatch grows slower than the tokens ([where the time goes](#where-the-ep-steps-time-goes)):
 
 | EP | batch | tok/s/GPU | TFLOPS | peak mem | step |
 |----|-------|:---------:|--------|----------|------|
@@ -274,9 +275,10 @@ Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-s
 
 ### Why MoE utilization reads low
 
-It is not idle hardware. gpt-oss-20b fires top-4 of 32 experts (3.5B active of 20.7B), so a sparse MoE cannot
+Sparsity first: gpt-oss-20b fires top-4 of 32 experts (3.5B active of 20.7B), so a sparse MoE cannot
 approach a dense model's plain MFU. Higher EP also shrinks `N_local` far faster than throughput (ep2 = 11.36B
-→ ep8 = 4.19B, −63%, against −12% tok/s/GPU at b1): ep8 trades per-GPU utilization for memory, not compute waste.
+→ ep8 = 4.19B, −63%, against −12% tok/s/GPU at b1): ep8 trades per-GPU utilization for memory. Part of the gap is
+idle hardware too: at ep8 ranks wait for the busiest one ([where the time goes](#where-the-ep-steps-time-goes)).
 
 Levers to raise it: lower EP (more local params), longer sequence (the EP-independent attention-score
 term), larger batch.
@@ -294,8 +296,9 @@ Keep more params local (low EP), then drop GC if activations fit, then add batch
 | qwen3.5-35b-a3b | ep2 | b4, s4096 | 16,447 | 1,908 | 137.8 GiB |
 | qwen3.5-35b-a3b | ep8 | b8, s4096 | 15,126 | 659 | 111.0 GiB |
 
-- **Local params decide the ceiling.** ep1 keeps all 20.7B local and tops the table; ep2 ~11.4B; ep8 ~4.2B;
-  qwen3.5-35b ep2 ~17.5B. Choose the lowest EP that fits. (The ep1 rows count every local expert as active,
+- **Local params set the TFLOPS figure.** ep1 keeps all 20.7B local and tops the table; ep2 ~11.4B; ep8 ~4.2B;
+  qwen3.5-35b ep2 ~17.5B. ep1 also has no dispatch group whose busiest rank it must wait for. Choose the lowest EP
+  that fits. (The ep1 rows count every local expert as active,
   so their TFLOPS are nominal — above what the silicon can issue — and over-read as a utilization fraction
   for sparse MoE.)
 - **Sequence length raises ep8's floor** but does not close the gap to ep1/ep2 — ep8 is the memory topology.
@@ -308,8 +311,8 @@ for balanced throughput/memory, **ep8 b1** for minimum memory, **ep8+cp8** for 3
 ## Maximizing throughput: sequence & batch
 
 Throughput is dominated by the effective per-GPU token count `M = per_device_batch_size × sequence_length` —
-bigger `M` amortizes fixed per-step costs (kernel launches, all-to-all latency, optimizer step) until a
-memory wall. This section's figures are from Halo 1.1.0 or earlier. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that you are latency-bound.
+bigger `M` amortizes fixed per-step costs (kernel launches, dispatch latency, optimizer step) until a
+memory wall. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b, 49% and 0.4% on Qwen3.5-35B-A3B.
 Cross-node EP is pinned to `M ≤ 8192` by the Gin dispatch ceiling
 ([DeepEP → EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) — the floor of this range by
 construction.
@@ -324,16 +327,34 @@ construction.
 5. **Measure**: `enable_efficiency_metrics: true` logs per-step tokens/s/GPU (add
    `report_mfu_diagnostics: true` for achieved-TFLOPS and S-MFU); sweep `(seq, batch)` until it plateaus.
 
-### Where the EP step's time goes (gpt-oss-20b ep8, b1/s4096, 8× B300, FA4)
+### Where the EP step's time goes
 
-The per-MoE-layer CUDA self-time at b1/s4096 (serialized attribution via `benchmark_sft_ep.py --comm_profile`) is **dispatch all-to-all 88%, expert GEMM 6.6%, combine all-to-all 5.5%** — communication is ~93% of the layer step.
+`benchmark_sft_ep.py --comm_profile` times each EP layer's dispatch, expert compute and combine on CUDA events on
+every rank, past the warm-up steps, over the forward and the checkpoint recompute. These are shares of those three
+phases, not of the step: the backward's GEMMs and wire sit outside them. Mean over ranks, 8× B300, GC on, uniform
+token ids, a 1.2.0 development build:
 
-The dispatch all-to-all is a near-fixed per-step latency (~49 ms here), so it dominates at small `M`. The
-expert GEMM is a minority: at 4096 rows per expert it sits above the roofline ridge and finishes well inside that
-latency, which is also why utilization reads low.
+| Shape | Dispatch | Expert compute | Combine, wait included |
+|---|---:|---:|---:|
+| gpt-oss-20b ep8 b1 s4096 | 13.3% | 47.2% | 39.4% |
+| gpt-oss-20b ep8 b4 s4096 | 9.0% | 45.6% | 45.4% |
+| gpt-oss-20b ep8 b1 s16384 | 9.0% | 45.6% | 45.4% |
+| gpt-oss-20b ep2 b1 s4096 | 12.2% | 71.8% | 15.9% |
+| Qwen3.5-35B-A3B ep2 b4 s4096 | 12.2% | 74.3% | 13.4% |
 
-Raising batch or sequence grows the compute term against the fixed comm cost; throughput plateaus around b4
-(b8 only adds memory). At b1 ep8 runs 3% below the default sharded ep1 (10,905 vs 11,236 tok/s/GPU) at
+Dispatch is the smallest phase. At ep8 it averages 0.35 ms per layer call at 4,096 tokens per rank and 0.80 ms at
+16,384; both ep2 rows read about 0.2 ms. The recompute's call replays the cached result, so a dispatch on the wire costs
+about twice that (calculated).
+
+At ep8 a rank's combine is mostly waiting for the rank with the most rows. On uniform ids that rank holds about 2.4×
+the mean, and the mean rank waits 27–39% of the ep8 b4 step, depending on what scales with rows (both calculated
+from span timings). The factor is lower on real text: CPU routing reads 1.99 on gpt-oss-20b and 1.40–1.72 on
+Qwen3-30B-A3B. A timing-only row that forces even routing at ep8 b4 ran 1.83× (24,515 against 13,399 tok/s/GPU); it
+changes the model, so it only sizes the wait. `moe_balancing` is the shipped lever on that skew; how far it lowers the
+factor on real text is not measured here.
+
+Raising batch or sequence fills the expert GEMMs, and at ep8 dispatch grows 2.3× for 4× the tokens. Throughput plateaus
+around b4 (b8 only adds memory). At b1 ep8 runs 3% below the default sharded ep1 (10,905 vs 11,236 tok/s/GPU) at
 ~2.4× less memory (25.5 vs 60.3 GiB).
 
 **Feature A/B at the optimal point (ep8 b4 s4096):**
@@ -349,7 +370,8 @@ SDPA runs GptOss only with the sinks reset (the neutralized column contributes 0
 sinks ([Flash Attention](flash-attention.md#model-specific-handling)); use FA4.
 
 The roofline ridge (AI ≈ 275 on B300) sits near 256–512 rows per expert at K=N=2880. This point runs 16384 rows per
-expert, so its expert GEMM is compute-bound and the step is limited mostly by the all-to-all.
+expert, so its expert GEMM is compute-bound. Expert GEMMs at the busiest rank take 46–48% of this step (calculated
+from 1.2.0 span timings).
 
 `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image), the setting EP is validated with, costs no throughput:
 ep8 b1 reads +1.5% against `8` ([DeepEP](../infrastructure/deepep.md#environment-variables)).
@@ -372,10 +394,6 @@ GC-off is +25–32% at 1.4–2.0× the memory, and on the default elastic transp
 GC-on for long context — pure ep8 GC-on streams to 64k (138 GiB) without Context Parallelism, tapering past
 16k as the per-rank sequence grows. Against stock TRL: [Halo vs stock TRL](halo-vs-stock-trl.md#gradient-checkpointing-on-vs-off).
 
-Because the dispatch is near-fixed (~47–49 ms across s4096→s16384), its share of the MoE-layer step **falls**
-as sequence grows while the expert GEMM gets more compute-efficient at larger per-expert `M` (gpt-oss-20b ep8
-GC-off: communication ≈93% @ s4096 → ≈88% @ s16384). Compute–comm overlap would pay off most at long context.
-
 ## Qwen3.5-35B-A3B MoE (8× B300)
 
 **Model**: `Qwen/Qwen3.5-35B-A3B` (35B total, 256 experts, top_k=8, ~3B active). liger on, grouped-GEMM on, AdamWBF16/bf16, GC on. Both tables: Halo 1.1.0, 8× B300, Blackwell image, on **SDPA**, that release's default for the family. 1.2.0 trains it on FA4 ([1.2.0 against 1.1.0](#120-against-110), [Flash Attention](flash-attention.md#model-specific-handling)).
@@ -389,9 +407,9 @@ GC-off: communication ≈93% @ s4096 → ≈88% @ s16384). Compute–comm overla
 | 8 | 1 | 7,876 | 343 | 41.5 GiB | 0.52s |
 | 8 | 4 | 14,275 | 622 | 72.1 GiB | 1.15s |
 
-ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41.5 GiB at batch 1 vs 130 GiB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.5×; ep8 b1→b4 = 1.8×), since small-batch pure EP is all-to-all-bound.
+ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41.5 GiB at batch 1 vs 130 GiB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.5×; ep8 b1→b4 = 1.8×): ep2 b1 holds 256 rows per expert, at the bf16 ridge, and b4 holds 1,024.
 
-At ep2 batch 4 the per-MoE-layer step splits ≈ **77% DeepEP dispatch all-to-all / 21% expert GEMM / 2% combine** (`--comm_profile`) — dispatch-bound on the top_k=8 token-count exchange. Raising sequence to 8192 amortizes the all-to-all to **17,446 tok/s/GPU** (b4).
+At ep2 batch 4 on 1.2.0, expert compute takes 74.3% of the EP phases ([split](#where-the-ep-steps-time-goes)). Sequence 8192 runs **17,446 tok/s/GPU** (b4).
 
 Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path), with 128 local experts/rank, and [Liger](liger-kernels.md), whose RMSNorm + CE add **+6.6% throughput and −15 GiB**.
 
@@ -403,7 +421,7 @@ Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md#grouped-vs-the
 | 8,192 | 11,726 | 51.8 GiB |
 | 16,384 | 11,768 | 72.4 GiB |
 
-Longer sequences amortize the all-to-all at modest memory growth — ep8 is the long-context / memory-efficient topology, ep2 batch 4 the throughput one.
+Longer sequences raise throughput at modest memory growth — ep8 is the long-context / memory-efficient topology, ep2 batch 4 the throughput one.
 
 ## Single-GPU dense (1× B300)
 
@@ -418,7 +436,7 @@ Batch is the dominant lever — raise it with GC off while it fits. At a fixed 3
 
 ## GPT-OSS-120B notes
 
-**Model**: `unsloth/gpt-oss-120b-BF16` (120B total, 128 experts, top_k=4). On B300 (288 GB) it fits with **EP=8 + GC**: local params = 16.47B → ~99 GB model + AdamWBF16 state, plus ~33 GB bf16 gradients + activations, comfortable at 8K sequence (it does not fit a 141 GB H200 at this config). EP+TP further reduces local params (attention sharded across the TP group); multi-node raises aggregate memory.
+**Model**: `unsloth/gpt-oss-120b-BF16` (120B total, 128 experts, top_k=4). On B300 (288 GB) it fits with **EP=8 + GC**, last run on code before 1.2.0. By calculation, local params = 16.47B → ~99 GB model + AdamWBF16 state, plus ~33 GB bf16 gradients + activations, comfortable at 8K sequence (it does not fit a 141 GB H200 at this config). EP+TP further reduces local params (attention sharded across the TP group); multi-node raises aggregate memory.
 
 ## Allocator: expandable segments
 

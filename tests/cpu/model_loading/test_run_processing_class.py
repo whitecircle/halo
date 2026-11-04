@@ -21,9 +21,12 @@ from transformers import (
 )
 
 from halo.checkpoint.parallel.save import save_checkpoint
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.entrypoints import model_setup
 from halo.entrypoints.model_setup import install_resolved_tokenizer
 from halo.model_loading.model_preparation import resolve_auto_model_class
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from halo.trainers import checkpointing
 from halo.trainers.checkpointing import CheckpointingMixin
 from tests.common.checkpoint_io import save_context
@@ -239,10 +242,22 @@ def test_the_base_save_writes_the_processor_a_grpo_run_carries(tmp_path, monkeyp
 
 @pytest.mark.parametrize("carried", [True, False], ids=["carried", "tokenizer_only"])
 def test_a_hub_push_uploads_the_processor_the_base_push_leaves_out(tmp_path, monkeypatch, carried):
-    """The base push copies the weights into ``output_dir``, resaves ``processing_class`` and uploads the directory."""
+    """The base push copies the weights into ``output_dir``, resaves ``processing_class`` and uploads the directory, none
+    of it with the run's window as the served context."""
+    model_context, run_window = 8192, 512
+    tokenizer = word_level_tokenizer(_TOKENIZER_WORDS)
+    tokenizer.model_max_length = model_context
+    tokenizer = configure_run_tokenizer(
+        CommonScriptArguments(), None, tokenizer, run_window, embeddings_sharded=is_input_embedding_tp_sharded
+    )
     order = []
-    processor = SimpleNamespace(save_pretrained=lambda path: order.append(("processor", path))) if carried else None
-    exporter = _exporter("tokenizer", processor)
+    processor = None
+    if carried:
+        processor = SimpleNamespace(
+            tokenizer=tokenizer,
+            save_pretrained=lambda path: order.append(("processor", path, tokenizer.model_max_length)),
+        )
+    exporter = _exporter(tokenizer, processor)
     exporter.args = SimpleNamespace(
         should_save=True, push_to_hub=True, output_dir=str(tmp_path), save_total_limit=None
     )
@@ -250,9 +265,11 @@ def test_a_hub_push_uploads_the_processor_the_base_push_leaves_out(tmp_path, mon
     monkeypatch.setattr(checkpointing, "rotate_checkpoints", lambda **k: None)
     exporter._get_output_dir = lambda trial=None: str(tmp_path)
     exporter.state = SimpleNamespace(best_model_checkpoint=None)
-    exporter._push_from_checkpoint = lambda folder: order.append(("push", folder))
+    exporter._push_from_checkpoint = lambda folder: order.append(("push", folder, tokenizer.model_max_length))
     exporter._publish_checkpoint("checkpoint-1", None)
-    assert order == ([("processor", str(tmp_path))] if carried else []) + [("push", "checkpoint-1")]
+    expected = [("processor", str(tmp_path), model_context)] if carried else []
+    assert order == [*expected, ("push", "checkpoint-1", model_context)]
+    assert tokenizer.model_max_length == run_window, "the run must keep truncating at its window after the push"
 
 
 def test_the_toolkit_saver_writes_files_an_engine_builds_a_processor_from(tmp_path):

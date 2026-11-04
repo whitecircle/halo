@@ -2,7 +2,7 @@
 
 Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp4) matmul compute**. The parameter, checkpoint, and optimizer state are never stored in low precision; only the GEMM operands are cast to a block-scaled format for the forward, and the gradient flows back to the bf16/fp32 master (straight-through estimator). This is quantization-aware training (QAT): it answers *"does this model converge in fp8/fp4?"* and pairs with a block-scaled weight export.
 
-**Train in bf16.** Halo has two low-precision paths, and neither beat bf16 in what ran. The simulated fake-quant path (the QAT oracle) does extra quantization work. The opt-in DeepGEMM adapter runs an FP8 forward and a bf16 backward, and measured slower at every shape in the table below but one. Other kernels, such as torch's `F.scaled_grouped_mm` and TransformerEngine's fused MLP, are different code.
+**Train in bf16; it stays the default.** Neither low-precision path Halo ships beats it. As whole training steps at ep8 the simulated fake-quant path (the QAT oracle) runs at 0.10–0.45× bf16 and the opt-in DeepGEMM adapter, an FP8 forward over a bf16 backward, at 0.37–0.54× ([Why bf16 is the default](#why-bf16-is-the-default)). The one faster whole step measured, torchao MXFP8, ran in a test wrapper with its quality unmeasured, and Halo has not adopted it.
 
 `scripts/after_training/quantize_to_lowp.py` writes MLP and expert weights in block-scaled fp8 (½ the bytes) or fp4 (¼). `halo.kernels.lowp.quantization.dequantize` reads them; serving engines do not load the manifest as-is. The roofline argument: [GPU Training Theory §7](../reference/gpu-training-theory.md#when-low-precision-compute-helps).
 
@@ -10,9 +10,9 @@ Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp
 
 | Path | What it is | Speed | When used |
 |------|-----------|-------|-----------|
-| **bf16** | `F.grouped_mm` (MoE) / `F.linear` (dense) | At the roofline | Default; all production training |
-| **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Slower than bf16 (expert GEMM forward on one B300: mxfp8 ≈8×, fp4 ≈17–19×) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
-| **DeepGEMM adapter** (fp8, mxfp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Forward slower than bf16 at every measured shape but one (table below) | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
+| **bf16** | `F.grouped_mm` (MoE) / `F.linear` (dense) | Baseline | Default; all production training |
+| **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Whole step 0.10–0.45× bf16 (fp8, mxfp4) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
+| **DeepGEMM adapter** (fp8, mxfp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Whole step 0.37–0.54× bf16 | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
 
 The `lowp_*` keys build one `LowpSpec` (`halo/kernels/lowp/spec.py`), carried as `ParallelismConfig.lowp` and validated there (`LowpSpec.validate`). `LOWP_RECIPES` maps each `lowp_precision` mode to its block-scaled `QuantFormat` and the peak-FLOPS key the MFU callback scores its native path against; the EP layers, the dense linear and the export tool all read it.
 
@@ -24,40 +24,52 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 
 ## Why bf16 is the default
 
-Rows per expert are `ep_size × tokens_per_rank × top_k / num_experts`. At s4096: gpt-oss-20b (K=N=2880) 512–2048 at ep1 b1–b4, 4096–16384 at ep8 b1–b4; Qwen3.6-35B (gate_up K2048 N1024, down K512 N2048) 256–1024 at ep2 b1–b4, 1024–8192 at ep8 b1–b8. The bf16 ridge (AI ≈ 275) sits near 256–512 rows per expert at these widths, so most configurations are compute-bound in the GEMM. At ep8 the step is still dominated by the all-to-all: gpt-oss-20b ep8 b1 s4096 spends 6.6% of MoE-layer time in the expert GEMM. Three things support the default:
+**Whole steps.** tok/s/GPU on 8× B300 at 4,096-token rows, gradient checkpointing on, uniform token ids, a 1.2.0 development build, with each arm as a ratio to bf16 on its shape:
 
-1. **Roofline.** On B300 (HBM ≈ 6.6 TB/s, bf16 ridge AI ≈ 275 FLOP/byte) bf16 `F.grouped_mm` runs near peak (≈80% of bf16 tensor-core peak at compute-bound shapes) with zero host overhead.
+| Shape | bf16 | simulated fp8 | simulated mxfp4 | native fp8 | native mxfp4 |
+|---|---:|---:|---:|---:|---:|
+| gpt-oss-20b ep8 b4 | 13,399 | 0.449× | 0.183× | 0.539× | 0.531× |
+| Qwen3-30B-A3B ep8 b8 | 14,063 | 0.294× | 0.098× | 0.425× | 0.369× |
+| Qwen3.5-35B-A3B ep8 b8 | 16,536 | 0.442× | 0.171× | 0.533× | 0.373× |
 
-2. **Blackwell hardware.** `tcgen05` has no native bf16×fp4 mixed-input MMA; the mixed modes are narrow×narrow (fp8×fp4). No W4A16/W8A16 grouped training kernel exists on sm_100/sm_103.
+**Kernels.** A sweep on one B300 timed each expert GEMM alone, forward and with both gradients, at the local expert counts, widths and rows per expert of gpt-oss-20b, Qwen3-30B and Qwen3.5-35B, on uniform and skewed routing: 94 cells, 3 repeats each. An arm counts as faster only when its range is disjoint from bf16's and the gap is at least max(2%, 2× bf16's spread). Halo's simulated and adapter paths are faster in 0 of the 94. Arms outside Halo's training path, in the same sweep:
 
-    A weight-only scheme (fp8/fp4 weight × bf16 activation, the one roofline-valid lever) must upcast the weight and run the MMA at bf16 rate; its win vanishes above the bf16 ridge (≈256–512 tokens/expert). A hand-rolled CuTe-DSL grouped kernel measured 0.03–0.31× of bf16 (host-launch-bound).
+- DeepGEMM's fp8 kernel alone beats the bf16 forward in 59 of 94, but that ratio leaves out the casts: at gpt-oss-20b ep8 b4's shape the activation cast takes 2.66 ms against 0.86–0.89 ms for the whole bf16 forward.
+- DeepGEMM's bf16 kernels show no net win: their forward and weight-gradient pair reads 0.69–1.01× torch's on uniform routing (median per model and row count).
+- torchao MXFP8 as a whole path is faster only at 16,384 rows per expert: 1.08–1.30× on gpt-oss-20b, 0.90–1.07× across Qwen3-30B's GEMM pair, and never on Qwen3.5-35B. `F.scaled_grouped_mm` refuses more than 32 groups, which rules out Qwen3-30B and Qwen3.5-35B at ep2, and its mxfp4 kernel failed to initialize on two wide cells.
 
-3. **Measured DeepGEMM.** Halo's adapter around DeepGEMM's fp8 grouped kernel measured slower than bf16 at the shapes below, forward only, at DeepGEMM 2.6.1.
+**Where native's time goes.** gpt-oss-20b ep8 b4 s4096, in a run that syncs the GPU around its timers: bf16 takes 1,311 ms a step and native fp8 2,424 ms, +1,113 ms. Activation cast +392, weight cast +63, padding and un-padding +59, kernel −37 and combine wait +309. Of the remaining +327, about +300 sits outside the EP spans, unattributed. The backward's GEMMs stay bf16 at 114 ms either way. So cheaper casts alone do not win: with every cast and copy free, native reaches about 1.08× (calculated).
 
-## Throughput scaling: where low precision *would* win
+**torchao MXFP8 as a whole step.** Through a test wrapper (torchao forward and input gradient, bf16 weight gradient), gpt-oss-20b ep8 b4 s4096 ran 1.133× bf16 over 3 repeats, peak memory +0.9%. The two Qwen shapes above raised a GPU memory fault in that wrapper, at 16 and 32 local experts, and whether the kernel or the wrapper caused it is unresolved. Quality is unmeasured and torchao is not in the lock, so Halo has not adopted it. On the gpt-oss shape, lower EP and GC off, which ship today, gain more ([tables](throughput-benchmarks.md#gpt-oss-20b-8-b300)).
 
-Figures on this page are from Halo 1.1.0 or earlier. Whether low precision can beat bf16 is a question of tokens per expert. Raising sequence length or batch moves the per-expert GEMM rightward along the roofline toward the compute-bound regime where fp8's 2× tensor-core throughput could pay off. Measured crossover, bf16 ÷ native DeepGEMM time on a single B300 (E=8, forward; **>1.0 means DeepGEMM is faster**):
+**Hardware.** `tcgen05` has no native bf16×fp4 mixed-input MMA; the mixed modes are narrow×narrow (fp8×fp4). A weight-only scheme (fp8/fp4 weight × bf16 activation) must upcast the weight and run the MMA at bf16 rate, so its win vanishes above the bf16 ridge. A hand-rolled CuTe-DSL grouped kernel measured 0.03–0.31× of bf16 on Halo 1.1.0 or earlier (host-launch-bound).
 
-| K · N | 256 tok/e | 512 | 1024 | 2048 | 4096 | 8192 | 16384 |
+## Where the adapter closes on bf16
+
+Rows per expert are `ep_size × tokens_per_rank × top_k / num_experts`. At s4096: gpt-oss-20b (K=N=2880) 512–2048 at ep1 b1–b4, 4096–16384 at ep8 b1–b4; Qwen3.6-35B (gate_up K2048 N1024, down K512 N2048) 256–1024 at ep2 b1–b4, 1024–8192 at ep8 b1–b8. The bf16 ridge (AI ≈ 275) sits near 256–512 rows per expert at these widths, so most configurations are compute-bound in the GEMM.
+
+Forward time, bf16 ÷ adapter fp8, at 8 local experts on uniform routing, from the same sweep (**>1.0 means the adapter is faster**):
+
+| K · N | 256 rows | 512 | 1024 | 2048 | 4096 | 8192 | 16384 |
 |-------|----|----|----|----|----|----|----|
-| 4096 · 8192  | 0.13× | 0.20× | 0.34× | 0.38× | 0.45× | 0.43× | 0.71× |
-| 4096 · 16384 | — | — | — | — | 0.34× | 0.89× | **1.04×** |
-| 2880 · 2880 (gpt-oss) | 0.05× | 0.07× | 0.11× | 0.15× | 0.17× | — | — |
+| 4096 · 8192  | 0.25× | 0.33× | 0.42× | 0.53× | 0.60× | 0.67× | 0.76× |
+| 4096 · 16384 | — | — | — | — | 0.85× | 0.93× | 1.02× |
+| 2880 · 2880 (gpt-oss) | 0.15× | 0.14× | 0.17× | 0.18× | 0.20× | — | — |
 
 These ratios measure Halo's adapter: it casts with DeepGEMM's Python utilities, passes float32 scales (a transform kernel per call) and copies rows in Python loops.
 
-In this table native reaches 1.0 only at 16384 rows per expert with N 16384. At 256–512 rows per expert and K=N=2880 it is 14–20× slower. gpt-oss-20b ep8 b4 s4096 runs 16384 rows per expert, past the last K2880 column.
+The adapter clears the bar only at K4096 N16384, wider than the three models above: forward 1.05× at 16384 rows per expert on skewed routing, forward with both gradients 1.03–1.08× at 8192. At gpt-oss-20b ep8 b4's own shape its forward reads 0.24×.
 
-Pushing sequence length is the right throughput lever for bf16 (amortizes the EP all-to-all, fills the expert GEMMs).
+Pushing sequence length is the throughput lever for bf16 too: it fills the expert GEMMs.
 
 ## The simulated path — why it is not bf16 speed
 
-The simulated path realizes fp8/fp4 by block-scale fake-quant: quantize→dequantize each operand (so the matmul sees the low-precision numerics), run the bf16 matmul, straight-through gradient. It is the exact QAT oracle but does quantization work bf16 never does. Measured (B300, MoE expert grouped GEMM, forward):
+The simulated path realizes fp8/fp4 by block-scale fake-quant: quantize→dequantize each operand (so the matmul sees the low-precision numerics), run the bf16 matmul, straight-through gradient. It is the exact QAT oracle but does quantization work bf16 never does. Measured (one B300, expert grouped GEMM at 8 local experts, K=N=2880, forward, uniform routing):
 
-| shape | bf16 | simulated mxfp8 | weight-quant alone (eager) |
-|-------|------|-----------------|----------------------------|
-| E8 K2880 N2880, 256 tok/e | 44 µs | 493 µs (≈11× bf16) | 2482 µs |
-| E256 K512 N512, 32 tok/e | 40 µs | 474 µs (≈12× bf16) | — |
+| rows per expert | bf16 | simulated mxfp8, weight cached | simulated mxfp8, no cache | simulated mxfp4 |
+|-------|------|------|------|------|
+| 256 | 80 µs | 322 µs | 2,810 µs | 658 µs |
+| 4096 | 368 µs | 2,408 µs | 4,866 µs | 7,976 µs |
 
 Cost is dominated by quantizing the weight (eagerly, 2.5 ms for a 133 MB expert weight — launch-bound, ~15 elementwise kernels per call). Two optimizations cut it:
 
@@ -71,13 +83,13 @@ FSDP2-managed experts (the `ep_size==1` + `fsdp_shard_ep1_experts` default) quan
 
 `HALO_LOWP_WEIGHT_CACHE=0` disables it; the cache holds a dequantized copy per expert weight for the step, which costs memory under gradient checkpointing.
 
-**Eager activation.** The activation quant runs eager: after EP dispatch the token count varies every step, so a compiled activation round-trip recompiles until it falls back to eager. With weight cached+compiled and activation eager, simulated mxfp8 is ≈8× a bf16 expert GEMM forward (≈11× uncached); the fp4 formats are ≈17–19×, floored by the fp4 activation quant (pack + bucketize), which is identical for mxfp4 and nvfp4.
+**Eager activation.** The activation quant runs eager: after EP dispatch the token count varies every step, so a compiled activation round-trip recompiles until it falls back to eager. With weight cached+compiled and activation eager, the median over the 94 cells above is 7× a bf16 expert GEMM forward for simulated mxfp8 (21× uncached) and 22–23× for the fp4 formats, floored by the fp4 activation quant (pack + bucketize), which is identical for mxfp4 and nvfp4.
 
 The simulated path is a convergence-validation tool — run a few hundred steps to confirm the loss tracks bf16, not a production run. For bf16 throughput leave low precision off (`lowp_precision: bf16`).
 
 ## DeepGEMM: the native fp8/fp4 path
 
-Native fp8/mxfp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's Blackwell grouped block-scaled GEMM, via `halo/kernels/lowp/deepgemm.py`. A fixed-layout grouped kernel rebuilds its per-expert layout on the host every call. DeepGEMM instead resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). The adapter's per-call host cost at small M is ~240 µs, mostly the activation-quant pass.
+Native fp8/mxfp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's Blackwell grouped block-scaled GEMM, via `halo/kernels/lowp/deepgemm.py`. A fixed-layout grouped kernel rebuilds its per-expert layout on the host every call. DeepGEMM instead resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). The cost sits around the kernel: at 256 rows per expert and K=N=2880 the adapter's forward takes 520 µs, the kernel 73 µs and the activation cast 180 µs.
 
 It is never auto-selected. With `HALO_DEEPGEMM_NATIVE=1`, every grouped expert GEMM runs native, and a shape the kernel rejects raises.
 

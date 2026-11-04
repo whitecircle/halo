@@ -37,8 +37,8 @@ In short:
 - **Sharding buys capacity**, at a cost in tokens per second.
 
 Before you judge a number, check `M = per_device_train_batch_size × max_length`.
-On a B300 MoE run it should be at least ~8k; below that the step is
-latency-bound. Set `enable_efficiency_metrics: true` to log tokens/s/GPU in your
+On a B300 MoE run it should be at least ~8k; below that throughput is still
+climbing fast. Set `enable_efficiency_metrics: true` to log tokens/s/GPU in your
 own run; it counts a batch that TP, ETP, CP or PP ranks share once.
 
 ## Levers that help
@@ -82,9 +82,9 @@ Step-3.7. Each lever's page carries its measurements:
 
 ## Levers that do not help here
 
-Halo's fp8/fp4 QAT path does extra quantization work, the opt-in DeepGEMM adapter
-measured slower in the forward GEMM on one B300, and `torch.compile` on an EP MoE
-run gained at most 1%
+Halo's fp8/fp4 QAT path and the opt-in DeepGEMM adapter ran whole training steps at
+about half bf16's speed or less, and `torch.compile` on an EP MoE run gained at most
+1%
 ([Levers that do not help](../agent-docs/optimization/README.md#levers-that-do-not-help-at-these-shapes) ↗).
 
 ![Roofline for a B300 expert GEMM, showing small-M experts far below the compute ceiling](../agent-docs/assets/diagrams/roofline.png)

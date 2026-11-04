@@ -214,11 +214,12 @@ torchrun --nproc_per_node=4 scripts/training/sft.py \
 # EP+CP (MoE, node-local EP with ep_group_size equal to the NVLink domain)
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-    --expert_parallel_size=8 --ep_scope=node --context_parallel_size=2 --packing=false
+    --expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true --context_parallel_size=2 --packing=false
 ```
 
 Both example configs set `packing: true` (refused under CP), and the gpt-oss one sets
-`ep_scope: global` (refused under CP), so the commands override them.
+`ep_scope: global` (refused under CP), so the commands override them. The gpt-oss one also pins the per-expert loop for
+its ep16, so its command turns grouped GEMM back on.
 
 Programmatic: `parallelism_config=ParallelismConfig(ep_size=8, cp_size=8)`.
 

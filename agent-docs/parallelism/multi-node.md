@@ -24,7 +24,7 @@ ranks, so EP never reduces DP.
 
 **NVLink domain vs OS node:** on a standard cluster the NVLink domain is the OS node (≤8 GPUs), so
 `nvlink_domain_size == gpus_per_node` and "node-local" means the OS node. On GB200/GB300 NVL72 the
-fabric spans the rack (up to 72 GPUs across ~18 OS nodes); set `NVLINK_DOMAIN_SIZE` to unlock
+fabric spans the rack (up to 72 GPUs across ~18 OS nodes); set `NVLINK_DOMAIN_SIZE` to run
 NVLink-wide TP/CP/EP — see [NVL72](#gb200gb300-nvl72-multi-node-nvlink).
 
 | Term | Definition |
@@ -335,25 +335,20 @@ run checks both declarations against the filesystem at startup and refuses a con
 
 ## Verified topologies
 
-What has run on real machines, and what only in simulation. Everything else on this page is enforced
-in code and covered by one-host simulations (a `ParallelismConfig` built with `gpus_per_node` /
-`nvlink_domain_size` below the world, so the domain-crossing branches execute over NVLink), which prove
-the rank math and the gradient algebra, not the fabric. On 1.2.0 the two PP recipes and cross-node
-`ep16` ran on two machines; every other two-machine row predates it. Those runs had evaluation off and
-used per-node storage, so on 1.2.0 no two-machine run has reached an evaluation or used a shared
-filesystem, the default.
+What has run on real machines. One-host simulations (a `ParallelismConfig` built with `gpus_per_node` /
+`nvlink_domain_size` below the world, so the domain-crossing branches execute over NVLink) cover the other
+rules on this page, simulated NVL72 domain sizes included; they prove the rank math and the gradient
+algebra, not the fabric. The 1.2.0 two-machine rows used per-node storage, not a shared filesystem.
 
 | Shape | Evidence |
 |---|---|
-| 2-node RDMA (Blackwell, EFA): cross-node EP `ep8`/`ep16` and its 8192 tokens/rank Gin ceiling, node-local `ep8×2` matching single-group `ep16`; plain FSDP2, HSDP, multi-group EP, EP+TP, EP+CP, pure CP, pure ETP and cross-node EP+ETP at 2 to 8 GPUs per node; trainer → rollout-server weight sync across nodes | real two-machine runs before 1.2.0; on 1.2.0, gpt-oss-20b `ep16` (`ep_scope=global`) trained 10 steps across two B300 nodes ([DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa), [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
-| PP across machines: the Qwen3-8B `pp2` and gpt-oss-20b `pp2 × ep8` recipes | 2 × 8 B300 over EFA, one stage per node: 10 steps each with gradient checkpointing on and off ([Pipeline Parallelism → Measured throughput](pipeline-parallelism.md#measured-throughput)) |
-| Save, resume and merge on per-node output storage | two B300 nodes over EFA: the Qwen3-8B `pp2` recipe (with `save_only_model: false`; it ships `true`, which saves no optimizer state) saved per node, resumed with the optimizer and LR scheduler restored and the uninterrupted run's losses, merged with `merge_pp_stages.py` and loaded with `from_pretrained`. Two containers on one host (socket NCCL, per-node output directories) also ran gpt-oss-20b `pp2 × ep2` through the same path and resumed from the merged directory with the optimizer restored, no warm restart. Two-process CPU simulations cover per-node optimizer shards, a torn shard set refused everywhere (`tests/cpu/checkpoint/test_nonshared_fs_resume.py`) and an interrupted save passed over by resume detection (`test_interrupted_save_resume.py`) |
-| Cross-domain EP+ETP on 1.2.0 | not repeated on two machines (`ep2+etp8` on 2 × 8 and `ep2+etp2` on 2 × 2 last trained across machines before it); no one-host test trains it, since training needs DeepEP's cross-node path |
-| `pp2 × etp2` across machines | not run on 1.2.0; the PP GPU tier runs on one 8-GPU host split into simulated NVLink domains, and it saves, resumes and exports every PP trainer's checkpoint ([Pipeline Parallelism → Checkpoints and resume](pipeline-parallelism.md#checkpoints-and-resume)) |
-| **Wider layouts** (4-node, 8-node, the 512-GPU layouts in [Large-Scale Scenarios](large-scale-scenarios.md)) | rank math only: `ParallelismConfig` is exercised at world 8/16/32, no recorded run |
-| **NVL72 / MNNVL rack-wide domains** | simulated domain sizes only; see the warning below and [Scale & Limits](../reference/scale-and-limitations.md) |
-| **InfiniBand/RoCE as a multi-node fabric** | EFA only; the IB path is config guidance, not a measurement |
-| **Cross-node gathered EP save** on a shared filesystem | hand-run recipe in `tests/gpu/parallelism/ep/test_ep_save_reload_roundtrip.py`, not exercised multi-node |
+| Node-local `ep8×2` with DP, on `gptoss-20b-multinode-ep.yaml`'s layout (B) | 2 × 8 B300 on 1.2.0: 10 steps; a per-node save at step 4, then a resume with the per-rank optimizer state restored and the uninterrupted run's losses (4.349, 3.976 against 4.349, 3.977); evaluation during training |
+| Cross-node `ep16` (`ep_scope=global`), gpt-oss-20b | 2 × 8 B300 on 1.2.0: 10 steps, and a gathered save that `from_pretrained` loads with a clean key report and moved weights ([DeepEP → cross-node limits](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) |
+| Trainer → rollout-server weight sync across machines | a 2-rank trainer and a Qwen3-30B-A3B server on another machine, on vLLM and SGLang on 1.2.0 ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
+| PP across machines: the Qwen3-8B `pp2` and gpt-oss-20b `pp2 × ep8` recipes | 2 × 8 B300, one stage per node: 10 steps each with gradient checkpointing on and off ([Pipeline Parallelism → Measured throughput](pipeline-parallelism.md#measured-throughput)) |
+| Save, resume and merge on per-node output storage, PP | two B300 nodes: the Qwen3-8B `pp2` recipe (with `save_only_model: false`; it ships `true`, which saves no optimizer state) saved per node, resumed with the optimizer and LR scheduler restored and the uninterrupted run's losses, merged with `merge_pp_stages.py` and loaded with `from_pretrained`. Two containers on one host (per-node output directories) also ran gpt-oss-20b `pp2 × ep2` through the same path and resumed from the merged directory with the optimizer restored, no warm restart. Two-process CPU simulations cover per-node optimizer shards, a torn shard set refused everywhere (`tests/cpu/checkpoint/test_nonshared_fs_resume.py`) and an interrupted save passed over by resume detection (`test_interrupted_save_resume.py`) |
+| Earlier two-machine rows | before 1.2.0: cross-node EP `ep8` and its 8192 tokens/rank Gin ceiling, node-local `ep8×2` matching single-group `ep16`; plain FSDP2, HSDP, multi-group EP, EP+TP, EP+CP, pure CP and pure ETP at 2 to 8 GPUs per node; cross-node EP+ETP (`ep2+etp8` on 2 × 8, `ep2+etp2` on 2 × 2), which no one-host test trains, since training needs DeepEP's cross-node path |
+| `pp2 × etp2` | the PP GPU tier on one 8-GPU host split into simulated NVLink domains, which saves, resumes and exports every PP trainer's checkpoint ([Pipeline Parallelism → Checkpoints and resume](pipeline-parallelism.md#checkpoints-and-resume)) |
 
 ## GB200/GB300 NVL72 (multi-node NVLink)
 

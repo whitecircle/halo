@@ -38,7 +38,7 @@ The short-conv layers mix tokens along the sequence axis, so a Ulysses sequence 
 The production SFT example is `examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml`.
 It trains `LiquidAI/LFM2.5-8B-A1B` on UltraChat with EP2 and gathered Hugging Face
 checkpoints, on packed 16,384-token rows without gradient checkpointing. A row holds about 43 GB of
-activations (LFM2-24B-A2B: about 70 GB). By computation, not measurement, that fits beside the EP state
+activations (LFM2-24B-A2B: about 70 GB). By computation, not measurement (this shape has not run on the full-size model), that fits beside the EP state
 on B200/B300 but not on an 80 GB GPU, where `--gradient_checkpointing=true` brings it back. Each rank still sees 65,536 tokens
 per optimizer step; the longer row spreads the per-micro-batch fixed cost over twice the tokens
 ([Throughput Benchmarks](../optimization/throughput-benchmarks.md) lists 35,517 tok/s/GPU at 16,384

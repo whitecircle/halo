@@ -59,7 +59,7 @@ halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat.yaml \
 
 ### GRPO
 
-Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+Online and async GRPO are not available for this family (see [Limits](#limits)). Offline GRPO trains on
 pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
 ## Settings that matter

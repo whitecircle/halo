@@ -10,12 +10,12 @@ trains on text.
 Modes: the Command A+ (Cohere2 MoE) row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
 [Rollout engines](../supported-matrix.md#rollout-engines).
 
-Only EP8 has run on the full checkpoint. CP, TP, ETP, EP+CP, EP+TP and LoRA pass the GPU tests on a
+Only EP8 has run on the full checkpoint, on Halo 1.0.0 or earlier. CP, TP, ETP, EP+CP, EP+TP and LoRA pass the GPU tests on a
 tiny model, so try a short run before a long one.
 
 - **Checkpoint:** `CohereLabs/command-a-plus-05-2026-bf16`, pinned to the revision in the recipe.
-- **GPUs:** eight B300s at EP8, 16 experts per GPU, at 1,024 tokens. Inference in BF16 needs at least
-  four B200s.
+- **GPUs:** eight B300s at EP8, 16 experts per GPU, at 1,024 tokens. The model card asks for four B200s
+  for BF16 inference.
 
 ## Recipes
 
@@ -50,7 +50,7 @@ The GPU tests cover LoRA, expert adapters included, on a tiny model: a merged sa
 
 ### GRPO
 
-Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+Online and async GRPO are not available for this family (see [Limits](#limits)). Offline GRPO trains on
 pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
 ## Settings that matter

@@ -125,6 +125,8 @@ A step is thousands of kernels, and at any moment one of four resources limits i
 | **Latency / launch-bound** | many tiny kernels, gaps between them | **batch** the work: grouped GEMM, CUDA graphs |
 | **Communication-bound** | GPUs idle on NCCL, util drops in bursts | bigger M, smaller parallel degree, compute–comm overlap |
 
+Under EP a rank's combine reads as communication but is mostly its wait for the busiest rank at ep8 ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)), so balance and a lower EP degree act on it, not a faster wire.
+
 The launch floor is a few microseconds of host time per kernel — the sustained issue cost with framework dispatch included, not the bare driver call. [§11](#11-measuring-it-yourself)'s script measures it on your GPU.
 
 Run a MoE layer as a per-expert loop and that cost dominates. Qwen3-30B-A3B's `128 experts × 2 fused projections = 256` tiny matmuls take 1.12 ms in the forward against 0.11 ms for one grouped kernel (B300, 4k tokens) ([Grouped GEMM](../optimization/grouped-gemm.md)). Batching into one kernel matters at high expert count independent of the roofline.
@@ -255,7 +257,7 @@ FP8/FP4 doubles or quadruples tensor-core throughput and raises the compute ceil
 - **Compute-bound (AI above ridge):** the ceiling is what you are hitting, so raising it makes the step faster. This is the large-M / wide-matmul regime (dense MLPs at long seq, very wide experts).
 - **Memory-bound (AI below ridge):** you're on the diagonal, nowhere near the ceiling, so raising it does nothing. Most schemes also add a per-step quantization pass (read operand, compute scales, write quantized copy), so on a bandwidth-bound kernel the net result is slower.
 
-An expert GEMM is memory-bound below roughly 256–512 rows per expert and compute-bound above. Most EP8 configurations sit above it, but the all-to-all dominates their step. bf16 is the default because Halo's low-precision paths are slower in what ran.
+An expert GEMM is memory-bound below roughly 256–512 rows per expert and compute-bound above. Most EP8 configurations sit above it, so the kernel has headroom, but Halo's low-precision paths spend more on casts and copies than the kernel saves, and the backward stays bf16. Their whole steps run at 0.10–0.54× bf16, so bf16 is the default ([Why bf16 is the default](../optimization/low-precision-moe-kernels.md#why-bf16-is-the-default)).
 
 A frontier-scale result does not transfer on its own. DeepSeek-V3 (671B total, 37B active) trained its core GEMMs in FP8 and roughly doubled their throughput. At 671B with an enormous global batch, those matmuls sit above the ridge. Even there it kept embeddings, output head, router gating, norms, and attention in higher precision.
 
@@ -265,7 +267,7 @@ Compute rows per expert for your shape ([Grouped GEMM](../optimization/grouped-g
 
 An isolated block-scaled nvfp4 grouped kernel does beat bf16 — but only with the group layout known ahead of time. MoE routing is dynamic, so each group's size and offset change every step and the fixed-layout CuTe grouped API has to rebuild its per-expert pointer arrays and swizzle metadata on the CPU every call, leaving the GPU idle behind a host wall.
 
-DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it measured slower than bf16 on one B300; it casts with Python utilities and copies rows in Python loops. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1`). Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
+DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it runs whole steps at 0.37–0.54× bf16 at ep8; it casts with Python utilities and copies rows in Python loops. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1`). Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
 
 ### bf16 numerics (what stays fp32)
 
@@ -399,7 +401,7 @@ Each mode buys memory headroom by spending a specific collective.
 - **FSDP (data parallel)** shards weights, grads, and optimizer state, paying that first identity once per FSDP unit (two decoder layers under ZeRO-2, one under ZeRO-3). Both halves overlap well (prefetch the next unit), so FSDP reaches the highest efficiency when the model fits. [Data Parallelism](../parallelism/data-parallelism.md).
 - **EP (expert parallel)** shards experts and adds a token all-to-all before and after each MoE layer (DeepEP). It is orthogonal to DP and tolerates cross-node links. [Expert Parallelism](../parallelism/expert-parallelism.md).
 
-    Load balance limits it: real routing is lumpy, so the busiest expert and the all-to-all gate the step and skew utilization. The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).
+    Load balance limits it: real routing is lumpy, so each layer waits for the rank with the most rows and the dispatch itself is a small share ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)). The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).
 
 - **TP (tensor parallel)** splits each matmul and needs an all-reduce on the forward's critical path that the toolkit does not overlap, so TP must stay NVLink-local. [Tensor Parallelism](../parallelism/tensor-parallelism.md).
 - **CP (context parallel)** splits the sequence; all-to-alls swap sequence-sharding for head-sharding around each attention (Ulysses): one carrying Q, K and V, one for the output. Use it for sequences too long for one GPU. [Context Parallelism](../parallelism/context-parallelism.md).
@@ -475,7 +477,7 @@ That is why low precision pays there: quantizing weights halves (fp8) or quarter
 | Passes/layer | `fprop`+`dgrad`+`wgrad` (3 GEMMs) | `fprop` only |
 | Dominant memory | activations (∝ seq×batch) + optimizer state | weights + KV cache |
 | Per-matmul M | batch×seq (large, packed) | 1 per sequence (tiny) |
-| Typical regime | compute-bound at good M; comm-bound when sharded | weight-bandwidth-bound |
+| Typical regime | compute-bound at good M; sharded runs add collectives and rank wait | weight-bandwidth-bound |
 | Low precision | bf16 here | a real *speed* lever |
 | Optimize | bigger M, fusion, GC trade-off, comm overlap | weight quant, KV compression, batching |
 

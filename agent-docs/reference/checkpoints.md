@@ -264,7 +264,9 @@ Each writer reverts the conversions the load recorded (`conversions_to_revert`,
 `halo/checkpoint/hub_layout.py`); a model with no record (built from its config, or by the lazy loader), or
 whose load dequantized fp8/MXFP4 weights, reverts the family's registered mapping. The EP-gathered save
 and the RL weight sync leave out only the per-expert merges (`export_conversions`), since the gather owns
-the expert layout. vLLM 0.32.0 raises on a SigLIP tower key that lacks its `vision_model` level.
+the expert layout. A revert that fails fails the save on every rank: a chunk written under module names
+would leave two layouts in one checkpoint. vLLM 0.32.0 raises on a SigLIP tower key that lacks its
+`vision_model` level.
 
 **Un-fuse experts.** transformers keeps MoE experts fused in memory (`experts.gate_up_proj` /
 `experts.down_proj`). Most hub checkpoints are per-expert, and `from_pretrained` fuses them on load;

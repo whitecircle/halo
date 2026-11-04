@@ -83,7 +83,7 @@ Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGat
 - **`causal_conv1d_fn`** kernel 4 — output `t` depends on `t..t-3`, so each rank's first 3 positions need the previous rank's last 3 input tokens. Without a halo exchange the kernel sees zero-padding.
 - **`chunk_gated_delta_rule`** is a recurrent scan — chunk `c+1` must start from chunk `c`'s final state, which a CP rank cannot recover.
 
-`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. A halo-exchange wrapper could fix this (`fla` / `causal-conv1d` upstream have no CP-aware variants) but none ships. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
+`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. `fla` 0.4.2, the pinned line, carries CP-aware variants of both ops (`cp_context` on the chunked delta rule, `fla/modules/conv/cp/` for the conv), but the Ulysses path does not call them. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
 
 ## TP and ETP
 
@@ -106,7 +106,7 @@ Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeG
 Examples under `examples/sft/qwen3_5/`:
 
 - `qwen3.5-35b-a3b-ultrachat-ep.yaml`.
-- `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 single-node. It is also sized for EP=16 with `ep_scope: global` across two nodes. It keeps the experts bf16 (`fp32_experts` off), since fp32 expert masters fit the 35B shape but OOM at 122B.
+- `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 on one node. Across two nodes it takes `--expert_parallel_size=16 --ep_scope=global --max_length=8192`: the cross-node dispatch gate refuses its 16,384 tokens per rank. It keeps the experts bf16 (`fp32_experts` off), since fp32 expert masters fit the 35B shape but OOM at 122B.
 - VLM SFT on Qwen3.5-9B: `qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
 
 Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Async GRPO with Environments: `examples/grpo/environmental/qwen3_5/vllm/` (code contests, plus the `-aime-`, `-exam-qa-` and `-react-math-` ep4 task recipes) and the `sglang/` ep1 siblings; both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
@@ -125,6 +125,10 @@ Its hub chat template, which Qwen3.8-Flash-Next shares:
 - `preserve_thinking` defaults to true: every assistant turn renders a `<think>` block, empty when the message carries no `reasoning_content`.
 
 Pin a Halo template with `force_chat_template` where those renders are not the training target, as the shipped SFT configs do.
+
+## Qwen3.8-2.4T-A95B
+
+`Qwen/Qwen3.8-2.4T-A95B` is a text-only `Qwen3_5MoeForCausalLM`, `model_type` `qwen3_5_moe_text`, which the family spec admits. It has 92 layers (23 full, 69 linear), 512 routed experts at top-10 plus the shared expert, hidden 8192 and 4 KV heads, and the hub stores the experts fused, the layout the spec writes. Its 4.9 TB of bf16 weights come to about 610 GB per GPU at EP=8 (calculated), more than a B300 holds. No recipe ships for it, and no GPU run has trained it.
 
 ## RL chat template
 

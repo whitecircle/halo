@@ -56,9 +56,9 @@ HF_HOME=$D/hf python scripts/before_training/convert_deepseek_v4_bf16.py \
     --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir $D/models/DeepSeek-V4-Flash-BF16
 ```
 
-Budget ~910 GB disk (~330 GB download cache + ~580 GB BF16 output) and ~580 GB of host RAM: the model is materialized on CPU. The script routes through transformers' dequantizing loader (`FineGrainedFP8Config(dequantize=True)`) and writes a **uniform BF16** checkpoint: transformers' `_keep_in_fp32_modules_strict` would keep the HC/norm modules fp32, whose fp32 outputs crash the eager bf16 forward on a dtype mismatch. Those modules upcast internally, so flattening is safe.
+Budget ~740 GB disk (~160 GB download + ~580 GB BF16 output) and ~580 GB of host RAM: the model is materialized on CPU. The script routes through transformers' dequantizing loader (`FineGrainedFP8Config(dequantize=True)`) and writes a **uniform BF16** checkpoint. The HC and norm modules transformers pins to fp32 (`_keep_in_fp32_modules_strict`) upcast internally, so flattening them is safe.
 
-A `from_pretrained` load resurrects the pins even from this checkpoint; every training loader casts them back to the run dtype ([Load precision](README.md#load-precision)), so V4 trains uniform bf16 under EP, ep1, plain FSDP2 and on one GPU alike. `fp32_experts` / `fp32_non_ep_params` are the supported way to hold masters in fp32; where the FSDP2 mixed-precision policy then computes pinned modules in bf16, a wrap-time warning lists them (`_warn_fp32_pins_cast_by_policy`). The fp32-sensitive paths upcast internally, so the cast affects weight-value rounding only.
+A `from_pretrained` load resurrects the pins even from this checkpoint, and on transformers 5.20.2 an eager bf16 forward and backward run with them live (tiny model, CPU); every training loader casts them back to the run dtype ([Load precision](README.md#load-precision)), so V4 trains uniform bf16 under EP, ep1, plain FSDP2 and on one GPU alike. `fp32_experts` / `fp32_non_ep_params` are the supported way to hold masters in fp32; where the FSDP2 mixed-precision policy then computes pinned modules in bf16, a wrap-time warning lists them (`_warn_fp32_pins_cast_by_policy`). The fp32-sensitive paths upcast internally, so the cast affects weight-value rounding only.
 
 ## Liger
 
@@ -68,7 +68,7 @@ A `from_pretrained` load resurrects the pins even from this checkpoint; every tr
 
 Example configs under `examples/sft/deepseek_v4/`:
 
-- `v4-flash-ultrachat-lora-ep.yaml` — EP=8 LoRA on the converted checkpoint, whose fit is computed, not measured: PEFT on `q_a_proj`/`q_b_proj`/`o_b_proj`, native grouped expert-LoRA on `gate_up_proj`/`down_proj`. `merge_expert_lora_on_save: true` folds both halves into a servable checkpoint; `false` writes the mixed adapter, which this toolkit resumes but no merge tool folds. It trains one unpacked row per micro-batch, so it sets `train_sampling_strategy: batch_rebalance`: each optimizer step's rows go to its accumulation slots by length, and the ranks of a micro-step wait on no single long row (the sampler's fixed-seed shuffle also sets which rows a step holds) ([Data Loading](../parallelism/data-loading.md)).
+- `v4-flash-ultrachat-lora-ep.yaml` — EP=8 LoRA on the converted checkpoint, a shape that has not run on the full-size model and whose fit is computed, not measured: PEFT on `q_a_proj`/`q_b_proj`/`o_b_proj`, native grouped expert-LoRA on `gate_up_proj`/`down_proj`. `merge_expert_lora_on_save: true` folds both halves into a servable checkpoint; `false` writes the mixed adapter, which this toolkit resumes but no merge tool folds. It trains one unpacked row per micro-batch, so it sets `train_sampling_strategy: batch_rebalance`: each optimizer step's rows go to its accumulation slots by length, and the ranks of a micro-step wait on no single long row (the sampler's fixed-seed shuffle also sets which rows a step holds) ([Data Loading](../parallelism/data-loading.md)).
 
     `o_a_proj` is excluded from adapter injection, by name and under `all-linear` alike: it is a
     `DeepseekV4GroupedLinear`, whose block-diagonal forward returns one group's width, so a stock LoRA

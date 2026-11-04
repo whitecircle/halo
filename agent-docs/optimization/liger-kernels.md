@@ -407,7 +407,7 @@ plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), ~
 per step on the most host-bound row measured (dense Qwen3-8B at CP2 on 8× B300, 4,096-token rows), and GPU
 kernel time is unchanged.
 
-**Measure MoE throughput at batch ≥ 4.** At batch 1 EP MoE is communication-bound and its DeepEP time varies run
+**Measure MoE throughput at batch ≥ 4.** At batch 1 an EP MoE's DeepEP time varies run
 to run, so a batch-1 delta is directional (Liger measures +27% there at seq 16384, [torch.compile](torch-compile.md#benchmark-results)).
 Memory numbers are deterministic at any batch.
 

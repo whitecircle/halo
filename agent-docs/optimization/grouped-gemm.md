@@ -91,12 +91,12 @@ End to end, these kernels together with the fused GLU, torch's fused RMSNorm on 
 The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, permute, attention, optimizer). The general sequence/batch playbook is in [Throughput Benchmarks](throughput-benchmarks.md#maximizing-throughput-sequence--batch); the kernel-side levers, measured on 8× B300 (SM 10.3, PyTorch 2.11+cu130, FA4, bf16):
 
 1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS, at a high memory cost; use EP only when FSDP OOMs ([Maximizing achieved TFLOPS](throughput-benchmarks.md#maximizing-achieved-tflops)).
-2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs.
-3. **GC off when the batch fits** ([the gpt-oss-20b EP step breakdown](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
+2. **Smallest EP degree that fits the experts.** Fewer ranks = larger per-rank GEMMs and less wait at the combine ([the split](throughput-benchmarks.md#where-the-ep-steps-time-goes)).
+3. **GC off when the batch fits** ([the feature A/B](throughput-benchmarks.md#where-the-ep-steps-time-goes)).
 4. **Atomic-free expert permute** (above) — always on the grouped path; +18% (seq 4k) to +65% (seq 16k) on qwen3.6 EP8, +24% on gpt-oss-20b EP8.
 5. **Leave `lowp_precision` off for throughput**; Halo's fp8/fp4 paths are for QAT. See [Low-Precision Kernels](low-precision-moe-kernels.md).
 
-Compute–comm overlap is the remaining structural lever. One narrow form ships opt-in: `HALO_EP_SHARED_OVERLAP=1` runs the shared-expert FFN on a side stream concurrent with the dispatch all-to-all, on the families that have one (see [DeepEP](../infrastructure/deepep.md)). The broader async dispatch/combine restructure (hiding the all-to-all behind the routed compute) is not implemented — it needs a larger forward restructure, and gpt-oss is already compute-bound at production seq lengths.
+Compute–comm overlap has little left to hide, since dispatch is 9–13% of the EP phases. One narrow form ships opt-in: `HALO_EP_SHARED_OVERLAP=1` runs the shared-expert FFN on a side stream concurrent with the dispatch all-to-all, on the families that have one (see [DeepEP](../infrastructure/deepep.md)). The larger term at ep8 is the wait for the busiest rank, which routing balance acts on and overlap does not.
 
 ## Low precision
 

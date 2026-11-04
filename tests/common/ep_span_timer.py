@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
+from transformers import TrainerCallback
 
 _global_timer: EPSpanTimer | None = None
 
@@ -57,6 +58,9 @@ class EPSpanTimer:
                 elapsed = time.perf_counter() - wall_start
             self.stats[operation_name].update(elapsed)
 
+    def reset(self) -> None:
+        self.stats.clear()
+
 
 def get_ep_span_timer() -> EPSpanTimer:
     """The process-wide timer, created on first use."""
@@ -64,3 +68,16 @@ def get_ep_span_timer() -> EPSpanTimer:
     if _global_timer is None:
         _global_timer = EPSpanTimer()
     return _global_timer
+
+
+class DropWarmupSpans(TrainerCallback):
+    """Forgets the spans of the warm-up steps. Step 1 builds DeepEP's buffers inside its dispatch, which would otherwise
+    read as communication in every average that follows."""
+
+    def __init__(self, warmup_steps: int, timer: EPSpanTimer):
+        self._warmup_steps = max(warmup_steps, 1)
+        self._timer = timer
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step == self._warmup_steps:
+            self._timer.reset()

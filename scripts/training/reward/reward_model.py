@@ -13,13 +13,14 @@ from halo.config_validation import reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.reward import RewardScriptArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.conversation import reject_image_content
 from halo.data.render_columns import alias_images_column, alias_tools_column
-from halo.data.vlm_detection import is_vlm_run_across_ranks
+from halo.data.vlm_detection import reject_unsupported_media_across_ranks
 from halo.entrypoints.data_setup import (
     apply_vision_options,
     load_script_datasets,
     log_script_dataset_examples,
-    reject_image_data_on_text_checkpoint,
+    resolve_vlm_run,
 )
 from halo.entrypoints.model_setup import (
     apply_max_length,
@@ -39,7 +40,6 @@ from halo.entrypoints.script import (
     with_distributed_teardown,
 )
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.models.modality import is_vlm_model
 from halo.runtime.collectives import barrier
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 
@@ -78,6 +78,17 @@ def main():
     # Before the load: a family with no score head fails inside Auto* resolution on every rank, naming no alternative.
     # After the distributed init, so the hub read is ordered main-rank-first.
     reject_multimodal_model_without_seq_cls_head(model_config)
+    # A multimodal checkpoint on text-only pairs is a text run, class unchanged.
+    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
+    if is_vlm:
+        # The VLM pair render (halo/data/pipeline/preferences.py) templates the prompt without
+        # `tools=`, so the aliased column would render toolless on this arm.
+        reject_unsupported_args("Reward modeling (VLM)", tools_field=args.tools_field)
+    else:
+        # TRL tokenizes these rows itself, into placeholder tokens with no pixels; the VLM render refuses its own.
+        reject_unsupported_media_across_ranks(
+            ds, ("prompt", "chosen", "rejected"), "Reward modeling", reject_row=reject_image_content
+        )
 
     model, tokenizer = load_model_and_tokenizer(
         context,
@@ -94,14 +105,6 @@ def main():
 
     log_model_info(model, tokenizer)
 
-    if not is_vlm_model(model_config.model_name_or_path, config=model.config):
-        reject_image_data_on_text_checkpoint(args, model_config.model_name_or_path, ds)
-    # Off the loaded config: a multimodal checkpoint on text-only pairs is a text run, class unchanged.
-    is_vlm = is_vlm_run_across_ranks(args, model_config.model_name_or_path, ds, config=model.config)
-    if is_vlm:
-        # The VLM pair render (halo/data/pipeline/preferences.py) templates the prompt without
-        # `tools=`, so the aliased column would render toolless on this arm.
-        reject_unsupported_args("Reward modeling (VLM)", tools_field=args.tools_field)
     # The processor only on the VLM branch: TRL's text tokenize map calls tokenizer-only methods, and the trainer reads
     # this object's modality as the run's verdict. Its inner tokenizer is the right-padded one TRL and the head expect.
     processing_class = tokenizer

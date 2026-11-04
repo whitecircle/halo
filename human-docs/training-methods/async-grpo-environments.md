@@ -106,11 +106,6 @@ SGLang ones are `ep1` only.
 - **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference: under EP,
   ETP or TP a whole unsharded copy on every rank. A PEFT policy is its own reference with the adapter
   off.
-- **The objective** truncates each token's importance-sampling ratio from above
-  ([Objective](../../agent-docs/training-methods/async-grpo/objective.md) ↗).
-- **Row order.** `length_ordered_microbatches`, on by default, deals a round's rows into its micro-batches
-  longest first, so ranks in lock-step run rows of one length together
-  ([Length-ordered micro-batches](../../agent-docs/training-methods/async-grpo/performance.md#length-ordered-micro-batches) ↗).
 
 Three decisions matter more than the rest:
 

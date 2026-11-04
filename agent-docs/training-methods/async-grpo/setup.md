@@ -65,8 +65,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_n
 
 ## Expert parallelism group size
 
-Dense models and `ep1` configs (no expert distribution) skip this. The trainer ranks must form **one** DeepEP dispatch group: set
-`expert_parallel_size` to the trainer-GPU count. Above `ep_size: 2`, a group narrower than the NVLink domain is
+Dense models and `ep1` configs (no expert distribution) skip this. Set `expert_parallel_size` to the trainer-GPU count to
+form one DeepEP dispatch group, as the recipes do. `ep_size: 2` also runs as several 2-rank groups, and node-local groups
+repeat across NVLink domains. Within one domain, a group above `ep_size: 2` narrower than the domain is
 rejected at config time: `ep4` on 4 trainer GPUs passes, on 8 it does not
 ([DeepEP](../../infrastructure/deepep.md#ep-grouping-what-is-reliable)).
 

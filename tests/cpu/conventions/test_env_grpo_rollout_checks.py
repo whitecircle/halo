@@ -65,12 +65,15 @@ def test_an_episode_that_does_not_report_its_draw_scores_zero(answer):
     assert grade == 0.0
 
 
-def _routing(flips: list[float], acquired: list[bool], probe: dict) -> dict[str, bool]:
+def _routing(flips: list[float], acquired: list[bool], probe: dict, mode: str = "rollout") -> dict[str, bool]:
     history = [
         {"step": step, "routing/replay_flip_rate": flip, "routing/rollout_unresolved_frac": 0.0}
         for step, flip in enumerate(flips, start=1)
     ]
-    trainer = types.SimpleNamespace(state=types.SimpleNamespace(log_history=history))
+    trainer = types.SimpleNamespace(
+        state=types.SimpleNamespace(log_history=history),
+        async_config=types.SimpleNamespace(routing_replay=mode),
+    )
     checks: dict[str, bool] = {}
     record_routing_replay(trainer, checks, {}, probe=probe, acquired=acquired)
     return checks
@@ -92,13 +95,26 @@ def test_steps_on_their_own_weights_rollouts_pass_and_popped_rounds_are_left_out
         ([0.026, 0.80, 0.39], [], _PROBE, _BAR_CHECK),
         ([0.96, 0.95], [], _PROBE, _BAR_CHECK),
         ([], [], _PROBE, _BAR_CHECK),
-        ([0.07], [], {**_PROBE, "floor": 0.3}, "routing_probe_separates_noise_from_a_misplaced_mask"),
+        ([0.07], [], {**_PROBE, "floor": 1.0, "misplaced": 0.9}, "routing_probe_floor_below_a_misplaced_mask"),
         ([0.0], [], {**_PROBE, "floor": 0.0}, "routing_probe_floor_flips_a_selection"),
     ],
-    ids=["a-stale-step-read-as-fresh", "a-shifted-mask", "no-step-1-flip", "ends-too-close", "a-zero-floor"],
+    ids=["a-stale-step-read-as-fresh", "a-shifted-mask", "no-step-1-flip", "ends-inverted", "a-zero-floor"],
 )
 def test_a_routing_mismatch_or_a_degenerate_probe_fails(flips, acquired, probe, failed):
     assert not _routing(flips, acquired, probe)[failed]
+
+
+def test_a_noise_sensitive_router_answers_to_the_separation_not_the_midpoint():
+    # Laguna's measured probe: the midpoint would sit at 0.60 and pass a flip rate no good replay shows.
+    laguna = {**_PROBE, "floor": 0.363, "misplaced": 1.0}
+    assert all(_routing([0.109], [], laguna).values())
+    assert not _routing([0.40], [], laguna)[_BAR_CHECK]
+
+
+def test_recompute_replay_has_no_engine_coverage_to_check():
+    checks = _routing([0.0], [], {**_PROBE, "floor": 0.07}, mode="recompute")
+    assert "routing_replay_masks_assembled" not in checks
+    assert all(checks.values())
 
 
 @pytest.mark.parametrize(

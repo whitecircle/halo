@@ -81,7 +81,8 @@ Under PP every `world_size` here is the stage's rank count.
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
     --expert_parallel_size=1 \
-    --expert_tensor_parallel_size=8
+    --expert_tensor_parallel_size=8 \
+    --use_grouped_gemm=true
 
 # 2-GPU correctness test (expert_tp_size=2, ep_size=1)
 torchrun --nproc_per_node=2 \

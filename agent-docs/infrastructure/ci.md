@@ -105,13 +105,17 @@ it in `tests/common/models.py` so the seed carries it.
 
 The scope Halo 1.2.0 is validated on:
 
-- **GPU:** single 8× B300 nodes: the core and pipeline tiers, both rollout-server tiers (vLLM 0.32.0,
-  SGLang 0.5.22), the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`) and
-  the throughput band (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)).
-- **Hopper:** the image build, the CPU tier inside it and an FA3 import check.
-- **Multi-node:** two B300 nodes over EFA for the two PP recipes (training; the Qwen3-8B one also a
-  per-node save, resume, merge and load) and cross-node `ep16`; the rest is a two-node simulation on one
-  host ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
+- **GPU:** 8× B300 machines: the core and pipeline tiers, both rollout-server tiers (vLLM 0.32.0,
+  SGLang 0.5.22) and the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`).
+- **Throughput band** (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)): on a second
+  B300 machine, 7 of 9 rows sat within band. `ep1` read 2.3% and `ep4 × etp2` 5.5% under their baseline
+  medians (one slow repeat of three); an A/B of the baseline commit and the tested commit on that machine
+  overlapped on both rows.
+- **Multi-node:** two 8-GPU machines ran node-local `ep8` with DP through a per-node save, resume and
+  evaluation, cross-node `ep16` through a gathered save and reload, cross-node weight sync on both
+  engines, and the two PP recipes (training; the Qwen3-8B one also a per-node save, resume, merge
+  and load). The other multi-node shapes run as a two-node simulation on one host
+  ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
 - **Model size:** full-size checkpoints ran up to Qwen3.5-35B-A3B (`ep8`), plus a few full-depth EP8 LoRA
   steps of Qwen3.8-Flash-Next. Larger recipes did not run on 1.2.0; gpt-oss-120b and Qwen3.5-122B-A10B at
   EP8 last ran on earlier code.

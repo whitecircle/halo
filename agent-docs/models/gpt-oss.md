@@ -48,7 +48,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
     `tests/gpu/kernels/test_fa4_trainable_sink_rescale.py` pins all four against an eager reference on both entry points. Frozen sinks and no-grad calls pass through untouched.
 
-    Refused: `reset_sinks: true` (a dtype-min sink has zero gradient), `flex_attention` (NaN sink gradients in its compiled backward), FA3 (no sink gradient), adapter runs (the adapter artifact has no sink slot), and weight-sync RL (no validated end-to-end sync of a moving sink; frozen live sinks are on-policy by construction).
+    Refused: `reset_sinks: true` (a dtype-min sink has zero gradient), `flex_attention` (NaN sink gradients in its compiled backward), FA3 (no sink gradient), adapter runs (the adapter artifact has no sink slot), and weight-sync RL (no validated end-to-end sync of a moving sink; frozen live sinks stay equal on both sides).
 
 ## CP, TP, ETP
 
@@ -63,7 +63,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 - `fp32_non_ep_params: true` is safe — the router lives inside the EP layer (unlike Gemma 4).
 - **Blackwell** auto-selects FA4 under every sink policy. GPT-OSS is unaffected by the Qwen3.5/3.6 FA4→SDPA fallback.
 - **SFT alternatives.** With sinks reset, `flash_attention_2` (`sinks = None`) and `sdpa` (the `dtype.min` column contributes `exp(dtype.min)=0`) also run end to end, both JIT-free. RL cannot use them ([why](#attention-sinks)). Which kernel carries a sink, and how the resolver reads it: [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
-- **Sink-free trainer, live engine.** `reject_unsyncable_model` refuses on-policy RL when the FA2 reset removed the sinks Parameter (`reset_sinks: true` + FA2): the sync sends named parameters only, so the engine would keep serving the pretrained sinks against a sink-free trainer — permanently off-policy with no error at sync time.
+- **Sink-free trainer, live engine.** `reject_unsyncable_model` refuses on-policy RL when the FA2 reset removed the sinks Parameter (`reset_sinks: true` + FA2): the sync sends the trainer's named parameters, so the engine would keep serving the pretrained sinks against a sink-free trainer — permanently off-policy with no error at sync time.
 - **Hopper FA2** runs the image's build, whose split-K kernels are stubbed and never picked by a forward Halo runs ([Docker → Building](../infrastructure/docker.md#building)).
 - **Variable-length RL** (async GRPO) runs FA4 through a per-row dense forward ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)).
 
@@ -121,7 +121,7 @@ With harmony disabled, five settings are load-bearing.
 
     The trap is `tokenizer.vocab_size`, which is **199998**: shrink to that and the checkpoint loses EOS and emits garbage. `scripts/before_training/patch_vocab.py` only **grows** the embedding, so a patched checkpoint keeps every special and serves like the base — unless it was patched with `--reset_sinks`, which leaves it sinks-off, and the pretrained model served sinks-off degenerates (below).
 
-Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer matches by freezing the same sinks, so recompute equals vLLM to ~0 nats (`is_ratio ~1`).
+Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer freezes the same sinks, so both sides score with them; what remains between the two bf16 forwards is routing and rounding noise ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
 GPT-OSS serves from **SGLang** for async GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.22); thinking budgets are rejected at config time for this backend, and the server container needs `NCCL_CUMEM_ENABLE=1` (the compose default). Flags and constraints: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
 
@@ -139,4 +139,4 @@ vLLM and SGLang load `router.bias` and route with it (top-k on bias-inclusive lo
 
 `router_aux_loss_coef` is forced to 0 for the run to avoid double-balancing (restored in the exported config). The bias lives in logit space, so the default γ is small for it; size `router_balancing_rate` per [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).
 
-**Not for on-policy RL.** Online and env GRPO must use `moe_balancing: none` — adoption re-registers `router.bias` as a buffer and the weight sync ships parameters only, so a synced engine routes on the pretrained bias (`configure_moe_balancing` downgrades it automatically). Bias-update needs the EP layers (`ep_size > 1`, or the default `use_grouped_gemm`); without them it raises at setup.
+**Not for on-policy RL.** Online and env GRPO must use `moe_balancing: none` — adoption re-registers `router.bias` as a buffer, and the weight sync ships a buffer only where the family declares it in `engine_loaded_buffers`, so a synced engine routes on the pretrained bias (`configure_moe_balancing` downgrades it automatically). Bias-update needs the EP layers (`ep_size > 1`, or the default `use_grouped_gemm`); without them it raises at setup.

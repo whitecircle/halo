@@ -120,7 +120,9 @@ the head too. A tied embedding is reserved for the root group and does not depen
 classification head (no `lm_head`), a `modules_to_save` copy or a second embedding table (Gemma 4's
 per-layer inputs) is untied and does.
 
-On a composite the embedding and root groups also hold what only an image row reaches, so a rank whose batch has no image would enter their reduce-scatter with a shorter list than its peers'. Before reducing, those groups agree across their process groups which parameters any rank holds a gradient for and zero-fill the rest (`_agree_unsharded_grad_presence`); what no rank reached keeps `grad is None`, so a text-only run never writes its tower. That is one small all-reduce per group and backward, two under HSDP. Accelerate-managed FSDP2 takes no such wrap, so mixed rows there need `freeze_vision_tower: true`, as does a frozen input embedding beside a trainable tower: a text row's first layer then gets no gradient-carrying input, so that layer's group reduces at the end of the backward on a text rank and in order on an image rank, and the ranks' reduces stop pairing.
+On a composite the embedding and root groups also hold what only an image row reaches, so a rank whose batch has no image would enter their reduce-scatter with a shorter list than its peers'. Before reducing, those groups agree across their process groups which parameters any rank holds a gradient for and zero-fill the rest (`_agree_unsharded_grad_presence`); what no rank reached keeps `grad is None`, so a text-only run never writes its tower. That costs one small all-reduce per group and backward, two under HSDP. Mixed image and text rows therefore train under `torchrun` without `freeze_vision_tower`. Accelerate-managed FSDP2 takes no such wrap, so mixed rows there need `freeze_vision_tower: true`.
+
+A frozen input embedding beside a trainable tower on mixed rows is not refused, and it hangs until the collective timeout: a text row's first layer gets no gradient-carrying input, so that layer's group reduces at the end of the backward on a text rank and in order on an image rank, and the ranks' reduces stop pairing. `unfreeze_layers_patterns` matching the tower but not the embedding gets there. Set `freeze_vision_tower: true`, or train the embedding.
 
 Two setups **raise** rather than wrap:
 
@@ -263,7 +265,7 @@ The two flags compose into the EP1 sharding matrix (MoE, `ep_group_size==1`):
 | `false` | `false` | replicated | ZeRO-2 |
 | `false` | `true` | replicated | ZeRO-3 |
 
-All four cells work for both SFT and online/async GRPO. At `ep_group_size==1` the MoE is
+All four cells are admitted for SFT and online/async GRPO; GPU rows run the first three. At `ep_group_size==1` the MoE is
 still EP-wrapped (grouped-GEMM path) while `has_ep_group` is `False`, so the GRPO weight-sync gather
 keys the EP expert reshape on the model's live EP layers, not on `has_ep_group`.
 

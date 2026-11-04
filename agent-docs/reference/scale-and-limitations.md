@@ -2,8 +2,8 @@
 
 What the toolkit can and cannot do for very large models, long sequences, multi-week runs, huge
 corpora, and many nodes. Multi-node mechanics: [Multi-Node Training](../parallelism/multi-node.md).
-Debugging: [Debugging & Profiling](debugging.md). What has run on real machines, and what is arithmetic
-only: [Verified topologies](../parallelism/multi-node.md#verified-topologies) and
+Debugging: [Debugging & Profiling](debugging.md). What has run on real machines:
+[Verified topologies](../parallelism/multi-node.md#verified-topologies) and
 [Release validation](../infrastructure/ci.md#release-validation).
 
 Which axis combinations may run at all is an **allowlist**
@@ -79,7 +79,7 @@ drops the optimizer shards but not the funnel.
 | **Weight sync fans out from one producer** | Online and async GRPO broadcast updated weights from the trainer's forwarding rank to every rollout server, and the push time grows with the server count (the fan-out costs the sum of the pushes, not the slowest) — fine for a handful of servers, not a large inference fleet. | Keep the inference fleet modest. |
 | **QLoRA (bitsandbytes 4-/8-bit) + EP / TP / grouped-GEMM MoE** | The EP and grouped-GEMM loaders materialize plain de-quantized weights (the EP lazy loader streams raw tensors), and TP shards into DTensors, so bitsandbytes `Params4bit` are lost and PEFT's 4-bit adapter dispatch fails. Rejected at model-load time (`load_distributed_model`), including an `ep_size=1` MoE run that only wants the grouped-GEMM EP layers. CP on a **dense** model is unaffected — it keeps the standard `from_pretrained` loader; a CP MoE run is rejected by the same guard (the CP loader applies the grouped-GEMM EP layers internally). | Use QLoRA under plain **DDP/FSDP** (either launcher; a MoE also needs `use_grouped_gemm: false`) or **CP on a dense model**, or **plain LoRA** (no quantization) for EP. TP has no LoRA path at all — full fine-tune there. |
 | **Pipeline parallelism trains full fine-tunes on registered families** | Every adapter shape is refused, a `PeftModel` included, along with online and async GRPO, distillation, embedding, `torch_compile`, reentrant checkpointing and interleaved schedules; the bubble rises with `pp_size` at a fixed global batch. Qwen3 MoE, GLM-4 MoE Lite, Laguna, Inkling and Qwen3.8-Flash-Next have run tiny models under it, plus a Qwen3-30B-A3B correctness smoke. | Train adapters without PP. Limits and the refusal list: [Pipeline Parallelism](../parallelism/pipeline-parallelism.md#rejected-combinations). |
-| **NVL72 / MNNVL rack-wide domains** | `NVLINK_DOMAIN_SIZE` makes the rack the locality unit for EP/CP/TP/ETP grouping. The fabric check (`validate_nvlink_domain_against_fabric`, run from `ParallelismConfig.__post_init__`) **raises** when a declared domain block straddles two fabric cliques, warns when the clique is wider, and no-ops where any rank cannot read its clique — it never builds groups. Ranks that disagree on the value are refused earlier in `__post_init__` (`reject_divergent_settings`). The path is exercised only against simulated domain sizes in the test suite — no rack-scale hardware run backs it. | Treat rack-wide grouping as unvalidated: bring up a small NVLink-wide job first, and keep `NVLINK_DOMAIN_SIZE` unset on ≤8-GPU nodes. |
+| **NVL72 / MNNVL rack-wide domains** | `NVLINK_DOMAIN_SIZE` makes the rack the locality unit for EP/CP/TP/ETP grouping. The fabric check (`validate_nvlink_domain_against_fabric`, run from `ParallelismConfig.__post_init__`) **raises** when a declared domain block straddles two fabric cliques, warns when the clique is wider, and no-ops where any rank cannot read its clique — it never builds groups. Ranks that disagree on the value are refused earlier in `__post_init__` (`reject_divergent_settings`). The test suite drives the path with simulated domain sizes. | Bring up a small NVLink-wide job first, and keep `NVLINK_DOMAIN_SIZE` unset on ≤8-GPU nodes. |
 | **EP requires a de-quantized (BF16) checkpoint** | The EP path materializes experts as plain `nn.Parameter`s, so a natively-quantized MoE checkpoint (e.g. the MXFP4 `openai/gpt-oss-20b`, whose expert blocks are `uint8` on disk) fails to load — the EP patcher checks every expert tensor and raises with the workaround. | Point EP configs at a BF16-dequantized checkpoint (`unsloth/gpt-oss-20b-BF16` or a locally patched BF16 export). |
 | **Tokens per rank through the DeepEP dispatch** | One rank's tokens per MoE forward are capped by DeepEP's 32-bit wire index, and lower when the EP group crosses NVLink domains. | Batch 1 or a shorter `max_length`; for the cross-domain cap, node-local EP with DP across nodes. Ceilings, where each is enforced, and the override in [Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit) and [EP over EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa). |
 | **Context-parallel trainer and model limits** | CP runs only under SFT, SMPO and offline GRPO full fine-tuning; every other trainer refuses it, as do families with sequence-mixing layers or no CP wrapper. | Requirements, including the head-count rule, in [Context Parallelism](../parallelism/context-parallelism.md#requirements). |
@@ -101,8 +101,7 @@ drops the optimizer shards but not the funnel.
 - **Huge corpus**: pre-tokenize with `scripts/before_training/prepare_dataset.py --num_shards N`
   (`N >= data_parallel_size`; `k×world_size` is safe). Loads per-rank with
   bounded RAM.
-- **NVL72 rack**: set `NVLINK_DOMAIN_SIZE` to run TP/CP/EP NVLink-wide — unvalidated on
-  rack hardware, see the
+- **NVL72 rack**: set `NVLINK_DOMAIN_SIZE` to run TP/CP/EP NVLink-wide; see the
   [NVL72 section](../parallelism/multi-node.md#gb200gb300-nvl72-multi-node-nvlink).
 
 See also: [Why This Framework](why-this-framework.md) · [Pre-training](../training-methods/pretraining.md) · [Checkpoints & Resume](checkpoints.md)

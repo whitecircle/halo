@@ -23,11 +23,12 @@ there, never from memory.
 ## How to use this skill
 
 1. Pin the **bottleneck**: throughput-bound (want more tok/s/GPU) or memory-bound (OOM /
-   want longer seq / bigger batch)? For MoE/EP also ask: comm-bound (low top-k, e.g.
-   gpt-oss) or permute/elementwise-bound (high top-k, e.g. qwen3.6)? When unsure, measure:
-   `enable_torch_profiler: true` → `python scripts/profiling/trace_report.py` (TraceLens
-   compute/comm/idle split; the `ep.dispatch`/`ep.combine` trace ranges give the all-to-all
-   fraction directly).
+   want longer seq / bigger batch)? For MoE/EP also ask where the layer's time goes: expert
+   work and the wait for the busiest rank, or permute/elementwise work (high top-k, e.g.
+   qwen3.6)? When unsure, measure: `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile`
+   for the per-rank EP split, or `enable_torch_profiler: true` →
+   `python scripts/profiling/trace_report.py` (TraceLens compute/comm/idle split). A rank's
+   `ep.combine` includes its wait for the slowest rank, so it is not wire time.
 2. Confirm the **shape**: dense vs MoE/EP, short vs long seq, fixed- vs variable-length data.
 3. Recommend from the flow below; take the measured effect and the exact YAML/env flag from the
    lever's page. Measure an EP throughput delta at batch ≥ 4 ([why](../../agent-docs/optimization/liger-kernels.md#benchmarks)).
@@ -47,12 +48,12 @@ Mention these only to confirm, not as new advice:
 
 ## Throughput flow (raise tok/s/GPU)
 
-- **MoE/EP, any shape →** push **seq × batch as high as memory allows** first: EP at low token counts
-  is comm-bound, so batch is the dominant EP lever. Read achieved TFLOPS / tok-s, not plain MFU%
+- **MoE/EP, any shape →** push **seq × batch as high as memory allows** first: it fills the expert
+  GEMMs, so batch is a leading EP lever. Read achieved TFLOPS / tok-s, not plain MFU%
   ([Throughput benchmarks](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-throughput-sequence--batch)).
 - **MoE/EP, fits without GC →** turn **gradient checkpointing off**, the largest single lever in the EP
   feature A/B, at a much larger activation footprint
-  ([the A/B](../../agent-docs/optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
+  ([the A/B](../../agent-docs/optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)).
   On packed SFT rows `gradient_checkpointing_plan: auto` measures whether it fits and checkpoints only the
   layers the memory needs ([GradientCheckpointingPlanCallback](../../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback)).
 - **MoE, small model fits in FSDP →** prefer **FSDP (ep1) over EP** (no all-to-all); use EP only when

@@ -136,7 +136,7 @@ isr_opsm_delta: 0.05
 skip_update_masked_frac: 0.4
 early_stop_on_skipped_updates: true  # end the run once the breaker has skipped every update of early_stop_patience (3) rounds in a row
 scale_rewards_std_floor: 0.2
-routing_replay: rollout     # R3 on SGLang: response-level sglext payload, raw-int32 wire format
+routing_replay: rollout     # R3 on SGLang: raw-int32 payload in each choice's meta_info
 num_generations_eval: 1
 scale_rewards: batch
 drop_degenerate_groups: true

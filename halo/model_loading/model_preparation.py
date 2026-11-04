@@ -136,10 +136,9 @@ def auto_load_model(
         if config is None:
             reject_adapter_directory(model_name_or_path)
             # revision must reach the config fetch too, else a pinned checkpoint pairs with hub-main's config.
-            config = AutoConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=trust_remote_code, revision=kwargs.get("revision")
+            config = resolve_build_config(
+                model_name_or_path, revision=kwargs.get("revision"), trust_remote_code=trust_remote_code
             )
-            drop_toolkit_stamps(config)
         model_class = resolve_auto_model_class(config, text_only=text_only)
         if text_only and (sibling := resolve_text_only_config(config)) is not config:
             kwargs["config"] = sibling

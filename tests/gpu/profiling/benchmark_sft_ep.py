@@ -45,7 +45,7 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
-from tests.common.ep_span_timer import get_ep_span_timer
+from tests.common.ep_span_timer import DropWarmupSpans, get_ep_span_timer
 from tests.common.memory import cleanup_memory, gpu_mem_gb, host_peak_rss_gib, reset_host_peak_rss
 from tests.common.models import MODEL_CONFIGS
 from tests.common.rank_log import log
@@ -54,6 +54,7 @@ from tests.common.sft_collator import build_sft_collator
 
 # The bench band's negative control: every EP layer holds the GPU idle this long before each forward.
 EP_FORWARD_DELAY_MS = env_float("HALO_TEST_EP_FORWARD_DELAY_MS", 0.0)
+_EP_PHASES = ("ep.dispatch", "ep.expert_compute", "ep.combine")
 
 
 def _stall_before_forward(*_) -> None:
@@ -61,6 +62,25 @@ def _stall_before_forward(*_) -> None:
     host."""
     torch.cuda.synchronize()
     time.sleep(EP_FORWARD_DELAY_MS / 1000)
+
+
+def _log_ep_attribution(rank: int, seq: int, ep_size: int) -> None:
+    """COLLECTIVE. Every rank's split, as ranks differ: a rank's combine includes its wait for the slowest rank's
+    compute, so one rank's split, or combine read as wire time, misstates where the step goes."""
+    stats = get_ep_span_timer().stats
+    per_rank = [None] * dist.get_world_size()
+    dist.all_gather_object(per_rank, [stats[phase].avg_time if phase in stats else 0.0 for phase in _EP_PHASES])
+    if rank != 0:
+        return
+    log(f"\n  --- EP phase split past warm-up, ms per MoE layer, serialized (seq={seq}, ep={ep_size}) ---")
+    log("  rank  dispatch   compute   combine")
+    for index, (dispatch, compute, combine) in enumerate(per_rank):
+        log(f"  {index:4d}  {dispatch * 1e3:8.3f}  {compute * 1e3:8.3f}  {combine * 1e3:8.3f}")
+    means = [sum(column) / len(column) for column in zip(*per_rank, strict=True)]
+    total = sum(means)
+    if total > 0:
+        dispatch, compute, combine = (100 * mean / total for mean in means)
+        log(f"  mean share: dispatch {dispatch:4.1f}%, compute {compute:4.1f}%, combine incl. wait {combine:4.1f}%")
 
 
 def _liger_config_pairs(spec: str) -> dict[str, bool]:
@@ -175,10 +195,9 @@ def main() -> int:
     parser.add_argument(
         "--comm_profile",
         action="store_true",
-        help="Attribute EP step time to DeepEP all-to-all (dispatch+combine) vs "
-        "local expert compute via the EPSpanTimer's per-phase CUDA "
-        "timers. Serialized/synchronized — measures the comm FRACTION, not "
-        "throughput. Prints a dispatch/compute/combine breakdown on rank 0.",
+        help="Split EP step time into dispatch, expert compute and combine with the EPSpanTimer's per-phase CUDA "
+        "timers, past the warm-up steps, for every rank. Serialized, so it measures shares, not throughput. A rank's "
+        "combine includes its wait for the slowest rank.",
     )
     parser.add_argument(
         "--ep_scope",
@@ -451,6 +470,8 @@ def main() -> int:
             sft_config.liger_kernel_config = liger_kernel_config
 
         callbacks = [efficiency_cb]
+        if args.comm_profile:
+            callbacks.append(DropWarmupSpans(args.warmup, get_ep_span_timer()))
         if args.profile:
             # Skip warmup + 1, then record 3 steady-state steps; profiling needs steps >= warmup + 5.
             callbacks.append(
@@ -540,22 +561,8 @@ def main() -> int:
                 if not identical:
                     raise RuntimeError(f"the gathered save's files differ across write-thread counts: {digests}")
 
-        if args.comm_profile and rank == 0:
-            stats = get_ep_span_timer().stats
-            disp = stats["ep.dispatch"].avg_time if "ep.dispatch" in stats else 0.0
-            comp = stats["ep.expert_compute"].avg_time if "ep.expert_compute" in stats else 0.0
-            comb = stats["ep.combine"].avg_time if "ep.combine" in stats else 0.0
-            total = disp + comp + comb
-            if total > 0:
-                comm = disp + comb
-                log("\n  --- EP step attribution (per MoE layer, serialized CUDA-event timing) ---")
-                log(f"  dispatch (all-to-all) : {disp * 1e3:7.3f} ms  ({100 * disp / total:4.1f}%)")
-                log(f"  expert compute (GEMM) : {comp * 1e3:7.3f} ms  ({100 * comp / total:4.1f}%)")
-                log(f"  combine  (all-to-all) : {comb * 1e3:7.3f} ms  ({100 * comb / total:4.1f}%)")
-                log(
-                    f"  => communication      : {comm * 1e3:7.3f} ms  ({100 * comm / total:4.1f}%)  "
-                    f"(seq={args.seq}, ep={ep_size})"
-                )
+        if args.comm_profile:
+            _log_ep_attribution(rank, args.seq, ep_size)
         log(f"{'=' * 70}\n")
 
     except Exception as e:

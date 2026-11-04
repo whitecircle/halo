@@ -75,11 +75,11 @@ Online and async GRPO sync into vLLM 0.32.0, which serves the family from the **
 
 The sync forwards that namespace: the same save-side revert the gathered save runs rewrites every forwarded key. The fused `experts.gate_up_proj` gather is split into the two hub stacks, the vision q/k/v are fused back into the un-permuted `in_proj`, and the `model.language_model.*` / `mlp.*` spellings return to the hub's, so the served model receives exactly the tensors a gathered checkpoint would carry.
 
-`tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server. Serve the hub repo or a toolkit export directly, and note:
+`tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server serving a tiny hub-layout checkpoint, with no training loop. Serve the hub repo or a toolkit export directly, and note:
 
 - `--trust-remote-code` — vLLM cannot parse transformers' native `step3p7` config, so the composite config is the repo's own `configuration_step3p7.py` (the text tower resolves to vLLM's `step3p5`). A toolkit export ships that module and the ones it imports itself ([Checkpoint](#checkpoint)), so it needs the same flag and nothing else.
 - `--moe-backend triton` and the layerwise-reload patch, as for every MoE family ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)); the experts are a `RoutedExperts`, which the patch already excludes from the reload lifecycle.
-- The router's selection bias (`moe.router_bias`) is a buffer and the sync ships parameters only: it stays at its checkpoint value on both sides, which is exact because weight-sync RL runs `moe_balancing: none` (bias-update balancing is downgraded before any bias state exists).
+- The router's selection bias (`moe.router_bias`) is a buffer the sync does not ship (the family declares no `engine_loaded_buffers`): it stays at its checkpoint value on both sides, which is exact because weight-sync RL runs `moe_balancing: none` (bias-update balancing is downgraded before any bias state exists).
 - vLLM's clamped fused-MoE kernel accepts `swiglu_limits` of exactly 7 (the release value); any other clamp fails at server start, not silently.
 - SGLang is refused for the family at construction: `Step3p5ForCausalLM.load_weights` asserts full parameter coverage in each call, which the chunked online update cannot satisfy ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 

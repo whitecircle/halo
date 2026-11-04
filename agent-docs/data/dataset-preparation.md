@@ -119,7 +119,7 @@ vision placeholders expanded, `attention_mask`, `labels` (image tokens masked to
 Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field` or
 `--interleaved_thinking` (the offline render would diverge from the runtime one), and a processor
 emitting a vision key outside this fixed schema on an image row (`mm_token_type_ids` and the like —
-the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5/3.6, Qwen3.8 and Gemma 4 processors all emit it, so
+the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5/3.6, Qwen3.8-27B, Qwen3.8-Flash-Next and Gemma 4 processors all emit it, so
 their image rows train through the runtime VLM path and `--is_vlm` bakes only their text rows.
 
 VLM sequences are never truncated, since cutting expanded placeholders while `pixel_values` keeps

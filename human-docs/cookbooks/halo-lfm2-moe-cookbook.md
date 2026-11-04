@@ -85,7 +85,7 @@ CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental lfm2-grpo.yaml -n 2 \
 
 Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. SGLang 0.5.22 also
 serves and weight-syncs LFM-2: add `--rollout_backend=sglang --rollout_server_url=http://localhost:30000`
-and leave out `--routing_replay=rollout`, because SGLang's routing capture is not verified for LFM-2.
+and start the server with `SGLANG_ENABLE_R3=1`.
 
 ## Settings that matter
 
@@ -94,8 +94,9 @@ and leave out `--routing_replay=rollout`, because SGLang's routing capture is no
   `expert_bias`, so the trained bias ships in every checkpoint and the served model routes as it
   trained. LFM-2 has no router auxiliary loss. Without EP or grouped GEMM nothing carries the bias, so
   freeze the router instead with `freeze_layers_patterns: ["*.feed_forward.gate.weight"]`.
-- **Gradient checkpointing.** The recipe trains 16,384-token packed rows without it. The fit on B200
-  and B300 is computed, not measured. On 80 GB GPUs add `--gradient_checkpointing=true`.
+- **Gradient checkpointing.** The recipe trains 16,384-token packed rows without it, a shape that has not
+  run on the full-size model. The fit on B200 and B300 is computed, not measured. On 80 GB GPUs add
+  `--gradient_checkpointing=true`.
 - **Tool parser.** vLLM needs `VLLM_TOOL_PARSER=lfm2`. The default `hermes` leaves LFM-2's tool calls as
   text, so every episode scores zero.
 

@@ -5,7 +5,8 @@ patches it, as accurately as on FA2, on four row shapes.
 Full-attention layers and every expert routed, so the comparison is continuous in the attention output. The unpacked
 and ``cu_seq_lens`` rows must reach FA4 strided, the layout flash-attn-4 4.0.0b16 read scrambled, on every family whose
 attention can hand it that. GLM-4.7-Flash holds the kernel path alone: the resolver keeps its latent attention on FA2 as
-a precaution.
+a precaution. A family that declares sliding layers also runs them on rows longer than the window, each document past
+it, against the same weights on full attention so the window has to show.
 """
 
 import argparse
@@ -21,12 +22,17 @@ from transformers import modeling_flash_attention_utils as flash_utils
 
 from halo.model_loading.dtype import configure_float32_matmul_precision
 from halo.model_loading.model_preparation import apply_family_patches
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.selection import resolve_attn_implementation
 from halo.models.segment_markers import SegmentMarkers, segment_marker_kwargs
-from tests.common.harness import gpu_test_main
+from tests.common.attention_kernels import kernel_calls
+from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.numerics import max_abs_rel_err
 from tests.common.rank_log import log
 from tests.common.tiny_models import (
+    TINY_DENSE_ATTENTION_FAMILIES,
     TINY_DENSE_FAMILIES,
+    TINY_GEMMA_FAMILY,
     TINY_MOE_FAMILIES,
     tiny_family_model,
 )
@@ -37,15 +43,41 @@ DOCUMENT_LENGTHS = (400, 300, 324)
 PADDED_LENGTHS = (SEQ, SEQ - 200)
 # Two bf16 kernels accumulate in different orders.
 FA2_ERROR_RATIO = 1.5
+# FA4 is held to FA2, so FA2 must track the reference itself, or both losing a window or a boundary reads as a ratio
+# near 1. Of the largest |logit|; bf16 noise reaches 8e-2 on Gemma 3.
+FA2_LOGITS_ERROR_MAX = 0.2
 # Transformers' position_ids-only and unpad paths copy q/k/v; these rows hand them strided.
 STRIDED_ROWS = ("unpacked", "packed_cu_seq_lens")
 # Contiguous at every shape: they rotate the whole head element by element, which keeps q's memory order, where the
 # others' partial rotary rebuilds q and k with a ``torch.cat``; Cohere2's global layers skip the rotary too.
-CONTIGUOUS_QKV_FAMILIES = frozenset({"cohere2_moe", "lfm2_moe"})
+CONTIGUOUS_QKV_FAMILIES = frozenset(
+    {"cohere2_moe", "gemma", "gemma3_text_hd128", "lfm2_moe", "llama", "mistral", "qwen2"}
+)
 
 _GQA_256 = {"num_hidden_layers": 2, "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 256}
 _FULL_ATTENTION = {"layer_types": ["full_attention", "full_attention"]}
 _ALL_EIGHT_EXPERTS = {"num_experts": 8, "num_experts_per_tok": 8}
+# Shorter than every document of DOCUMENT_LENGTHS and PADDED_LENGTHS.
+WINDOW = 128
+_WINDOWED_LAYERS = {"layer_types": ["sliding_attention", "sliding_attention"], "sliding_window": WINDOW}
+# The families with a sliding layer type; the overrides that put each one's layers on it.
+PAST_WINDOW_OVERRIDES = {
+    "cohere2_moe": _WINDOWED_LAYERS,
+    "gemma3_text_hd128": _WINDOWED_LAYERS,
+    "laguna": _WINDOWED_LAYERS,
+    "mistral": {"sliding_window": WINDOW},
+    "qwen2": {"use_sliding_window": True, "max_window_layers": 0, "sliding_window": WINDOW},
+}
+# Each past-window row and the row shape it reruns on the windowed layers.
+PAST_WINDOW_ROWS = {
+    "past_window": "unpacked",
+    "packed_past_window": "packed_position_ids",
+    "padded_past_window": "padded",
+}
+# Of the largest |logit|: the window has to move logits past FA2's error, or the rows compare nothing.
+WINDOW_MOVES_LOGITS_MIN = 1e-1
+# The latent attention FA4's dedicated kernel leaves to FA2.
+_RESOLVES_FA2 = frozenset({"glm4_moe_lite"})
 FAMILIES = {
     "qwen3_5": (TINY_DENSE_FAMILIES["qwen3_5"], {**_GQA_256, **_FULL_ATTENTION}),
     "qwen3_5_moe_text": (TINY_MOE_FAMILIES["qwen3_5_moe_text"], {**_GQA_256, **_FULL_ATTENTION, **_ALL_EIGHT_EXPERTS}),
@@ -89,6 +121,14 @@ FAMILIES = {
             "n_routed_experts": 8,
             "num_experts_per_tok": 8,
         },
+    ),
+    "qwen2": (TINY_DENSE_ATTENTION_FAMILIES["qwen2"], {"num_hidden_layers": 2, "hidden_size": 256}),
+    "gemma": (TINY_GEMMA_FAMILY, {"num_hidden_layers": 2, "head_dim": 64}),
+    "llama": (TINY_DENSE_ATTENTION_FAMILIES["llama"], {"num_hidden_layers": 2, "head_dim": 64}),
+    "mistral": (TINY_DENSE_ATTENTION_FAMILIES["mistral"], {"num_hidden_layers": 2, "head_dim": 64}),
+    "gemma3_text_hd128": (
+        TINY_DENSE_ATTENTION_FAMILIES["gemma3_text"],
+        {"num_hidden_layers": 2, "head_dim": 128, **_FULL_ATTENTION},
     ),
 }
 
@@ -156,8 +196,40 @@ def _fa4_strided_calls():
         flash_utils._loaded_implementation = None
 
 
+def _reference_and_model(family, overrides: dict, device):
+    """The fp32 SDPA reference and the bf16 model on one seed's weights."""
+    torch.manual_seed(SEED)
+    base = tiny_family_model(family, overrides=overrides)
+    reference_model = copy.deepcopy(base).to(device, torch.float32)
+    reference_model.config._attn_implementation = "sdpa"
+    return reference_model, copy.deepcopy(base).to(device, torch.bfloat16)
+
+
+def _compare_row(family_name, row_name, row, reference, model, checks, metrics, *, asserts_strided) -> None:
+    model.config._attn_implementation = apply_family_patches(model.config, "flash_attention_4")
+    with _fa4_strided_calls() as strided, kernel_calls() as fa4_calls:
+        fa4 = _errors(model, row, reference)
+    model.config._attn_implementation = "flash_attention_2"
+    with kernel_calls() as fa2_calls:
+        fa2 = _errors(model, row, reference)
+    log(f"  [{family_name}/{row_name}] fa4 {fa4}  fa2 {fa2}  strided fa4 calls {sum(strided)}/{len(strided)}")
+    checks[f"{row_name}_finite"] = bool(fa4["finite"] and fa2["finite"])
+    checks[f"{row_name}_compares_fa4_with_fa2"] = set(fa4_calls) == {"flash_attention_4"} and set(fa2_calls) == {
+        "flash_attention_2"
+    }
+    checks[f"{row_name}_fa2_tracks_the_reference"] = fa2["logits"] <= FA2_LOGITS_ERROR_MAX
+    for metric in ("logits", "attention_grad_max", "grad_median"):
+        checks[f"{row_name}_{metric}_within_fa2_error"] = fa4[metric] <= FA2_ERROR_RATIO * fa2[metric]
+        metrics[f"{row_name}_{metric}_fa4"] = fa4[metric]
+        metrics[f"{row_name}_{metric}_fa2"] = fa2[metric]
+    if asserts_strided:
+        checks[f"{row_name}_hands_fa4_strided_inputs"] = any(strided)
+    metrics[f"{row_name}_fa4_strided_calls"] = sum(strided)
+
+
 @gpu_test_main(exact_world_size=1, partial_state=False, prefix="fa4_hd256_family_parity")
 def run(ctx):
+    skip_unless_blackwell("the FA4 parity rows")
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
     family_name = parser.parse_args().family
@@ -166,30 +238,41 @@ def run(ctx):
         raise RuntimeError("FLASH_ATTENTION_DETERMINISTIC=1 keeps head_dim-256 attention off FA4; unset it")
     configure_float32_matmul_precision()
 
-    torch.manual_seed(SEED)
-    base = tiny_family_model(family, overrides=overrides)
-    reference_model = copy.deepcopy(base).to(ctx.device, torch.float32)
-    reference_model.config._attn_implementation = "sdpa"
-    model = copy.deepcopy(base).to(ctx.device, torch.bfloat16)
-    rows = _rows(base.config.vocab_size, ctx.device)
+    reference_model, model = _reference_and_model(family, overrides, ctx.device)
+    rows = _rows(reference_model.config.vocab_size, ctx.device)
 
     checks, metrics = {}, {}
+    resolved = resolve_attn_implementation(
+        copy.deepcopy(model.config), None, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+    )
+    log(f"  [{family_name}] attention unset resolves {resolved}")
+    expected = "flash_attention_2" if family_name in _RESOLVES_FA2 else "flash_attention_4"
+    checks["attention_unset_resolves_the_kernel_this_row_trains"] = resolved == expected
+    references = {}
     for row_name, row in rows.items():
-        reference = _forward_backward(reference_model, row)
-        model.config._attn_implementation = apply_family_patches(model.config, "flash_attention_4")
-        with _fa4_strided_calls() as strided:
-            fa4 = _errors(model, row, reference)
-        model.config._attn_implementation = "flash_attention_2"
-        fa2 = _errors(model, row, reference)
-        log(f"  [{family_name}/{row_name}] fa4 {fa4}  fa2 {fa2}  strided fa4 calls {sum(strided)}/{len(strided)}")
-        checks[f"{row_name}_finite"] = bool(fa4["finite"] and fa2["finite"])
-        for metric in ("logits", "attention_grad_max", "grad_median"):
-            checks[f"{row_name}_{metric}_within_fa2_error"] = fa4[metric] <= FA2_ERROR_RATIO * fa2[metric]
-            metrics[f"{row_name}_{metric}_fa4"] = fa4[metric]
-            metrics[f"{row_name}_{metric}_fa2"] = fa2[metric]
-        if row_name in STRIDED_ROWS and family_name not in CONTIGUOUS_QKV_FAMILIES:
-            checks[f"{row_name}_hands_fa4_strided_inputs"] = any(strided)
-        metrics[f"{row_name}_fa4_strided_calls"] = sum(strided)
+        references[row_name] = _forward_backward(reference_model, row)
+        asserts_strided = row_name in STRIDED_ROWS and family_name not in CONTIGUOUS_QKV_FAMILIES
+        _compare_row(
+            family_name, row_name, row, references[row_name], model, checks, metrics, asserts_strided=asserts_strided
+        )
+
+    if family_name in PAST_WINDOW_OVERRIDES:
+        reference_model, model = _reference_and_model(
+            family, {**overrides, **PAST_WINDOW_OVERRIDES[family_name]}, ctx.device
+        )
+        for row_name, full_attention_row in PAST_WINDOW_ROWS.items():
+            row = rows[full_attention_row]
+            reference = _forward_backward(reference_model, row)
+            metrics[f"{row_name}_window_moves_logits"] = max_abs_rel_err(
+                reference[0], references[full_attention_row][0]
+            )
+            log(
+                f"  [{family_name}/{row_name}] the window moves fp32 logits {metrics[f'{row_name}_window_moves_logits']:.3e}"
+            )
+            checks[f"{row_name}_window_moves_the_reference"] = (
+                metrics[f"{row_name}_window_moves_logits"] >= WINDOW_MOVES_LOGITS_MIN
+            )
+            _compare_row(family_name, row_name, row, reference, model, checks, metrics, asserts_strided=False)
     return {"checks": checks, "metrics": metrics}
 
 

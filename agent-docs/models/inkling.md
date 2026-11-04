@@ -26,7 +26,7 @@ One contract fails closed: the spec's `weight_sync_refusal` refuses online/async
 
 ## Loading
 
-The hub checkpoint stores the expert width as `intermediate_size: 2048`, but transformers defaults `moe_intermediate_size: 3072` and its compat shim maps only `dense_intermediate_size` — without `model_init_kwargs: {moe_intermediate_size: 2048}` every expert tensor is built 3072-wide and the load hard-fails.
+The hub config spells the expert width `intermediate_size: 2048` beside `dense_intermediate_size: 16384`. transformers 5.20 reads those as `moe_intermediate_size` 2048 and `intermediate_size` 16384, so a run needs no override: the built expert tensors match the hub's shard shapes.
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).
 
@@ -67,7 +67,7 @@ multimodal is EP/ETP-only.
 
 ## Configs
 
-`examples/sft/inkling/inkling-small-multinode-ep16.yaml` (EP=16 across 2 nodes, 256 experts → 16/rank). Two settings are load-bearing beyond the loading overrides above:
+`examples/sft/inkling/inkling-small-multinode-ep16.yaml` (EP=16 across 2 nodes, 256 experts → 16/rank). Two settings are load-bearing:
 
 - `attn_implementation: sdpa` — no Inkling FA dispatch; the Blackwell auto-select would fall back per-rank. Every attention call carries the dense relative bias, which the class declares by not being backend-compatible, so the sliding layers stay on SDPA rather than `sdpa_flex_sliding`.
 - `pad_token: "<|unused|>"` — the tokenizer ships no pad token; id 199998 is a dedicated special that never appears in text.

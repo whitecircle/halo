@@ -47,13 +47,13 @@ The kernel is faster because it fuses state EMA + weight update + SR into one me
 
 ## Usage
 
-AdamWBF16 is auto-enabled when `bf16: true` and `optim` is the default AdamW. No separate flag, no special launch flags:
+AdamWBF16 is auto-enabled when `bf16: true` and `optim` is the default AdamW, with no flag of its own:
 
 ```bash
 torchrun --nproc_per_node=8 \
     scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-    --expert_parallel_size=8
+    --expert_parallel_size=8 --use_grouped_gemm=true
 ```
 
 ```yaml

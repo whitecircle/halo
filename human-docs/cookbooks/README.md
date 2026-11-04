@@ -3,7 +3,7 @@
 Each cookbook takes one MoE family from an empty host to a trained, served checkpoint. The
 [Supported Matrix](../supported-matrix.md) is the authority: where a cookbook disagrees, the matrix wins.
 
-| Cookbook | Recipe model | GPUs | Online RL |
+| Cookbook | Recipe model | GPUs | RL engines |
 | --- | --- | --- | --- |
 | [GPT-OSS](halo-gpt-oss-cookbook.md) | `unsloth/gpt-oss-20b-BF16` | 8 | vLLM, SGLang |
 | [Qwen3 MoE](halo-qwen3-moe-cookbook.md) | `Qwen/Qwen3-30B-A3B-Instruct-2507` | 4 | vLLM, SGLang |
@@ -20,6 +20,17 @@ Every cookbook has the same sections: Support, Recipes, Settings that matter, Li
 and Reference. The GPU counts are the ones the recipes are written for, B300s unless a page says otherwise. On
 H100 or H200, use the Hopper image. Those GPUs have far less memory than a B300, so a recipe may need
 more GPUs or a shorter `max_length` there.
+
+## What ran on 1.2.0
+
+Short runs on the full checkpoints covered these SFT recipes: Gemma 4, GLM-4.7-Flash, Ling 2.0, both ZAYA1
+recipes, Qwen3.5-35B-A3B at 16,384 tokens, and on two 8-GPU machines gpt-oss-20b and the two pipeline
+recipes. They also covered gpt-oss-20b's classification, self-distillation, embedding, offline GRPO, DPO, SMPO
+and reward recipes and Gemma 4's DPO, SMPO and reward recipes.
+
+Laguna S, LFM2.5-8B, Mistral Small 4, DeepSeek-V4 LoRA and Command A+ changed shape in 1.2.0, and those shapes
+have not run on the full-size model. Their memory fit is computed (Command A+'s comes from an earlier shape) and
+their speed unmeasured, so try a short run first.
 
 ## Start the training container
 
@@ -66,7 +77,7 @@ print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 A LoRA run saves an adapter, not a full checkpoint. Load it with
 `PeftModel.from_pretrained(base, path)` or merge it first;
 `AutoModelForCausalLM.from_pretrained` does not load an adapter directory under
-PEFT 0.18.1.
+PEFT 0.18.1. A run with `merge_expert_lora_on_save: true` saves the merged checkpoint instead.
 
 ## Serve from the host
 
@@ -92,7 +103,7 @@ request for any other model name with a 404, so the served path must match the t
 which defaults to its `model_name_or_path`.
 
 The compose files already pass the MoE backend that weight sync needs (`--moe-backend triton` and
-`--moe-runner-backend triton`), so leave it alone. A run with `routing_replay: rollout` also needs
+`--moe-runner-backend triton`), so leave it alone. A run with `routing_replay: rollout` (experimental) also needs
 `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` set where you run compose. Plain serving works on the upstream
 SGLang 0.5.22 image, but weight sync needs this repo's server images. Parsers, ports and the other variables
 are in [Rollout Servers](../rollout-servers.md).

@@ -27,8 +27,8 @@ owning doc page). This skill does both, to the house voice.
    not orphan a page.
 2. **Ground every edit against the code.** Read the actual `halo/` file before you
    write the claim; when the code and the doc disagree, the code wins — fix the
-   doc. `CLAUDE.md` and sibling docs can themselves lag the code (e.g. a
-   mid-migration WIP commit) — treat them as leads, not authority, and verify
+   doc. `CLAUDE.md` and sibling docs can themselves lag the code: treat them as
+   leads, not authority, and verify
    against the `halo/` file. Grounding is about correctness, not citation: cite the
    path only where the reader needs to find or set that thing (see `style.md`), not
    on every sentence.

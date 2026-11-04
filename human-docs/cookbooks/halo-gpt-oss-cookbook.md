@@ -11,9 +11,9 @@ Modes: the GPT-OSS row of the [Supported Matrix](../supported-matrix.md#model-fa
 
 - **Checkpoints:** `unsloth/gpt-oss-20b-BF16` (32 experts, top-4) and `unsloth/gpt-oss-120b-BF16` (128
   experts, top-4).
-- **GPUs:** the 20B recipe runs at EP8 on eight GPUs. The 120B trains at EP8 on eight B300s. On H100 or
-  H200 it needs two nodes at EP16 (`examples/sft/gptoss/gptoss-120b-multinode-ep.yaml`,
-  [Clusters](../clusters.md)).
+- **GPUs:** the 20B recipe runs at EP8 on eight GPUs. The 120B recipe is a two-node EP16 layout
+  (`examples/sft/gptoss/gptoss-120b-multinode-ep.yaml`, [Clusters](../clusters.md)), which H100 or H200
+  need. At EP8 on eight B300s it last ran on code before 1.2.0.
 
 ## Recipes
 
@@ -54,11 +54,12 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
   --expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true \
   --use_peft=true --lora_r=64 --lora_alpha=128 --learning_rate=1e-4 \
   --lora_target_modules=q_proj,k_proj,v_proj,o_proj,gate_up_proj,down_proj \
-  --lora_modules_to_save=embed_tokens,lm_head,router \
+  --lora_modules_to_save=embed_tokens,lm_head,router --merge_expert_lora_on_save=true \
   --output_dir=/data/checkpoints/gpt-oss-20b-lora
 ```
 
-The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA.
+The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which no tool merges
+afterwards, so `merge_expert_lora_on_save` folds the adapters into each save.
 
 ### GRPO
 
@@ -101,9 +102,9 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
   so the run trains on nothing at a loss near zero. RL uses harmony, and the server must serve the same
   file.
 - **Attention sinks.** SFT neutralizes them (`reset_sinks: true`, the default) and saves them that way.
-  RL sets `reset_sinks: false`, which keeps the sinks live and frozen so the trainer scores what the
-  server samples. A later stage runs the sinks it loads, so to carry the pretrained sinks into GRPO, run
-  SFT with `--reset_sinks=false` too.
+  RL sets `reset_sinks: false`, which keeps the sinks live and frozen, so the trainer scores with the
+  sinks the server serves. A later stage runs the sinks it loads, so to carry the pretrained sinks into
+  GRPO, run SFT with `--reset_sinks=false` too.
 - **Router aux-loss coefficient.** The hub config ships `router_aux_loss_coef: 0.9`, which swamps the SFT
   loss. The shipped SFT recipes set it to `0.001` in `model_init_kwargs`. Do the same on any other run
   that balances with `aux_loss`, which is what `auto` picks for GPT-OSS.
@@ -126,7 +127,8 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - The DPO, SMPO, reward, classification and offline GRPO recipes pin FA4, so they run on Blackwell only;
   FA4 is also what those scripts pick there unpinned. Unpinned on other GPUs, they take SDPA; on Hopper,
   pass `--attn_implementation=flash_attention_3`. The self-distillation recipe trains without
-  gradient checkpointing and peaks at about 130 GB, so on an 80 GB GPU it also needs
+  gradient checkpointing and reserved 138 GiB per GPU over three steps at 16k tokens, so on an 80 GB
+  GPU it also needs
   `--gradient_checkpointing=true`.
 
 ## Export and serve

@@ -38,7 +38,7 @@ along:
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml -n 8
 halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
-    --expert_parallel_size=8 --learning_rate=1e-5
+    --expert_parallel_size=8 --use_grouped_gemm=true --learning_rate=1e-5
 ```
 
 A method name is the script's path under `scripts/training/`, with hyphens for

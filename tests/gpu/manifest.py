@@ -78,6 +78,33 @@ _TINY_MOE_FAMILY_MARKERS = {
     "zaya": "zaya",
 }
 _TINY_MOE_FAMILIES = tuple(_TINY_MOE_FAMILY_MARKERS)
+# The families test_family_packing_isolation.py holds on the kernel a packed run resolves, past its original rows.
+_PACKED_DEFAULT_FAMILIES = (
+    "cohere2_moe",
+    "gemma4_text",
+    "glm4_moe_lite",
+    "gpt_oss",
+    "laguna",
+    "lfm2_moe",
+    "mistral4",
+    "qwen3_5_moe_text",
+    "qwen3_moe",
+    "qwen3_next",
+    "step3p7",
+)
+_PACKED_EP_FAMILIES = (("gpt_oss", "gptoss"), ("qwen3_5_moe_text", "qwen3"), ("qwen3_moe", "qwen3"), ("zaya", "zaya"))
+# The other EP layers a packed recipe runs.
+_PACKED_EP_FULL_FAMILIES = (
+    "bailing_moe",
+    "cohere2_moe",
+    "gemma4_text",
+    "glm4_moe_lite",
+    "laguna",
+    "lfm2_moe",
+    "mistral4",
+    "qwen3_next",
+    "step3p7",
+)
 # One family per expert layout the reentrant-recompute suite crosses; every other family runs only its full fine-tune.
 _REENTRANT_FAMILIES = ("qwen3_moe", "gpt_oss", "gemma4_text")
 _REENTRANT_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if family not in _REENTRANT_FAMILIES)
@@ -291,18 +318,80 @@ MANIFEST: dict[str, TestSpec] = {
     "data/test_family_packing_isolation.py": TestSpec(
         nproc=1,
         markers=("gpu", "core", "1gpu", "moe"),
-        args_matrix=tuple(
-            Row(f"--family {family}{attn}", markers=("gpu", "core", "1gpu", "moe", marker))
-            for family, marker, attn in (
-                ("bailing_moe", "bailing", ""),
-                ("bailing_moe", "bailing", " --attn flash_attention_2"),
-                ("bailing_moe_linear", "bailing", ""),
-                ("bailing_moe_linear", "bailing", " --attn flash_attention_2"),
-                ("zaya", "zaya", ""),
-                ("zaya", "zaya", " --attn flash_attention_2"),
-                ("zaya", "zaya", " --attn sdpa"),
-                ("qwen4_exp_text", "qwen3", " --attn sdpa"),
-            )
+        args_matrix=(
+            *(
+                Row(f"--family {family}{attn}", markers=("gpu", "core", "1gpu", "moe", marker))
+                for family, marker, attn in (
+                    ("bailing_moe", "bailing", ""),
+                    ("bailing_moe", "bailing", " --attn flash_attention_2"),
+                    ("bailing_moe_linear", "bailing", ""),
+                    ("bailing_moe_linear", "bailing", " --attn flash_attention_2"),
+                    ("zaya", "zaya", ""),
+                    ("zaya", "zaya", " --attn flash_attention_2"),
+                    ("zaya", "zaya", " --attn sdpa"),
+                    ("qwen4_exp_text", "qwen3", " --attn sdpa"),
+                )
+            ),
+            *(
+                Row(f"--family {family}", markers=("gpu", "core", "1gpu", "moe", _TINY_MOE_FAMILY_MARKERS[family]))
+                for family in _PACKED_DEFAULT_FAMILIES
+            ),
+            Row("--family qwen3", markers=("gpu", "core", "1gpu", "qwen3")),
+            Row("--family qwen3_5", markers=("gpu", "core", "1gpu", "qwen3")),
+            Row("--family qwen3_5_moe", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
+            Row("--family gemma4", markers=("gpu", "core", "1gpu", "moe", "gemma4")),
+            *(
+                Row(f"--family {family} --ep 2", nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", marker))
+                for family, marker in _PACKED_EP_FAMILIES
+            ),
+            *(
+                Row(f"--family {family} --attn {attn}", markers=("gpu", "full", "1gpu", "moe", marker))
+                for family, marker, attn in (
+                    ("cohere2_moe", "cohere2_moe", "flash_attention_2"),
+                    ("gpt_oss", "gptoss", "flash_attention_2"),
+                    ("laguna", "laguna", "flash_attention_2"),
+                    ("lfm2_moe", "lfm2", "flash_attention_2"),
+                    ("mistral4", "mistral4", "flash_attention_2"),
+                    ("qwen3_moe", "qwen3", "flash_attention_2"),
+                    ("qwen3_5_moe_text", "qwen3", "flash_attention_4"),
+                    ("qwen3_next", "qwen3", "flash_attention_4"),
+                )
+            ),
+            Row("--family qwen3 --attn flash_attention_2", markers=("gpu", "full", "1gpu", "qwen3")),
+            Row("--family qwen3_5 --attn flash_attention_4", markers=("gpu", "full", "1gpu", "qwen3")),
+            *(
+                Row(f"--family {family} --ep 2", nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", marker))
+                for family, marker in (
+                    *((family, _TINY_MOE_FAMILY_MARKERS[family]) for family in _PACKED_EP_FULL_FAMILIES),
+                    ("laguna_remote", "laguna"),
+                    ("gemma4", "gemma4"),
+                    ("qwen3_5_moe", "qwen3"),
+                )
+            ),
+            Row(
+                "--family qwen4_exp_text --attn sdpa --ep 2",
+                nproc=2,
+                markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+            ),
+            *(Row(f"--family {family}", markers=("gpu", "full", "1gpu")) for family in ("llama", "mistral", "qwen2")),
+            Row("--family laguna_remote", markers=("gpu", "full", "1gpu", "moe", "laguna")),
+            Row("--family laguna_remote --liger", markers=("gpu", "full", "1gpu", "moe", "laguna")),
+            *(
+                Row(f"--family {family} --liger", markers=("gpu", "full", "1gpu", "moe", marker))
+                for family, marker in (
+                    ("bailing_moe", "bailing"),
+                    ("zaya", "zaya"),
+                    *((family, _TINY_MOE_FAMILY_MARKERS[family]) for family in _PACKED_DEFAULT_FAMILIES),
+                )
+            ),
+            Row("--family qwen3 --liger", markers=("gpu", "full", "1gpu", "qwen3")),
+            Row("--family qwen3_5_moe --liger", markers=("gpu", "full", "1gpu", "moe", "qwen3")),
+            Row("--family gemma4 --liger", markers=("gpu", "full", "1gpu", "moe", "gemma4")),
+            Row("--family qwen3_5 --liger", markers=("gpu", "full", "1gpu", "qwen3")),
+            *(
+                Row(f"--family {family} --ep 2 --liger", nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", marker))
+                for family, marker in _PACKED_EP_FAMILIES
+            ),
         ),
         timeout=900,
     ),
@@ -333,11 +422,16 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--family laguna", markers=("gpu", "full", "1gpu", "moe", "laguna")),
             Row("--family lfm2_moe", markers=("gpu", "full", "1gpu", "moe", "lfm2")),
             Row("--family mistral4", markers=("gpu", "full", "1gpu", "moe", "mistral4")),
+            Row("--family qwen2", markers=("gpu", "full", "1gpu")),
+            Row("--family gemma", markers=("gpu", "full", "1gpu")),
+            Row("--family llama", markers=("gpu", "full", "1gpu")),
+            Row("--family mistral", markers=("gpu", "full", "1gpu")),
+            Row("--family gemma3_text_hd128", markers=("gpu", "full", "1gpu")),
         ),
         timeout=1200,
     ),
     "kernels/test_fa4_tree_attention.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "moe", "gptoss", "qwen3"), timeout=900
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "gptoss", "qwen3"), timeout=1500
     ),
     # 900s: FA4 JIT-compiles forward and backward per form.
     "kernels/test_fa4_gqa_ratio.py": TestSpec(
@@ -384,6 +478,7 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=300
     ),
     "kernels/test_fla_blackwell_autotune.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600),
+    "kernels/test_fla_simple_gla.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "bailing"), timeout=600),
     "kernels/test_lowp_expert_lora.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "lora", "moe"), timeout=600),
     "kernels/test_packed_broadcast_memory.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_lowp_ep_trainer.py": TestSpec(
@@ -1165,7 +1260,7 @@ MANIFEST: dict[str, TestSpec] = {
     # HALO_TEST_ENV_GRPO_MODEL / HALO_TEST_ENV_GRPO_SGLANG_MODEL point the two-rank rows at another family; a family
     # pass runs -k "not peft and not resume and not routing and not prefetch and not zero3 and not unsharded and not
     # world and not servers". --thinking-budget is not a row: that gpt-oss shape needs the image's reasoning plugin
-    # (agent-docs/models/gpt-oss.md#serving-for-grpo-vllm). --routing-replay rows need the server on VLLM_ENABLE_R3=1,
+    # (agent-docs/models/gpt-oss.md#serving-for-grpo-vllm). --routing-replay rollout rows need the server on VLLM_ENABLE_R3=1,
     # or SGLANG_ENABLE_R3=1 with SGLANG_MOE_RUNNER_BACKEND=triton, since SGLang's fused runners bypass the capture
     # hook; the flag is additive, so one server carrying it runs every row. The SGLang --tp-size 2 and --resume R3 rows
     # produce runaway completions after the sync, the zero-gradient batch the replay gate exempts.
@@ -1189,6 +1284,8 @@ MANIFEST: dict[str, TestSpec] = {
                     "--ep-size 2 --resume",
                     "--ep-size 1 --routing-replay rollout",
                     "--ep-size 2 --routing-replay rollout",
+                    "--ep-size 1 --routing-replay recompute",
+                    "--ep-size 2 --routing-replay recompute",
                     "--ep-size 2 --prefetch-depth 1",
                     "--ep-size 2 --prefetch-depth 2",
                     "--ep-size 2 --routing-replay rollout --prefetch-depth 1",
@@ -1238,6 +1335,7 @@ MANIFEST: dict[str, TestSpec] = {
                         "--ep-size 1 --resume",
                         "--ep-size 1 --peft lora --resume",
                         "--ep-size 1 --routing-replay rollout",
+                        "--ep-size 1 --routing-replay recompute",
                         "--ep-size 1 --peft lora --routing-replay rollout",
                         "--tp-size 2 --routing-replay rollout",
                         "--ep-size 1 --resume --routing-replay rollout",
@@ -1636,6 +1734,16 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss", "qwen3"),
         args_matrix=("--mode lora", "--mode qlora", "--mode lora_ep", "--mode expert_lora"),
         timeout=1500,
+    ),
+    "trainers/lora/test_qlora_grad_sweep.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "lora", "qwen3"),
+        args_matrix=(
+            "--model qwen3_0_6b",
+            Row("--model gpt_oss_20b", markers=("gpu", "core", "2gpu", "lora", "moe", "gptoss")),
+            Row("--model mixtral_tiny", markers=("gpu", "core", "2gpu", "lora", "moe")),
+        ),
+        timeout=900,
     ),
     "trainers/lora/test_lora_reference_pass_fsdp2.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "qwen3"), timeout=600
@@ -2128,6 +2236,7 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_tp_packed_varlen.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "tp", "qwen3"), timeout=900
     ),
+    "trainers/sft/test_sft_mixtral_fsdp2.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "moe"), timeout=600),
     "trainers/sft/test_sft_qwen3_modes.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "cp", "qwen3"), timeout=600
     ),

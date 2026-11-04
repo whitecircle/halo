@@ -102,7 +102,7 @@ Qwen3-30B pass needs `SGLANG_TOOL_PARSER=qwen25`
 ```bash
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8
 make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-  NPROC=8 EXTRA="--expert_parallel_size=8"
+  NPROC=8 EXTRA="--expert_parallel_size=8 --use_grouped_gemm=true"
 make train METHOD=preference/smpo CONFIG=<config>    # METHOD: any `halo launch --list` entry; default sft
 ```
 
@@ -277,7 +277,7 @@ the script:
 | `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of that e2e: MoE rows `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP), dense rows `Qwen/Qwen3-0.6B` (TP, FSDP2-DP, one-process); the server must serve the same one |
 | `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and steps (default `2`; a `--prefetch-depth N` row runs `N + 2`: its `N` cold rounds, then two that pop a prefetched one) of the two-rank vLLM rows of the Environmental-GRPO e2e (`tests/common/env_grpo_e2e.py`) |
 | `HALO_TEST_ENV_GRPO_SGLANG_MODEL` / `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoints of the SGLang rows and of the four-rank vLLM rows (EP+ETP, EP+TP, ep4) of `trainers/grpo/test_env_grpo_e2e.py`, both default `unsloth/gpt-oss-20b-BF16` |
-| `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` | Per-family overrides for that e2e: the policy's `attn_implementation` (unset: auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset: the attention projections read off the index; needed where they do not end in `_proj`, such as Ling's `query_key_value,dense`) |
+| `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` / `HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE` | Per-family overrides for that e2e: the policy's `attn_implementation` (unset: auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset: the attention projections read off the index; needed where they do not end in `_proj`, such as Ling's `query_key_value,dense`) The last (default on) is off for Step-3.7, whose `auto_map` is for the server: its trainer takes the native class. |
 | `HALO_TEST_PUSH_EXACT_FRESH` / `HALO_TEST_PUSH_EXACT_MODEL` | `trainers/grpo/test_weight_push_exact.py`: the first states the server has taken no other suite's push, without which the suite skips, since a server another push moved cannot be told from one this push moved; the second is a local path standing in for the row's checkpoint on both sides (the script header has the server launch) |
 | `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` / `HALO_TEST_VLLM_SERVER_GPU` | Checkpoint (default `Qwen/Qwen3-0.6B`), connect/sync/disconnect cycles (default `12`, enough for a stranded communicator to overshoot the 1 GiB growth budget) and the server's `nvidia-smi` index (unset: every GPU the trainer does not own) for `trainers/grpo/test_weight_transfer_reinit.py --backend vllm`; the pool-reconnect suite reads the same checkpoint knob |
 | `HALO_TEST_SGLANG_REINIT_MODEL` / `HALO_TEST_SGLANG_REINIT_CYCLES` / `HALO_TEST_SGLANG_SERVER_GPU` | The same three for `--backend sglang`, against `SGLANG_SERVER_URL` |
@@ -378,6 +378,9 @@ measured with, and the metrics of at least five repeats. `make bench BAND=1` hol
   flagged, never failed: re-run it before reading its throughput as a regression.
 - **Same command.** A key compares only with a baseline measured by the same command on as many ranks of
   the same GPU model; a measured key with no baseline, and a baseline the run did not measure, fail.
+- **Another machine.** A baseline can fail on another machine of its type with no code effect: gpt-oss-20b
+  EP1 read 2.4% under its baseline on a second B300 machine, at the baseline's commit too. Split a miss with
+  an A/B of that commit and HEAD on the machine that missed.
 
 `make bench RECORD=1` runs the rows five times on a clean tree and writes the baselines only when no
 repeat is outlying (a rate or duration outside the other repeats' band widened to four times their
@@ -523,7 +526,10 @@ deliberate perturbation, and the verdict fails when that record matches its base
   a few layouts on stubbed groups; `TIER=gpu` runs the grouped-GEMM path in bf16 under `full_determinism`
   (DeepEP's deterministic dispatch included) on one rank, `ep2` (2 GPUs) and `ep2+etp2` (4 GPUs), each
   with `HALO_EP_SHARED_OVERLAP` off and on. Records outside `KNOWN_RAISING` must not raise; the negative
-  control rotates every expert bank by one expert (`tests/cpu/parallelism/test_ep_bitwise_harness.py`).
+  control rotates every expert bank by one expert (`tests/cpu/parallelism/test_ep_bitwise_harness.py`). Both
+  trees read one Triton cache, so it does not compare autotune picks across caches, and another run filling that
+  cache beside it can read as deltas on the families that call fla's kernels
+  ([Docker](../infrastructure/docker.md#baked-in-environment-variables)).
 - **CP equivalence** (`make verify-cp`, `tests/common/equivalence/cp_equivalence.py`) runs a two-rank CP
   group in each tree on the CP roster, tiny models covering every Ulysses wrapper class (the Qwen3 wrapper on
   its dense, MoE and VL classes), at two levels: the first attention layer on fixed hidden states, and the
@@ -561,8 +567,8 @@ generator owes `make diagrams` and the regenerated figure in the same commit
 | Behavior change | An end-to-end test demonstrating the new behavior or convergence |
 | Performance | Before/after **tokens/s/GPU** and **peak memory** (utilization is a diagnostic, not the headline) |
 
-State the GPU, model and sequence/batch shape with any number. A measured net-slower result is
-first-class content: report it with the reason.
+State the GPU, model and sequence/batch shape with any number. Report a measured net-slower result
+too, with the reason.
 
 ## Submitting a PR
 

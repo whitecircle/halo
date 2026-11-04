@@ -222,15 +222,15 @@ allocated on the buffer and passed to every dispatch **and** combine, since disp
 `num_qps <= num_allocated_qps` (17 automatic, 65/129 in hybrid mode) and a combine inherits only
 `num_sms` from the handle.
 
-## Dispatch is the EP bottleneck
+## Dispatch cost
 
-The **dispatch** dominates the EP step beyond its byte volume: it computes the routing layout and
-exchanges per-expert receive counts across the group, so it is latency-bound. The combine reuses that
-layout through the `handle` and runs several times faster. The count exchange earns its cost: the local
-GEMM processes only real tokens instead of a capacity-padded buffer. Levers:
+The **dispatch** computes the routing layout and exchanges per-expert receive counts across the group. The
+combine reuses that layout through the `handle`. The count exchange earns its cost: the local GEMM processes only
+real tokens instead of a capacity-padded buffer. Within one NVLink domain the dispatch is 9–13% of the EP phases, and
+at ep8 the combine's larger share is mostly the wait for the busiest rank
+([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)). Levers:
 `HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN, and
-`HALO_DEEPEP_NUM_SMS` tunes the split
-([Throughput Benchmarks](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
+`HALO_DEEPEP_NUM_SMS` tunes the split.
 
 ## Dispatch wire-index limit
 
@@ -330,8 +330,8 @@ operations (on two 8-GPU B300 nodes NCCL all-to-all reaches ~173 GB/s busbw, yet
 dispatch sits ~100× over what that bandwidth predicts). Three consequences:
 
 - **Fewer cross-node partners per rank is faster.** On 2-node 8× B300 EFA, gpt-oss-20b at **EP=2
-  global** (1 cross-node partner, 16 experts/GPU) ran ~2.4× the throughput of EP=16 (8 partners), in an
-  earlier run at an unrecorded batch shape. `gptoss-20b-multinode-ep.yaml` at EP=16 (one 8,192-token row
+  global** (1 cross-node partner, 16 experts/GPU) ran ~2.4× the throughput of EP=16 (8 partners), at a
+  batch shape the run did not record. `gptoss-20b-multinode-ep.yaml` at EP=16 (one 8,192-token row
   per rank, `gradient_accumulation_steps: 4`, loop path, `aux_loss`, no gradient checkpointing) runs
   3,636 tok/s/GPU at 8.97 s/step and a 55.4 GiB rank-0 allocated peak. The PP recipe's 15,500 is not
   comparable: its dispatch stays on NVLink, with grouped GEMM and `bias_update`. Combine EP=2 with

@@ -40,9 +40,9 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 
 Each of these ran on B300 and did not pay off; its page holds the shapes.
 
-- **Halo's fp8/fp4 paths** — QAT, not a speedup: the simulated path adds quantization work and the DeepGEMM adapter measured slower: [Why bf16 is the default](low-precision-moe-kernels.md#why-bf16-is-the-default).
-- **DeepGEMM adapter** — forward slower than bf16 at every measured shape but one: [DeepGEMM](low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path).
+- **Halo's fp8/fp4 paths** — QAT, not a speedup: whole steps run at 0.10–0.54× bf16 at ep8: [Why bf16 is the default](low-precision-moe-kernels.md#why-bf16-is-the-default).
+- **DeepGEMM adapter** — whole steps at 0.37–0.54× bf16, since casts and row copies cost more than the kernel saves: [DeepGEMM](low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path).
 - **torch.compile on EP MoE** — at most 1%, and `reduce-overhead` is slower: [Benchmark results](torch-compile.md#benchmark-results).
 - **Sub-bf16 master weights** — parameters, checkpoints and optimizer state never go below bf16; bf16 with stochastic rounding is the floor: [BF16 optimizer](bf16-optimizer.md).
 - **FA2 on Blackwell where FA4 runs the model** — the slow outlier against FA4 and SDPA at head_dim 128: [FA4 vs FA2 vs SDPA](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell). The defaults land on FA2 on purpose for GLM-4.7-Flash, Gemma 2/3 at head_dim 256 and softcapped rows that reach FA4's varlen kernels; leave those on it. Packed head_dim-256 GatedDeltaNet rows (Qwen3.5/3.6, Qwen3-Next) default to FA2 as well, where FA4 gains under 5% ([Model-specific handling](flash-attention.md#model-specific-handling)).
-- **MoE throughput measured at batch 1** — communication-bound and run-to-run noisy; measure at batch ≥ 4 ([Liger benchmarks](liger-kernels.md#benchmarks)).
+- **MoE throughput measured at batch 1** — noisy from run to run; measure at batch ≥ 4 ([Liger benchmarks](liger-kernels.md#benchmarks)).

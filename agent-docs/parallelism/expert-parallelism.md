@@ -174,8 +174,11 @@ That sweep covers every shape holding more than one EP group, the single-node on
 ```bash
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-    --expert_parallel_size=8
+    --expert_parallel_size=8 --use_grouped_gemm=true
 ```
+
+The recipe pins the per-expert loop for its own ep16; at ep8 grouped GEMM is faster
+([Grouped GEMM](../optimization/grouped-gemm.md#grouped-vs-the-loop-path)).
 
 EP patching and gradient sync are automatic. Programmatically, pass
 `parallelism_config=ParallelismConfig(ep_size=8)`; `trainer.save_model()` gathers expert slices, and

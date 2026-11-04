@@ -26,7 +26,7 @@ trainer-side mechanics (prefetch and its staleness, sync cadence, trajectory len
 
 | | vLLM 0.32.0 | SGLang 0.5.22 |
 |---|---|---|
-| Trainers | online, async GRPO | async GRPO |
+| Trainers | online GRPO, online SDPG, async GRPO | async GRPO |
 | Sampled-token ids | `--return-tokens-as-token-ids` (server flag) | per-request `return_meta_info` |
 | IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/async-grpo/objective.md#routing-replay) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
@@ -238,8 +238,15 @@ Laguna's bias and GPT-OSS's `router.bias` are trainer parameters, so they are pu
 copy name by name with nothing to count, so a tensor left out keeps its value on every family, and Ling's bias
 lands on a parameter of the same name. `tests/cpu/grpo/test_weight_sync_engine_loaded_buffers.py` holds every
 syncable family's push to its gathered checkpoint, and `tests/gpu/trainers/grpo/test_weight_push_exact.py`
-proves on a live server, per family and engine, that an unchanged push leaves the served log-probs alone and
-that a push after a real optimizer step serves what the trainer computes, within their gap before the step.
+proves on a live server, per family and engine, that an unchanged push leaves the served log-probs bit-identical
+([Coverage](#coverage)).
+
+The TP=2 rows stop there. The others take one real optimizer step and push it. The served log-probs must then sit
+within twice the trainer-versus-served gap measured before the step (at least 0.01 nats), since the two forwards disagree on identical
+weights ([noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise)). On its fixed rows that gap
+reads 0.02–0.06 nats on Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite and Ling 2.0, 0.16 on LFM-2, 0.31–0.47 on Gemma 4,
+0.38–0.40 on GPT-OSS and 0.60–0.65 on Laguna. At the top of that range the bar is too loose to catch a small sync
+error, so there the bit-identical rows and the CPU test hold the sync.
 
 ### Construction gates
 
@@ -344,8 +351,9 @@ The server parses every checkpoint with its own transformers, the base image's 5
 image build: vLLM's `ModelConfig` must resolve what the toolkit exports, to a per-layer attention
 geometry, for every family whose EP layer admits weight sync and the vLLM client does not list as
 unservable. One `config.json` fixture per family is rendered from the tiny roster config in
-`tests/common/models.py`, plus a control under `unparseable/` that must be refused (a control the
-server reads fails the build, since its rewrite is then redundant).
+`tests/common/models.py` (Ling 2.0 through a checked-in vendor config module), or for Step-3.7 from the release
+config at a pinned revision. Step-3.7 also has a control under `unparseable/` that must be refused (a control
+the server reads fails the build, since its rewrite is then redundant).
 `tests/cpu/checkpoint/test_vllm_parity_fixtures.py` fails when the roster or the fixtures drift, and a
 transformers bump on either side fails the build rather than the first live sync.
 
@@ -485,7 +493,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 | `SGLANG_PORT` | `30000` | Bound on the host |
 | `SGLANG_TP` / `SGLANG_GPU_MEM` | `1` / `0.85` | `--tp-size` / `--mem-fraction-static` |
 | `SGLANG_CUDA_DEVICES` | `7` | Server GPUs, disjoint from the trainer's |
-| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`; `auto` reads the parser off the chat template and **disables it** on a template it cannot detect ([below](#tool-parsers-on-sglang)); `qwen25` for the Qwen3 2507 releases |
+| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`; `auto` reads the parser off the chat template and **disables it** on a template it cannot detect ([below](#tool-parsers-on-sglang)); `qwen25` for the Qwen3 2507 releases, `hermes` for Ling-mini-2.0 |
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | Keep `triton` for MoE RL and R3 |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any value adds `--enable-return-routed-experts` |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) |
@@ -507,11 +515,10 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 - **R3**: the fused runners (`triton_kernel`, `flashinfer_trtllm`, `flashinfer_mxfp4`) bypass the
   capture hook. The payload (base64 raw int32, decoded by the model's own layer and top-k counts) sits
   in each choice's `meta_info` when sampled ids are captured, response-level under
-  `sglext.routed_experts` otherwise; rows cover the full sequence. The capturer serves GptOss, Qwen3
-  MoE, Qwen3.5/3.6 and GLM-4 MoE Lite, exits at start for a dense model and Gemma 4 (no
-  `num_experts_per_tok`; Gemma 4 has no routing replay on either engine) and raises at the first capture
-  for Bailing. Keep `--enable-torch-compile` off under R3: capture × compile produces isolated
-  catastrophic log-ratio rows.
+  `sglext.routed_experts` otherwise; rows cover the full sequence. The capturer exits at start for a dense
+  model and Gemma 4 (no `num_experts_per_tok`; Gemma 4 has no routing replay on either engine). Families with
+  a passing R3 row: [Coverage](#coverage). Keep `--enable-torch-compile` off under R3: capture × compile
+  produces isolated catastrophic log-ratio rows.
 - **`rollout_max_thinking_tokens` is refused** for every model (SGLang ignores unknown request fields).
   Steer with `reasoning_effort`, which reaches the chat template only; a per-level `thinking_tokens`
   reaches no request field and is warned once.
@@ -523,15 +530,15 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 
 ### Tool parsers on SGLang
 
-`--tool-call-parser auto` resolves where one of SGLang's template rules matches, as on the families of the
-shipped SGLang recipes: gpt-oss (`gpt-oss`), Qwen3.5 and Qwen3.6 (`qwen3_coder`), Gemma 4 (`gemma4`). On a
+`--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5 and
+Qwen3.6 (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
 template no rule matches it logs one warning (`could not detect tool-call parser from chat template. Disabling
 tool-call parser.`) and serves with no parser, the failure [above](#running-it): calls stay text and every
 episode of a native-tool environment scores 0, with no error anywhere. Qwen3-30B-A3B-Instruct-2507 and
 Ling-mini-2.0 land there, since their templates carry no `enable_thinking` toggle for the `qwen` rule to read.
 
-Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25` (0.5.22 logs it as the old spelling of `qwen`).
-Ling-mini-2.0 writes the same JSON inside `<tool_call>` tags, which that detector parses.
+Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25`, which ran on Qwen3-30B-A3B-Instruct-2507 (0.5.22 logs it
+as the old spelling of `qwen`), and Ling-mini-2.0 with `SGLANG_TOOL_PARSER=hermes`, the parser its rows ran on.
 
 ### NCCL transport (SGLang)
 
@@ -636,7 +643,8 @@ compose `cpuset:`). Batch sizes and timeouts:
 **Servers × TP.** Run one engine per GPU, grouped into the fewest servers that hold the model: a second
 engine on one GPU only time-slices it (and two starting at once fail their memory profiling), and
 fewer servers shrink the sync fan-out. Where rollout collection dominates (a tool-heavy environment
-such as `code_contests`), 2×(TP=2) and 4×(TP=1) give the same step time; re-measure short single-turn
+such as `code_contests`, gpt-oss-20b on 4 B300s, measured on vLLM 0.26.0), 2×(TP=2) and 4×(TP=1) give the
+same step time; re-measure short single-turn
 environments before consolidating. Per-server request load is
 `max_concurrent_rollouts × world_size / num_servers` per round in flight (`prefetch_depth` of them under
 prefetch): every rank builds its own actor pool, under TP
@@ -686,15 +694,55 @@ JIT-fails on SM 10.0.
 
 ## Coverage
 
-Async GRPO against a live server, per trainer parallelism axis:
+What passed against a live server on this release, on one node with each server at TP=1 unless a row says otherwise.
+A dash is a shape the code admits with no row on that engine.
 
-| Trainer axis | vLLM | SGLang |
+**Weight push** (`test_weight_push_exact.py`, 40 rows). A push of the unchanged checkpoint leaves every served
+log-prob bit-identical, on 2,010 positions (987 on Step-3.7's tiny checkpoint): dense Qwen3-0.6B plain and at TP=2;
+gpt-oss-20b, every checkpoint of the second table below and Step-3.7 at `ep1` and EP=2, on each engine that takes the
+family.
+
+**Async GRPO, full fine-tuning**: vLLM on Qwen3-30B-A3B at 2 ranks and gpt-oss-20b at 4, SGLang on gpt-oss-20b at 2 and
+4, dense rows on Qwen3-0.6B.
+
+| Trainer shape | vLLM | SGLang |
 |---|---|---|
-| FSDP2 DP (dense) | supported | supported |
-| TP=2 | supported | supported, gpt-oss included (its hand-sliced `sinks` are sent once from the gathered drain) |
-| EP=2; EP=2 + ETP=2, EP=2 + TP=2, EP=4, with or without LoRA / expert LoRA; expert LoRA resume | supported | supported |
-| Undistributed MoE (`ep_group_size == 1`, EP layers present) with 2×TP=2 / 4×TP=1 servers, expert sync and R3 | supported | supported |
-| Trainer and server on different nodes over EFA ([above](#servers-on-other-nodes-efa)) | supported; not run on the 0.32.0 image | supported; not run on the 0.5.22 image |
+| Plain FSDP2, dense | 1 and 2 ranks | - (a weight push and the re-init row ran, with no training loop) |
+| `ep1`; `ep1` ZeRO-3 | ran | ran |
+| `ep1` with `fsdp_shard_ep1_experts: false` | ran | - |
+| EP=2, EP=4 | ran | ran |
+| EP=2 as two groups, on one domain and on two simulated domains | ran | - |
+| TP=2 | ran, also TP=2 × DP=2 | ran, gpt-oss included (its hand-sliced `sinks` are sent once from the gathered drain) |
+| EP=2 + TP=2, EP=2 + ETP=2 | ran | ran |
+| HSDP on two simulated domains | ran | - |
+| Attention LoRA | `ep1`, EP=2, pure ETP=2, EP=2 + ETP=2 | `ep1`, EP=2 + ETP=2 |
+| Native expert LoRA | EP=2, EP=4, EP=2 resume | EP=2, EP=4, EP=2 resume |
+| Resume | EP=2, `ep1` LoRA | `ep1`, `ep1` LoRA |
+| Prefetch | EP=2 at depth 1 and 2 | `ep1` at depth 1 |
+| Two servers | EP=2 at prefetch depth 1; one rank at depth 1 and 2 | - |
+| R3 | `ep1`, EP=2, chunked, prefetch depth 1 | `ep1`, `ep1` LoRA, TP=2, `ep1` resume, chunked, prefetch depth 1 |
+| R2 | EP=2 | EP=2 |
+| A server at TP=2 | Qwen3-30B-A3B at `ep1` | Qwen3-30B-A3B at `ep1` |
+| Trainer and server on two machines ([overlays](#servers-on-other-nodes-efa)) | Qwen3-30B-A3B at `ep1` | Qwen3-30B-A3B at `ep1` |
+
+Other checkpoints, async GRPO at 2 ranks:
+
+| Checkpoint | vLLM | SGLang |
+|---|---|---|
+| Qwen3-30B-A3B | R2 and R3 at EP=2 | `ep1`, EP=2, each also with R3 |
+| Qwen3.5-35B-A3B | R2 and R3 at EP=2 | R3 at EP=2 |
+| Qwen3.6-35B-A3B | EP=2, TP=2, `ep1` attention LoRA, R2 and R3 at EP=2 | `ep1`, EP=2, `ep1` attention LoRA, R3 at EP=2 |
+| GLM-4.7-Flash | `ep1`, EP=2, TP=2, each also with R3; R2 at EP=2 | `ep1`, EP=2, each also with R3 |
+| LFM2-24B-A2B | `ep1`, EP=2, TP=2, each also with R3; R2 at EP=2 | `ep1`, EP=2, each also with R3 |
+| Gemma 4 26B-A4B | `ep1`, EP=2, `ep1` attention LoRA | `ep1`, EP=2, `ep1` attention LoRA |
+| Laguna-XS-2.1 | `ep1`, EP=2, R2 and R3 at EP=2 | refused |
+| Ling-mini-2.0 | `ep1`, EP=2, R2 and R3 at EP=2 | R2 and R3 at EP=2 |
+
+Online GRPO and SDPG ran on Qwen3-30B-A3B (`ep1`, EP=2, EP=2 × DP=2, EP=2 on two simulated domains, EP=2 + TP=2, EP=2 +
+ETP=2, attention and expert LoRA) and Qwen3-0.6B (FSDP2, one rank, TP=2, TP=2 × DP=2, ZeRO-3, HSDP on two simulated
+domains, LoRA); online GRPO also on gpt-oss-20b, Qwen3.6-35B-A3B and Gemma 4 26B-A4B at EP=2. Step-3.7 ran as a weight
+push on a tiny hub-layout checkpoint, with no training loop. The R2 and R3 rows show capture and replay work; what they
+change: [Trainer and engine noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise).
 
 An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`) takes
 the sync for Qwen3 MoE. Measured on SGLang 0.5.17 (not re-run on 0.5.22), gpt-oss fails at start under

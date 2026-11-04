@@ -170,6 +170,12 @@ def world_min(value: float, device=None) -> float:
     return float(_world_reduced(value, dist.ReduceOp.MIN, device))
 
 
+def world_max(value: float, device=None) -> float:
+    """The largest ``value`` across all ranks, for an error every rank's shard must keep under a bar; ``inf`` when any
+    is non-finite, since NCCL's reduce is free to drop a NaN. Collective."""
+    return float(_world_reduced(value if math.isfinite(value) else math.inf, dist.ReduceOp.MAX, device))
+
+
 def world_spread(value: float, device=None) -> float:
     """``max - min`` of ``value`` across ranks; ``inf`` when any is non-finite, since NaN would read as agreement.
     Collective."""
