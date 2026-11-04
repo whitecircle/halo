@@ -35,8 +35,9 @@ from halo.model_loading.parallel.lazy_plan import (
     lazy_load_prologue,
 )
 from halo.model_loading.parallel.model_source import ModelSource
-from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, tie_flag_configs
+from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, built_level_path, tie_flag_configs
 from halo.models.module_tree import split_layer_path
+from halo.models.moe.config_fields import resolve_expert_count
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.load_coordination import timed_global_load
 from halo.runtime.ranks import get_global_rank
@@ -74,7 +75,9 @@ class StageKeyFilter:
 
 def _instantiate_untied_on_meta(model_path: str, model_class, config, **model_kwargs) -> nn.Module:
     """The meta shell built with weight tying suppressed (``from_pretrained``'s tied-value ``torch.equal`` has
-    no meta kernel), the declared flag written back for the pipeline tie gate and the saved stage config."""
+    no meta kernel), the declared flag written back for the pipeline tie gate and the saved stage config. A class
+    built from one level of a composite carries only that level's subtree, so a tie stated above it lands on its root:
+    the checkpoint was saved tied either way. A sibling tower's flag says nothing of this head."""
     holders = tie_flag_configs(config)
     declared = {path: bool(getattr(holder, TIE_WORD_EMBEDDINGS_FLAG)) for path, holder in holders.items()}
     try:
@@ -87,7 +90,9 @@ def _instantiate_untied_on_meta(model_path: str, model_class, config, **model_kw
 
     # ``from_pretrained`` deep-copies the config, so the shell carries its own suppressed tree.
     built = tie_flag_configs(model.config)
-    unrestorable = sorted(set(declared) - set(built))
+    level = built_level_path(config, model.config)
+    kept = {path.removeprefix(level): flag for path, flag in declared.items() if path.startswith(level)}
+    unrestorable = sorted(set(kept) - set(built))
     if unrestorable:
         raise RuntimeError(
             f"Meta shell for {type(model).__name__} lost the config level(s) {unrestorable} that "
@@ -95,8 +100,10 @@ def _instantiate_untied_on_meta(model_path: str, model_class, config, **model_kw
             f"Leaving it suppressed would let a tied checkpoint past the pipeline tie gate and save "
             f"a stage config that silently untied the head."
         )
-    for path, flag in declared.items():
+    for path, flag in kept.items():
         setattr(built[path], TIE_WORD_EMBEDDINGS_FLAG, flag)
+    if any(flag for path, flag in declared.items() if path != level and level.startswith(path)):
+        setattr(model.config, TIE_WORD_EMBEDDINGS_FLAG, True)
     return model
 
 
@@ -234,6 +241,16 @@ def _plan_stage(
     return plans, dropped_keys, fusion_tasks, partition, stage_filter
 
 
+def _stage_expert_fuser(layout: ExpertKeyLayout, config, ep_config: EPConfig | None) -> ExpertFuser | None:
+    """The fuser of a per-expert checkpoint, which a stage has no ``from_pretrained`` to do for it: this rank's experts,
+    or all of them where no EP layer wraps the family (``use_grouped_gemm: false``)."""
+    if layout != ExpertKeyLayout.PER_EXPERT:
+        return None
+    if ep_config is not None:
+        return ExpertFuser(ep_config.expert_start_idx, ep_config.expert_end_idx)
+    return ExpertFuser(0, resolve_expert_count(config))
+
+
 def _load_stage_lazy(
     model_path: str,
     pp_rank: int,
@@ -271,11 +288,7 @@ def _load_stage_lazy(
         ),
     )
     model = base.model
-    fuser = (
-        ExpertFuser(ep_config.expert_start_idx, ep_config.expert_end_idx)
-        if ep_config is not None and base.expert_layout == ExpertKeyLayout.PER_EXPERT
-        else None
-    )
+    fuser = _stage_expert_fuser(base.expert_layout, config, ep_config)
     plans, dropped_keys, fusion_tasks, partition, stage_filter = _plan_stage(
         base, model_path, pp_rank, pp_size, pp_split, fuser
     )

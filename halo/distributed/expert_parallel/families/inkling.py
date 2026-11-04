@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,8 +24,6 @@ class EPInklingMoELayer(EPMoELayerBase):
     # The causal-LM loss never reads router_logits, so there is no aux-loss path either way.
     SEVERS_AUX_LOSS = True
 
-    _SHARED_EXPERT_REQUIRED = True
-
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         super()._adopt_routing(original_layer)
         self.n_shared_experts = self.gate.n_shared_experts
@@ -34,7 +34,11 @@ class EPInklingMoELayer(EPMoELayerBase):
             raise ValueError(f"EPInklingMoELayer requires n_shared_experts >= 1, got {self.n_shared_experts}")
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return (f"n_shared={self.n_shared_experts}", f"route_scale={self.route_scale}")
+        return (
+            *super()._init_summary_extras(original_layer),
+            f"n_shared={self.n_shared_experts}",
+            f"route_scale={self.route_scale}",
+        )
 
     def _route_joint(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reproduce ``InklingTopkRouter``; returns ``(topk_indices, topk_weights, shared_gammas)``."""
@@ -70,10 +74,7 @@ class EPInklingMoELayer(EPMoELayerBase):
 
         # Routing runs in fp32, but the shared FFN is a bf16 bmm: an fp32 gamma promotes its
         # activations and mismatches ``down_proj``. Stock HF's gammas carry the input dtype.
-        gammas = shared_gammas.to(input_dtype)
-        shared_fn = (
-            (lambda: self.shared_experts(residuals, gammas=gammas)) if self.shared_experts is not None else None
-        )
+        shared_fn = partial(self.shared_experts, residuals, gammas=shared_gammas.to(input_dtype))
 
         return self._dispatch_compute_combine_shared(
             flat, topk_indices.long(), topk_weights.float(), input_dtype, orig_shape, shared_fn

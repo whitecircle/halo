@@ -1,6 +1,6 @@
 """Upstream's hyper-connection forwards on the fused kernels, for the families whose mHC residual mixes through a
-Sinkhorn-projected matrix. Idempotent; a moved upstream signature fails loud, and an input off CUDA runs upstream's own
-forward. ``HALO_HC_KERNELS=0`` leaves upstream's classes as they are."""
+Sinkhorn-projected matrix. Idempotent; a moved upstream signature fails loud, and an input off CUDA or in fp64, which the
+kernels compute in fp32, runs upstream's own forward. ``HALO_HC_KERNELS=0`` leaves upstream's classes as they are."""
 
 import functools
 import inspect
@@ -90,8 +90,15 @@ def _deepseek_v4_layer_forward(self, hidden_states, input_ids=None, **kwargs):
     return _mixed(block, hidden_states, post, comb)
 
 
-# Each family's hyper-connection and decoder-layer classes, with the forward that replaces upstream's. HY-V4's
-# hyper-connection has no mixing matrix, and it is off the roster.
+def _deepseek_v4_head_forward(self, x):
+    """``DeepseekV4HyperHead.forward`` (transformers ~5.20) with its projection and collapse on the kernels. Outside any
+    decoder layer, so its fp32 copies of the streams would outlast per-layer checkpointing to the backward."""
+    mixes = project_streams(x, self.hc_fn, self.input_norm.eps)
+    return collapse_streams(x, torch.sigmoid(mixes * self.hc_scale.float() + self.hc_base.float()) + self.eps)
+
+
+# Each family's classes that read the streams, with the forward that replaces upstream's. HY-V4's hyper-connection has
+# no mixing matrix, and it is off the roster.
 _FAMILIES = {
     GLM5_NEXT: (
         (glm5_next_modeling.Glm5NextTextHyperConnection, _hyper_connection_forward),
@@ -100,6 +107,7 @@ _FAMILIES = {
     DEEPSEEK_V4: (
         (deepseek_v4_modeling.DeepseekV4HyperConnection, _hyper_connection_forward),
         (deepseek_v4_modeling.DeepseekV4DecoderLayer, _deepseek_v4_layer_forward),
+        (deepseek_v4_modeling.DeepseekV4HyperHead, _deepseek_v4_head_forward),
     ),
 }
 
@@ -112,7 +120,8 @@ def _install(owner: type, fused) -> None:
 
     @functools.wraps(stock)
     def forward(self, hidden_states, *args, **kwargs):
-        return (fused if hidden_states.is_cuda else stock)(self, hidden_states, *args, **kwargs)
+        on_kernels = hidden_states.is_cuda and hidden_states.dtype != torch.float64
+        return (fused if on_kernels else stock)(self, hidden_states, *args, **kwargs)
 
     setattr(forward, _PATCHED_ATTR, True)
     owner.forward = forward

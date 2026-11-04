@@ -12,8 +12,6 @@ class EPMistral4MoELayer(EPGroupLimitedMoELayerBase):
     HF_MODULE_NAMES = ("Mistral4MoE",)
     FAMILY = MISTRAL4
 
-    _SHARED_EXPERT_REQUIRED = True
-
     def _routing_scores(self, router_logits: torch.Tensor) -> torch.Tensor:
         """``Mistral4TopkRouter`` scores with a softmax over all experts."""
         return router_logits.softmax(dim=-1)

@@ -9,7 +9,7 @@ import pytest
 
 from halo.distributed.pipeline_parallel.families import PP_FAMILY_SPECS
 from halo.models.module_tree import backbone_with_layers
-from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.gpu.manifest import MANIFEST
 
 # The pipeline suites that score a family's stages against its unsplit model: the family a row runs when it names
@@ -23,7 +23,7 @@ PP_EQUIVALENCE_SUITES = {
     "parallelism/pp/test_pp_family_vs_reference.py": (None, 2),
     "parallelism/pp/test_pp_qwen4_exp_vs_reference.py": ("qwen4_exp_text", 2),
 }
-ROSTER = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}
+ROSTER = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 VALIDATED = frozenset(name for spec in PP_FAMILY_SPECS if spec.validated for name in spec.hf_module_names)
 
 

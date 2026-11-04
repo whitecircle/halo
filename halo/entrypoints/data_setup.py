@@ -1,4 +1,5 @@
-"""Script-side dataset loading, the run's VLM verdict, shared prepare steps and switches for TRL's dataset prep."""
+"""Script-side dataset loading, the run's VLM verdict and vision options (the tower freeze, the FSDP2 refusal of a
+batch holding no image), shared prepare steps and switches for TRL's dataset prep."""
 
 import logging
 import os
@@ -205,10 +206,9 @@ def _why_a_batch_holding_no_image_cannot_pair(model) -> str | None:
         )
     if model.is_gradient_checkpointing or any(p.requires_grad for p in embedding_module(model, "input").parameters()):
         return None
-    layers = decoder_layers(backbone_with_layers(model) or model)
-    if (layers is None or not any(param.requires_grad for param in layers.parameters())) and not any(
-        group.post_forward_mesh_info is not None for group in fsdp2_param_groups(model)
-    ):
+    layers = decoder_layers(backbone_with_layers(model))
+    trains_a_layer = layers is not None and any(param.requires_grad for param in layers.parameters())
+    if not trains_a_layer and not any(group.post_forward_mesh_info is not None for group in fsdp2_param_groups(model)):
         return None
     return (
         "a frozen input embedding leaves a text row's hidden states with no gradient, so the groups they pass through "

@@ -12,12 +12,13 @@ import torch.nn as nn
 from halo.checkpoint.reading import read_checkpoint_config, resolve_checkpoint_weights
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import current_device
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.buffer_repair import apply_buffer_repairs
 from halo.model_loading.dtype import resolve_load_dtype
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.liger.cross_entropy import head_token_ce_sum
-from halo.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
+from halo.model_loading.liger.dispatch import fused_loss_applied
 from halo.model_loading.parallel.expert_fuser import ExpertFuser, FusionTask
 from halo.model_loading.parallel.lazy_load import load_planned_weights
 from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, LazyLoadPlan, WeightPlanner
@@ -31,10 +32,11 @@ from halo.models.mtp.head import (
     build_mtp_head,
     freeze_trunk_for_head,
     mtp_head_path,
+    set_nested_submodule,
 )
 from halo.models.mtp.spec import MtpHeadRequest, MtpHeadSpec, require_mtp_head_spec, stored_head_prefix
 from halo.runtime.consensus import DeferredRankFailure
-from halo.runtime.ranks import get_global_rank, get_local_rank, is_global_main_process
+from halo.runtime.ranks import get_global_rank, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +49,7 @@ class _HeadShell(nn.Module):
     def __init__(self, config, head: nn.Module, path: str):
         super().__init__()
         self.config = config
-        *parents, name = path.split(".")
-        node: nn.Module = self
-        for parent in parents:
-            child = nn.ModuleDict()
-            node.add_module(parent, child)
-            node = child
-        node.add_module(name, head)
+        set_nested_submodule(self, path, head)
 
 
 def _reject_stored_quantization(source: ModelSource) -> None:
@@ -151,8 +147,9 @@ def _stream_tail(
         _reject_tail_mismatch(tail, disk_to_model, shell_keys, shell.config, source)
         return tail, disk_to_model, WeightPlanner(ep_config).build(tail, disk_to_model, shell_keys)
 
-    tail, disk_to_model, plans = guard.run(read_tail) or ({}, {}, [])
+    read = guard.run(read_tail)
     guard.reject()
+    tail, disk_to_model, plans = read
 
     fuser = None
     layout = ExpertKeyLayout.detect(tail)
@@ -198,10 +195,10 @@ def _draw_random_head(model: nn.Module, spec: MtpHeadSpec, *, dtype: torch.dtype
     return head
 
 
-def _tail_source(request: MtpHeadRequest, trunk_source: ModelSource, *, from_checkpoint: bool) -> ModelSource:
+def _tail_source(request: MtpHeadRequest, trunk_source: ModelSource, *, resuming: bool) -> ModelSource:
     """COLLECTIVE-EQUIVALENT. The resume checkpoint's tail, whose head is the trained one, else ``request.source``
     agreed across ranks, else the model's own."""
-    if from_checkpoint:
+    if resuming:
         if request.source is not None and is_global_main_process():
             logger.warning(
                 f"mtp_head_source {request.source!r} is ignored on this resume: the head continues from "
@@ -233,7 +230,7 @@ def attach_mtp_head(
         shell = _HeadShell(model.config, head, path)
         weights_already_sharded = False
     else:
-        tail_source = _tail_source(request, source, from_checkpoint=preserve_checkpoint_precision)
+        tail_source = _tail_source(request, source, resuming=preserve_checkpoint_precision)
         head = build_mtp_head(model, spec)
         shell = _HeadShell(model.config, head, path)
         weights_already_sharded = _stream_tail(
@@ -249,18 +246,12 @@ def attach_mtp_head(
     if ep_config is not None:
         apply_ep_layers(shell, ep_config, weights_already_sharded=weights_already_sharded)
     apply_buffer_repairs(shell)
-    device = f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu"
-    head = shell.get_submodule(path).to(device)
+    head = shell.get_submodule(path).to(current_device())
     attach_mtp_head_module(model, head, spec)
     if request.objective.scope == "head_only":
         freeze_trunk_for_head(model, head)
-    applied = getattr(model.config, LIGER_APPLIED_CONFIG_ATTR, None) or {}
     MtpForwardTerm(
-        model,
-        head,
-        spec,
-        request.objective,
-        head_token_ce_sum(model, fused=bool(applied.get("fused_linear_cross_entropy"))),
+        model, head, spec, request.objective, head_token_ce_sum(model, fused=fused_loss_applied(model.config))
     )
     if is_global_main_process():
         logger.info(

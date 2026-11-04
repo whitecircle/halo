@@ -21,8 +21,6 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
     # Routing is re-derived from ``gate.weight``, so ``outputs.router_logits`` stays empty under EP.
     SEVERS_AUX_LOSS = True
 
-    _SHARED_EXPERT_REQUIRED = True
-
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         super()._adopt_routing(original_layer)
         self.is_hash = bool(original_layer.is_hash)
@@ -47,7 +45,7 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
         self._fused_glu_mul = resolve_clamped_glu_mul(self.act_fn, self.limit, clamp_activated=False)
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
-        return (f"is_hash={self.is_hash}",)
+        return (*super()._init_summary_extras(original_layer), f"is_hash={self.is_hash}")
 
     def enable_bias_balancing(self) -> bool:
         """Top-k layers only: a balancing bias cannot shift a hash layer's frozen ``tid2eid`` selection."""

@@ -54,19 +54,41 @@ def model_type_matches(cfg, *prefixes: str) -> bool:
     return any(model_type.startswith(prefixes) for model_type in config_model_types(cfg))
 
 
-def tie_flag_configs(config, prefix: str = "") -> dict[str, object]:
-    """Dotted sub-config path → the config declaring the embedding tie. Keyed by path so the values can be put back on
-    a different config tree (``from_pretrained`` hands the model a deep copy)."""
-    holders = {prefix: config} if hasattr(config, TIE_WORD_EMBEDDINGS_FLAG) else {}
+def _config_levels(config, prefix: str = "") -> dict[str, object]:
+    """Dotted sub-config path → each level of ``config``'s tree, the root first."""
+    levels = {prefix: config}
     for name in getattr(config, "sub_configs", None) or ():
         sub = getattr(config, name, None)
         if sub is not None:
-            holders.update(tie_flag_configs(sub, f"{prefix}{name}."))
-    return holders
+            levels.update(_config_levels(sub, f"{prefix}{name}."))
+    return levels
+
+
+def built_level_path(config, built) -> str:
+    """The level of ``config``'s tree a model carrying ``built`` took: a sub-config's path where its class takes only
+    that level (``AutoModelForCausalLM`` hands a composite's text class the text config), else the root's. By class, as
+    ``from_pretrained`` hands the model a deep copy."""
+    return next((path for path, level in _config_levels(config).items() if type(level) is type(built)), "")
+
+
+def tie_flag_configs(config) -> dict[str, object]:
+    """Dotted sub-config path → the config declaring the embedding tie. Keyed by path so the values can be put back on
+    a different config tree (``from_pretrained`` hands the model a deep copy)."""
+    return {path: level for path, level in _config_levels(config).items() if hasattr(level, TIE_WORD_EMBEDDINGS_FLAG)}
 
 
 def ties_word_embeddings(config) -> bool:
     return any(bool(getattr(level, TIE_WORD_EMBEDDINGS_FLAG)) for level in tie_flag_configs(config).values())
+
+
+def narrow_to_text_config(config):
+    """``config``'s text level for a class built from it alone. A composite states the tie at either level and a text
+    class reads only its own, so a tie stated only on the root comes along: the checkpoint was saved tied either way. A
+    sibling tower's flag describes that tower, and an older ``config.json`` can spell it out as a default."""
+    text = text_config(config)
+    if text is not config and getattr(config, TIE_WORD_EMBEDDINGS_FLAG, False):
+        setattr(text, TIE_WORD_EMBEDDINGS_FLAG, True)
+    return text
 
 
 def untie_word_embeddings(config) -> None:

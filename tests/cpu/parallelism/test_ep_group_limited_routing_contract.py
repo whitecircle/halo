@@ -244,7 +244,6 @@ def test_a_knob_can_be_opted_out_under_either_of_its_spellings():
         # A test-local subclass inheriting GLM-4's registrations would shadow the real family in every registry walk.
         HF_MODULE_NAMES = ()
         FAMILY = MoEFamilySpec(model_types=())
-        _SHARED_EXPERT_REQUIRED = False
         _OPTIONAL_ROUTING_KNOBS = ("num_group", "topk_group")
 
     torch.manual_seed(0)

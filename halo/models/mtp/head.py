@@ -89,7 +89,7 @@ def _list_head_class(layer_class: type[nn.Module]) -> type[nn.Module]:
     return type(f"Mtp{layer_class.__name__}", (MtpHeadChain, layer_class), {})
 
 
-def _set_submodule(root: nn.Module, path: str, module: nn.Module) -> None:
+def set_nested_submodule(root: nn.Module, path: str, module: nn.Module) -> None:
     *parents, name = path.split(".")
     for parent in parents:
         if parent not in root._modules:
@@ -122,10 +122,10 @@ def build_mtp_head(model: nn.Module, spec: MtpHeadSpec, *, device: str | torch.d
         head = build_block(_list_head_class(type(layers[index])), index)
         head._mtp_spec = spec
     with torch.device(device):
-        _set_submodule(head, spec.projection, nn.Linear(2 * hidden_size, hidden_size, bias=False))
+        set_nested_submodule(head, spec.projection, nn.Linear(2 * hidden_size, hidden_size, bias=False))
     trunk_norm = getattr(backbone, spec.trunk_norm)
     for path in (spec.embedding_norm, spec.hidden_norm, spec.output_norm):
-        _set_submodule(head, path, copy.deepcopy(trunk_norm).to(device))
+        set_nested_submodule(head, path, copy.deepcopy(trunk_norm).to(device))
     return head
 
 

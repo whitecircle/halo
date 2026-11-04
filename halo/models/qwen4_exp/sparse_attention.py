@@ -10,6 +10,7 @@ import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 from torch import nn
 from torch.autograd.function import once_differentiable
 
+from halo.kernels.fp32_matmul import to_autocast_dtype
 from halo.models.gradient_checkpointing import active_recompute_scope
 from halo.models.row_documents import RowDocument, row_documents
 
@@ -158,7 +159,7 @@ def _attend_tile(
     return output.reshape(heads, tile, dim)
 
 
-def _tiles(selection: QSASelection, blocks: torch.Tensor, device: torch.device):
+def _tiles(selection: QSASelection, device: torch.device):
     """Each query tile's row, query span, K/V slice and mask, one setup for both directions."""
     for doc in selection.documents:
         for lo in range(doc.start, doc.stop, QUERY_TILE):
@@ -166,20 +167,20 @@ def _tiles(selection: QSASelection, blocks: torch.Tensor, device: torch.device):
             keys = doc.tile_keys(hi)
             if keys:
                 visible = doc.visible_keys(lo, hi, device)
-                mask = _tile_mask(blocks[doc.row, lo:hi], visible, keys, selection.compress_ratio)
+                mask = _tile_mask(selection.blocks[doc.row, lo:hi], visible, keys, selection.compress_ratio)
                 yield doc.row, lo, hi, slice(doc.key_start, doc.key_start + keys), mask
 
 
 class _TiledQSAttention(torch.autograd.Function):
-    """One query tile at a time; saves Q/K/V and the block ids only."""
+    """One query tile at a time; saves Q/K/V and the selection only."""
 
     @staticmethod
-    def forward(ctx, query, key, value, blocks, selection, scale):
-        ctx.save_for_backward(query, key, value, blocks)
+    def forward(ctx, query, key, value, selection, scale):
+        ctx.save_for_backward(query, key, value)
         ctx.selection, ctx.scale = selection, scale
         output = torch.zeros_like(query)
         with torch.autocast(query.device.type, enabled=False):
-            for row, lo, hi, kv, mask in _tiles(selection, blocks, query.device):
+            for row, lo, hi, kv, mask in _tiles(selection, query.device):
                 output[row, :, lo:hi] = _attend_tile(
                     query[row, :, lo:hi], key[row, :, kv], value[row, :, kv], mask, scale
                 )
@@ -188,14 +189,14 @@ class _TiledQSAttention(torch.autograd.Function):
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
-        query, key, value, blocks = ctx.saved_tensors
+        query, key, value = ctx.saved_tensors
         selection, scale = ctx.selection, ctx.scale
         needs = ctx.needs_input_grad[:3]
         accumulate = torch.float32 if key.dtype in (torch.float16, torch.bfloat16) else key.dtype
         grad_query = torch.zeros_like(query) if needs[0] else None
         grad_key = torch.zeros_like(key, dtype=accumulate) if needs[1] else None
         grad_value = torch.zeros_like(value, dtype=accumulate) if needs[2] else None
-        for row, lo, hi, kv, mask in _tiles(selection, blocks, query.device):
+        for row, lo, hi, kv, mask in _tiles(selection, query.device):
             inputs = [
                 tensor.detach().requires_grad_(need)
                 for tensor, need in zip((query[row, :, lo:hi], key[row, :, kv], value[row, :, kv]), needs, strict=True)
@@ -217,7 +218,6 @@ class _TiledQSAttention(torch.autograd.Function):
             grad_value.to(value.dtype) if needs[2] else None,
             None,
             None,
-            None,
         )
 
 
@@ -227,13 +227,10 @@ def tiled_qsa_attention(
     """Returns ``[batch, length, heads, dim]``. A query with no visible key reads zeros, as SDPA gives a masked row."""
     if query.shape[1] % key.shape[1]:
         raise ValueError(f"{query.shape[1]} query heads do not group over {key.shape[1]} K/V heads")
-    device_type = query.device.type
-    if torch.is_autocast_enabled(device_type):
-        # Cast before the Function so the tiles, which run with autocast off, see what SDPA under autocast would,
-        # and the backward recompute matches whatever autocast state it runs under.
-        dtype = torch.get_autocast_dtype(device_type)
-        query, key, value = (t.to(dtype) if t.dtype != torch.float64 else t for t in (query, key, value))
-    output = _TiledQSAttention.apply(query, key, value, selection.blocks, selection, scale)
+    # Before the Function, so the tiles, which run with autocast off, see what SDPA under autocast would, and the
+    # backward recompute matches whatever autocast state it runs under.
+    query, key, value = to_autocast_dtype(query, key, value)
+    output = _TiledQSAttention.apply(query, key, value, selection, scale)
     return output.transpose(1, 2)
 
 

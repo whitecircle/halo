@@ -16,6 +16,9 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("Lfm2MoeSparseMoeBlock",)
     FAMILY = LFM2
 
+    # Upstream ships no shared expert on this block, so the absent slot is a configuration.
+    _SHARED_EXPERT_REQUIRED = False
+
     # ``Lfm2MoeTopKRouter``'s renormalization floor.
     _TOPK_WEIGHT_NORM_EPS = 1e-6
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""GLM-5.3-Flash DSA attention on one GPU, forward and backward: mem-efficient SDPA against the masked matmul kernel on
-the same bf16 inputs and mask, each output and gradient against an fp32 reference that runs on neither kernel.
+"""GLM-5.3-Flash DSA attention on one GPU, forward and backward: stock SDPA, on the backend it selects and pinned to its
+mem-efficient kernel, against the masked matmul kernel on the same bf16 inputs and mask, each output and gradient against
+an fp32 reference that runs on none of them.
 
     python scripts/profiling/benchmark_dsa_attention.py --mask /path/to/mask-L16384-layer3.pt
     python scripts/profiling/benchmark_dsa_attention.py --seq 8192 --heads 64 --head_dim 256
@@ -66,12 +67,17 @@ def _stock_layout_inputs(seq: int, heads: int, dim: int, device: torch.device) -
     return q, k, kv[..., dim:].requires_grad_()
 
 
+def _selected(q, k, v, mask, scale) -> torch.Tensor:
+    """At the release's head width, mem-efficient on Blackwell and cuDNN on Hopper."""
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=scale).transpose(1, 2).contiguous()
+
+
 def _stock(q, k, v, mask, scale) -> torch.Tensor:
     with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=scale).transpose(1, 2).contiguous()
+        return _selected(q, k, v, mask, scale)
 
 
-KERNELS = {"stock_mem_efficient": _stock, "masked_matmul": masked_matmul}
+KERNELS = {"stock_selected": _selected, "stock_mem_efficient": _stock, "masked_matmul": masked_matmul}
 
 
 def _measure(kernel, q, k, v, mask, scale, grad, iters: int) -> tuple[dict, tuple[torch.Tensor, ...]]:

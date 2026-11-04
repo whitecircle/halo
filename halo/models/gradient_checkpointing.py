@@ -129,8 +129,7 @@ def install_recompute_scopes(model) -> int:
         inner = getattr(module, "_gradient_checkpointing_func", None)
         if inner is None:
             continue
-        if not getattr(inner, "_ep_scoped", False):
-            module._gradient_checkpointing_func = scoped_checkpoint_func(inner)
+        module._gradient_checkpointing_func = scoped_checkpoint_func(inner)
         installed += 1
     return installed
 

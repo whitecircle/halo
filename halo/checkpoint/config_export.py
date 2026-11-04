@@ -73,7 +73,9 @@ def _source_config_payload(source: str, config) -> dict | None:
     needs and lacks)."""
     try:
         config_file = cached_file(source, CONFIG_NAME)
-        with open(str(config_file), encoding="utf-8") as handle:
+        if config_file is None:
+            raise FileNotFoundError(f"{source!r} holds no {CONFIG_NAME}")
+        with open(config_file, encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, ValueError) as error:  # unreachable or unparseable; anything else is a bug
         logger.warning(
@@ -101,21 +103,31 @@ def _aux_auto_maps(payload: dict) -> Iterator[dict]:
             yield auto_map if isinstance(auto_map, dict) else {"AutoTokenizer": auto_map}
 
 
+def _local_modules(entry: str | list | tuple | dict) -> set[str]:
+    """The modules one ``auto_map`` entry needs beside its config; a ``repo--module.Class`` reference needs none."""
+    return {reference.split(".")[0] for reference in auto_map_references(entry) if "--" not in reference}
+
+
+def _lacks_module(entry: str | list | tuple | dict, output_dir: str) -> bool:
+    return any(not os.path.isfile(os.path.join(output_dir, f"{module}.py")) for module in _local_modules(entry))
+
+
 def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None:
     """Copy the remote-code modules ``auto_map`` names, with their sibling imports (Step-3.7's ``vision_encoder``)."""
-    pending = {reference.split(".")[0] for entry in auto_map.values() for reference in auto_map_references(entry)}
+    pending = {module for entry in auto_map.values() for module in _local_modules(entry)}
     copied: set[str] = set()
     while pending:
         module = pending.pop()
         if module in copied:
             continue
         copied.add(module)
-        module_file = cached_file(source, f"{module}.py")
+        module_file = cached_file(source, f"{module}.py", _raise_exceptions_for_missing_entries=False)
         if module_file is None:
             raise FileNotFoundError(
                 f"export_source_config_schema: source {source!r} names remote-code module "
-                f"{module}.py but does not carry it — the export would ship a config no consumer "
-                f"can load. Re-derive the source from a complete checkpoint."
+                f"{module}.py, which it does not carry or which could not be fetched — the export would "
+                f"ship a config no consumer can load. Make the source reachable, or re-derive it from a "
+                f"complete checkpoint."
             )
         shutil.copyfile(module_file, os.path.join(output_dir, f"{module}.py"))
         pending.update(get_relative_imports(module_file))
@@ -209,8 +221,6 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
             f"text-only load of a composite, so its config.json keeps transformers' schema for {config.model_type!r}."
         )
         return
-    exported.pop("transformers_version", None)
-    exported.pop("auto_map", None)
     with tempfile.TemporaryDirectory() as staging:
         source_values = _reparsed_source_values(config, payload, staging)
         # What the class itself holds no field for, as the Trainer's use_cache on a composite, is no change a reload sees.
@@ -237,14 +247,7 @@ def drop_unshipped_auto_map(output_dir: str) -> None:
     auto_map = (payload or {}).get("auto_map")
     if not auto_map:
         return
-    unshipped = {
-        auto_class
-        for auto_class, entry in auto_map.items()
-        if any(
-            "--" not in reference and not os.path.isfile(os.path.join(output_dir, f"{reference.split('.')[0]}.py"))
-            for reference in auto_map_references(entry)
-        )
-    }
+    unshipped = {auto_class for auto_class, entry in auto_map.items() if _lacks_module(entry, output_dir)}
     if not unshipped:
         return
     logger.info(
@@ -270,16 +273,11 @@ def carry_aux_auto_map_modules(output_dir: str, *, source: str | None) -> None:
             continue
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
-        local: dict[str, list[str]] = {}
+        named: dict[str, list[str]] = {}
         for auto_map in _aux_auto_maps(payload):
             for auto_class, entry in auto_map.items():
-                references = (reference for reference in auto_map_references(entry) if "--" not in reference)
-                local.setdefault(auto_class, []).extend(references)
-        absent = {
-            auto_class: references
-            for auto_class, references in local.items()
-            if any(not os.path.isfile(os.path.join(output_dir, f"{r.split('.')[0]}.py")) for r in references)
-        }
+                named.setdefault(auto_class, []).extend(auto_map_references(entry))
+        absent = {auto_class: entry for auto_class, entry in named.items() if _lacks_module(entry, output_dir)}
         if not absent:
             continue
         try:

@@ -43,7 +43,8 @@ GRAD_COSINE_FLOOR = 0.999
 BF16_COSINE_FLOOR = 0.9
 BF16_COSINE_MARGIN = 5e-3
 DSA_PROJECTIONS = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj")
-TILE_BUDGETS = {"whole_row": 1 << 40, "default": kernel.SCORES_PER_TILE, "many_tiles": HEADS * SEQ * 40}
+# The shipped budget holds this row in one tile, up to about 2,900 tokens at these heads.
+TILE_BUDGETS = {"default": kernel.SCORES_PER_TILE, "many_tiles": HEADS * SEQ * 40}
 DSA_FIRST_LAYER_TYPES = ["indexed_attention", "indexed_attention", "linear_attention", "indexed_attention"]
 # Every expert active, as top-k routing flips on bf16 noise, which would measure the router.
 TINY_OVERRIDES = {"layer_types": DSA_FIRST_LAYER_TYPES, "index_n_heads": 8, "num_experts_per_tok": 8}
@@ -239,10 +240,12 @@ def _check_dispatch(checks: dict) -> None:
 
 @contextlib.contextmanager
 def _stock_registry():
+    """On the kernel the masked matmul replaces, as at this tiny head width SDPA would select cuDNN."""
     installed = modeling_glm5_next.ALL_ATTENTION_FUNCTIONS
     modeling_glm5_next.ALL_ATTENTION_FUNCTIONS = ALL_ATTENTION_FUNCTIONS
     try:
-        yield
+        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+            yield
     finally:
         modeling_glm5_next.ALL_ATTENTION_FUNCTIONS = installed
 

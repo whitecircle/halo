@@ -12,9 +12,12 @@ from halo.models.config_access import config_sources, text_config
 from halo.models.moe.family_specs import (
     BAILING,
     DEEPSEEK_V4,
+    GLM4,
     GLM5_NEXT,
     INKLING,
     NEMOTRON_H,
+    QWEN3_5,
+    QWEN3_NEXT,
     QWEN4_EXP,
     STEP3P7,
     find_moe_family_spec,
@@ -95,7 +98,7 @@ class MtpHeadSpec:
 MTP_HEAD_SPECS: tuple[MtpHeadSpec, ...] = (
     # Qwen3.6 and Qwen3.8-27B ship under these same types.
     MtpHeadSpec(
-        model_types=("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"),
+        model_types=("qwen3_5", "qwen3_5_text", *QWEN3_5.model_types, *QWEN3_NEXT.model_types),
         placement="root",
         projection="fc",
         embedding_norm="pre_fc_norm_embedding",
@@ -103,7 +106,7 @@ MTP_HEAD_SPECS: tuple[MtpHeadSpec, ...] = (
         output_norm="norm",
     ),
     MtpHeadSpec(
-        model_types=("glm4_moe_lite",),
+        model_types=GLM4.model_types,
         placement="list",
         projection="eh_proj",
         embedding_norm="enorm",

@@ -23,10 +23,8 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
     # group knob, so the shared body runs as plain top-k. ``routed_scaling_factor``, which upstream applies to the
     # routed-expert sum, resolves into the per-token weights instead: equivalent, since the combine is linear.
     # Required: at 1.0 every routed weight misses the model's own factor.
-    _TOPK_WEIGHT_NORM_EPS = 0.0  # the value its router divides with
+    _TOPK_WEIGHT_NORM_EPS = 0.0
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group", "norm_topk_prob")
-
-    _SHARED_EXPERT_REQUIRED = True
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """This layer's clamp bound, ``inf`` meaning unclamped (Step-3.7-Flash clamps layers 43-44 at 7.0); a clamped

@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
+from torch.autograd.function import once_differentiable
 
 from halo.kernels.fp32_matmul import GEMM_ALIGNMENT, bmm_fp32, wide_dtype
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
@@ -144,6 +145,7 @@ class _SparseLatentAttention(torch.autograd.Function):
         return out
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad):
         query, latent, keys, out, lse = ctx.saved_tensors
         d_query = torch.empty_like(query)

@@ -300,9 +300,8 @@ def reject_ep_gradient_checkpointing(ep_layers) -> None:
     if unsupported:
         raise ValueError(
             f"gradient_checkpointing=True is not supported with Expert Parallelism for "
-            f"{', '.join(unsupported)}: the family declares supports_gradient_checkpointing="
-            f"False (agent-docs/models/zaya.md gives the mechanism there: its EDA/CCA cross-layer state makes "
-            f"checkpoint recompute recurse polynomially). Disable gradient_checkpointing for this model."
+            f"{', '.join(unsupported)}: the family declares supports_gradient_checkpointing=False; its page under "
+            f"agent-docs/models/ gives the mechanism. Disable gradient_checkpointing for this model."
         )
 
 

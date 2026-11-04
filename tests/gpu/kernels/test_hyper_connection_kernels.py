@@ -238,18 +238,17 @@ def test_mix_promotes_like_upstream():
         _assert_close(mix_streams, _eager_mix, _mix_inputs(1, 40, 4, 64, dtype, block_dtype), BF16_TOL)
 
 
-def test_each_input_is_optional():
-    """The first layer of a frozen embedding has a constant residual, and a frozen hyper-connection constant weights:
-    each subset of inputs compiles a variant that writes only what was asked for."""
+def test_a_frozen_input_takes_no_gradient():
+    """The first layer of a frozen embedding has a constant residual, where a frozen hyper-connection's weights are
+    constant too, and a frozen ``fn`` skips its own launch."""
     cases = (
-        (mix_streams, _eager_mix, _mix_inputs(1, 40, 4, 64)),
-        (collapse_streams, _eager_collapse, _collapse_inputs(1, 40, 4, 64)),
-        (_kernel_projection, _eager_projection, _projection_inputs(1, 70, 4, 32)),
+        (mix_streams, _eager_mix, _mix_inputs(1, 40, 4, 64), ((True, False, True, True), (True, False, False, False))),
+        (collapse_streams, _eager_collapse, _collapse_inputs(1, 40, 4, 64), ((False, True),)),
+        (_kernel_projection, _eager_projection, _projection_inputs(1, 70, 4, 32), ((True, False), (False, True))),
     )
-    for kernel, eager, inputs in cases:
-        for needed in itertools.product((True, False), repeat=len(inputs)):
-            if any(needed):
-                _assert_close(kernel, eager, inputs, FP32_TOL, needed)
+    for kernel, eager, inputs, frozen in cases:
+        for needed in frozen:
+            _assert_close(kernel, eager, inputs, FP32_TOL, needed)
 
 
 def test_bf16_rounds_once():
@@ -657,6 +656,11 @@ def run(ctx) -> dict:
     record_check(checks, "sinkhorn_matches_autograd", test_sinkhorn_matches_autograd)
     record_check(checks, "sinkhorn_reverses_near_zero_rows", test_sinkhorn_reverses_near_zero_rows)
     record_check(
+        checks,
+        "sinkhorn_takes_a_zero_eps_at_a_padded_stream_count",
+        test_sinkhorn_takes_a_zero_eps_at_a_padded_stream_count,
+    )
+    record_check(
         checks, "sinkhorn_saves_only_the_scales_with_a_graph", test_sinkhorn_saves_only_the_scales_with_a_graph
     )
     record_check(checks, "projection_matches_autograd", test_projection_matches_autograd)
@@ -665,7 +669,7 @@ def run(ctx) -> dict:
     record_check(checks, "collapse_matches_autograd", test_collapse_matches_autograd)
     record_check(checks, "mix_matches_autograd", test_mix_matches_autograd)
     record_check(checks, "mix_promotes_like_upstream", test_mix_promotes_like_upstream)
-    record_check(checks, "each_input_is_optional", test_each_input_is_optional)
+    record_check(checks, "a_frozen_input_takes_no_gradient", test_a_frozen_input_takes_no_gradient)
     record_check(checks, "bf16_rounds_once", test_bf16_rounds_once)
     record_check(checks, "a_second_backward_reads_the_same_state", test_a_second_backward_reads_the_same_state)
     record_check(checks, "no_token_and_strided_inputs", test_no_token_and_strided_inputs)

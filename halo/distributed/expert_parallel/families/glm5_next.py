@@ -20,8 +20,6 @@ class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
     # ``SEVERS_AUX_LOSS`` stays False: ``_router_logits`` calls the real ``Glm5NextTextTopkRouter``, so
     # ``outputs.router_logits`` still populates and the aux loss keeps working under EP.
 
-    _SHARED_EXPERT_REQUIRED = True
-
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """``Glm5NextTextExperts._apply_gate`` clamps then SiLUs with no act_fn and no config branch, so the latched
         combine is unconditional; the clamp bound is read as an attribute so a rename raises."""

@@ -75,8 +75,8 @@ class EPExpertComputeMixin:
         self._fused_glu_mul = resolve_fused_glu_mul(act_fn)
 
     def _init_fused_glu_params(self, experts: nn.Module, weights_already_sharded: bool = False):
-        """Store this rank's fused-GLU experts in matmul convention ``[E, K, N]``: ``gate_up_proj`` +
-        ``down_proj``, or under ETP gate and up apart, since sharding the fused halves misaligns them."""
+        """Store this rank's fused-GLU experts in matmul convention ``[E, K, N]``: ``gate_up_proj`` + ``down_proj``, or
+        gate and up apart under ETP, where sharding fused halves misaligns them, or on a ``SEPARATE_GLU`` family."""
         self._require_fused_experts(experts)
         start, end = self._local_expert_range(weights_already_sharded)
         gate_up = experts.gate_up_proj.data[start:end]  # [E, 2M, H], dim 1 = [gate(M) | up(M)]

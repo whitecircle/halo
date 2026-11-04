@@ -167,6 +167,9 @@ class _StreamProjection(torch.autograd.Function):
     @staticmethod
     def forward(ctx, stream: torch.Tensor, fn: torch.Tensor, norm_eps: float) -> torch.Tensor:
         _require_shape(fn, (fn.shape[0], stream.shape[-2] * stream.shape[-1]), "fn")
+        # A launch takes address 0 as a valid pointer, so this would otherwise fault later and asynchronously.
+        if fn.numel() and not fn.data_ptr():
+            raise RuntimeError("fn holds no local data, as a sharded DTensor or a meta tensor does: unshard it first")
         stream, fn = stream.contiguous(), fn.contiguous()
         width = fn.shape[1]
         n_tokens = stream.numel() // width
@@ -371,12 +374,8 @@ def _stream_launch(stream: torch.Tensor) -> tuple[tuple[int], dict]:
     }
 
 
-def _empty_grads(ctx, *inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """An input stands in for a gradient nothing asks for, which the kernel does not write."""
-    return tuple(
-        torch.empty_like(t, memory_format=torch.contiguous_format) if needed else t
-        for t, needed in zip(inputs, ctx.needs_input_grad, strict=True)
-    )
+def _empty_grads(*inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    return tuple(torch.empty_like(t, memory_format=torch.contiguous_format) for t in inputs)
 
 
 def _requested(ctx, grads: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor | None, ...]:
@@ -407,8 +406,6 @@ def _collapse_bwd_kernel(
     N: tl.constexpr,
     N_PAD: tl.constexpr,
     COLUMNS: tl.constexpr,
-    NEED_STREAM: tl.constexpr,
-    NEED_WEIGHT: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     lane, in_lane, weight_cells, _ = _lane_cells(token, N, N_PAD)
@@ -419,12 +416,9 @@ def _collapse_bwd_kernel(
     for start in range(0, width, COLUMNS):
         block_cells, in_col, stream_cells, in_stream = _stream_cells(token, start, width, lane, in_lane, N, COLUMNS)
         grad = tl.load(grad_ptr + block_cells, mask=in_col, other=0.0).to(tl.float32)
-        if NEED_STREAM:
-            tl.store(dstream_ptr + stream_cells, weight[:, None] * grad[None, :], mask=in_stream)
-        if NEED_WEIGHT:
-            dweight += tl.load(stream_ptr + stream_cells, mask=in_stream, other=0.0).to(tl.float32) * grad[None, :]
-    if NEED_WEIGHT:
-        tl.store(dweight_ptr + weight_cells, tl.sum(dweight, axis=1), mask=in_lane)
+        tl.store(dstream_ptr + stream_cells, weight[:, None] * grad[None, :], mask=in_stream)
+        dweight += tl.load(stream_ptr + stream_cells, mask=in_stream, other=0.0).to(tl.float32) * grad[None, :]
+    tl.store(dweight_ptr + weight_cells, tl.sum(dweight, axis=1), mask=in_lane)
 
 
 class _StreamCollapse(torch.autograd.Function):
@@ -443,25 +437,15 @@ class _StreamCollapse(torch.autograd.Function):
     def backward(ctx, grad_out: torch.Tensor):
         stream, weight = ctx.saved_tensors
         grid, tile = _stream_launch(stream)
-        grads = _empty_grads(ctx, stream, weight)
-        need_stream, need_weight = ctx.needs_input_grad
-        _collapse_bwd_kernel[grid](
-            grad_out.contiguous(),
-            stream,
-            weight,
-            *grads,
-            stream.shape[-1],
-            NEED_STREAM=need_stream,
-            NEED_WEIGHT=need_weight,
-            **tile,
-        )
+        grads = _empty_grads(stream, weight)
+        _collapse_bwd_kernel[grid](grad_out.contiguous(), stream, weight, *grads, stream.shape[-1], **tile)
         return _requested(ctx, grads)
 
 
 @torch.compiler.disable
 def collapse_streams(stream: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """``(weight.unsqueeze(-1) * stream).sum(-2)``, for ``[..., N, H]`` ``stream`` and ``[..., N]`` ``weight``, in
-    ``stream``'s dtype."""
+    """``(weight.unsqueeze(-1) * stream).sum(-2)``, for ``[..., N, H]`` ``stream`` and ``[..., N]`` ``weight``, computed in
+    fp32 and stored in ``stream``'s dtype."""
     return _StreamCollapse.apply(stream, weight)
 
 
@@ -505,10 +489,6 @@ def _mix_bwd_kernel(
     N: tl.constexpr,
     N_PAD: tl.constexpr,
     COLUMNS: tl.constexpr,
-    NEED_BLOCK: tl.constexpr,
-    NEED_RESIDUAL: tl.constexpr,
-    NEED_POST: tl.constexpr,
-    NEED_COMB: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
     lane, in_lane, post_cells, comb_cells = _lane_cells(token, N, N_PAD)
@@ -521,19 +501,13 @@ def _mix_bwd_kernel(
     for start in range(0, width, COLUMNS):
         block_cells, in_col, stream_cells, in_stream = _stream_cells(token, start, width, lane, in_lane, N, COLUMNS)
         grad = tl.load(grad_ptr + stream_cells, mask=in_stream, other=0.0).to(tl.float32)
-        if NEED_BLOCK:
-            tl.store(dblock_ptr + block_cells, tl.sum(post[:, None] * grad, axis=0), mask=in_col)
-        if NEED_RESIDUAL:
-            tl.store(dresidual_ptr + stream_cells, _lane_product(comb, grad), mask=in_stream)
-        if NEED_POST:
-            dpost += grad * tl.load(block_ptr + block_cells, mask=in_col, other=0.0).to(tl.float32)[None, :]
-        if NEED_COMB:
-            residual = tl.load(residual_ptr + stream_cells, mask=in_stream, other=0.0).to(tl.float32)
-            dcomb += residual[:, None, :] * grad[None, :, :]
-    if NEED_POST:
-        tl.store(dpost_ptr + post_cells, tl.sum(dpost, axis=1), mask=in_lane)
-    if NEED_COMB:
-        tl.store(dcomb_ptr + comb_cells, tl.sum(dcomb, axis=2), mask=in_comb)
+        tl.store(dblock_ptr + block_cells, tl.sum(post[:, None] * grad, axis=0), mask=in_col)
+        tl.store(dresidual_ptr + stream_cells, _lane_product(comb, grad), mask=in_stream)
+        dpost += grad * tl.load(block_ptr + block_cells, mask=in_col, other=0.0).to(tl.float32)[None, :]
+        residual = tl.load(residual_ptr + stream_cells, mask=in_stream, other=0.0).to(tl.float32)
+        dcomb += residual[:, None, :] * grad[None, :, :]
+    tl.store(dpost_ptr + post_cells, tl.sum(dpost, axis=1), mask=in_lane)
+    tl.store(dcomb_ptr + comb_cells, tl.sum(dcomb, axis=2), mask=in_comb)
 
 
 class _StreamMix(torch.autograd.Function):
@@ -560,22 +534,8 @@ class _StreamMix(torch.autograd.Function):
     def backward(ctx, grad_out: torch.Tensor):
         block, residual, post, comb = ctx.saved_tensors
         grid, tile = _stream_launch(residual)
-        grads = _empty_grads(ctx, block, residual, post, comb)
-        need_block, need_residual, need_post, need_comb = ctx.needs_input_grad
-        _mix_bwd_kernel[grid](
-            grad_out.contiguous(),
-            block,
-            residual,
-            post,
-            comb,
-            *grads,
-            residual.shape[-1],
-            NEED_BLOCK=need_block,
-            NEED_RESIDUAL=need_residual,
-            NEED_POST=need_post,
-            NEED_COMB=need_comb,
-            **tile,
-        )
+        grads = _empty_grads(block, residual, post, comb)
+        _mix_bwd_kernel[grid](grad_out.contiguous(), block, residual, post, comb, *grads, residual.shape[-1], **tile)
         return _requested(ctx, grads)
 
 

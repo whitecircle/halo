@@ -33,6 +33,7 @@ QWEN4_OVERRIDES = {
     "num_hidden_layers": 8,
     "layer_types": (["linear_attention"] * 3 + ["full_attention"]) * 2,
     "ple_layer_ids": [2, 6],
+    "num_experts_per_tok": 2,  # The expert-sum pin commutes over two adds; the PLE gate's gradient amplifies a third's.
 }
 SPLITS = {"qwen4_exp_text": [3, 5], "qwen3_5_moe_text": [4, 4]}
 # Fill the row to its fixed length; positions restart at each.

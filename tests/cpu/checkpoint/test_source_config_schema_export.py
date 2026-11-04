@@ -233,6 +233,20 @@ def _exported(tmp_path, cls, mutate=None) -> tuple[dict, str, object]:
         return json.load(handle), export, model
 
 
+def test_a_source_without_a_named_module_is_refused_by_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_export, "cached_file", lambda *args, **kwargs: None)
+    with pytest.raises(FileNotFoundError, match=r"modeling_x\.py, which it does not carry or which could not be"):
+        config_export._copy_auto_map_modules("source", {"AutoModel": "modeling_x.Model"}, str(tmp_path))
+
+
+def test_a_source_without_a_config_keeps_the_native_schema_and_says_why(monkeypatch):
+    warned = []
+    monkeypatch.setattr(config_export, "cached_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(config_export.logger, "warning", warned.append)
+    assert config_export._source_config_payload("source", None) is None
+    assert "'source' holds no config.json" in warned[0]
+
+
 def test_every_declaring_family_has_a_source_schema_fixture():
     declaring = {
         cls for cls in set(ep_layer_class_by_model_type().values()) if cls.FAMILY.exports_source_config_schema
@@ -269,6 +283,21 @@ def test_the_export_carries_the_source_schema_and_its_modules(cls, tmp_path):
     assert payload["auto_map"] == family.source_config["auto_map"]
     missing = [name for name in family.modules if not os.path.isfile(os.path.join(export, name))]
     assert not missing, f"the export ships no {missing} — the directory does not load without them"
+
+
+@pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
+def test_a_dashed_auto_map_reference_is_carried_with_no_module_looked_for(cls, tmp_path):
+    """A ``repo--module.Class`` reference resolves itself, so the save neither looks for its module nor drops it."""
+    family = FIXTURES[cls]
+    dashed = "vendor/release--modeling_remote.RemoteModel"
+    source_config = {**family.source_config, "auto_map": {**family.source_config["auto_map"], "AutoModel": dashed}}
+    source = _write_source(tmp_path / "source", source_config, family.modules)
+    export = str(tmp_path / "export")
+    os.makedirs(export, exist_ok=True)
+    save_model_config(_model_from(cls, source), export)
+    with open(os.path.join(export, "config.json")) as handle:
+        assert json.load(handle)["auto_map"]["AutoModel"] == dashed
+    assert not os.path.exists(os.path.join(export, "modeling_remote.py"))
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)

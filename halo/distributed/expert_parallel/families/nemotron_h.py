@@ -23,8 +23,6 @@ class EPNemotronHMoELayer(EPGroupLimitedMoELayerBase):
     # The router's module never runs here, and the modeling has no aux loss to lose: the bias is the one balancing.
     SEVERS_AUX_LOSS = True
 
-    _SHARED_EXPERT_REQUIRED = True
-
     @classmethod
     def _detect_hidden_dim(cls, router: nn.Module | None, experts: nn.Module) -> int:
         """The latent; the router's input width is the hidden state's, which never reaches the wire."""

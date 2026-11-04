@@ -18,6 +18,9 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("Cohere2MoeSparseMoeBlock",)
     FAMILY = COHERE2_MOE
 
+    # Upstream builds the shared expert only under a config flag, so an absent one is a configuration.
+    _SHARED_EXPERT_REQUIRED = False
+
     # The sigmoid top-k renorm adds no floor.
     _TOPK_WEIGHT_NORM_EPS = 0.0
 
@@ -46,6 +49,7 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
         return (
+            *super()._init_summary_extras(original_layer),
             f"selection={self.expert_selection_fn}",
             f"output_scale={self._output_scale}",
         )

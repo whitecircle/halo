@@ -70,6 +70,12 @@ _LIGER_DEFAULTS = {
 }
 
 
+def fused_loss_applied(model_config) -> bool:
+    """Whether the classes were patched with ``fused_linear_cross_entropy`` on."""
+    applied = getattr(model_config, LIGER_APPLIED_CONFIG_ATTR, None) or {}
+    return bool(applied.get("fused_linear_cross_entropy"))
+
+
 def _liger_model_types(model_config) -> tuple[str | None, str | None]:
     """``(model_type, text-config fallback)``: the two spellings an applier may be registered under, since a
     multimodal wrapper carries its decoder classes on its text sub-config."""
@@ -237,8 +243,7 @@ def trl_reapplication_config(model_config, applied: dict) -> dict:
 def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> None:
     """Warn when FLCE was applied but the trainer's loss passes no ``labels``; the patch site does not know the trainer
     and re-applying would not unpatch the forward."""
-    applied = getattr(model_config, LIGER_APPLIED_CONFIG_ATTR, None) or {}
-    if applied.get("fused_linear_cross_entropy") and is_global_main_process():
+    if fused_loss_applied(model_config) and is_global_main_process():
         logger.warning(
             f"Liger fused_linear_cross_entropy is applied but unreachable on {trainer_name}: its "
             f"loss runs outside the model's forward and never passes labels, so the fused path "
@@ -455,9 +460,10 @@ def finalize_liger_after_direct_load(training_config, original_use_liger: bool, 
     re-apply over the patches."""
     if not original_use_liger:
         return
-    applied = getattr(model.config, LIGER_APPLIED_CONFIG_ATTR, None)
-    if applied and applied.get("fused_linear_cross_entropy", False):
+    if fused_loss_applied(model.config):
         training_config.use_liger_kernel = True
-        training_config.liger_kernel_config = trl_reapplication_config(model.config, applied)
+        training_config.liger_kernel_config = trl_reapplication_config(
+            model.config, getattr(model.config, LIGER_APPLIED_CONFIG_ATTR)
+        )
     else:
         training_config.use_liger_kernel = False

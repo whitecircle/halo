@@ -175,11 +175,13 @@ def _release_layout(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
     return split
 
 
-def write_checkpoint_with_tail(name: str, target: Path, *, per_expert: bool, seed: int = 123, edit=None) -> dict:
+def write_checkpoint_with_tail(
+    name: str, target: Path, *, per_expert: bool, seed: int = 123, edit=None, overrides: dict | None = None
+) -> dict:
     """Family ``name``'s trunk beside a seeded release-layout tail, saved bf16 as a release stores it; returns the tail
     as stored in the head's own (fused) keys. ``edit`` rewrites the stored tail's dict before the write."""
     torch.manual_seed(1)
-    model = tiny_family_model(MTP_TINY_FAMILIES[name]).to(torch.bfloat16)
+    model = tiny_family_model(MTP_TINY_FAMILIES[name], overrides=overrides).to(torch.bfloat16)
     spec = require_mtp_head_spec(model.config)
     path = mtp_head_path(model, spec)
     head = build_mtp_head(model, spec, device="cpu")

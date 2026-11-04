@@ -4,21 +4,35 @@
 Expert TP reorders each expert's sum, which in bf16 flips near-tied picks with no sync bug, so ETP rows run fp32.
 Gradients score by direction and norm ratio, since a flipped pick moves mass. A gradient under
 ``TOL.grad_negligible_layer_fraction`` of its layer's largest (Qwen3.5's ``A_log`` / ``dt_bias``) is held to that floor
-as absolute error, Nemotron-H's Mamba layers to their own.
+as absolute error, Nemotron-H's Mamba layers to their own. ``--text-only`` reads a composite release from disk through
+the real loader, as ``text_only_model: true`` does, and scores it against the whole text class that checkpoint loads
+as.
 """
 
 import argparse
 import copy
 
 import torch
+from transformers import AutoModelForCausalLM
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.finalization import finalize_loaded_model
+from halo.model_loading.model_preparation import resolve_text_only_config
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common import pp_equivalence as ppeq
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
-from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_PP_SPLIT_OVERRIDES, tiny_family_model
+from tests.common.qwen4_exp import stamped_config
+from tests.common.tiny_models import (
+    TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
+    TINY_PP_SPLIT_OVERRIDES,
+    shared_tiny_family_checkpoint,
+    tiny_family_model,
+    word_level_tokenizer,
+)
 from tests.common.tolerances import TOL
 
 SEED = 1234
@@ -43,24 +57,66 @@ FAMILIES = {
     ),
 }
 
-NEGLIGIBLE_FRACTIONS = {"nemotron_h": TOL.nemotron_mamba_grad_negligible_layer_fraction}
+# The same towers in the composite spelling their releases ship, a PLE layer on each of Flash-Next's stages. Its two
+# experts a token are the sum below's too: the PLE gate's gradient grows as 1/sqrt|gate|, so the rounding of a third add
+# moves a near-zero gate's share of it by 10x.
+TEXT_ONLY_FAMILIES = {
+    "qwen3_5_moe": FAMILIES["qwen3_5_moe_text"],
+    "nemotron_h_omni": FAMILIES["nemotron_h"],
+    "qwen4_exp": (
+        {
+            "num_hidden_layers": 8,
+            "layer_types": (["linear_attention"] * 3 + ["full_attention"]) * 2,
+            "ple_layer_ids": [2, 6],
+            "num_experts_per_tok": 2,
+        },
+        [3, 5],
+    ),
+}
+
+NEGLIGIBLE_FRACTIONS = {
+    "nemotron_h": TOL.nemotron_mamba_grad_negligible_layer_fraction,
+    "nemotron_h_omni": TOL.nemotron_mamba_grad_negligible_layer_fraction,
+}
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--family", choices=sorted(FAMILIES), required=True)
+parser.add_argument("--family", choices=sorted({*FAMILIES, *TEXT_ONLY_FAMILIES}), required=True)
 parser.add_argument("--ep-size", type=int, choices=(1, 2), default=2)
 parser.add_argument("--etp-size", type=int, choices=(1, 2), default=1)
+parser.add_argument("--text-only", action="store_true")
 ARGS = parser.parse_args()
 if ARGS.etp_size > 1 and ARGS.ep_size > 1:
     parser.error("PP+EP+ETP is refused at config time: --etp-size 2 runs at --ep-size 1")
+if ARGS.text_only != (ARGS.family in TEXT_ONLY_FAMILIES):
+    parser.error(f"--text-only runs exactly {sorted(TEXT_ONLY_FAMILIES)}")
 # fp32 under expert TP (the module docstring says why).
 FP32 = ARGS.etp_size > 1
 DTYPE = torch.float32 if FP32 else torch.bfloat16
 
 
+def _load_from_composite_checkpoint(ctx, config: ParallelismConfig, overrides: dict):
+    """This rank's stage through the real loader, and the whole text class the checkpoint loads as. The family patches
+    the stage's load applies stamp the config the whole model must be built from too."""
+    path = shared_tiny_family_checkpoint(
+        ctx, TINY_MOE_VLM_FAMILIES[ARGS.family], f"pp_text_only_{ARGS.family}", None, SEED, overrides=overrides
+    )
+    if ctx.rank == 0:
+        word_level_tokenizer().save_pretrained(path)
+    ctx.barrier()
+    stage, _ = load_distributed_model(
+        path, config, DTYPE, trust_remote_code=False, text_only_model=True, attn_implementation="sdpa"
+    )
+    whole = AutoModelForCausalLM.from_pretrained(
+        path, config=resolve_text_only_config(stamped_config(path)), dtype=DTYPE, attn_implementation="sdpa"
+    )
+    finalize_loaded_model(whole)
+    return stage, whole
+
+
 @gpu_test_main(exact_world_size=4, prefix="pp_family_vs_reference")
 def run(ctx):
     checks, metrics = {}, {}
-    overrides, pp_split = FAMILIES[ARGS.family]
+    overrides, pp_split = TEXT_ONLY_FAMILIES[ARGS.family] if ARGS.text_only else FAMILIES[ARGS.family]
     if FP32:
         torch.set_float32_matmul_precision("highest")  # Keeps the fp32 reference an actual fp32 reference.
     config = ParallelismConfig(
@@ -75,7 +131,11 @@ def run(ctx):
     dp_size = config.data_parallel_size
 
     torch.manual_seed(SEED)
-    base = tiny_family_model(TINY_MOE_FAMILIES[ARGS.family], overrides=overrides).to(DTYPE)
+    if ARGS.text_only:
+        model, base = _load_from_composite_checkpoint(ctx, config, overrides)
+    else:
+        model = None
+        base = tiny_family_model(TINY_MOE_FAMILIES[ARGS.family], overrides=overrides).to(DTYPE)
     rows, labels = ppeq.build_ragged_batch(dp_size * PER_DEVICE_BATCH)
 
     # Both runs sum each token's two weighted expert outputs alike on the same fla configs, so they route alike.
@@ -85,7 +145,11 @@ def run(ctx):
     reference = ppeq.run_unsplit_reference(twin, rows, labels, ctx.device, dp_size)
     del twin
 
-    model = apply_ep_layers(copy.deepcopy(base), config.ep_config())
+    if ARGS.text_only:
+        # The class test: a loader falling back to the composite would still score alike on its text tower.
+        checks["stage_is_the_text_class"] = type(model) is type(base)
+    else:
+        model = apply_ep_layers(copy.deepcopy(base), config.ep_config())
     trainer = ppeq.build_pp_sft_trainer(
         ctx,
         config,

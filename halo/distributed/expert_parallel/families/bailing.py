@@ -17,6 +17,9 @@ class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("BailingMoeV2SparseMoeBlock", "BailingMoeV3SparseMoeBlock")
     FAMILY = BAILING
 
+    # Upstream builds the shared expert only under a config flag, so an absent one is a configuration.
+    _SHARED_EXPERT_REQUIRED = False
+
     # Selection happens inside the gate (the forward never consults ``_transient_balancing_bias``), so the
     # base's transient fallback would register a buffer nothing reads.
     _supports_transient_balancing_bias = False

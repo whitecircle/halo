@@ -105,7 +105,7 @@ def _assert_contiguous_gate_up(shape: torch.Size, hidden: int | None, inter: int
     checkpoint or a config whose width does not describe the weights would be split at the wrong offset."""
     if hidden is None or inter is None:
         raise ValueError(
-            "config.json lacks hidden_size / moe_intermediate_size (checked text_config too); "
+            f"config.json lacks hidden_size or any of {EXPERT_FFN_WIDTH_FIELDS} (checked text_config too); "
             "cannot verify the expert layout. Add them or convert with a family-specific script."
         )
     _, a, b = shape
@@ -119,7 +119,7 @@ def _assert_contiguous_gate_up(shape: torch.Size, hidden: int | None, inter: int
         )
     raise ValueError(
         f"Unrecognized fused gate_up_proj layout {tuple(shape)} for hidden={hidden}, "
-        f"moe_intermediate_size={inter} (model_type={model_type})."
+        f"expert FFN width={inter} (model_type={model_type})."
     )
 
 

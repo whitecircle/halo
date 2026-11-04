@@ -405,6 +405,20 @@ def test_the_latent_attention_is_the_masked_softmax_with_exact_gradients():
     assert torch.autograd.gradcheck(lambda q, c: _SparseLatentAttention.apply(q, c, keys, scale), (query, latent))
 
 
+def test_the_latent_attention_refuses_a_second_order_backward():
+    """With another differentiable term beside it, a backward that cuts the graph would read as a wrong second
+    derivative."""
+    generator = torch.Generator().manual_seed(2)
+    tokens, heads, rank, width = 9, 3, 5, 4
+    query = torch.randn(tokens, heads, rank, generator=generator, requires_grad=True)
+    latent = torch.randn(tokens, rank, generator=generator, requires_grad=True)
+    keys = torch.randint(0, tokens, (tokens, width), generator=generator)
+    out = _SparseLatentAttention.apply(query, latent, keys, 0.5)
+    first = torch.autograd.grad(out.square().sum() + query.square().sum(), query, create_graph=True)[0]
+    with pytest.raises(RuntimeError, match="once_differentiable"):
+        first.sum().backward()
+
+
 def _sparse_layers(model) -> list[torch.nn.Module]:
     family = TREE_FAMILIES["glm5_next_text"]
     return [module for module in model.modules() if isinstance(module, family.sparse)]

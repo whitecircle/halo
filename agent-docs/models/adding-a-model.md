@@ -199,7 +199,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `MoEFamilySpec.balancing_slot` — the family's exported balancing slot: its first spelling is the live-tree path the layer adopts, so the sign-updates land in exported state (`bias_update_transient` is the user's explicit opt-in where there is none), and its `config_flag` the field flipped for a slot the config gates. A config-gated slot also implements the `_materialize_native_balancing_slot` hook (LFM-2).
 
 - `SEVERS_AUX_LOSS` — `True` when the EP layer bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `halo/models/moe/balancing.py`, applied by `halo/callbacks/balancing.py`).
-- `_SHARED_EXPERT_REQUIRED` — `True` for a family whose block always builds its shared expert, so a rename raises instead of dropping the FFN from every output.
+- `_SHARED_EXPERT_REQUIRED` — `True` by default: a declared shared expert the block does not carry raises as a rename instead of dropping the FFN from every output. `False` only where the block may lack one: a config flag decides (Bailing, Cohere2 MoE) or upstream ships none (LFM-2).
 
     `replicated_named_params()` is derived from the adopted name, so a family with the ordinary single shared expert writes no override. Replicated submodules are FSDP-ignored and DP-averaged by the router hook, and an undeclared one trips the same construction-time scan. Override `replicated_named_params()` only when the replicated set is a different *shape* — Qwen3.5/3.6, whose gate is a second module, and Nemotron-H, with its latent projections.
 

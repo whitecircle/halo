@@ -1059,6 +1059,27 @@ MANIFEST: dict[str, TestSpec] = {
                 )
                 for family in _PP_MOE_FAMILIES
             ),
+            # A composite release read from disk through its text class, which no row above builds from a checkpoint.
+            Row(
+                "--family qwen3_5_moe --text-only --ep-size 1",
+                markers=("gpu", "full", "4gpu", "pp", "moe", "vlm", "qwen3"),
+            ),
+            Row(
+                "--family qwen3_5_moe --text-only --ep-size 2",
+                markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "vlm", "qwen3"),
+            ),
+            Row(
+                "--family qwen3_5_moe --text-only --ep-size 1 --etp-size 2",
+                markers=("gpu", "full", "4gpu", "pp", "etp", "moe", "vlm", "qwen3"),
+            ),
+            Row(
+                "--family qwen4_exp --text-only --ep-size 2",
+                markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "vlm", "qwen3"),
+            ),
+            Row(
+                "--family nemotron_h_omni --text-only --ep-size 2",
+                markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "vlm", "nemotron"),
+            ),
         ),
     ),
     "parallelism/pp/test_pp_ep_gc_equivalence.py": TestSpec(
@@ -2466,6 +2487,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--family deepseek_v4 --mode full --ep 1 --fp32-masters",
             "--family inkling_text --mode full --ep 2 --fp32-masters",
             "--family glm5_next --mode full --ep 2 --fp32-masters",
+            "--family glm5_next --mode full --ep 2 --dsa-kernel",
             "--family deepseek_v4 --mode expert_lora --ep 1",
             "--family glm5_next --mode mixed --ep 1",
             "--family deepseek_v4 --mode expert_lora --ep 2",

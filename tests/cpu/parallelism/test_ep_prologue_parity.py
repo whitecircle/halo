@@ -342,7 +342,6 @@ def test_the_parity_check_is_sensitive_to_a_dropped_declaration():
         (glm4_wrapper,),
         {
             "FAMILY": dataclasses.replace(glm4_wrapper.FAMILY, model_types=(), shared_expert_attrs=()),
-            "_SHARED_EXPERT_REQUIRED": False,
         },
     )
     block, layer = _build(glm4_factory, forgot_shared)

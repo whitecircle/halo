@@ -20,13 +20,13 @@ def wide_dtype(dtype: torch.dtype) -> torch.dtype:
 
 
 def to_autocast_dtype(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """Autocast casts SDPA's inputs; a kernel calling ``out_dtype`` matmuls or running with autocast off is outside its
-    reach."""
+    """Autocast casts SDPA's inputs, fp64 excepted; a kernel calling ``out_dtype`` matmuls or running with autocast off
+    is outside its reach."""
     device_type = tensors[0].device.type
     if not torch.is_autocast_enabled(device_type):
         return tensors
     dtype = torch.get_autocast_dtype(device_type)
-    return tuple(t.to(dtype) for t in tensors)
+    return tuple(t if t.dtype == torch.float64 else t.to(dtype) for t in tensors)
 
 
 def bmm_fp32(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:

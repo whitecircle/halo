@@ -22,8 +22,6 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
     # ``Qwen3_5MoeTopKRouter`` renormalizes with no floor.
     _TOPK_WEIGHT_NORM_EPS = 0.0
 
-    _SHARED_EXPERT_REQUIRED = True
-
     def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
         super()._adopt_shared_experts(original_layer)
         self.shared_expert_gate = original_layer.shared_expert_gate

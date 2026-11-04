@@ -4,8 +4,9 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
-from halo.kernels.fp32_matmul import bmm_fp32, mm_fp32
+from halo.kernels.fp32_matmul import bmm_fp32, mm_fp32, to_autocast_dtype
 from halo.models.attention import tree_sparse
 from halo.models.attention.sdpa_flex_sliding import _Fp32ScoreMatmul
 from halo.models.attention.tree_sparse import _SparseLatentAttention
@@ -178,6 +179,17 @@ def test_mm_half_cuda_b_casts_a_to_its_dtype_with_an_fp32_result(mm, dtype):
     )
     assert got.dtype == out.dtype == torch.float32
     assert torch.equal(out.as_subclass(torch.Tensor), got.as_subclass(torch.Tensor))
+
+
+def test_to_autocast_dtype_casts_what_autocast_casts():
+    single, double = torch.ones(2, 2), torch.ones(2, 2, dtype=torch.float64)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        cast, kept = to_autocast_dtype(single, double)
+        autocast_out = F.linear(double, double)
+    assert cast.dtype == torch.bfloat16
+    assert kept is double and autocast_out.dtype == torch.float64, "autocast leaves fp64 alone"
+    off_single, off_double = to_autocast_dtype(single, double)
+    assert off_single is single and off_double is double
 
 
 if __name__ == "__main__":

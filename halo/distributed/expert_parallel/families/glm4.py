@@ -19,8 +19,6 @@ class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
     # and ``routed_scaling_factor`` (1.8 in-library) stay required: defaulting either rescales every routed weight.
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group")
 
-    _SHARED_EXPERT_REQUIRED = True
-
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Also materialize the correction bias a lazy load can leave on meta: Laguna's pinned remote-code revision
         omits it from its checkpoint, so it would be read from meta storage on every selection."""

@@ -36,7 +36,7 @@ from halo.models.attention.selection import (
     is_flash_attn_implementation,
     verify_live_sinks_carried,
 )
-from halo.models.config_access import drop_toolkit_stamps, model_type_matches, text_config
+from halo.models.config_access import drop_toolkit_stamps, model_type_matches, narrow_to_text_config
 from halo.models.hyper_connections import apply_hyper_connection_patches
 from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
 from halo.models.model_classes import auto_map_references, mapped_model_class
@@ -58,9 +58,11 @@ def _auto_map_class_name(auto_map: dict, key: str) -> str | None:
 
 def resolve_text_only_config(model_config):
     """The config a ``text_only`` build takes: a family declaring ``text_only_layout`` reaches its CausalLM only through
-    its text sub-config's ``model_type``; any other stays composite, which the Auto factory narrows itself."""
+    its text sub-config's ``model_type``; any other stays composite, which the Auto factory narrows itself. Either way
+    the text level states the tie, as the only flag that class reads."""
+    text_level = narrow_to_text_config(model_config)
     spec = find_moe_family_spec(getattr(model_config, "model_type", None))
-    return text_config(model_config) if spec is not None and spec.text_only_layout is not None else model_config
+    return text_level if spec is not None and spec.text_only_layout is not None else model_config
 
 
 def resolve_auto_model_class(model_config, *, text_only: bool = False):
@@ -149,8 +151,8 @@ def auto_load_model(
                 model_name_or_path, revision=kwargs.get("revision"), trust_remote_code=trust_remote_code
             )
         model_class = resolve_auto_model_class(config, text_only=text_only)
-        if text_only and (sibling := resolve_text_only_config(config)) is not config:
-            kwargs["config"] = sibling
+        if text_only:
+            kwargs["config"] = resolve_text_only_config(config)
     return from_pretrained_verified(model_class, model_name_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
 
@@ -183,7 +185,8 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # sparse layer reads a [T, T] mask, and packed documents leak through the per-layer embedding.
     if model_type_matches(model_config, "qwen4_exp"):
         apply_qwen4_exp_patches(model_config)
-    # Else the DSA layers run mem-efficient SDPA over their [T, T] mask, whose backward grows to most of a long step.
+    # Else the DSA layers run stock SDPA over their [T, T] mask: mem-efficient on Blackwell, whose backward grows to most
+    # of a long step, and cuDNN on Hopper.
     if attn_implementation == "sdpa" and model_type_matches(model_config, "glm5_next") and dsa_matmul_enabled():
         install_glm5_next_masked_matmul()
     # Else each hyper-connection and its mix launch some 450 kernels a forward and backward, most of them on a Sinkhorn

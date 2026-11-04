@@ -251,28 +251,21 @@ def patch_qwen4_exp_document_forwards() -> None:
         **kwargs,
     ):
         cached = past_key_values is not None or bool(use_cache)
-        if cached or isinstance(attention_mask, dict) or (attention_mask is not None and attention_mask.ndim != 2):
-            return original_model(
-                self,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                ple_input_ids=ple_input_ids,
-                **kwargs,
-            )
-        rows = input_ids if input_ids is not None else inputs_embeds
-        padding = document_padding_mask(self.config, rows, attention_mask, position_ids, kwargs.get("seq_idx"))
+        if not (
+            cached or isinstance(attention_mask, dict) or (attention_mask is not None and attention_mask.ndim != 2)
+        ):
+            rows = input_ids if input_ids is not None else inputs_embeds
+            padding = document_padding_mask(self.config, rows, attention_mask, position_ids, kwargs.get("seq_idx"))
+            attention_mask = dict.fromkeys(_MASK_KINDS, padding)
+            use_cache = False
         return original_model(
             self,
             input_ids=input_ids,
-            attention_mask=dict.fromkeys(_MASK_KINDS, padding),
+            attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=None,
+            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            use_cache=False,
+            use_cache=use_cache,
             ple_input_ids=ple_input_ids,
             **kwargs,
         )

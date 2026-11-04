@@ -100,7 +100,16 @@ def _rank_local_param_names(model: torch.nn.Module) -> frozenset[str]:
     return frozenset(name for name, param in model.named_parameters() if id(param) in local)
 
 
-def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, check_sync: bool) -> dict:
+def train_row(
+    ctx,
+    model,
+    tokenizer,
+    pc: ParallelismConfig,
+    peft_config,
+    *,
+    check_sync: bool,
+    gradient_checkpointing: bool = False,
+) -> dict:
     """Train ``NUM_STEPS`` SFT steps; ``check_sync`` adds moved and cross-rank-identical checks, rank-local expert
     shards excepted."""
     args = SFTConfig(
@@ -111,7 +120,8 @@ def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, chec
         lr_scheduler_type="constant",
         max_length=MAX_LENGTH,
         bf16=True,
-        gradient_checkpointing=False,
+        gradient_checkpointing=gradient_checkpointing,
+        gradient_checkpointing_kwargs={"use_reentrant": True},
         use_liger_kernel=False,
         logging_steps=1,
         save_strategy="no",
@@ -162,10 +172,18 @@ def train_row(ctx, model, tokenizer, pc: ParallelismConfig, peft_config, *, chec
     return {"checks": checks, "metrics": metrics}
 
 
-def run_pinned_family_row(ctx, family: str, mode: str, pc: ParallelismConfig) -> dict:
+def run_pinned_family_row(
+    ctx,
+    family: str,
+    mode: str,
+    pc: ParallelismConfig,
+    *,
+    attn_implementation: str = "eager",
+    gradient_checkpointing: bool = False,
+) -> dict:
     torch.cuda.set_device(ctx.device)
     base_dir = tiny_family_checkpoint(ctx, family, fp32_pins=pc.fp32_non_ep_params)
-    model, tokenizer, peft_config = load_row_model(base_dir, mode, pc)
+    model, tokenizer, peft_config = load_row_model(base_dir, mode, pc, attn_implementation=attn_implementation)
 
     checks: dict[str, bool] = {}
     if pc.fp32_non_ep_params:
@@ -179,6 +197,14 @@ def run_pinned_family_row(ctx, family: str, mode: str, pc: ParallelismConfig) ->
         log(f"{family} {mode} ep{pc.ep_size}: {len(off)} base params off {RUN_DTYPE} after load {off[:6]}")
         checks["loaded_in_run_dtype"] = not off
 
-    result = train_row(ctx, model, tokenizer, pc, peft_config, check_sync=mode != "full")
+    result = train_row(
+        ctx,
+        model,
+        tokenizer,
+        pc,
+        peft_config,
+        check_sync=mode != "full",
+        gradient_checkpointing=gradient_checkpointing,
+    )
     result["checks"] = {**checks, **result["checks"]}
     return result

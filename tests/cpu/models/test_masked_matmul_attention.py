@@ -576,6 +576,15 @@ def test_the_warm_up_compiles_nothing_off_the_kernel(monkeypatch, stock_registry
     assert not _recorded_warm_up(monkeypatch, other), "no DSA layer on this model"
 
 
+def test_a_load_with_no_gpu_warms_nothing(monkeypatch, stock_registry):
+    """The kernel takes no call off CUDA, so such a run stays on stock instead of raising at load."""
+    model = _tiny_glm5()
+    install_glm5_next_masked_matmul()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(kernel, "masked_softmax_backward", None)
+    warm_masked_matmul_kernels(model, dtype=torch.bfloat16)
+
+
 def test_every_load_warms_the_kernel_behind_the_fence(monkeypatch):
     warmed = []
     monkeypatch.setattr(whole_model, "get_global_world_size", lambda: 2)
@@ -590,6 +599,7 @@ def test_every_load_warms_the_kernel_behind_the_fence(monkeypatch):
 
 
 def test_the_patch_applies_to_glm5_next_under_sdpa_only(monkeypatch, stock_registry):
+    monkeypatch.setattr(kernel, "is_blackwell_gpu", lambda: True)
     config = _glm5_config()
     for model_config in (config, config.get_text_config()):
         monkeypatch.setattr(modeling_glm5_next, "ALL_ATTENTION_FUNCTIONS", ALL_ATTENTION_FUNCTIONS)
@@ -625,8 +635,17 @@ def test_the_knob_off_restores_stock(monkeypatch, stock_registry, value):
     assert modeling_glm5_next.ALL_ATTENTION_FUNCTIONS is ALL_ATTENTION_FUNCTIONS
 
 
-def test_the_knob_defaults_on(monkeypatch, stock_registry):
+@pytest.mark.parametrize(("blackwell", "installed"), [(True, True), (False, False)])
+def test_the_knob_defaults_on_blackwell_only(monkeypatch, stock_registry, blackwell, installed):
     monkeypatch.delenv("HALO_DSA_MATMUL", raising=False)
+    monkeypatch.setattr(kernel, "is_blackwell_gpu", lambda: blackwell)
+    apply_family_patches(_glm5_config(), "sdpa")
+    assert (modeling_glm5_next.ALL_ATTENTION_FUNCTIONS["sdpa"] is masked_matmul_attention) is installed
+
+
+def test_the_knob_turns_the_kernel_on_beside_a_gpu_it_does_not_default_to(monkeypatch, stock_registry):
+    monkeypatch.setenv("HALO_DSA_MATMUL", "1")
+    monkeypatch.setattr(kernel, "is_blackwell_gpu", lambda: False)
     apply_family_patches(_glm5_config(), "sdpa")
     assert modeling_glm5_next.ALL_ATTENTION_FUNCTIONS["sdpa"] is masked_matmul_attention
 
@@ -650,6 +669,17 @@ def test_a_tree_view_over_the_library_registry_stays_and_runs_stock(monkeypatch,
     install_glm5_next_masked_matmul()
     assert modeling_glm5_next.ALL_ATTENTION_FUNCTIONS is view
     assert view.get_interface("sdpa", None) is ALL_ATTENTION_FUNCTIONS["sdpa"]
+
+
+def test_a_second_order_backward_is_refused():
+    """With another differentiable term beside it, a backward that cuts the graph would read as a wrong second
+    derivative."""
+    q, k, v, mask, _ = _problem()
+    q, k, v = (t.requires_grad_() for t in (q, k, v))
+    out = masked_matmul(q, k, v, mask, SCALE)
+    first = torch.autograd.grad(out.square().sum() + q.square().sum(), q, create_graph=True)[0]
+    with pytest.raises(RuntimeError, match="once_differentiable"):
+        first.sum().backward()
 
 
 if __name__ == "__main__":

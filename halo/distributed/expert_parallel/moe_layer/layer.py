@@ -55,9 +55,9 @@ class EPMoELayerBase(
     # from ``FAMILY.shared_expert_attrs`` for a family that declares one.
     _shared_expert_attr: str = "shared_experts"
 
-    # True where the architecture always builds the shared expert: an absent or ``None`` slot is then an
-    # upstream rename rather than a configuration, and adopting nothing would drop it from every output.
-    _SHARED_EXPERT_REQUIRED: bool = False
+    # A declared shared expert is always built unless a family says otherwise, as adopting nothing after an upstream
+    # rename would drop it from every output. False where the block may lack one, as a configuration and no rename.
+    _SHARED_EXPERT_REQUIRED: bool = True
 
     # Attribute the router hangs off, on the wrapped HF block and on this EP layer, declared once per family so the
     # probe, the fp32 upcast and the grad-sync hook cannot point at different modules. ``None``: the router is external
@@ -184,6 +184,8 @@ class EPMoELayerBase(
 
     def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
         """Adopt the shared expert under the first ``FAMILY.shared_expert_attrs`` spelling carried (its export key)."""
+        if not self.FAMILY.shared_expert_attrs:
+            return
         for attr in self.FAMILY.shared_expert_attrs:
             if not hasattr(original_layer, attr):
                 continue
@@ -200,10 +202,9 @@ class EPMoELayerBase(
                 f"family renamed it upstream. A tolerant fallback would silently drop the shared "
                 f"expert from every output."
             )
-        if self.FAMILY.shared_expert_attrs:
-            # Declared but absent (LFM-2 ships none): register the slot so the shared leg reads None.
-            self._shared_expert_attr = self.FAMILY.shared_expert_attrs[0]
-            setattr(self, self._shared_expert_attr, None)
+        # Declared but absent (LFM-2 ships none): register the slot so the shared leg reads None.
+        self._shared_expert_attr = self.FAMILY.shared_expert_attrs[0]
+        setattr(self, self._shared_expert_attr, None)
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """A family reads its extra constants here directly, so an upstream rename raises instead of defaulting."""

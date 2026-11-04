@@ -1,14 +1,16 @@
 """SDPA's mem-efficient kernel over a boolean mask, one tile of queries over the keys it selected, with a closed-form
-backward, and the local ``sdpa`` override that runs GLM-5 Next's DSA layers on it: their ``[T, T]`` masks keep SDPA on that
-kernel, whose own backward takes most of a long step."""
+backward, and the local ``sdpa`` override that runs GLM-5 Next's DSA layers on it: their ``[T, T]`` masks at their head
+width keep SDPA on that kernel on Blackwell, whose own backward takes most of a long step, and on cuDNN on Hopper."""
 
 from typing import NamedTuple
 
 import torch
+from torch.autograd.function import once_differentiable
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, AttentionInterface
 from transformers.models.glm5_next import modeling_glm5_next
 
 from halo.env import env_flag
+from halo.hardware import is_blackwell_gpu
 from halo.kernels.fp32_matmul import GEMM_ALIGNMENT, bmm_fp32, to_autocast_dtype, wide_dtype
 from halo.kernels.masked_softmax import masked_softmax_backward
 from halo.models.attention.selection import effective_attn_implementation
@@ -134,6 +136,7 @@ class _MaskedMatmulAttention(torch.autograd.Function):
         return out
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad):
         saved = ctx.saved_tensors
         query, key, value, *_ = saved
@@ -207,7 +210,8 @@ _GLM5_NEXT_ATTENTION_FUNCTIONS["sdpa"] = masked_matmul_attention
 
 
 def dsa_matmul_enabled() -> bool:
-    return env_flag("HALO_DSA_MATMUL", True)
+    """On by default where stock SDPA takes this head to its mem-efficient kernel; on Hopper it selects cuDNN."""
+    return env_flag("HALO_DSA_MATMUL", is_blackwell_gpu())
 
 
 def install_glm5_next_masked_matmul() -> None:
@@ -222,9 +226,10 @@ def warm_masked_matmul_kernels(
     model: torch.nn.Module, *, dtype: torch.dtype, device: torch.device | None = None
 ) -> None:
     """Compile the backward's launch in each form a trained or frozen input reaches, so no rank compiles one mid-step.
-    Rank-local; the caller fences it."""
+    Rank-local; the caller fences it. A load with no GPU warms nothing, as everything off CUDA stays on stock."""
     if (
-        modeling_glm5_next.ALL_ATTENTION_FUNCTIONS.get_interface("sdpa", None) is not masked_matmul_attention
+        (device is None and not torch.cuda.is_available())
+        or modeling_glm5_next.ALL_ATTENTION_FUNCTIONS.get_interface("sdpa", None) is not masked_matmul_attention
         or effective_attn_implementation(model.config) != "sdpa"
         or not any(isinstance(module, modeling_glm5_next.Glm5NextTextAttention) for module in model.modules())
     ):
