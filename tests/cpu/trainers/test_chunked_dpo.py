@@ -34,6 +34,7 @@ from halo.model_loading.parallel.load_rules import reject_unsupported_model, rej
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.trainers.preference.chunked_dpo import CHUNKED_DPO_SCORER, DPO_SCORER_KEY, reject_chunked_dpo_options
 from halo.trainers.preference.dpo import DistributedDPOTrainer
+from tests.common.dpo_head_gradients import PinnedHeadGradients, full_head_derivative
 from tests.common.dpo_scoring import (
     assert_dpo_gradients_match,
     assert_dpo_loss_matches,
@@ -115,6 +116,42 @@ def _reference_batch(trainer, model):
         ref_chosen_logps=chosen - torch.tensor([0.3, -0.8]), ref_rejected_logps=rejected + torch.tensor([0.4, 0.1])
     )
     return batch
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_pinned_full_head_derivative_separates_logits_gradient_rounding(dtype):
+    generator = torch.Generator().manual_seed(102)
+    hidden = torch.randn(7, 16, generator=generator).to(dtype)
+    weight = torch.randn(32, 16, generator=generator).to(dtype)
+    targets = torch.arange(7) + 3
+    upstream = torch.linspace(-0.2312345, 0.5432123, 7)
+    exact = full_head_derivative(hidden, weight, targets, upstream)
+    rounded = full_head_derivative(hidden, weight, targets, upstream, quantize_logits_gradient=True)
+    logits = F.linear(hidden.float(), weight.float())
+    derivative = (F.one_hot(targets, weight.shape[0]) - logits.softmax(-1)) * upstream[:, None]
+    for output, dz in ((exact, derivative), (rounded, derivative.to(dtype).float())):
+        torch.testing.assert_close(output["hidden"], (dz @ weight.float()).to(dtype), atol=2e-6, rtol=2e-5)
+        torch.testing.assert_close(output["weight"], (dz.T @ hidden.float()).to(dtype), atol=2e-6, rtol=2e-5)
+    assert torch.equal(exact["logps"], rounded["logps"])
+    assert torch.equal(exact["hidden"], rounded["hidden"]) == (dtype == torch.float32)
+
+
+def test_pinned_head_diagnosis_observes_real_loss_without_replacing_gradients():
+    policy, oracle = _model(), _model()
+    bounded, full = _loss_trainer(policy, bounded=True), _loss_trainer(oracle, bounded=False)
+    batch = _reference_batch(full, oracle)
+    original_forward = oracle.lm_head.forward
+    with PinnedHeadGradients().record(full) as diagnosis:
+        losses = [trainer.compute_loss(model, batch) for trainer, model in ((bounded, policy), (full, oracle))]
+        for loss in losses:
+            loss.backward()
+        report = diagnosis.report({"head": policy.lm_head.weight.grad}, {"head": oracle.lm_head.weight.grad})
+    assert oracle.lm_head.forward == original_forward and not diagnosis.hooks
+    assert report["qualification"] == "DIAGNOSTIC_NOT_ACCEPTANCE"
+    assert report["identical_supervised_hidden"] and report["identical_live_weight"]
+    assert report["native_hidden_vs_fp32_derivative"]["relative_l2"] < 1e-5
+    assert report["full_logits_gradient_vs_pinned_upstream"]["relative_l2"] < 1e-5
+    assert report["full_hidden_vs_fp32_derivative"]["relative_l2"] < 1e-5
 
 
 @pytest.mark.parametrize("family", ["qwen3", "gemma2"])

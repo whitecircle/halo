@@ -1,6 +1,7 @@
 """Full-model DPO head equivalence on identical dense-FSDP2 or EP2 layouts and frozen reference scores."""
 
-from contextlib import nullcontext
+import json
+from contextlib import ExitStack, nullcontext
 from types import MethodType
 
 import torch
@@ -17,6 +18,7 @@ from halo.models.unwrapping import base_transformers_model
 from halo.runtime.dtensor import to_local
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
+from tests.common.dpo_head_gradients import PinnedHeadGradients
 from tests.common.ep_reference import captured_picks, routing_pinned
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.preference_precompute import column
@@ -212,28 +214,42 @@ def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bou
     return trainer, hidden_dtypes
 
 
-def _compare_backward(bounded, full, batch, *, ep: bool, bf16: bool):
-    capture = captured_picks(bounded.model) if ep else nullcontext([])
-    with capture as picks, bounded.compute_loss_context_manager():
-        got_loss = bounded.compute_loss(bounded.model, batch)
-    bounded.accelerator.backward(got_loss)
-    bounded._finish_fsdp2_backward(bounded.model)
-    got_norm = bounded._get_grad_norm(bounded.model)
-    gradients = _local_snapshot(bounded, gradients=True)
-    replay = routing_pinned(full.model, [torch.cat(chunks) for chunks in picks]) if picks else nullcontext([])
-    with replay as routes, full.compute_loss_context_manager():
-        want_loss = full.compute_loss(full.model, batch)
-    assert_dpo_loss_matches(got_loss, want_loss)
-    if ep:
-        assert (
-            picks
-            and routes
-            and all(route.duplicated == 0 and route.regret <= TOL.router_near_tie_logit_abs for route in routes)
-        )
-    full.accelerator.backward(want_loss)
-    full._finish_fsdp2_backward(full.model)
-    want_norm = full._get_grad_norm(full.model)
-    worst = assert_dpo_gradients_match(gradients, _local_snapshot(full, gradients=True), bf16=bf16)
+def _compare_backward(bounded, full, batch, *, ep: bool, bf16: bool, diagnose: bool = False):
+    with ExitStack() as scope:
+        diagnosis = scope.enter_context(PinnedHeadGradients().record(full)) if diagnose else None
+        capture = captured_picks(bounded.model) if ep else nullcontext([])
+        with capture as picks, bounded.compute_loss_context_manager():
+            got_loss = bounded.compute_loss(bounded.model, batch)
+        bounded.accelerator.backward(got_loss)
+        bounded._finish_fsdp2_backward(bounded.model)
+        got_norm = bounded._get_grad_norm(bounded.model)
+        gradients = _local_snapshot(bounded, gradients=True)
+        replay = routing_pinned(full.model, [torch.cat(chunks) for chunks in picks]) if picks else nullcontext([])
+        with replay as routes, full.compute_loss_context_manager():
+            want_loss = full.compute_loss(full.model, batch)
+        assert_dpo_loss_matches(got_loss, want_loss)
+        if ep:
+            assert (
+                picks
+                and routes
+                and all(route.duplicated == 0 and route.regret <= TOL.router_near_tie_logit_abs for route in routes)
+            )
+        full.accelerator.backward(want_loss)
+        full._finish_fsdp2_backward(full.model)
+        want_norm = full._get_grad_norm(full.model)
+        expected_gradients = _local_snapshot(full, gradients=True)
+        if diagnosis:
+            report = diagnosis.report(gradients, expected_gradients)
+            report.update(
+                rank=bounded.accelerator.process_index,
+                bounded_loss=float(got_loss.detach()),
+                full_loss=float(want_loss.detach()),
+            )
+            print(
+                "__DPO_HEAD_GRADIENT_DIAGNOSTIC__ " + json.dumps(report),
+                flush=True,
+            )
+        worst = assert_dpo_gradients_match(gradients, expected_gradients, bf16=bf16)
     if ep:
         expert_ids = bounded._get_sharded_expert_param_ids()
         names = {name for name, parameter in bounded.model.named_parameters() if id(parameter) in expert_ids}
@@ -307,7 +323,9 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
             trainer.model.train()
             trainer.state.global_step = step
             trainer.optimizer.zero_grad(set_to_none=True)
-        got_loss, error = _compare_backward(bounded, full, batch, ep=family == "qwen3_moe", bf16=bf16)
+        got_loss, error = _compare_backward(
+            bounded, full, batch, ep=family == "qwen3_moe", bf16=bf16, diagnose=bf16 and step == 0
+        )
         if step == 0:
             assert_dpo_loss_matches(got_loss, parity)
         worst_gradient = max(worst_gradient, error)
