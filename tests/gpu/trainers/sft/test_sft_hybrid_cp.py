@@ -102,7 +102,9 @@ def run(ctx):
             callbacks=[recorder],
         )
 
-    route = ResumeExportRoute(build_trainer, Qwen3_5ForCausalLM, torch.bfloat16, "flash_attention_2")
+    route = ResumeExportRoute(
+        build_trainer, Qwen3_5ForCausalLM, torch.bfloat16, "flash_attention_2", trust_remote_code=False
+    )
     checks, metrics = run_resume_export(ctx, route, parallelism, base=base, root=root, save_step=2, total_steps=4)
     checks["unbroken_and_resumed_eval_finite"] = len(observed) == 2 and all(
         recorder.losses and all(math.isfinite(loss) for loss in recorder.losses) for recorder in observed
